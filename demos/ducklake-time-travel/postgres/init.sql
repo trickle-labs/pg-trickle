@@ -1,30 +1,86 @@
--- Time-Travel Demo - Simplified for pg_trickle only
--- Note: Original demo requires DuckLake extension which is optional
--- This simplified version demonstrates pg_trickle stream tables
+-- Demo B: DuckLake Time-Travel Debugging — PostgreSQL initialization
+--
+-- Scenario:
+--   1. Generator inserts clean events → stream table aggregates them →
+--      DuckLake sink writes Parquet deltas to MinIO every 5 s.
+--   2. Take a checkpoint:
+--        SELECT pgtrickle.snapshot_stream_table('events_summary');
+--   3. Inject a data-quality bug (set INJECT_BUG_AFTER_BATCH in generator,
+--      or run: INSERT INTO events(event_type,user_id) VALUES('CORRUPT_BILLING',0)).
+--   4. Stream table picks up the corrupt rows; new event_type rows appear.
+--   5. Time-travel rewind:
+--        SELECT pgtrickle.pause_scheduler(ARRAY['public.events_summary']);
+--        SELECT pgtrickle.restore_from_snapshot('public.events_summary',
+--               '<snapshot table from step 2>');
+--        SELECT pgtrickle.resume_scheduler(ARRAY['public.events_summary']);
+--   6. Stream table is back to the clean state; next refresh replays forward
+--      from the checkpointed frontier.
 
 CREATE EXTENSION IF NOT EXISTS pg_trickle;
 
--- Create a simple events table for demonstration
 CREATE TABLE IF NOT EXISTS events (
-    event_id   BIGINT PRIMARY KEY,
-    event_type TEXT   NOT NULL,
-    user_id    BIGINT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    event_id    BIGSERIAL   PRIMARY KEY,
+    event_type  TEXT        NOT NULL,
+    user_id     INT         NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Insert sample data
-INSERT INTO events (event_id, event_type, user_id, created_at) VALUES
-    (1, 'login', 100, now()),
-    (2, 'click', 100, now()),
-    (3, 'login', 101, now());
+-- ── DuckLake catalog tables ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ducklake_table (
+    table_id    BIGSERIAL PRIMARY KEY,
+    schema_name TEXT NOT NULL DEFAULT 'public',
+    table_name  TEXT NOT NULL,
+    data_path   TEXT NOT NULL DEFAULT ''
+);
 
--- Create a stream table demonstrating pg_trickle functionality
+CREATE TABLE IF NOT EXISTS ducklake_data_file (
+    data_file_id      BIGSERIAL PRIMARY KEY,
+    table_id          BIGINT NOT NULL,
+    begin_snapshot    BIGINT,
+    path              TEXT NOT NULL,
+    row_count         BIGINT,
+    file_size_bytes   BIGINT,
+    encryption_key_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_table_stats (
+    table_id   BIGINT PRIMARY KEY,
+    row_count  BIGINT DEFAULT 0,
+    file_count BIGINT DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_snapshot (
+    table_id      BIGINT NOT NULL,
+    snapshot_id   BIGINT NOT NULL,
+    snapshot_time TIMESTAMPTZ DEFAULT now(),
+    created_by    TEXT,
+    PRIMARY KEY (table_id, snapshot_id)
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_view (
+    view_name       TEXT PRIMARY KEY,
+    view_definition TEXT
+);
+
+-- Register in the DuckLake catalog.
+INSERT INTO ducklake_table (schema_name, table_name, data_path)
+VALUES ('public', 'events_summary', 's3://pg-trickle-demo/events_summary/');
+
+-- ── Stream table: event counts per type ───────────────────────────────────
 SELECT pgtrickle.create_stream_table(
-    name => 'events_by_type',
-    query => $$
-        SELECT event_type, MAX(event_id) as latest_event_id, MIN(user_id) as min_user
-        FROM events GROUP BY event_type
+    name                   => 'events_summary',
+    query                  => $$
+        SELECT
+            event_type,
+            COUNT(*)                AS event_count,
+            COUNT(DISTINCT user_id) AS unique_users,
+            MAX(event_id)           AS latest_event_id
+        FROM events
+        GROUP BY event_type
     $$,
-    schedule => '5s',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule               => '5s',
+    refresh_mode           => 'DIFFERENTIAL',
+    sink                   => 'ducklake',
+    ducklake_sink_path     => 's3://pg-trickle-demo/events_summary/',
+    ducklake_sink_table_id => (SELECT table_id FROM ducklake_table WHERE table_name = 'events_summary')
 );
