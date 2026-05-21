@@ -1,6 +1,8 @@
 -- Demo C: Multi-Engine Leaderboard — PostgreSQL initialization
 -- Sets up source tables and stream tables for the leaderboard demo.
 
+CREATE EXTENSION IF NOT EXISTS pg_trickle;
+
 -- Source table
 CREATE TABLE IF NOT EXISTS game_scores (
     score_id   BIGSERIAL PRIMARY KEY,
@@ -12,29 +14,27 @@ CREATE TABLE IF NOT EXISTS game_scores (
 );
 
 -- Stream table: top players leaderboard (written to DuckLake)
--- Note: In a real deployment with pg_trickle installed, replace this with:
--- SELECT pgtrickle.create_stream_table('top_players', ...);
--- For demo purposes without pg_trickle, we use a materialized view.
-CREATE MATERIALIZED VIEW IF NOT EXISTS top_players AS
-    SELECT
-        player_id,
-        player_name,
-        SUM(score)  AS total_score,
-        COUNT(*)    AS games_played,
-        RANK() OVER (ORDER BY SUM(score) DESC) AS rank
-    FROM game_scores
-    GROUP BY player_id, player_name;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_top_players_pid ON top_players (player_id);
-
--- Stream table: scores by game
-CREATE MATERIALIZED VIEW IF NOT EXISTS scores_by_game AS
-    SELECT
-        game_id,
-        AVG(score)  AS avg_score,
-        MAX(score)  AS high_score,
-        COUNT(*)    AS player_count
-    FROM game_scores
-    GROUP BY game_id;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_scores_game ON scores_by_game (game_id);
+SELECT pgtrickle.create_stream_table(
+    'top_players',
+    query => $$
+        SELECT
+            player_id,
+            player_name,
+            SUM(score)  AS total_score,
+            COUNT(*)    AS games_played,
+            RANK() OVER (ORDER BY SUM(score) DESC) AS rank
+        FROM game_scores
+        GROUP BY player_id, player_name
+    $$,
+    schedule           => '5s',
+    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE   _p    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFEea    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE   CT
+    refresh_mode       => 'DIFFE    refree)     refresh_mo
+                                                                              
+        FROM game_scores
+        GROUP BY game_id
+    $$,
+    schedule           => '5s',
+    refresh_mode       => 'DIFFERENTIAL',
+    sink               => 'ducklake',
+                                                                
+);

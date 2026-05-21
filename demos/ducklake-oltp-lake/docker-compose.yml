@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18
+    image: ghcr.io/trickle-labs/pg-trickle:latest
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
