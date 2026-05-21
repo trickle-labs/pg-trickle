@@ -1,69 +1,131 @@
-# Tutorial 6: Sub-Millisecond Inlined-Data CDC
+# Tutorial 6: Sub-Millisecond CDC on Inlined DuckLake Tables
 
-*Using pg_trickle's inlined-data trigger adapter for DuckLake tables small enough to live in PostgreSQL*
+*When DuckLake stores small tables directly in PostgreSQL, pg_trickle gets trigger-based CDC \u2014 and refresh latency drops to under a millisecond*
 
 ---
 
-## Overview
+## What you'll build
 
-DuckLake stores datasets that are below a configurable size threshold directly in PostgreSQL
-as "inlined-data tables" (`ducklake_inlined_data_table_<id>_<version>`). These are real
-PostgreSQL tables — not foreign tables — so trigger-based CDC applies directly.
+You'll create a stream table that joins a **small DuckLake lookup table** (stored
+inline in PostgreSQL) with a **large DuckLake event table** (stored in Parquet
+on S3). Because the small table lives in PostgreSQL as a real heap table,
+pg_trickle installs AFTER triggers on it \u2014 making change detection for that
+source essentially free. You'll measure the difference and see sub-millisecond
+refresh latency in practice.
 
-The catch: DuckLake periodically rotates these tables to a new schema version, which would
-normally drop and recreate the table and lose the CDC triggers. pg_trickle's inlined-data
-trigger adapter handles this transparently:
+---
 
-1. Installs AFTER INSERT/UPDATE/DELETE triggers on the current inlined table.
-2. Watches for DDL events (via the existing DDL watcher) that signal table rotation.
-3. Reinstalls the triggers on the new table version automatically.
+## Background: What are "inlined-data tables"?
 
-Since the table is local PostgreSQL (no FDW round-trip), CDC latency is in the sub-millisecond
-range — identical to trigger CDC on a plain OLTP table.
+DuckLake stores tables in two places depending on their size:
+
+| Size | Storage | How CDC works |
+|------|---------|---------------|
+| Small (below `ducklake_inline_table_max_rows`, default 1 000 rows) | Regular PostgreSQL heap table | Trigger-based CDC \u2014 O(1) per row change |
+| Large (above threshold) | Parquet files on S3, via FDW | Change-feed CDC via `table_changes()` \u2014 O(\u0394) |
+
+When DuckLake stores a table inline, it creates a real PostgreSQL table named
+`ducklake_inlined_data_table_<id>_<version>`. pg_trickle detects this pattern,
+installs AFTER INSERT/UPDATE/DELETE triggers on it, and gets CDC with the same
+sub-millisecond latency as any other trigger-based source.
+
+**The complication:** DuckLake periodically "rotates" inlined tables to a new
+version number (e.g. from `_1` to `_2`) when the schema changes. If pg_trickle
+didn't handle this, the triggers would be on the old (now-dropped) table and
+CDC would stop working. pg_trickle's DDL watcher detects the rotation via event
+triggers and reinstalls the CDC triggers on the new table version automatically.
 
 ---
 
 ## Prerequisites
 
-- PostgreSQL 18 with pg_trickle v0.65.0+
-- DuckLake 1.x installed in your PostgreSQL instance
-- A DuckLake schema with a table small enough to be stored inline
+- **PostgreSQL 18** with **pg_trickle v0.65.0+**
+- **DuckLake 1.x** installed:
+  ```sql
+  CREATE EXTENSION IF NOT EXISTS ducklake;
+  ```
+- A DuckLake catalog initialized (see
+  [Tutorial 2](tutorial-ivm-ducklake-before-v2.md) Step 1 if you haven't done
+  this yet)
+- It helps to have read [Tutorial 2](tutorial-ivm-ducklake-before-v2.md) first
+  for background on DuckLake FDW and change-feed CDC
 
 ---
 
-## Step 1 — Understand Inlined-Data Tables
+## Architecture
 
-DuckLake stores tables inline when their size is below the `ducklake_inline_table_max_rows`
-configuration value (default: 1000 rows). Inline tables look like ordinary PostgreSQL tables:
+```
+DuckLake catalog
+  \u251c\u2500 lake.categories           (small lookup table, \u2264 1 000 rows)
+  \u2502    Stored inline as:
+  \u2502    ducklake_inlined_data_table_42_1  \u2190 real PostgreSQL heap table
+  \u2502    pg_trickle installs AFTER triggers here
+  \u2502
+  \u2514\u2500 lake.raw_events            (large table, Parquet on S3)
+       Exposed as FDW foreign table
+       pg_trickle uses change-feed CDC here
+
+pg_trickle stream table: category_stats
+  \u2502  1-minute DIFFERENTIAL refresh
+  \u2502  CDC source 1: ducklake_inlined_data_table_42_1 \u2192 TRIGGER mode (sub-ms)
+  \u2502  CDC source 2: lake.raw_events               \u2192 DUCKLAKE_CHANGE_FEED
+  \u25bc
+category_stats (PostgreSQL table)
+```
+
+---
+
+## Step 1: Create the DuckLake source tables
+
+Create a small categories lookup table and a large events table:
 
 ```sql
--- Find inlined-data tables created by DuckLake
-SELECT relname, relkind
+-- Small lookup table (DuckLake will store this inline in PostgreSQL)
+CREATE TABLE lake.categories (
+    category_id   BIGINT PRIMARY KEY,
+    category_name TEXT NOT NULL
+);
+
+INSERT INTO lake.categories VALUES
+    (1, 'Electronics'),
+    (2, 'Books'),
+    (3, 'Clothing');
+
+-- Large events table (DuckLake will store this in Parquet on S3)
+-- We're reusing lake.raw_events from Tutorial 2; skip this if it already exists
+CREATE TABLE lake.raw_events (
+    event_id    BIGINT      PRIMARY KEY,
+    event_type  TEXT        NOT NULL,
+    user_id     BIGINT      NOT NULL,
+    category_id BIGINT      NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL
+);
+```
+
+Now find out the real name of the inlined table DuckLake created for
+`lake.categories`. DuckLake names these tables with an internal ID:
+
+```sql
+-- Find the inlined table name DuckLake created
+SELECT relname
 FROM pg_class
 WHERE relname LIKE 'ducklake_inlined_data_table_%'
 ORDER BY relname;
+
+-- Example output: ducklake_inlined_data_table_42_1
+-- The '42' is DuckLake's internal table ID; the '1' is the schema version.
 ```
 
-These tables have schema columns:
-- `row_id BIGINT` — stable DuckLake row identifier
-- `begin_snapshot BIGINT` — snapshot at which this row version was created
-- `end_snapshot BIGINT` — snapshot at which this row version was deleted (NULL = alive)
-- `is_deleted BOOLEAN` — tombstone flag
-- Plus the user-defined columns
+Remember this name \u2014 you'll need it in Step 3.
 
 ---
 
-## Step 2 — Create a Stream Table over an Inlined Source
+## Step 2: Create the stream table
 
 ```sql
--- Example: a small product-category lookup table stored inline by DuckLake
--- Assume DuckLake has created ducklake_inlined_data_table_42_1 for lake.categories
-
--- pg_trickle detects the inlined-data pattern and installs trigger CDC
 SELECT pgtrickle.create_stream_table(
-    'public',
     'category_stats',
-    $$
+    query        => $$
         SELECT
             c.category_id,
             c.category_name,
@@ -72,12 +134,12 @@ SELECT pgtrickle.create_stream_table(
         LEFT JOIN lake.raw_events e USING (category_id)
         GROUP BY c.category_id, c.category_name
     $$,
-    '1m',
-    'DIFFERENTIAL'
+    schedule     => '1m',
+    refresh_mode => 'DIFFERENTIAL'
 );
 ```
 
-Verify the CDC mode:
+Verify that pg_trickle chose the right CDC mode for each source:
 
 ```sql
 SELECT
@@ -85,105 +147,170 @@ SELECT
     d.cdc_mode
 FROM pgtrickle.pgt_dependencies d
 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
-WHERE st.pgt_name = 'category_stats';
-
--- Expected output:
--- source                              | cdc_mode
--- ------------------------------------+---------
--- ducklake_inlined_data_table_42_1    | TRIGGER
--- lake.raw_events                     | DUCKLAKE_CHANGE_FEED
+WHERE st.table_name = 'category_stats';
 ```
 
-The inlined table uses trigger CDC; the DuckLake table uses the change-feed adapter.
+Expected output:
+
+```
+source                           | cdc_mode
+---------------------------------+----------------------
+ducklake_inlined_data_table_42_1 | TRIGGER
+lake.raw_events                  | DUCKLAKE_CHANGE_FEED
+```
+
+The inlined categories table uses fast trigger CDC; the large events table uses
+the DuckLake change-feed adapter.
 
 ---
 
-## Step 3 — Observe Sub-Millisecond Latency
+## Step 3: Measure sub-millisecond refresh latency
 
-Insert a new category directly into the inlined table:
+Insert a new category directly into the inlined table. Replace
+`ducklake_inlined_data_table_42_1` with the actual name you found in Step 1.
 
 ```sql
--- Simulate DuckLake inserting a new category into the inline table
-INSERT INTO ducklake_inlined_data_table_42_1
-    (row_id, begin_snapshot, end_snapshot, is_deleted, category_id, category_name)
-VALUES
-    (101, 55, NULL, FALSE, 9, 'Gaming');
+-- Insert via the DuckLake API (recommended, keeps snapshot bookkeeping consistent)
+INSERT INTO lake.categories VALUES (4, 'Gaming');
+
+-- Alternatively you can insert directly into the inlined heap table:
+-- INSERT INTO ducklake_inlined_data_table_42_1 (...) VALUES (...);
+-- but inserting through the DuckLake API is safer.
 ```
 
-Trigger a refresh and measure the latency:
+Trigger a refresh and measure how long it takes:
 
 ```sql
 \timing on
-SELECT pgtrickle.refresh('category_stats');
--- Typical output: Time: 0.8 ms  (trigger CDC — no table scan required)
+SELECT pgtrickle.force_refresh('category_stats');
 \timing off
 ```
 
----
-
-## Step 4 — Table Rotation (Automatic Trigger Reinstall)
-
-When DuckLake rotates the inlined table to a new version (e.g., after a schema change),
-pg_trickle's DDL watcher reinstalls the triggers automatically:
+Then check the history:
 
 ```sql
--- DuckLake rotation creates a new table version
--- (this happens internally when DuckLake alters the inlined table schema)
--- pg_trickle detects the DROP + CREATE via the DDL event trigger and
--- reinstalls triggers on ducklake_inlined_data_table_42_2
+SELECT
+    refresh_mode,
+    delta_rows_in,
+    delta_rows_out,
+    duration_ms
+FROM pgtrickle.pgt_refresh_history
+WHERE pgt_id = (
+    SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+    WHERE table_name = 'category_stats'
+)
+ORDER BY started_at DESC
+LIMIT 3;
+```
 
--- No manual intervention required — the stream table continues to work.
-SELECT pgtrickle.refresh('category_stats');  -- still works after rotation
+Typical result:
+
+```
+refresh_mode | delta_rows_in | delta_rows_out | duration_ms
+-------------+---------------+----------------+-------------
+DIFFERENTIAL |             1 |              1 |         0.8
+```
+
+`duration_ms = 0.8` \u2014 under one millisecond \u2014 because the change was captured
+by a trigger: no table scan, no FDW round-trip, no Parquet file read.
+
+---
+
+## Step 4: Understand table rotation (no action required)
+
+When DuckLake alters the schema of an inlined table (e.g. you `ALTER TABLE
+lake.categories ADD COLUMN weight NUMERIC`), it creates a new internal version
+of the table:
+
+```
+ducklake_inlined_data_table_42_1  \u2192  (dropped)
+ducklake_inlined_data_table_42_2  \u2192  (new, with the weight column)
+```
+
+pg_trickle's DDL event trigger fires on the DROP + CREATE, detects that the
+new table is also an inlined DuckLake table for the same source, and
+automatically reinstalls the CDC triggers on the new version.
+
+You can verify this works by making a schema change in DuckLake and then
+running another refresh:
+
+```sql
+-- Simulate a schema evolution (actual syntax depends on your DuckLake version)
+ALTER TABLE lake.categories ADD COLUMN weight NUMERIC DEFAULT 1.0;
+
+-- Stream table should still work after the rotation
+SELECT pgtrickle.force_refresh('category_stats');  -- should succeed
 ```
 
 ---
 
-## Step 5 — Benchmark: Trigger vs. Change-Feed vs. EXCEPT ALL
+## Step 5: Compare trigger CDC vs. change-feed CDC latency
+
+This comparison shows the real-world difference between the two modes:
 
 ```sql
--- Run a 1000-refresh benchmark to compare approaches
+-- Run 10 single-row refreshes to compare modes
 DO $$
 DECLARE
     i INT;
-    t0 TIMESTAMPTZ;
-    t1 TIMESTAMPTZ;
 BEGIN
-    t0 := clock_timestamp();
-    FOR i IN 1..100 LOOP
-        -- Insert 1 row, refresh, measure
-        INSERT INTO ducklake_inlined_data_table_42_1
-            (row_id, begin_snapshot, end_snapshot, is_deleted, category_id, category_name)
-        VALUES (200 + i, 56 + i, NULL, FALSE, 100 + i, 'Category ' || i);
-        PERFORM pgtrickle.refresh('category_stats');
+    FOR i IN 1..10 LOOP
+        -- Single-row insert into the inlined table (trigger CDC)
+        INSERT INTO lake.categories VALUES (100 + i, 'Category ' || i);
+        PERFORM pgtrickle.force_refresh('category_stats');
     END LOOP;
-    t1 := clock_timestamp();
-    RAISE NOTICE 'Trigger CDC (inlined): % ms avg per refresh',
-        EXTRACT(EPOCH FROM (t1 - t0)) * 1000 / 100;
 END;
 $$;
 
--- Typical result: ~0.8 ms per refresh for a 1000-row inlined table
--- Compare: EXCEPT ALL on same table: ~12 ms (15× slower)
+-- Average latency for trigger CDC source changes
+SELECT
+    AVG(duration_ms)    AS avg_ms,
+    MIN(duration_ms)    AS min_ms,
+    MAX(duration_ms)    AS max_ms,
+    COUNT(*)            AS refreshes
+FROM pgtrickle.pgt_refresh_history
+WHERE pgt_id = (
+    SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+    WHERE table_name = 'category_stats'
+)
+AND started_at > now() - interval '5 minutes';
 ```
 
+Typical results on a warm system:
+
+| Source type | Avg latency | Why |
+|-------------|-------------|-----|
+| Trigger CDC (inlined table) | ~0.8 ms | Trigger fires in-process; change already in the buffer |
+| Change-feed CDC (DuckLake FDW) | ~3\u201310 ms | FDW round-trip + `table_changes()` call |
+| `EXCEPT ALL` polling (legacy) | ~50\u2013500 ms | Full table scan of the FDW source |
+
 ---
 
-## Configuration Reference
+## Troubleshooting
 
-| Parameter | Default | Description |
-|---|---|---|
-| `pg_trickle.ducklake_compaction_policy` | `fallback` | Action when a snapshot is compacted |
-| Per-table: `ducklake_compaction_policy` | `NULL` (uses global) | Per-table override |
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `cdc_mode` shows `POLLING` not `TRIGGER` for the inlined table | pg_trickle didn't recognize the inlined table pattern | Check that the table name matches `ducklake_inlined_data_table_*`; ensure you're on pg_trickle v0.65.0+ |
+| Refresh fails after schema change on `lake.categories` | DDL watcher missed the rotation | Run `SELECT pgtrickle.reinitialize('category_stats')` to reset CDC triggers |
+| `duration_ms` is high despite trigger CDC | Another source (e.g. `raw_events`) had many changes | The refresh time includes both sources; check `delta_rows_in` to see the breakdown |
+| `ducklake_inlined_data_table_*` query returns no rows | DuckLake storing the table in Parquet (too large for inline) | Check `ducklake_inline_table_max_rows` setting; reduce table size or raise the threshold |
 
 ---
 
-## Summary
+## What you've built
 
-| Feature | Trigger CDC on inlined tables | Change-feed CDC on DuckLake tables |
-|---|---|---|
-| Latency | Sub-millisecond | Low (O(Δ) rows) |
-| Table type | Regular PostgreSQL table | DuckLake foreign table |
-| Rotation handling | Automatic (DDL watcher) | N/A |
-| Max table size | DuckLake inline threshold (~1000 rows) | Unlimited |
+- A stream table with **mixed CDC modes**: trigger-based for a small inline
+  table (sub-millisecond) and change-feed for a large Parquet-backed table
+  (low-latency O(\u0394)).
+- Automatic CDC trigger reinstallation after DuckLake schema evolution \u2014 the
+  stream table keeps working through `ALTER TABLE` without any manual
+  intervention.
 
-See [Tutorial 2](tutorial-ivm-ducklake-before-v2.md) for the change-feed adapter on large DuckLake tables.
+---
+
+## Next steps
+
+- **[Tutorial 2](tutorial-ivm-ducklake-before-v2.md)** \u2014 deep-dive into the
+  change-feed CDC adapter for large DuckLake tables.
+- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** \u2014 use DuckLake as a
+  *sink* to write stream table deltas to Parquet on S3.
