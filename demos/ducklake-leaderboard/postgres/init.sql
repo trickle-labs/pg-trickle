@@ -1,5 +1,4 @@
 -- Demo C: Multi-Engine Leaderboard — PostgreSQL initialization
--- Sets up source tables and stream tables for the leaderboard demo.
 
 CREATE EXTENSION IF NOT EXISTS pg_trickle;
 
@@ -13,10 +12,10 @@ CREATE TABLE IF NOT EXISTS game_scores (
     scored_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Stream table: top players leaderboard (written to DuckLake)
+-- Stream table: top players leaderboard
 SELECT pgtrickle.create_stream_table(
-    'top_players',
-    query => $$
+    name     => 'top_players',
+    query    => $$
         SELECT
             player_id,
             player_name,
@@ -26,15 +25,22 @@ SELECT pgtrickle.create_stream_table(
         FROM game_scores
         GROUP BY player_id, player_name
     $$,
-    schedule           => '5s',
-    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE   _p    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFEea    refresh_mode       => 'DIFFE    refresh_mode       => 'DIFFE   CT
-    refresh_mode       => 'DIFFE    refree)     refresh_mo
-                                                                              
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- Stream table: scores by game
+SELECT pgtrickle.create_stream_table(
+    name     => 'scores_by_game',
+    query    => $$
+        SELECT
+            game_id,
+            AVG(score)  AS avg_score,
+            MAX(score)  AS high_score,
+            COUNT(*)    AS player_count
         FROM game_scores
         GROUP BY game_id
     $$,
-    schedule           => '5s',
-    refresh_mode       => 'DIFFERENTIAL',
-    sink               => 'ducklake',
-                                                                
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
 );

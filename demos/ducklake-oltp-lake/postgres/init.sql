@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS orders (
 
 -- Create the revenue_by_region stream table
 SELECT pgtrickle.create_stream_table(
-    'revenue_by_region',
-    query => $$
+    name     => 'revenue_by_region',
+    query    => $$
         SELECT
             region,
             date_trunc('minute', created_at) AS minute,
@@ -21,9 +21,6 @@ SELECT pgtrickle.create_stream_table(
         FROM orders
         GROUP BY region, date_trunc('minute', created_at)
     $$,
-    schedule           => '5s',
-    refresh_mode       => 'DIFFERENTIAL',
-    sink               => 'ducklake',
-    ducklake_sink_path => 's3://pg-trickle-demo/revenue_by_region/'
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
 );
-
