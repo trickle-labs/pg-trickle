@@ -29,7 +29,7 @@ def generate_batch(conn, batch_num: int):
             for i in range(BATCH_SIZE)
         ]
         cur.executemany(
-            "INSERT INTO lake.events (event_id, event_type, user_id) VALUES (%s, %s, %s)"
+            "INSERT INTO events (event_id, event_type, user_id) VALUES (%s, %s, %s)"
             " ON CONFLICT DO NOTHING",
             rows,
         )
