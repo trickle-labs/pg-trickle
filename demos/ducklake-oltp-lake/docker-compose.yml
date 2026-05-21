@@ -10,7 +10,14 @@ services:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
-    command: postgres -c shared_preload_libraries=pg_trickle -c listen_addresses='*'
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_trickle
+        -c listen_addresses='*'
+        -c pg_trickle.ducklake_sink_s3_endpoint=http://minio:9000
+        -c pg_trickle.ducklake_sink_s3_region=us-east-1
+        -c pg_trickle.ducklake_sink_s3_access_key=minioadmin
+        -c pg_trickle.ducklake_sink_s3_secret_key=minioadmin
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s

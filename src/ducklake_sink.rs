@@ -424,9 +424,12 @@ fn fetch_stream_table_rows(
 
     Spi::connect(|client| {
         // First: discover columns via information_schema.
+        // Cast column_name and udt_name to plain text — their actual type is
+        // information_schema.sql_identifier (a domain over varchar), which pgrx
+        // cannot deserialise as String directly (OID mismatch).
         let col_table = client
             .select(
-                "SELECT column_name, udt_name \
+                "SELECT column_name::text, udt_name::text \
                  FROM information_schema.columns \
                  WHERE table_schema = $1 AND table_name = $2 \
                  ORDER BY ordinal_position",
