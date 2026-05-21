@@ -165,21 +165,22 @@ Watch the refresh history to see exactly how many rows each cycle processed:
 
 ```sql
 SELECT
-    started_at,
-    refresh_mode,
-    delta_rows_in,
-    delta_rows_out,
-    duration_ms
+    start_time,
+    action,
+    rows_inserted,
+    rows_deleted,
+    delta_row_count,
+    EXTRACT(EPOCH FROM (end_time - start_time)) * 1000 AS duration_ms
 FROM pgtrickle.pgt_refresh_history
 WHERE pgt_id = (
     SELECT pgt_id FROM pgtrickle.pgt_stream_tables
-    WHERE table_name = 'funnel_by_product'
+    WHERE pgt_name = 'funnel_by_product'
 )
-ORDER BY started_at DESC
+ORDER BY start_time DESC
 LIMIT 5;
 ```
 
-Notice that `delta_rows_in` is always small — only the events from the last 5
+Notice that `rows_inserted` and `rows_deleted` are always small — only the events from the last 5
 seconds, not the entire history. This is DIFFERENTIAL refresh: O(Δ), not O(N).
 
 ---
