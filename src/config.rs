@@ -1674,6 +1674,37 @@ pub static PGS_DUCKLAKE_SINK_S3_SECRET_KEY: GucSetting<Option<std::ffi::CString>
 pub static PGS_DUCKLAKE_SINK_ENCRYPTION_KEY_PREFIX: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
+// ── v0.69.0: DuckLake sink reliability & security GUCs ───────────────────
+
+/// ARCH-002/REL-001 (v0.69.0): Maximum number of retryable delivery attempts
+/// for a DuckLake sink write before transitioning to FAILED_PERMANENT.
+///
+/// Default: 3. When `run_ducklake_sink()` fails with a transient error, the
+/// delivery row status is set to `FAILED_RETRYABLE` and the attempt count is
+/// incremented. Once `attempt_count >= ducklake_sink_max_retries`, the status
+/// transitions to `FAILED_PERMANENT`.
+pub static PGS_DUCKLAKE_SINK_MAX_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(3);
+
+/// ARCH-002/REL-001 (v0.69.0): What to do when a DuckLake sink delivery
+/// reaches `FAILED_PERMANENT` status.
+///
+/// - `"warn"` (default): emit a PostgreSQL WARNING and continue. The stream
+///   table stays ACTIVE so future refreshes still attempt delivery.
+/// - `"error"`: propagate as a PostgreSQL error. The refresh cycle that
+///   triggered the delivery will be marked FAILED.
+pub static PGS_DUCKLAKE_SINK_FAILURE_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"warn"));
+
+/// SEC-002 (v0.69.0): Schema name for DuckLake catalog tables.
+///
+/// Default: `"main"`. When DuckLake tables (`ducklake_view`, `ducklake_snapshot`,
+/// `ducklake_data_file`, `ducklake_table_stats`) live in a schema other than
+/// the current `search_path`, set this GUC to their fully-qualified schema so
+/// that catalog writes are always directed to the correct namespace regardless
+/// of `search_path` manipulation.
+pub static PGS_DUCKLAKE_CATALOG_SCHEMA: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"main"));
+
 /// PERF-1 (v0.62.0): Deduplicate change-buffer scans across all stream tables
 /// that share the same source within a single scheduler tick.
 ///
@@ -3331,6 +3362,47 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // ── v0.69.0: DuckLake reliability & security GUCs ─────────────────────
+
+    // ARCH-002/REL-001: Max retries before FAILED_PERMANENT.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.ducklake_sink_max_retries",
+        c"ARCH-002/REL-001: Maximum retryable attempts before FAILED_PERMANENT (v0.69.0).",
+        c"When a DuckLake sink write fails with a transient error, the attempt count \
+          is incremented. Once attempt_count reaches this limit the delivery row \
+          transitions from FAILED_RETRYABLE to FAILED_PERMANENT. Default 3.",
+        &PGS_DUCKLAKE_SINK_MAX_RETRIES,
+        1,   // min
+        100, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // ARCH-002/REL-001: Failure mode when delivery is FAILED_PERMANENT.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_failure_mode",
+        c"ARCH-002/REL-001: What to do when DuckLake delivery is FAILED_PERMANENT (v0.69.0).",
+        c"'warn' (default): emit a WARNING and continue; the stream table stays \
+          ACTIVE. 'error': propagate as a PostgreSQL error and mark the refresh \
+          FAILED.",
+        &PGS_DUCKLAKE_SINK_FAILURE_MODE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // SEC-002: DuckLake catalog schema.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_catalog_schema",
+        c"SEC-002: Schema that contains the DuckLake catalog tables (v0.69.0).",
+        c"Default 'main'. Set to the schema name used by your DuckLake installation \
+          if it differs from the default. All catalog writes (ducklake_view, \
+          ducklake_snapshot, ducklake_data_file, ducklake_table_stats) use this \
+          schema to avoid search_path-based misdirection.",
+        &PGS_DUCKLAKE_CATALOG_SCHEMA,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 /// PERF-1 (v0.62.0): Returns whether the change-buffer fan-out deduplication is enabled.
@@ -3413,6 +3485,35 @@ pub fn pg_trickle_ducklake_sink_encryption_key_prefix() -> Option<String> {
         .get()
         .map(|c| c.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
+}
+
+// ── v0.69.0 DuckLake reliability & security accessors ──────────────────────
+
+/// ARCH-002/REL-001 (v0.69.0): Returns the max retries before FAILED_PERMANENT.
+pub fn pg_trickle_ducklake_sink_max_retries() -> i32 {
+    PGS_DUCKLAKE_SINK_MAX_RETRIES.get()
+}
+
+/// ARCH-002/REL-001 (v0.69.0): Returns whether FAILED_PERMANENT propagates as
+/// a PostgreSQL error (`true`) or is silently warned (`false`).
+pub fn pg_trickle_ducklake_sink_failure_mode_is_error() -> bool {
+    PGS_DUCKLAKE_SINK_FAILURE_MODE
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("error")
+}
+
+/// SEC-002 (v0.69.0): Returns the DuckLake catalog schema name.
+/// Defaults to `"main"` when not set.
+pub fn pg_trickle_ducklake_catalog_schema() -> String {
+    PGS_DUCKLAKE_CATALOG_SCHEMA
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_string())
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
