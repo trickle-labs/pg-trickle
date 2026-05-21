@@ -15,6 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    command: postgres -c shared_preload_libraries=pg_trickle -c listen_addresses='*'
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d timetravel_demo"]
       interval: 5s
