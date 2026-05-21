@@ -52,7 +52,6 @@ use crate::version;
 pub mod citus;
 pub mod cost;
 pub mod dispatch;
-pub mod pool;
 pub mod scheduler_loop;
 pub mod tier;
 pub mod watermark;

@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.68.0 — Assessment-13 Correctness & Durability Sprint](#0680--assessment-13-correctness--durability-sprint)
 - [0.67.0 — DuckLake Phase 3b: View Registration, Provenance & Ecosystem](#0670--ducklake-phase-3b-view-registration-provenance--ecosystem)
 - [0.66.0 — DuckLake Phase 3a: Parquet Sink Infrastructure](#0660--ducklake-phase-3a-parquet-sink-infrastructure)
 - [0.65.0 — DuckLake Phase 2: Change-Feed Adapter](#0650--ducklake-phase-2-change-feed-adapter)
@@ -82,6 +83,69 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.68.0] — Assessment-13 Correctness & Durability Sprint
+
+### What's New
+
+v0.68.0 targets the highest-severity correctness findings from the v0.67.0
+overall assessment (Assessment 13). The release resolves four code defects that
+produced silent data loss, audit-integrity loss, or operator-visible
+misbehaviour — fixing real bugs before adding more features.
+
+**COR-001: Fused Refresh Audit Trail**
+
+Scheduler-driven fused refreshes are now fully recorded in
+`pgt_refresh_history`. Before this fix the `initiated_by` CHECK constraint
+did not include `'SCHEDULER_FUSED'`, so every fused-refresh audit record was
+silently rejected by the constraint and the audit log showed a gap. The
+constraint now accepts all five valid values:
+`SCHEDULER`, `MANUAL`, `INITIAL`, `SELF_MONITOR`, `SCHEDULER_FUSED`.
+
+**COR-003 / ARCH-001: `change_buffer_durability` GUC is now wired**
+
+The `pg_trickle.change_buffer_durability` GUC (`'unlogged'` / `'logged'` /
+`'sync'`) is now honoured when `create_stream_table()` creates a new change
+buffer. Previously the GUC was registered but never read; only the legacy
+`pg_trickle.unlogged_buffers` bool had any effect. The legacy GUC is preserved
+as a backward-compat alias and now emits a `WARNING` advising migration to the
+new GUC.
+
+**COR-004: DuckLake Timestamp NULL Fix**
+
+`timestamptz` and `timestamp` columns exported to the DuckLake Parquet sink
+now round-trip correctly. Before this fix they were serialised as text (e.g.
+`"2023-01-01 00:00:00+00"`) which the Arrow writer could not parse as an
+integer, silently producing `NULL` in every exported Parquet file. They are
+now serialised as microsecond-epoch integers via
+`EXTRACT(EPOCH FROM ...) * 1000000`.
+
+**SCAL-001: Pool Path Deleted**
+
+The persistent background-worker pool introduced in v0.25.0 (SCAL-5) was dead
+code: `pg_trickle.worker_pool_size` defaults to 0 and no production deployment
+had enabled it. The pool executor pre-dated fused chains, SCC cycles, and
+immediate closures and would have broken on activation. The 297-line `pool.rs`
+module has been removed. Dynamic per-tick background workers remain the sole
+scheduling path (see ADR-024). The GUC is retained as a documented no-op for
+backward compatibility.
+
+### Upgrade Notes
+
+Run the upgrade migration:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.68.0';
+```
+
+The migration adds `'SCHEDULER_FUSED'` to the `initiated_by` CHECK constraint
+on `pgt_refresh_history`. It is idempotent and safe to run on a live database.
+
+The `pg_trickle.unlogged_buffers` GUC continues to work; the only visible
+change is a `WARNING` in the PostgreSQL log advising migration to
+`pg_trickle.change_buffer_durability`. No action is required before v1.0.
 
 ---
 

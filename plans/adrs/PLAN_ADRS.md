@@ -433,6 +433,43 @@ than full recomputation at high change rates.
 
 ---
 
+### ADR-024: Dynamic Workers as Sole Scheduling Path (Pool Removal)
+
+| Field | Value |
+|-------|-------|
+| **Status** | Accepted |
+| **Category** | Scheduling & Runtime |
+| **Sources** | `src/scheduler/mod.rs`, `plans/PLAN_OVERALL_ASSESSMENT_13.md` |
+| **Decided** | v0.68.0 (SCAL-001) |
+
+**Decision:** Remove the persistent worker pool (`pool.rs`) and adopt
+on-demand dynamic background worker spawning as the sole scheduling path.
+
+**Context:**  A persistent worker pool was introduced in SCAL-5 (v0.25.0)
+as an optimisation to avoid per-tick BGW registration overhead.  Assessment 13
+found the pool path is never activated in practice: `pg_trickle.worker_pool_size`
+defaults to 0 and no production deployment has enabled it.  The pool code
+diverged from the dynamic-worker path, carrying duplicate job execution logic
+that received no maintenance.  Activating it would break on the current job
+model (fused chains, SCC cycles, immediate closures) because the pool executor
+pre-dates all of those execution strategies.
+
+**Decision points:**
+- **Keep pool:** would require re-implementing all execution strategies in the
+  pool loop; estimated ~3 weeks effort with high correctness risk.
+- **Delete pool:** one-time 297-line deletion; dynamic workers handle the same
+  use-cases with lower latency variance (no idle spin in the pool).
+
+**Key points:**
+- Dynamic BGWs are spawned per-tick and de-registered on completion.
+- PostgreSQL's internal BGW management handles restart and cleanup.
+- No operator-visible behaviour change — `worker_pool_size = 0` was the
+  effective setting in all deployments.
+- The GUC `pg_trickle.worker_pool_size` is retained as a no-op for backward
+  compatibility of any operator scripts that reference it.
+
+---
+
 ### ADR-030: dbt Integration via Macro Package (Not Custom Adapter)
 
 | Field | Value |
@@ -1210,6 +1247,7 @@ plans/adrs/
 ├── adr-021-single-background-worker.md
 ├── adr-022-replication-origin-feedback-prevention.md
 ├── adr-023-adaptive-full-refresh-fallback.md
+├── adr-024-dynamic-workers-pool-removal.md
 │
 │ ── Tooling & Ecosystem (030-039) ──
 ├── adr-030-dbt-macro-package.md

@@ -462,10 +462,25 @@ fn fetch_stream_table_rows(
             return Ok((vec![], vec![]));
         }
 
-        // Build a SELECT that casts every column to TEXT for uniform handling.
+        // COR-004 (v0.68.0): Build a SELECT that serialises every column to a
+        // parseable string.  Timestamp/timestamptz columns must be emitted as
+        // microsecond-epoch integers so they can be parsed as i64 by
+        // write_parquet_bytes().  Casting them to ::text yields a locale-
+        // sensitive string like "2023-01-01 00:00:00+00" which cannot be
+        // parsed as i64, causing silent NULL coercion in Parquet output.
         let col_list = columns
             .iter()
-            .map(|c| format!("\"{}\"::text", c.name.replace('"', "\"\"")))
+            .map(|c| {
+                let qname = c.name.replace('"', "\"\"");
+                if c.type_oid == 4 {
+                    // timestamp / timestamptz → microseconds since Unix epoch
+                    format!(
+                        "(EXTRACT(EPOCH FROM \"{qname}\"::timestamptz) * 1000000)::bigint::text"
+                    )
+                } else {
+                    format!("\"{}\"::text", qname)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
 

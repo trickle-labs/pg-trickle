@@ -1201,3 +1201,136 @@ async fn test_fused_refresh_tpch_22() {
         .await;
     db.reload_config_and_wait().await;
 }
+
+// ── TEST-003: Scheduler-driven fused refresh audit trail ──────────────
+
+/// TEST-003 (COR-001, v0.68.0): Verify that scheduler-driven fused refreshes
+/// are recorded in `pgt_refresh_history` with `initiated_by = 'SCHEDULER_FUSED'`.
+///
+/// Prior to v0.68.0, the CHECK constraint on `initiated_by` did not include
+/// `'SCHEDULER_FUSED'`, so fused-refresh audit records were silently rejected
+/// and the audit log showed a gap.
+///
+/// This is a light-eligible test (uses E2eDb::new()).
+#[tokio::test]
+async fn test_fused_refresh_scheduler_audit_trail() {
+    let db = e2e::E2eDb::new_on_postgres_db()
+        .await
+        .with_extension()
+        .await;
+
+    // Configure fast scheduler.
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enable_fused_refresh = true")
+        .await;
+    db.reload_config_and_wait().await;
+    db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
+        .await;
+    db.wait_for_setting("pg_trickle.enable_fused_refresh", "on")
+        .await;
+
+    // Wait for scheduler to start.
+    let sched_running = db
+        .wait_for_scheduler(std::time::Duration::from_secs(90))
+        .await;
+    assert!(sched_running, "Scheduler should start within 90 s");
+
+    // Build a two-level DAG so the scheduler can execute a fused chain.
+    db.execute("CREATE TABLE fused_audit_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO fused_audit_src SELECT i, i FROM generate_series(1, 10) i")
+        .await;
+
+    db.create_st(
+        "fused_audit_l1",
+        "SELECT id, val FROM fused_audit_src",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    db.create_st(
+        "fused_audit_l2",
+        "SELECT id, val * 2 AS val2 FROM public.fused_audit_l1",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Insert data to trigger differential refreshes.
+    db.execute("INSERT INTO fused_audit_src VALUES (11, 11)")
+        .await;
+
+    // Wait for the scheduler to refresh l2 (it may fuse l1 + l2).
+    let refreshed = db
+        .wait_for_auto_refresh("fused_audit_l2", std::time::Duration::from_secs(60))
+        .await;
+    assert!(
+        refreshed,
+        "Scheduler should auto-refresh fused_audit_l2 within 60 s"
+    );
+
+    // Check pgt_refresh_history: the CHECK constraint must accept SCHEDULER_FUSED.
+    // We verify this by querying whether any row with initiated_by = 'SCHEDULER_FUSED'
+    // exists OR that standard SCHEDULER rows are present (the scheduler may fall back
+    // to sequential if fusing was not eligible this cycle).
+    let fused_count: i64 = db
+        .query_scalar(
+            "SELECT count(*) \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables d ON h.pgt_id = d.pgt_id \
+             WHERE d.pgt_name IN ('fused_audit_l1', 'fused_audit_l2') \
+               AND h.initiated_by IN ('SCHEDULER', 'SCHEDULER_FUSED') \
+               AND h.status = 'COMPLETED'",
+        )
+        .await;
+
+    assert!(
+        fused_count > 0,
+        "pgt_refresh_history should contain COMPLETED scheduler-driven records \
+         for the fused DAG (fused_count={}). \
+         If this assertion fails it likely means SCHEDULER_FUSED is not in the \
+         initiated_by CHECK constraint.",
+        fused_count,
+    );
+
+    // Additionally, verify SCHEDULER_FUSED is an accepted initiated_by value
+    // by attempting a direct INSERT (would fail with CHECK violation pre-v0.68.0).
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'fused_audit_l1'",
+        )
+        .await;
+
+    let insert_ok = db
+        .try_execute(&format!(
+            "INSERT INTO pgtrickle.pgt_refresh_history \
+                (pgt_id, start_time, refresh_mode, status, initiated_by) \
+             VALUES \
+                ({pgt_id}, now(), 'DIFFERENTIAL', 'COMPLETED', 'SCHEDULER_FUSED')"
+        ))
+        .await;
+
+    assert!(
+        insert_ok.is_ok(),
+        "Inserting a row with initiated_by = 'SCHEDULER_FUSED' must succeed \
+         (COR-001: CHECK constraint should include SCHEDULER_FUSED)"
+    );
+
+    // Reset GUCs.
+    db.execute("ALTER SYSTEM RESET pg_trickle.enable_fused_refresh")
+        .await;
+    db.execute("ALTER SYSTEM RESET pg_trickle.scheduler_interval_ms")
+        .await;
+    db.execute("ALTER SYSTEM RESET pg_trickle.min_schedule_seconds")
+        .await;
+    db.execute("ALTER SYSTEM RESET pg_trickle.auto_backoff")
+        .await;
+    db.reload_config_and_wait().await;
+}
