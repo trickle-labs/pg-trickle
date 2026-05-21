@@ -2,7 +2,9 @@ version: "3.9"
 
 services:
   postgres:
-    image: ghcr.io/trickle-labs/pg-trickle:latest
+    build:
+      context: ../../
+      dockerfile: Dockerfile.demo
     container_name: ducklake_timetravel_postgres
     environment:
       POSTGRES_DB: timetravel_demo
