@@ -1,6 +1,6 @@
 # Tutorial 2: O(Δ) Refresh on DuckLake Tables
 
-*How pg_trickle's change-feed adapter reads only the rows that changed \u2014 even when the source is a DuckLake foreign table with 10 million rows*
+*How pg_trickle's change-feed adapter reads only the rows that changed — even when the source is a DuckLake foreign table with 10 million rows*
 
 ---
 
@@ -9,7 +9,7 @@
 You'll create a pg_trickle stream table whose **source is a DuckLake table**
 (not a regular PostgreSQL table). You'll see that pg_trickle uses DuckLake's
 `table_changes()` API to read only the rows that changed since the last
-refresh cycle \u2014 an O(\u0394) scan instead of an O(N) full-table scan.
+refresh cycle — an O(Δ) scan instead of an O(N) full-table scan.
 
 ---
 
@@ -21,25 +21,25 @@ Foreign Data Wrapper (FDW) so you can query DuckLake tables using ordinary SQL
 from inside PostgreSQL.
 
 **FDW (Foreign Data Wrapper)** is a PostgreSQL mechanism that lets you access
-external data sources \u2014 including DuckLake tables, files on S3, or remote
-databases \u2014 as if they were regular PostgreSQL tables. They appear in
+external data sources — including DuckLake tables, files on S3, or remote
+databases — as if they were regular PostgreSQL tables. They appear in
 `pg_class` with `relkind = 'f'` (foreign table).
 
 **IVM (Incremental View Maintenance)** means maintaining a precomputed result
-set by applying only the *changes* (\u0394) that occurred since the last refresh,
+set by applying only the *changes* (Δ) that occurred since the last refresh,
 rather than recomputing from scratch every time.
 
 **The problem pg_trickle solves here:** before v0.65.0, the only way to detect
 changes on a DuckLake FDW table was to scan the entire table and compare with a
-snapshot (`EXCEPT ALL`). That is O(N) \u2014 it gets slower as the table grows,
+snapshot (`EXCEPT ALL`). That is O(N) — it gets slower as the table grows,
 regardless of how few rows actually changed. DuckLake 1.x provides
 `table_changes(table, from_snapshot, to_snapshot)` which returns only the delta
 rows. pg_trickle v0.65.0+ uses this API automatically.
 
 | Approach | Work per refresh | When to use |
 |----------|-----------------|-------------|
-| `EXCEPT ALL` polling (\u2264 v0.64.0) | O(N) \u2014 full table scan | DuckLake without `table_changes` |
-| Change-feed adapter (v0.65.0+) | O(\u0394) \u2014 only changed rows | DuckLake 1.x with `table_changes` |
+| `EXCEPT ALL` polling (≤ v0.64.0) | O(N) — full table scan | DuckLake without `table_changes` |
+| Change-feed adapter (v0.65.0+) | O(Δ) — only changed rows | DuckLake 1.x with `table_changes` |
 
 ---
 
@@ -53,7 +53,7 @@ Before starting you need:
   ```sql
   CREATE EXTENSION IF NOT EXISTS ducklake;
   ```
-- A DuckLake catalog initialized \u2014 see Step 1 below
+- A DuckLake catalog initialized — see Step 1 below
 
 ---
 
@@ -61,17 +61,17 @@ Before starting you need:
 
 ```
 DuckLake catalog (PostgreSQL)
-  \u2502  raw_events table  \u2190 batch loads land here
-  \u2502  (exposed as FDW foreign table in pg_class)
-  \u2502
-  \u2514\u2500 pg_trickle stream table: event_summary
-       \u2502  5-minute DIFFERENTIAL refresh
-       \u2502  CDC mode: DUCKLAKE_CHANGE_FEED
-       \u2502  pg_trickle calls table_changes(raw_events, prev_snapshot, latest)
-       \u2502  and processes only the \u0394 rows
-       \u25bc
+  │  raw_events table  ← batch loads land here
+  │  (exposed as FDW foreign table in pg_class)
+  │
+  └─ pg_trickle stream table: event_summary
+       │  5-minute DIFFERENTIAL refresh
+       │  CDC mode: DUCKLAKE_CHANGE_FEED
+       │  pg_trickle calls table_changes(raw_events, prev_snapshot, latest)
+       │  and processes only the Δ rows
+       ▼
   event_summary (PostgreSQL table)
-       \u2514\u2500 SELECT * FROM event_summary  \u2190 always fresh, always fast
+       └─ SELECT * FROM event_summary  ← always fresh, always fast
 ```
 
 ---
@@ -88,7 +88,7 @@ SELECT ducklake_init('/var/lib/ducklake/events.db');
 ```
 
 Now create a DuckLake table. This table will be the *source* for our stream
-table \u2014 the data that pg_trickle watches for changes:
+table — the data that pg_trickle watches for changes:
 
 ```sql
 -- Create a DuckLake table (this executes DuckLake DDL via the FDW)
@@ -168,11 +168,11 @@ WHERE st.table_name = 'event_summary';
 
 If you see `POLLING` instead of `DUCKLAKE_CHANGE_FEED`, your DuckLake version
 does not have the `table_changes()` function (pre-1.x). The tutorial still
-works but refreshes will be O(N) instead of O(\u0394).
+works but refreshes will be O(N) instead of O(Δ).
 
 ---
 
-## Step 3: Observe O(\u0394) refresh behaviour
+## Step 3: Observe O(Δ) refresh behaviour
 
 Now insert just 100 new rows into the 10-million-row table:
 
@@ -215,7 +215,7 @@ DIFFERENTIAL |           100 |             68 |           3
 ```
 
 `delta_rows_in = 100` means pg_trickle read exactly the 100 new rows via
-`table_changes()` \u2014 not the 10 million rows in the full table. The
+`table_changes()` — not the 10 million rows in the full table. The
 `delta_rows_out = 68` is the number of rows in `event_summary` that changed
 as a result (some `hour` + `event_type` combinations received their first row,
 others updated an existing aggregate).
@@ -224,7 +224,7 @@ others updated an existing aggregate).
 
 ## Step 4: Understand and configure the compaction policy
 
-DuckLake periodically **compacts** old Parquet files \u2014 merging many small
+DuckLake periodically **compacts** old Parquet files — merging many small
 delta files into one large file and deleting the originals. This is a routine
 maintenance operation that improves query performance.
 
@@ -288,17 +288,17 @@ only the rows that appeared after that snapshot.
 ## What you've built
 
 - A stream table that aggregates a 10-million-row DuckLake FDW table into
-  an hourly event summary \u2014 refreshing in milliseconds by reading only the
+  an hourly event summary — refreshing in milliseconds by reading only the
   rows that changed.
 - Automatic compaction resilience: if DuckLake compacts away old snapshots,
-  pg_trickle falls back to a full scan and then resumes O(\u0394) operation.
+  pg_trickle falls back to a full scan and then resumes O(Δ) operation.
 
 ---
 
 ## Next steps
 
-- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** \u2014 use DuckLake as a
+- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** — use DuckLake as a
   *sink* (write stream table deltas out to Parquet on S3) in a full docker
   compose stack.
-- **[Tutorial 6](tutorial-sub-millisecond-inlined-cdc.md)** \u2014 sub-millisecond
+- **[Tutorial 6](tutorial-sub-millisecond-inlined-cdc.md)** — sub-millisecond
   CDC on small DuckLake tables that are stored inline in PostgreSQL.

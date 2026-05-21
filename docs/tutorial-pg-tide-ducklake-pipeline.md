@@ -1,6 +1,6 @@
 # Tutorial 5: Guaranteed Delivery to DuckLake with pg-tide
 
-*Add a transactional outbox between pg_trickle and DuckLake so every delta reaches S3 \u2014 even through network failures and restarts*
+*Add a transactional outbox between pg_trickle and DuckLake so every delta reaches S3 — even through network failures and restarts*
 
 ---
 
@@ -11,7 +11,7 @@ relay**. Every differential delta is atomically enqueued in a pg-tide outbox
 *in the same database transaction as the refresh*. A background relay worker
 then picks up the outbox messages and writes Parquet files to S3. If the S3
 write fails, the message stays in the outbox and the relay retries
-automatically \u2014 giving you at-least-once delivery with no message loss.
+automatically — giving you at-least-once delivery with no message loss.
 
 **When should you use this instead of the direct sink?**
 
@@ -60,30 +60,30 @@ happen with the direct sink.
 
 ```
 Application
-  \u2502  INSERT into orders
-  \u25bc
+  │  INSERT into orders
+  ▼
 PostgreSQL
-  \u251c\u2500 orders table
-  \u2502
-  \u251c\u2500 pg_trickle: revenue_by_region stream table
-  \u2502    \u2502  5-second DIFFERENTIAL refresh
-  \u2502    \u25bc
-  \u2514\u2500 pg-tide outbox: revenue_by_region_outbox
-       \u2502  Written in the same transaction as the refresh
-       \u2502  Survives pg_trickle restarts and S3 outages
-       \u25bc
+  ├─ orders table
+  │
+  ├─ pg_trickle: revenue_by_region stream table
+  │    │  5-second DIFFERENTIAL refresh
+  │    ▼
+  └─ pg-tide outbox: revenue_by_region_outbox
+       │  Written in the same transaction as the refresh
+       │  Survives pg_trickle restarts and S3 outages
+       ▼
   pg-tide relay (background worker)
-       \u2502  Polls outbox with SKIP LOCKED
-       \u2502  Serializes delta to Parquet
-       \u2502  Uploads to S3
-       \u2502  On success: marks message delivered
-       \u2502  On failure: leaves message for retry
-       \u25bc
+       │  Polls outbox with SKIP LOCKED
+       │  Serializes delta to Parquet
+       │  Uploads to S3
+       │  On success: marks message delivered
+       │  On failure: leaves message for retry
+       ▼
   S3 / MinIO
-       \u2502  Parquet delta files
-       \u25bc
+       │  Parquet delta files
+       ▼
   DuckLake catalog
-       \u2514\u2500 ducklake_snapshot, ducklake_view
+       └─ ducklake_snapshot, ducklake_view
 ```
 
 ---
@@ -182,7 +182,7 @@ WHERE outbox_name = 'revenue_by_region';
 
 ## Step 5: Configure the relay destination
 
-Tell the pg-tide relay where to send the messages \u2014 in this case, to DuckLake
+Tell the pg-tide relay where to send the messages — in this case, to DuckLake
 on S3:
 
 ```sql
@@ -200,7 +200,7 @@ SELECT tide.relay_set_outbox(
 ```
 
 > **Tip:** Set `s3_access_key` and `s3_secret_key` to empty strings to reuse
-> the GUC values you set in Step 2 \u2014 that way you only store credentials in
+> the GUC values you set in Step 2 — that way you only store credentials in
 > one place.
 
 ---
@@ -276,7 +276,7 @@ SELECT pg_reload_conf();
 ```
 
 The relay will automatically retry and deliver the pending messages. No data
-was lost \u2014 the deltas are safely in the outbox.
+was lost — the deltas are safely in the outbox.
 
 ---
 
@@ -287,7 +287,7 @@ With `attach_outbox()` + pg-tide relay versus `sink => 'ducklake'`:
 | Aspect | Direct sink | pg-tide relay |
 |--------|------------|---------------|
 | S3 write timing | During the refresh transaction | After the refresh, in a separate relay transaction |
-| Refresh blocked by S3 | Yes \u2014 if S3 is slow, the refresh cycle takes longer | No \u2014 refresh completes as soon as the outbox write succeeds |
+| Refresh blocked by S3 | Yes — if S3 is slow, the refresh cycle takes longer | No — refresh completes as soon as the outbox write succeeds |
 | Retry on S3 failure | Automatic (next refresh cycle) | Automatic (relay retry loop, independent of refresh schedule) |
 | Fan-out to multiple sinks | Not supported | Supported: add multiple relay destinations to the same outbox |
 | Delivery guarantee | Best-effort | At-least-once (outbox survives crashes) |
@@ -319,9 +319,9 @@ SELECT pgtrickle.drop_stream_table('revenue_by_region');
 
 ## Next steps
 
-- **[pg-tide documentation](https://github.com/trickle-labs/pg-tide)** \u2014 fan-out
+- **[pg-tide documentation](https://github.com/trickle-labs/pg-tide)** — fan-out
   configuration, dead-letter queues, and monitoring.
-- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** \u2014 the full modern data
+- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** — the full modern data
   stack with a `docker compose` environment.
-- **[Tutorial 4](tutorial-streaming-postgres-to-data-lake.md)** \u2014 using the
+- **[Tutorial 4](tutorial-streaming-postgres-to-data-lake.md)** — using the
   direct DuckLake sink without pg-tide.
