@@ -253,6 +253,29 @@ four tutorials plus two containerised demos ship with the code.
 | [v0.66.0](roadmap/v0.66.0.md) | DuckLake Phase 3a: Parquet delta export (`arrow-rs`), DuckLake sink output mode, S3 upload, catalog transaction writer, encryption key pass-through, E2E tests | ✅ Released | Large | [Full details](roadmap/v0.66.0.md) |
 | [v0.67.0](roadmap/v0.67.0.md) | DuckLake Phase 3b: view registration, snapshot provenance (INT-11), pg-tide tutorial, 2 tutorials, 2 containerised demos | ✅ Released | Medium | [Full details](roadmap/v0.67.0.md-full.md) |
 
+### Assessment-13-Driven Hardening Arc (v0.68.x – v0.71.x)
+
+Driven by the findings in the v0.67.0 overall assessment
+([plans/PLAN_OVERALL_ASSESSMENT_13.md](plans/PLAN_OVERALL_ASSESSMENT_13.md)).
+The assessment found 0 critical, 10 HIGH, 19 MEDIUM, and 7 LOW findings across
+correctness (fused refresh audit trail, LATERAL validation bypass, durability GUC
+not wired, DuckLake timestamp NULL serialisation), reliability (DuckLake sink
+warning-only delivery), scalability (stale scheduler pool code, launcher fan-out),
+performance (per-source SPI storm, fused eligibility O(N×M) cost, history prune
+GUC ignored), security (publication name-parser inconsistency, unqualified
+DuckLake schema resolution), observability (sink metrics absent, prune failures
+invisible), test coverage (no LATERAL volatile tests, stale test harness schema),
+CI/CD (fuzz smoke incomplete, `fuzz-all` masks crashes, coverage schedule wrong),
+code quality (SQL API catalog generator truncates return types, Tarjan SCC
+panics), and documentation (PLAN.md obsolete, INDEX.md stale). This four-release
+arc resolves every finding before v1.0.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.68.0](roadmap/v0.68.0.md) | Correctness & Durability Sprint: fused refresh audit trail (COR-001), wire `change_buffer_durability` into CDC (ARCH-001/COR-003), DuckLake timestamp NULL fix (COR-004), stale pool path deleted (SCAL-001), scheduler fused E2E audit test (TEST-003), durability mode tests (TEST-004) | Planned | Medium | [Full details](roadmap/v0.68.0.md-full.md) |
+| [v0.69.0](roadmap/v0.69.0.md) | DuckLake Sink Reliability & Security: delivery state machine with retry/backoff (ARCH-002/REL-001), view registration on query-only ALTER (COR-005), snapshot ID advisory lock (COR-006), qualified schema resolution (SEC-002), sink health metrics & Prometheus (OBS-001), dependency policy docs (DEP-002) | Planned | Large | [Full details](roadmap/v0.69.0.md-full.md) |
+| [v0.70.0](roadmap/v0.70.0.md) | Scheduler, Validator & Security Hardening: LATERAL body volatility scanning (COR-002), batched monitor buffer health (PERF-001), batched fused eligibility loads (PERF-002), history prune GUC wired + start_time index (PERF-003), work-mem cap conservative default (PERF-004), launcher DB cache (SCAL-002), publication name-parser unified (SEC-001), prune failure visibility (OBS-002), LATERAL volatile tests (TEST-001), cache_stats() E2E tests (TEST-002) | Planned | Large | [Full details](roadmap/v0.70.0.md-full.md) |
+| [v0.71.0](roadmap/v0.71.0.md) | CI Truthfulness, Test Harness & Documentation Cleanup: fuzz smoke covers all 9 targets (CI-001), fuzz-all failure propagation (CI-002), E2E coverage schedule (CI-003), docs-lint in just lint (CI-004), advisory expiry metadata (DEP-001), SQL API catalog generator rewritten (DOC-001/CODE-001), Tarjan SCC unwrap→error (CODE-002), generated test harness schema (TEST-005), PLAN.md archived (ARCH-003/DOC-002), INDEX.md regenerated (DOC-003) | Planned | Medium | [Full details](roadmap/v0.71.0.md-full.md) |
 
 ### Beyond v1.0
 
@@ -353,6 +376,14 @@ v0.65    ─── DuckLake Phase 2: change-feed adapter, snapshot frontier, inl
 v0.66    ─── DuckLake Phase 3a: Parquet delta export, DuckLake sink output mode, S3 upload, catalog writer, encryption
     │
 v0.67    ─── DuckLake Phase 3b: view registration, snapshot provenance, pg-tide tutorial, tutorials & demos
+    │
+v0.68    ─── Assessment-13 sprint: fused refresh audit trail, change_buffer_durability wired, DuckLake timestamp fix, stale pool deleted
+    │
+v0.69    ─── DuckLake sink reliability: delivery state machine, view-on-ALTER, snapshot lock, qualified schema, sink metrics
+    │
+v0.70    ─── Scheduler/validator hardening: LATERAL validation, batched monitor, fused eligibility, prune GUC, work-mem cap, launcher cache
+    │
+v0.71    ─── CI truth + doc cleanup: fuzz all 9 targets, catalog generator rewrite, test harness schema generated, PLAN.md archived
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
