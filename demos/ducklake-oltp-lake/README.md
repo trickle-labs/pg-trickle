@@ -129,6 +129,8 @@ The notebook has three sections:
 
 Run all cells top to bottom with **Run → Run All Cells**.
 
+**Note:** The JupyterLab container includes DuckDB, psycopg2, and S3 tools pre-installed, so you can immediately query Parquet files and PostgreSQL without additional setup.
+
 ---
 
 ## Step 3: Connect to PostgreSQL and explore the pipeline
