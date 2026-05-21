@@ -63,3 +63,19 @@ CREATE INDEX IF NOT EXISTS pgt_ducklake_sink_delivery_st_started
 
 COMMENT ON TABLE pgtrickle.pgt_ducklake_sink_delivery IS
     'ARCH-002/REL-001 (v0.69.0): per-delivery tracking for the DuckLake sink write path.';
+
+-- ── OBS-001: Sink health metrics SQL function ─────────────────────────────
+
+CREATE OR REPLACE FUNCTION pgtrickle."ducklake_sink_status"()
+RETURNS TABLE (
+    "stream_table_name"    TEXT,
+    "last_delivery_status" TEXT,
+    "last_delivery_at"     timestamp with time zone,
+    "last_bytes_written"   bigint,
+    "last_rows_written"    bigint,
+    "failed_attempts"      bigint,
+    "last_error"           TEXT
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'ducklake_sink_status_wrapper';
