@@ -92,14 +92,14 @@ SELECT pgtrickle.create_stream_table(
     query        => $$
         SELECT
             product_id,
-            COUNT(*) FILTER (WHERE event_type = 'view')        AS views,
-            COUNT(*) FILTER (WHERE event_type = 'add_to_cart') AS add_to_cart,
+            COUNT(*) FILTER (WHERE event_type = 'view')        AS visits,
+            COUNT(*) FILTER (WHERE event_type = 'add_to_cart') AS carts,
             COUNT(*) FILTER (WHERE event_type = 'purchase')    AS purchases,
             ROUND(
                 100.0 * COUNT(*) FILTER (WHERE event_type = 'purchase')
                        / NULLIF(COUNT(*) FILTER (WHERE event_type = 'view'), 0),
-                2
-            ) AS conversion_pct
+                1
+            ) AS purchase_rate_pct
         FROM events_bridge
         GROUP BY product_id
     $$,

@@ -209,21 +209,22 @@ The leaderboard is defined by a single `create_stream_table` call
 
 ```sql
 SELECT pgtrickle.create_stream_table(
-    'top_players',
+    name => 'top_players',
     query => $$
         SELECT
             player_id,
             player_name,
             SUM(score)                             AS total_score,
-            COUNT(*)                               AS games_played,
+            COUNT(1)                               AS games_played,
             RANK() OVER (ORDER BY SUM(score) DESC) AS rank
         FROM game_scores
         GROUP BY player_id, player_name
     $$,
-    schedule           => '5s',
-    refresh_mode       => 'DIFFERENTIAL',
-    sink               => 'ducklake',
-    ducklake_sink_path => 's3://pg-trickle-demo/top_players/'
+    schedule                => '5s',
+    refresh_mode            => 'DIFFERENTIAL',
+    sink                    => 'ducklake',
+    ducklake_sink_path      => 's3://pg-trickle-demo/top_players/',
+    ducklake_sink_table_id  => (SELECT table_id FROM ducklake_table WHERE table_name = 'top_players')
 );
 ```
 
@@ -234,9 +235,53 @@ over new score events), then applies the `RANK()` over the full refreshed
 result set. This means ranks are always globally consistent — no partial
 recompute artifacts.
 
+**Note on `COUNT(1)` vs `COUNT(*)`:**
+When defining stream table queries with dollar-quoted strings (`$$ ... $$`),
+PostgreSQL's parser has a quirk where bare `COUNT(*)` is rejected. Use
+`COUNT(1)` (or any literal) instead — it's semantically identical and
+pg_trickle's DVM engine will handle it correctly.
+
 ---
 
-## Step 6: Run the analytics notebook (optional)
+## Step 6: Connect from DuckDB (optional)
+
+Query the stream tables and provenance trail directly from DuckDB without leaving
+the Python REPL:
+
+```python
+import duckdb
+
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+
+# Attach PostgreSQL (no ducklake: protocol — direct postgresql://)
+con.execute("""
+    ATTACH 'dbname=postgres user=postgres password=postgres host=localhost port=5432'
+        AS lake (TYPE POSTGRES)
+""")
+
+# Query stream tables
+print(con.execute("""
+    SELECT pgt_name, pgt_schema, schedule, refresh_mode, status
+    FROM lake.pgtrickle.pgt_stream_tables
+    ORDER BY pgt_name
+""").df())
+
+# Check Parquet files written to MinIO
+print(con.execute("""
+    SELECT stream_table_name, delta_row_count, written_at
+    FROM lake.pgtrickle.pgt_ducklake_provenance
+    ORDER BY written_at DESC
+    LIMIT 10
+""").df())
+```
+
+DuckDB will automatically recognize the `pgtrickle` schema and the DuckLake
+catalog tables. No separate notebook container is needed.
+
+---
+
+## Step 7: Run the analytics notebook (optional)
 
 If you have DuckDB and JupyterLab installed locally:
 
@@ -245,30 +290,41 @@ pip install duckdb jupyterlab
 jupyter lab notebooks/leaderboard_analysis.ipynb
 ```
 
-In the notebook, attach to the DuckLake catalog and query the ranking history:
+In the notebook, attach to PostgreSQL (DuckDB will automatically recognize the
+DuckLake catalog tables) and query the ranking history:
 
 ```python
 import duckdb
 
 con = duckdb.connect()
+
+# Install and load the postgres extension
+con.execute("INSTALL postgres; LOAD postgres;")
+
+# Attach PostgreSQL directly (connection string goes in ATTACH)
 con.execute("""
-    ATTACH 'ducklake:postgresql://postgres:postgres@localhost:5432/postgres'
-        AS lake (TYPE DUCKLAKE)
+    ATTACH 'dbname=postgres user=postgres password=postgres host=localhost port=5432'
+        AS lake (TYPE POSTGRES)
 """)
 
-# Who was rank 1 at each snapshot?
+# Query the stream tables via the pgtrickle schema
 result = con.execute("""
     SELECT
-        s.snapshot_time,
-        p.player_name,
-        p.total_score,
-        p.rank
-    FROM lake.top_players p
-    JOIN ducklake_snapshot s USING (snapshot_id)
-    WHERE p.rank = 1
-    ORDER BY s.snapshot_time
+        pgt_name,
+        COUNT(*) as rows,
+        MAX(updated_at) as last_updated
+    FROM lake.pgtrickle.pgt_stream_tables
+    GROUP BY pgt_name
 """).df()
 print(result)
+
+# Query the provenance trail to see when Parquet files were written
+provenance = con.execute("""
+    SELECT * FROM lake.pgtrickle.pgt_ducklake_provenance
+    ORDER BY written_at DESC
+    LIMIT 20
+""").df()
+print(provenance)
 ```
 
 ---
@@ -277,11 +333,13 @@ print(result)
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
+| Postgres container exits with "syntax error at or near '*'" | `COUNT(*)` syntax in dollar-quoted stream table queries | Use `COUNT(1)` instead; PostgreSQL parser rejects bare `*` in this context |
 | Grafana shows "No data" | Stream tables not yet populated | Wait 15 s; check `docker compose logs postgres` |
 | MinIO console is empty | `minio-setup` container failed | Run `docker compose up minio-setup` to retry bucket creation |
-| `pgt_ducklake_provenance` has no rows | S3 write failed | Check `docker compose logs postgres` for S3 errors |
-| Rankings not changing | Score generator not running | Check `docker compose logs generator` |
-| Port 3000 conflict | Another service using port 3000 | The leaderboard compose doesn't expose a `GRAFANA_PORT` env var; edit `docker-compose.yml` to change `3000:3000` |
+| `pgt_ducklake_provenance` has no rows | S3 write failed or sink not configured | Check `docker compose logs postgres` for S3 errors; verify `sink => 'ducklake'` in stream table SQL |
+| Rankings not changing | Score generator not running or not inserting rows | Check `docker compose logs generator` and `docker compose logs postgres` |
+| Port 3000 conflict | Another service using port 3000 | Edit `docker-compose.yml` to change Grafana port from `3000:3000` to desired `PORT:3000` |
+| DuckDB connection fails "Table does not exist" | Using old DuckLake attachment syntax | Use direct `postgresql://` connection in ATTACH, not `ducklake:` protocol
 
 ---
 
