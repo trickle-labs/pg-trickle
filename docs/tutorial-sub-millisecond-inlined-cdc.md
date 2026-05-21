@@ -1,6 +1,6 @@
 # Tutorial 6: Sub-Millisecond CDC on Inlined DuckLake Tables
 
-*When DuckLake stores small tables directly in PostgreSQL, pg_trickle gets trigger-based CDC \u2014 and refresh latency drops to under a millisecond*
+*When DuckLake stores small tables directly in PostgreSQL, pg_trickle gets trigger-based CDC — and refresh latency drops to under a millisecond*
 
 ---
 
@@ -9,7 +9,7 @@
 You'll create a stream table that joins a **small DuckLake lookup table** (stored
 inline in PostgreSQL) with a **large DuckLake event table** (stored in Parquet
 on S3). Because the small table lives in PostgreSQL as a real heap table,
-pg_trickle installs AFTER triggers on it \u2014 making change detection for that
+pg_trickle installs AFTER triggers on it — making change detection for that
 source essentially free. You'll measure the difference and see sub-millisecond
 refresh latency in practice.
 
@@ -21,8 +21,8 @@ DuckLake stores tables in two places depending on their size:
 
 | Size | Storage | How CDC works |
 |------|---------|---------------|
-| Small (below `ducklake_inline_table_max_rows`, default 1 000 rows) | Regular PostgreSQL heap table | Trigger-based CDC \u2014 O(1) per row change |
-| Large (above threshold) | Parquet files on S3, via FDW | Change-feed CDC via `table_changes()` \u2014 O(\u0394) |
+| Small (below `ducklake_inline_table_max_rows`, default 1 000 rows) | Regular PostgreSQL heap table | Trigger-based CDC — O(1) per row change |
+| Large (above threshold) | Parquet files on S3, via FDW | Change-feed CDC via `table_changes()` — O(Δ) |
 
 When DuckLake stores a table inline, it creates a real PostgreSQL table named
 `ducklake_inlined_data_table_<id>_<version>`. pg_trickle detects this pattern,
@@ -56,20 +56,20 @@ triggers and reinstalls the CDC triggers on the new table version automatically.
 
 ```
 DuckLake catalog
-  \u251c\u2500 lake.categories           (small lookup table, \u2264 1 000 rows)
-  \u2502    Stored inline as:
-  \u2502    ducklake_inlined_data_table_42_1  \u2190 real PostgreSQL heap table
-  \u2502    pg_trickle installs AFTER triggers here
-  \u2502
-  \u2514\u2500 lake.raw_events            (large table, Parquet on S3)
+  ├─ lake.categories           (small lookup table, ≤ 1 000 rows)
+  │    Stored inline as:
+  │    ducklake_inlined_data_table_42_1  ← real PostgreSQL heap table
+  │    pg_trickle installs AFTER triggers here
+  │
+  └─ lake.raw_events            (large table, Parquet on S3)
        Exposed as FDW foreign table
        pg_trickle uses change-feed CDC here
 
 pg_trickle stream table: category_stats
-  \u2502  1-minute DIFFERENTIAL refresh
-  \u2502  CDC source 1: ducklake_inlined_data_table_42_1 \u2192 TRIGGER mode (sub-ms)
-  \u2502  CDC source 2: lake.raw_events               \u2192 DUCKLAKE_CHANGE_FEED
-  \u25bc
+  │  1-minute DIFFERENTIAL refresh
+  │  CDC source 1: ducklake_inlined_data_table_42_1 → TRIGGER mode (sub-ms)
+  │  CDC source 2: lake.raw_events               → DUCKLAKE_CHANGE_FEED
+  ▼
 category_stats (PostgreSQL table)
 ```
 
@@ -116,7 +116,7 @@ ORDER BY relname;
 -- The '42' is DuckLake's internal table ID; the '1' is the schema version.
 ```
 
-Remember this name \u2014 you'll need it in Step 3.
+Remember this name — you'll need it in Step 3.
 
 ---
 
@@ -211,7 +211,7 @@ refresh_mode | delta_rows_in | delta_rows_out | duration_ms
 DIFFERENTIAL |             1 |              1 |         0.8
 ```
 
-`duration_ms = 0.8` \u2014 under one millisecond \u2014 because the change was captured
+`duration_ms = 0.8` — under one millisecond — because the change was captured
 by a trigger: no table scan, no FDW round-trip, no Parquet file read.
 
 ---
@@ -223,8 +223,8 @@ lake.categories ADD COLUMN weight NUMERIC`), it creates a new internal version
 of the table:
 
 ```
-ducklake_inlined_data_table_42_1  \u2192  (dropped)
-ducklake_inlined_data_table_42_2  \u2192  (new, with the weight column)
+ducklake_inlined_data_table_42_1  →  (dropped)
+ducklake_inlined_data_table_42_2  →  (new, with the weight column)
 ```
 
 pg_trickle's DDL event trigger fires on the DROP + CREATE, detects that the
@@ -281,8 +281,8 @@ Typical results on a warm system:
 | Source type | Avg latency | Why |
 |-------------|-------------|-----|
 | Trigger CDC (inlined table) | ~0.8 ms | Trigger fires in-process; change already in the buffer |
-| Change-feed CDC (DuckLake FDW) | ~3\u201310 ms | FDW round-trip + `table_changes()` call |
-| `EXCEPT ALL` polling (legacy) | ~50\u2013500 ms | Full table scan of the FDW source |
+| Change-feed CDC (DuckLake FDW) | ~3–10 ms | FDW round-trip + `table_changes()` call |
+| `EXCEPT ALL` polling (legacy) | ~50–500 ms | Full table scan of the FDW source |
 
 ---
 
@@ -301,8 +301,8 @@ Typical results on a warm system:
 
 - A stream table with **mixed CDC modes**: trigger-based for a small inline
   table (sub-millisecond) and change-feed for a large Parquet-backed table
-  (low-latency O(\u0394)).
-- Automatic CDC trigger reinstallation after DuckLake schema evolution \u2014 the
+  (low-latency O(Δ)).
+- Automatic CDC trigger reinstallation after DuckLake schema evolution — the
   stream table keeps working through `ALTER TABLE` without any manual
   intervention.
 
@@ -310,7 +310,7 @@ Typical results on a warm system:
 
 ## Next steps
 
-- **[Tutorial 2](tutorial-ivm-ducklake-before-v2.md)** \u2014 deep-dive into the
+- **[Tutorial 2](tutorial-ivm-ducklake-before-v2.md)** — deep-dive into the
   change-feed CDC adapter for large DuckLake tables.
-- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** \u2014 use DuckLake as a
+- **[Tutorial 3](tutorial-modern-data-stack-one-box.md)** — use DuckLake as a
   *sink* to write stream table deltas to Parquet on S3.
