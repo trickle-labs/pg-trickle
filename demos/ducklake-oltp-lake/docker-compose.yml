@@ -61,7 +61,9 @@ services:
       PG_DSN: "host=postgres dbname=postgres user=postgres password=postgres"
 
   jupyter:
-    image: jupyter/scipy-notebook:latest
+    build:
+      context: ./jupyter
+      dockerfile: Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
