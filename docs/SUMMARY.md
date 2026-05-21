@@ -70,35 +70,58 @@
 
 # Tutorials
 
+## Fundamentals
+
 - [What Happens on INSERT](tutorials/WHAT_HAPPENS_ON_INSERT.md)
 - [What Happens on UPDATE](tutorials/WHAT_HAPPENS_ON_UPDATE.md)
 - [What Happens on DELETE](tutorials/WHAT_HAPPENS_ON_DELETE.md)
 - [What Happens on TRUNCATE](tutorials/WHAT_HAPPENS_ON_TRUNCATE.md)
+
+## Data Lake & Real-Time Analytics
+
 - [Real-Time Analytics Dashboard](tutorials/FIRST_DASHBOARD.md)
-- [Event Sourcing / CQRS Read Models](tutorials/EVENT_SOURCING.md)
-- [Backfill and Migration from Materialized Views](tutorials/BACKFILL_AND_MIGRATION.md)
-- [Security Hardening](tutorials/SECURITY_HARDENING.md)
-- [Row-Level Security](tutorials/ROW_LEVEL_SECURITY.md)
-- [Partitioned Tables](tutorials/PARTITIONED_TABLES.md)
-- [Foreign Table Sources](tutorials/FOREIGN_TABLE_SOURCES.md)
-- [Tiered Scheduling](tutorials/TIERED_SCHEDULING.md)
-- [Fuse Circuit Breaker](tutorials/FUSE_CIRCUIT_BREAKER.md)
-- [Circular Dependencies](tutorials/CIRCULAR_DEPENDENCIES.md)
-- [Tuning Refresh Mode](tutorials/tuning-refresh-mode.md)
-- [Monitoring & Alerting](tutorials/MONITORING_AND_ALERTING.md)
-- [ETL & Bulk Load Patterns](tutorials/ETL_BULK_LOAD.md)
-- [Migrating from Materialized Views](tutorials/MIGRATING_FROM_MATERIALIZED_VIEWS.md)
-- [Migrating from pg_ivm](tutorials/MIGRATING_FROM_PG_IVM.md)
-- [IVM for DuckLake Before v2.0](tutorial-ivm-ducklake-before-v2.md)
 - [The Modern Data Stack in One Box](tutorial-modern-data-stack-one-box.md)
 - [Streaming PostgreSQL to a Data Lake](tutorial-streaming-postgres-to-data-lake.md)
-- [Sub-Millisecond Inlined-Data CDC](tutorial-sub-millisecond-inlined-cdc.md)
+- [IVM for DuckLake Before v2.0](tutorial-ivm-ducklake-before-v2.md)
 - [pg-tide DuckLake Pipeline](tutorial-pg-tide-ducklake-pipeline.md)
+
+## Event-Driven Architecture
+
+- [Event Sourcing / CQRS Read Models](tutorials/EVENT_SOURCING.md)
+- [ETL & Bulk Load Patterns](tutorials/ETL_BULK_LOAD.md)
+
+## CDC & Data Integration
+
+- [Sub-Millisecond Inlined-Data CDC](tutorial-sub-millisecond-inlined-cdc.md)
+- [Foreign Table Sources](tutorials/FOREIGN_TABLE_SOURCES.md)
+- [Migrating from Materialized Views](tutorials/MIGRATING_FROM_MATERIALIZED_VIEWS.md)
+- [Migrating from pg_ivm](tutorials/MIGRATING_FROM_PG_IVM.md)
+
+## Operations & Performance
+
+- [Tiered Scheduling](tutorials/TIERED_SCHEDULING.md)
+- [Tuning Refresh Mode](tutorials/tuning-refresh-mode.md)
+- [Circular Dependencies](tutorials/CIRCULAR_DEPENDENCIES.md)
+- [Fuse Circuit Breaker](tutorials/FUSE_CIRCUIT_BREAKER.md)
+- [Monitoring & Alerting](tutorials/MONITORING_AND_ALERTING.md)
+- [Backfill and Migration from Materialized Views](tutorials/BACKFILL_AND_MIGRATION.md)
+
+## Security & Multi-Tenancy
+
+- [Security Hardening](tutorials/SECURITY_HARDENING.md)
+- [Row-Level Security](tutorials/ROW_LEVEL_SECURITY.md)
+- [Per-Tenant ANN Indexing Patterns](tutorials/PER_TENANT_ANN_PATTERNS.md)
+
+## Vector Search & AI/ML
+
 - [Hybrid Search Patterns](tutorials/HYBRID_SEARCH_PATTERNS.md)
 - [pgvector RAG Cookbook](tutorials/PGVECTOR_RAG_COOKBOOK.md)
 - [pgVector Embedding Pipelines](tutorials/PGVECTOR_EMBEDDING_PIPELINES.md)
 - [Vector RAG Starter](tutorials/VECTOR_RAG_STARTER.md)
-- [Per-Tenant ANN Indexing Patterns](tutorials/PER_TENANT_ANN_PATTERNS.md)
+
+## Advanced Patterns
+
+- [Partitioned Tables](tutorials/PARTITIONED_TABLES.md)
 
 ---
 
