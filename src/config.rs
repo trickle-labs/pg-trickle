@@ -689,18 +689,19 @@ pub static PGS_UNLOGGED_BUFFERS: GucSetting<bool> = GucSetting::<bool>::new(fals
 /// DUR-2: Change buffer durability mode.
 ///
 /// Controls the WAL-logging behavior of change buffer tables:
-/// - `"unlogged"` (default): Change buffers are UNLOGGED for maximum write
-///   throughput. After a crash, buffers are lost and the ST receives a FULL
-///   refresh. Equivalent to `pg_trickle.unlogged_buffers = true`.
-/// - `"logged"`: Change buffers are WAL-logged. Survives crashes and is
-///   replicated to standbys. Higher write overhead (~30% more WAL).
+/// - `"logged"` (default): Change buffers are WAL-logged. Survives crashes
+///   and is replicated to standbys. Preserves the pre-v0.68.0 default
+///   behavior (equivalent to `pg_trickle.unlogged_buffers = false`).
+/// - `"unlogged"`: Change buffers are UNLOGGED for maximum write throughput.
+///   After a crash, buffers are lost and the ST receives a FULL refresh.
+///   Equivalent to `pg_trickle.unlogged_buffers = true`.
 /// - `"sync"`: WAL-logged + `synchronous_commit = on` for the change buffer
 ///   transaction. Maximum durability — no data loss even under OS crashes.
 ///
 /// This GUC supersedes `pg_trickle.unlogged_buffers` (which is now a
 /// compatibility alias: `true` maps to `"unlogged"`, `false` to `"logged"`).
 pub static PGS_CHANGE_BUFFER_DURABILITY: GucSetting<Option<std::ffi::CString>> =
-    GucSetting::<Option<std::ffi::CString>>::new(Some(c"unlogged"));
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"logged"));
 
 /// DUR-2: Change buffer durability mode enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -739,7 +740,21 @@ fn normalize_change_buffer_durability(value: Option<String>) -> ChangeBufferDura
 }
 
 /// Return the current change buffer durability mode.
+///
+/// COR-003/ARCH-001 (v0.68.0): Also checks the legacy `unlogged_buffers` GUC
+/// for backward compatibility.  When `unlogged_buffers = true`, a deprecation
+/// WARNING is emitted and `Unlogged` is returned regardless of the
+/// `change_buffer_durability` setting.
 pub fn pg_trickle_change_buffer_durability() -> ChangeBufferDurability {
+    // COR-003: Backward-compat shim — legacy GUC takes precedence with a
+    // deprecation warning.
+    if PGS_UNLOGGED_BUFFERS.get() {
+        pgrx::warning!(
+            "pg_trickle.unlogged_buffers is deprecated. \
+             Use pg_trickle.change_buffer_durability = 'unlogged' instead."
+        );
+        return ChangeBufferDurability::Unlogged;
+    }
     let raw = PGS_CHANGE_BUFFER_DURABILITY
         .get()
         .map(|c| c.to_string_lossy().into_owned());
@@ -3885,8 +3900,20 @@ pub fn pg_trickle_merge_join_strategy() -> MergeJoinStrategy {
 }
 
 /// D-1a: Returns whether new change buffer tables should be created UNLOGGED.
+///
+/// **Deprecated (COR-003/ARCH-001, v0.68.0):** Use
+/// `pg_trickle_change_buffer_durability()` instead.  This function emits a
+/// PostgreSQL WARNING when the GUC is set to `true` so operators know to
+/// migrate to `pg_trickle.change_buffer_durability`.
 pub fn pg_trickle_unlogged_buffers() -> bool {
-    PGS_UNLOGGED_BUFFERS.get()
+    let val = PGS_UNLOGGED_BUFFERS.get();
+    if val {
+        pgrx::warning!(
+            "pg_trickle.unlogged_buffers is deprecated. \
+             Use pg_trickle.change_buffer_durability = 'unlogged' instead."
+        );
+    }
+    val
 }
 
 /// PH-D1: Returns the merge strategy override.

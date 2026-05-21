@@ -648,9 +648,13 @@ pub fn create_change_buffer_table(
         ""
     };
 
-    // D-1a: When unlogged_buffers GUC is enabled, create buffer as UNLOGGED
-    // to eliminate WAL writes for CDC trigger inserts.
-    let unlogged_kw = if crate::config::pg_trickle_unlogged_buffers() {
+    // COR-003/ARCH-001 (v0.68.0): Use change_buffer_durability GUC to determine
+    // table persistence.  Unlogged = UNLOGGED (no WAL, max throughput);
+    // Logged/Sync = permanent WAL-logged table.  The Sync variant additionally
+    // sets synchronous_commit at the session level but that is handled by the
+    // CDC trigger execution path, not at table-creation time.
+    let durability = crate::config::pg_trickle_change_buffer_durability();
+    let unlogged_kw = if durability == crate::config::ChangeBufferDurability::Unlogged {
         "UNLOGGED "
     } else {
         ""
@@ -757,8 +761,9 @@ pub fn create_st_change_buffer_table(
     // A44-10: Use the same flat column schema as base-table buffers.
     let typed_col_defs = build_typed_col_defs(columns);
 
-    // D-1a: When unlogged_buffers GUC is enabled, create buffer as UNLOGGED.
-    let unlogged_kw = if crate::config::pg_trickle_unlogged_buffers() {
+    // COR-003/ARCH-001 (v0.68.0): Use change_buffer_durability GUC.
+    let durability = crate::config::pg_trickle_change_buffer_durability();
+    let unlogged_kw = if durability == crate::config::ChangeBufferDurability::Unlogged {
         "UNLOGGED "
     } else {
         ""

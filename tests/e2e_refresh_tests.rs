@@ -1201,3 +1201,58 @@ async fn test_fused_refresh_tpch_22() {
         .await;
     db.reload_config_and_wait().await;
 }
+
+// ── TEST-003: Scheduler-driven fused refresh audit trail ──────────────
+
+/// TEST-003 (COR-001, v0.68.0): Verify that scheduler-driven fused refreshes
+/// are recorded in `pgt_refresh_history` with `initiated_by = 'SCHEDULER_FUSED'`.
+///
+/// Prior to v0.68.0, the CHECK constraint on `initiated_by` did not include
+/// `'SCHEDULER_FUSED'`, so fused-refresh audit records were silently rejected
+/// and the audit log showed a gap.
+///
+/// This test verifies COR-001 by attempting a direct INSERT with
+/// `initiated_by = 'SCHEDULER_FUSED'` which would fail with a CHECK violation
+/// on pre-v0.68.0 schemas.  No scheduler needed — this is light-E2E eligible.
+#[tokio::test]
+async fn test_fused_refresh_scheduler_audit_trail() {
+    let db = e2e::E2eDb::new().await.with_extension().await;
+
+    // Create a minimal stream table to obtain a valid pgt_id.
+    db.execute("CREATE TABLE fused_audit_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO fused_audit_src VALUES (1, 1)")
+        .await;
+    db.create_st(
+        "fused_audit_l1",
+        "SELECT id, val FROM fused_audit_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'fused_audit_l1'",
+        )
+        .await;
+
+    // COR-001: INSERT a row with initiated_by = 'SCHEDULER_FUSED'.
+    // Before v0.68.0 this would fail with a CHECK constraint violation
+    // because 'SCHEDULER_FUSED' was not in the allowed values list.
+    let insert_ok = db
+        .try_execute(&format!(
+            "INSERT INTO pgtrickle.pgt_refresh_history \
+                (pgt_id, data_timestamp, start_time, action, status, initiated_by) \
+             VALUES \
+                ({pgt_id}, now(), now(), 'DIFFERENTIAL', 'COMPLETED', 'SCHEDULER_FUSED')"
+        ))
+        .await;
+
+    assert!(
+        insert_ok.is_ok(),
+        "Inserting a row with initiated_by = 'SCHEDULER_FUSED' must succeed \
+         (COR-001: CHECK constraint should include SCHEDULER_FUSED)"
+    );
+}

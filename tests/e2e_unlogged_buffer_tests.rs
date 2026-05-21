@@ -227,3 +227,135 @@ async fn test_full_mode_no_change_buffer() {
         .await;
     assert!(result.is_ok(), "convert_buffers_to_unlogged should succeed");
 }
+
+// ── TEST-004: change_buffer_durability GUC (COR-003/ARCH-001, v0.68.0) ───
+
+/// TEST-004a: `change_buffer_durability = 'unlogged'` creates UNLOGGED buffer.
+///
+/// COR-003/ARCH-001 (v0.68.0): Verify the `change_buffer_durability` GUC is
+/// honoured by `create_stream_table()`. Before this fix the GUC was a no-op
+/// and the legacy `unlogged_buffers` bool was the only working path.
+#[tokio::test]
+async fn test_change_buffer_durability_unlogged() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "SET pg_trickle.change_buffer_durability = 'unlogged'",
+        "CREATE TABLE cbd_unlog_src (id INT PRIMARY KEY, val INT)",
+        "INSERT INTO cbd_unlog_src VALUES (1, 1)",
+        "SELECT pgtrickle.create_stream_table(\
+            'cbd_unlog_st',\
+            'SELECT id, val FROM cbd_unlog_src',\
+            '1m',\
+            'DIFFERENTIAL'\
+        )",
+    ])
+    .await;
+
+    let oid: i32 = db.table_oid("cbd_unlog_src").await;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let persistence: String = db
+        .query_scalar(&format!(
+            "SELECT relpersistence::text FROM pg_class \
+             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'pgtrickle_changes') \
+             AND relname = 'changes_{stable_name}'"
+        ))
+        .await;
+
+    assert_eq!(
+        persistence, "u",
+        "change_buffer_durability = 'unlogged' must create UNLOGGED buffer \
+         (relpersistence = 'u'); got '{persistence}'"
+    );
+}
+
+/// TEST-004b: `change_buffer_durability = 'logged'` creates a logged buffer.
+///
+/// COR-003/ARCH-001 (v0.68.0): Logged variant.
+#[tokio::test]
+async fn test_change_buffer_durability_logged() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "SET pg_trickle.change_buffer_durability = 'logged'",
+        "CREATE TABLE cbd_log_src (id INT PRIMARY KEY, val INT)",
+        "INSERT INTO cbd_log_src VALUES (1, 1)",
+        "SELECT pgtrickle.create_stream_table(\
+            'cbd_log_st',\
+            'SELECT id, val FROM cbd_log_src',\
+            '1m',\
+            'DIFFERENTIAL'\
+        )",
+    ])
+    .await;
+
+    let oid: i32 = db.table_oid("cbd_log_src").await;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let persistence: String = db
+        .query_scalar(&format!(
+            "SELECT relpersistence::text FROM pg_class \
+             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'pgtrickle_changes') \
+             AND relname = 'changes_{stable_name}'"
+        ))
+        .await;
+
+    assert_eq!(
+        persistence, "p",
+        "change_buffer_durability = 'logged' must create permanent buffer \
+         (relpersistence = 'p'); got '{persistence}'"
+    );
+}
+
+/// TEST-004c: Legacy `unlogged_buffers = true` still works (maps to 'unlogged').
+///
+/// COR-003/ARCH-001 (v0.68.0): Backward-compat shim — setting the deprecated
+/// GUC must still produce an UNLOGGED buffer. A WARNING is emitted in the
+/// PostgreSQL log but the functional behaviour is preserved.
+#[tokio::test]
+async fn test_unlogged_buffers_legacy_shim_still_creates_unlogged_buffer() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "SET pg_trickle.unlogged_buffers = on",
+        "CREATE TABLE cbd_legacy_src (id INT PRIMARY KEY, val INT)",
+        "INSERT INTO cbd_legacy_src VALUES (1, 1)",
+        "SELECT pgtrickle.create_stream_table(\
+            'cbd_legacy_st',\
+            'SELECT id, val FROM cbd_legacy_src',\
+            '1m',\
+            'DIFFERENTIAL'\
+        )",
+    ])
+    .await;
+
+    let oid: i32 = db.table_oid("cbd_legacy_src").await;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let persistence: String = db
+        .query_scalar(&format!(
+            "SELECT relpersistence::text FROM pg_class \
+             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'pgtrickle_changes') \
+             AND relname = 'changes_{stable_name}'"
+        ))
+        .await;
+
+    assert_eq!(
+        persistence, "u",
+        "Legacy unlogged_buffers = true must still create UNLOGGED buffer \
+         (relpersistence = 'u'); got '{persistence}'"
+    );
+}
