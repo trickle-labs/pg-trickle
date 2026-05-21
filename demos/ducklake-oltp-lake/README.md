@@ -49,6 +49,16 @@ between the operational and analytical views.
 
 ---
 
+## First startup: Image build
+
+**⚠️ The first `docker compose up` will build the pg_trickle image from source.** This takes 2–3 minutes and requires an internet connection (Rust toolchain download).
+
+**Subsequent restarts will use Docker cache and start in seconds.**
+
+Once built, the image is cached locally.
+
+---
+
 ## Architecture
 
 ```
@@ -119,6 +129,8 @@ The notebook has three sections:
 
 Run all cells top to bottom with **Run → Run All Cells**.
 
+**Note:** The JupyterLab container includes DuckDB, psycopg2, and S3 tools pre-installed, so you can immediately query Parquet files and PostgreSQL without additional setup.
+
 ---
 
 ## Step 3: Connect to PostgreSQL and explore the pipeline
@@ -129,11 +141,27 @@ In a second terminal:
 psql postgresql://postgres:postgres@localhost:5432/postgres
 ```
 
-See the stream table:
+**What's happening behind the scenes:**
+
+- The `orders` table is receiving inserts from the generator (10 orders/second)
+- CDC triggers capture each insert into `pgtrickle_changes.changes_*`
+- The pg_trickle scheduler runs every 5 seconds (configured schedule) and executes a DIFFERENTIAL refresh
+- Each refresh applies the delta changes to `revenue_by_region` and publishes the delta to MinIO
+
+The scheduler is **automatically enabled** via `shared_preload_libraries` in the PostgreSQL Docker configuration, so stream tables begin refreshing immediately at startup.
+
+See the stream table status:
 
 ```sql
-SELECT table_name, refresh_mode, schedule, sink, ducklake_sink_path
+SELECT pgt_name, pgt_schema, refresh_mode, schedule, status, is_populated, last_refresh_at
 FROM pgtrickle.pgt_stream_tables;
+```
+
+Expected output:
+```
+     pgt_name      | pgt_schema | refresh_mode | schedule | status | is_populated | last_refresh_at
+-------------------+------------+--------------+----------+--------+--------------+------------------
+ revenue_by_region | public     | DIFFERENTIAL | 5s       | ACTIVE | true         | 2026-05-21 09:42:36
 ```
 
 Query the current revenue by region:
@@ -219,6 +247,7 @@ to the existing `revenue_by_region` values. Only the affected buckets are update
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `revenue_by_region` is empty after 30 s | Generator not running | Check `docker compose logs generator` |
+| Stream table shows `is_populated=true` but 0 rows | Scheduler not enabled (old Docker image) | Ensure `shared_preload_libraries=pg_trickle` is set; run `docker compose down && docker compose up` to rebuild |
 | MinIO console shows empty bucket | DuckLake sink S3 write failed | Check `docker compose logs postgres` for S3 errors |
 | JupyterLab shows "No such file or directory" on notebook | Jupyter started before volume was ready | Refresh the browser and re-open the notebook |
 | `pgt_ducklake_provenance` has no rows | DuckLake sink not writing | Verify `sink = 'ducklake'` in `pgt_stream_tables` |

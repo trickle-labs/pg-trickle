@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: PostgreSQL
+    type: postgres
+    url: postgres:5432
+    database: postgres
+    user: postgres
+    secureJsonData:
+      password: postgres
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 2
+      postgresVersion: 1800
+      timescaledb: false
+    isDefault: true

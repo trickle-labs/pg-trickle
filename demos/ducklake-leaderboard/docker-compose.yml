@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:18
+    build:
+      context: ../../
+      dockerfile: Dockerfile.demo
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
@@ -8,6 +10,14 @@ services:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_trickle
+        -c listen_addresses='*'
+        -c pg_trickle.ducklake_sink_s3_endpoint=http://minio:9000
+        -c pg_trickle.ducklake_sink_s3_region=us-east-1
+        -c pg_trickle.ducklake_sink_s3_access_key=minioadmin
+        -c pg_trickle.ducklake_sink_s3_secret_key=minioadmin
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -66,9 +76,12 @@ services:
       - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
 
 volumes:
   minio_data:

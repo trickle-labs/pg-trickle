@@ -2,7 +2,9 @@ version: "3.9"
 
 services:
   postgres:
-    image: ghcr.io/trickle-labs/pg-trickle:latest
+    build:
+      context: ../../
+      dockerfile: Dockerfile.demo
     container_name: ducklake_timetravel_postgres
     environment:
       POSTGRES_DB: timetravel_demo
@@ -11,13 +13,52 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_trickle
+        -c listen_addresses='*'
+        -c pg_trickle.ducklake_sink_s3_endpoint=http://minio:9000
+        -c pg_trickle.ducklake_sink_s3_region=us-east-1
+        -c pg_trickle.ducklake_sink_s3_access_key=minioadmin
+        -c pg_trickle.ducklake_sink_s3_secret_key=minioadmin
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d timetravel_demo"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: ducklake_timetravel_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: ducklake_timetravel_minio_setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/pg-trickle-demo;
+      mc anonymous set download local/pg-trickle-demo;
+      "
 
   generator:
     build: ./generator
@@ -26,9 +67,12 @@ services:
       POSTGRES_DSN: "postgresql://postgres:postgres@postgres:5432/timetravel_demo"
       BATCH_SIZE: "${BATCH_SIZE:-50}"
       INTERVAL_MS: "${INTERVAL_MS:-2000}"
+      INJECT_BUG_AFTER_BATCH: "${INJECT_BUG_AFTER_BATCH:-0}"
+      BUG_EVENT_TYPE: "${BUG_EVENT_TYPE:-CORRUPT_BILLING}"
     depends_on:
       postgres:
         condition: service_healthy
 
 volumes:
   postgres_data:
+  minio_data:
