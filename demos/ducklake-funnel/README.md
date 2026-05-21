@@ -47,6 +47,16 @@ result with a single `docker compose up` and two SQL statements.
 
 ---
 
+## First startup: Image build
+
+**⚠️ The first `docker compose up` will build the pg_trickle image from source.** This takes 2–3 minutes and requires an internet connection (Rust toolchain download).
+
+**Subsequent restarts will use Docker cache and start in seconds.**
+
+Once built, the image is cached locally.
+
+---
+
 ## Architecture
 
 ```
@@ -132,9 +142,9 @@ psql postgresql://postgres:postgres@localhost:5432/lake_demo
 See the stream tables pg_trickle created:
 
 ```sql
-SELECT table_name, refresh_mode, schedule, status
+SELECT pgt_name, pgt_schema, refresh_mode, schedule, status
 FROM pgtrickle.pgt_stream_tables
-ORDER BY table_name;
+ORDER BY pgt_name;
 ```
 
 Query the current funnel numbers directly:

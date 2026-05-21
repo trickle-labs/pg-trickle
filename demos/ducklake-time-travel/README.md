@@ -24,6 +24,16 @@ history.
 
 ---
 
+## First startup: Image build
+
+**⚠️ The first `docker compose up` will build the pg_trickle image from source.** This takes 2–3 minutes and requires an internet connection (Rust toolchain download).
+
+**Subsequent restarts will use Docker cache and start in seconds.**
+
+Once built, the image is cached locally.
+
+---
+
 ## Background: What is DuckLake time-travel?
 
 Every time data is written to a DuckLake table, a new **snapshot** is created.
@@ -316,7 +326,7 @@ docker compose up
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `event_summary` is empty after 30 s | Generator not running or init failed | Check `docker compose logs generator` and `docker compose logs postgres` |
-| `pause_scheduler` has no effect | Stream table name typo | Verify with `SELECT table_name FROM pgtrickle.pgt_stream_tables` |
+| `pause_scheduler` has no effect | Stream table name typo | Verify with `SELECT pgt_name FROM pgtrickle.pgt_stream_tables` |
 | After rewind, row count is higher than expected | Snapshot ID was after the bug | Repeat with a lower `good_snapshot` value |
 | `FULL` refresh takes a long time | Large event table | Normal — FULL refresh scans all data from the frontier snapshot |
 | Stream table shows status `ERROR` | Underlying DuckLake FDW unreachable | Check `docker compose logs postgres` for FDW errors |

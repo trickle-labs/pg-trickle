@@ -49,6 +49,16 @@ between the operational and analytical views.
 
 ---
 
+## First startup: Image build
+
+**⚠️ The first `docker compose up` will build the pg_trickle image from source.** This takes 2–3 minutes and requires an internet connection (Rust toolchain download).
+
+**Subsequent restarts will use Docker cache and start in seconds.**
+
+Once built, the image is cached locally.
+
+---
+
 ## Architecture
 
 ```
@@ -132,7 +142,7 @@ psql postgresql://postgres:postgres@localhost:5432/postgres
 See the stream table:
 
 ```sql
-SELECT table_name, refresh_mode, schedule, sink, ducklake_sink_path
+SELECT pgt_name, pgt_schema, refresh_mode, schedule, status, is_populated, last_refresh_at
 FROM pgtrickle.pgt_stream_tables;
 ```
 
