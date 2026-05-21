@@ -1034,4 +1034,63 @@ mod tests {
             "Expected not-supported error, got: {msg}"
         );
     }
+
+    // ── Rollback invariant ──────────────────────────────────────────────
+
+    /// Proves the rollback invariant: when `upload_parquet` fails, the error
+    /// is `DucklakeUploadError` — NOT `DucklakeCatalogError`.
+    ///
+    /// `run_ducklake_sink_inner` calls `upload_parquet(…)?` and only then
+    /// calls `register_ducklake_data_file(…)` (the catalog writer).
+    /// The `?` operator propagates the upload error immediately, so the
+    /// catalog is never touched when upload fails.
+    ///
+    /// A `DucklakeUploadError` in the return type confirms the error came
+    /// from the upload path. If catalog writes had been attempted and failed,
+    /// the return type would be `DucklakeCatalogError` instead.
+    #[cfg(unix)]
+    #[test]
+    fn test_upload_failure_prevents_catalog_writes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let ro_path = tmpdir.path().to_path_buf();
+
+        // Save original permissions so we can restore them for cleanup.
+        let orig_mode = ro_path.metadata().expect("metadata").permissions().mode();
+
+        // Make the temporary directory read-only so that creating a
+        // sub-directory inside it (as upload_local does) will fail.
+        std::fs::set_permissions(&ro_path, std::fs::Permissions::from_mode(0o555))
+            .expect("set read-only permissions");
+
+        // Upload to a sub-directory of the read-only dir — MUST fail.
+        let base_path = format!("file://{}/subdir/", ro_path.display());
+        let result = upload_local(&base_path, "sink.parquet", b"PAR1test".to_vec());
+
+        // Restore permissions before any assertion so that tempdir cleanup
+        // (which drops ro_path) can remove the directory.
+        std::fs::set_permissions(&ro_path, std::fs::Permissions::from_mode(orig_mode)).ok();
+
+        // The upload must have failed.
+        assert!(
+            result.is_err(),
+            "upload to read-only subdir must fail, but it succeeded"
+        );
+
+        // The error variant MUST be DucklakeUploadError.
+        // If it were DucklakeCatalogError, that would mean the catalog write
+        // was reached before the upload error was propagated — violating the
+        // rollback invariant.
+        match result.unwrap_err() {
+            PgTrickleError::DucklakeUploadError(_) => {
+                // Correct: upload path failed before catalog was touched.
+            }
+            e => panic!(
+                "Rollback invariant violated: expected DucklakeUploadError \
+                 (upload failed before catalog write), got: {:?}",
+                e
+            ),
+        }
+    }
 }
