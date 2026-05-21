@@ -1244,9 +1244,9 @@ async fn test_fused_refresh_scheduler_audit_trail() {
     let insert_ok = db
         .try_execute(&format!(
             "INSERT INTO pgtrickle.pgt_refresh_history \
-                (pgt_id, start_time, refresh_mode, status, initiated_by) \
+                (pgt_id, data_timestamp, start_time, action, status, initiated_by) \
              VALUES \
-                ({pgt_id}, now(), 'DIFFERENTIAL', 'COMPLETED', 'SCHEDULER_FUSED')"
+                ({pgt_id}, now(), now(), 'DIFFERENTIAL', 'COMPLETED', 'SCHEDULER_FUSED')"
         ))
         .await;
 
