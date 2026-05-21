@@ -1214,10 +1214,7 @@ async fn test_fused_refresh_tpch_22() {
 /// This is a light-eligible test (uses E2eDb::new()).
 #[tokio::test]
 async fn test_fused_refresh_scheduler_audit_trail() {
-    let db = e2e::E2eDb::new_on_postgres_db()
-        .await
-        .with_extension()
-        .await;
+    let db = e2e::E2eDb::new().await.with_extension().await;
 
     // Configure fast scheduler.
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
