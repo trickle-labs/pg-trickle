@@ -29,7 +29,11 @@ use std::time::Duration;
 /// `E2eDb::execute`) is a prepared statement and cannot execute multiple
 /// commands at once.  Use `db.execute_seq(DUCKLAKE_CATALOG_DDL)` to run them.
 const DUCKLAKE_CATALOG_DDL: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS ducklake_data_file (\
+    // SEC-002 (v0.69.0): the sink writes to pg_trickle.ducklake_catalog_schema
+    // which defaults to "main".  Create the schema first so all catalog tables
+    // land there instead of in "public".
+    "CREATE SCHEMA IF NOT EXISTS main",
+    "CREATE TABLE IF NOT EXISTS main.ducklake_data_file (\
         data_file_id    BIGSERIAL PRIMARY KEY,\
         table_id        BIGINT NOT NULL,\
         begin_snapshot  BIGINT NOT NULL,\
@@ -38,12 +42,12 @@ const DUCKLAKE_CATALOG_DDL: &[&str] = &[
         file_size_bytes BIGINT,\
         encryption_key_id TEXT\
     )",
-    "CREATE TABLE IF NOT EXISTS ducklake_table_stats (\
+    "CREATE TABLE IF NOT EXISTS main.ducklake_table_stats (\
         table_id   BIGINT PRIMARY KEY,\
         row_count  BIGINT NOT NULL DEFAULT 0,\
         file_count BIGINT NOT NULL DEFAULT 0\
     )",
-    "CREATE TABLE IF NOT EXISTS ducklake_snapshot (\
+    "CREATE TABLE IF NOT EXISTS main.ducklake_snapshot (\
         table_id      BIGINT NOT NULL,\
         snapshot_id   BIGINT NOT NULL,\
         snapshot_time TIMESTAMPTZ NOT NULL DEFAULT now(),\
@@ -148,7 +152,7 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
 
     // The sink must have registered a file in ducklake_data_file.
     let file_count: i64 = db
-        .query_scalar("SELECT count(*) FROM ducklake_data_file WHERE table_id = 1")
+        .query_scalar("SELECT count(*) FROM main.ducklake_data_file WHERE table_id = 1")
         .await;
     assert!(
         file_count >= 1,
@@ -160,7 +164,7 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
     // Verify the registered path starts with the expected prefix.
     let path: Option<String> = db
         .query_scalar(
-            "SELECT path FROM ducklake_data_file \
+            "SELECT path FROM main.ducklake_data_file \
              WHERE table_id = 1 ORDER BY data_file_id LIMIT 1",
         )
         .await;
@@ -173,7 +177,7 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
 
     // The snapshot table must also have a row.
     let snap_count: i64 = db
-        .query_scalar("SELECT count(*) FROM ducklake_snapshot WHERE table_id = 1")
+        .query_scalar("SELECT count(*) FROM main.ducklake_snapshot WHERE table_id = 1")
         .await;
     assert!(
         snap_count >= 1,
@@ -256,7 +260,7 @@ async fn test_ducklake_sink_catalog_not_modified_when_upload_fails() {
     // CRITICAL: ducklake_data_file and ducklake_snapshot must have ZERO rows
     // for table_id=2, proving the catalog was never touched when upload failed.
     let file_count: i64 = db
-        .query_scalar("SELECT count(*) FROM ducklake_data_file WHERE table_id = 2")
+        .query_scalar("SELECT count(*) FROM main.ducklake_data_file WHERE table_id = 2")
         .await;
     assert_eq!(
         file_count, 0,
@@ -265,7 +269,7 @@ async fn test_ducklake_sink_catalog_not_modified_when_upload_fails() {
     );
 
     let snap_count: i64 = db
-        .query_scalar("SELECT count(*) FROM ducklake_snapshot WHERE table_id = 2")
+        .query_scalar("SELECT count(*) FROM main.ducklake_snapshot WHERE table_id = 2")
         .await;
     assert_eq!(
         snap_count, 0,
@@ -335,7 +339,7 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
     // A row_count of 0 or NULL would indicate all rows were dropped/nullified.
     let row_count: Option<i64> = db
         .query_scalar(
-            "SELECT row_count FROM ducklake_data_file \
+            "SELECT row_count FROM main.ducklake_data_file \
              WHERE table_id = 3 ORDER BY data_file_id LIMIT 1",
         )
         .await;
