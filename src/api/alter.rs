@@ -893,6 +893,12 @@ fn alter_stream_table_query(
     let updated_st = StreamTableMeta::get_by_name(schema, table_name)?;
     execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)?;
 
+    // ERR-1f: Clear any previous error state now that the query has been fixed
+    // and the refresh succeeded. This ensures alter_stream_table with a fixed
+    // query always produces a clean ACTIVE state, even when called directly on
+    // an ERROR table (without a prior resume_stream_table call).
+    let _ = StreamTableMeta::clear_error_state(st.pgt_id);
+
     // Re-activate the stream table
     StreamTableMeta::update_status(st.pgt_id, StStatus::Active)?;
 
