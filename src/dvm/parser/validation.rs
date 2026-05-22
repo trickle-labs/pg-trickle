@@ -928,9 +928,17 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
         } => {
             #[cfg(not(test))]
             {
-                let wrapped = format!("SELECT {_func_sql}");
-                if let Ok(inner) = parse_defining_query_full(&wrapped) {
-                    check_ivm_support_inner(&inner.tree)?;
+                // COR-002: JSON_TABLE and similar SQL/JSON table-valued functions
+                // contain the COLUMNS keyword in their deparsed form.
+                // "SELECT JSON_TABLE(... COLUMNS (...))" is not valid standalone SQL —
+                // raw_parser ereports on COLUMNS in expression context, causing a
+                // PostgreSQL panic that propagates past `if let Ok`.
+                // JSON_TABLE has no unsupported IVM constructs, so skip safely.
+                if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
+                    let wrapped = format!("SELECT {_func_sql}");
+                    if let Ok(inner) = parse_defining_query_full(&wrapped) {
+                        check_ivm_support_inner(&inner.tree)?;
+                    }
                 }
             }
             check_ivm_support(child)
