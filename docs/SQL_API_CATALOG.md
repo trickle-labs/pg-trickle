@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**122 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**123 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -14,6 +14,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle._signal_launcher_rescan()` | `pgtrickle` | `` | Also safe to call manually if the launcher needs a nudge. |
 | `pgtrickle.advance_watermark()` | `pgtrickle` | `Result<(), PgTrickleError>` | - **Monotonic:** rejects watermarks that go backward. |
 | `pgtrickle.alter_stream_table()` | `pgtrickle` | `` | Alter properties of an existing stream table. |
+| `pgtrickle.attach_embedding_outbox()` | `pgtrickle` | `` | The `vector_column` parameter documents which column carries the embedding — it is stored in the outbox headers so consumers can identify the embedding field without inspecting the payload. |
 | `pgtrickle.attach_outbox()` | `pgtrickle` | `` | Requires `pg_tide` to be installed. |
 | `pgtrickle.bootstrap_gate_status_fn()` | `pgtrickle` | `TableIterator<` | BOOT-F3: Designed for debugging "why isn't my stream table refreshing?" situations by showing the full gate lifecycle at a glance. |
 | `pgtrickle.build_init_decision()` | `pgtrickle` | `InitDecision` |  |

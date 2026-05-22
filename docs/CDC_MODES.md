@@ -1,8 +1,9 @@
 # CDC Modes
 
 pg_trickle captures changes from source tables using **Change Data Capture (CDC)**.
-Two mechanisms are available: row-level **triggers** and **WAL-based** logical
-decoding. Understanding both helps you choose the right setting for your workload.
+Two mechanisms are available: trigger-based CDC and WAL-based logical decoding.
+Trigger-based CDC uses statement-level triggers by default and can fall back to
+row-level triggers when explicitly configured.
 
 ---
 
@@ -20,32 +21,37 @@ decoding. Understanding both helps you choose the right setting for your workloa
 
 ## How trigger-based CDC works
 
-When you create a stream table, pg_trickle installs three `AFTER` row-level
-triggers on every source table:
+When you create a stream table, pg_trickle installs trigger-based CDC on every
+source table. The default `pg_trickle.cdc_trigger_mode = 'statement'` creates
+one `AFTER` statement trigger per DML event with transition tables:
 
 ```
-AFTER INSERT OR UPDATE OR DELETE FOR EACH ROW
+AFTER INSERT FOR EACH STATEMENT REFERENCING NEW TABLE AS __pgt_new
+AFTER UPDATE FOR EACH STATEMENT REFERENCING OLD TABLE AS __pgt_old NEW TABLE AS __pgt_new
+AFTER DELETE FOR EACH STATEMENT REFERENCING OLD TABLE AS __pgt_old
 ```
 
-Each trigger fires **synchronously within the user's transaction** and writes
-one row per changed row to a buffer table (`pgtrickle_changes.changes_<oid>`).
-The buffer row is in the same transaction as the user's change — if the
-transaction rolls back, the buffer row also disappears.
+Each trigger fires **synchronously within the user's transaction** and bulk
+writes one change-buffer row per changed source row to
+`pgtrickle_changes.changes_<stable_name>`. The buffer rows are in the same
+transaction as the user's change — if the transaction rolls back, the buffer
+rows also disappear.
 
 ```
 User transaction:
   INSERT INTO orders …
-    → trigger fires
-    → INSERT INTO pgtrickle_changes.changes_12345 (op, row_data)
+   → statement trigger fires
+   → INSERT INTO pgtrickle_changes.changes_12345 (action, typed row columns)
   COMMIT
         │
         ▼
   Scheduler picks up buffer rows → computes delta → refreshes stream table
 ```
 
-**Write-side cost:** approximately 2–15 µs per changed row, depending on row
-width and table size. This is added directly to the user transaction's commit
-latency.
+**Write-side cost:** statement-level triggers amortize trigger invocation cost
+across the whole statement, while still writing one typed change-buffer row per
+changed source row. Row-level triggers remain available with
+`pg_trickle.cdc_trigger_mode = 'row'` for diagnostic compatibility.
 
 ---
 
@@ -103,7 +109,7 @@ TRIGGER ──► TRANSITIONING ──► WAL
 
 ### Transition lifecycle
 
-1. **TRIGGER** — pg_trickle installs row-level triggers on the source table.
+1. **TRIGGER** — pg_trickle installs statement-level triggers on the source table by default.
 2. When `wal_level = logical` becomes available, pg_trickle starts the transition:
    - Creates a publication (`pgtrickle_cdc_<oid>`) and replication slot (`pgtrickle_<oid>`)
    - Sets the source's CDC state to **TRANSITIONING**
@@ -238,7 +244,7 @@ SELECT pg_reload_conf();
 ```
 
 pg_trickle will drop all CDC replication slots and publications on the next
-scheduler tick and reinstall row-level triggers. Stream tables remain current
+scheduler tick and reinstall trigger-based CDC. Stream tables remain current
 throughout — the transition is safe.
 
 To revert a single table:
@@ -253,13 +259,14 @@ SELECT pgtrickle.alter_stream_table('public.order_totals', p_cdc_mode => 'trigge
 
 ### Statement-level vs. row-level triggers
 
-By default, pg_trickle uses row-level `AFTER` triggers. On high-volume bulk
-inserts (e.g. `INSERT INTO orders SELECT … FROM staging`), row-level triggers
-fire once per row. You can switch to statement-level triggers to reduce
-overhead at the cost of coarser change capture:
+By default, pg_trickle uses statement-level `AFTER` triggers with transition
+tables. This avoids firing the PL/pgSQL trigger body once per row on bulk DML
+while still recording each changed source row in the change buffer. Row-level
+triggers are available if you need the legacy behavior:
 
 ```
-pg_trickle.cdc_trigger_mode = 'statement'   # default: 'row'
+pg_trickle.cdc_trigger_mode = 'statement'   # default
+pg_trickle.cdc_trigger_mode = 'row'         # legacy/diagnostic mode
 ```
 
 Note: `cdc_trigger_mode` is ignored when WAL-based CDC is active.

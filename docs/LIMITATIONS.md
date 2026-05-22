@@ -28,11 +28,16 @@ successfully, but every refresh performs a full table recomputation:
 | `FETCH FIRST` without `ORDER BY` | Non-deterministic selection | Add a deterministic `ORDER BY` and use Top-N via `LIMIT` |
 | `GROUPING SETS` beyond branch limit | Explosion prevents O(Δ) maintenance | Reduce dimensions, or raise `pg_trickle.max_grouping_set_branches` |
 
+### Supported with constraints
+
+| Construct | Support | Notes |
+|-----------|---------|-------|
+| `WITH RECURSIVE` | ✅ Supported | DIFFERENTIAL and IMMEDIATE mode use bounded semi-naive evaluation for monotone insert-only changes, DRed for mixed changes, and full recomputation fallback when needed. Guarded by `pg_trickle.ivm_recursive_max_depth`. |
+
 ### Not supported at all (any mode)
 
 | Construct | Reason |
 |-----------|--------|
-| `WITH RECURSIVE` | Recursive CTEs require convergence logic not yet implemented |
 | DDL inside the defining query | `CREATE TABLE`, `CALL` etc. are not valid in `SELECT` |
 | `RETURNING` clauses | Not applicable to `SELECT` queries |
 | `FOR UPDATE` / `FOR SHARE` | Locking hints cannot be used in defining queries |
@@ -193,7 +198,7 @@ Does your query use ORDER BY without LIMIT?
   NO  ↓
 
 Does your query use WITH RECURSIVE?
-  YES → Not supported. Materialize the recursive query into a regular table first.
+  YES → Supported with bounded semi-naive / DRed maintenance; tune pg_trickle.ivm_recursive_max_depth.
   NO  ↓
 
 Do all join keys use equi-join conditions (= not BETWEEN / >=)?

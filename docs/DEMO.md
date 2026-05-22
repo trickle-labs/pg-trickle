@@ -491,8 +491,9 @@ there is no point waiting for a clock interval when they have.
 
 ### Why triggers and not logical replication?
 
-The demo uses the default CDC mode (row-level AFTER triggers). This works with
-any PostgreSQL 18 installation out of the box — no replication slot
+The demo uses the default CDC mode: trigger-based capture, with statement-level
+triggers unless configured otherwise. This works with any PostgreSQL 18
+installation out of the box — no replication slot
 configuration, no `wal_level = logical` requirement. For production deployments
 with very high write throughput, WAL-based CDC is more efficient. pg_trickle
 can switch modes transparently; see [CONFIGURATION.md](CONFIGURATION.md) for

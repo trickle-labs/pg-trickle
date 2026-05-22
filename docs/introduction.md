@@ -34,11 +34,12 @@ refresh cycle, pg_trickle applies a *delta* computation proportional to the
 number of changed rows, not the total table size. A stream table over a
 billion-row orders table refreshes in milliseconds when only a few rows changed.
 
-Change capture works through **row-level AFTER triggers** (the default) or
-**WAL-based logical decoding** (`cdc_mode = 'wal'` or the automatic `'auto'`
-mode). Trigger-based capture writes changed rows into a per-source change-buffer
-table within the same transaction, providing full atomicity with no possibility
-of a committed change being missed. The background scheduler reads from the
+Change capture works through **trigger-based CDC** (statement-level triggers by
+default, row-level triggers available for compatibility) or **WAL-based logical
+decoding** (`cdc_mode = 'wal'` or the automatic `'auto'` mode). Trigger-based
+capture writes changed rows into a per-source change-buffer table within the
+same transaction, providing full atomicity with no possibility of a committed
+change being missed. The background scheduler reads from the
 change buffer, computes the delta SQL, and applies the result to the stream
 table using `MERGE` in a separate transaction.
 

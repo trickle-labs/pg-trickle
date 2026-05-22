@@ -185,7 +185,7 @@ def extract_gucs(config_rs: Path) -> list[dict]:
 # SQL API extraction
 # ---------------------------------------------------------------------------
 
-_PG_EXTERN_RE = re.compile(r'#\[pg_extern\s*\(([^)]*)\)\]')
+_PG_EXTERN_RE = re.compile(r'#\[(?:pgrx::)?pg_extern\s*\(([^)]*)\)\]')
 _FN_SIG_RE = re.compile(
     r'(?:pub\s+)?(?:unsafe\s+)?fn\s+(\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)\s*(?:->\s*([^{;]+))?'
 )

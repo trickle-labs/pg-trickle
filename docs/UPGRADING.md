@@ -634,8 +634,11 @@ No breaking changes.
 **New catalog tables:** `pgtrickle.outbox_events`, `pgtrickle.inbox_messages`,
 `pgtrickle.inbox_dead_letters` for transactional outbox and inbox patterns.
 
-**New SQL functions:** `pgtrickle.enable_outbox(name, ...)`,
-`pgtrickle.enable_inbox(name, ...)`, and related management functions.
+**Historical SQL functions:** this release introduced pg_trickle-managed
+outbox/inbox functions such as `enable_outbox()` and `enable_inbox()`. Those
+APIs were later extracted to [`pg_tide`](https://github.com/trickle-labs/pg-tide)
+in v0.46.0; current pg_trickle keeps only the integration hooks
+`attach_outbox()` and `detach_outbox()`.
 
 No breaking changes.
 

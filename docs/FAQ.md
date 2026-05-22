@@ -72,8 +72,10 @@ dependency DAG and refreshes them in topological order automatically.
 
 ### 10. How does change data capture work?
 
-Lightweight row-level AFTER triggers capture every INSERT, UPDATE, and DELETE
-into per-table change buffers. If `wal_level = logical` is available,
+Trigger-based CDC captures every INSERT, UPDATE, and DELETE into per-table
+change buffers. Statement-level triggers are the default, with row-level
+triggers available via `pg_trickle.cdc_trigger_mode = 'row'`. If
+`wal_level = logical` is available,
 pg_trickle can automatically transition to WAL-based CDC for near-zero
 write-path overhead. [Full answer →](#change-data-capture-cdc)
 
@@ -283,9 +285,9 @@ Backward compatibility with PostgreSQL 16–17 is planned for a future release (
 
 ### Does pg_trickle require `wal_level = logical`?
 
-**No.** By default, pg_trickle uses lightweight row-level triggers for change data capture instead of logical replication. This means you do not need to set `wal_level = logical`, configure `max_replication_slots`, or create publications.
+**No.** By default, pg_trickle starts with trigger-based CDC instead of logical replication. Statement-level triggers are used unless you explicitly set `pg_trickle.cdc_trigger_mode = 'row'`. This means you do not need to set `wal_level = logical`, configure `max_replication_slots`, or create publications.
 
-If you later enable the hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`), WAL-based capture becomes an option — but this is opt-in and not required for normal operation.
+With the default hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`), WAL-based capture becomes active only when `wal_level = logical` is available and the transition succeeds. It is not required for normal operation.
 
 ### Is pg_trickle production-ready?
 
@@ -427,7 +429,7 @@ Use **IMMEDIATE** when:
 | ✅ pg_ivm compatibility | Drop-in migration path for existing pg_ivm / IMMV users. |
 | ❌ Write amplification | Every DML statement on a base table also executes IVM trigger logic, adding latency to the original transaction. |
 | ❌ Serialized concurrent writes | An `ExclusiveLock` is taken on the stream table during maintenance, serializing writers. |
-| ❌ Limited SQL support | Window functions, recursive CTEs, `LATERAL` joins, scalar subqueries, and TopK (`ORDER BY … LIMIT`) are not supported — use `DIFFERENTIAL` instead. |
+| ❌ Limited SQL support | Window functions, `LATERAL` joins, scalar subqueries, and TopK (`ORDER BY … LIMIT`) are not supported — use `DIFFERENTIAL` instead. Recursive CTEs are supported with bounded semi-naive / DRed maintenance. |
 | ❌ Cascading limitations | Cascading IMMEDIATE stream tables work but may require manual refresh for deep chains. |
 | ❌ No throttling | The refresh cannot be delayed or rate-limited. |
 
@@ -1263,7 +1265,7 @@ JOIN pg_class c ON c.oid = d.source_relid;
 ```
 
 The `cdc_mode` column shows one of three values:
-- `TRIGGER` — changes are captured via row-level triggers (the default)
+- `TRIGGER` — changes are captured via trigger-based CDC (statement-level by default)
 - `TRANSITIONING` — the system is in the process of switching from triggers to WAL
 - `WAL` — changes are captured via logical replication
 
@@ -1325,7 +1327,7 @@ A trigger added between two refresh cycles will simply be picked up on the next 
 
 ### Why does pg_trickle use triggers instead of logical replication for initial CDC?
 
-pg_trickle always bootstraps CDC with row-level AFTER triggers because they provide **single-transaction atomicity** — the change record is written in the same transaction as the source DML, so: 
+pg_trickle always bootstraps CDC with triggers because they provide **single-transaction atomicity** — the change record is written in the same transaction as the source DML, so:
 
 1. **No commit-order ambiguity.** The change buffer always reflects committed data; rolled-back transactions never produce partial change records.
 2. **No replication slot management at creation time.** Logical replication requires creating and monitoring replication slots, which can bloat WAL if the subscriber falls behind. Trigger-based bootstrap avoids this complexity.
@@ -1367,7 +1369,7 @@ When `pg_trickle.cdc_mode = 'auto'`, pg_trickle monitors each source table's wri
 
 1. **Slot creation.** A logical replication slot is created for the source table's OID (e.g., `pg_trickle_slot_16384`).
 2. **Dual capture.** For a brief period, both triggers and WAL decoding capture changes. The system uses LSN comparison to deduplicate, ensuring no changes are lost or double-counted.
-3. **Trigger removal.** Once the WAL decoder has confirmed it is caught up (its confirmed LSN ≥ the frontier LSN), the row-level triggers are dropped and the source transitions fully to WAL mode.
+3. **Trigger removal.** Once the WAL decoder has confirmed it is caught up (its confirmed LSN ≥ the frontier LSN), the trigger-based CDC objects are dropped and the source transitions fully to WAL mode.
 
 The transition is tracked in `pgt_dependencies.cdc_mode` (values: `TRIGGER` → `TRANSITIONING` → `WAL`). If the transition times out (`pg_trickle.wal_transition_timeout`, default 5 minutes), it is rolled back and triggers are kept.
 
@@ -1685,7 +1687,7 @@ When the number of pending changes exceeds `pg_trickle.differential_max_change_r
 
 ### How many concurrent refreshes can run?
 
-By default (`parallel_refresh_mode = 'off'`) refreshes are processed **sequentially** within the scheduler's single background worker. This is safe and efficient for most deployments.
+By default (`parallel_refresh_mode = 'on'`) the scheduler can dispatch independent refresh units to dynamic background workers. Set `pg_trickle.parallel_refresh_mode = 'off'` when you want sequential refreshes within each per-database scheduler for a resource-constrained or diagnostic deployment.
 
 **True parallel refresh** is available via:
 
@@ -3121,7 +3123,7 @@ The differential refresh path executes the delta query as a **single SQL stateme
 
 ### Why are refreshes processed sequentially by default?
 
-The default (`parallel_refresh_mode = 'off'`) is sequential because it is simple, correct, and efficient for most workloads. Topological ordering guarantees upstream stream tables refresh before downstream ones with no coordination overhead.
+The current default (`parallel_refresh_mode = 'on'`) enables parallel refresh for independent execution units while preserving topological ordering. Set `parallel_refresh_mode = 'off'` for sequential refreshes when minimizing worker usage matters more than refresh throughput.
 
 **When to consider enabling parallel refresh:**
 
