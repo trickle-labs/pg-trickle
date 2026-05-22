@@ -104,6 +104,36 @@ async fn wait_for_n_refreshes(
     }
 }
 
+/// Wait until `main.ducklake_data_file` has at least one row for `table_id`.
+///
+/// `create_stream_table` runs an initial MANUAL refresh (and records a
+/// COMPLETED row in `pgt_refresh_history`) *before* persisting the DuckLake
+/// sink configuration.  `wait_for_n_refreshes` can therefore return after
+/// seeing that early MANUAL record — before the scheduler has had a chance to
+/// run the first SCHEDULED refresh (the one that actually drives the sink).
+///
+/// Polling `ducklake_data_file` directly avoids the race: the scheduler
+/// writes the catalog row in the same transaction as the COMPLETED history
+/// record, so visibility is guaranteed once the row appears.
+async fn wait_for_ducklake_data_file(db: &E2eDb, table_id: i64, timeout: Duration) -> i64 {
+    let start = std::time::Instant::now();
+    loop {
+        let count: i64 = db
+            .query_scalar(&format!(
+                "SELECT count(*) FROM main.ducklake_data_file \
+                 WHERE table_id = {table_id}"
+            ))
+            .await;
+        if count >= 1 {
+            return count;
+        }
+        if start.elapsed() > timeout {
+            return count;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 /// v0.66.0 (F-2/F-4): After a successful scheduler refresh, the DuckLake sink
@@ -150,10 +180,15 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
         "dl_sink_write_st must have at least 1 COMPLETED refresh, got {refreshes}"
     );
 
-    // The sink must have registered a file in ducklake_data_file.
-    let file_count: i64 = db
-        .query_scalar("SELECT count(*) FROM main.ducklake_data_file WHERE table_id = 1")
-        .await;
+    // Wait for the DuckLake sink to write at least one catalog entry.
+    //
+    // `create_stream_table` records a COMPLETED refresh row in
+    // `pgt_refresh_history` during its initial MANUAL refresh — *before* the
+    // DuckLake sink configuration is persisted.  `wait_for_n_refreshes` can
+    // therefore return immediately after seeing that early record, before the
+    // scheduler has executed the first SCHEDULED refresh (which drives the
+    // sink).  Polling `ducklake_data_file` directly avoids the race.
+    let file_count = wait_for_ducklake_data_file(&db, 1, Duration::from_secs(60)).await;
     assert!(
         file_count >= 1,
         "Expected at least 1 ducklake_data_file row for table_id=1, \
@@ -334,6 +369,12 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
         refreshes >= 1,
         "dl_ts_sink_st must refresh at least once, got {refreshes}"
     );
+
+    // Wait for the DuckLake sink to write at least one catalog entry before
+    // reading row_count.  The initial MANUAL refresh (recorded before the sink
+    // config is persisted) causes wait_for_n_refreshes to return early; the
+    // scheduler-driven refresh (which runs the sink) may still be in flight.
+    wait_for_ducklake_data_file(&db, 3, Duration::from_secs(60)).await;
 
     // Verify catalog registration succeeded with row_count = 2.
     // A row_count of 0 or NULL would indicate all rows were dropped/nullified.
