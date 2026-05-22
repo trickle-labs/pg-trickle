@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.70.0 — Scheduler, Validator & Security Hardening](#0700--scheduler-validator--security-hardening)
 - [0.69.0 — DuckLake Sink Reliability & Security](#0690--ducklake-sink-reliability--security)
 - [0.68.0 — Assessment-13 Correctness & Durability Sprint](#0680--assessment-13-correctness--durability-sprint)
 - [0.67.0 — DuckLake Phase 3b: View Registration, Provenance & Ecosystem](#0670--ducklake-phase-3b-view-registration-provenance--ecosystem)
@@ -84,6 +85,84 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.70.0] — Scheduler, Validator & Security Hardening
+
+### What's New
+
+v0.70.0 is a quality sprint targeting correctness in the LATERAL validator,
+scheduler throughput, observability of the history prune loop, scalability of
+the launcher rescan path, and security hardening of the publication API.
+
+**COR-002: LATERAL Validator Body Scanning**
+
+Stream tables with LATERAL SRFs or LATERAL subqueries that contain volatile
+expressions (e.g. `random()`, `clock_timestamp()`) now correctly trigger the
+`volatile_function_policy` check. Before this fix, only the left-hand child of
+the LATERAL node was scanned; volatile expressions inside the LATERAL body SQL
+were silently skipped, allowing non-deterministic queries to poison differential
+maintenance.
+
+**PERF-001: Batched Buffer Health Checks**
+
+`check_slot_health_and_alert()` previously issued one SPI call per monitored
+change buffer. It now builds a single `UNION ALL` query for all buffers,
+reducing the per-alert overhead from O(n) to O(1) SPI round-trips.
+
+**PERF-002: Batched Fused-Chain Eligibility Lookups**
+
+The fused-chain refresh eligibility loop now fetches all dependency rows for the
+candidate set in a single `StDependency::get_for_sts()` query instead of one
+per candidate.
+
+**PERF-003: History Prune Interval Now GUC-Controlled**
+
+The background history cleanup previously ran on a hard-coded 24-hour cycle.
+`pg_trickle.history_prune_interval_seconds` (default `60`) now controls the
+interval. Setting it to `0` disables automatic pruning entirely.
+
+**PERF-004: `delta_work_mem_cap_mb` Default Raised to 256 MiB**
+
+The previous default of `0` (disabled) caused unbounded memory growth during
+large differential refreshes. The new default of `256` caps per-refresh memory
+use at a safe value for typical deployments.
+
+**SCAL-002: Launcher Install-Epoch Fast-Rescan**
+
+A shared-memory counter (`LAUNCHER_INSTALL_EPOCH`) is now bumped every time
+`CREATE EXTENSION pg_trickle` or `DROP EXTENSION pg_trickle` is executed. The
+launcher detects the change on the next loop and briefly switches to a 10-second
+poll interval before returning to the steady-state 60-second interval. This
+eliminates the 60-second dead zone after a fresh extension install.
+
+**SEC-001: Publication Name Parser Unified**
+
+`create_publication()` and `alter_publication()` now share the single
+`helpers::parse_qualified_name_pub()` implementation. The redundant local copy
+has been removed, closing a potential divergence between the two parse paths.
+
+**OBS-002: Prune Error Visibility**
+
+History prune failures now: (1) increment a shared-memory counter
+`HISTORY_PRUNE_ERRORS`, (2) log a `WARNING`, and (3) are exposed via the new
+SQL function `pgtrickle.history_prune_status()`. A non-zero
+`prune_error_count` from this function indicates the cleanup loop is failing and
+`pgt_refresh_history` may be growing unbounded.
+
+### New SQL Functions
+
+| Function | Returns | Description |
+|---|---|---|
+| `pgtrickle.history_prune_status()` | `(prune_error_count bigint, last_prune_at timestamptz, last_rows_deleted bigint)` | OBS-002: prune error counter and last timing |
+
+### Configuration Changes
+
+| GUC | Old Default | New Default | Notes |
+|---|---|---|---|
+| `pg_trickle.delta_work_mem_cap_mb` | `0` (disabled) | `256` | PERF-004: caps per-refresh memory |
+| `pg_trickle.history_prune_interval_seconds` | hard-coded 24 h | `60` s | PERF-003: set `0` to disable |
 
 ---
 

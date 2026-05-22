@@ -1809,6 +1809,78 @@ impl StDependency {
         })
     }
 
+    /// PERF-002 (v0.70.0): Batch-load dependencies for multiple stream tables
+    /// in a single SPI round-trip. Returns a `HashMap<pgt_id, Vec<StDependency>>`.
+    ///
+    /// Used by the fused eligibility checker to preload all dependency rows
+    /// before the eligibility loop, eliminating the O(N) per-node SPI fan-out.
+    pub fn get_for_sts(
+        pgt_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<Self>>, PgTrickleError> {
+        if pgt_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        // Build a VALUES list to avoid binding an array parameter.
+        let id_list = pgt_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        // nosemgrep: rust.spi.query.dynamic-format — pgt_ids are i64 (not user input).
+        let sql = format!(
+            "SELECT pgt_id, source_relid, source_type, columns_used, \
+                    cdc_mode, slot_name, decoder_confirmed_lsn::text, \
+                    transition_started_at::text, column_snapshot, \
+                    schema_fingerprint, source_stable_name, \
+                    COALESCE(source_placement, 'local') AS source_placement \
+             FROM pgtrickle.pgt_dependencies WHERE pgt_id IN ({id_list})"
+        );
+        Spi::connect(|client| {
+            let table = client
+                .select(&sql, None, &[])
+                .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+
+            let mut map: std::collections::HashMap<i64, Vec<Self>> =
+                std::collections::HashMap::new();
+            for row in table {
+                let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
+                let pgt_id = row.get::<i64>(1).map_err(map_spi)?.unwrap_or(0);
+                let source_relid = row
+                    .get::<pg_sys::Oid>(2)
+                    .map_err(map_spi)?
+                    .unwrap_or(pg_sys::InvalidOid);
+                let source_type = row.get::<String>(3).map_err(map_spi)?.unwrap_or_default();
+                let columns_used = row.get::<Vec<String>>(4).map_err(map_spi)?;
+                let cdc_mode_str = row.get::<String>(5).map_err(map_spi)?.unwrap_or_default();
+                let slot_name = row.get::<String>(6).map_err(map_spi)?;
+                let decoder_confirmed_lsn = row.get::<String>(7).map_err(map_spi)?;
+                let transition_started_at = row.get::<String>(8).map_err(map_spi)?;
+                let column_snapshot = row.get::<pgrx::JsonB>(9).map_err(map_spi)?.map(|jb| jb.0);
+                let schema_fingerprint = row.get::<String>(10).map_err(map_spi)?;
+                let source_stable_name = row.get::<String>(11).map_err(map_spi)?;
+                let source_placement = row
+                    .get::<String>(12)
+                    .map_err(map_spi)?
+                    .unwrap_or_else(|| "local".to_string());
+                map.entry(pgt_id).or_default().push(StDependency {
+                    pgt_id,
+                    source_relid,
+                    source_type,
+                    columns_used,
+                    column_snapshot,
+                    schema_fingerprint,
+                    cdc_mode: CdcMode::from_str(&cdc_mode_str),
+                    slot_name,
+                    decoder_confirmed_lsn,
+                    transition_started_at,
+                    source_stable_name,
+                    source_placement,
+                });
+            }
+            Ok(map)
+        })
+    }
+
     /// Get all dependencies across all STs (for building the full DAG).
     pub fn get_all() -> Result<Vec<Self>, PgTrickleError> {
         Spi::connect(|client| {

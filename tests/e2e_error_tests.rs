@@ -1086,3 +1086,119 @@ async fn test_create_st_transaction_abort_leaves_no_orphans() {
         "No CDC triggers should remain after rollback"
     );
 }
+
+// ── TEST-001 (v0.70.0): COR-002 LATERAL body volatility ───────────────────
+
+/// COR-002: A LATERAL subquery containing `random()` must be rejected when
+/// the volatile_function_policy is 'reject' (the default) and the refresh
+/// mode is DIFFERENTIAL.
+///
+/// Before v0.70.0, only the left-hand child of the LATERAL node was scanned
+/// for volatile expressions; the body SQL was silently skipped, allowing
+/// non-deterministic queries to poison differential maintenance.
+#[tokio::test]
+async fn test_lateral_volatile_subquery_rejected_in_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE lat_vol_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO lat_vol_src VALUES (1, 10), (2, 20)")
+        .await;
+
+    // Volatile expression inside a LATERAL subquery: random().
+    // With volatile_function_policy = 'reject' (default) and DIFFERENTIAL
+    // mode, create_stream_table must fail.
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'lat_vol_sub_st', \
+             $$ SELECT s.id, r.noise \
+                FROM lat_vol_src s \
+                LEFT JOIN LATERAL (SELECT random()::numeric AS noise) AS r ON true $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "LATERAL subquery containing random() should be rejected in DIFFERENTIAL mode"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.to_lowercase().contains("volatile")
+            || err_msg.to_lowercase().contains("unsupported"),
+        "Error should mention volatile expressions, got: {err_msg}"
+    );
+}
+
+/// COR-002: A LATERAL SRF containing a volatile function in its argument
+/// must also be caught. `generate_series(1, (random()*10)::int)` uses random()
+/// as the upper bound, making the set non-deterministic.
+#[tokio::test]
+async fn test_lateral_volatile_srf_argument_rejected_in_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE lat_vol_srf_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO lat_vol_srf_src VALUES (1), (2)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'lat_vol_srf_st', \
+             $$ SELECT s.id, g.n \
+                FROM lat_vol_srf_src s, \
+                LATERAL generate_series(1, (random() * 5)::int) AS g(n) $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "LATERAL SRF with volatile argument should be rejected in DIFFERENTIAL mode"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.to_lowercase().contains("volatile")
+            || err_msg.to_lowercase().contains("unsupported"),
+        "Error should mention volatile expressions, got: {err_msg}"
+    );
+}
+
+/// COR-002: An immutable LATERAL SRF (jsonb_array_elements) must continue to
+/// work correctly in DIFFERENTIAL mode — the volatility scanner must not
+/// incorrectly flag stable/immutable SRFs.
+#[tokio::test]
+async fn test_lateral_immutable_srf_allowed_in_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE lat_immut_src (id INT PRIMARY KEY, tags JSONB)")
+        .await;
+    db.execute(
+        "INSERT INTO lat_immut_src VALUES \
+         (1, '[\"rust\",\"pg\"]'), \
+         (2, '[\"sql\"]')",
+    )
+    .await;
+
+    // jsonb_array_elements is immutable — must be accepted.
+    db.create_st(
+        "lat_immut_st",
+        "SELECT s.id, e.tag \
+         FROM lat_immut_src s, \
+         jsonb_array_elements_text(s.tags) AS e(tag)",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let (status, mode, populated, errors) = db.pgt_status("lat_immut_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(mode, "DIFFERENTIAL");
+    assert!(populated, "Stream table should be populated after creation");
+    assert_eq!(errors, 0);
+
+    // 2 tags for id=1 + 1 tag for id=2 = 3 rows.
+    assert_eq!(db.count("public.lat_immut_st").await, 3);
+}

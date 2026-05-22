@@ -20,7 +20,9 @@ fn stream_table_to_publication(name: &str) {
 }
 
 fn stream_table_to_publication_impl(name: &str) -> Result<(), PgTrickleError> {
-    let (schema, table) = parse_qualified_name(name);
+    // SEC-001 (v0.70.0): Use shared parse_qualified_name_pub which respects
+    // current_schema() for unqualified names instead of hardcoding 'public'.
+    let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
     let meta = StreamTableMeta::get_by_name(&schema, &table)?;
 
     // SEC-2: Ownership check — same guard as alter/drop/pause/resume.
@@ -80,7 +82,8 @@ fn drop_stream_table_publication(name: &str) {
 }
 
 fn drop_stream_table_publication_impl(name: &str) -> Result<(), PgTrickleError> {
-    let (schema, table) = parse_qualified_name(name);
+    // SEC-001 (v0.70.0): Use shared parse_qualified_name_pub.
+    let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
     let meta = StreamTableMeta::get_by_name(&schema, &table)?;
 
     // SEC-2: Ownership check — same guard as alter/drop/pause/resume.
@@ -136,7 +139,8 @@ fn set_stream_table_sla(name: &str, sla: Interval) {
 }
 
 fn set_stream_table_sla_impl(name: &str, sla: Interval) -> Result<(), PgTrickleError> {
-    let (schema, table) = parse_qualified_name(name);
+    // SEC-001 (v0.70.0): Use shared parse_qualified_name_pub.
+    let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
     let meta = StreamTableMeta::get_by_name(&schema, &table)?;
 
     // Convert interval to milliseconds.
@@ -557,15 +561,6 @@ pub fn maybe_adjust_tier_for_sla(meta: &StreamTableMeta) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Parse a potentially qualified name into (schema, table).
-fn parse_qualified_name(name: &str) -> (String, String) {
-    if let Some((schema, table)) = name.split_once('.') {
-        (schema.to_string(), table.to_string())
-    } else {
-        ("public".to_string(), name.to_string())
-    }
-}
-
 /// Quote a SQL identifier.
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -684,20 +679,26 @@ mod tests {
         assert_eq!(assign_tier_for_sla(60000).ok(), Some(RefreshTier::Cold));
     }
 
+    // SEC-001 (v0.70.0): The local parse_qualified_name() has been removed.
+    // Schema-qualified name parsing is now done by
+    // super::helpers::parse_qualified_name_pub() which respects
+    // current_schema() for unqualified names (requires SPI — no unit test).
+    // Tests for the shared helper live in helpers.rs.
+
     #[test]
     fn test_parse_qualified_name_with_schema() {
+        // Two-part qualified names: no SPI needed (the split path).
         assert_eq!(
-            parse_qualified_name("myschema.mytable"),
-            ("myschema".into(), "mytable".into())
+            crate::api::helpers::parse_qualified_name_pub("myschema.mytable").ok(),
+            Some(("myschema".to_string(), "mytable".to_string()))
         );
     }
 
     #[test]
-    fn test_parse_qualified_name_without_schema() {
-        assert_eq!(
-            parse_qualified_name("mytable"),
-            ("public".into(), "mytable".into())
-        );
+    fn test_parse_qualified_dots_in_schema() {
+        // Only the first dot is treated as schema separator.
+        let result = crate::api::helpers::parse_qualified_name_pub("my.schema.table").ok();
+        assert_eq!(result, Some(("my".to_string(), "schema.table".to_string())));
     }
 
     #[test]
@@ -776,28 +777,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qualified_dots_in_schema() {
-        // Only the first dot is treated as schema separator
-        let (schema, table) = parse_qualified_name("my.schema.table");
-        assert_eq!(schema, "my");
-        assert_eq!(table, "schema.table");
-    }
-
-    #[test]
-    fn test_parse_qualified_empty_string() {
-        let (schema, table) = parse_qualified_name("");
-        assert_eq!(schema, "public");
-        assert_eq!(table, "");
-    }
-
-    #[test]
-    fn test_parse_qualified_dot_only() {
-        let (schema, table) = parse_qualified_name(".");
-        assert_eq!(schema, "");
-        assert_eq!(table, "");
-    }
-
-    #[test]
     fn test_quote_ident_empty() {
         assert_eq!(quote_ident(""), "\"\"");
     }
@@ -843,20 +822,6 @@ mod tests {
     fn test_assign_tier_sla_cold_100s() {
         use crate::scheduler::RefreshTier;
         assert_eq!(assign_tier_for_sla(100_000).ok(), Some(RefreshTier::Cold));
-    }
-
-    #[test]
-    fn test_parse_qualified_leading_dot() {
-        let (schema, table) = parse_qualified_name(".table");
-        assert_eq!(schema, "");
-        assert_eq!(table, "table");
-    }
-
-    #[test]
-    fn test_parse_qualified_trailing_dot() {
-        let (schema, table) = parse_qualified_name("schema.");
-        assert_eq!(schema, "schema");
-        assert_eq!(table, "");
     }
 
     #[test]

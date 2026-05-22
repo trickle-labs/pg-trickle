@@ -410,3 +410,69 @@ async fn test_pg_stat_stream_tables_stale_null_when_never_refreshed() {
         "pg_stat_stream_tables.stale should be NULL when last_refresh_at has never been set"
     );
 }
+
+// ── TEST-002 (v0.70.0): cache_stats() shape and monotonicity ──────────────
+
+/// TEST-002: `pgtrickle.cache_stats()` returns exactly one row with
+/// non-negative counters, and the total access count (l1_hits + l2_hits +
+/// misses) increases after a DIFFERENTIAL refresh warms the template cache.
+#[tokio::test]
+async fn test_cache_stats_shape_and_monotonicity() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // ── Step 1: Baseline shape ──────────────────────────────────────
+    // cache_stats() must return exactly one row.
+    let row_count: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.cache_stats()")
+        .await;
+    assert_eq!(row_count, 1, "cache_stats() must return exactly one row");
+
+    // All counters must be non-negative.
+    let (l1_hits_0, l2_hits_0, misses_0): (i64, i64, i64) = {
+        let row: (i64, i64, i64) =
+            sqlx::query_as("SELECT l1_hits, l2_hits, misses FROM pgtrickle.cache_stats()")
+                .fetch_one(&db.pool)
+                .await
+                .expect("cache_stats() query failed");
+        row
+    };
+    assert!(l1_hits_0 >= 0, "l1_hits must be non-negative");
+    assert!(l2_hits_0 >= 0, "l2_hits must be non-negative");
+    assert!(misses_0 >= 0, "misses must be non-negative");
+
+    // ── Step 2: Create a DIFFERENTIAL stream table and refresh ──────
+    db.execute("CREATE TABLE mon_cs_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO mon_cs_src VALUES (1, 100), (2, 200), (3, 300)")
+        .await;
+
+    db.create_st(
+        "mon_cs_st",
+        "SELECT id, val FROM mon_cs_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Trigger an explicit refresh to ensure the template cache is exercised.
+    db.refresh_st("mon_cs_st").await;
+
+    // ── Step 3: Total access count must have increased ──────────────
+    let (l1_hits_1, l2_hits_1, misses_1): (i64, i64, i64) = {
+        let row: (i64, i64, i64) =
+            sqlx::query_as("SELECT l1_hits, l2_hits, misses FROM pgtrickle.cache_stats()")
+                .fetch_one(&db.pool)
+                .await
+                .expect("cache_stats() query failed after refresh");
+        row
+    };
+
+    let total_0 = l1_hits_0 + l2_hits_0 + misses_0;
+    let total_1 = l1_hits_1 + l2_hits_1 + misses_1;
+
+    assert!(
+        total_1 > total_0,
+        "Total cache accesses (l1_hits + l2_hits + misses) must increase \
+         after a DIFFERENTIAL refresh. Before: {total_0}, after: {total_1}"
+    );
+}

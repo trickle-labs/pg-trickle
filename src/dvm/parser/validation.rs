@@ -573,10 +573,49 @@ pub(crate) fn tree_collect_volatility(
             }
             tree_collect_volatility(child, worst)?;
         }
-        OpTree::Distinct { child }
-        | OpTree::Subquery { child, .. }
-        | OpTree::LateralFunction { child, .. }
-        | OpTree::LateralSubquery { child, .. } => {
+        OpTree::Distinct { child } | OpTree::Subquery { child, .. } => {
+            tree_collect_volatility(child, worst)?;
+        }
+        OpTree::LateralFunction {
+            func_sql: _func_sql,
+            child,
+            ..
+        } => {
+            // COR-002 (v0.70.0): Scan the LATERAL function body for volatile
+            // calls. Previously only `child` (the left-hand scan) was checked;
+            // volatile expressions inside `func_sql` (e.g. `random()`) would
+            // bypass the volatile_function_policy check silently.
+            #[cfg(not(test))]
+            {
+                let wrapped = format!("SELECT {_func_sql}");
+                match parse_defining_query_full(&wrapped) {
+                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                    Err(_) => {
+                        // Conservative: treat an unparseable body as volatile.
+                        *worst = max_volatility(*worst, 'v');
+                    }
+                }
+            }
+            tree_collect_volatility(child, worst)?;
+        }
+        OpTree::LateralSubquery {
+            subquery_sql: _subquery_sql,
+            child,
+            ..
+        } => {
+            // COR-002 (v0.70.0): Scan the LATERAL subquery body for volatile
+            // expressions. The subquery body is stored as raw SQL and was
+            // previously not scanned by the volatility walker.
+            #[cfg(not(test))]
+            {
+                match parse_defining_query_full(_subquery_sql) {
+                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                    Err(_) => {
+                        // Conservative: treat an unparseable body as volatile.
+                        *worst = max_volatility(*worst, 'v');
+                    }
+                }
+            }
             tree_collect_volatility(child, worst)?;
         }
         OpTree::UnionAll { children } => {
@@ -838,9 +877,36 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
         // Window functions use partition-based recomputation.
         OpTree::Window { child, .. } => check_ivm_support(child),
         // Lateral SRFs use row-scoped recomputation.
-        OpTree::LateralFunction { child, .. } => check_ivm_support(child),
+        // COR-002 (v0.70.0): Also check the function body for unsupported constructs.
+        OpTree::LateralFunction {
+            func_sql: _func_sql,
+            child,
+            ..
+        } => {
+            #[cfg(not(test))]
+            {
+                let wrapped = format!("SELECT {_func_sql}");
+                if let Ok(inner) = parse_defining_query_full(&wrapped) {
+                    check_ivm_support_inner(&inner.tree)?;
+                }
+            }
+            check_ivm_support(child)
+        }
         // Lateral subqueries use row-scoped recomputation.
-        OpTree::LateralSubquery { child, .. } => check_ivm_support(child),
+        // COR-002 (v0.70.0): Also check the subquery body for unsupported constructs.
+        OpTree::LateralSubquery {
+            subquery_sql: _subquery_sql,
+            child,
+            ..
+        } => {
+            #[cfg(not(test))]
+            {
+                if let Ok(inner) = parse_defining_query_full(_subquery_sql) {
+                    check_ivm_support_inner(&inner.tree)?;
+                }
+            }
+            check_ivm_support(child)
+        }
         // Semi-join (EXISTS / IN subquery): both sides must be DVM-compatible.
         OpTree::SemiJoin { left, right, .. } | OpTree::AntiJoin { left, right, .. } => {
             check_ivm_support(left)?;
