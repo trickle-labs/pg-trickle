@@ -57,7 +57,7 @@ For deployments with 50+ stream tables, enable tiered scheduling to reduce
 scheduler overhead:
 
 ```ini
-pg_trickle.tiered_scheduling = on   -- default since v0.12.0
+pg_trickle.tiered_scheduling = on   -- default
 ```
 
 The scheduler classifies stream tables into tiers based on change frequency:

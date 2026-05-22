@@ -7,8 +7,7 @@ is mostly invisible: you create stream tables exactly as you would
 on single-node PostgreSQL, and pg_trickle handles per-worker change
 capture and merging on the coordinator.
 
-> **Available since v0.32.0** (sources, output targets); the fully
-> automated per-worker scheduler arrived in **v0.34.0**.
+> **Citus support available** — distributed sources, output targets, and fully automated per-worker scheduling.
 
 > This page is the canonical entry point for Citus support. The
 > long-form reference (worker-slot lifecycle, troubleshooting, and

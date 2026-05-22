@@ -332,9 +332,9 @@ SELECT pgtrickle.create_stream_table(
 );
 ```
 
-> **Note on short schedules:** A 1-second schedule is safe for development and production thanks to `auto_backoff` (on by default since v0.10.0). If a refresh takes more than 95% of the schedule window, the scheduler automatically stretches the effective interval (up to 8× the configured schedule) to prevent CPU runaway, then resets to 1× as soon as a refresh completes on time. You will see a `WARNING` message when backoff activates.
+> **Note on short schedules:** A 1-second schedule is safe for development and production thanks to `auto_backoff` (on by default). If a refresh takes more than 95% of the schedule window, the scheduler automatically stretches the effective interval (up to 8× the configured schedule) to prevent CPU runaway, then resets to 1× as soon as a refresh completes on time. You will see a `WARNING` message when backoff activates.
 >
-> **v0.2.0+:** `create_stream_table` also accepts `diamond_consistency` (`'none'` or `'atomic'`) and `diamond_schedule_policy` (`'fastest'` or `'slowest'`) for diamond-shaped dependency graphs. Schedules can be cron expressions (e.g., `'*/5 * * * *'`, `'@hourly'`). Set `pooler_compatibility_mode => true` if you're connecting through PgBouncer or another transaction-mode connection pooler. See [SQL_REFERENCE.md](SQL_REFERENCE.md) for the full parameter list.
+> **Additional parameters:** `create_stream_table` also accepts `diamond_consistency` (`'none'` or `'atomic'`) and `diamond_schedule_policy` (`'fastest'` or `'slowest'`) for diamond-shaped dependency graphs. Schedules can be cron expressions (e.g., `'*/5 * * * *'`, `'@hourly'`). Set `pooler_compatibility_mode => true` if you're connecting through PgBouncer or another transaction-mode connection pooler. See [SQL_REFERENCE.md](SQL_REFERENCE.md) for the full parameter list.
 
 ### What just happened?
 

@@ -7,7 +7,7 @@ Streaming, a read replica, a custom consumer — subscribe to stream table
 changes in real time, without needing to poll the table or set up a separate
 CDC pipeline.
 
-> **Available since v0.22.0**
+> **Supported feature**
 
 ---
 

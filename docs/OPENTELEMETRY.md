@@ -1,6 +1,6 @@
 # OpenTelemetry Operator Guide
 
-> **Status:** Available since v0.37.0 (F10). Operator guide added in v0.39.0 (O39-5).
+> **Status:** Available feature with comprehensive operator guidance.
 
 pg_trickle supports W3C Trace Context propagation through the refresh pipeline.
 When enabled, distributed traces initiated in application sessions are linked to

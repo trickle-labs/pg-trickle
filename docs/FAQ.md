@@ -1332,7 +1332,7 @@ pg_trickle always bootstraps CDC with row-level AFTER triggers because they prov
 3. **Works on all hosting providers.** Some managed PostgreSQL services restrict `wal_level = logical` or limit the number of replication slots. Trigger bootstrap works everywhere, with no configuration changes.
 4. **Simpler initial deployment.** No need for `wal_level = logical`, no publication/subscription setup, and no extra connections for WAL senders.
 
-With `pg_trickle.cdc_mode = 'auto'` (the default since v0.3.0), pg_trickle uses triggers initially and then transparently transitions to WAL-based CDC if `wal_level = logical` is available. If WAL is not available, triggers are kept permanently — no degradation, no errors. Set `pg_trickle.cdc_mode = 'trigger'` if you want to disable WAL transitions entirely. See ADR-001 and ADR-002 in the architecture documentation for the full rationale.
+With `pg_trickle.cdc_mode = 'auto'` (the default), pg_trickle uses triggers initially and then transparently transitions to WAL-based CDC if `wal_level = logical` is available. If WAL is not available, triggers are kept permanently — no degradation, no errors. Set `pg_trickle.cdc_mode = 'trigger'` if you want to disable WAL transitions entirely. See ADR-001 and ADR-002 in the architecture documentation for the full rationale.
 
 ### Why is `auto` the default `pg_trickle.cdc_mode`?
 

@@ -11,8 +11,6 @@ per-type statistics. Because the inbox table is ordinary PostgreSQL, your
 application's processing step and the "mark as processed" step can be wrapped
 in a single transaction — making the entire operation atomic.
 
-> **Available since v0.28.0**
-
 ---
 
 ## How it works

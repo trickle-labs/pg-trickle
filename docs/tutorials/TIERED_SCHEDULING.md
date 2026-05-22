@@ -37,7 +37,7 @@ For a stream table with `schedule => '1m'`:
 
 ### 1. Enable tiered scheduling
 
-Tiered scheduling is enabled by default since v0.12.0. Verify:
+Tiered scheduling is enabled by default. Verify:
 
 ```sql
 SHOW pg_trickle.tiered_scheduling;
