@@ -388,7 +388,8 @@ pub fn increment_history_prune_errors() {
 /// removed from a database.  The launcher reads this on every loop and
 /// resets to a fast-poll interval when it detects a change, then backs off
 /// to the steady-state 60-second interval once the epoch is stable.
-// SAFETY: PgAtomic::new requires a static CStr name.
+// SAFETY: PgAtomic::new requires a static CStr name. Registered via pg_shmem_init!
+// in init_shared_memory(); must stay in sync with the pg_shmem_init! call below.
 pub static LAUNCHER_INSTALL_EPOCH: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_launcher_install_epoch") };
 
