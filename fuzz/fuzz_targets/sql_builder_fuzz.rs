@@ -1,22 +1,20 @@
 // FUZZ-6 (v0.44.0 / A45-9): SQL-builder and parser typed facade fuzz target.
 //
-// This target exercises:
+// This target exercises pure-Rust helpers only — no PostgreSQL backend required:
 //   - `sql_builder` module helpers (A45-2): ident quoting, literal escaping,
-//     qualified names, regclass, spi_param, list_idents.
-//   - `validate_immediate_mode_support`: parser validation pipeline entry
-//     point — pure Rust, no backend required.
-//   - `lookup_function_volatility` / `lookup_operator_volatility`: pure Rust
-//     volatility classification.
-//   - `max_volatility`: pure Rust volatility algebra.
+//     qualified names, spi_param, list_idents.
+//   - `max_volatility`: pure Rust volatility algebra (char comparison only).
+//
+// NOTE: `lookup_function_volatility` and `lookup_operator_volatility` are
+// intentionally NOT fuzzed here.  In non-test builds they call `Spi::connect`
+// which requires a live PostgreSQL backend, causing linker errors in the fuzz
+// harness.  They are covered by integration tests instead.
 //
 // Invariants verified for each input:
-//   1. `sql_builder::ident` output contains the input wrapped in double quotes
-//      with double-quote chars escaped — never panics.
-//   2. `sql_builder::literal` output contains the input wrapped in single
-//      quotes with single-quote chars escaped — never panics.
-//   3. `sql_builder::qualified` output is the concatenation of the two ident-
-//      quoted fragments separated by `.` — never panics.
-//   4. None of the pure validation helpers panic or abort.
+//   1. `sql_builder::ident` output starts and ends with `"`, never panics.
+//   2. `sql_builder::literal` output starts and ends with `'`, never panics.
+//   3. `sql_builder::qualified` produces two ident-quoted parts — never panics.
+//   4. `max_volatility` is deterministic and never panics.
 //
 // Run locally:
 //   cargo +nightly fuzz run sql_builder_fuzz -- -max_total_time=60
@@ -75,14 +73,8 @@ fuzz_target!(|data: &[u8]| {
     let _ = pg_trickle::sql_builder::list_idents(&parts.iter().map(|p| *p).collect::<Vec<_>>());
 
     // ---------------------------------------------------------------
-    // 6. Volatility classifier — pure Rust, no backend.
+    // 6. max_volatility — pure char comparison, no backend required.
     //    Must never panic.
-    // ---------------------------------------------------------------
-    let _ = pg_trickle::dvm::parser::lookup_function_volatility(s);
-    let _ = pg_trickle::dvm::parser::lookup_operator_volatility(s);
-
-    // ---------------------------------------------------------------
-    // 7. max_volatility — must never panic.
     // ---------------------------------------------------------------
     if data.len() >= 2 {
         let a = data[0] as char;
@@ -90,3 +82,4 @@ fuzz_target!(|data: &[u8]| {
         let _ = pg_trickle::dvm::parser::max_volatility(a, b);
     }
 });
+
