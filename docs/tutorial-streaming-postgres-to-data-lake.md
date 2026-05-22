@@ -42,7 +42,7 @@ extension.
 
 Before starting you need:
 
-- **PostgreSQL 18** with **pg_trickle v0.67.0+** installed and loaded via
+- **PostgreSQL 18** with **pg_trickle** installed and loaded via
   `shared_preload_libraries`.
 - The **DuckLake PostgreSQL extension** installed in the same database:
   ```sql

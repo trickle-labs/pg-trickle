@@ -402,7 +402,7 @@ In all cases, the work is proportional to the number of **changed rows**, not th
 
 ## What About IMMEDIATE Mode?
 
-Everything above describes **DIFFERENTIAL** mode — changes accumulate in a buffer and are applied on a schedule. As of v0.2.0, pg_trickle also supports **IMMEDIATE** mode, where the stream table is updated synchronously within the same transaction as your UPDATE.
+Everything above describes **DIFFERENTIAL** mode — changes accumulate in a buffer and are applied on a schedule. pg_trickle also supports **IMMEDIATE** mode, where the stream table is updated synchronously within the same transaction as your UPDATE.
 
 ### How IMMEDIATE Mode Differs for UPDATE
 

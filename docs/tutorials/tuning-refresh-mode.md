@@ -6,7 +6,7 @@ refresh mode (FULL vs DIFFERENTIAL), and how to act on the recommendations.
 
 ## Prerequisites
 
-- pg_trickle v0.14.0 or later
+- pg_trickle or later
 - At least one stream table with several completed refresh cycles (the
   diagnostics become more accurate with more history)
 

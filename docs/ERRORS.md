@@ -352,7 +352,7 @@ will suspend the stream table after `max_consecutive_errors` failures. Check
 **Message:** `SPI error [<sqlstate_code>]: <details>`
 
 **Description:** A PostgreSQL SPI error where the original SQLSTATE code has
-been preserved for programmatic classification (SCAL-1, v0.30.0). Used when
+been preserved for programmatic classification (SCAL-1). Used when
 `pg_trickle.use_sqlstate_classification = true`, which is the default.
 
 **Common causes:** Same as `SpiError` above. The difference is that this
@@ -516,7 +516,7 @@ tiers with `pgtrickle.list_sla_tiers()`.
 
 **Message:** `failed to build changed-columns bitmask: <details>`
 
-**Description:** CDC-1 (v0.24.0): The columnar change tracking system could not
+**Description:** CDC-1: The columnar change tracking system could not
 build the bitmask expression for changed-column detection. This indicates a
 table structure that prevents column-level CDC tracking.
 
@@ -536,7 +536,7 @@ at least one non-primary-key column.
 
 **Message:** `publication rebuild failed: <details>`
 
-**Description:** CDC-2 (v0.24.0): The logical replication publication could not
+**Description:** CDC-2: The logical replication publication could not
 be rebuilt for a partitioned source table after a partition attach/detach or
 schema change.
 
@@ -558,7 +558,7 @@ schema change.
 
 **Message:** `diagnostic error: <details>`
 
-**Description:** ERR-1 (v0.26.0): An error occurred inside a diagnostic or
+**Description:** ERR-1: An error occurred inside a diagnostic or
 monitoring function such as `explain_refresh_mode()`, `source_gates()`, or
 `watermarks()`. These surface as user-visible PostgreSQL errors with context.
 
@@ -580,7 +580,7 @@ its catalog entry is corrupted — use `pgtrickle.repair_stream_table()`.
 
 **Message:** `snapshot already exists: <name>`
 
-**Description:** SNAP-1 (v0.27.0): A snapshot with the given target name
+**Description:** SNAP-1: A snapshot with the given target name
 already exists in the snapshot catalog.
 
 **Common causes:**
@@ -596,7 +596,7 @@ snapshot with `pgtrickle.drop_snapshot()` before creating a new one.
 
 **Message:** `snapshot source not found: <name>`
 
-**Description:** SNAP-2 (v0.27.0): The stream table specified as the snapshot
+**Description:** SNAP-2: The stream table specified as the snapshot
 source was not found in the catalog.
 
 **Common causes:**
@@ -612,7 +612,7 @@ source was not found in the catalog.
 
 **Message:** `snapshot schema version mismatch: <details>`
 
-**Description:** SNAP-3 (v0.27.0): The snapshot's schema version does not
+**Description:** SNAP-3: The snapshot's schema version does not
 match the current extension version, indicating the snapshot was taken with
 a different version of pg_trickle.
 
@@ -632,7 +632,7 @@ cannot be used across major version boundaries. See
 
 **Message:** `outbox already attached for stream table: <name>`
 
-**Description:** v0.46.0: `pgtrickle.attach_outbox()` was called for a stream
+**Description:** `pgtrickle.attach_outbox()` was called for a stream
 table that already has an outbox registered via the `pg_tide` integration.
 
 **Common causes:**
@@ -649,7 +649,7 @@ Use `pgtrickle.detach_outbox()` if you need to reconfigure.
 
 **Message:** `outbox not attached for stream table: <name>`
 
-**Description:** v0.46.0: An outbox management operation was called on a stream
+**Description:** An outbox management operation was called on a stream
 table that does not have a `pg_tide` outbox attached.
 
 **Common causes:**
@@ -665,7 +665,7 @@ stream table name.
 
 **Message:** `attach_outbox() requires the pg_tide extension. Install it with: CREATE EXTENSION pg_tide;`
 
-**Description:** v0.46.0: The `pg_tide` extension is not installed in the
+**Description:** The `pg_tide` extension is not installed in the
 current database. The outbox/inbox functionality requires `pg_tide` to be
 present.
 
@@ -713,7 +713,7 @@ If this persists, please [report the issue](https://github.com/trickle-labs/pg-t
 
 **Message:** `differential query depth exceeded limit of <N> levels; reduce query nesting or raise pg_trickle.max_parse_depth`
 
-**Description:** C-7 (v0.54.0): The `diff_node()` recursion depth exceeded
+**Description:** C-7: The `diff_node()` recursion depth exceeded
 the configured limit during differential query generation. This prevents stack
 overflows on pathologically deeply-nested queries.
 
@@ -735,7 +735,7 @@ Alternatively, use `refresh_mode => 'FULL'` to bypass the differential engine.
 
 **Message:** `differential query CTE count exceeded limit of <N>; simplify the query or raise pg_trickle.max_diff_ctes`
 
-**Description:** R-7 (v0.54.0): The number of CTEs generated during
+**Description:** R-7: The number of CTEs generated during
 differentiation exceeded the configured limit (`pg_trickle.max_diff_ctes`).
 This prevents unbounded memory growth for queries that produce thousands of
 intermediate CTEs.
@@ -757,7 +757,7 @@ Alternatively, use `refresh_mode => 'FULL'`.
 
 **Message:** `upstream stream table (pgt_id=<id>) not found in refresh frontier; the source stream table may have been dropped — call pgtrickle.reinitialize_stream_table() to recover`
 
-**Description:** C-4 (v0.54.0): A stream-table-to-stream-table source frontier
+**Description:** C-4: A stream-table-to-stream-table source frontier
 entry is missing from the refresh frontier, indicating the upstream stream
 table was dropped while a downstream stream table still references it.
 

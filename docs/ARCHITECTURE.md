@@ -63,8 +63,8 @@ The public entry point for users. All operations are exposed as `#[pg_extern]` f
 |------|----------------|
 | `src/api/mod.rs` | Core lifecycle: `create_stream_table`, `alter_stream_table`, `drop_stream_table`, `refresh_stream_table`, `bulk_create`, `repair_stream_table`, `pgt_status` |
 | `src/api/diagnostics.rs` | Inspection helpers: `explain_st`, `explain_refresh_mode`, `dependency_tree`, `list_sources` |
-| `src/api/outbox_hook.rs` | pg_tide integration hook: `attach_outbox()` — calls into pg_tide after each successful refresh (v0.46.0+) |
-| `src/api/snapshot.rs` | Stream table snapshots (v0.27.0): `snapshot_stream_table`, `restore_from_snapshot`, `list_snapshots`, `drop_snapshot` |
+| `src/api/outbox_hook.rs` | pg_tide integration hook: `attach_outbox()` — calls into pg_tide after each successful refresh |
+| `src/api/snapshot.rs` | Stream table snapshots: `snapshot_stream_table`, `restore_from_snapshot`, `list_snapshots`, `drop_snapshot` |
 | `src/api/self_monitoring.rs` | Self-monitoring setup/teardown and auto-apply policy |
 | `src/api/cluster.rs` | Multi-database cluster overview: `cluster_worker_summary` |
 | `src/api/publication.rs` | Logical publication helpers and predictive cost model utilities |
@@ -194,7 +194,7 @@ When `refresh_mode = 'IMMEDIATE'`, pg_trickle uses **statement-level AFTER trigg
 
 No change buffer tables, no scheduler involvement, and no WAL infrastructure is needed for IMMEDIATE mode. See [plans/sql/PLAN_TRANSACTIONAL_IVM.md](https://github.com/trickle-labs/pg-trickle/blob/main/plans/sql/PLAN_TRANSACTIONAL_IVM.md) for the design plan.
 
-#### ST-to-ST Change Capture (v0.11.0+)
+#### ST-to-ST Change Capture
 
 When a stream table's defining query references another stream table (rather than a base table), neither triggers nor WAL capture apply — the upstream source is itself maintained by pg_trickle. A dedicated **ST change buffer** mechanism enables downstream stream tables to refresh differentially even when their source is another stream table.
 
@@ -212,7 +212,7 @@ When a stream table's defining query references another stream table (rather tha
 
 **Frontier tracking.** ST source positions are tracked in the same frontier JSONB structure as base-table sources, using `pgt_<upstream_pgt_id>` as the key (e.g., `{"pgt_42": 157}`) rather than the OID-based keys used for base tables. The scheduler's `has_stream_table_source_changes()` function compares the downstream's last-consumed frontier position against the upstream buffer's current maximum LSN to decide whether a refresh is needed.
 
-**Lifecycle.** ST change buffers are created automatically when a stream table gains its first downstream consumer (`create_st_change_buffer_table()`), and dropped when the last downstream consumer is removed (`drop_st_change_buffer_table()`). On upgrade from pre-v0.11.0, existing ST-to-ST dependencies have their buffers auto-created on the first scheduler tick. Consumed rows are cleaned up by `cleanup_st_change_buffers_by_frontier()` after each successful downstream refresh.
+**Lifecycle.** ST change buffers are created automatically when a stream table gains its first downstream consumer (`create_st_change_buffer_table()`), and dropped when the last downstream consumer is removed (`drop_st_change_buffer_table()`). Existing ST-to-ST dependencies have their buffers auto-created on the first scheduler tick. Consumed rows are cleaned up by `cleanup_st_change_buffers_by_frontier()` after each successful downstream refresh.
 
 #### Frontier Visibility Holdback (Issue #536)
 
@@ -668,7 +668,7 @@ The `pgtrickle.diamond_groups()` SQL function exposes detected groups for operat
 
 ### 14. pg_tide Integration
 
-> **Extracted in v0.46.0.** The outbox, inbox, and relay subsystems were moved
+> The outbox, inbox, and relay subsystems were moved
 > to the standalone [`pg_tide`](https://github.com/trickle-labs/pg-tide)
 > extension to give event messaging its own focused release cadence and reduce
 > the surface area of `pg_trickle`.
@@ -699,8 +699,6 @@ See the [pg_tide repository](https://github.com/trickle-labs/pg-tide) for the
 complete API reference, deployment guide, and relay architecture.
 
 ### 15. Stream Table Snapshots (`src/api/snapshot.rs`)
-
-> **Added in v0.27.0.**
 
 `snapshot_stream_table(name)` exports the current content of a stream table into an archival table, capturing the extension version and current frontier in metadata columns (`__pgt_snapshot_version`, `__pgt_frontier`, `__pgt_snapshotted_at`).
 
@@ -793,8 +791,8 @@ src/
 ├── api/
 │   ├── mod.rs       # Core lifecycle functions (create/alter/drop/refresh/status)
 │   ├── diagnostics.rs   # explain_st, explain_refresh_mode, dependency_tree
-│   ├── outbox_hook.rs   # pg_tide integration hook (attach_outbox, v0.46.0+)
-│   ├── snapshot.rs  # Stream table snapshots (v0.27.0)
+│   ├── outbox_hook.rs   # pg_tide integration hook (attach_outbox)
+│   ├── snapshot.rs  # Stream table snapshots
 │   ├── self_monitoring.rs  # Self-monitoring setup/teardown
 │   ├── cluster.rs   # cluster_worker_summary
 │   ├── publication.rs   # Logical publication helpers
@@ -865,5 +863,5 @@ target's `share/extension/` directory alongside the SQL migration scripts.
 
 > **Note:** The relay binary (`pgtrickle-relay`), outbox, and inbox subsystems
 > were extracted to the standalone [`pg_tide`](https://github.com/trickle-labs/pg-tide)
-> extension in v0.46.0. See [§ 14 pg_tide Integration](#14-pg_tide-integration)
+> extension. See [§ 14 pg_tide Integration](#14-pg_tide-integration)
 > and the `pg_tide` repository for the relay architecture and deployment guide.

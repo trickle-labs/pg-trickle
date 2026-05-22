@@ -233,7 +233,7 @@ After the MERGE succeeds:
    1          | 1      | DIFFERENTIAL | 1             | 0            | 1               | COMPLETED | SCHEDULER
    ```
 
-   The `delta_row_count` column (new in v0.2.0) records the total number of change buffer rows consumed during this refresh cycle.
+   The `delta_row_count` column records the total number of change buffer rows consumed during this refresh cycle.
 
 4. **The data timestamp** on the stream table is advanced, resetting the staleness clock.
 
@@ -288,7 +288,7 @@ For a table with 10 million rows and 100 changed rows, a DIFFERENTIAL refresh pr
 
 ## What About IMMEDIATE Mode?
 
-Everything described above applies to the default **AUTO** mode — changes accumulate in a buffer and are applied on a schedule using differential (delta-only) maintenance. As of v0.2.0, pg_trickle also supports **IMMEDIATE** mode, which takes a fundamentally different path.
+Everything described above applies to the default **AUTO** mode — changes accumulate in a buffer and are applied on a schedule using differential (delta-only) maintenance. pg_trickle also supports **IMMEDIATE** mode, which takes a fundamentally different path.
 
 With IMMEDIATE mode, there are no change buffers, no scheduler, and no waiting:
 

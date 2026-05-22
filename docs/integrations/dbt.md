@@ -38,7 +38,7 @@ Subsequent `dbt run` invocations update the defining query if it changed
 pip install dbt-pgtrickle
 ```
 
-Requires dbt-postgres 1.7+ and pg_trickle v0.30+.
+Requires dbt-postgres 1.7+ and pg_trickle.
 
 > The full configuration reference, supported materializations, macros,
 > testing guide, and CI setup are in the

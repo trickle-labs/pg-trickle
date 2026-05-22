@@ -511,7 +511,7 @@ The MERGE updates both rows. **All work is proportional to the number of deleted
 TRUNCATE orders;
 ```
 
-`TRUNCATE` does **not** fire row-level triggers. However, as of v0.2.0, pg_trickle installs a **statement-level AFTER TRUNCATE** trigger that writes a `'T'` marker to the change buffer. On the next refresh cycle, the scheduler detects this marker and automatically performs a **full refresh** — truncating the stream table and recomputing from the defining query.
+`TRUNCATE` does **not** fire row-level triggers. However, pg_trickle installs a **statement-level AFTER TRUNCATE** trigger that writes a `'T'` marker to the change buffer. On the next refresh cycle, the scheduler detects this marker and automatically performs a **full refresh** — truncating the stream table and recomputing from the defining query.
 
 No manual intervention is required. For details on how TRUNCATE is handled across all three refresh modes (DIFFERENTIAL, IMMEDIATE, FULL), see [What Happens When You TRUNCATE a Table?](WHAT_HAPPENS_ON_TRUNCATE.md).
 
@@ -575,7 +575,7 @@ In all cases, the work is proportional to the number of **changed rows**, not th
 
 ## What About IMMEDIATE Mode?
 
-Everything above describes **DIFFERENTIAL** mode — changes accumulate in a buffer and are applied on a schedule. As of v0.2.0, pg_trickle also supports **IMMEDIATE** mode, where the stream table is updated synchronously within the same transaction as your DELETE.
+Everything above describes **DIFFERENTIAL** mode — changes accumulate in a buffer and are applied on a schedule. pg_trickle also supports **IMMEDIATE** mode, where the stream table is updated synchronously within the same transaction as your DELETE.
 
 ### How IMMEDIATE Mode Differs for DELETE
 

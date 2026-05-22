@@ -158,7 +158,7 @@ ORDER BY restart_lsn;
 ```
 
 pg_trickle also watches subscriber lag automatically via
-`pg_trickle.publication_lag_warn_bytes` (v0.25.0). When a slot exceeds the
+`pg_trickle.publication_lag_warn_bytes`. When a slot exceeds the
 configured byte lag:
 
 1. A warning is logged.

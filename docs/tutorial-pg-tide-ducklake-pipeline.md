@@ -39,8 +39,8 @@ happen with the direct sink.
 
 ## Prerequisites
 
-- **PostgreSQL 18** with **pg_trickle v0.67.0+**
-- **pg-tide v0.22.0+** installed:
+- **PostgreSQL 18** with **pg_trickle**
+- **pg-tide** installed:
   ```sql
   CREATE EXTENSION IF NOT EXISTS pg_tide;
   ```

@@ -1,6 +1,5 @@
 # Drain-Mode Runbook — pg_trickle
 
-> **Version:** v0.40.0  
 > **Audience:** Database administrators and on-call engineers performing
 > controlled shutdowns, maintenance windows, and rolling upgrades.
 

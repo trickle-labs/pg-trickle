@@ -79,7 +79,7 @@ advisory lock issues. Use a direct connection for management operations.
 
 ## Pooler Compatibility Mode
 
-pg_trickle includes a `pooler_compatibility_mode` setting (v0.10.0+) that
+pg_trickle includes a `pooler_compatibility_mode` setting that
 adjusts internal behavior for environments where the scheduler's SPI
 connection may be affected by pooler-like middleware:
 

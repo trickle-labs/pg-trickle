@@ -230,8 +230,6 @@ is undersized. If utilization is < 50%, the pool is oversized and consuming
 
 ## Read Replicas & Hot Standby
 
-> **Added in v0.19.0 (SCAL-1 / STAB-2).**
-
 pg_trickle is a **primary-only** extension. Stream tables are maintained
 by the background scheduler through DML (INSERT, DELETE, MERGE), which is
 only possible on the primary server.
@@ -259,8 +257,6 @@ standby or streaming replica):
 ---
 
 ## CNPG & Kubernetes Operations
-
-> **Added in v0.19.0 (SCAL-3).**
 
 [CloudNativePG (CNPG)](https://cloudnative-pg.io/) is the recommended Kubernetes
 operator for running pg_trickle. The extension is packaged as a custom container
@@ -313,7 +309,7 @@ spec:
 
 ---
 
-## Cluster-wide Worker Fairness (v0.27.0)
+## Cluster-wide Worker Fairness
 
 When pg_trickle is installed across multiple databases on the same PostgreSQL
 instance, all scheduler background workers share a single worker pool bounded
@@ -350,7 +346,7 @@ dashboard snippets.
 
 ### Per-database Prometheus labels
 
-From v0.27.0, all metrics include `db_oid` and `db_name` labels so Grafana
+All metrics include `db_oid` and `db_name` labels so Grafana
 dashboards can filter by database without requiring separate scrape targets:
 
 ```promql

@@ -1,7 +1,7 @@
 # Tutorial: ETL & Bulk Load Patterns
 
-pg_trickle provides **source gating** (v0.5.0+) and **watermark gating**
-(v0.7.0+) to coordinate stream table refreshes with ETL pipelines and bulk
+pg_trickle provides **source gating** and **watermark gating**
+to coordinate stream table refreshes with ETL pipelines and bulk
 data loads. This tutorial covers common patterns for pausing refreshes
 during loads and resuming them safely afterward.
 
@@ -127,7 +127,7 @@ While sources are gated, verify the gate status:
 -- Check which sources are currently gated
 SELECT * FROM pgtrickle.source_gates();
 
--- Bootstrap gate status (v0.6.0+)
+-- Bootstrap gate status
 SELECT * FROM pgtrickle.bootstrap_gate_status();
 ```
 
@@ -150,7 +150,7 @@ SELECT pgtrickle.ungate_source('public.orders');
 -- The fuse catches any unexpected bulk changes outside the gated window
 ```
 
-## Watermark Gating (v0.7.0+)
+## Watermark Gating
 
 Watermark gating extends source gating with **LSN-based coordination**
 for more precise control:

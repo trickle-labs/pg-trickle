@@ -1,6 +1,5 @@
 # Security Model — pg_trickle
 
-> **Version:** v0.44.0  
 > **Audience:** Database administrators, security engineers, and operators
 > deploying pg_trickle in production environments.
 

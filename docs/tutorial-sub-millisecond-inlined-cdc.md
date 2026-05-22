@@ -39,7 +39,7 @@ triggers and reinstalls the CDC triggers on the new table version automatically.
 
 ## Prerequisites
 
-- **PostgreSQL 18** with **pg_trickle v0.65.0+**
+- **PostgreSQL 18** with **pg_trickle**
 - **DuckLake 1.x** installed:
   ```sql
   CREATE EXTENSION IF NOT EXISTS ducklake;
@@ -290,7 +290,7 @@ Typical results on a warm system:
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `cdc_mode` shows `POLLING` not `TRIGGER` for the inlined table | pg_trickle didn't recognize the inlined table pattern | Check that the table name matches `ducklake_inlined_data_table_*`; ensure you're on pg_trickle v0.65.0+ |
+| `cdc_mode` shows `POLLING` not `TRIGGER` for the inlined table | pg_trickle didn't recognize the inlined table pattern | Check that the table name matches `ducklake_inlined_data_table_*`; ensure you're on pg_trickle |
 | Refresh fails after schema change on `lake.categories` | DDL watcher missed the rotation | Run `SELECT pgtrickle.reinitialize('category_stats')` to reset CDC triggers |
 | `duration_ms` is high despite trigger CDC | Another source (e.g. `raw_events`) had many changes | The refresh time includes both sources; check `delta_rows_in` to see the breakdown |
 | `ducklake_inlined_data_table_*` query returns no rows | DuckLake storing the table in Parquet (too large for inline) | Check `ducklake_inline_table_max_rows` setting; reduce table size or raise the threshold |

@@ -271,7 +271,7 @@ See [DBSP_COMPARISON.md](research/DBSP_COMPARISON.md) for a detailed comparison.
 | Cascading (view-on-view) | No | Yes (DAG-aware topological refresh) |
 | Scheduling | None (always immediate) | Duration, cron, CALCULATED, or NULL |
 | Monitoring | None | Built-in views, stats, NOTIFY alerts |
-| PostgreSQL version | 14–17 | 18 only (until v0.4.0) |
+| PostgreSQL version | 14–17 | 18 only |
 
 pg_trickle's IMMEDIATE mode is designed as a migration path for pg_ivm users — it uses the same statement-level trigger approach with transition tables.
 
@@ -1336,7 +1336,7 @@ With `pg_trickle.cdc_mode = 'auto'` (the default), pg_trickle uses triggers init
 
 ### Why is `auto` the default `pg_trickle.cdc_mode`?
 
-As of v0.3.0, `auto` is the default CDC mode. This was changed from `trigger` based on the following considerations:
+`auto` is the default CDC mode. It was changed from `trigger` based on the following considerations:
 
 **1. Safe no-op on standard installs.**
 PostgreSQL ships with `wal_level = replica` by default. In this configuration, `auto` simply stays on trigger-based CDC permanently — it does not create replication slots, publications, or any WAL infrastructure. There is no error, warning, or user-visible difference from the old `trigger` default. `auto` only activates the WAL transition path when `wal_level = logical` is explicitly configured by the operator.
@@ -1354,7 +1354,7 @@ When `wal_level != logical`, the `auto` scheduler branch takes a fast-path exit 
 **4. Progressive optimisation without config changes.**
 When an operator later enables `wal_level = logical` (e.g., for other replication needs), pg_trickle automatically benefits from lower per-row CDC overhead (~5–15 μs vs ~20–55 μs) without any configuration change. This aligns with the principle of least surprise.
 
-**When to use `trigger` instead:** Set `pg_trickle.cdc_mode = 'trigger'` if you want fully deterministic trigger-only behaviour, need to minimize any replication slot management, or are on a restricted managed PostgreSQL that caps replication slots. This reverts to the pre-v0.3.0 default.
+**When to use `trigger` instead:** Set `pg_trickle.cdc_mode = 'trigger'` if you want fully deterministic trigger-only behaviour, need to minimize any replication slot management, or are on a restricted managed PostgreSQL that caps replication slots. This reverts to the legacy trigger-only default.
 
 **Caveats to be aware of in `auto` mode:**
 - Keyless tables (no PRIMARY KEY) stay on triggers permanently — WAL mode requires a PK for `pk_hash` computation.
@@ -1384,7 +1384,6 @@ After restoring a backup (pg_dump, pg_basebackup, or PITR), the CDC state depend
 In all cases, the pg_trickle scheduler automatically detects frontier inconsistencies and falls back to a full refresh for the first cycle after restore. No manual intervention is required for trigger-mode sources.
 
 For full guidelines on disaster recovery strategies, see our dedicated [Backup and Restore](BACKUP_AND_RESTORE.md) chapter.
-
 
 For WAL-mode sources, replication slots created after the backup point will not exist in the restored state. Set `pg_trickle.cdc_mode = 'trigger'` temporarily, or let the auto transition recreate slots.
 
@@ -1688,7 +1687,7 @@ When the number of pending changes exceeds `pg_trickle.differential_max_change_r
 
 By default (`parallel_refresh_mode = 'off'`) refreshes are processed **sequentially** within the scheduler's single background worker. This is safe and efficient for most deployments.
 
-Starting in v0.4.0, **true parallel refresh** is available via:
+**True parallel refresh** is available via:
 
 ```sql
 ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'on';
@@ -3130,7 +3129,7 @@ The default (`parallel_refresh_mode = 'off'`) is sequential because it is simple
 - Total cycle time = sum of all refresh durations and some refreshes are visibly blocking unrelated ones.
 - You have enough `max_worker_processes` headroom (each parallel worker uses one slot).
 
-**Enabling parallel refresh (v0.4.0+):**
+**Enabling parallel refresh:**
 
 ```sql
 ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'on';

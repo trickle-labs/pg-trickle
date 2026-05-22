@@ -1,6 +1,6 @@
 # Tutorial: Stream Tables as Event-Sourced Read Models
 
-> DOC-NEW-25 (v0.57.0) — End-to-end tutorial: use stream tables as read-model
+> DOC-NEW-25 — End-to-end tutorial: use stream tables as read-model
 > projections over an event-sourced write model.  Models an order-processing
 > domain with CQRS pattern and event-replay guidance.
 

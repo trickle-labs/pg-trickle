@@ -797,7 +797,7 @@ SELECT pg_reload_conf();
 
 pg_trickle will automatically transition each stream table from trigger-based to WAL-based capture after the first successful refresh — reducing per-write overhead from ~2–15 μs (triggers) to near-zero (WAL-based capture adds no synchronous overhead to your DML). The transition is transparent; your queries and the refresh schedule are unaffected.
 
-### Optional: Parallel Refresh (v0.4.0+)
+### Optional: Parallel Refresh
 
 By default the scheduler refreshes stream tables **sequentially** in topological order within a single background worker. This is correct and efficient for most workloads.
 
@@ -828,7 +828,7 @@ SELECT * FROM pgtrickle.parallel_job_status(60);     -- recent jobs
 
 See [CONFIGURATION.md — Parallel Refresh](CONFIGURATION.md#parallel-refresh) for the complete tuning reference.
 
-### Optional: PgBouncer / Connection Pooler Compatibility (v0.10.0+)
+### Optional: PgBouncer / Connection Pooler Compatibility
 
 If you're connecting through PgBouncer or another connection pooler in **transaction mode** (the default on Supabase, Railway, Neon, and most managed PostgreSQL platforms), set `pooler_compatibility_mode` when creating or altering a stream table:
 
@@ -843,7 +843,7 @@ SELECT pgtrickle.create_stream_table(
 
 This disables prepared statements and NOTIFY emissions for that table — the two features that break in transaction-pool mode. Leave it off (the default) if you connect directly to PostgreSQL.
 
-### Optional: Change Buffer Compaction (v0.10.0+)
+### Optional: Change Buffer Compaction
 
 For high-churn tables, pg_trickle automatically compacts the pending change buffer before each refresh cycle when it exceeds `pg_trickle.compact_threshold` (default 100,000 rows). INSERT→DELETE pairs that cancel each other out are eliminated, and multiple changes to the same row are collapsed to a single net change, reducing delta scan overhead by 50–90%.
 
@@ -866,7 +866,7 @@ You've now seen the IVM strategies pg_trickle uses for incremental view maintena
 
 When you omit `refresh_mode`, the default is `'AUTO'` — it uses differential (delta-only) maintenance when the query supports it, and automatically falls back to full recomputation when it doesn't. You only need to specify a mode explicitly for advanced cases.
 
-**IMMEDIATE mode** (new in v0.2.0) maintains stream tables synchronously within the same transaction as the base table DML. It uses statement-level AFTER triggers with transition tables — no change buffers, no scheduler. The stream table is always consistent with the current transaction.
+**IMMEDIATE mode** maintains stream tables synchronously within the same transaction as the base table DML. It uses statement-level AFTER triggers with transition tables — no change buffers, no scheduler. The stream table is always consistent with the current transaction.
 
 ```sql
 -- Create a stream table that updates in real-time
@@ -933,19 +933,19 @@ You don't choose — pg_trickle detects the strategy automatically based on the 
 | Query Pattern | Strategy | Performance |
 |---------------|----------|-------------|
 | Scan + Filter + Join + algebraic Aggregate (COUNT/SUM/AVG) | Algebraic | Excellent — O(changes) |
-| `CORR`, `COVAR_POP/SAMP`, `REGR_*` (12 functions) | Algebraic (Welford running totals) | O(changes) — running totals updated per changed row, no group rescan (v0.10.0+) |
+| `CORR`, `COVAR_POP/SAMP`, `REGR_*` (12 functions) | Algebraic (Welford running totals) | O(changes) — running totals updated per changed row, no group rescan |
 | Non-recursive CTEs | Algebraic (inlined) | CTE body is differentiated inline |
 | `MIN` / `MAX` aggregates | Semi-algebraic | Uses LEAST/GREATEST merge; per-group rescan only when an extremum is deleted |
 | `STRING_AGG`, `ARRAY_AGG`, ordered-set aggregates | Group-rescan | Affected groups fully re-aggregated from source |
 | `GROUPING SETS` / `CUBE` / `ROLLUP` | Algebraic (rewritten) | Auto-expanded to `UNION ALL` of `GROUP BY` queries; CUBE capped at 64 branches |
 | Recursive CTEs (`WITH RECURSIVE`) INSERT | Semi-naive evaluation | O(new rows derived from the change) |
-| Recursive CTEs (`WITH RECURSIVE`) DELETE/UPDATE | Delete-and-Rederive | Re-derives rows with alternative paths; O(affected subgraph) (v0.10.0+) |
-| LATERAL subqueries | Correlated re-evaluation | Only outer rows correlated with changed inner data re-evaluated — O(correlated rows) (v0.10.0+) |
+| Recursive CTEs (`WITH RECURSIVE`) DELETE/UPDATE | Delete-and-Rederive | Re-derives rows with alternative paths; O(affected subgraph) |
+| LATERAL subqueries | Correlated re-evaluation | Only outer rows correlated with changed inner data re-evaluated — O(correlated rows) |
 | Window functions | Partition recompute | Only affected partitions recomputed |
 | `ORDER BY … LIMIT N` (TopK) | Scoped recomputation | Re-evaluates top-N via MERGE; stores exactly N rows |
 | IMMEDIATE mode queries | In-transaction delta | Same algebraic strategies, applied synchronously via transition tables |
 
-### FUSE Circuit Breaker (v0.11.0+)
+### FUSE Circuit Breaker
 
 The fuse is a **circuit breaker** that stops a stream table from processing an
 unexpectedly large batch of changes — for example from a runaway script or
@@ -978,7 +978,7 @@ SELECT pgtrickle.reset_fuse('category_summary', action => 'skip_changes');
 A `pgtrickle_alert` NOTIFY is emitted when the fuse blows, making it easy to
 hook into alerting pipelines or `LISTEN` from application code.
 
-### Partitioned Stream Tables (v0.11.0+)
+### Partitioned Stream Tables
 
 For large stream tables, declare a **partition key** at creation time so
 MERGE operations are scoped to only the relevant partitions:
@@ -1032,7 +1032,7 @@ no change buffers, no scheduler, no background workers. The stream table is
 always consistent with the current transaction. Ideal for audit tables,
 real-time dashboards, and applications that need zero-latency reads.
 
-### Multi-Tenant Worker Quotas (v0.11.0+)
+### Multi-Tenant Worker Quotas
 
 In deployments with multiple databases, one busy database can starve others
 if all dynamic refresh workers are claimed. The `per_database_worker_quota`
@@ -1119,7 +1119,7 @@ SELECT * FROM pgtrickle.dependency_tree();
 ### Fuse Status
 
 ```sql
--- Check circuit breaker state for all stream tables (v0.11.0+)
+-- Check circuit breaker state for all stream tables
 SELECT * FROM pgtrickle.fuse_status();
 ```
 
@@ -1160,15 +1160,15 @@ SUSPENDED, CDC buffer > 1 GB, scheduler down, high refresh duration.
 | **CDC triggers** | Lightweight change capture in the same transaction — no logical replication or polling required |
 | **DAG scheduling** | Stream tables can depend on other stream tables; refreshes run in topological order, schedules propagate upstream via `CALCULATED` mode |
 | **Algebraic IVM** | Delta queries that process only changed rows — O(changes) regardless of table size |
-| **Semi-naive / DRed** | Incremental strategies for `WITH RECURSIVE` — INSERT uses semi-naive, DELETE/UPDATE uses Delete-and-Rederive (v0.10.0+) |
+| **Semi-naive / DRed** | Incremental strategies for `WITH RECURSIVE` — INSERT uses semi-naive, DELETE/UPDATE uses Delete-and-Rederive |
 | **IMMEDIATE mode** | Synchronous in-transaction IVM — stream tables updated within the same transaction as your DML, always consistent |
 | **TopK** | `ORDER BY … LIMIT N` queries store exactly N rows, refreshed via scoped recomputation |
 | **Diamond consistency** | Atomic refresh groups for diamond-shaped dependency graphs via `diamond_consistency = 'atomic'` |
 | **Downstream propagation** | A single base table write cascades through an entire chain of stream tables, automatically, in the right order |
 | **Trigger-based CDC** | Lightweight row-level triggers by default (no WAL configuration needed); optional transition to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` |
-| **Parallel refresh** | Independent stream tables refresh concurrently in dynamic background workers via `pg_trickle.parallel_refresh_mode = 'on'` (v0.4.0+, default off) |
-| **auto_backoff** | Scheduler automatically stretches effective interval when refresh cost exceeds 95% of the schedule window, capped at 8× (on by default, v0.10.0+) |
-| **PgBouncer compatibility** | Set `pooler_compatibility_mode => true` per stream table to work behind transaction-mode connection poolers (v0.10.0+) |
+| **Parallel refresh** | Independent stream tables refresh concurrently in dynamic background workers via `pg_trickle.parallel_refresh_mode = 'on'` (default off) |
+| **auto_backoff** | Scheduler automatically stretches effective interval when refresh cost exceeds 95% of the schedule window, capped at 8× (on by default) |
+| **PgBouncer compatibility** | Set `pooler_compatibility_mode => true` per stream table to work behind transaction-mode connection poolers |
 | **Monitoring** | `pgt_status()`, `health_check()`, `dependency_tree()`, `pg_stat_stream_tables`, and more for freshness, timing, and error history |
 
 The key takeaway: you write to base tables — **pg_trickle does the rest**. Data flows downstream automatically, each layer doing the minimum work proportional to what changed, in dependency order.
@@ -1407,8 +1407,6 @@ so deployments are always idempotent.
 ---
 
 ## Day 2 Operations
-
-> **Added in v0.20.0 (UX-4).**
 
 Once your stream tables are running in production, pg_trickle can monitor
 itself using its own stream tables — a technique called *self-monitoring*.

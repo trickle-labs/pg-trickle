@@ -29,17 +29,17 @@ databases — as if they were regular PostgreSQL tables. They appear in
 set by applying only the *changes* (Δ) that occurred since the last refresh,
 rather than recomputing from scratch every time.
 
-**The problem pg_trickle solves here:** before v0.65.0, the only way to detect
+**The problem pg_trickle solves here:** previously, the only way to detect
 changes on a DuckLake FDW table was to scan the entire table and compare with a
 snapshot (`EXCEPT ALL`). That is O(N) — it gets slower as the table grows,
 regardless of how few rows actually changed. DuckLake 1.x provides
 `table_changes(table, from_snapshot, to_snapshot)` which returns only the delta
-rows. pg_trickle v0.65.0+ uses this API automatically.
+rows. pg_trickle uses this API automatically.
 
 | Approach | Work per refresh | When to use |
 |----------|-----------------|-------------|
-| `EXCEPT ALL` polling (≤ v0.64.0) | O(N) — full table scan | DuckLake without `table_changes` |
-| Change-feed adapter (v0.65.0+) | O(Δ) — only changed rows | DuckLake 1.x with `table_changes` |
+| `EXCEPT ALL` polling (legacy) | O(N) — full table scan | DuckLake without `table_changes` |
+| Change-feed adapter | O(Δ) — only changed rows | DuckLake 1.x with `table_changes` |
 
 ---
 
@@ -47,7 +47,7 @@ rows. pg_trickle v0.65.0+ uses this API automatically.
 
 Before starting you need:
 
-- **PostgreSQL 18** with **pg_trickle v0.65.0+** installed and in
+- **PostgreSQL 18** with **pg_trickle** installed and in
   `shared_preload_libraries`
 - **DuckLake 1.x** installed in your PostgreSQL instance:
   ```sql

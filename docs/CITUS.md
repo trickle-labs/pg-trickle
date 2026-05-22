@@ -25,7 +25,7 @@ capture and merging on the coordinator.
 - **Distributed output.** Pass `output_distribution_column` to
   `create_stream_table()` and the resulting stream table is itself a
   Citus distributed table, co-located with your source shards.
-- **Automated scheduler.** Since v0.34, the per-worker slot lifecycle
+- **Automated scheduler.** the per-worker slot lifecycle
   (`ensure_worker_slot`, `poll_worker_slot_changes`, lease
   management) runs automatically — no manual wiring required.
 - **Shard-rebalance auto-recovery.** Topology changes detected by

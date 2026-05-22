@@ -1,6 +1,6 @@
 # pg_trickle Starter: Vector RAG Corpus
 
-> VA-5 (v0.48.0) — Quick-start for building a production RAG corpus with
+> VA-5 — Quick-start for building a production RAG corpus with
 > pg_trickle and pgvector.
 
 ## Prerequisites

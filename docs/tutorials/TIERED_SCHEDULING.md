@@ -1,6 +1,6 @@
 # Tutorial: Tiered Scheduling
 
-Tiered scheduling (v0.12.0+) lets you assign refresh priorities to stream
+Tiered scheduling lets you assign refresh priorities to stream
 tables using four tiers: **Hot**, **Warm**, **Cold**, and **Frozen**. This
 reduces CPU and I/O overhead by refreshing less-critical tables less
 frequently.

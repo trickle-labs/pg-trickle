@@ -4,7 +4,6 @@ This guide covers common data modeling patterns and recommended configurations
 for pg_trickle stream tables. Each pattern includes worked SQL examples,
 anti-patterns to avoid, and refresh mode recommendations.
 
-> **Version:** v0.14.0+. Some features require recent versions — check
 > [SQL_REFERENCE.md](SQL_REFERENCE.md) for per-feature availability.
 
 ---
@@ -18,9 +17,9 @@ anti-patterns to avoid, and refresh mode recommendations.
 - [Pattern 5: Real-Time Dashboards](#pattern-5-real-time-dashboards)
 - [Pattern 6: Tiered Refresh Strategy](#pattern-6-tiered-refresh-strategy)
 - [General Guidelines](#general-guidelines)
-- [Replica Bootstrap & PITR Alignment (v0.27.0)](#replica-bootstrap--pitr-alignment-v0270)
-- [Pattern 7: Transactional Outbox (v0.28.0)](#pattern-7-transactional-outbox-v0280)
-- [Pattern 8: Transactional Inbox (v0.28.0)](#pattern-8-transactional-inbox-v0280)
+- [Replica Bootstrap & PITR Alignment](#replica-bootstrap--pitr-alignment-v0270)
+- [Pattern 7: Transactional Outbox](#pattern-7-transactional-outbox-v0280)
+- [Pattern 8: Transactional Inbox](#pattern-8-transactional-inbox-v0280)
 
 ---
 
@@ -456,7 +455,7 @@ SELECT pgtrickle.alter_stream_table('audit_log_summary', tier => 'frozen');
 | Target table < 1000 rows                     | FULL             |
 | Need per-row latency guarantee               | IMMEDIATE        |
 
-Use `pgtrickle.recommend_refresh_mode()` (v0.14.0+) for automated
+Use `pgtrickle.recommend_refresh_mode()` for automated
 analysis:
 
 ```sql
@@ -512,7 +511,7 @@ FROM pgtrickle.pgt_stream_tables;
 
 ---
 
-## Replica Bootstrap & PITR Alignment (v0.27.0)
+## Replica Bootstrap & PITR Alignment
 
 When bootstrapping a new replica or performing point-in-time recovery,
 stream tables need special handling because their state is derived from
@@ -581,9 +580,7 @@ FROM pgtrickle.pgt_stream_tables;
 
 ---
 
-## Pattern 7: Transactional Outbox (v0.28.0)
-
-> **Requires:** v0.28.0+
+## Pattern 7: Transactional Outbox
 
 The **transactional outbox** pattern reliably publishes stream table deltas to
 external consumers — even if the consumer is temporarily offline. Each time the
@@ -689,9 +686,7 @@ pg_trickle.consumer_cleanup_enabled = true
 
 ---
 
-## Pattern 8: Transactional Inbox (v0.28.0)
-
-> **Requires:** v0.28.0+
+## Pattern 8: Transactional Inbox
 
 The **transactional inbox** pattern provides a reliable, idempotent message
 receiver inside PostgreSQL. External producers write events to the inbox table;

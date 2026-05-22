@@ -93,7 +93,7 @@ The following table shows which SQL constructs are supported under each refresh 
 | `CROSS JOIN` | ✅ | ✅ | ✅ | |
 | `LATERAL JOIN` | ✅ | ✅ | ✅ | Row-scoped re-execution |
 | Multi-table join (≤2 right scans) | ✅ | ✅ | ✅ | Full phantom-row-after-DELETE fix |
-| Multi-table join (≥3 right scans) | ✅ | ⚠️ | ⚠️ | Falls back to post-change snapshot for right subtree (EC-01 boundary, fix planned for v0.12.0) |
+| Multi-table join (≥3 right scans) | ✅ | ⚠️ | ⚠️ | Falls back to post-change snapshot for right subtree (EC-01 boundary) |
 | **Subqueries** | | | | |
 | `EXISTS` / `IN` (semi-join) | ✅ | ✅ | ✅ | Delta-key pre-filter on left side |
 | `NOT EXISTS` / `NOT IN` (anti-join) | ✅ | ✅ | ✅ | Inverted semantics; two-part delta |
@@ -137,7 +137,7 @@ The following table shows which SQL constructs are supported under each refresh 
 | `generate_series()` | ✅ | ✅ | ✅ | |
 | `unnest()` | ✅ | ✅ | ✅ | |
 | **ST-to-ST Dependencies** | | | | |
-| Stream table reading from another stream table | ✅ | ✅ | ✅ | Differential via `changes_pgt_` buffers (v0.11.0); FULL upstream produces I/D diff so downstream stays differential |
+| Stream table reading from another stream table | ✅ | ✅ | ✅ | Differential via `changes_pgt_` buffers; FULL upstream produces I/D diff so downstream stays differential |
 | Multi-level ST chains | ✅ | ✅ | ✅ | Topological order; per-level delta propagation |
 | **Function Volatility** | | | | |
 | `IMMUTABLE` functions | ✅ | ✅ | ✅ | |
@@ -706,7 +706,7 @@ The cost is proportional to the full result set size.
 | Match | Mixed (INSERT+DELETE/UPDATE) | IMMEDIATE (TransitionTable) | DRed (Strategy 2) |
 | Mismatch | Any | Any | Recomputation (Strategy 3) |
 
-> **DRed in DIFFERENTIAL mode (P2-1 -- implemented in v0.10.0)**
+> **DRed in DIFFERENTIAL mode (P2-1)**
 >
 > DRed is now active in both DIFFERENTIAL and IMMEDIATE modes when CTE output columns
 > match ST storage columns. Phase 1 propagates inserts via semi-naive evaluation;
@@ -1154,7 +1154,7 @@ The tree is then traversed bottom-up during delta generation: each operator's `g
 
 ---
 
-## LATERAL Joins and DIFFERENTIAL Mode (FEAT-2, v0.61.0)
+## LATERAL Joins and DIFFERENTIAL Mode (FEAT-2)
 
 The following table summarises which LATERAL patterns are supported in
 `DIFFERENTIAL` mode and what behaviour to expect for each:
