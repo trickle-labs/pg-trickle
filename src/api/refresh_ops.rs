@@ -327,6 +327,12 @@ fn execute_manual_refresh(
             if rows_changed > 0 {
                 crate::scheduler::execute_post_refresh_action(st, rows_changed);
             }
+            // F-2/F-4 (v0.66.0): Run the DuckLake sink after a successful manual refresh,
+            // mirroring the scheduler path so that refresh_stream_table() also writes
+            // Parquet output when a ducklake sink is configured.
+            if st.ducklake_sink_mode.is_some() {
+                crate::ducklake_sink::run_ducklake_sink(st);
+            }
         }
         Err(e) => {
             let _ = RefreshRecord::complete(

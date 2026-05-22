@@ -104,6 +104,13 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
     // database and immediately re-probe, rather than waiting for skip_ttl.
     let mut last_dag_version = shmem::current_dag_version();
 
+    // SCAL-002 (v0.70.0): Track the install epoch to detect CREATE/DROP EXTENSION.
+    // When the epoch is stable, the launcher uses a 60-second steady-state
+    // poll interval instead of 10 seconds, reducing catalog fan-out at scale.
+    let mut last_install_epoch = shmem::LAUNCHER_INSTALL_EPOCH
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     // last_attempt[db] = when we last tried to spawn a worker for that DB.
     // Used to avoid hammering databases where pg_trickle is not installed.
     let mut last_attempt: HashMap<String, std::time::Instant> = HashMap::new();
@@ -199,6 +206,17 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
             last_attempt.clear();
         }
 
+        // SCAL-002 (v0.70.0): Also clear the skip-cache on install epoch change
+        // (CREATE/DROP EXTENSION events bump LAUNCHER_INSTALL_EPOCH via hooks.rs).
+        let install_epoch = shmem::LAUNCHER_INSTALL_EPOCH
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let epoch_changed = install_epoch != last_install_epoch;
+        if epoch_changed {
+            last_install_epoch = install_epoch;
+            last_attempt.clear();
+        }
+
         for db in &databases {
             if active.contains(db) {
                 // Worker healthy — record that this DB has had a running
@@ -259,9 +277,12 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
         // per-database scheduler workers run the purge in their own DB context.
         let _ = last_cache_purge; // suppress unused-variable warning
 
-        // Wake every 10 s or on SIGHUP/SIGTERM.
+        // SCAL-002 (v0.70.0): Use a 60-second steady-state poll interval when
+        // no extension install/drop has been signalled.  Reset to 10 seconds
+        // when an epoch change is detected so new databases are picked up quickly.
+        let launcher_wait_secs = if epoch_changed { 10u64 } else { 60u64 };
         let should_continue =
-            BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(10)));
+            BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(launcher_wait_secs)));
 
         unsafe {
             if pg_sys::ConfigReloadPending != 0 {
@@ -449,9 +470,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut backpressure_cycles: HashMap<u32, i32> = HashMap::new();
 
     // DB-5: Timestamp for daily history retention cleanup.
+    // PERF-003 (v0.70.0): Interval is now read from the
+    // pg_trickle.history_prune_interval_seconds GUC instead of the
+    // previous hard-coded 24-hour constant.
     let mut last_history_cleanup_ms: u64 = 0;
-    const HISTORY_CLEANUP_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
-
     // DF-G2: Dog-feeding auto-apply — timestamp-gated, rate-limited.
     let mut last_auto_apply_ms: u64 = 0;
     const AUTO_APPLY_INTERVAL_MS: u64 = 10 * 60 * 1000; // 10 minutes
@@ -766,11 +788,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             }
         }
 
-        // DB-5: Periodic history retention cleanup (daily).
+        // DB-5: Periodic history retention cleanup.
+        // PERF-003 (v0.70.0): Interval driven by
+        // pg_trickle.history_prune_interval_seconds GUC instead of a
+        // hard-coded 24-hour constant.
         {
             let now_for_cleanup = current_epoch_ms();
-            if now_for_cleanup.saturating_sub(last_history_cleanup_ms)
-                >= HISTORY_CLEANUP_INTERVAL_MS
+            let prune_interval_secs = config::pg_trickle_history_prune_interval_seconds() as u64;
+            let prune_interval_ms = prune_interval_secs.saturating_mul(1_000);
+            if prune_interval_ms > 0
+                && now_for_cleanup.saturating_sub(last_history_cleanup_ms) >= prune_interval_ms
             {
                 let retention_days = config::pg_trickle_history_retention_days();
                 if retention_days > 0 {
@@ -780,9 +807,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let batch_size: i64 = 10_000;
                     let mut total_deleted: i64 = 0;
                     loop {
-                        let deleted: i64 = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                            Spi::get_one_with_args::<i64>(
-                                "WITH batch AS (\
+                        // OBS-002 (v0.70.0): Return Result so SPI errors are
+                        // visible instead of silently collapsed to 0.
+                        let batch_result: Result<i64, String> =
+                            BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                                Spi::get_one_with_args::<i64>(
+                                    "WITH batch AS (\
                                         SELECT refresh_id FROM pgtrickle.pgt_refresh_history \
                                         WHERE start_time < now() - make_interval(days => $1) \
                                         LIMIT $2 \
@@ -791,14 +821,23 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                                         WHERE refresh_id IN (SELECT refresh_id FROM batch) \
                                         RETURNING 1\
                                     ) SELECT count(*) FROM deleted",
-                                &[retention_days.into(), batch_size.into()],
-                            )
-                            .unwrap_or(Some(0))
-                            .unwrap_or(0)
-                        }));
-                        total_deleted += deleted;
-                        if deleted < batch_size {
-                            break;
+                                    &[retention_days.into(), batch_size.into()],
+                                )
+                                .map(|v| v.unwrap_or(0))
+                                .map_err(|e| e.to_string())
+                            }));
+                        match batch_result {
+                            Ok(deleted) => {
+                                total_deleted += deleted;
+                                if deleted < batch_size {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                pgrx::warning!("pg_trickle: history prune failed: {}", e);
+                                crate::shmem::increment_history_prune_errors();
+                                break;
+                            }
                         }
                     }
                     if total_deleted > 0 {

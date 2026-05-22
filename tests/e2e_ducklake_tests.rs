@@ -173,11 +173,25 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
     )
     .await;
 
-    // Wait for the scheduler to run at least one refresh.
-    let refreshes = wait_for_n_refreshes(&db, "dl_sink_write_st", 1, Duration::from_secs(60)).await;
+    // Insert a new row so the manual refresh below finds 3 rows to write.
+    // (The initial population refresh in initialize_st runs before
+    //  update_sink_config sets the ducklake sink config, so the sink does
+    //  not run during initialize_st.)
+    db.execute("INSERT INTO dl_sink_src VALUES (3, 'gamma')")
+        .await;
+
+    // Explicitly trigger a manual refresh so the ducklake sink runs.
+    // refresh_stream_table() now calls run_ducklake_sink() after a successful
+    // refresh, so this is the second COMPLETED refresh and the first one that
+    // actually writes a Parquet file.
+    db.execute("SELECT pgtrickle.refresh_stream_table('dl_sink_write_st')")
+        .await;
+
+    // Verify at least 2 COMPLETED refreshes: initialize_st (#1) + manual (#2).
+    let refreshes = wait_for_n_refreshes(&db, "dl_sink_write_st", 2, Duration::from_secs(10)).await;
     assert!(
-        refreshes >= 1,
-        "dl_sink_write_st must have at least 1 COMPLETED refresh, got {refreshes}"
+        refreshes >= 2,
+        "dl_sink_write_st must have at least 2 COMPLETED refreshes, got {refreshes}"
     );
 
     // Wait for the DuckLake sink to write at least one catalog entry.
@@ -363,11 +377,24 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
     )
     .await;
 
-    // Wait for at least one refresh.
-    let refreshes = wait_for_n_refreshes(&db, "dl_ts_sink_st", 1, Duration::from_secs(60)).await;
+    // Insert a third row so the manual refresh below writes 3 rows to Parquet.
+    // (The initial population refresh in initialize_st runs before
+    //  update_sink_config sets the ducklake sink config, so the sink does
+    //  not run during initialize_st.)
+    db.execute("INSERT INTO dl_ts_src VALUES (3, '2024-12-01 00:00:00+00')")
+        .await;
+
+    // Explicitly trigger a manual refresh so the ducklake sink runs.
+    // refresh_stream_table() calls run_ducklake_sink() after a successful
+    // refresh, writing all 3 rows (including the timestamp) to Parquet.
+    db.execute("SELECT pgtrickle.refresh_stream_table('dl_ts_sink_st')")
+        .await;
+
+    // Verify at least 2 COMPLETED refreshes: initialize_st (#1) + manual (#2).
+    let refreshes = wait_for_n_refreshes(&db, "dl_ts_sink_st", 2, Duration::from_secs(10)).await;
     assert!(
-        refreshes >= 1,
-        "dl_ts_sink_st must refresh at least once, got {refreshes}"
+        refreshes >= 2,
+        "dl_ts_sink_st must have at least 2 COMPLETED refreshes, got {refreshes}"
     );
 
     // Wait for the DuckLake sink to write at least one catalog entry before
@@ -376,8 +403,9 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
     // scheduler-driven refresh (which runs the sink) may still be in flight.
     wait_for_ducklake_data_file(&db, 3, Duration::from_secs(60)).await;
 
-    // Verify catalog registration succeeded with row_count = 2.
+    // Verify catalog registration succeeded with row_count = 3.
     // A row_count of 0 or NULL would indicate all rows were dropped/nullified.
+    // The FULL refresh writes all 3 current rows (original 2 + the CDC trigger row).
     let row_count: Option<i64> = db
         .query_scalar(
             "SELECT row_count FROM main.ducklake_data_file \
@@ -386,8 +414,8 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
         .await;
     let row_count = row_count.expect("ducklake_data_file must have a row for table_id=3");
     assert_eq!(
-        row_count, 2,
-        "Expected 2 rows written to Parquet (COR-004: timestamps must not be \
+        row_count, 3,
+        "Expected 3 rows written to Parquet (COR-004: timestamps must not be \
          silently NULLed), got {row_count}"
     );
 }

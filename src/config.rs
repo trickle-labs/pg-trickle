@@ -141,9 +141,10 @@ pub static PGS_MERGE_WORK_MEM_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
 /// prevents OOM on unexpectedly large deltas where hash joins would
 /// allocate unbounded memory.
 ///
-/// Set to 0 to disable the cap (default — no limit enforced).
-/// Recommended range: 128–1024 depending on available system memory.
-pub static PGS_DELTA_WORK_MEM_CAP_MB: GucSetting<i32> = GucSetting::<i32>::new(0);
+/// PERF-004 (v0.70.0): Default changed from 0 (disabled) to 256 MB.
+/// Deployments that rely on the old unlimited behaviour must set
+/// `pg_trickle.delta_work_mem_cap_mb = 0` explicitly in `postgresql.conf`.
+pub static PGS_DELTA_WORK_MEM_CAP_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 
 /// Whether to use SQL PREPARE / EXECUTE for MERGE statements.
 ///

@@ -238,6 +238,10 @@ fn handle_ddl_command(cmd: &DdlCommand) {
             if let Some(ref ident) = cmd.object_identity
                 && ident == "pg_trickle"
             {
+                // SCAL-002 (v0.70.0): Bump the launcher install epoch so the
+                // launcher detects this CREATE/DROP EXTENSION immediately and
+                // re-probes with its fast-poll interval.
+                crate::shmem::bump_launcher_install_epoch();
                 pgrx::info!(
                     "pg_trickle extension loaded; checking for orphaned catalog entries to restore..."
                 );

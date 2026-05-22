@@ -43,7 +43,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.delta_amplification_threshold` | `float8` | `100.0` | Set to 0.0 to disable amplification detection. |
 | `pg_trickle.delta_enable_nestloop` | `bool` | `true` | When enabled, `SET LOCAL enable_nestloop = off` is applied inside `execute_delta_sql` before running the generated delta SQL. |
 | `pg_trickle.delta_work_mem` | `int4` | `0` | Set to 0 (default) to inherit the session `work_mem`. |
-| `pg_trickle.delta_work_mem_cap_mb` | `int4` | `0` | Set to 0 to disable the cap (default — no limit enforced). |
+| `pg_trickle.delta_work_mem_cap_mb` | `int4` | `256` | PERF-004 (v0.70.0): Default changed from 0 (disabled) to 256 MB. |
 | `pg_trickle.diff_output_format` | `text` | `"split"` | Controls how the DI-2 aggregate UPDATE-split surfaces changes: - `"split"` (default): Emit DELETE+INSERT pairs for aggregate UPDATEs. |
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |

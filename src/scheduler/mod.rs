@@ -701,6 +701,14 @@ fn try_fused_chain_refresh(
     let max_delta_rows = crate::config::pg_trickle_fused_refresh_max_delta_rows();
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
 
+    // PERF-002 (v0.70.0): Preload all dependency rows for every candidate in a
+    // single SPI round-trip before the eligibility loop.  This removes the
+    // O(N×2) per-node SPI fan-out introduced when get_for_st was called twice
+    // per loop iteration (once for ST-source frontier augmentation and once for
+    // the delta-size gate).
+    let deps_map: std::collections::HashMap<i64, Vec<crate::catalog::StDependency>> =
+        crate::catalog::StDependency::get_for_sts(member_pgt_ids).unwrap_or_default();
+
     // Phase 1: Identify eligible nodes and gather their NodeSpec data.
     struct NodeData {
         pgt_id: i64,
@@ -787,7 +795,9 @@ fn try_fused_chain_refresh(
         let change_schema_for_st = crate::config::pg_trickle_change_buffer_schema()
             .trim_matches('"')
             .to_string();
-        let st_dep_ids: Vec<i64> = crate::catalog::StDependency::get_for_st(pgt_id)
+        let st_dep_ids: Vec<i64> = deps_map
+            .get(&pgt_id)
+            .cloned()
             .unwrap_or_default()
             .into_iter()
             .filter(|d| d.source_type == "STREAM_TABLE")
@@ -815,7 +825,9 @@ fn try_fused_chain_refresh(
 
         // Check delta size against fused_refresh_max_delta_rows.
         if let Some(max_rows) = max_delta_rows {
-            let dep_oids: Vec<u32> = crate::catalog::StDependency::get_for_st(pgt_id)
+            let dep_oids: Vec<u32> = deps_map
+                .get(&pgt_id)
+                .cloned()
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|d| {

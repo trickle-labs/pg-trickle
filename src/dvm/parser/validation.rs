@@ -322,6 +322,29 @@ fn collect_raw_expr_volatility(_raw_sql: &str, worst: &mut char) -> Result<(), P
     Ok(())
 }
 
+/// Scan a complete SQL string for volatile function calls using the raw SQL
+/// parser (no semantic resolution). Used as a fallback when
+/// `parse_defining_query_full` fails — e.g. for LATERAL bodies with no FROM
+/// clause (`SELECT random()::numeric AS noise`) or correlated subqueries that
+/// reference outer-scope columns.
+///
+/// Correctly handles both cases:
+/// - `SELECT random()::numeric AS noise` → finds `random()` → marks volatile
+/// - `SELECT col FROM t WHERE t.id = outer.id LIMIT 1` → no volatile fns → no-op
+#[cfg(not(test))]
+fn scan_sql_for_volatility(sql: &str, worst: &mut char) -> Result<(), PgTrickleError> {
+    if let Ok(list) = parse_query(sql) {
+        for raw_stmt in list.iter_ptr() {
+            let stmt = pg_deref!(raw_stmt).stmt;
+            if !stmt.is_null() {
+                walk_node_for_volatility(stmt, worst)?;
+            }
+        }
+    }
+    // If parse_query itself fails, we have no information — skip.
+    Ok(())
+}
+
 pub(crate) fn sql_value_function_name(op: pg_sys::SQLValueFunctionOp::Type) -> &'static str {
     match op {
         pg_sys::SQLValueFunctionOp::SVFOP_CURRENT_DATE => "CURRENT_DATE",
@@ -573,10 +596,69 @@ pub(crate) fn tree_collect_volatility(
             }
             tree_collect_volatility(child, worst)?;
         }
-        OpTree::Distinct { child }
-        | OpTree::Subquery { child, .. }
-        | OpTree::LateralFunction { child, .. }
-        | OpTree::LateralSubquery { child, .. } => {
+        OpTree::Distinct { child } | OpTree::Subquery { child, .. } => {
+            tree_collect_volatility(child, worst)?;
+        }
+        OpTree::LateralFunction {
+            func_sql: _func_sql,
+            child,
+            ..
+        } => {
+            // COR-002 (v0.70.0): Scan the LATERAL function body for volatile
+            // calls. Previously only `child` (the left-hand scan) was checked;
+            // volatile expressions inside `func_sql` (e.g. `random()`) would
+            // bypass the volatile_function_policy check silently.
+            //
+            // Two-phase scan:
+            // 1. Try full semantic parse — uses resolved OpTree for accuracy.
+            // 2. On failure (e.g. outer-scope refs, no FROM clause), fall back
+            //    to raw AST walk via `scan_sql_for_volatility` which detects
+            //    volatile FuncCall nodes without needing catalog resolution.
+            //
+            // Special case: JSON_TABLE and similar SQL/JSON table-valued
+            // functions contain the COLUMNS keyword in their deparsed form.
+            // The wrapped SQL `SELECT JSON_TABLE(... COLUMNS (...))` is not a
+            // valid standalone statement — raw_parser ereports on COLUMNS in
+            // expression context. These constructs are stable (non-volatile),
+            // so skip scanning entirely when the COLUMNS keyword is present.
+            #[cfg(not(test))]
+            {
+                if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
+                    let wrapped = format!("SELECT {_func_sql}");
+                    match parse_defining_query_full(&wrapped) {
+                        Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                        Err(_) => scan_sql_for_volatility(&wrapped, worst)?,
+                    }
+                }
+            }
+            tree_collect_volatility(child, worst)?;
+        }
+        OpTree::LateralSubquery {
+            subquery_sql: _subquery_sql,
+            child,
+            ..
+        } => {
+            // COR-002 (v0.70.0): Scan the LATERAL subquery body for volatile
+            // expressions. The subquery body is stored as raw SQL and was
+            // previously not scanned by the volatility walker.
+            //
+            // Two-phase scan:
+            // 1. Try full semantic parse — uses resolved OpTree for accuracy.
+            // 2. On failure (e.g. outer-scope refs, no FROM clause), fall back
+            //    to raw AST walk via `scan_sql_for_volatility` which detects
+            //    volatile FuncCall nodes without needing catalog resolution.
+            //    This correctly handles:
+            //    - `SELECT random()::numeric AS noise` (no FROM → full parse
+            //      fails, raw walk finds random())
+            //    - Correlated `SELECT col FROM t WHERE t.id = outer.id LIMIT 1`
+            //      (full parse fails, raw walk finds no volatile fns → safe)
+            #[cfg(not(test))]
+            {
+                match parse_defining_query_full(_subquery_sql) {
+                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                    Err(_) => scan_sql_for_volatility(_subquery_sql, worst)?,
+                }
+            }
             tree_collect_volatility(child, worst)?;
         }
         OpTree::UnionAll { children } => {
@@ -838,9 +920,44 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
         // Window functions use partition-based recomputation.
         OpTree::Window { child, .. } => check_ivm_support(child),
         // Lateral SRFs use row-scoped recomputation.
-        OpTree::LateralFunction { child, .. } => check_ivm_support(child),
+        // COR-002 (v0.70.0): Also check the function body for unsupported constructs.
+        OpTree::LateralFunction {
+            func_sql: _func_sql,
+            child,
+            ..
+        } => {
+            #[cfg(not(test))]
+            {
+                // COR-002: JSON_TABLE and similar SQL/JSON table-valued functions
+                // contain the COLUMNS keyword in their deparsed form.
+                // "SELECT JSON_TABLE(... COLUMNS (...))" is not valid standalone SQL —
+                // raw_parser ereports on COLUMNS in expression context, causing a
+                // PostgreSQL panic that propagates past `if let Ok`.
+                // JSON_TABLE has no unsupported IVM constructs, so skip safely.
+                if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
+                    let wrapped = format!("SELECT {_func_sql}");
+                    if let Ok(inner) = parse_defining_query_full(&wrapped) {
+                        check_ivm_support_inner(&inner.tree)?;
+                    }
+                }
+            }
+            check_ivm_support(child)
+        }
         // Lateral subqueries use row-scoped recomputation.
-        OpTree::LateralSubquery { child, .. } => check_ivm_support(child),
+        // COR-002 (v0.70.0): Also check the subquery body for unsupported constructs.
+        OpTree::LateralSubquery {
+            subquery_sql: _subquery_sql,
+            child,
+            ..
+        } => {
+            #[cfg(not(test))]
+            {
+                if let Ok(inner) = parse_defining_query_full(_subquery_sql) {
+                    check_ivm_support_inner(&inner.tree)?;
+                }
+            }
+            check_ivm_support(child)
+        }
         // Semi-join (EXISTS / IN subquery): both sides must be DVM-compatible.
         OpTree::SemiJoin { left, right, .. } | OpTree::AntiJoin { left, right, .. } => {
             check_ivm_support(left)?;

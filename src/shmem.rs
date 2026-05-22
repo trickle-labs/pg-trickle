@@ -360,6 +360,49 @@ pub static REFRESH_MODE_FULL_TOTAL: PgAtomic<AtomicU64> =
 pub static SNAPSHOT_CACHE_COLLISIONS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_snapshot_cache_collisions_total") };
 
+// ── OBS-002 (v0.70.0): History prune error counter ───────────────────────
+
+/// OBS-002: Cumulative count of history prune failures since server start.
+///
+/// Incremented each time the background history retention DELETE encounters
+/// an SPI error. A non-zero value indicates the prune loop is failing and
+/// `pgt_refresh_history` may be growing unbounded.
+/// Exposed via `pgtrickle.history_prune_status()` and Prometheus metrics.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static HISTORY_PRUNE_ERRORS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_history_prune_errors_total") };
+
+/// OBS-002: Increment the history prune error counter.
+pub fn increment_history_prune_errors() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    HISTORY_PRUNE_ERRORS
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ── SCAL-002 (v0.70.0): Launcher extension-install epoch ────────────────
+
+/// SCAL-002: Monotonic epoch bumped whenever pg_trickle is installed or
+/// removed from a database.  The launcher reads this on every loop and
+/// resets to a fast-poll interval when it detects a change, then backs off
+/// to the steady-state 60-second interval once the epoch is stable.
+// SAFETY: PgAtomic::new requires a static CStr name. Registered via pg_shmem_init!
+// in init_shared_memory(); must stay in sync with the pg_shmem_init! call below.
+pub static LAUNCHER_INSTALL_EPOCH: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_launcher_install_epoch") };
+
+/// SCAL-002: Bump the launcher install epoch (called from DDL event trigger).
+pub fn bump_launcher_install_epoch() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    LAUNCHER_INSTALL_EPOCH
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 // ── API-1/2 (v0.62.0): Scheduler per-node pause state ───────────────────
 
 /// Maximum number of simultaneously paused stream table nodes.
@@ -630,6 +673,10 @@ pub fn init_shared_memory() {
     pg_shmem_init!(SNAPSHOT_CACHE_COLLISIONS);
     // API-1/2 (v0.62.0): Per-node pause state.
     pg_shmem_init!(PAUSED_NODES_STATE);
+    // OBS-002 (v0.70.0): History prune error counter.
+    pg_shmem_init!(HISTORY_PRUNE_ERRORS);
+    // SCAL-002 (v0.70.0): Launcher install epoch for fast CREATE/DROP EXTENSION detection.
+    pg_shmem_init!(LAUNCHER_INSTALL_EPOCH);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
