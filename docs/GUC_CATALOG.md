@@ -8,6 +8,7 @@
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
+
 | GUC name | Type | Default | Description |
 |----------|------|---------|-------------|
 | `pg_trickle.adaptive_batch_coalescing` | `bool` | `true` | Disable if the batched query plan is unexpectedly slow (rare). |
@@ -20,7 +21,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.auto_backoff` | `bool` | `true` | This prevents CPU runaway when a stream table's refresh cost exceeds its schedule budget and an operator is not available to respond manually. |
 | `pg_trickle.auto_index` | `bool` | `true` | When enabled, `create_stream_table()` automatically creates indexes on GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the `__pgt_row_id` index for stream tables with ≤ 8 output columns. |
 | `pg_trickle.backpressure_consecutive_limit` | `int4` | `3` | Default: 3 cycles. |
-| `pg_trickle.block_source_ddl` | `bool` | `true` | Set to `false` to restore the previous permissive behavior (DDL triggers reinitialization instead of blocking). |
+| `pg_trickle.block_source_ddl` | `bool` | `true` | Default is `true` (enabled) as of v0.11.0 — set to `false` to restore the previous permissive behavior (DDL triggers reinitialization instead of blocking). |
 | `pg_trickle.buffer_alert_threshold` | `int4` | `1000000` | When any source table's change buffer exceeds this number of rows, a `BufferGrowthWarning` alert is emitted. |
 | `pg_trickle.buffer_partitioning` | `text` | `"off"` | Controls whether change buffer tables use `PARTITION BY RANGE (lsn)`: - `"off"` (default): Unpartitioned heap tables (current behaviour). |
 | `pg_trickle.cdc_capture_mode` | `text` | `"discard"` | Use `pgtrickle.cdc_capture_mode()` to inspect the active mode at runtime. |
@@ -48,8 +49,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.ducklake_catalog_schema` | `text` | `"main"` | Default: `"main"`. |
 | `pg_trickle.ducklake_compaction_policy` | `text` | `"fallback"` | Individual stream tables may override this with the `ducklake_compaction_policy` column in `pgtrickle.pgt_stream_tables`. |
-| `pg_trickle.ducklake_sink_compression` | `text` | `"snappy"` | F-4: Parquet compression codec for the DuckLake sink. |
-| `pg_trickle.ducklake_sink_encryption_key_prefix` | `text` | `None` | F-9: Key-name prefix for per-file Parquet encryption keys. |
+| `pg_trickle.ducklake_sink_compression` | `text` | `"snappy"` | F-4 (v0.66.0): Parquet compression codec for the DuckLake sink. |
+| `pg_trickle.ducklake_sink_encryption_key_prefix` | `text` | `None` | F-9 (v0.66.0): Key-name prefix for per-file Parquet encryption keys. |
 | `pg_trickle.ducklake_sink_failure_mode` | `text` | `"warn"` | - `"warn"` (default): emit a PostgreSQL WARNING and continue. |
 | `pg_trickle.ducklake_sink_max_retries` | `int4` | `3` | Default: 3. |
 | `pg_trickle.ducklake_sink_s3_access_key` | `text` | `None` | AWS S3 access key ID for the DuckLake sink (empty = use credential chain). |
@@ -58,8 +59,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.ducklake_sink_s3_secret_key` | `text` | `None` | AWS S3 secret access key for the DuckLake sink (empty = use credential chain). |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
-| `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10: Enable W3C Trace Context propagation through the refresh pipeline. |
-| `pg_trickle.enable_vector_agg` | `bool` | `false` | F4: Enable pgVectorMV — incremental vector aggregate operators. |
+| `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline. |
+| `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
 | `pg_trickle.enforce_backpressure` | `bool` | `false` | Default: `false` (alerts only, no throttling). |
 | `pg_trickle.force_full_refresh` | `bool` | `false` | Useful for SRE diagnosis when a cluster-wide `refresh_strategy = 'full'` still has DIFFERENTIAL STs due to explicit per-ST row values. |
@@ -94,7 +95,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.merge_join_strategy` | `text` | `"auto"` | Controls the join strategy hint applied via `SET LOCAL` during MERGE: - `"auto"` (default): delta-size heuristics choose the strategy. |
 | `pg_trickle.merge_planner_hints` | `bool` | `true` | Deprecated — use `pg_trickle.planner_aggressive` instead. |
 | `pg_trickle.merge_seqscan_threshold` | `float8` | `0.001` | Set to 0.0 to disable this optimization. |
-| `pg_trickle.merge_strategy` | `text` | `"auto"` | The `"delete_insert"` value has been removed (CORR-1). |
+| `pg_trickle.merge_strategy` | `text` | `"auto"` | The former `"delete_insert"` value was removed in v0.19.0 (CORR-1). |
 | `pg_trickle.merge_strategy_threshold` | `float8` | `0.01` | Default: 0.01 (1%). |
 | `pg_trickle.merge_work_mem_mb` | `int4` | `64` | A higher value lets PostgreSQL use larger hash tables for the MERGE join, avoiding disk-spilling sort/merge strategies on large deltas. |
 | `pg_trickle.metrics_port` | `int4` | `0` | Example: ```sql ALTER SYSTEM SET pg_trickle.metrics_port = 9188; SELECT pg_reload_conf(); ```. |
@@ -102,8 +103,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.min_schedule_seconds` | `int4` | `1` | Default: 1 s. |
 | `pg_trickle.notify_coalesce_ms` | `int4` | `250` | Default: 250 ms. |
 | `pg_trickle.online_schema_evolution` | `bool` | `false` | Default: `false` (standard ALTER QUERY reinit behaviour). |
-| `pg_trickle.otel_endpoint` | `text` | `None` | F10: OTLP/gRPC endpoint for OpenTelemetry span export. |
-| `pg_trickle.parallel_refresh_mode` | `text` | `"on"` | - `"on"` (default): Enable true parallel refresh via   dynamic workers. |
+| `pg_trickle.otel_endpoint` | `text` | `None` | F10 (v0.37.0): OTLP/gRPC endpoint for OpenTelemetry span export. |
+| `pg_trickle.parallel_refresh_mode` | `text` | `"on"` | - `"on"` (default as of v0.11.0): Enable true parallel refresh via   dynamic workers. |
 | `pg_trickle.part3_max_scan_count` | `int4` | `5` | Default: 5 (matches the previously hardcoded `PART3_MAX_SCAN_COUNT`). |
 | `pg_trickle.per_database_worker_quota` | `int4` | `0` | Set to 0 (default) to disable per-database quotas — all databases share `max_dynamic_refresh_workers` on a first-come-first-served basis, bounded per coordinator by `max_concurrent_refreshes`. |
 | `pg_trickle.planner_aggressive` | `bool` | `true` | Replaces the old `merge_planner_hints` and `merge_work_mem_mb` GUCs (both still accepted but emit deprecation warnings). |
@@ -127,8 +128,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.template_cache_max_entries` | `int4` | `0` | When the cache reaches this size, the least-recently-used entry is evicted. |
 | `pg_trickle.temporal_stream_tables` | `bool` | `false` | Default: `false` (standard non-temporal storage). |
 | `pg_trickle.tick_watermark_enabled` | `bool` | `true` | Disable only if you need stream tables to always advance to the very latest available LSN regardless of cross-source consistency. |
-| `pg_trickle.tiered_scheduling` | `bool` | `true` | Default: `true` — prevents large deployments from wasting CPU refreshing cold STs at full speed. |
-| `pg_trickle.trace_id` | `text` | `None` | F10: Session-level W3C traceparent header for trace context propagation. |
+| `pg_trickle.tiered_scheduling` | `bool` | `true` | Default changed to `true` in v0.12.0 (PERF-3) — prevents large deployments from wasting CPU refreshing cold STs at full speed. |
+| `pg_trickle.trace_id` | `text` | `None` | F10 (v0.37.0): Session-level W3C traceparent header for trace context propagation. |
 | `pg_trickle.unlogged_buffers` | `bool` | `false` | Default `false` — change buffers remain WAL-logged and crash-safe. |
 | `pg_trickle.use_prepared_statements` | `bool` | `true` | Disable if prepared-statement parameter sniffing produces poor plans (e.g., highly skewed LSN distributions). |
 | `pg_trickle.use_sqlstate_classification` | `bool` | `true` | The SQLSTATE-based classification is locale-safe: it works correctly regardless of `lc_messages`. |
