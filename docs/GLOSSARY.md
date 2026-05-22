@@ -240,7 +240,7 @@ ARRAY_AGG). pg_trickle re-aggregates the affected groups from source.
 ## Stream-table features
 
 ### Snapshot
-A point-in-time copy of a stream table's contents (v0.27+). Useful for
+A point-in-time copy of a stream table's contents. Useful for
 backups, replica bootstrap, or test fixtures. See [Snapshots](SNAPSHOTS.md).
 
 ### Outbox
@@ -264,7 +264,7 @@ See [Downstream Publications](PUBLICATIONS.md).
 A standalone Rust binary (`pg-tide-relay`) that bridges outbox/inbox
 tables with external messaging systems (NATS, Kafka, Redis Streams,
 SQS, RabbitMQ, webhooks). Extracted to the
-[`pg_tide`](https://github.com/trickle-labs/pg-tide) project in v0.46.0.
+[`pg_tide`](https://github.com/trickle-labs/pg-tide) project.
 
 ### TopK
 Stream tables of the form `SELECT … ORDER BY x LIMIT N` (optionally with

@@ -59,15 +59,6 @@ Then connect with psql:
 psql postgresql://postgres:playground@localhost:5432/playground
 ```
 
-Or connect with any PostgreSQL client:
-
-```bash
-pgtrickle --url postgresql://postgres:playground@localhost:5432/playground
-```
-
-Press `1`–`9` to switch between views (Dashboard, Dependencies, Refresh Log, CDC Health, …),
-`r` to trigger a manual refresh, `/` to filter by name, and `?` for the full keybindings overlay.
-
 The [`playground/`](playground/) directory is a self-contained Docker environment with sample
 tables, pre-loaded data, and five stream tables demonstrating key pg_trickle patterns — basic
 aggregates, window functions, multi-table joins, time-series, and EXISTS subqueries. See
@@ -125,22 +116,22 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Tiered scheduling** — Hot / Warm / Cold / Frozen tiers control effective refresh rates in large deployments; Frozen tables are skipped until manually thawed.
 - **Multi-database** — a single launcher worker auto-discovers every database with the extension installed and spawns a scheduler for each.
 
-### Citus distributed tables (v0.32.0+)
+### Citus distributed tables
 
 - **Distributed sources** — stream tables can be defined over Citus distributed source tables; the scheduler polls per-worker WAL slots via `dblink` and merges changes on the coordinator.
 - **Distributed output** — pass `output_distribution_column` to `create_stream_table()` to co-locate the result table with the source shards.
-- **Automated scheduler** — since v0.34.0 the scheduler drives the full per-worker slot lifecycle automatically (no manual wiring required): `ensure_worker_slot`, `poll_worker_slot_changes`, and `pgt_st_locks` lease management.
+- **Automated scheduler** — the scheduler drives the full per-worker slot lifecycle automatically (no manual wiring required): `ensure_worker_slot`, `poll_worker_slot_changes`, and `pgt_st_locks` lease management.
 - **Shard rebalance auto-recovery** — topology changes are detected by comparing `pg_dist_node` against `pgt_worker_slots`; stale slots are pruned and new ones inserted without operator intervention.
 - **Worker failure isolation** — per-worker poll failures are logged and skipped; after `pg_trickle.citus_worker_retry_ticks` (default 5) consecutive failures a WARNING is raised while healthy workers continue uninterrupted.
 
-### DuckLake lakehouse integration (v0.64.0+)
+### DuckLake lakehouse integration
 
 pg_trickle is positioning itself as the incremental view maintenance engine for [DuckLake](https://ducklake.select) — the PostgreSQL-catalog-backed lakehouse format from the DuckDB team.
 
-- **Phase 1 (v0.64.0, shipped)** — tutorials, blog posts, and containerised demos for running pg_trickle as the IVM layer for DuckLake-backed data lakes using the existing foreign-table path; zero new extension code required.
-- **Phase 2 (v0.65.0, shipped)** — native `CdcMode::DuckLakeChangeFeed` adapter calling DuckLake's `table_changes()` API for O(Δ) change consumption; snapshot-based frontier model; inlined-data trigger adapter; row-ID plumbing for O(1) delta application; compaction-window safety policy.
-- **Phase 3a (v0.66.0, shipped)** — DuckLake sink output mode (`sink => 'ducklake'`): stream table results serialised as Parquet (Snappy/ZSTD) via `arrow-rs`/`parquet` crates, uploaded to `file://` or `s3://`, and registered in the DuckLake catalog (data files, stats, snapshot) — queryable by DuckDB, Spark, and Trino with no custom export code.
-- **Phase 3b (v0.67.0, shipped)** — automatic DuckLake view registration on `create_stream_table` / `drop_stream_table`; snapshot provenance table (`pgtrickle.pgt_ducklake_provenance`) recording every sink run with `created_by` identity, snapshot ID, and delta row count for full end-to-end lineage.
+- **Phase 1** — tutorials, blog posts, and containerised demos for running pg_trickle as the IVM layer for DuckLake-backed data lakes using the existing foreign-table path; zero new extension code required.
+- **Phase 2** — native `CdcMode::DuckLakeChangeFeed` adapter calling DuckLake's `table_changes()` API for O(Δ) change consumption; snapshot-based frontier model; inlined-data trigger adapter; row-ID plumbing for O(1) delta application; compaction-window safety policy.
+- **Phase 3a** — DuckLake sink output mode (`sink => 'ducklake'`): stream table results serialised as Parquet (Snappy/ZSTD) via `arrow-rs`/`parquet` crates, uploaded to `file://` or `s3://`, and registered in the DuckLake catalog (data files, stats, snapshot) — queryable by DuckDB, Spark, and Trino with no custom export code.
+- **Phase 3b** — automatic DuckLake view registration on `create_stream_table` / `drop_stream_table`; snapshot provenance table (`pgtrickle.pgt_ducklake_provenance`) recording every sink run with `created_by` identity, snapshot ID, and delta row count for full end-to-end lineage.
 
 See [DuckLake Integration Plan](plans/ecosystem/PLAN_DUCKLAKE.md) and [ROADMAP.md](ROADMAP.md) for the full roadmap.
 
@@ -234,7 +225,7 @@ DIFFERENTIAL processes only changed rows; FULL re-executes the entire query. The
 
 DIFFERENTIAL is the right default for **scans, joins, filtered projections, and high-cardinality aggregates** (`GROUP BY customer_id` with thousands of distinct groups): FULL must TRUNCATE and re-insert or re-aggregate the entire result set, while DIFFERENTIAL touches only the 1–2% of rows that changed. The TPC-H validation section below shows 15.9x measured speedup for joins at 1% change rate.
 
-**Aggregate queries with few distinct groups** (e.g. `GROUP BY region` with 5 regions from 100K rows) are the exception: FULL re-aggregates into 5 output rows in a single cheap hash pass, so DIFFERENTIAL's delta overhead is not recovered. Use `refresh_mode = 'full'` explicitly for these cases, or rely on the adaptive fallback (`pg_trickle.adaptive_full_threshold`, default 50%) which switches to FULL automatically when the change ratio is high. Starting in v0.14.0, `create_stream_table` emits a WARNING when a low-cardinality aggregate pattern is detected.
+**Aggregate queries with few distinct groups** (e.g. `GROUP BY region` with 5 regions from 100K rows) are the exception: FULL re-aggregates into 5 output rows in a single cheap hash pass, so DIFFERENTIAL's delta overhead is not recovered. Use `refresh_mode = 'full'` explicitly for these cases, or rely on the adaptive fallback (`pg_trickle.adaptive_full_threshold`, default 50%) which switches to FULL automatically when the change ratio is high. `create_stream_table` emits a WARNING when a low-cardinality aggregate pattern is detected.
 
 For a detailed per-query breakdown across all 22 TPC-H queries see the [TPC-H Validation](#tpc-h-validation-22-queries-sf001) section below, and [docs/BENCHMARK.md](docs/BENCHMARK.md) for methodology and how to run your own benchmarks.
 
@@ -266,7 +257,7 @@ Changes propagate through multi-level stream table DAGs efficiently:
 | Wide DAG (3 levels × 20 wide) | 60 | ~2,430 ms |
 | Diamond (4-way fan-out + join) | 5 | ~200 ms |
 
-PARALLEL refresh mode processes independent branches concurrently, reducing wall-clock time for wide DAGs. Since v0.63.0, the scheduler composes all per-node delta SQL into a single CTE-chain statement (**fused multi-node refresh**), eliminating round-trips between nodes and achieving a ≥20% wall-time improvement on complex DAGs.
+PARALLEL refresh mode processes independent branches concurrently, reducing wall-clock time for wide DAGs. The scheduler composes all per-node delta SQL into a single CTE-chain statement (**fused multi-node refresh**) — eliminating round-trips between nodes and achieving a ≥20% wall-time improvement on complex DAGs.
 
 **Tips:** Enable `PARALLEL` refresh mode (`ALTER STREAM TABLE ... SET refresh_mode = 'parallel'`) to process independent DAG branches concurrently. For deep linear chains (> 5 levels), consider consolidating intermediate steps into a single defining query to reduce propagation hops and transaction overhead.
 
@@ -377,7 +368,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.67.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:latest
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -391,7 +382,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.67.0
+          reference: ghcr.io/trickle-labs/pg_trickle-ext:latest
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -500,7 +491,7 @@ The `dbt-pgtrickle` package provides a custom `stream_table` materialization for
 # packages.yml
 packages:
   - git: "https://github.com/trickle-labs/pg-trickle.git"
-    revision: v0.67.0
+    revision: main
     subdirectory: "dbt-pgtrickle"
 ```
 

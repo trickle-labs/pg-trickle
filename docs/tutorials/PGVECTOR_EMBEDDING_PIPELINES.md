@@ -1,6 +1,6 @@
 # Maintaining Centroids with pgVectorMV
 
-**pg_trickle v0.37.0+** — F4: pgVectorMV incremental vector aggregate operators
+**pg_trickle** — F4: pgVectorMV incremental vector aggregate operators
 
 ## Overview
 
@@ -97,7 +97,7 @@ SELECT pgtrickle.create_stream_table(
 
 ## Refresh strategy
 
-pgVectorMV v0.37.0 uses the **group-rescan strategy** for vector aggregates:
+The current implementation uses the **group-rescan strategy** for vector aggregates:
 any insert/delete/update affecting a group triggers a full re-aggregation
 of that group using PostgreSQL's native `avg(vector)` or `sum(vector)`
 aggregates from pgvector. Groups that were not affected are not touched.
@@ -109,7 +109,7 @@ This is:
 - **Safe under concurrent updates**: no state accumulation errors possible
 
 A fully algebraic strategy (maintaining running `sum` + `count` auxiliary
-columns without group rescans) is planned for v0.38.0.
+columns without group rescans) is planned.
 
 ## Distance operators and ANN queries
 

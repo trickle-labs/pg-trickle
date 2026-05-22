@@ -210,7 +210,7 @@ Does every source table have a primary key or unique index on the join key?
 
 ---
 
-## Multi-Column NOT IN with Nullable Elements (COR-1, v0.58.0)
+## Multi-Column NOT IN with Nullable Elements (COR-1)
 
 When a defining query contains a multi-column `NOT IN` subquery such as:
 
@@ -219,14 +219,14 @@ SELECT a, b FROM t
 WHERE (a, b) NOT IN (SELECT x, y FROM s)
 ```
 
-pg_trickle v0.55.0 introduced an optimisation that rewrites `(a, b) IN (SELECT x, y …)` as a
+pg_trickle introduced an optimisation that rewrites `(a, b) IN (SELECT x, y …)` as a
 SemiJoin and `NOT IN` as an AntiJoin.  However, SQL semantics for `NOT IN` differ from
 AntiJoin semantics when either side of the comparison can be `NULL`: SQL propagates
 `UNKNOWN` (which excludes the outer row), whereas an AntiJoin keeps the outer row.
 
 **Behaviour:** When any element on the left-hand side of the row constructor is a `NULL`
 constant, or when any column in the subquery's SELECT list is a `NULL` literal,
-pg_trickle v0.58.0 detects this condition and falls back to the subquery-based
+pg_trickle detects this condition and falls back to the subquery-based
 (FULL refresh) execution path, emitting a `NOTICE`:
 
 ```
@@ -239,7 +239,7 @@ NULL-producing expressions in the row constructor.
 
 ---
 
-## Multi-Column NOT IN with Nullable Columns (DOC-2, v0.61.0)
+## Multi-Column NOT IN with Nullable Columns (DOC-2)
 
 When using a multi-column `NOT IN` subquery where any of the left-hand side
 columns or the subquery's corresponding output columns can be `NULL` at
@@ -309,7 +309,7 @@ when the subquery returns no rows.
 
 ---
 
-## LATERAL Joins in DIFFERENTIAL Mode (FEAT-2, v0.61.0)
+## LATERAL Joins in DIFFERENTIAL Mode (FEAT-2)
 
 Most `LATERAL` patterns are supported in `DIFFERENTIAL` mode.  The following
 patterns have known limitations:

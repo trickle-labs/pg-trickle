@@ -1,6 +1,4 @@
 # pgvector RAG Cookbook: Always-Fresh Embedding Pipelines with pg_trickle
-
-**Version:** v0.47.0+
 **Prerequisites:** PostgreSQL 18, `pg_trickle`, `pgvector` extension.
 
 ---

@@ -317,7 +317,7 @@ running them in parallel.
 
 **Problem:** You want to monitor pg_trickle metrics with Prometheus.
 
-**Recipe — Enable the built-in metrics endpoint (v0.21.0+):**
+**Recipe — Enable the built-in metrics endpoint:**
 
 ```sql
 ALTER SYSTEM SET pg_trickle.metrics_port = 9188;
@@ -408,7 +408,7 @@ from `pgtrickle.df_threshold_advice` when confidence is HIGH.
 **Problem:** You want to change a stream table's defining query safely without
 impacting production.
 
-**Recipe — Use canary/shadow mode (v0.21.0+):**
+**Recipe — Use canary/shadow mode:**
 
 ```sql
 -- 1. Create a canary table with the new query

@@ -83,7 +83,7 @@ The `total_active_workers` column shows the cluster-wide total from shared memor
 ## Per-Database Prometheus Labels (CLUS-2)
 
 All pg_trickle metrics emitted by the `/metrics` endpoint include `db_oid` and
-`db_name` labels from v0.27.0 onwards. This enables per-database Grafana panels
+`db_name` labels. This enables per-database Grafana panels
 and alerting rules without requiring separate Prometheus scrape targets.
 
 **Example metric with labels:**

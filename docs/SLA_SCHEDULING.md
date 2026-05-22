@@ -8,8 +8,7 @@ Set a target — "this stream table must never be more than 10 seconds stale"
 meet the target based on real refresh history, and alerts you before an SLA
 breach happens.
 
-> **`set_stream_table_sla` available since v0.22.0**
-> **`recommend_schedule`, `predicted_sla_breach` alerts available since v0.27.0**
+> **`set_stream_table_sla`, `recommend_schedule`, `predicted_sla_breach` alerts available**
 
 ---
 

@@ -53,7 +53,7 @@ All four rows are removed instantly.
 
 ### What Happens at the Trigger Level: TRUNCATE Marker
 
-> **Updated in v0.2.0:** pg_trickle now installs a **statement-level AFTER TRUNCATE** trigger on tracked source tables. This trigger writes a single marker row to the change buffer with `action = 'T'`.
+> pg_trickle installs a **statement-level AFTER TRUNCATE** trigger on tracked source tables. This trigger writes a single marker row to the change buffer with `action = 'T'`.
 
 Unlike the per-row DML triggers, the TRUNCATE trigger cannot capture individual row data (PostgreSQL's `TRUNCATE` does not provide `OLD` records). Instead, it writes a sentinel:
 
@@ -90,7 +90,7 @@ SELECT * FROM customer_totals;
 
 **No manual intervention required.** The TRUNCATE marker ensures the stream table is automatically brought back into consistency on the next refresh cycle.
 
-> **Note:** In versions before v0.2.0, TRUNCATE was not captured at all — the change buffer stayed empty and the stream table became silently stale. If you're running an older version, you still need to call `pgtrickle.refresh_stream_table()` manually after a TRUNCATE.
+> **Note:** In older versions, TRUNCATE was not captured at all — the change buffer stayed empty and the stream table became silently stale. If you're running an older version, you still need to call `pgtrickle.refresh_stream_table()` manually after a TRUNCATE.
 
 ---
 
@@ -265,7 +265,7 @@ For tables with millions of rows, `DELETE FROM` can be slow and generate signifi
 
 ### 1. TRUNCATE Is Safe to Use
 
-As of v0.2.0, TRUNCATE on tracked source tables is automatically detected and triggers a full refresh on the next scheduler cycle. No manual intervention is required for standard operation.
+TRUNCATE on tracked source tables is automatically detected and triggers a full refresh on the next scheduler cycle. No manual intervention is required for standard operation.
 
 ### 2. Use Manual Refresh for Immediate Consistency
 
@@ -343,7 +343,7 @@ No waiting for a scheduler cycle, no stale data — TRUNCATE is fully handled in
 
 ## Summary
 
-As of v0.2.0, TRUNCATE is fully tracked by pg_trickle across all three refresh modes. While it cannot be captured as per-row DELETE events (PostgreSQL's TRUNCATE doesn't process individual rows), pg_trickle uses a statement-level trigger to detect the event and respond appropriately.
+TRUNCATE is fully tracked by pg_trickle across all three refresh modes. While it cannot be captured as per-row DELETE events (PostgreSQL's TRUNCATE doesn't process individual rows), pg_trickle uses a statement-level trigger to detect the event and respond appropriately.
 
 The key takeaways:
 

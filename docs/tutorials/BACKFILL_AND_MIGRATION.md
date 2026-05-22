@@ -1,6 +1,6 @@
 # Tutorial: Zero-Downtime Migration from Materialized Views
 
-> DOC-NEW-26 (v0.57.0) — Step-by-step guide: migrate a manually-maintained
+> DOC-NEW-26 — Step-by-step guide: migrate a manually-maintained
 > materialized view to a stream table with zero downtime.
 
 ## Overview

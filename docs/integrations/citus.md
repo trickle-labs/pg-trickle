@@ -103,7 +103,7 @@ CALL pgtrickle.create_stream_table(
 );
 ```
 
-The `output_distribution_column` parameter (added in v0.33.0) converts the
+The `output_distribution_column` parameter converts the
 output storage table into a Citus distributed table on that column immediately
 after creation.  If Citus is not loaded and you pass this parameter, an error
 is raised.
@@ -129,8 +129,8 @@ SELECT
     worker_port,
     worker_slot,
     worker_frontier,
-    last_polled_at,     -- v0.34.0+
-    lease_health        -- v0.34.0+: 'unlocked' | 'locked' | 'expired'
+    last_polled_at,
+    lease_health        -- 'unlocked' | 'locked' | 'expired'
 FROM pgtrickle.citus_status
 ORDER BY pgt_name, worker_name;
 ```
@@ -143,13 +143,13 @@ ORDER BY pgt_name, worker_name;
 | `worker_port` | Port of the Citus worker |
 | `worker_slot` | WAL slot name on the worker |
 | `worker_frontier` | Last consumed LSN on the worker |
-| `last_polled_at` | Timestamp of the last successful poll for each worker slot (v0.34.0+) |
-| `lease_holder` | Session that currently holds the `pgt_st_locks` lease, if any (v0.34.0+) |
-| `lease_acquired_at` | When the current lease was acquired (v0.34.0+) |
-| `lease_expires_at` | When the current lease expires (v0.34.0+) |
-| `lease_health` | `'unlocked'`, `'locked'`, or `'expired'` (v0.34.0+) |
+| `last_polled_at` | Timestamp of the last successful poll for each worker slot |
+| `lease_holder` | Session that currently holds the `pgt_st_locks` lease, if any |
+| `lease_acquired_at` | When the current lease was acquired |
+| `lease_expires_at` | When the current lease expires |
+| `lease_health` | `'unlocked'`, `'locked'`, or `'expired'` |
 
-### Worker-failure alerting GUC (v0.34.0)
+### Worker-failure alerting GUC
 
 | GUC | Default | Description |
 |-----|---------|-------------|
@@ -185,7 +185,7 @@ SELECT pg_drop_replication_slot('pgtrickle_<stable_name>');
 
 ### Shard rebalance
 
-Citus shard rebalancing changes which worker holds which shards. Since v0.34.0,
+Citus shard rebalancing changes which worker holds which shards.
 pg_trickle detects a topology change automatically (by comparing `pg_dist_node`
 active primaries against `pgt_worker_slots`) and recovers without operator
 intervention:
@@ -218,9 +218,9 @@ same pg_trickle version on all nodes before creating distributed stream tables.
   (default 5) to control how many consecutive poll failures trigger a WARNING.
   Set to `0` to disable the alert entirely.
 
-## pg_ripple Integration (v0.58.0+)
+## pg_ripple Integration
 
-pg_trickle v0.33.0 and pg_ripple v0.58.0 can be deployed together on a Citus
+pg_trickle and pg_ripple v0.58.0 can be deployed together on a Citus
 cluster.  pg_ripple stores its RDF triples in _Vertical Partitioning (VP)_
 tables that are distributed by subject hash (`s BIGINT`).  pg_trickle can track
 changes to these tables and materialize downstream stream tables.

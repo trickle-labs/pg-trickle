@@ -562,7 +562,6 @@ SELECT pgtrickle.reset_fuse('my_stream_table');
 See the [Fuse Circuit Breaker tutorial](tutorials/FUSE_CIRCUIT_BREAKER.md) for
 details on fuse thresholds and configuration.
 
-
 ---
 
 ### 14. Stream Table Appears Stuck Behind a Long Transaction
@@ -654,7 +653,6 @@ ORDER BY prepared;
 
    Then restart the pg_trickle scheduler (or reload PostgreSQL) so the new
    privilege takes effect.
-
 
 ---
 

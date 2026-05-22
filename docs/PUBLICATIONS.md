@@ -7,7 +7,7 @@ Streaming, a read replica, a custom consumer — subscribe to stream table
 changes in real time, without needing to poll the table or set up a separate
 CDC pipeline.
 
-> **Available since v0.22.0**
+> **Supported feature**
 
 ---
 
@@ -158,7 +158,7 @@ ORDER BY restart_lsn;
 ```
 
 pg_trickle also watches subscriber lag automatically via
-`pg_trickle.publication_lag_warn_bytes` (v0.25.0). When a slot exceeds the
+`pg_trickle.publication_lag_warn_bytes`. When a slot exceeds the
 configured byte lag:
 
 1. A warning is logged.

@@ -1,6 +1,6 @@
 # Hybrid Search Patterns with pg_trickle
 
-> VH-3 (v0.48.0) — Cookbook for BM25 + vector + metadata retrieval on
+> VH-3 — Cookbook for BM25 + vector + metadata retrieval on
 > incrementally maintained stream tables.
 
 ## Overview

@@ -1,6 +1,6 @@
 # Tutorial: Circular Dependencies
 
-pg_trickle supports circular (cyclic) stream table dependencies (v0.7.0+)
+pg_trickle supports circular (cyclic) stream table dependencies
 for queries that use only **monotone** operators. The scheduler groups
 circular dependencies into Strongly Connected Components (SCCs) and
 iterates them to a fixed point.

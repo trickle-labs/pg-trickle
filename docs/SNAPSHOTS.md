@@ -6,7 +6,7 @@ derived state, bootstrap a replica, build deterministic test
 fixtures, or compare two refresh runs without having to re-derive
 the data.
 
-> **Available since v0.27.0**
+> **Supported feature**
 
 ---
 

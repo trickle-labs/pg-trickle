@@ -1,6 +1,6 @@
 # Tutorial: Security Hardening for pg_trickle
 
-> DOC-NEW-27 (v0.57.0) — Step-by-step security hardening guide: dedicated
+> DOC-NEW-27 — Step-by-step security hardening guide: dedicated
 > roles, CDC trigger ownership, change-buffer protection, and audit logging.
 
 ## Overview
@@ -47,7 +47,6 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO pgtrickle_admin;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT ON TABLES TO pgtrickle_admin;
 
-
 -- ─── pgtrickle_user ───────────────────────────────────────────────────────
 -- Reads stream tables and calls monitoring functions.
 -- Intended for application backends.
@@ -60,7 +59,6 @@ GRANT USAGE  ON SCHEMA pgtrickle  TO pgtrickle_user;
 GRANT EXECUTE ON FUNCTION pgtrickle.pgt_status()             TO pgtrickle_user;
 GRANT EXECUTE ON FUNCTION pgtrickle.refresh_efficiency()     TO pgtrickle_user;
 GRANT EXECUTE ON FUNCTION pgtrickle.health_check()           TO pgtrickle_user;
-
 
 -- ─── pgtrickle_readonly ───────────────────────────────────────────────────
 -- Pure read access to stream tables only; no extension function access.

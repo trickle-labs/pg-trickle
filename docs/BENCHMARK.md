@@ -688,7 +688,7 @@ cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --no
 
 ### Key Patterns to Look For
 
-1. **Statement-level triggers vs row-level**: Statement-level triggers (default since v0.11.0) should show significantly lower overhead for bulk DML compared to row-level triggers.
+1. **Statement-level triggers vs row-level**: Statement-level triggers (the default) should show significantly lower overhead for bulk DML compared to row-level triggers.
 
 2. **Bulk DML advantage**: Bulk INSERT/UPDATE/DELETE should show lower write amplification than single-row INSERT because the trigger fires once per statement, not once per row.
 

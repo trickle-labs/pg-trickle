@@ -1,6 +1,6 @@
 # Tutorial: Build a Real-Time Analytics Dashboard
 
-> DOC-NEW-24 (v0.57.0) — End-to-end tutorial: build the backend for a
+> DOC-NEW-24 — End-to-end tutorial: build the backend for a
 > real-time analytics dashboard over a sample e-commerce dataset.
 
 ## What You Will Build

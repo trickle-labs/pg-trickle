@@ -8,7 +8,7 @@ ordinary PostgreSQL relations, so they get backed up like anything
 else.
 
 This page walks through the recommended workflows, the gotchas, and
-how the v0.27 [Snapshots](SNAPSHOTS.md) API fits in.
+how the [Snapshots](SNAPSHOTS.md) API fits in.
 
 > **TL;DR.** Physical backups (pgBackRest, `pg_basebackup`) just
 > work. `pg_dump` works too, with one small ordering rule. Snapshots
@@ -111,7 +111,7 @@ If you do not need the audit history, you can shrink the dump with
 
 ## Stream-table snapshots vs. backups
 
-[Snapshots](SNAPSHOTS.md) (v0.27+) are an **application-level**
+[Snapshots](SNAPSHOTS.md) are an **application-level**
 mechanism for capturing the contents of *one* stream table at a
 *chosen* point. They are great for:
 

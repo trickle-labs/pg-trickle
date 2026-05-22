@@ -9,8 +9,6 @@ stream table refresh produces a non-empty delta, a summary row is written to an
 outbox table **in the same transaction** as the MERGE. Consumers are notified
 via `pg_notify` the moment the commit lands.
 
-> **Available since v0.28.0**
-
 ---
 
 ## How it works

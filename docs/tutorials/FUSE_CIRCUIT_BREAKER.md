@@ -1,6 +1,6 @@
 # Tutorial: Fuse Circuit Breaker
 
-The fuse circuit breaker (v0.11.0+) suspends differential refreshes when
+The fuse circuit breaker suspends differential refreshes when
 the incoming change volume exceeds a threshold. This protects your database
 from runaway refresh cycles during bulk data loads, accidental mass-deletes,
 or migration scripts.

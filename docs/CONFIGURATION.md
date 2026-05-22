@@ -96,10 +96,10 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
   - [Circular Dependencies](#circular-dependencies)
     - [pg\_trickle.allow\_circular](#pg_trickleallow_circular)
     - [pg\_trickle.max\_fixpoint\_iterations](#pg_tricklemax_fixpoint_iterations)
-- [Scheduler Scalability (v0.25.0)](#scheduler-scalability-v0250)
+- [Scheduler Scalability](#scheduler-scalability-v0250)
   - [pg\_trickle.worker\_pool\_size](#pg_trickleworker_pool_size)
   - [pg\_trickle.template\_cache\_max\_entries](#pg_trickletemplate_cache_max_entries)
-- [Operability, Observability & DR (v0.27.0)](#operability-observability--dr-v0270)
+- [Operability, Observability & DR](#operability-observability--dr-v0270)
   - [pg\_trickle.metrics\_port](#pg_tricklemetrics_port)
   - [pg\_trickle.metrics\_request\_timeout\_ms](#pg_tricklemetrics_request_timeout_ms)
   - [pg\_trickle.frontier\_holdback\_mode](#pg_tricklefrontier_holdback_mode)
@@ -107,7 +107,7 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
   - [pg\_trickle.publication\_lag\_warn\_bytes](#pg_tricklepublication_lag_warn_bytes)
   - [pg\_trickle.schedule\_recommendation\_min\_samples](#pg_trickleschedule_recommendation_min_samples)
   - [pg\_trickle.schedule\_alert\_cooldown\_seconds](#pg_trickleschedule_alert_cooldown_seconds)
-- [Transactional Outbox (v0.28.0)](#transactional-outbox-v0280)
+- [Transactional Outbox](#transactional-outbox-v0280)
   - [pg\_trickle.outbox\_enabled](#pg_trickleoutbox_enabled)
   - [pg\_trickle.outbox\_retention\_hours](#pg_trickleoutbox_retention_hours)
   - [pg\_trickle.outbox\_drain\_batch\_size](#pg_trickleoutbox_drain_batch_size)
@@ -119,18 +119,18 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
   - [pg\_trickle.consumer\_dead\_threshold\_hours](#pg_trickleconsumer_dead_threshold_hours)
   - [pg\_trickle.consumer\_stale\_offset\_threshold\_days](#pg_trickleconsumer_stale_offset_threshold_days)
   - [pg\_trickle.consumer\_cleanup\_enabled](#pg_trickleconsumer_cleanup_enabled)
-- [Transactional Inbox (v0.28.0)](#transactional-inbox-v0280)
+- [Transactional Inbox](#transactional-inbox-v0280)
   - [pg\_trickle.inbox\_enabled](#pg_trickleinbox_enabled)
   - [pg\_trickle.inbox\_processed\_retention\_hours](#pg_trickleinbox_processed_retention_hours)
   - [pg\_trickle.inbox\_dlq\_retention\_hours](#pg_trickleinbox_dlq_retention_hours)
   - [pg\_trickle.inbox\_drain\_batch\_size](#pg_trickleinbox_drain_batch_size)
   - [pg\_trickle.inbox\_drain\_interval\_seconds](#pg_trickleinbox_drain_interval_seconds)
   - [pg\_trickle.inbox\_dlq\_alert\_max\_per\_refresh](#pg_trickleinbox_dlq_alert_max_per_refresh)
-- [Pre-GA Correctness & Stability (v0.30.0)](#pre-ga-correctness--stability-v0300)
+- [Pre-GA Correctness & Stability](#pre-ga-correctness--stability-v0300)
   - [pg\_trickle.use\_sqlstate\_classification](#pg_trickleuse_sqlstate_classification)
   - [pg\_trickle.template\_cache\_max\_age\_hours](#pg_trickletemplate_cache_max_age_hours)
   - [pg\_trickle.max\_parse\_nodes](#pg_tricklemax_parse_nodes)
-- [Citus Distributed Tables (v0.32.0+)](#citus-distributed-tables-v0320)
+- [Citus Distributed Tables](#citus-distributed-tables-v0320)
   - [pg\_trickle.citus\_st\_lock\_lease\_ms](#pg_tricklecitus_st_lock_lease_ms)
   - [pg\_trickle.citus\_worker\_retry\_ticks](#pg_tricklecitus_worker_retry_ticks)
 - [GUC Interaction Matrix](#guc-interaction-matrix)
@@ -268,8 +268,7 @@ SET pg_trickle.scheduler_interval_ms = 500;
 
 ### pg_trickle.event_driven_wake
 
-> ⚠️ **Removed in v0.51.0** — This GUC has been removed. It had no effect since
-> v0.39.0 because PostgreSQL's `LISTEN` command is not permitted inside
+> ⚠️ **Removed** — This GUC has been removed. It had no effect because PostgreSQL's `LISTEN` command is not permitted inside
 > background worker processes. The scheduler always uses efficient latch-based
 > polling regardless of this setting.
 >
@@ -283,7 +282,7 @@ SET pg_trickle.scheduler_interval_ms = 500;
 
 ### pg_trickle.wake_debounce_ms
 
-> ⚠️ **Removed in v0.51.0** — This GUC has been removed together with
+> ⚠️ **Removed** — This GUC has been removed together with
 > `event_driven_wake`. It had no effect since `event_driven_wake` was always
 > non-functional in background workers.
 >
@@ -520,7 +519,7 @@ SET pg_trickle.refresh_strategy = 'auto';
 
 ### pg_trickle.cost_model_safety_margin
 
-*Added in v0.17.0.* Safety margin for the predictive cost model that decides FULL vs. DIFFERENTIAL.
+Safety margin for the predictive cost model that decides FULL vs. DIFFERENTIAL.
 
 | Property | Value |
 |---|---|
@@ -558,7 +557,7 @@ SET pg_trickle.cost_model_safety_margin = 1.0;
 
 ### pg_trickle.max_delta_estimate_rows
 
-*Added in v0.15.0.* Maximum estimated delta output cardinality before falling back to FULL refresh.
+Maximum estimated delta output cardinality before falling back to FULL refresh.
 
 | Property | Value |
 |---|---|
@@ -619,7 +618,7 @@ SET pg_trickle.cleanup_use_truncate = false;
 
 ### pg_trickle.planner_aggressive
 
-*Added in v0.14.0.* Consolidated switch for all MERGE planner hints. Replaces the deprecated `merge_planner_hints` and `merge_work_mem_mb` GUCs.
+Consolidated switch for all MERGE planner hints. Replaces the deprecated `merge_planner_hints` and `merge_work_mem_mb` GUCs.
 
 | Property | Value |
 |---|---|
@@ -646,7 +645,7 @@ SET pg_trickle.planner_aggressive = false;
 
 ### pg_trickle.merge_join_strategy
 
-*Added in v0.15.0.* Manual override for the join strategy used during MERGE execution.
+Manual override for the join strategy used during MERGE execution.
 
 | Property | Value |
 |---|---|
@@ -682,7 +681,7 @@ SET pg_trickle.merge_join_strategy = 'auto';
 
 ### pg_trickle.merge_strategy
 
-*Added in v0.16.0.* Controls how differential refresh applies deltas to stream tables.
+Controls how differential refresh applies deltas to stream tables.
 
 | Property | Value |
 |---|---|
@@ -697,8 +696,8 @@ SET pg_trickle.merge_join_strategy = 'auto';
 | `auto` (default) | Use DELETE+INSERT when `delta_rows / target_rows` is below [`merge_strategy_threshold`](#pg_tricklemerge_strategy_threshold); MERGE otherwise |
 | `merge` | Always use the PostgreSQL MERGE statement |
 
-> **Breaking change (v0.19.0):** The `delete_insert` value was removed in
-> v0.19.0 (CORR-1) because it was semantically unsafe for aggregate and
+> **Breaking change:** The `delete_insert` value was removed in
+> (CORR-1) because it was semantically unsafe for aggregate and
 > DISTINCT queries. Setting it now logs a WARNING and falls back to `auto`.
 
 The DELETE+INSERT strategy avoids the MERGE join cost by executing two targeted statements:
@@ -708,7 +707,7 @@ scanning the entire target for the MERGE join.
 
 **Tuning Guidance:**
 - **Most workloads**: Leave at `auto` — the heuristic picks DELETE+INSERT for small deltas automatically.
-- **Correctness concerns**: The `merge` setting preserves the pre-v0.16.0 behaviour.
+- **Correctness concerns**: The `merge` setting preserves the the original behaviour.
 
 ```sql
 -- Force MERGE for all differential refreshes
@@ -722,7 +721,7 @@ SET pg_trickle.merge_strategy = 'auto';
 
 ### pg_trickle.merge_strategy_threshold
 
-*Added in v0.16.0.* Delta ratio threshold for the `auto` merge strategy.
+Delta ratio threshold for the `auto` merge strategy.
 
 | Property | Value |
 |---|---|
@@ -750,7 +749,7 @@ SET pg_trickle.merge_strategy_threshold = 0.05;
 
 ### pg_trickle.merge_planner_hints
 
-> **Deprecated in v0.14.0.** Use [`pg_trickle.planner_aggressive`](#pg_trickleplanner_aggressive) instead. This GUC is still accepted for backward compatibility but is ignored at runtime.
+> **Deprecated.** Use [`pg_trickle.planner_aggressive`](#pg_trickleplanner_aggressive) instead. This GUC is still accepted for backward compatibility but is ignored at runtime.
 
 Inject `SET LOCAL` planner hints before MERGE execution during differential refresh.
 
@@ -960,9 +959,9 @@ SELECT pgtrickle.alter_stream_table('seasonal_report', tier => 'warm');
 SELECT pgtrickle.alter_stream_table('my_table', tier => 'frozen');
 ```
 
-> **Changed in v0.12.0:** The default for `pg_trickle.tiered_scheduling`
+> **** The default for `pg_trickle.tiered_scheduling`
 > changed from `off` to `on`. Set `pg_trickle.tiered_scheduling = off` in
-> `postgresql.conf` to restore pre-v0.12.0 behavior (all STs refresh at
+> `postgresql.conf` to restore the previous behavior (all STs refresh at
 > full speed regardless of tier assignment).
 
 ---
@@ -1146,7 +1145,7 @@ SET pg_trickle.compact_threshold = 0;
 
 ### pg_trickle.max_buffer_rows
 
-*Added in v0.16.0.* Hard limit on change buffer rows per source table. When
+Hard limit on change buffer rows per source table. When
 a source table's change buffer exceeds this limit at refresh time, pg_trickle
 forces a FULL refresh and truncates the buffer, preventing unbounded disk
 growth when differential refresh fails repeatedly.
@@ -1178,7 +1177,7 @@ SET pg_trickle.max_buffer_rows = 0;
 
 ### pg_trickle.auto_index
 
-*Added in v0.16.0.* Controls whether `create_stream_table()` automatically
+Controls whether `create_stream_table()` automatically
 creates performance indexes on stream tables.
 
 | Property | Value |
@@ -1219,7 +1218,7 @@ SET pg_trickle.auto_index = false;
 
 ### pg_trickle.aggregate_fast_path
 
-*Added in v0.16.0.* Controls whether stream tables with all-algebraic
+Controls whether stream tables with all-algebraic
 aggregates use the explicit DML fast-path instead of MERGE.
 
 | Property | Value |
@@ -1259,7 +1258,7 @@ SELECT * FROM pgtrickle.explain_st('my_agg_st');
 
 ### pg_trickle.template_cache
 
-*Added in v0.16.0.* Controls the cross-backend delta template cache backed by
+Controls the cross-backend delta template cache backed by
 an UNLOGGED catalog table.
 
 | Property | Value |
@@ -1462,7 +1461,7 @@ SET pg_trickle.ivm_recursive_max_depth = 500;
 
 ---
 
-## Invalidation Ring & Deep-Join Tuning (v0.50.0)
+## Invalidation Ring & Deep-Join Tuning
 
 ### SCAL-10-01 — Invalidation ring capacity ceiling
 
@@ -1580,7 +1579,7 @@ work to multiple dynamic background workers instead of processing
 stream tables sequentially. See
 [PLAN_PARALLELISM.md](https://github.com/trickle-labs/pg-trickle/blob/main/plans/sql/PLAN_PARALLELISM.md) for the design.
 
-> **Note:** Parallel refresh has been the default (`on`) since v0.11.0. Use
+> **Note:** Parallel refresh has been the default (`on`). Use
 > `pg_trickle.parallel_refresh_mode = 'off'` to revert to sequential execution.
 
 ### pg_trickle.parallel_refresh_mode
@@ -1596,7 +1595,7 @@ background workers.
 | Context | `SUSET` |
 | Restart Required | No |
 
-- **`on`** (default as of v0.11.0): True parallel refresh. The coordinator builds an execution-unit
+- **`on`** (default): True parallel refresh. The coordinator builds an execution-unit
   DAG, dispatches ready units to dynamic background workers, and respects
   both the per-database cap (`max_concurrent_refreshes`) and the
   cluster-wide cap (`max_dynamic_refresh_workers`).
@@ -2066,8 +2065,6 @@ SET pg_trickle.agg_diff_cardinality_threshold = 100;
 
 ### Connection Pooler
 
-> **v0.19.0+ (STAB-1).**
-
 #### pg_trickle.connection_pooler_mode
 
 Cluster-wide connection pooler compatibility override.
@@ -2097,8 +2094,6 @@ SET pg_trickle.connection_pooler_mode = 'transaction';
 
 ### History & Retention
 
-> **v0.19.0+ (DB-5).**
-
 #### pg_trickle.history_retention_days
 
 Number of days to retain rows in `pgtrickle.pgt_refresh_history`.
@@ -2124,7 +2119,7 @@ SET pg_trickle.history_retention_days = 30;
 
 ### Circular Dependencies
 
-> **v0.7.0+** — Circular dependency support is now fully available for safe
+> Circular dependency support is available for safe
 > monotone cycles in DIFFERENTIAL mode. These settings control whether cycles
 > are allowed at all and how many fixpoint iterations the scheduler will try
 > before surfacing a non-convergence error.
@@ -2168,8 +2163,6 @@ SET pg_trickle.max_fixpoint_iterations = 50;
 
 ### pg_trickle.self_monitoring_auto_apply
 
-> **Added in v0.20.0 (DF-G1).**
-
 Controls whether the self-monitoring analytics stream tables can automatically
 adjust stream table configuration.
 
@@ -2201,11 +2194,9 @@ threshold values.
 
 ---
 
-## Scheduler Scalability (v0.25.0)
+## Scheduler Scalability
 
 ### pg_trickle.worker_pool_size
-
-> **Added in v0.25.0 (SCAL-5).**
 
 Number of persistent background workers kept ready in a pool. When `> 0`,
 the scheduler reuses these workers across refresh cycles instead of spawning
@@ -2226,11 +2217,9 @@ SELECT pg_reload_conf();
 ```
 
 Set to `0` to use the original spawn-per-task model (default, no change from
-pre-v0.25.0 behavior).
+the previous behavior (spawn-per-task model)).
 
 ### pg_trickle.template_cache_max_entries
-
-> **Added in v0.25.0 (CACHE-2).**
 
 Maximum number of entries in the per-backend L1 delta SQL template cache. When
 the cache reaches this limit, the least-recently-used entry is evicted.
@@ -2250,11 +2239,9 @@ SET pg_trickle.template_cache_max_entries = 200;
 
 ---
 
-## Operability, Observability & DR (v0.27.0)
+## Operability, Observability & DR
 
 ### pg_trickle.metrics_port
-
-> **Added in v0.27.0 (OP-2).**
 
 TCP port for the Prometheus/OpenMetrics endpoint served by the per-database
 background scheduler. When non-zero, `GET /metrics` returns all pg_trickle
@@ -2279,8 +2266,6 @@ own scheduler, so the port must be unique per database on the same host.
 
 ### pg_trickle.metrics_request_timeout_ms
 
-> **Added in v0.27.0 (METR-2).**
-
 Maximum milliseconds the metrics HTTP handler is allowed to run. If a slow
 HTTP client holds the connection open longer, it is dropped. This protects the
 scheduler tick loop from being blocked by unresponsive Prometheus scrapers.
@@ -2294,8 +2279,6 @@ scheduler tick loop from being blocked by unresponsive Prometheus scrapers.
 | Restart required | No |
 
 ### pg_trickle.frontier_holdback_mode
-
-> **Added in v0.27.0 (issue #536).**
 
 Controls how the scheduler prevents silent data loss from long-running
 transactions. When an uncommitted transaction has written rows to a source
@@ -2318,8 +2301,6 @@ transaction commits (or rolls back).
 
 ### pg_trickle.frontier_holdback_warn_seconds
 
-> **Added in v0.27.0 (issue #536).**
-
 Emit a WARNING when a holdback-causing transaction has been blocking frontier
 advancement for longer than this many seconds. The warning fires at most once
 per minute to avoid log spam. Useful for identifying forgotten long-running
@@ -2334,8 +2315,6 @@ transactions.
 | Restart required | No |
 
 ### pg_trickle.publication_lag_warn_bytes
-
-> **Added in v0.27.0 (PUB-1).**
 
 Emit a WARNING and defer change-buffer truncation when a downstream logical
 replication subscriber's confirmed WAL position lags behind the current
@@ -2354,8 +2333,6 @@ part of their replication pipeline.
 
 ### pg_trickle.schedule_recommendation_min_samples
 
-> **Added in v0.27.0 (PLAN-4).**
-
 Minimum number of refresh-history observations before
 `pgtrickle.recommend_schedule()` returns a recommendation with non-zero
 confidence. Raise this for more reliable recommendations; lower it to get
@@ -2371,8 +2348,6 @@ early guidance on new stream tables.
 
 ### pg_trickle.schedule_alert_cooldown_seconds
 
-> **Added in v0.27.0 (PLAN-3).**
-
 Minimum seconds between consecutive `predicted_sla_breach` alerts for the
 same stream table. Prevents log spam when the cost model consistently predicts
 an imminent SLA violation.
@@ -2387,7 +2362,7 @@ an imminent SLA violation.
 
 ---
 
-## Transactional Outbox (v0.28.0)
+## Transactional Outbox
 
 These GUCs control the transactional outbox subsystem. See the SQL Reference
 for the `enable_outbox()`, `poll_outbox()`, and consumer group functions.
@@ -2536,7 +2511,7 @@ and leases. When disabled, old records must be removed manually.
 
 ---
 
-## Transactional Inbox (v0.28.0)
+## Transactional Inbox
 
 These GUCs control the transactional inbox subsystem. See the SQL Reference
 for `create_inbox()` and related functions.
@@ -2620,11 +2595,9 @@ DLQ alerting.
 
 ---
 
-## Pre-GA Correctness & Stability (v0.30.0)
+## Pre-GA Correctness & Stability
 
 ### pg_trickle.use_sqlstate_classification
-
-> **Added in v0.30.0 (SCAL-1).**
 
 When `true`, the retry classification for SPI errors uses the five-character
 PostgreSQL SQLSTATE class rather than message-text pattern matching. This
@@ -2648,8 +2621,6 @@ Set to `true` in any deployment where `lc_messages` is not `en_US.UTF-8`, or
 in mixed-locale clusters.
 
 ### pg_trickle.template_cache_max_age_hours
-
-> **Added in v0.30.0 (STAB-3).**
 
 Maximum age (in hours) for entries in the L2 catalog-backed template cache
 (`pgtrickle.pgt_template_cache`). Entries older than this limit are purged
@@ -2675,8 +2646,6 @@ Higher values improve performance by retaining warm cache entries across
 long maintenance windows.
 
 ### pg_trickle.max_parse_nodes
-
-> **Added in v0.30.0 (PERF-2).**
 
 Maximum estimated number of parse-tree nodes allowed in a stream table
 defining query. When `> 0`, queries whose estimated node count exceeds this
@@ -2705,7 +2674,7 @@ recommended for production deployments.
 
 ---
 
-## Citus Distributed Tables (v0.32.0+)
+## Citus Distributed Tables
 
 Configuration for Citus distributed-table CDC and stream table support.
 See [docs/integrations/citus.md](integrations/citus.md) for the full setup guide.
@@ -2729,7 +2698,6 @@ prevent the lease from expiring mid-merge.
 | Range | 0 (disabled) – 600,000 ms (10 minutes) |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.33.0 (COORD-2) |
 
 ```sql
 -- Align with a 30-second pg_ripple merge fence
@@ -2756,7 +2724,6 @@ Set to `0` to disable the alerting entirely (failures are still logged at
 | Range | 0 (disabled) – 100 |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.34.0 (COORD-15) |
 
 ```sql
 -- Alert after 3 consecutive failures instead of 5
@@ -2770,7 +2737,7 @@ SELECT pg_reload_conf();
 
 ---
 
-## WAL Backpressure & Logging (v0.36.0)
+## WAL Backpressure & Logging
 
 ### pg_trickle.enforce_backpressure
 
@@ -2793,7 +2760,6 @@ true` only when disk exhaustion is an immediate risk.
 | Default | `false` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.36.0 (A12) |
 
 ```sql
 -- Enable backpressure suppression (discard mode)
@@ -2821,7 +2787,6 @@ Log format for pg_trickle structured log events.
 | Valid values | `text`, `json` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.36.0 (A20) |
 
 ```sql
 -- Switch to JSON structured logging
@@ -2831,7 +2796,7 @@ SELECT pg_reload_conf();
 
 ---
 
-## pgVectorMV & OpenTelemetry (v0.37.0)
+## pgVectorMV & OpenTelemetry
 
 ### pg_trickle.enable_vector_agg
 
@@ -2845,7 +2810,6 @@ queries are handled by the DVM engine using incremental aggregate operators for
 | Default | `false` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.37.0 (F4) |
 
 ```sql
 ALTER SYSTEM SET pg_trickle.enable_vector_agg = true;
@@ -2867,7 +2831,6 @@ CDC capture time and stores the W3C traceparent in the change buffer column
 | Default | `false` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.37.0 (F10) |
 
 ---
 
@@ -2883,7 +2846,6 @@ disables span export.
 | Example | `'http://jaeger:4317'` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.37.0 (F10) |
 
 ```sql
 -- Export spans to a local Jaeger instance
@@ -2906,7 +2868,6 @@ initiating trace. Requires `enable_trace_propagation = true`.
 | Default | `''` |
 | Context | `USERSET` (any user) |
 | Restart required | No |
-| Added in | v0.37.0 (F10) |
 
 ```sql
 -- Propagate a trace across CDC capture
@@ -2916,7 +2877,7 @@ INSERT INTO orders VALUES (42, 'widget', 5);
 
 ---
 
-## Operational Truthfulness (v0.39.0)
+## Operational Truthfulness
 
 ### pg_trickle.cdc_capture_mode
 
@@ -2940,7 +2901,6 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 | Valid values | `discard`, `hold` (reserved) |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
-| Added in | v0.39.0 (O39-8) |
 
 ```sql
 -- Check the current CDC pause status
@@ -3118,22 +3078,22 @@ pg_trickle.max_parse_depth = 64
 pg_trickle.ivm_topk_max_limit = 1000
 pg_trickle.ivm_recursive_max_depth = 100
 
-# Circular dependencies (v0.7.0+)
+# Circular dependencies
 pg_trickle.allow_circular = false                # master switch
 pg_trickle.max_fixpoint_iterations = 100         # convergence limit
 
-# Parallel refresh (v0.11.0+, default 'on')
+# Parallel refresh (default 'on')
 pg_trickle.parallel_refresh_mode = 'on'         # 'off' | 'dry_run' | 'on'
 pg_trickle.max_dynamic_refresh_workers = 4       # cluster-wide worker cap
 pg_trickle.max_concurrent_refreshes = 4          # per-database dispatch cap
 pg_trickle.max_parallel_workers = 0              # user-facing parallel cap (0 = use automatic sizing)
 
-# Predictive cost model (v0.22.0+)
+# Predictive cost model
 pg_trickle.prediction_window = 60               # minutes of history for regression
 pg_trickle.prediction_ratio = 1.5               # diff/full cost ratio threshold
 pg_trickle.prediction_min_samples = 5           # minimum samples before model activates
 
-# DVM scaling & diagnostics (v0.23.0+)
+# DVM scaling & diagnostics
 pg_trickle.log_delta_sql = false                # log delta SQL at DEBUG1 (diagnostic only)
 pg_trickle.delta_work_mem = 0                   # work_mem MB for delta execution (0 = inherit)
 pg_trickle.delta_enable_nestloop = true         # allow nested-loop joins in delta SQL
@@ -3141,17 +3101,17 @@ pg_trickle.analyze_before_delta = true          # ANALYZE change buffers before 
 pg_trickle.max_change_buffer_alert_rows = 0     # change buffer overflow alert threshold (0 = off)
 pg_trickle.diff_output_format = 'split'         # 'split' (DI-2 pairs) | 'merged' (compat)
 
-# Scheduler scalability (v0.25.0+)
+# Scheduler scalability
 pg_trickle.worker_pool_size = 0                 # 0 = spawn-per-task; >0 = persistent pool
 pg_trickle.template_cache_max_entries = 0       # 0 = unbounded
 
-# Operability & observability (v0.27.0+)
+# Operability & observability
 pg_trickle.metrics_port = 0                     # 0 = disabled; set per-database
 pg_trickle.frontier_holdback_mode = 'xmin'      # xmin | none | lsn:<N>
 pg_trickle.frontier_holdback_warn_seconds = 300 # warn after 5 min of blocked frontier
 pg_trickle.publication_lag_warn_bytes = 0       # 0 = disabled
 
-# Transactional outbox (v0.28.0+)
+# Transactional outbox
 pg_trickle.outbox_enabled = true
 pg_trickle.outbox_retention_hours = 24
 pg_trickle.outbox_inline_threshold_rows = 10000
@@ -3160,13 +3120,13 @@ pg_trickle.outbox_force_retention = false
 pg_trickle.consumer_dead_threshold_hours = 24
 pg_trickle.consumer_cleanup_enabled = true
 
-# Transactional inbox (v0.28.0+)
+# Transactional inbox
 pg_trickle.inbox_enabled = true
 pg_trickle.inbox_processed_retention_hours = 72
 pg_trickle.inbox_dlq_retention_hours = 0       # 0 = keep forever
 pg_trickle.inbox_dlq_alert_max_per_refresh = 10
 
-# Citus distributed tables (v0.32.0+)
+# Citus distributed tables
 pg_trickle.citus_st_lock_lease_ms = 60000      # lease duration for cross-node coordination
 pg_trickle.citus_worker_retry_ticks = 5        # failures before WARNING in citus_status
 
@@ -3212,8 +3172,8 @@ have no effect on extension behaviour and should be removed from new deployments
 
 ### pg_trickle.event_driven_wake
 
-> ⚠️ **Removed in v0.51.0** — This GUC has been fully removed from the
-> extension. If it appears in `postgresql.conf` after upgrading to v0.51.0,
+> ⚠️ **Removed** — This GUC has been fully removed from the
+> extension. If it appears in `postgresql.conf` after upgrading,
 > PostgreSQL will emit an "unrecognized configuration parameter" warning at
 > startup. Remove it to suppress the warning.
 >
@@ -3223,7 +3183,7 @@ have no effect on extension behaviour and should be removed from new deployments
 
 ### pg_trickle.wake_debounce_ms
 
-> ⚠️ **Removed in v0.51.0** — This GUC has been fully removed together with
+> ⚠️ **Removed** — This GUC has been fully removed together with
 > `event_driven_wake`. Remove it from `postgresql.conf` to avoid an
 > "unrecognized configuration parameter" warning at startup.
 >

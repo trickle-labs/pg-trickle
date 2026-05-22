@@ -94,19 +94,19 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [pgtrickle.pgt\_change\_tracking](#pgtricklepgt_change_tracking)
   - [pgtrickle.pgt\_source\_gates](#pgtricklepgt_source_gates)
   - [pgtrickle.pgt\_refresh\_groups](#pgtricklepgt_refresh_groups)
-- [Delta SQL Profiling (v0.13.0)](#delta-sql-profiling-v0130)
+- [Delta SQL Profiling](#delta-sql-profiling-v0130)
   - [pgtrickle.explain\_delta](#pgtrickleexplain_delta)
   - [pgtrickle.dedup\_stats](#pgtricklededup_stats)
   - [pgtrickle.shared\_buffer\_stats](#pgtrickleshared_buffer_stats)
-- [dbt Integration (v0.13.0)](#dbt-integration-v0130)
+- [dbt Integration](#dbt-integration-v0130)
   - [partition\_by config](#partition_by-config)
   - [fuse config](#fuse-config)
-- [Stream Table Snapshots (v0.27.0)](#stream-table-snapshots-v0270)
+- [Stream Table Snapshots](#stream-table-snapshots-v0270)
   - [snapshot\_stream\_table](#pgtricklesnapshotst)
   - [restore\_from\_snapshot](#pgtricklerestorefromsnapshot)
   - [list\_snapshots](#pgtricklelistsnapshots)
   - [drop\_snapshot](#pgtrickledropsnapshot)
-- [Transactional Outbox & Consumer Groups (v0.28.0)](#transactional-outbox--consumer-groups-v0280)
+- [Transactional Outbox & Consumer Groups](#transactional-outbox--consumer-groups-v0280)
   - [enable\_outbox](#pgtrickleenableoutbox)
   - [disable\_outbox](#pgtrickledisableoutbox)
   - [outbox\_status](#pgtrickleoutboxstatus)
@@ -114,7 +114,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [poll\_outbox](#pgtricklepolloutbox)
   - [commit\_offset](#pgtricklecommitoffset)
   - [consumer\_lag](#pgtrickleconsumerlag)
-- [Transactional Inbox (v0.28.0)](#transactional-inbox-v0280)
+- [Transactional Inbox](#transactional-inbox-v0280)
   - [create\_inbox](#pgtricklecreateinbox)
   - [drop\_inbox](#pgtrickledropinbox)
   - [inbox\_status](#pgtrickleinboxstatus)
@@ -700,7 +700,7 @@ SELECT pgtrickle.create_stream_table(
 > (3) rederivation from current source tables; (4) combine net deletions. DRed correctly
 > handles derived-column changes such as path rebuilds under a renamed ancestor node.
 > When CTE output columns differ from ST storage columns (mismatch), recomputation is used.
-> Implemented in v0.10.0 (P2-1).
+> Implemented in P2-1.
 - LATERAL SRFs in DIFFERENTIAL mode use row-scoped recomputation: when a source row changes, only the SRF expansions for that row are re-evaluated.
 - LATERAL subqueries in DIFFERENTIAL mode also use row-scoped recomputation: when an outer row changes, the correlated subquery is re-executed only for that row.
 - WHERE subqueries (`EXISTS`, `IN`, scalar) are parsed into dedicated semi-join, anti-join, and scalar subquery operators with specialized delta computation.
@@ -1379,8 +1379,6 @@ SELECT pgtrickle.get_staleness('order_totals');
 ---
 
 ### pgtrickle.explain_refresh_mode
-
-> **Added in v0.11.0**
 
 Explain the configured vs. effective refresh mode for a stream table, including the reason for any downgrade (e.g., AUTO choosing FULL).
 
@@ -2680,7 +2678,7 @@ data mutation patterns. They have no effect on FULL mode.
 
 #### JOIN Key Column Change + Simultaneous Right-Side Delete — Fixed (EC-01)
 
-> **Resolved in v0.14.0.** This limitation no longer exists — the delta query
+> **Resolved.** This limitation no longer exists — the delta query
 > now uses a pre-change right snapshot (R₀) for DELETE deltas, ensuring stale
 > rows are correctly removed even when the join partner is simultaneously deleted.
 
@@ -3052,7 +3050,7 @@ refreshes.
 
 ### pgtrickle.pgt_refresh_groups
 
-User-declared Cross-Source Snapshot Consistency groups (v0.9.0). A refresh
+User-declared Cross-Source Snapshot Consistency groups. A refresh
 group guarantees that all member stream tables are refreshed against a snapshot
 taken at the same point in time, preventing partial-update visibility (e.g.
 `orders` and `order_lines` both reflecting the same transaction boundary).
@@ -3090,7 +3088,7 @@ SELECT pgtrickle.drop_refresh_group('orders_snapshot');
 
 ---
 
-## Bootstrap Source Gating (v0.5.0)
+## Bootstrap Source Gating
 
 These functions let operators pause and resume scheduler-driven refreshes for
 individual source tables — useful during large bulk loads or ETL windows.
@@ -3146,7 +3144,7 @@ COPY orders FROM '/data/historical_orders.csv';
 SELECT pgtrickle.ungate_source('orders');
 ```
 
-### pgtrickle.bootstrap_gate_status() (v0.6.0)
+### pgtrickle.bootstrap_gate_status()
 
 Rich introspection of bootstrap gate lifecycle.  Returns the same columns as
 `source_gates()` plus computed fields for debugging.
@@ -3169,7 +3167,7 @@ SELECT * FROM pgtrickle.bootstrap_gate_status();
 
 Rows are sorted with currently-gated sources first, then alphabetically.
 
-## ETL Coordination Cookbook (v0.6.0)
+## ETL Coordination Cookbook
 
 Step-by-step recipes for common bulk-load patterns using source gating.
 
@@ -3291,7 +3289,7 @@ SELECT pgtrickle.ungate_source('stale_source');
 
 ---
 
-## Watermark Gating (v0.7.0)
+## Watermark Gating
 
 Watermark gating is a scheduling control for ETL pipelines where multiple
 source tables are populated by separate jobs that finish at different times.
@@ -3329,7 +3327,7 @@ be temporally aligned.
 
 #### pgtrickle.pgt_template_cache
 
-*Added in v0.16.0.* Cross-backend delta SQL template cache (UNLOGGED). Stores
+Cross-backend delta SQL template cache (UNLOGGED). Stores
 compiled delta query templates so new backends skip the ~45 ms DVM
 parse+differentiate step. Managed automatically — no user interaction required.
 
@@ -3481,7 +3479,7 @@ FROM pgtrickle.watermarks()
 ORDER BY watermark;
 ```
 
-### Stuck Watermark Detection (WM-7, v0.15.0)
+### Stuck Watermark Detection (WM-7)
 
 When `pg_trickle.watermark_holdback_timeout` is set to a positive value
 (seconds), the scheduler periodically checks all watermark sources. If any
@@ -3530,7 +3528,7 @@ SELECT pgtrickle.advance_watermark('orders', '2026-03-02 00:00:00+00');
 
 ---
 
-## Developer Diagnostics (v0.12.0)
+## Developer Diagnostics
 
 Four SQL-callable introspection functions that surface internal DVM state
 without side-effects. All functions are read-only — they never modify catalog
@@ -3716,7 +3714,7 @@ FROM pgtrickle.validate_query(
 
 ---
 
-## Delta SQL Profiling (v0.13.0)
+## Delta SQL Profiling
 
 ### `pgtrickle.explain_delta(st_name text, format text DEFAULT 'text')`
 
@@ -3795,8 +3793,6 @@ for background.
 
 ### `pgtrickle.shared_buffer_stats()`
 
-> **Added in v0.13.0**
-
 D-4 observability function. Returns one row per shared change buffer (one per
 tracked source table), showing how many stream tables share the buffer, which
 columns are tracked, the safe cleanup frontier, and the current buffer size.
@@ -3823,11 +3819,9 @@ SELECT * FROM pgtrickle.shared_buffer_stats();
 --      16456 | public.orders      |              3 | public.orders_by_region, public... |               5 | 0/1A2B3C4D        |         142 | f
 ```
 
-
-
 ---
 
-## UNLOGGED Change Buffers (v0.14.0)
+## UNLOGGED Change Buffers
 
 ### `pgtrickle.convert_buffers_to_unlogged()`
 
@@ -3855,7 +3849,7 @@ SELECT pgtrickle.convert_buffers_to_unlogged();
 
 ---
 
-## Refresh Mode Diagnostics (v0.14.0)
+## Refresh Mode Diagnostics
 
 ### `pgtrickle.recommend_refresh_mode(st_name TEXT DEFAULT NULL)`
 
@@ -3947,7 +3941,7 @@ ORDER BY total_refreshes DESC;
 
 ---
 
-## Export API (v0.14.0)
+## Export API
 
 ### `pgtrickle.export_definition(st_name TEXT)`
 
@@ -3978,10 +3972,10 @@ FROM pgtrickle.pgt_stream_tables;
 
 ---
 
-## dbt Integration (v0.13.0)
+## dbt Integration
 
 The `dbt-pgtrickle` package exposes two new `config(...)` keys added in
-v0.13.0: `partition_by` and the fuse circuit-breaker options. Use them directly
+The `partition_by` and fuse circuit-breaker options are available. Use them directly
 in any `stream_table` materialization model.
 
 For full dbt documentation see `dbt-pgtrickle/README.md`.
@@ -4065,9 +4059,7 @@ WHERE fuse_mode != 'off';
 
 ---
 
-## Self Monitoring — Self-Monitoring (v0.20.0)
-
-> **Added in v0.20.0.**
+## Self Monitoring — Self-Monitoring
 
 pg_trickle can monitor itself using its own stream tables. Five *self-monitoring*
 stream tables maintain reactive analytics over the internal catalog, replacing
@@ -4201,9 +4193,7 @@ This column is `NULL` when either FULL or DIFF observations are missing.
 
 ---
 
-## Stream Table Snapshots (v0.27.0)
-
-> **Added in v0.27.0 (SNAP-1–3).**
+## Stream Table Snapshots
 
 Snapshots let you export the current state of a stream table into an archival
 table, then restore from that snapshot on another node or after a PITR
@@ -4304,9 +4294,7 @@ SELECT pgtrickle.drop_snapshot('pgtrickle.orders_agg_replica_init');
 
 ---
 
-## Transactional Outbox & Consumer Groups (v0.28.0)
-
-> **Added in v0.28.0 (OUTBOX-1–6, OUTBOX-B1–B6).**
+## Transactional Outbox & Consumer Groups
 
 The outbox pattern lets you reliably publish stream table deltas to external
 consumers — even if the consumer is temporarily unavailable. Each refresh
@@ -4638,9 +4626,7 @@ Primary key: `(group_name, consumer_id)`
 
 ---
 
-## Transactional Inbox (v0.28.0)
-
-> **Added in v0.28.0 (INBOX-1–6, INBOX-B1–B4).**
+## Transactional Inbox
 
 The inbox pattern provides a reliable, idempotent message receiver inside
 PostgreSQL. Incoming events are written to an inbox table; pg_trickle
@@ -4920,13 +4906,11 @@ Priority tier configuration for inbox message scheduling (INBOX-B2).
 > **Note:** The relay pipeline SQL API (`set_relay_outbox`, `set_relay_inbox`,
 > `enable_relay`, `disable_relay`, `delete_relay`, `get_relay_config`,
 > `list_relay_configs`) was moved to the
-> [`pg_tide`](https://github.com/trickle-labs/pg-tide) extension in v0.46.0.
+> [`pg_tide`](https://github.com/trickle-labs/pg-tide) extension.
 
 ---
 
 ## Public API Stability Contract
-
-> **Added in v0.19.0 (DB-6).**
 
 ### Stable (will not break without a major version bump)
 
@@ -4965,9 +4949,7 @@ Priority tier configuration for inbox message scheduling (INBOX-B2).
 
 ---
 
-## Reserved Column-Name Prefixes (v0.55.0)
-
-> **Added in v0.55.0 (M-7).**
+## Reserved Column-Name Prefixes
 
 pg_trickle uses several internal column-name prefixes for synthetic columns it
 creates during query analysis and delta SQL generation.  **User-defined columns
@@ -5008,7 +4990,6 @@ SELECT id, sum(amount) AS __pgt_count FROM orders GROUP BY id;
 -- Good: use any name that does not start with __pgt_ or __pgs_
 SELECT id, sum(amount) AS order_total FROM orders GROUP BY id;
 ```
-
 
 ---
 
@@ -5107,7 +5088,7 @@ pgtrickle.stream_table_spec(qualified_name text) → jsonb
 ```
 
 Returns `NULL` if `relid` / `qualified_name` is not a managed stream table.
-All fields in the v0.62.0 response are stable across future minor releases.
+All fields in the response are stable across future minor releases.
 
 **Example:**
 

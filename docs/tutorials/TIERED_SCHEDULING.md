@@ -1,6 +1,6 @@
 # Tutorial: Tiered Scheduling
 
-Tiered scheduling (v0.12.0+) lets you assign refresh priorities to stream
+Tiered scheduling lets you assign refresh priorities to stream
 tables using four tiers: **Hot**, **Warm**, **Cold**, and **Frozen**. This
 reduces CPU and I/O overhead by refreshing less-critical tables less
 frequently.
@@ -37,7 +37,7 @@ For a stream table with `schedule => '1m'`:
 
 ### 1. Enable tiered scheduling
 
-Tiered scheduling is enabled by default since v0.12.0. Verify:
+Tiered scheduling is enabled by default. Verify:
 
 ```sql
 SHOW pg_trickle.tiered_scheduling;

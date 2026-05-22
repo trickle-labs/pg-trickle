@@ -1,6 +1,6 @@
 # Per-Tenant ANN Indexing Patterns
 
-> VA-3 (v0.48.0) — Production patterns for multi-tenant RAG using RLS-scoped
+> VA-3 — Production patterns for multi-tenant RAG using RLS-scoped
 > embedding corpora.
 
 ## Security Model
@@ -180,7 +180,6 @@ ALTER TABLE premium_corpus ENABLE ROW LEVEL SECURITY;
 ALTER TABLE premium_corpus FORCE ROW LEVEL SECURITY;
 CREATE POLICY premium_tenant ON premium_corpus
     USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
-
 
 -- Standard tenants: 5-minute refresh, half-precision to save storage
 SELECT pgtrickle.create_stream_table(

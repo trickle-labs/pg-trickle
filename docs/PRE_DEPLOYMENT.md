@@ -3,8 +3,6 @@
 Complete this checklist before deploying pg_trickle to a new environment.
 Each item links to the relevant documentation for details.
 
-> **Version:** v0.14.0+. Earlier versions may have different requirements.
-
 ---
 
 ## 1. PostgreSQL Version
@@ -255,8 +253,6 @@ DROP TABLE _deploy_test_src;
 ---
 
 ## Connection Pooler Compatibility
-
-> **Added in v0.19.0 (UX-4 / STAB-1).**
 
 pg_trickle uses prepared statements and `NOTIFY` internally. These features
 require special handling when a connection pooler sits between the application
