@@ -672,6 +672,10 @@ pub fn init_shared_memory() {
     pg_shmem_init!(SNAPSHOT_CACHE_COLLISIONS);
     // API-1/2 (v0.62.0): Per-node pause state.
     pg_shmem_init!(PAUSED_NODES_STATE);
+    // OBS-002 (v0.70.0): History prune error counter.
+    pg_shmem_init!(HISTORY_PRUNE_ERRORS);
+    // SCAL-002 (v0.70.0): Launcher install epoch for fast CREATE/DROP EXTENSION detection.
+    pg_shmem_init!(LAUNCHER_INSTALL_EPOCH);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
