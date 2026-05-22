@@ -322,6 +322,29 @@ fn collect_raw_expr_volatility(_raw_sql: &str, worst: &mut char) -> Result<(), P
     Ok(())
 }
 
+/// Scan a complete SQL string for volatile function calls using the raw SQL
+/// parser (no semantic resolution). Used as a fallback when
+/// `parse_defining_query_full` fails — e.g. for LATERAL bodies with no FROM
+/// clause (`SELECT random()::numeric AS noise`) or correlated subqueries that
+/// reference outer-scope columns.
+///
+/// Correctly handles both cases:
+/// - `SELECT random()::numeric AS noise` → finds `random()` → marks volatile
+/// - `SELECT col FROM t WHERE t.id = outer.id LIMIT 1` → no volatile fns → no-op
+#[cfg(not(test))]
+fn scan_sql_for_volatility(sql: &str, worst: &mut char) -> Result<(), PgTrickleError> {
+    if let Ok(list) = parse_query(sql) {
+        for raw_stmt in list.iter_ptr() {
+            let stmt = pg_deref!(raw_stmt).stmt;
+            if !stmt.is_null() {
+                walk_node_for_volatility(stmt, worst)?;
+            }
+        }
+    }
+    // If parse_query itself fails, we have no information — skip.
+    Ok(())
+}
+
 pub(crate) fn sql_value_function_name(op: pg_sys::SQLValueFunctionOp::Type) -> &'static str {
     match op {
         pg_sys::SQLValueFunctionOp::SVFOP_CURRENT_DATE => "CURRENT_DATE",
@@ -586,15 +609,17 @@ pub(crate) fn tree_collect_volatility(
             // volatile expressions inside `func_sql` (e.g. `random()`) would
             // bypass the volatile_function_policy check silently.
             //
-            // Note: parse failure is NOT treated as volatile. LATERAL functions
-            // with outer-scope column references (e.g. `func(outer.col)`) will
-            // fail to parse standalone; that's expected and not a sign of
-            // volatility.
+            // Two-phase scan:
+            // 1. Try full semantic parse — uses resolved OpTree for accuracy.
+            // 2. On failure (e.g. outer-scope refs, no FROM clause), fall back
+            //    to raw AST walk via `scan_sql_for_volatility` which detects
+            //    volatile FuncCall nodes without needing catalog resolution.
             #[cfg(not(test))]
             {
                 let wrapped = format!("SELECT {_func_sql}");
-                if let Ok(inner) = parse_defining_query_full(&wrapped) {
-                    tree_collect_volatility(&inner.tree, worst)?;
+                match parse_defining_query_full(&wrapped) {
+                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                    Err(_) => scan_sql_for_volatility(&wrapped, worst)?,
                 }
             }
             tree_collect_volatility(child, worst)?;
@@ -608,14 +633,21 @@ pub(crate) fn tree_collect_volatility(
             // expressions. The subquery body is stored as raw SQL and was
             // previously not scanned by the volatility walker.
             //
-            // Note: parse failure is NOT treated as volatile. Correlated LATERAL
-            // subqueries reference outer-scope columns (e.g. `d.id`), which are
-            // not present when parsing the body in isolation — causing expected
-            // parse failures that must not be misclassified as volatile.
+            // Two-phase scan:
+            // 1. Try full semantic parse — uses resolved OpTree for accuracy.
+            // 2. On failure (e.g. outer-scope refs, no FROM clause), fall back
+            //    to raw AST walk via `scan_sql_for_volatility` which detects
+            //    volatile FuncCall nodes without needing catalog resolution.
+            //    This correctly handles:
+            //    - `SELECT random()::numeric AS noise` (no FROM → full parse
+            //      fails, raw walk finds random())
+            //    - Correlated `SELECT col FROM t WHERE t.id = outer.id LIMIT 1`
+            //      (full parse fails, raw walk finds no volatile fns → safe)
             #[cfg(not(test))]
             {
-                if let Ok(inner) = parse_defining_query_full(_subquery_sql) {
-                    tree_collect_volatility(&inner.tree, worst)?;
+                match parse_defining_query_full(_subquery_sql) {
+                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                    Err(_) => scan_sql_for_volatility(_subquery_sql, worst)?,
                 }
             }
             tree_collect_volatility(child, worst)?;
