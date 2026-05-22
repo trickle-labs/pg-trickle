@@ -1513,6 +1513,45 @@ SELECT * FROM pgtrickle.cache_stats();
 
 ---
 
+### pgtrickle.history_prune_status
+
+Return history prune statistics from shared memory.
+
+Reports the cumulative count of SPI failures in the background prune loop,
+the timestamp of the last successful prune run, and the number of rows deleted
+in the most recent prune. A non-zero `prune_error_count` indicates the
+background cleanup loop is failing and `pgt_refresh_history` may grow unbounded.
+
+```sql
+pgtrickle.history_prune_status() → SETOF record(
+    prune_error_count  bigint,
+    last_prune_at      timestamptz,
+    last_rows_deleted  bigint
+)
+```
+
+| Column | Description |
+|--------|-------------|
+| `prune_error_count` | Cumulative number of SPI failures in the background history prune loop. |
+| `last_prune_at` | Timestamp of the last successful prune run, or `NULL` if no prune has run yet. |
+| `last_rows_deleted` | Number of rows deleted in the most recent prune run, or `NULL` if no prune has run yet. |
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.history_prune_status();
+```
+
+| prune_error_count | last_prune_at | last_rows_deleted |
+|-------------------|---------------|-------------------|
+| 0 | 2024-01-15 10:30:00+00 | 1250 |
+
+> **Note:** Counters are stored in shared memory. Requires
+> `shared_preload_libraries = 'pg_trickle'`. The prune interval is controlled
+> by `pg_trickle.history_prune_interval_seconds` (default 60 s; 0 disables).
+
+---
+
 ### CDC Diagnostics
 
 Inspect CDC pipeline health, replication slots, change buffers, and trigger coverage.
