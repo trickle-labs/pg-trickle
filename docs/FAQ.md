@@ -99,9 +99,15 @@ Prometheus metrics endpoint, Grafana dashboard, and NOTIFY-based alerts.
 
 ### 14. What happens if a refresh fails?
 
-The stream table is marked SUSPENDED after exceeding the fuse threshold (default
-5 consecutive failures). Data in the change buffer is preserved. Use
-`pgtrickle.reset_fuse('my_st')` to resume after fixing the issue.
+The stream table is automatically suspended after `pg_trickle.max_consecutive_errors`
+consecutive failures (default **3**). Data already in the change buffer is
+preserved. After fixing the root cause, resume with:
+
+```sql
+ALTER STREAM TABLE my_st RESUME;
+```
+
+See [Stream Table Lifecycle](SQL_REFERENCE.md#stream-table-lifecycle) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for step-by-step guidance.
 [Full answer →](#troubleshooting)
 
 ### 15. Can I use pg_trickle with dbt?
@@ -1210,7 +1216,9 @@ like backup/restore and buffer inspection.
 
 ### How does pg_trickle capture changes to source tables?
 
-pg_trickle installs `AFTER INSERT/UPDATE/DELETE` row-level PL/pgSQL triggers on each source table referenced by a stream table. Whenever a row in the source table is modified, the trigger writes a change record into a per-source buffer table in the `pgtrickle_changes` schema.
+pg_trickle installs **statement-level** `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` PL/pgSQL triggers on each source table referenced by a stream table (`pg_trickle.cdc_trigger_mode = 'statement'` is the default). Each trigger uses `REFERENCING NEW TABLE / OLD TABLE` transition tables so it fires once per statement and can batch all affected rows in one pass.
+
+For the step-by-step walkthrough, see [WHAT_HAPPENS_ON_INSERT.md](tutorials/WHAT_HAPPENS_ON_INSERT.md) and [ARCHITECTURE.md](ARCHITECTURE.md#change-data-capture).
 
 Each change record contains:
 - **Action** — `I` (insert), `U` (update), `D` (delete), or `T` (truncate marker)
@@ -1222,11 +1230,11 @@ The trigger fires within your transaction, so if you roll back, the change recor
 
 ### What is the overhead of CDC triggers?
 
-The per-row overhead is approximately **20–55 μs**, which covers the PL/pgSQL function dispatch, `row_to_json()` serialization, and the buffer table INSERT.
+With statement-level triggers (the default), the overhead is amortized across all rows in a statement. For a single-row INSERT the overhead is approximately **20–55 μs** (PL/pgSQL dispatch + transition table scan + buffer INSERT). For a bulk INSERT of N rows, the trigger fires once and writes N buffer rows in a single batched INSERT — dramatically lower per-row cost than the legacy row-level mode.
 
 At typical write rates (fewer than 1,000 writes per second per source table), this adds **less than 5% additional DML latency**. For most OLTP workloads, the overhead is negligible — a single network round-trip to the database is usually 10–100× more expensive.
 
-If you have very high-throughput source tables (>10K writes/sec), consider enabling the hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`) which can automatically transition to WAL-based capture for lower per-row overhead (~5–15 μs).
+If you have very high-throughput source tables (>10K writes/sec), consider enabling the hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`) which can automatically transition to WAL-based capture for near-zero write-path overhead.
 
 ### What happens when I `TRUNCATE` a source table?
 

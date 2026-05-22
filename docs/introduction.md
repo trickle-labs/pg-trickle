@@ -64,6 +64,10 @@ ratio.
 | **Event-sourced architecture** | [Event Sourcing / CQRS tutorial](tutorials/EVENT_SOURCING.md) |
 | **Migrating from REFRESH MATERIALIZED VIEW** | [Backfill and Migration tutorial](tutorials/BACKFILL_AND_MIGRATION.md) |
 | **Hardening a production deployment** | [Security Hardening tutorial](tutorials/SECURITY_HARDENING.md) → [Security Guide](SECURITY_GUIDE.md) |
+| **Integrating with Citus** | [Citus Support](CITUS.md) *(Beta)* |
+| **Using pgvector / embeddings** | [pgvector RAG Cookbook](tutorials/PGVECTOR_RAG_COOKBOOK.md) → [Embedding Pipelines](tutorials/PGVECTOR_EMBEDDING_PIPELINES.md) *(Stable)* |
+| **Troubleshooting a suspended table** | [Stream Table Lifecycle](SQL_REFERENCE.md#stream-table-lifecycle) → [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
+| **Looking up a GUC or function** | [GUC_CATALOG.md](GUC_CATALOG.md) → [SQL_API_CATALOG.md](SQL_API_CATALOG.md) → [DOCS_OWNERSHIP.md](DOCS_OWNERSHIP.md) |
 | **Confused by jargon** | [Glossary](GLOSSARY.md) |
 
 ---

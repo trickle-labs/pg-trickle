@@ -440,7 +440,8 @@ produce identical output for the current source data.
 **Recipe — Pause all tables, catch up, then resume:**
 
 ```sql
-SELECT pgtrickle.pause_all();
+-- Pause the scheduler for all tables (stops scheduled refresh cycles)
+SELECT pgtrickle.pause_scheduler();
 
 -- Investigate
 SELECT pgt_name, status, consecutive_errors
@@ -448,21 +449,22 @@ FROM pgtrickle.pgt_stream_tables
 ORDER BY consecutive_errors DESC;
 
 -- Fix the root cause, then resume
-SELECT pgtrickle.resume_all();
+SELECT pgtrickle.resume_scheduler();
 ```
 
-**Recipe — Force immediate refresh on stale tables:**
+**Recipe — Force immediate refresh on a table:**
 
 ```sql
--- Refresh only if older than 10 minutes
-SELECT pgtrickle.refresh_if_stale('public.orders_mv', '10 minutes');
+-- Refresh immediately (ignores schedule)
+SELECT pgtrickle.refresh_stream_table('public.orders_mv');
 ```
 
 **Recipe — Full reinitialization after schema change:**
 
 ```sql
--- If source schema changed, reinitialize to rebuild column metadata
-SELECT pgtrickle.reinitialize_stream_table('public.orders_mv');
+-- Mark for reinit and trigger a full refresh
+UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name = 'orders_mv';
+SELECT pgtrickle.refresh_stream_table('public.orders_mv');
 ```
 
 ---
