@@ -37,7 +37,7 @@ each layer refreshed in the correct topological order, each doing only the work
 proportional to what actually changed.
 
 1. You write to your base tables normally — `INSERT`, `UPDATE`, `DELETE`
-2. Lightweight `AFTER` row-level triggers capture each change into a buffer, atomically in the same transaction. No polling, no logical replication slots required by default.
+2. Lightweight trigger-based CDC captures each change into a buffer, atomically in the same transaction. Statement-level triggers are the default; no polling or logical replication slots are required.
 3. On each refresh cycle, pg_trickle derives a **delta query (ΔQ)** that reads only the buffered changes since the last refresh frontier
 4. The delta is merged into the stream table — only the affected rows are written
 5. If other stream tables depend on this one, they are scheduled next (topological order)
@@ -342,11 +342,11 @@ That single function call did a lot of work atomically (all in one transaction):
 
 1. **Parsed** the defining query into an operator tree — identifying the recursive CTE, the scan on `departments`, the join, the union
 2. **Created a storage table** called `department_tree` in the `public` schema — a real PostgreSQL heap table with columns matching the SELECT output, plus internal columns `__pgt_row_id` (a hash used to track individual rows)
-3. **Installed CDC triggers** on the `departments` table — lightweight `AFTER INSERT OR UPDATE OR DELETE` row-level triggers that will capture every future change
+3. **Installed CDC triggers** on the `departments` table — lightweight statement-level `AFTER` triggers that will capture future `INSERT`, `UPDATE`, and `DELETE` changes
 4. **Created a change buffer table** in the `pgtrickle_changes` schema — this is where the triggers write captured changes
 5. **Ran an initial full refresh** — executed the recursive query against the current data and populated the storage table
 6. **Registered the stream table** in pg_trickle's catalog with a 1-second refresh schedule
-> **TRUNCATE caveat:** Row-level triggers do not fire on `TRUNCATE`. If you `TRUNCATE` a base table, the change is not captured incrementally — the stream table will become stale. Use `DELETE FROM table` instead, or call `pgtrickle.refresh_stream_table('department_tree')` after a TRUNCATE. If the stream table uses DIFFERENTIAL mode, temporarily switch to FULL for a full recompute: `pgtrickle.alter_stream_table('department_tree', refresh_mode => 'FULL')`, refresh, then switch back.
+> **TRUNCATE note:** PostgreSQL does not provide row images for `TRUNCATE`, so pg_trickle captures it with a statement-level TRUNCATE marker and performs a full refresh for affected stream tables on the next cycle.
 Query it immediately — it's already populated:
 
 ```sql
@@ -799,7 +799,7 @@ pg_trickle will automatically transition each stream table from trigger-based to
 
 ### Optional: Parallel Refresh
 
-By default the scheduler refreshes stream tables **sequentially** in topological order within a single background worker. This is correct and efficient for most workloads.
+By default the scheduler preserves topological order and may run independent refresh units in parallel background workers. Set `pg_trickle.parallel_refresh_mode = 'off'` if you want strictly sequential refreshes in a small or diagnostic deployment.
 
 For deployments with many independent stream tables, enable parallel refresh:
 
@@ -884,7 +884,7 @@ SELECT pgtrickle.create_stream_table(
 -- live_headcount is already up-to-date — no refresh needed!
 ```
 
-IMMEDIATE mode supports joins, aggregates, window functions, LATERAL subqueries, and cascading IMMEDIATE stream tables. Recursive CTEs are not supported in IMMEDIATE mode (use DIFFERENTIAL instead).
+IMMEDIATE mode supports joins, aggregates, window functions, LATERAL subqueries, recursive CTEs, and cascading IMMEDIATE stream tables. Recursive CTEs run inside the trigger with the same bounded semi-naive / DRed machinery used by DIFFERENTIAL mode, guarded by `pg_trickle.ivm_recursive_max_depth`.
 
 You can switch between modes at any time:
 
@@ -1165,8 +1165,8 @@ SUSPENDED, CDC buffer > 1 GB, scheduler down, high refresh duration.
 | **TopK** | `ORDER BY … LIMIT N` queries store exactly N rows, refreshed via scoped recomputation |
 | **Diamond consistency** | Atomic refresh groups for diamond-shaped dependency graphs via `diamond_consistency = 'atomic'` |
 | **Downstream propagation** | A single base table write cascades through an entire chain of stream tables, automatically, in the right order |
-| **Trigger-based CDC** | Lightweight row-level triggers by default (no WAL configuration needed); optional transition to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` |
-| **Parallel refresh** | Independent stream tables refresh concurrently in dynamic background workers via `pg_trickle.parallel_refresh_mode = 'on'` (default off) |
+| **Trigger-based CDC** | Lightweight trigger-based capture by default (statement-level triggers unless configured otherwise); optional transition to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` |
+| **Parallel refresh** | Independent stream tables refresh concurrently in dynamic background workers via `pg_trickle.parallel_refresh_mode = 'on'` (default) |
 | **auto_backoff** | Scheduler automatically stretches effective interval when refresh cost exceeds 95% of the schedule window, capped at 8× (on by default) |
 | **PgBouncer compatibility** | Set `pooler_compatibility_mode => true` per stream table to work behind transaction-mode connection poolers |
 | **Monitoring** | `pgt_status()`, `health_check()`, `dependency_tree()`, `pg_stat_stream_tables`, and more for freshness, timing, and error history |

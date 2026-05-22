@@ -34,11 +34,12 @@ refresh cycle, pg_trickle applies a *delta* computation proportional to the
 number of changed rows, not the total table size. A stream table over a
 billion-row orders table refreshes in milliseconds when only a few rows changed.
 
-Change capture works through **row-level AFTER triggers** (the default) or
-**WAL-based logical decoding** (`cdc_mode = 'wal'` or the automatic `'auto'`
-mode). Trigger-based capture writes changed rows into a per-source change-buffer
-table within the same transaction, providing full atomicity with no possibility
-of a committed change being missed. The background scheduler reads from the
+Change capture works through **trigger-based CDC** (statement-level triggers by
+default, row-level triggers available for compatibility) or **WAL-based logical
+decoding** (`cdc_mode = 'wal'` or the automatic `'auto'` mode). Trigger-based
+capture writes changed rows into a per-source change-buffer table within the
+same transaction, providing full atomicity with no possibility of a committed
+change being missed. The background scheduler reads from the
 change buffer, computes the delta SQL, and applies the result to the stream
 table using `MERGE` in a separate transaction.
 
@@ -63,6 +64,10 @@ ratio.
 | **Event-sourced architecture** | [Event Sourcing / CQRS tutorial](tutorials/EVENT_SOURCING.md) |
 | **Migrating from REFRESH MATERIALIZED VIEW** | [Backfill and Migration tutorial](tutorials/BACKFILL_AND_MIGRATION.md) |
 | **Hardening a production deployment** | [Security Hardening tutorial](tutorials/SECURITY_HARDENING.md) → [Security Guide](SECURITY_GUIDE.md) |
+| **Integrating with Citus** | [Citus Support](CITUS.md) *(Beta)* |
+| **Using pgvector / embeddings** | [pgvector RAG Cookbook](tutorials/PGVECTOR_RAG_COOKBOOK.md) → [Embedding Pipelines](tutorials/PGVECTOR_EMBEDDING_PIPELINES.md) *(Stable)* |
+| **Troubleshooting a suspended table** | [Stream Table Lifecycle](SQL_REFERENCE.md#stream-table-lifecycle) → [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
+| **Looking up a GUC or function** | [GUC_CATALOG.md](GUC_CATALOG.md) → [SQL_API_CATALOG.md](SQL_API_CATALOG.md) → [DOCS_OWNERSHIP.md](DOCS_OWNERSHIP.md) |
 | **Confused by jargon** | [Glossary](GLOSSARY.md) |
 
 ---

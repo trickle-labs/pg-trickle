@@ -1,5 +1,7 @@
 # Maintaining Centroids with pgVectorMV
 
+> **Status: Stable** — pgvector stream tables are production-ready. The `attach_embedding_outbox` integration is **Beta**.
+
 **pg_trickle** — F4: pgVectorMV incremental vector aggregate operators
 
 ## Overview

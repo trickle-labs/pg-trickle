@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**129 configuration parameters** extracted from `src/config.rs`.
+**130 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -118,6 +118,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.schedule_recommendation_min_samples` | `int4` | `20` | When fewer samples are available, `confidence` is returned as 0.0 and the recommendation fields are NULL or conservative defaults. |
 | `pg_trickle.scheduler_drain_timeout` | `int4` | `30` | Default: 30 seconds. |
 | `pg_trickle.scheduler_interval_ms` | `int4` | `1000` | Default: 1,000 ms (1 s). |
+| `pg_trickle.self_monitoring_auto_apply` | `text` | `"off"` | Automatic application mode for self-monitoring stream tables. |
 | `pg_trickle.sla_window_hours` | `int4` | `24` | Default: 24 hours. |
 | `pg_trickle.slot_lag_critical_threshold_mb` | `int4` | `1024` | When a WAL-mode source retains more than this amount of WAL, `pgtrickle.check_cdc_health()` reports a `slot_lag_exceeds_threshold` alert for the source. |
 | `pg_trickle.slot_lag_warning_threshold_mb` | `int4` | `100` | When a WAL-mode source retains more than this amount of WAL, pg_trickle: - emits a `slot_lag_warning` NOTIFY event from the scheduler, and - reports a WARN row in `pgtrickle.health_check()`. |

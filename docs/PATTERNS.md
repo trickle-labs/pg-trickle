@@ -582,16 +582,17 @@ FROM pgtrickle.pgt_stream_tables;
 
 ## Pattern 7: Transactional Outbox
 
-The **transactional outbox** pattern reliably publishes stream table deltas to
-external consumers — even if the consumer is temporarily offline. Each time the
-stream table refreshes, pg_trickle writes a header row to a dedicated outbox
-table. Consumers read from the outbox via `poll_outbox()`, process the delta,
-then commit their offset.
+The **transactional outbox** pattern reliably publishes stream table refresh
+events to external consumers. In current pg_trickle, the full outbox,
+consumer-group, inbox, and relay stack lives in the standalone `pg_tide`
+extension. pg_trickle contributes the stream-table hook: `attach_outbox()`
+publishes a compact refresh summary to pg_tide in the same transaction as each
+non-empty refresh.
 
 **Use this pattern when:**
 - You need to publish stream table changes to a message queue, webhook, or another service
 - Consumers need at-least-once delivery guarantees
-- Multiple independent consumers need to read the same stream independently
+- Multiple independent consumers need to read the same stream independently through pg_tide
 - You want replay / seek-to-offset for recovery
 
 ### Architecture
@@ -599,9 +600,9 @@ then commit their offset.
 ```
 orders (base table)
   └─→ orders_agg (stream table)
-        └─→ pgt_outbox_orders_agg (outbox table)
-              ├─→ Consumer group A: analytics pipeline
-              └─→ Consumer group B: notification service
+    └─→ pg_tide outbox
+      ├─→ Consumer group A: analytics pipeline
+      └─→ Consumer group B: notification service
 ```
 
 ### SQL Example
@@ -611,40 +612,24 @@ orders (base table)
 SELECT pgtrickle.create_stream_table(
     'public.orders_agg',
     'SELECT customer_id, SUM(amount) AS total, COUNT(*) AS cnt FROM orders GROUP BY customer_id',
-    schedule_seconds => 5
+  schedule => '5s'
 );
 
--- 2. Enable the outbox
-SELECT pgtrickle.enable_outbox('public.orders_agg', retention_hours => 48);
+-- 2. Attach a pg_tide outbox
+CREATE EXTENSION IF NOT EXISTS pg_tide;
+SELECT pgtrickle.attach_outbox(
+  p_name                  => 'public.orders_agg',
+  p_retention_hours       => 48,
+  p_inline_threshold_rows => 10000
+);
 
--- 3. Create consumer groups
-SELECT pgtrickle.create_consumer_group('analytics', 'public.orders_agg', auto_offset_reset => 'latest');
-SELECT pgtrickle.create_consumer_group('notifications', 'public.orders_agg', auto_offset_reset => 'latest');
-
--- 4. Consumer A polls and processes
-DO $$
-DECLARE
-    r RECORD;
-    last_id BIGINT := 0;
-BEGIN
-    FOR r IN
-        SELECT * FROM pgtrickle.poll_outbox('analytics', 'worker-1', batch_size => 50)
-    LOOP
-        -- process r.payload (JSONB with inserted/deleted row arrays)
-        last_id := r.outbox_id;
-    END LOOP;
-
-    IF last_id > 0 THEN
-        PERFORM pgtrickle.commit_offset('analytics', 'worker-1', last_id);
-    END IF;
-END;
-$$;
-
--- 5. Check consumer lag
-SELECT * FROM pgtrickle.consumer_lag('analytics');
+-- 3. Consume, relay, and manage offsets with pg_tide.
 ```
 
 ### Consumer Group Tips
+
+Consumer groups are managed by pg_tide, not pg_trickle. The usual outbox
+guidance still applies:
 
 | Scenario | Setting |
 |----------|---------|
@@ -655,24 +640,19 @@ SELECT * FROM pgtrickle.consumer_lag('analytics');
 
 ### Recommended Configuration
 
-```ini
-pg_trickle.outbox_enabled = true
-pg_trickle.outbox_retention_hours = 48        # keep 2 days of history
-pg_trickle.outbox_skip_empty_delta = true     # don't write rows for no-op refreshes
-pg_trickle.outbox_force_retention = true      # keep rows until all groups commit
-pg_trickle.consumer_dead_threshold_hours = 24 # mark workers dead after 24h silence
-pg_trickle.consumer_cleanup_enabled = true
-```
+Configure retention, consumer leases, polling, and relay delivery in pg_tide.
+pg_trickle has no `pg_trickle.outbox_*` or `pg_trickle.consumer_*` GUCs in the
+current release.
 
 ### Anti-Patterns
 
-- **Polling without committing:** If `commit_offset()` is never called, the lease
-  expires and the rows are re-delivered. Always commit after successful processing.
+- **Polling without committing:** If offsets are never committed in pg_tide, the
+  lease expires and rows are re-delivered. Always commit after successful processing.
 - **One group per worker:** Use one group and multiple named consumers within it
   for competing-consumer parallelism. Use multiple groups only when pipelines are
   truly independent.
-- **Long processing without heartbeats:** Call `consumer_heartbeat()` every 10–15
-  seconds for long-running processing to avoid being marked dead.
+- **Long processing without heartbeats:** Use pg_tide's heartbeat or lease
+  extension API for long-running processing to avoid being marked dead.
 
 ### When NOT to use this pattern
 
@@ -689,13 +669,14 @@ pg_trickle.consumer_cleanup_enabled = true
 ## Pattern 8: Transactional Inbox
 
 The **transactional inbox** pattern provides a reliable, idempotent message
-receiver inside PostgreSQL. External producers write events to the inbox table;
-pg_trickle maintains stream tables that give you live views of pending, failed,
-and processed messages — all updated incrementally.
+receiver inside PostgreSQL. Current pg_trickle does not provide managed
+`create_inbox()` APIs; those moved to pg_tide. You can still build the pattern
+directly by creating an ordinary inbox table and defining stream tables over it
+for pending work, dead letters, and statistics.
 
 **Use this pattern when:**
 - You receive events from external systems and need to process them exactly-once
-- You want automatic dead-letter handling for failed messages
+- You want live SQL views of pending and failed messages
 - Multiple workers need to process different aggregates without stepping on each other
 - You need per-aggregate ordering guarantees
 
@@ -703,7 +684,7 @@ and processed messages — all updated incrementally.
 
 ```
 external producer (Kafka / webhook / custom application)
-  └─→ pgtrickle.orders_inbox (raw event table)
+  └─→ app.orders_inbox (raw event table)
         ├─→ orders_inbox_pending  (stream table: awaiting processing)
         ├─→ orders_inbox_dlq      (stream table: failed messages)
         └─→ orders_inbox_stats    (stream table: event counts by type)
@@ -712,82 +693,113 @@ external producer (Kafka / webhook / custom application)
 ### SQL Example
 
 ```sql
--- 1. Create the inbox
-SELECT pgtrickle.create_inbox(
-    'orders_inbox',
-    schema           => 'pgtrickle',
-    max_retries      => 3,
-    with_dead_letter => true,
-    with_stats       => true,
-    schedule_seconds => 5
+-- 1. Create the raw inbox table
+CREATE SCHEMA IF NOT EXISTS app;
+
+CREATE TABLE app.orders_inbox (
+  event_id     text PRIMARY KEY,
+  event_type   text NOT NULL,
+  aggregate_id text NOT NULL,
+  payload      jsonb NOT NULL,
+  received_at  timestamptz NOT NULL DEFAULT now(),
+  processed_at timestamptz,
+  retry_count  int NOT NULL DEFAULT 0,
+  last_error   text
 );
 
--- 2. External system inserts a message
-INSERT INTO pgtrickle.orders_inbox (event_id, event_type, aggregate_id, payload)
+-- 2. Create stream-table views of inbox state
+SELECT pgtrickle.create_stream_table(
+  name     => 'app.orders_inbox_pending',
+  query    => $$
+    SELECT event_id, event_type, aggregate_id, payload, received_at, retry_count
+    FROM app.orders_inbox
+    WHERE processed_at IS NULL AND retry_count < 3
+  $$,
+  schedule => '5s'
+);
+
+SELECT pgtrickle.create_stream_table(
+  name     => 'app.orders_inbox_dlq',
+  query    => $$
+    SELECT event_id, event_type, aggregate_id, payload, retry_count, last_error
+    FROM app.orders_inbox
+    WHERE processed_at IS NULL AND retry_count >= 3
+  $$,
+  schedule => '5s'
+);
+
+SELECT pgtrickle.create_stream_table(
+  name     => 'app.orders_inbox_stats',
+  query    => $$
+    SELECT event_type,
+         COUNT(*) FILTER (WHERE processed_at IS NULL AND retry_count < 3) AS pending,
+         COUNT(*) FILTER (WHERE processed_at IS NULL AND retry_count >= 3) AS dlq,
+         COUNT(*) FILTER (WHERE processed_at IS NOT NULL) AS processed
+    FROM app.orders_inbox
+    GROUP BY event_type
+  $$,
+  schedule => '5s'
+);
+
+-- 3. External system inserts a message idempotently
+INSERT INTO app.orders_inbox (event_id, event_type, aggregate_id, payload)
 VALUES (
     gen_random_uuid()::text,
     'order.placed',
     'customer-123',
     '{"order_id": 42, "amount": 99.50}'::jsonb
-);
+)
+ON CONFLICT (event_id) DO NOTHING;
 
--- 3. Worker polls pending messages and processes
-UPDATE pgtrickle.orders_inbox
+-- 4. Worker reads pending messages and marks successful work processed
+SELECT event_id, payload
+FROM app.orders_inbox_pending
+ORDER BY received_at
+LIMIT 100;
+
+UPDATE app.orders_inbox
 SET processed_at = now()
 WHERE event_id = '<event_id>'
   AND processed_at IS NULL;
-
--- 4. Check inbox health
-SELECT pgtrickle.inbox_health('orders_inbox');
-
--- 5. Replay failed messages
-SELECT pgtrickle.replay_inbox_messages(
-    'orders_inbox',
-    ARRAY['event-id-1', 'event-id-2']
-);
 ```
 
 ### Per-Aggregate Ordering
 
-When messages for the same customer / entity must be processed in sequence:
+When messages for the same customer or entity must be processed in sequence,
+include a sequence column in the raw table and make workers claim only the
+lowest unprocessed sequence per aggregate:
 
 ```sql
--- Enable ordering: only surface the next unprocessed message per aggregate
-SELECT pgtrickle.enable_inbox_ordering(
-    'orders_inbox',
-    aggregate_id_col => 'aggregate_id',
-    seq_col          => 'event_sequence'
+SELECT i.*
+FROM app.orders_inbox_pending i
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM app.orders_inbox_pending earlier
+    WHERE earlier.aggregate_id = i.aggregate_id
+      AND earlier.received_at < i.received_at
 );
-
--- Workers now read from next_orders_inbox (one row per aggregate)
-SELECT * FROM pgtrickle.next_orders_inbox;
 ```
 
 ### Multi-Worker Partitioning
 
-Scale horizontally without external coordination:
-
-```sql
--- Worker 0 of 4 handles its share of aggregates
-SELECT * FROM pgtrickle.orders_inbox_pending
-WHERE pgtrickle.inbox_is_my_partition(aggregate_id, 0, 4);
-```
+Scale horizontally with PostgreSQL advisory locks or application-level
+partitioning. For managed partitioning helpers, use pg_tide.
 
 ### Recommended Configuration
 
-```ini
-pg_trickle.inbox_enabled = true
-pg_trickle.inbox_processed_retention_hours = 72   # keep 3 days of processed msgs
-pg_trickle.inbox_dlq_retention_hours = 0          # keep DLQ forever for forensics
-pg_trickle.inbox_dlq_alert_max_per_refresh = 10   # alert on DLQ growth
-```
+There are no `pg_trickle.inbox_*` GUCs in current pg_trickle. Tune the stream
+tables themselves with normal pg_trickle settings such as `schedule`,
+`refresh_mode`, `tier`, and `pg_trickle.differential_max_change_ratio`. Use
+pg_tide configuration for managed inbox retention, DLQ, and relay behavior.
+
+### Anti-Patterns
 
 ### Anti-Patterns
 
 - **Not marking messages as processed:** The `_pending` stream table will keep
   growing. Always set `processed_at = now()` after successful processing.
 - **Ignoring the DLQ:** Monitor `orders_inbox_dlq` and replay or investigate
-  failed messages regularly. Use `inbox_health()` in your alerting pipeline.
+  failed messages regularly.
 - **Skipping idempotency:** The inbox uses `event_id` for deduplication.
   Producers must supply stable, unique `event_id` values — typically a UUID
   derived from the source event.
@@ -802,6 +814,9 @@ pg_trickle.inbox_dlq_alert_max_per_refresh = 10   # alert on DLQ growth
   without benefit over direct INSERT + trigger.
 - The event source already provides at-least-once with dedup — a second
   layer of dedup in the inbox wastes storage.
+
+For managed inbox APIs, consumer leases, DLQ retention, and relay workflows,
+use pg_tide.
 
 ---
 

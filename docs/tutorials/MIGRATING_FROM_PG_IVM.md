@@ -43,7 +43,7 @@ mapping, behavioral differences, and a step-by-step migration checklist.
 | `DROP TABLE immv_name` | `pgtrickle.drop_stream_table(name)` | Stream tables must be dropped via the API |
 | `ALTER TABLE immv RENAME TO ...` | `pgtrickle.alter_stream_table(old, name => new)` | Rename via API |
 | In-transaction maintenance (AFTER row triggers) | `refresh_mode => 'IMMEDIATE'` | Same model — triggers fire in the writing transaction |
-| (not available) | `refresh_mode => 'DIFFERENTIAL'` | Deferred incremental refresh via change buffers |
+| (not available) | `refresh_mode => 'DIFFERENTIAL'` | Deferred differential refresh via change buffers |
 | (not available) | `refresh_mode => 'AUTO'` | Picks DIFFERENTIAL or FULL automatically |
 | Auto-created indexes on GROUP BY / PK | Manual `CREATE INDEX` | pg_trickle auto-creates the primary key but not secondary indexes |
 

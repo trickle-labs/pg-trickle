@@ -1,5 +1,7 @@
 # Storage Backends
 
+> **Status per backend** — Heap: **Stable** · Unlogged: **Stable** · columnar/Hydra: **Beta** · DuckDB: **Experimental** · TimescaleDB: **Beta** · pgvector: **Stable**
+
 pg_trickle supports multiple storage backends for stream table output. Each
 backend has different prerequisites, semantics, and performance characteristics.
 

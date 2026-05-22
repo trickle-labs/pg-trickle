@@ -1,6 +1,38 @@
 # Configuration
 
-Complete reference for all pg_trickle GUC (Grand Unified Configuration) variables.
+Narrative reference for the pg_trickle GUC (Grand Unified Configuration)
+variables operators are most likely to tune. For the exhaustive generated
+catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).
+
+---
+
+## Coverage policy
+
+| Source | What it contains | When to use |
+|--------|-----------------|-------------|
+| **This file** | Curated narrative for the GUCs you are most likely to touch, with examples and cross-references | Day-to-day tuning and troubleshooting |
+| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 129 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
+
+This file does **not** attempt to document every GUC — it focuses on the ones
+that have the most impact in production. If you do not see a GUC here, check
+GUC_CATALOG.md for its default and a brief description.
+
+### GUC categories at a glance
+
+| Category | Documented here | Full list in GUC_CATALOG.md |
+|----------|-----------------|-----------------------------|
+| Scheduler / timing | ✅ | ✅ |
+| CDC mode | ✅ | ✅ |
+| WAL CDC | ✅ | ✅ |
+| Refresh performance | ✅ | ✅ |
+| Parallel refresh | ✅ | ✅ |
+| Change buffer durability | ✅ see [`pg_trickle.change_buffer_durability`](#pg_tricklechange_buffer_durability) | ✅ |
+| CDC pause / hold | ✅ see [`pg_trickle.cdc_paused`](#pg_tricklecdc_paused) | ✅ |
+| Force full refresh | ✅ see [`pg_trickle.force_full_refresh`](#pg_trickleforce_full_refresh) | ✅ |
+| WAL polling limits | ✅ see [`pg_trickle.wal_max_changes_per_poll`](#pg_tricklewal_max_changes_per_poll) | ✅ |
+| Fused refresh | ✅ see [`pg_trickle.enable_fused_refresh`](#pg_trickleenable_fused_refresh) | ✅ |
+| Guardrails & limits | ✅ | ✅ |
+| Advanced / internal | links to GUC_CATALOG.md | ✅ |
 
 ---
 
@@ -12,8 +44,8 @@ Not sure which GUC to change? Start here.
 |---|---|
 | **Lower refresh latency** | `scheduler_interval_ms`, `min_schedule_seconds` |
 | **Reduce write overhead on busy tables** | `compact_threshold`, `max_buffer_rows`, `cleanup_use_truncate`, `user_triggers` |
-| **Handle larger DAGs without timeouts** | `max_workers`, `max_dynamic_refresh_workers`, `scheduler_interval_ms` |
-| **Connection-pooler compatibility (PgBouncer)** | `pooler_compatibility_mode`, `use_prepared_statements` |
+| **Handle larger DAGs without timeouts** | `parallel_refresh_mode`, `max_dynamic_refresh_workers`, `per_database_worker_quota`, `scheduler_interval_ms` |
+| **Connection-pooler compatibility (PgBouncer)** | `connection_pooler_mode`, `use_prepared_statements` |
 | **Lower memory usage during refresh** | `merge_work_mem_mb`, `max_delta_estimate_rows` |
 | **Improve cost-model accuracy** | `cost_model_safety_margin`, `planner_aggressive`, `differential_max_change_ratio` |
 | **Enable WAL-based CDC** | `cdc_mode`, `wal_transition_timeout`, `slot_lag_warning_threshold_mb` |
@@ -107,25 +139,7 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
   - [pg\_trickle.publication\_lag\_warn\_bytes](#pg_tricklepublication_lag_warn_bytes)
   - [pg\_trickle.schedule\_recommendation\_min\_samples](#pg_trickleschedule_recommendation_min_samples)
   - [pg\_trickle.schedule\_alert\_cooldown\_seconds](#pg_trickleschedule_alert_cooldown_seconds)
-- [Transactional Outbox](#transactional-outbox-v0280)
-  - [pg\_trickle.outbox\_enabled](#pg_trickleoutbox_enabled)
-  - [pg\_trickle.outbox\_retention\_hours](#pg_trickleoutbox_retention_hours)
-  - [pg\_trickle.outbox\_drain\_batch\_size](#pg_trickleoutbox_drain_batch_size)
-  - [pg\_trickle.outbox\_drain\_interval\_seconds](#pg_trickleoutbox_drain_interval_seconds)
-  - [pg\_trickle.outbox\_inline\_threshold\_rows](#pg_trickleoutbox_inline_threshold_rows)
-  - [pg\_trickle.outbox\_skip\_empty\_delta](#pg_trickleoutbox_skip_empty_delta)
-  - [pg\_trickle.outbox\_storage\_critical\_mb](#pg_trickleoutbox_storage_critical_mb)
-  - [pg\_trickle.outbox\_force\_retention](#pg_trickleoutbox_force_retention)
-  - [pg\_trickle.consumer\_dead\_threshold\_hours](#pg_trickleconsumer_dead_threshold_hours)
-  - [pg\_trickle.consumer\_stale\_offset\_threshold\_days](#pg_trickleconsumer_stale_offset_threshold_days)
-  - [pg\_trickle.consumer\_cleanup\_enabled](#pg_trickleconsumer_cleanup_enabled)
-- [Transactional Inbox](#transactional-inbox-v0280)
-  - [pg\_trickle.inbox\_enabled](#pg_trickleinbox_enabled)
-  - [pg\_trickle.inbox\_processed\_retention\_hours](#pg_trickleinbox_processed_retention_hours)
-  - [pg\_trickle.inbox\_dlq\_retention\_hours](#pg_trickleinbox_dlq_retention_hours)
-  - [pg\_trickle.inbox\_drain\_batch\_size](#pg_trickleinbox_drain_batch_size)
-  - [pg\_trickle.inbox\_drain\_interval\_seconds](#pg_trickleinbox_drain_interval_seconds)
-  - [pg\_trickle.inbox\_dlq\_alert\_max\_per\_refresh](#pg_trickleinbox_dlq_alert_max_per_refresh)
+- [pg_tide Integration](#pg_tide-integration)
 - [Pre-GA Correctness & Stability](#pre-ga-correctness--stability-v0300)
   - [pg\_trickle.use\_sqlstate\_classification](#pg_trickleuse_sqlstate_classification)
   - [pg\_trickle.template\_cache\_max\_age\_hours](#pg_trickletemplate_cache_max_age_hours)
@@ -146,7 +160,9 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
 
 ## Overview
 
-pg_trickle exposes over forty configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
+pg_trickle exposes its configuration variables in the `pg_trickle` namespace.
+Most can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`;
+settings marked `postmaster` must be set before PostgreSQL starts.
 
 **Required `postgresql.conf` settings:**
 
@@ -154,9 +170,9 @@ pg_trickle exposes over forty configuration variables in the `pg_trickle` namesp
 shared_preload_libraries = 'pg_trickle'
 ```
 
-The extension **must** be loaded via `shared_preload_libraries` because it registers GUC variables and a background worker at startup.
+The extension **must** be loaded via `shared_preload_libraries` because it registers GUC variables, shared memory, and the launcher background worker at startup.
 
-> **Note:** `wal_level = logical` and `max_replication_slots` are recommended but **not** required. The default CDC mode (`auto`) uses lightweight row-level triggers initially and transparently transitions to WAL-based capture if `wal_level = logical` is available. If `wal_level` is not `logical`, pg_trickle stays on triggers permanently — no degradation, no errors. Set `pg_trickle.cdc_mode = 'trigger'` to disable WAL transitions entirely (see [pg_trickle.cdc_mode](#pg_tricklecdc_mode)).
+> **Note:** `wal_level = logical` and `max_replication_slots` are recommended but **not** required. The default CDC mode (`auto`) uses trigger-based CDC initially (statement-level triggers by default) and transparently transitions to WAL-based capture if `wal_level = logical` is available. If `wal_level` is not `logical`, pg_trickle stays on triggers permanently — no degradation, no errors. Set `pg_trickle.cdc_mode = 'trigger'` to disable WAL transitions entirely (see [pg_trickle.cdc_mode](#pg_tricklecdc_mode)).
 
 ---
 
@@ -209,7 +225,7 @@ CDC (Change Data Capture) mechanism selection.
 | Value | Description |
 |-------|-------------|
 | `'auto'` | **(default)** Use triggers for creation; transition to WAL-based CDC if `wal_level = logical`. Falls back to triggers automatically on error. |
-| `'trigger'` | Always use row-level triggers for change capture |
+| `'trigger'` | Always use trigger-based CDC for change capture (`cdc_trigger_mode` controls statement vs row triggers) |
 | `'wal'` | Require WAL-based CDC (fails if `wal_level != logical`) |
 
 **Default:** `'auto'`
@@ -1472,10 +1488,10 @@ When a source table DDL change (e.g. `ALTER TABLE`) or schema reload is
 detected, the extension marks affected stream-table OIDs in this ring so
 background refresh workers can schedule a full DAG rebuild.
 
-**Default:** `128`  
-**Range:** `1` – `1024`  
-**Hard ceiling:** `1024` entries (enforced at registration time; values above
-1024 are clamped to 1024)
+**Default:** `1024`  
+**Range:** `1` – `4096`  
+**Hard ceiling:** `4096` entries (enforced at registration time; values above
+4096 are rejected)
 
 ```sql
 -- Increase for deployments with many simultaneously-modified source tables
@@ -1503,19 +1519,19 @@ should be increased.
 
 | ST count | Recommended capacity |
 |----------|--------------------|
-| < 200    | 128 (default)      |
-| 200–500  | 256                |
-| 500–1000 | 512                |
-| > 1000   | 1024 (maximum)     |
+| < 200    | 1024 (default)     |
+| 200–500  | 1024               |
+| 500–1000 | 1024–2048          |
+| > 1000   | 2048–4096          |
 
 > **Note:** Each ring slot consumes ~8 bytes of shared memory (allocated at
-> `pg_trickle.max_shared_memory_kb`). Increasing capacity by 896 slots
-> (128 → 1024) uses an extra ~7 KB of shared memory, which is negligible.
+> `pg_trickle.max_shared_memory_kb`). Increasing capacity from 1024 to 4096
+> uses roughly 24 KB of additional shared memory, which is usually negligible.
 
 | Setting | Value |
 |---------|-------|
-| Default | `128` |
-| Range | `1` – `1024` |
+| Default | `1024` |
+| Range | `1` – `4096` |
 | Context | `postmaster` (requires server restart) |
 
 ---
@@ -1603,9 +1619,8 @@ background workers.
   decisions (unit keys, ready-queue contents, budget), but still executes
   refreshes inline. Useful for previewing parallel behaviour without
   actually spawning workers.
-- **`off`**: Sequential execution. All stream tables are
-  refreshed one at a time in topological order by the single scheduler
-  background worker.
+- **`off`**: Sequential execution. All stream tables in a database are
+  refreshed one at a time in topological order by that database's scheduler.
 
 ```sql
 -- Preview parallel dispatch decisions without changing runtime behaviour
@@ -2362,236 +2377,25 @@ an imminent SLA violation.
 
 ---
 
-## Transactional Outbox
+## pg_tide Integration
 
-These GUCs control the transactional outbox subsystem. See the SQL Reference
-for the `enable_outbox()`, `poll_outbox()`, and consumer group functions.
+The transactional outbox, inbox, consumer-group, and relay configuration moved
+to the standalone `pg_tide` extension in v0.46.0. pg_trickle keeps only the
+stream-table integration hooks:
 
-### pg_trickle.outbox_enabled
+- `pgtrickle.attach_outbox(name, retention_hours, inline_threshold_rows)`
+- `pgtrickle.detach_outbox(name, if_exists)`
+- `pgtrickle.attach_embedding_outbox(name, vector_column, retention_hours, inline_threshold_rows)`
 
-Master enable/disable switch for the outbox subsystem.
+Those functions store mappings in `pgtrickle.pgt_outbox_config` and call
+`tide.outbox_create()` / `tide.outbox_publish()` when `pg_tide` is installed.
+There are no `pg_trickle.outbox_*`, `pg_trickle.inbox_*`, or
+`pg_trickle.consumer_*` GUCs in current pg_trickle.
 
-| Property | Value |
-|---|---|
-| Type | `boolean` |
-| Default | `true` |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_retention_hours
-
-Default retention period (in hours) for outbox rows. Rows older than this
-threshold are eligible for the background drain sweep. Can be overridden
-per stream table via `enable_outbox(retention_hours => N)`.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `24` |
-| Range | 1 – 87 600 (10 years) |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_drain_batch_size
-
-Number of expired outbox rows deleted in a single background drain pass.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `1000` |
-| Range | 1 – 1 000 000 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_drain_interval_seconds
-
-Seconds between background outbox drain sweeps. Set to `0` to disable
-automatic draining (you would then drain manually with `outbox_rows_consumed()`).
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `60` |
-| Range | 0 (disabled) – 86 400 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_inline_threshold_rows
-
-Maximum number of delta rows stored inline in the outbox payload. When a
-refresh delta exceeds this count, pg_trickle switches to **claim-check** mode:
-the payload is stored in a separate table and `poll_outbox()` returns
-`is_claim_check = true` with a `NULL` payload.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `10000` |
-| Range | 0 (always inline) – 10 000 000 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_skip_empty_delta
-
-When `true`, no outbox row is written for refreshes that produce zero inserted
-and zero deleted rows. This reduces outbox table growth for frequently-scheduled
-stream tables with sparse updates.
-
-| Property | Value |
-|---|---|
-| Type | `boolean` |
-| Default | `true` |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_storage_critical_mb
-
-Size threshold (in MB) at which the outbox table is considered critically large.
-When exceeded, a WARNING is emitted on each refresh cycle.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `1024` (1 GB) |
-| Range | 1 – 10 000 000 (10 TB) |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.outbox_force_retention
-
-When `true`, outbox rows are kept past their `retention_hours` expiry until
-**all** consumer groups have committed an offset past them. Prevents consumers
-that are temporarily offline from missing messages.
-
-| Property | Value |
-|---|---|
-| Type | `boolean` |
-| Default | `false` |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.consumer_dead_threshold_hours
-
-Hours of silence (no heartbeat) after which a consumer is marked as dead and
-eligible for cleanup (when `consumer_cleanup_enabled = true`).
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `24` |
-| Range | 1 – 87 600 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.consumer_stale_offset_threshold_days
-
-Days of no offset progress after which a consumer's offset record is
-considered stale and eligible for cleanup.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `7` |
-| Range | 1 – 3650 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.consumer_cleanup_enabled
-
-Enable automatic background cleanup of dead and stale consumer offsets
-and leases. When disabled, old records must be removed manually.
-
-| Property | Value |
-|---|---|
-| Type | `boolean` |
-| Default | `true` |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
----
-
-## Transactional Inbox
-
-These GUCs control the transactional inbox subsystem. See the SQL Reference
-for `create_inbox()` and related functions.
-
-### pg_trickle.inbox_enabled
-
-Master enable/disable switch for the inbox subsystem.
-
-| Property | Value |
-|---|---|
-| Type | `boolean` |
-| Default | `true` |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.inbox_processed_retention_hours
-
-Retention period (in hours) for successfully processed inbox messages
-(`processed_at IS NOT NULL`). Rows older than this threshold are deleted
-by the background drain sweep.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `72` (3 days) |
-| Range | 1 – 87 600 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.inbox_dlq_retention_hours
-
-Retention period (in hours) for dead-letter queue rows. Set to `0` to
-keep DLQ rows indefinitely (useful for forensics and manual replay).
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `0` (keep forever) |
-| Range | 0 (keep forever) – 87 600 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.inbox_drain_batch_size
-
-Number of expired inbox messages deleted in a single background drain pass.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `1000` |
-| Range | 1 – 1 000 000 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.inbox_drain_interval_seconds
-
-Seconds between inbox background drain sweeps. Set to `0` to disable
-automatic draining.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `60` |
-| Range | 0 (disabled) – 86 400 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
-
-### pg_trickle.inbox_dlq_alert_max_per_refresh
-
-Maximum number of DLQ alert events raised per refresh cycle. Limits log
-volume when many messages are failing simultaneously. Set to `0` to disable
-DLQ alerting.
-
-| Property | Value |
-|---|---|
-| Type | `integer` |
-| Default | `10` |
-| Range | 0 (disabled) – 100 |
-| Context | `SUSET` (superuser) |
-| Restart required | No |
+Use `pg_tide` configuration for retention, polling, consumer leases,
+dead-letter handling, and relay delivery. See [OUTBOX.md](OUTBOX.md) and
+[tutorial-pg-tide-ducklake-pipeline.md](tutorial-pg-tide-ducklake-pipeline.md)
+for the pg_trickle-side integration points.
 
 ---
 
@@ -3111,21 +2915,6 @@ pg_trickle.frontier_holdback_mode = 'xmin'      # xmin | none | lsn:<N>
 pg_trickle.frontier_holdback_warn_seconds = 300 # warn after 5 min of blocked frontier
 pg_trickle.publication_lag_warn_bytes = 0       # 0 = disabled
 
-# Transactional outbox
-pg_trickle.outbox_enabled = true
-pg_trickle.outbox_retention_hours = 24
-pg_trickle.outbox_inline_threshold_rows = 10000
-pg_trickle.outbox_skip_empty_delta = true
-pg_trickle.outbox_force_retention = false
-pg_trickle.consumer_dead_threshold_hours = 24
-pg_trickle.consumer_cleanup_enabled = true
-
-# Transactional inbox
-pg_trickle.inbox_enabled = true
-pg_trickle.inbox_processed_retention_hours = 72
-pg_trickle.inbox_dlq_retention_hours = 0       # 0 = keep forever
-pg_trickle.inbox_dlq_alert_max_per_refresh = 10
-
 # Citus distributed tables
 pg_trickle.citus_st_lock_lease_ms = 60000      # lease duration for cross-node coordination
 pg_trickle.citus_worker_retry_ticks = 5        # failures before WARNING in citus_status
@@ -3151,6 +2940,156 @@ SET pg_trickle.parallel_refresh_mode = 'on';
 
 -- Change persistently (requires reload)
 ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 500;
+SELECT pg_reload_conf();
+```
+
+---
+
+## Change Buffer Durability
+
+### pg_trickle.change_buffer_durability
+
+| | |
+|---|---|
+| **Type** | `text` |
+| **Default** | `"logged"` |
+| **Valid values** | `"logged"`, `"unlogged"` |
+
+Controls whether the change buffer tables used by trigger-based CDC are created
+as regular `LOGGED` tables or as PostgreSQL `UNLOGGED` tables.
+
+- **`"logged"` (default)** — Change buffers are crash-safe. In the event of a
+  PostgreSQL crash, buffered CDC rows are preserved and will be processed on the
+  next scheduler cycle. **Recommended for production.**
+- **`"unlogged"`** — Change buffers are faster to write (no WAL overhead) but
+  are emptied on crash. If PostgreSQL crashes between a source INSERT and the
+  next refresh cycle, those changes are lost and the affected stream tables are
+  forced to reinitialize. Suitable only for non-critical derived tables where
+  occasional stale data after a crash is acceptable.
+
+> **Note:** `pg_trickle.unlogged_buffers` is a compatibility alias retained for
+> backward compatibility. `true` maps to `"unlogged"`, `false` to `"logged"`.
+> Prefer the new `change_buffer_durability` GUC.
+
+```
+SET pg_trickle.change_buffer_durability = 'logged';   -- default, crash-safe
+SET pg_trickle.change_buffer_durability = 'unlogged'; -- faster, not crash-safe
+```
+
+---
+
+## CDC Pause
+
+### pg_trickle.cdc_paused
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `false` |
+
+Global switch to temporarily stop capturing DML changes into change buffers.
+When `on`, the trigger still fires but captured rows are **discarded** (default)
+or **held** depending on `pg_trickle.cdc_capture_mode`.
+
+Use `pgtrickle.cdc_pause_status()` to inspect the current state.
+
+Typical use case: maintenance windows where you want to prevent change buffers
+from growing unbounded without disabling the extension entirely.
+
+```sql
+-- Pause CDC during maintenance
+ALTER SYSTEM SET pg_trickle.cdc_paused = on;
+SELECT pg_reload_conf();
+
+-- Resume after maintenance
+ALTER SYSTEM SET pg_trickle.cdc_paused = off;
+SELECT pg_reload_conf();
+```
+
+---
+
+## Force Full Refresh
+
+### pg_trickle.force_full_refresh
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `false` |
+
+When `on`, forces ALL stream tables to use FULL refresh mode regardless of their
+individual `refresh_mode` catalog setting. Useful for SRE diagnosis when you
+need to temporarily eliminate the differential pipeline to isolate a correctness
+issue.
+
+> **Warning:** This is a cluster-wide override. Setting it in production will
+> dramatically increase refresh time and I/O for any table that is normally
+> DIFFERENTIAL. Do not leave it on for more than a short diagnostic window.
+
+```sql
+-- Force full refresh cluster-wide (diagnostic only)
+ALTER SYSTEM SET pg_trickle.force_full_refresh = on;
+SELECT pg_reload_conf();
+
+-- Restore normal mode
+ALTER SYSTEM SET pg_trickle.force_full_refresh = off;
+SELECT pg_reload_conf();
+```
+
+---
+
+## WAL Polling Limits
+
+### pg_trickle.wal_max_changes_per_poll
+
+| | |
+|---|---|
+| **Type** | `int4` |
+| **Default** | `10000` |
+
+Maximum number of WAL change records to read in a single polling batch (WAL CDC
+mode). Limiting this prevents the WAL decoder from consuming excessive memory
+on busy tables. If a source table generates more than this many changes between
+polls, subsequent polls will continue draining the backlog.
+
+### pg_trickle.wal_max_lag_bytes
+
+| | |
+|---|---|
+| **Type** | `int4` |
+| **Default** | `65536` (64 KiB) |
+
+Maximum number of bytes the WAL decoder is allowed to lag behind the write LSN
+before a warning is emitted. Does not stop processing; used for alerting only.
+See also `pg_trickle.slot_lag_warning_threshold_mb` for slot-based thresholds.
+
+```
+SET pg_trickle.wal_max_changes_per_poll = 50000; -- raise cap on low-change tables
+SET pg_trickle.wal_max_lag_bytes = 131072;        -- 128 KiB lag warning threshold
+```
+
+---
+
+## Fused Refresh
+
+### pg_trickle.enable_fused_refresh
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `true` |
+
+Controls whether pg_trickle uses the "fused refresh" optimisation: when multiple
+stream tables in the same DAG are ready to refresh, their delta pipelines are
+merged into a single query plan so that shared source scans and joins are
+executed only once.
+
+Disable (`false`) if a specific DAG shape causes unexpected planner behaviour
+or if you need to isolate which refresh is consuming resources.
+
+```sql
+-- Temporarily disable fused refresh for diagnosis
+ALTER SYSTEM SET pg_trickle.enable_fused_refresh = off;
 SELECT pg_reload_conf();
 ```
 

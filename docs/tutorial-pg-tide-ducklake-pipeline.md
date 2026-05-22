@@ -1,5 +1,7 @@
 # Tutorial 5: Guaranteed Delivery to DuckLake with pg-tide
 
+> **Status: Experimental** — The pg-tide → DuckLake delivery pipeline is early-access. Requires both `pg_trickle` and `pg_tide` installed.
+
 *Add a transactional outbox between pg_trickle and DuckLake so every delta reaches S3 — even through network failures and restarts*
 
 ---

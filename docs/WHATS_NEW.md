@@ -104,7 +104,7 @@ sources.
 ## v0.5 — Row-level security and ETL bootstrap gating
 
 - RLS policies on source tables are respected during the defining query's
-  first FULL refresh; incremental refreshes maintain the same visibility
+  first FULL refresh; differential refreshes maintain the same visibility
   contract
 - ETL bootstrap gate: a stream table can be held in SUSPENDED state until
   an external ETL load completes, then released atomically

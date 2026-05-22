@@ -1,338 +1,164 @@
-# Transactional Outbox
+# pg_tide Outbox Integration
 
-The **transactional outbox pattern** solves the dual-write problem: how to
-atomically update your database _and_ publish an event to an external system
-without risking inconsistency if one side fails.
+> **Status: Stable** — The `attach_outbox`, `detach_outbox`, and `attach_embedding_outbox` APIs are stable. The full outbox consumer pipeline is in [pg_tide](https://github.com/trickle-labs/pg-tide).
 
-pg_trickle's outbox implementation builds on top of stream tables. Every time a
-stream table refresh produces a non-empty delta, a summary row is written to an
-outbox table **in the same transaction** as the MERGE. Consumers are notified
-via `pg_notify` the moment the commit lands.
+pg_trickle no longer implements the full transactional outbox, consumer-group,
+inbox, or relay stack itself. That functionality moved to the standalone
+[`pg_tide`](https://github.com/trickle-labs/pg-tide) extension in v0.46.0.
+
+What remains in pg_trickle is the integration point that publishes stream-table
+refresh summaries into a pg_tide outbox in the same transaction as the refresh.
 
 ---
 
-## How it works
+## What pg_trickle Provides
 
-```
-Source tables (INSERT / UPDATE / DELETE)
-        │
-        ▼
-  CDC trigger fires → pgtrickle_changes buffer
-        │
-        ▼
-  Stream table refresh (MERGE)
-        │   ← same transaction ─────────────────────────────┐
-        ▼                                                    │
-  Delta rows applied to stream table               outbox row written
-  (inserted_count / deleted_count recorded)        to pgtrickle.outbox_<st>
-                                                             │
-                                                    pg_notify fired
-                                                             │
-                                                    Consumer polls / listens
-```
+pg_trickle exposes three outbox-related SQL functions:
 
-The outbox row is guaranteed to exist if and only if the stream table was
-updated. There is no window where the stream table changes but no outbox row
-exists, or an outbox row exists but the stream table did not change.
+| Function | Purpose |
+|----------|---------|
+| `pgtrickle.attach_outbox(name, retention_hours, inline_threshold_rows)` | Create or register a pg_tide outbox for a stream table |
+| `pgtrickle.detach_outbox(name, if_exists)` | Remove the pg_trickle mapping without dropping pg_tide storage |
+| `pgtrickle.attach_embedding_outbox(name, vector_column, retention_hours, inline_threshold_rows)` | Attach an outbox whose events are tagged as embedding changes |
 
-### Inline vs. claim-check mode
+After an outbox is attached, every non-empty refresh calls
+`tide.outbox_publish()` inside the refresh transaction. If the refresh rolls
+back, the outbox event rolls back too.
 
-| Condition | Mode | What the consumer receives |
-|-----------|------|---------------------------|
-| `delta_rows ≤ outbox_inline_threshold_rows` (default: 1000) | **Inline** | Full delta serialized as JSONB in `payload` |
-| `delta_rows > outbox_inline_threshold_rows` | **Claim-check** | `is_claim_check = true`, payload is NULL; delta rows in `pgtrickle.outbox_delta_rows_<st>` |
-
-Inline mode is simpler — the consumer reads one row and gets everything.
-Claim-check mode avoids storing very large payloads in the outbox table, at the
-cost of an extra query to fetch the delta rows.
+pg_trickle does not expose `poll_outbox`, `commit_offset`, consumer groups,
+leases, inboxes, or relay configuration. Use pg_tide for those APIs.
 
 ---
 
 ## Quickstart
 
-### 1. Create a stream table
+### 1. Install pg_tide
+
+```sql
+CREATE EXTENSION pg_tide;
+```
+
+`attach_outbox()` checks for `tide.outbox_create(text, integer, integer)` and
+raises a clear error if pg_tide is missing.
+
+### 2. Create a stream table
 
 ```sql
 SELECT pgtrickle.create_stream_table(
-    'public.order_totals',
-    $$SELECT customer_id, SUM(amount) AS total
-      FROM orders
-      GROUP BY customer_id$$
+    name     => 'public.order_totals',
+    query    => $$
+        SELECT customer_id, SUM(amount) AS total
+        FROM orders
+        GROUP BY customer_id
+    $$,
+    schedule => '5s'
 );
 ```
 
-### 2. Enable the outbox
+### 3. Attach an outbox
 
 ```sql
-SELECT pgtrickle.enable_outbox('public.order_totals');
-```
-
-This creates:
-- `pgtrickle.outbox_order_totals` — outbox header table
-- `pgtrickle.outbox_delta_rows_order_totals` — claim-check delta rows
-- `pgtrickle.pgt_outbox_latest_order_totals` — convenience view pointing to the most recent outbox row
-
-### 3. Create consumer groups
-
-Each independent consumer needs its own group. Groups track their own offset
-into the outbox table so they never interfere with each other.
-
-```sql
-SELECT pgtrickle.create_consumer_group(
-    'shipping_service',
-    'public.order_totals'
-);
-
-SELECT pgtrickle.create_consumer_group(
-    'analytics_pipeline',
-    'public.order_totals'
+SELECT pgtrickle.attach_outbox(
+    p_name                  => 'public.order_totals',
+    p_retention_hours       => 48,
+    p_inline_threshold_rows => 10000
 );
 ```
 
-### 4. Poll for messages
+This creates the corresponding pg_tide outbox via `tide.outbox_create()` and
+records the mapping in `pgtrickle.pgt_outbox_config`.
 
-A consumer loop looks like this:
+### 4. Consume with pg_tide
 
-```sql
--- Claim up to 50 unprocessed rows, hold the lease for 30 seconds
-SELECT * FROM pgtrickle.poll_outbox(
-    'public.order_totals',
-    'shipping_service',
-    batch_size    => 50,
-    lease_seconds => 30
-);
-```
-
-`poll_outbox` returns outbox rows that this consumer has not yet committed.
-Each row is leased — no other worker sharing the same consumer group can claim
-it until the lease expires.
-
-### 5. Process and commit
-
-After successfully processing each batch:
-
-```sql
-SELECT pgtrickle.commit_offset('shipping_service', 'public.order_totals', last_id);
-```
-
-`last_id` is the highest `id` value from the batch you just processed.
-Committed rows are never returned by `poll_outbox` again.
+Use pg_tide's polling, relay, consumer, and retention APIs to consume the
+outbox. pg_trickle only publishes the event envelope.
 
 ---
 
-## Reading the payload
+## Event Envelope
 
-### Inline mode
+The standard stream-table outbox payload is a compact refresh summary:
 
-```sql
-SELECT
-    id,
-    created_at,
-    inserted_count,
-    deleted_count,
-    payload -> 'inserted' AS inserted_rows,
-    payload -> 'deleted'  AS deleted_rows
-FROM pgtrickle.outbox_order_totals
-ORDER BY id DESC
-LIMIT 5;
-```
-
-### Claim-check mode
-
-```sql
--- Get the outbox row
-SELECT id, is_claim_check FROM pgtrickle.pgt_outbox_latest_order_totals;
-
--- Fetch the actual delta rows for a claim-check outbox row
-SELECT row_op, row_data
-FROM pgtrickle.outbox_delta_rows_order_totals
-WHERE outbox_id = <outbox_id>
-ORDER BY row_num;
-```
-
----
-
-## Multiple workers (parallel consumption)
-
-Multiple workers in the same consumer group share the workload. pg_trickle
-assigns non-overlapping leases, so each row is processed by exactly one worker
-at a time.
-
-```sql
--- Worker 1
-SELECT * FROM pgtrickle.poll_outbox('public.order_totals', 'shipping_service');
-
--- Worker 2 (concurrent, gets a different batch)
-SELECT * FROM pgtrickle.poll_outbox('public.order_totals', 'shipping_service');
-```
-
-Workers should register their presence so the system can detect dead workers:
-
-```sql
--- Call periodically (e.g. every 30 s) while the worker is alive
-SELECT pgtrickle.consumer_heartbeat('shipping_service', 'worker-1');
-```
-
-Workers that miss their heartbeat deadline are removed from the consumer group.
-Any leases held by a dead worker expire automatically after `lease_seconds`,
-returning those rows to the available pool.
-
----
-
-## Lease management
-
-### Extending a lease
-
-If processing is taking longer than expected:
-
-```sql
-SELECT pgtrickle.extend_lease(
-    'shipping_service',
-    'public.order_totals',
-    outbox_id     => 42,
-    extra_seconds => 60
-);
-```
-
-### Seeking to a specific position
-
-For replay or recovery scenarios:
-
-```sql
--- Replay from the beginning
-SELECT pgtrickle.seek_offset('shipping_service', 'public.order_totals', 0);
-
--- Skip ahead to the current tip
-SELECT pgtrickle.seek_offset(
-    'shipping_service', 'public.order_totals',
-    (SELECT MAX(id) FROM pgtrickle.outbox_order_totals)
-);
-```
-
----
-
-## Monitoring
-
-### Check outbox health
-
-```sql
-SELECT pgtrickle.outbox_status('public.order_totals');
-```
-
-Returns JSONB:
 ```json
 {
-  "enabled": true,
-  "stream_table": "public.order_totals",
-  "outbox_table": "pgtrickle.outbox_order_totals",
-  "row_count": 1247,
-  "oldest_row": "2025-04-20T10:00:00Z",
-  "newest_row": "2025-04-23T14:32:00Z",
-  "retention_hours": 24
+  "v": 1,
+  "refresh_id": "...",
+  "inserted": 12,
+  "deleted": 3,
+  "source": "public.order_totals"
 }
 ```
 
-### Consumer lag
+Headers include:
+
+```json
+{
+  "source": "public.order_totals",
+  "version": 1
+}
+```
+
+The payload reports counts, not full row data. Consumers that need row-level
+changes need a separate CDC feed; pg_trickle's attached outbox event does not
+include changed rows.
+
+---
+
+## Embedding Outbox
+
+Vector pipelines can tag events as embedding changes:
 
 ```sql
--- Per consumer group
-SELECT pgtrickle.consumer_lag('shipping_service', 'public.order_totals');
+SELECT pgtrickle.attach_embedding_outbox(
+    p_name          => 'public.product_embeddings',
+    p_vector_column => 'embedding'
+);
 ```
 
-Returns the number of outbox rows that the consumer group has not yet committed.
-A large or growing lag means the consumer is falling behind.
+Embedding events add `event_type = 'embedding_change'` and `vector_column` to
+the payload and headers, making downstream routing simpler.
 
-### Global outbox overview
+---
+
+## Detaching
 
 ```sql
-SELECT * FROM pgtrickle.pgt_outbox_config;
+SELECT pgtrickle.detach_outbox('public.order_totals', p_if_exists => true);
 ```
+
+Detaching removes only the row from `pgtrickle.pgt_outbox_config`. It does not
+drop pg_tide's outbox table or delete published messages. Use pg_tide's storage
+management APIs for that cleanup.
 
 ---
 
-## Catalog tables
+## Catalog
 
-| Table | Contents |
-|-------|---------|
-| `pgtrickle.pgt_outbox_config` | One row per enabled outbox: ST OID, outbox table name, retention hours |
-| `pgtrickle.pgt_consumer_groups` | One row per consumer group: name, stream table, created_at |
-| `pgtrickle.pgt_consumer_offsets` | Per-group committed offsets and lease state |
-| `pgtrickle.outbox_<st>` | Outbox header rows (auto-created per stream table) |
-| `pgtrickle.outbox_delta_rows_<st>` | Claim-check delta rows (auto-created per stream table) |
+`pgtrickle.pgt_outbox_config` stores one row per attached stream table:
 
----
-
-## Retention and cleanup
-
-Outbox rows are automatically deleted after `outbox_retention_hours` (default:
-24). Claim-check delta rows are removed when `commit_offset` is called or when
-the retention period expires.
-
-Configure retention per stream table at enable time:
-
-```sql
-SELECT pgtrickle.enable_outbox('public.order_totals', p_retention_hours => 48);
-```
-
-Or globally in `postgresql.conf`:
-
-```
-pg_trickle.outbox_retention_hours = 48
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| `stream_table_oid` | `oid` | Stream table OID |
+| `stream_table_name` | `text` | Qualified stream table name |
+| `tide_outbox_name` | `text` | pg_tide outbox name |
+| `embedding_vector_column` | `text` | Optional vector column for embedding events |
+| `created_at` | `timestamptz` | Attachment time |
 
 ---
 
-## Disabling the outbox
+## Troubleshooting
 
-```sql
-SELECT pgtrickle.disable_outbox('public.order_totals');
-```
-
-This drops the outbox table, delta-rows table, and latest view, and removes the
-catalog entry. Consumer groups must be dropped separately:
-
-```sql
-SELECT pgtrickle.drop_consumer_group('shipping_service', 'public.order_totals');
-```
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `attach_outbox() requires the pg_tide extension` | pg_tide is not installed in this database | Run `CREATE EXTENSION pg_tide;` |
+| `outbox already enabled` | The stream table already has a mapping | Use `detach_outbox()` first if you need to recreate it |
+| No events appear in pg_tide | Refreshes are empty, the stream table is suspended, or the outbox was detached | Check `pgtrickle.pgt_outbox_config`, `pgtrickle.pgt_status()`, and refresh history |
+| Old `enable_outbox()` examples fail | They refer to the pre-v0.46.0 pg_trickle API | Use `attach_outbox()` and pg_tide's current outbox API |
 
 ---
 
-## Recommended configuration
+## See Also
 
-| GUC | Recommended value | Notes |
-|-----|------------------|-------|
-| `pg_trickle.outbox_enabled` | `on` | Must be on for the outbox background worker to run |
-| `pg_trickle.outbox_retention_hours` | `24`–`72` | Balance storage cost vs. replay window |
-| `pg_trickle.outbox_drain_batch_size` | `500`–`2000` | Larger batches improve throughput |
-| `pg_trickle.outbox_inline_threshold_rows` | `500`–`2000` | Tune based on typical delta size |
-| `pg_trickle.outbox_skip_empty_delta` | `on` | Skip writing outbox rows when delta is empty |
-| `pg_trickle.consumer_cleanup_enabled` | `on` | Auto-remove dead consumer workers |
-| `pg_trickle.consumer_dead_threshold_hours` | `1` | Mark worker dead after 1 h of silence |
-
----
-
-## Anti-patterns
-
-**Do not poll without committing.** If your consumer processes messages but
-never calls `commit_offset`, the lag grows unboundedly and messages are
-replayed forever after a worker restart.
-
-**Do not use a single consumer group for independent services.** Each service
-that needs to process outbox events independently must have its own consumer
-group. Sharing a group means one service blocking the other.
-
-**Do not delete outbox rows manually.** Let the retention mechanism handle
-cleanup. Manual deletes can cause consumer group offsets to point to
-non-existent rows.
-
-**Do not enable the outbox on IMMEDIATE-mode stream tables.** The outbox
-requires DIFFERENTIAL or FULL refresh mode to detect which rows changed.
-
----
-
-## See also
-
-- [Transactional Inbox](INBOX.md) — receive events from external systems
-- [SQL Reference: Transactional Outbox](SQL_REFERENCE.md#transactional-outbox--consumer-groups-v0280)
-- [Configuration](CONFIGURATION.md#transactional-outbox-v0280)
-- [Pattern 7: Transactional Outbox](PATTERNS.md#pattern-7-transactional-outbox-v0280)
+- [SQL Reference](SQL_REFERENCE.md#pg_tide-outbox-integration)
+- [pg_tide + DuckLake tutorial](tutorial-pg-tide-ducklake-pipeline.md)
+- [Error Reference](ERRORS.md#outboxalreadyenabled)

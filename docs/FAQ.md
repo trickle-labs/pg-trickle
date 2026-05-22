@@ -72,8 +72,10 @@ dependency DAG and refreshes them in topological order automatically.
 
 ### 10. How does change data capture work?
 
-Lightweight row-level AFTER triggers capture every INSERT, UPDATE, and DELETE
-into per-table change buffers. If `wal_level = logical` is available,
+Trigger-based CDC captures every INSERT, UPDATE, and DELETE into per-table
+change buffers. Statement-level triggers are the default, with row-level
+triggers available via `pg_trickle.cdc_trigger_mode = 'row'`. If
+`wal_level = logical` is available,
 pg_trickle can automatically transition to WAL-based CDC for near-zero
 write-path overhead. [Full answer →](#change-data-capture-cdc)
 
@@ -97,9 +99,15 @@ Prometheus metrics endpoint, Grafana dashboard, and NOTIFY-based alerts.
 
 ### 14. What happens if a refresh fails?
 
-The stream table is marked SUSPENDED after exceeding the fuse threshold (default
-5 consecutive failures). Data in the change buffer is preserved. Use
-`pgtrickle.reset_fuse('my_st')` to resume after fixing the issue.
+The stream table is automatically suspended after `pg_trickle.max_consecutive_errors`
+consecutive failures (default **3**). Data already in the change buffer is
+preserved. After fixing the root cause, resume with:
+
+```sql
+ALTER STREAM TABLE my_st RESUME;
+```
+
+See [Stream Table Lifecycle](SQL_REFERENCE.md#stream-table-lifecycle) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for step-by-step guidance.
 [Full answer →](#troubleshooting)
 
 ### 15. Can I use pg_trickle with dbt?
@@ -159,7 +167,7 @@ auto-rewrite pipeline) that power the extension.
 
 ### What is pg_trickle?
 
-pg_trickle is a PostgreSQL 18 extension that implements **stream tables** — declarative, automatically-refreshing materialized views with **Differential View Maintenance (DVM)**. You define a SQL query and a refresh schedule; the extension handles change capture, delta computation, and incremental refresh automatically.
+pg_trickle is a PostgreSQL 18 extension that implements **stream tables** — declarative, automatically-refreshing materialized views with **Differential View Maintenance (DVM)**. You define a SQL query and a refresh schedule; the extension handles change capture, delta computation, and differential refresh automatically.
 
 It is inspired by the [DBSP](https://arxiv.org/abs/2203.16684) differential dataflow framework. See [DBSP_COMPARISON.md](research/DBSP_COMPARISON.md) for a detailed comparison.
 
@@ -179,7 +187,7 @@ pg_trickle's DVM engine implements IVM using differentiation rules for each SQL 
 | Feature | Materialized Views | Stream Tables |
 |---|---|---|
 | Refresh | Manual (`REFRESH MATERIALIZED VIEW`) | Automatic (scheduler) or manual |
-| Incremental refresh | Not supported natively | Built-in differential mode |
+| Differential refresh | Not supported natively | Built-in differential mode |
 | Change detection | None — always full recompute | CDC triggers track row-level changes |
 | Dependency ordering | None | DAG-aware topological refresh |
 | Monitoring | None | Built-in views, stats, NOTIFY alerts |
@@ -283,9 +291,9 @@ Backward compatibility with PostgreSQL 16–17 is planned for a future release (
 
 ### Does pg_trickle require `wal_level = logical`?
 
-**No.** By default, pg_trickle uses lightweight row-level triggers for change data capture instead of logical replication. This means you do not need to set `wal_level = logical`, configure `max_replication_slots`, or create publications.
+**No.** By default, pg_trickle starts with trigger-based CDC instead of logical replication. Statement-level triggers are used unless you explicitly set `pg_trickle.cdc_trigger_mode = 'row'`. This means you do not need to set `wal_level = logical`, configure `max_replication_slots`, or create publications.
 
-If you later enable the hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`), WAL-based capture becomes an option — but this is opt-in and not required for normal operation.
+With the default hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`), WAL-based capture becomes active only when `wal_level = logical` is available and the transition succeeds. It is not required for normal operation.
 
 ### Is pg_trickle production-ready?
 
@@ -427,7 +435,7 @@ Use **IMMEDIATE** when:
 | ✅ pg_ivm compatibility | Drop-in migration path for existing pg_ivm / IMMV users. |
 | ❌ Write amplification | Every DML statement on a base table also executes IVM trigger logic, adding latency to the original transaction. |
 | ❌ Serialized concurrent writes | An `ExclusiveLock` is taken on the stream table during maintenance, serializing writers. |
-| ❌ Limited SQL support | Window functions, recursive CTEs, `LATERAL` joins, scalar subqueries, and TopK (`ORDER BY … LIMIT`) are not supported — use `DIFFERENTIAL` instead. |
+| ❌ Limited SQL support | Window functions, `LATERAL` joins, scalar subqueries, and TopK (`ORDER BY … LIMIT`) are not supported — use `DIFFERENTIAL` instead. Recursive CTEs are supported with bounded semi-naive / DRed maintenance. |
 | ❌ Cascading limitations | Cascading IMMEDIATE stream tables work but may require manual refresh for deep chains. |
 | ❌ No throttling | The refresh cannot be delayed or rate-limited. |
 
@@ -926,7 +934,7 @@ For example, a stream table defined as `SELECT dept, AVG(salary) FROM employees 
 
 When a new employee is inserted, the refresh updates `__pgt_count += 1`, `__pgt_sum_x += new_salary`, and recomputes `avg`. No rescan of the source table is needed.
 
-### How does HAVING work with incremental refresh?
+### How does HAVING work with differential refresh?
 
 `HAVING` is fully supported in DIFFERENTIAL mode. The DVM engine tracks **threshold transitions** — groups entering or exiting the HAVING condition:
 
@@ -1208,7 +1216,9 @@ like backup/restore and buffer inspection.
 
 ### How does pg_trickle capture changes to source tables?
 
-pg_trickle installs `AFTER INSERT/UPDATE/DELETE` row-level PL/pgSQL triggers on each source table referenced by a stream table. Whenever a row in the source table is modified, the trigger writes a change record into a per-source buffer table in the `pgtrickle_changes` schema.
+pg_trickle installs **statement-level** `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` PL/pgSQL triggers on each source table referenced by a stream table (`pg_trickle.cdc_trigger_mode = 'statement'` is the default). Each trigger uses `REFERENCING NEW TABLE / OLD TABLE` transition tables so it fires once per statement and can batch all affected rows in one pass.
+
+For the step-by-step walkthrough, see [WHAT_HAPPENS_ON_INSERT.md](tutorials/WHAT_HAPPENS_ON_INSERT.md) and [ARCHITECTURE.md](ARCHITECTURE.md#change-data-capture).
 
 Each change record contains:
 - **Action** — `I` (insert), `U` (update), `D` (delete), or `T` (truncate marker)
@@ -1220,11 +1230,11 @@ The trigger fires within your transaction, so if you roll back, the change recor
 
 ### What is the overhead of CDC triggers?
 
-The per-row overhead is approximately **20–55 μs**, which covers the PL/pgSQL function dispatch, `row_to_json()` serialization, and the buffer table INSERT.
+With statement-level triggers (the default), the overhead is amortized across all rows in a statement. For a single-row INSERT the overhead is approximately **20–55 μs** (PL/pgSQL dispatch + transition table scan + buffer INSERT). For a bulk INSERT of N rows, the trigger fires once and writes N buffer rows in a single batched INSERT — dramatically lower per-row cost than the legacy row-level mode.
 
 At typical write rates (fewer than 1,000 writes per second per source table), this adds **less than 5% additional DML latency**. For most OLTP workloads, the overhead is negligible — a single network round-trip to the database is usually 10–100× more expensive.
 
-If you have very high-throughput source tables (>10K writes/sec), consider enabling the hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`) which can automatically transition to WAL-based capture for lower per-row overhead (~5–15 μs).
+If you have very high-throughput source tables (>10K writes/sec), consider enabling the hybrid CDC mode (`pg_trickle.cdc_mode = 'auto'`) which can automatically transition to WAL-based capture for near-zero write-path overhead.
 
 ### What happens when I `TRUNCATE` a source table?
 
@@ -1263,7 +1273,7 @@ JOIN pg_class c ON c.oid = d.source_relid;
 ```
 
 The `cdc_mode` column shows one of three values:
-- `TRIGGER` — changes are captured via row-level triggers (the default)
+- `TRIGGER` — changes are captured via trigger-based CDC (statement-level by default)
 - `TRANSITIONING` — the system is in the process of switching from triggers to WAL
 - `WAL` — changes are captured via logical replication
 
@@ -1325,7 +1335,7 @@ A trigger added between two refresh cycles will simply be picked up on the next 
 
 ### Why does pg_trickle use triggers instead of logical replication for initial CDC?
 
-pg_trickle always bootstraps CDC with row-level AFTER triggers because they provide **single-transaction atomicity** — the change record is written in the same transaction as the source DML, so: 
+pg_trickle always bootstraps CDC with triggers because they provide **single-transaction atomicity** — the change record is written in the same transaction as the source DML, so:
 
 1. **No commit-order ambiguity.** The change buffer always reflects committed data; rolled-back transactions never produce partial change records.
 2. **No replication slot management at creation time.** Logical replication requires creating and monitoring replication slots, which can bloat WAL if the subscriber falls behind. Trigger-based bootstrap avoids this complexity.
@@ -1367,7 +1377,7 @@ When `pg_trickle.cdc_mode = 'auto'`, pg_trickle monitors each source table's wri
 
 1. **Slot creation.** A logical replication slot is created for the source table's OID (e.g., `pg_trickle_slot_16384`).
 2. **Dual capture.** For a brief period, both triggers and WAL decoding capture changes. The system uses LSN comparison to deduplicate, ensuring no changes are lost or double-counted.
-3. **Trigger removal.** Once the WAL decoder has confirmed it is caught up (its confirmed LSN ≥ the frontier LSN), the row-level triggers are dropped and the source transitions fully to WAL mode.
+3. **Trigger removal.** Once the WAL decoder has confirmed it is caught up (its confirmed LSN ≥ the frontier LSN), the trigger-based CDC objects are dropped and the source transitions fully to WAL mode.
 
 The transition is tracked in `pgt_dependencies.cdc_mode` (values: `TRIGGER` → `TRANSITIONING` → `WAL`). If the transition times out (`pg_trickle.wal_transition_timeout`, default 5 minutes), it is rolled back and triggers are kept.
 
@@ -1685,7 +1695,7 @@ When the number of pending changes exceeds `pg_trickle.differential_max_change_r
 
 ### How many concurrent refreshes can run?
 
-By default (`parallel_refresh_mode = 'off'`) refreshes are processed **sequentially** within the scheduler's single background worker. This is safe and efficient for most deployments.
+By default (`parallel_refresh_mode = 'on'`) the scheduler can dispatch independent refresh units to dynamic background workers. Set `pg_trickle.parallel_refresh_mode = 'off'` when you want sequential refreshes within each per-database scheduler for a resource-constrained or diagnostic deployment.
 
 **True parallel refresh** is available via:
 
@@ -3121,7 +3131,7 @@ The differential refresh path executes the delta query as a **single SQL stateme
 
 ### Why are refreshes processed sequentially by default?
 
-The default (`parallel_refresh_mode = 'off'`) is sequential because it is simple, correct, and efficient for most workloads. Topological ordering guarantees upstream stream tables refresh before downstream ones with no coordination overhead.
+The current default (`parallel_refresh_mode = 'on'`) enables parallel refresh for independent execution units while preserving topological ordering. Set `parallel_refresh_mode = 'off'` for sequential refreshes when minimizing worker usage matters more than refresh throughput.
 
 **When to consider enabling parallel refresh:**
 

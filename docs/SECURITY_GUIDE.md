@@ -104,8 +104,8 @@ for a complete worked example.
 
 ## CDC triggers — SECURITY DEFINER vs INVOKER
 
-In trigger CDC mode, pg_trickle installs `AFTER` row-level triggers
-on every source table. These triggers run as **SECURITY DEFINER**
+In trigger CDC mode, pg_trickle installs `AFTER` triggers on every source table
+(statement-level by default, row-level if configured). These triggers run as **SECURITY DEFINER**
 under the role that owns the stream table — so they can write to
 `pgtrickle_changes.*` regardless of who issued the source-table
 write.

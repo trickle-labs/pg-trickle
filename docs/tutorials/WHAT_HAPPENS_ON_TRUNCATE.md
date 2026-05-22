@@ -1,8 +1,8 @@
 # What Happens When You TRUNCATE a Table?
 
-This tutorial explains what happens when a `TRUNCATE` statement hits a base table that is referenced by a stream table. Unlike INSERT, UPDATE, and DELETE — which are fully tracked by the CDC trigger — TRUNCATE is a special case that **bypasses row-level triggers entirely**. Understanding this gap is essential for operating pg_trickle correctly.
+This tutorial explains what happens when a `TRUNCATE` statement hits a base table that is referenced by a stream table. PostgreSQL does not provide per-row OLD records for TRUNCATE, so pg_trickle captures it with a statement-level marker and refreshes affected stream tables with a full recomputation.
 
-> **Prerequisite:** Read [WHAT_HAPPENS_ON_INSERT.md](WHAT_HAPPENS_ON_INSERT.md) first — it introduces the 7-phase lifecycle. This tutorial explains why TRUNCATE breaks that lifecycle and how to recover.
+> **Prerequisite:** Read [WHAT_HAPPENS_ON_INSERT.md](WHAT_HAPPENS_ON_INSERT.md) first — it introduces the 7-phase lifecycle. This tutorial explains why TRUNCATE takes a different path through that lifecycle.
 
 ## Setup
 

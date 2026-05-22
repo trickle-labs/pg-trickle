@@ -48,13 +48,14 @@ the source table has billions of rows.
 
 ## 3. Change Capture: The Change Buffer
 
-Before pg_trickle can compute `ΔV`, it needs to know `ΔT`. It captures
-changes using **row-level AFTER triggers** (the default) or **WAL decoding**.
+Before pg_trickle can compute `ΔV`, it needs to know `ΔT`. It captures changes
+using **trigger-based CDC** (statement-level triggers by default) or **WAL
+decoding**.
 
 Each source table gets a dedicated **change buffer** table:
-`pgtrickle_changes.changes_<source_table_oid>`. The trigger writes every
-inserted, updated, or deleted row into this buffer as part of the *same
-transaction* as the DML. This gives you:
+`pgtrickle_changes.changes_<source_table_oid>` or a stable-name equivalent. The
+trigger writes every inserted, updated, or deleted row into this buffer as part
+of the *same transaction* as the DML. This gives you:
 
 - **Atomicity**: A committed change is guaranteed to be in the buffer.
 - **No missed changes**: There is no window between commit and capture.

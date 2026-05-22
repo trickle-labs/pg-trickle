@@ -15,6 +15,7 @@ agent skills exist:
 1. **create-pull-request** — Safe PR creation with Unicode-correct body files
 2. **enrich-release-roadmap** — Roadmap enrichment across six quality pillars
 3. **implement-roadmap-version** — ✅ Created 2026-04-15 — Full implementation loop for a release milestone
+4. **improve-documentation** — ✅ Created 2026-05-22 — Thorough docs review: accuracy, links, gaps, consistency, duplication
 
 Many recurring development tasks are complex enough to benefit from codified
 agent skills — structured procedures that encode project-specific conventions

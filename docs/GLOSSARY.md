@@ -103,9 +103,10 @@ source table so pg_trickle knows what changed since the last refresh.
 pg_trickle has two CDC backends — see [CDC Modes](CDC_MODES.md).
 
 ### Trigger-based CDC
-The default backend. Lightweight `AFTER` row-level triggers on each source
-table write a single row to a *change buffer* per data change. Cost is
-roughly 2–15 µs per row, paid by the writing transaction.
+The default initial backend. Lightweight `AFTER` statement-level triggers with
+transition tables write changed rows to a per-source *change buffer* inside the
+writing transaction. Row-level triggers are available with
+`pg_trickle.cdc_trigger_mode = 'row'` for legacy or diagnostic use.
 
 ### WAL-based CDC
 The optional backend that uses PostgreSQL's logical replication to read

@@ -1,4 +1,7 @@
 # pgvector RAG Cookbook: Always-Fresh Embedding Pipelines with pg_trickle
+
+> **Status: Stable** — pgvector RAG pipelines using stream tables are production-ready.
+
 **Prerequisites:** PostgreSQL 18, `pg_trickle`, `pgvector` extension.
 
 ---

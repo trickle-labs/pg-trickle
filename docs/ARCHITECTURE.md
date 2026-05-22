@@ -162,14 +162,14 @@ erDiagram
 
 pg_trickle uses a **hybrid CDC** architecture that starts with triggers and optionally transitions to WAL-based (logical replication) capture for lower write-side overhead.
 
-#### Trigger Mode (default)
+#### Trigger Mode (initial path in `cdc_mode = 'auto'`)
 
-1. **Trigger Management** — Creates `AFTER INSERT OR UPDATE OR DELETE` row-level triggers (`pg_trickle_cdc_<oid>`) on each tracked source table. Each trigger fires a PL/pgSQL function (`pg_trickle_cdc_fn_<oid>()`) that writes changes to the buffer table.
+1. **Trigger Management** — Creates statement-level `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` triggers with transition tables on each tracked source table by default (`pg_trickle.cdc_trigger_mode = 'statement'`). Legacy row-level triggers are available with `pg_trickle.cdc_trigger_mode = 'row'`. Each trigger fires a PL/pgSQL function (`pg_trickle_cdc_fn_<stable_name>()`) that writes typed changes to the buffer table.
 2. **Change Buffering** — Decoded changes are written to per-source change buffer tables in the `pgtrickle_changes` schema. Each row captures the LSN (`pg_current_wal_lsn()`), transaction ID, action type (I/U/D), and the new/old row data as typed columns (`new_<col> TYPE`, `old_<col> TYPE`) — native PostgreSQL types, not JSONB.
 3. **Cleanup** — Consumed changes are deleted after each successful refresh via `delete_consumed_changes()`, bounded by the upper LSN to prevent unbounded scans.
 4. **Lifecycle** — Triggers and trigger functions are automatically created when a source table is first tracked and dropped when the last stream table referencing a source is removed.
 
-The trigger approach was chosen as the default for **transaction safety** (triggers can be created in the same transaction as DDL), **simplicity** (no slot management, no `wal_level = logical` requirement), and **immediate visibility** (changes are visible in buffer tables as soon as the source transaction commits).
+The trigger approach is the initial path in `cdc_mode = 'auto'` because it gives **transaction safety** (triggers can be created in the same transaction as DDL), **simplicity** (no slot management, no `wal_level = logical` requirement), and **immediate visibility** (changes are visible in buffer tables as soon as the source transaction commits).
 
 #### WAL Mode (optional, automatic transition)
 
@@ -413,11 +413,16 @@ Orchestrates the complete refresh cycle:
  └──────────────────────┘
 ```
 
-### 8. Background Worker & Scheduling (`src/scheduler.rs`)
+### 8. Background Worker & Scheduling (`src/scheduler/`)
 
 #### Registration & Lifecycle
 
-pg_trickle registers **one PostgreSQL background worker** — the *scheduler* — during `_PG_init()` (extension load). Because it is registered at startup, `pg_trickle` **must** appear in `shared_preload_libraries`, which requires a server restart.
+pg_trickle registers one static PostgreSQL background worker — the
+**launcher** — during `_PG_init()` (extension load). The launcher discovers
+databases that have pg_trickle installed and starts one dynamic scheduler
+worker per database. Because the launcher, shared memory, and GUCs are
+registered at startup, `pg_trickle` **must** appear in
+`shared_preload_libraries`, which requires a server restart.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -429,7 +434,7 @@ pg_trickle registers **one PostgreSQL background worker** — the *scheduler* �
 │  _PG_init()                                                      │
 │    ├─ Register GUCs (pg_trickle.enabled, scheduler_interval_ms …) │
 │    ├─ Register shared memory (PgTrickleSharedState, atomics)      │
-│    └─ BackgroundWorkerBuilder::new("pg_trickle scheduler")        │
+│    └─ BackgroundWorkerBuilder::new("pg_trickle launcher")         │
 │         .set_start_time(RecoveryFinished)                        │
 │         .set_restart_time(5s)       ← auto-restart on crash      │
 │         .load()                                                  │
@@ -437,11 +442,12 @@ pg_trickle registers **one PostgreSQL background worker** — the *scheduler* �
 │  After recovery finishes:                                        │
 │       │                                                          │
 │       ▼                                                          │
-│  pg_trickle_scheduler_main()         ← background worker starts   │
+│  pg_trickle_launcher_main()          ← launcher worker starts     │
 │    ├─ Attach SIGHUP + SIGTERM handlers                           │
 │    ├─ Connect to SPI (database = "postgres")                     │
-│    ├─ Crash recovery: mark stale RUNNING records as FAILED       │
-│    └─ Enter main loop ─────────────────────────┐                 │
+│    ├─ Scan pg_database for pg_trickle installs                    │
+│    ├─ Spawn missing per-database schedulers                       │
+│    └─ Enter discovery loop ───────────────────┐                  │
 │         │                                      │                 │
 │         ▼                                      │                 │
 │     wait_latch(scheduler_interval_ms)          │                 │
@@ -449,12 +455,18 @@ pg_trickle registers **one PostgreSQL background worker** — the *scheduler* �
 │     ┌───▼───────────────────────────────┐      │                 │
 │     │ SIGTERM? → log + break            │      │                 │
 │     │ pg_trickle.enabled = false? → skip │      │                 │
-│     │ Otherwise → scheduler tick        │      │                 │
+│     │ Otherwise → discovery tick        │      │                 │
 │     └───┬───────────────────────────────┘      │                 │
 │         │                                      │                 │
 │         └──────────── loop ────────────────────┘                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+Each per-database scheduler then connects to its target database, marks stale
+`RUNNING` refresh records as `FAILED`, and runs the normal scheduler tick loop
+for that database. The launcher automatically re-spawns schedulers that crash
+or exit, and databases without pg_trickle installed are skipped until the next
+discovery interval.
 
 Key lifecycle properties:
 
@@ -462,11 +474,11 @@ Key lifecycle properties:
 |---|---|
 | **Start condition** | After PostgreSQL recovery finishes (`RecoveryFinished`) |
 | **Auto-restart** | 5-second delay after an unexpected crash |
-| **Graceful shutdown** | Handles `SIGTERM` — breaks the main loop and exits cleanly |
-| **Config reload** | Handles `SIGHUP` — re-reads GUC values on the next latch wake |
-| **Crash recovery** | On startup, any `pgt_refresh_history` rows stuck in `RUNNING` status are marked `FAILED` (the transaction that wrote them was rolled back by PostgreSQL, but the status row may have been committed in a prior transaction) |
-| **Database** | Connects to the `postgres` database via SPI |
-| **Standby / replica** | On standby servers (`pg_is_in_recovery() = true`), the worker enters a sleep loop and does **not** attempt refreshes. Stream tables are still readable on standbys — they are regular heap tables replicated via physical streaming replication. After promotion the scheduler resumes automatically. See the [FAQ § Replication](FAQ.md#ec-21-22-23) for details on logical replication and subscriber limitations. |
+| **Graceful shutdown** | Launcher and schedulers handle `SIGTERM` — they break the loop and exit cleanly |
+| **Config reload** | Launcher and schedulers handle `SIGHUP` — they re-read GUC values on the next latch wake |
+| **Crash recovery** | Per-database schedulers mark any `pgt_refresh_history` rows stuck in `RUNNING` status as `FAILED` on startup |
+| **Database connections** | Launcher connects to `postgres`; each scheduler connects to its own database via SPI |
+| **Standby / replica** | On standby servers (`pg_is_in_recovery() = true`), the launcher sleeps and does **not** spawn refresh workers. Stream tables are still readable on standbys — they are regular heap tables replicated via physical streaming replication. After promotion the launcher resumes automatically. See the [FAQ § Replication](FAQ.md#ec-21-22-23) for details on logical replication and subscriber limitations. |
 
 #### Scheduler Tick
 
@@ -484,16 +496,20 @@ Each tick of the main loop performs the following steps inside a single transact
 6. **Slot health** — Check replication slot health and emit `NOTIFY` alerts.
 7. **Prune retry state** — Remove backoff entries for STs that no longer exist.
 
-#### Sequential Processing (Default)
+#### Sequential Processing (`parallel_refresh_mode = 'off'`)
 
-**By default (`parallel_refresh_mode = 'off`), the scheduler processes
-stream tables sequentially within a single background worker.** All STs
-are refreshed one at a time in topological order.
+When `parallel_refresh_mode = 'off'`, each per-database scheduler processes
+stream tables sequentially. All STs in that database are refreshed one at a
+time in topological order. Parallel refresh is the default in current releases;
+sequential mode is an explicit resource-constrained or diagnostic setting.
 `pg_trickle.max_concurrent_refreshes` (default 4) only prevents a manual
 `pgtrickle.refresh_stream_table()` call from overlapping with the
 scheduler on the *same* ST — it does not spawn additional workers.
 
-The PostgreSQL GUC `max_worker_processes` (default 8) sets the server-wide budget for *all* background workers (autovacuum, parallel query, logical replication, extensions). In sequential mode pg_trickle consumes **one** slot from that budget.
+The PostgreSQL GUC `max_worker_processes` (default 8) sets the server-wide
+budget for *all* background workers (autovacuum, parallel query, logical
+replication, extensions). In sequential mode pg_trickle consumes one launcher
+slot plus one scheduler slot per database with pg_trickle installed.
 
 #### Parallel Refresh (`parallel_refresh_mode = 'on'`)
 
@@ -675,21 +691,18 @@ The `pgtrickle.diamond_groups()` SQL function exposes detected groups for operat
 
 #### What Stays in pg_trickle
 
-- **`attach_outbox()` integration hook** — a lightweight hook that pg_tide calls
-  after each successful refresh cycle to publish the delta summary to pg_tide's
-  outbox table. pg_trickle itself never writes to the outbox; it only invokes
-  the hook.
-- **Change buffer subscription** — pg_trickle exposes the internal change buffer
-  (`pgtrickle_changes.changes_<oid>`) as a stable interface so pg_tide consumers
-  can subscribe to raw CDC events without going through the refresh engine.
+- **`attach_outbox()` integration hook** — registers a pg_tide outbox for a
+  stream table. After each non-empty refresh, pg_trickle calls
+  `tide.outbox_publish()` inside the same transaction to publish a delta
+  summary to pg_tide.
 
 #### What Lives in pg_tide
 
-- `enable_outbox()` / `poll_outbox()` — outbox provisioning and polling API.
+- `outbox_create()` / `poll_outbox()` — outbox provisioning and polling API.
 - Consumer groups and visibility lease management.
 - Claim-check mode for large payloads.
-- `create_inbox()` / `enable_inbox_ordering()` — inbox provisioning.
-- FNV-1a consistent hashing (`inbox_is_my_partition()`) for horizontal scaling.
+- `create_inbox()` / `enable_inbox_ordering()` — inbox provisioning (moved to **pg_tide** v0.46.0).
+- FNV-1a consistent hashing (`inbox_is_my_partition()`) for horizontal scaling (moved to **pg_tide** v0.46.0).
 - The `pgtrickle-relay` binary — forwards outbox rows to Kafka, NATS, SQS, and
   other transports.
 
@@ -708,20 +721,20 @@ Primary use cases: replica bootstrap, PITR alignment, and historical archiving.
 
 ### 16. Configuration (`src/config.rs`)
 
-Runtime behavior is controlled by a growing set of GUC (Grand Unified Configuration) variables. See [CONFIGURATION.md](CONFIGURATION.md) for the complete, current list.
+Runtime behavior is controlled by a growing set of GUC (Grand Unified Configuration) variables. See [GUC_CATALOG.md](GUC_CATALOG.md) for the exhaustive generated list and [CONFIGURATION.md](CONFIGURATION.md) for tuning guidance.
 
 | GUC | Default | Purpose |
 |---|---|---|
 | `pg_trickle.enabled` | `true` | Master on/off switch for the scheduler |
 | `pg_trickle.scheduler_interval_ms` | `1000` | Scheduler background worker wake interval (ms) |
-| `pg_trickle.min_schedule_seconds` | `60` | Minimum allowed `schedule` |
+| `pg_trickle.min_schedule_seconds` | `1` | Minimum allowed `schedule` |
 | `pg_trickle.max_consecutive_errors` | `3` | Errors before auto-suspending a ST |
 | `pg_trickle.change_buffer_schema` | `pgtrickle_changes` | Schema for change buffer tables |
 | `pg_trickle.max_concurrent_refreshes` | `4` | Maximum parallel refresh workers |
 | `pg_trickle.differential_max_change_ratio` | `0.15` | Change-to-table-size ratio above which DIFFERENTIAL falls back to FULL |
 | `pg_trickle.cleanup_use_truncate` | `true` | Use `TRUNCATE` instead of `DELETE` for change buffer cleanup when the entire buffer is consumed |
 | `pg_trickle.user_triggers` | `'auto'` | User-defined trigger handling: `auto` / `off` (`on` accepted as deprecated alias for `auto`) |
-| `pg_trickle.block_source_ddl` | `false` | Block column-affecting DDL on tracked source tables instead of reinit |
+| `pg_trickle.block_source_ddl` | `true` | Block column-affecting DDL on tracked source tables instead of reinit |
 | `pg_trickle.cdc_mode` | `'auto'` | CDC mechanism: `auto` / `trigger` / `wal` |
 | `pg_trickle.wal_transition_timeout` | `300` | Max seconds to wait for WAL decoder catch-up during transition |
 | `pg_trickle.slot_lag_warning_threshold_mb` | `100` | Warning threshold for WAL slot retention used by `slot_lag_warning` and `health_check()` |
@@ -741,16 +754,16 @@ Runtime behavior is controlled by a growing set of GUC (Grand Unified Configurat
            │
            ▼
  Hybrid CDC Layer:
-   ┌─────────────────────────────────────────────┐
-   │ TRIGGER mode: Row-Level AFTER Trigger        │
-   │   pg_trickle_cdc_fn_<oid>() → buffer table    │
-   │                                              │
-   │ WAL mode: Logical Replication Slot           │
-   │   wal_decoder bgworker → same buffer table   │
-   │                                              │
-   │ ST-to-ST: Refresh engine captures delta      │
-   │   → changes_pgt_<pgt_id> buffer table        │
-   └─────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────┐
+  │ TRIGGER mode: AFTER trigger-based CDC        │
+  │   pg_trickle_cdc_fn_<stable>() → buffer      │
+  │                                             │
+  │ WAL mode: Logical Replication Slot          │
+  │   wal_decoder bgworker → same buffer table  │
+  │                                             │
+  │ ST-to-ST: Refresh engine captures delta     │
+  │   → changes_pgt_<pgt_id> buffer table       │
+  └─────────────────────────────────────────────┘
            │
            ▼
  Change Buffer Table

@@ -87,6 +87,11 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [pgtrickle.pg\_stat\_stream\_tables](#pgtricklepg_stat_stream_tables)
   - [pgtrickle.quick\_health](#pgtricklequick_health)
   - [pgtrickle.pgt\_cdc\_status](#pgtricklepgt_cdc_status)
+- [Stream Table Lifecycle](#stream-table-lifecycle)
+  - [Status values](#status-values)
+  - [State transitions](#state-transitions)
+  - [Auto-suspend behaviour](#auto-suspend-behaviour)
+  - [Reinitialisation](#reinitialisation)
 - [Catalog Tables](#catalog-tables)
   - [pgtrickle.pgt\_stream\_tables](#pgtricklepgt_stream_tables)
   - [pgtrickle.pgt\_dependencies](#pgtricklepgt_dependencies)
@@ -94,6 +99,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [pgtrickle.pgt\_change\_tracking](#pgtricklepgt_change_tracking)
   - [pgtrickle.pgt\_source\_gates](#pgtricklepgt_source_gates)
   - [pgtrickle.pgt\_refresh\_groups](#pgtricklepgt_refresh_groups)
+- [Advanced and Diagnostic Functions](#advanced-and-diagnostic-functions)
 - [Delta SQL Profiling](#delta-sql-profiling-v0130)
   - [pgtrickle.explain\_delta](#pgtrickleexplain_delta)
   - [pgtrickle.dedup\_stats](#pgtricklededup_stats)
@@ -137,16 +143,25 @@ Create a new stream table.
 
 ```sql
 pgtrickle.create_stream_table(
-    name                  text,
-    query                 text,
-    schedule              text      DEFAULT 'calculated',
-    refresh_mode          text      DEFAULT 'AUTO',
-    initialize            bool      DEFAULT true,
-    diamond_consistency   text      DEFAULT NULL,
-    diamond_schedule_policy text    DEFAULT NULL,
-    cdc_mode              text      DEFAULT NULL,
-    append_only           bool      DEFAULT false,
-    pooler_compatibility_mode bool  DEFAULT false
+    name                      text,
+    query                     text,
+    schedule                  text      DEFAULT 'calculated',
+    refresh_mode              text      DEFAULT 'AUTO',
+    initialize                bool      DEFAULT true,
+    diamond_consistency       text      DEFAULT NULL,
+    diamond_schedule_policy   text      DEFAULT NULL,
+    cdc_mode                  text      DEFAULT NULL,
+    append_only               bool      DEFAULT false,
+    pooler_compatibility_mode bool      DEFAULT false,
+    partition_by              text      DEFAULT NULL,
+    max_differential_joins    integer   DEFAULT NULL,
+    max_delta_fraction        float8    DEFAULT NULL,
+    output_distribution_column text     DEFAULT NULL,
+    temporal                  bool      DEFAULT false,
+    storage_backend           text      DEFAULT NULL,
+    sink                      text      DEFAULT NULL,
+    ducklake_sink_path        text      DEFAULT NULL,
+    ducklake_sink_table_id    bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -164,6 +179,15 @@ pgtrickle.create_stream_table(
 | `cdc_mode` | `text` | `NULL` (use `pg_trickle.cdc_mode`) | Optional per-stream-table CDC override: `'auto'`, `'trigger'`, or `'wal'`. This affects all deferred TABLE sources of the stream table. |
 | `append_only` | `bool` | `false` | When `true`, differential refreshes use a fast INSERT path instead of MERGE. Skips DELETE/UPDATE/IS DISTINCT FROM checks. If a DELETE or Update is later detected in the change buffer, the flag is automatically reverted to `false`. Not compatible with `FULL`, `IMMEDIATE`, or keyless sources. |
 | `pooler_compatibility_mode` | `bool` | `false` | When `true`, the refresh engine uses inline SQL instead of `PREPARE`/`EXECUTE` and suppresses all `NOTIFY` emissions for this stream table. Enable this when the stream table is accessed through a transaction-mode connection pooler (e.g. PgBouncer). |
+| `partition_by` | `text` | `NULL` | Partition key column. When set, the storage table is created with `PARTITION BY RANGE (column)`. Only effective at creation time. |
+| `max_differential_joins` | `integer` | `NULL` (use global default) | Per-stream-table cap on the number of join combinations examined during differential refresh. Overrides `pg_trickle.max_differential_joins`. |
+| `max_delta_fraction` | `float8` | `NULL` (use global default) | Per-stream-table threshold (0.0–1.0) for the AUTO cost model. If the estimated delta-to-table-size ratio exceeds this fraction, AUTO falls back to FULL. Overrides `pg_trickle.differential_max_change_ratio`. |
+| `output_distribution_column` | `text` | `NULL` | Citus only: distribution column for the stream table storage table. Must be a column present in the query output. |
+| `temporal` | `bool` | `false` | When `true`, enables temporal IVM mode — the stream table tracks effective-time ranges and can answer as-of queries. |
+| `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
+| `sink` | `text` | `NULL` | DuckLake sink type. Pass `'ducklake'` to enable continuous Parquet export to an object store via DuckLake. |
+| `ducklake_sink_path` | `text` | `NULL` | Object-store path for DuckLake Parquet output (e.g. `'s3://my-bucket/my_table/'`). Required when `sink => 'ducklake'`. |
+| `ducklake_sink_table_id` | `bigint` | `NULL` | DuckLake catalog table ID. When set, registers the stream table in the DuckLake catalog at the given ID. |
 
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
@@ -719,16 +743,25 @@ The existing definition is never modified.
 
 ```sql
 pgtrickle.create_stream_table_if_not_exists(
-    name                    text,
-    query                   text,
-    schedule                text      DEFAULT 'calculated',
-    refresh_mode            text      DEFAULT 'AUTO',
-    initialize              bool      DEFAULT true,
-    diamond_consistency     text      DEFAULT NULL,
-    diamond_schedule_policy text      DEFAULT NULL,
-    cdc_mode                text      DEFAULT NULL,
-    append_only             bool      DEFAULT false,
-    pooler_compatibility_mode bool    DEFAULT false
+    name                      text,
+    query                     text,
+    schedule                  text      DEFAULT 'calculated',
+    refresh_mode              text      DEFAULT 'AUTO',
+    initialize                bool      DEFAULT true,
+    diamond_consistency       text      DEFAULT NULL,
+    diamond_schedule_policy   text      DEFAULT NULL,
+    cdc_mode                  text      DEFAULT NULL,
+    append_only               bool      DEFAULT false,
+    pooler_compatibility_mode bool      DEFAULT false,
+    partition_by              text      DEFAULT NULL,
+    max_differential_joins    integer   DEFAULT NULL,
+    max_delta_fraction        float8    DEFAULT NULL,
+    output_distribution_column text     DEFAULT NULL,
+    temporal                  bool      DEFAULT false,
+    storage_backend           text      DEFAULT NULL,
+    sink                      text      DEFAULT NULL,
+    ducklake_sink_path        text      DEFAULT NULL,
+    ducklake_sink_table_id    bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -758,20 +791,26 @@ Create a stream table if it does not exist, or replace the existing one if the d
 
 ```sql
 pgtrickle.create_or_replace_stream_table(
-    name                    text,
-    query                   text,
-    schedule                text      DEFAULT 'calculated',
-    refresh_mode            text      DEFAULT 'AUTO',
-    initialize              bool      DEFAULT true,
-    diamond_consistency     text      DEFAULT NULL,
-    diamond_schedule_policy text      DEFAULT NULL,
-    cdc_mode                text      DEFAULT NULL,
-    append_only             bool      DEFAULT false,
-    pooler_compatibility_mode bool    DEFAULT false
+    name                      text,
+    query                     text,
+    schedule                  text      DEFAULT 'calculated',
+    refresh_mode              text      DEFAULT 'AUTO',
+    initialize                bool      DEFAULT true,
+    diamond_consistency       text      DEFAULT NULL,
+    diamond_schedule_policy   text      DEFAULT NULL,
+    cdc_mode                  text      DEFAULT NULL,
+    append_only               bool      DEFAULT false,
+    pooler_compatibility_mode bool      DEFAULT false,
+    partition_by              text      DEFAULT NULL,
+    max_differential_joins    integer   DEFAULT NULL,
+    max_delta_fraction        float8    DEFAULT NULL,
+    output_distribution_column text     DEFAULT NULL,
+    temporal                  bool      DEFAULT false,
+    storage_backend           text      DEFAULT NULL
 ) → void
 ```
 
-**Parameters:** Same as [`create_stream_table`](#pgtricklecreate_stream_table).
+**Parameters:** Same as [`create_stream_table`](#pgtricklecreate_stream_table) (DuckLake `sink`, `ducklake_sink_path`, and `ducklake_sink_table_id` are not available via this function — use `create_stream_table` or `alter_stream_table` instead).
 
 **Behavior:**
 
@@ -779,7 +818,7 @@ pgtrickle.create_or_replace_stream_table(
 |---|---|
 | Stream table does **not** exist | **Create** — identical to `create_stream_table(...)` |
 | Stream table exists, query **and** all config identical | **No-op** — logs INFO, returns immediately |
-| Stream table exists, query identical but config differs | **Alter config** — delegates to `alter_stream_table(...)` for schedule, refresh_mode, diamond settings, cdc_mode, append_only, pooler_compatibility_mode |
+| Stream table exists, query identical but config differs | **Alter config** — delegates to `alter_stream_table(...)` for schedule, refresh_mode, diamond settings, cdc_mode, append_only, pooler_compatibility_mode, partition_by, max_differential_joins, max_delta_fraction, output_distribution_column, temporal, storage_backend |
 | Stream table exists, query differs | **Replace query** — in-place ALTER QUERY migration plus any config changes; a full refresh is applied |
 
 The `initialize` parameter is honoured on **create** only. On replace, the stream table is always repopulated via a full refresh.
@@ -864,17 +903,28 @@ Alter properties of an existing stream table.
 
 ```sql
 pgtrickle.alter_stream_table(
-    name                  text,
-    query                 text      DEFAULT NULL,
-    schedule              text      DEFAULT NULL,
-    refresh_mode          text      DEFAULT NULL,
-    status                text      DEFAULT NULL,
-    diamond_consistency   text      DEFAULT NULL,
-    diamond_schedule_policy text    DEFAULT NULL,
-    cdc_mode              text      DEFAULT NULL,
-    append_only           bool      DEFAULT NULL,
-    pooler_compatibility_mode bool  DEFAULT NULL,
-    tier                  text      DEFAULT NULL
+    name                       text,
+    query                      text      DEFAULT NULL,
+    schedule                   text      DEFAULT NULL,
+    refresh_mode               text      DEFAULT NULL,
+    status                     text      DEFAULT NULL,
+    diamond_consistency        text      DEFAULT NULL,
+    diamond_schedule_policy    text      DEFAULT NULL,
+    cdc_mode                   text      DEFAULT NULL,
+    append_only                bool      DEFAULT NULL,
+    pooler_compatibility_mode  bool      DEFAULT NULL,
+    tier                       text      DEFAULT NULL,
+    fuse                       text      DEFAULT NULL,
+    fuse_ceiling               bigint    DEFAULT NULL,
+    fuse_sensitivity           integer   DEFAULT NULL,
+    partition_by               text      DEFAULT NULL,
+    max_differential_joins     integer   DEFAULT NULL,
+    max_delta_fraction         float8    DEFAULT NULL,
+    post_refresh_action        text      DEFAULT NULL,
+    reindex_drift_threshold    float8    DEFAULT NULL,
+    sink                       text      DEFAULT NULL,
+    ducklake_sink_path         text      DEFAULT NULL,
+    ducklake_sink_table_id     bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -893,6 +943,17 @@ pgtrickle.alter_stream_table(
 | `append_only` | `bool` | `NULL` | Enable or disable the append-only INSERT fast path. Pass `NULL` to leave unchanged. When `true`, rejected for FULL, IMMEDIATE, or keyless source stream tables. |
 | `pooler_compatibility_mode` | `bool` | `NULL` | Enable or disable pooler-safe mode. When `true`, prepared statements are bypassed and NOTIFY emissions are suppressed. Pass `NULL` to leave unchanged. |
 | `tier` | `text` | `NULL` | Refresh tier for tiered scheduling (`'hot'`, `'warm'`, `'cold'`, or `'frozen'`). Only effective when `pg_trickle.tiered_scheduling` GUC is enabled. Hot (1×), Warm (2×), Cold (10×), Frozen (skip). Pass `NULL` to leave unchanged. |
+| `fuse` | `text` | `NULL` | Fuse (circuit breaker) mode: `'off'`, `'on'`, or `'auto'`. `'auto'` blows the fuse when FULL would be cheaper than DIFFERENTIAL. Pass `NULL` to leave unchanged. |
+| `fuse_ceiling` | `bigint` | `NULL` | Change-count threshold that triggers the fuse. `NULL` uses the global `pg_trickle.fuse_default_ceiling`. |
+| `fuse_sensitivity` | `integer` | `NULL` | Number of consecutive over-ceiling cycles before the fuse blows. `NULL` means 1 (blow immediately). |
+| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. |
+| `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
+| `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
+| `post_refresh_action` | `text` | `NULL` | Action to take after each successful refresh: `'reindex'` (rebuild indexes when drift exceeds threshold) or `NULL` (no action). |
+| `reindex_drift_threshold` | `float8` | `NULL` | Index drift ratio threshold (0.0–1.0) for `post_refresh_action = 'reindex'`. Pass `NULL` to leave unchanged. |
+| `sink` | `text` | `NULL` | DuckLake sink type. Pass `'ducklake'` to enable, `'none'` to detach. Pass `NULL` to leave unchanged. |
+| `ducklake_sink_path` | `text` | `NULL` | Object-store path for DuckLake Parquet output. Pass `NULL` to leave unchanged. |
+| `ducklake_sink_table_id` | `bigint` | `NULL` | DuckLake catalog table ID. Pass `NULL` to leave unchanged. |
 
 If you switch a stream table to `refresh_mode => 'IMMEDIATE'` while the
 cluster-wide `pg_trickle.cdc_mode` GUC is set to `'wal'`, pg_trickle logs an
@@ -2945,6 +3006,95 @@ events when a source moves between CDC modes (payload is a JSON object with
 
 ---
 
+## Stream Table Lifecycle
+
+Each stream table progresses through well-defined states stored in
+`pgtrickle.pgt_stream_tables.status`.  Understanding the lifecycle helps with
+troubleshooting, automation, and capacity planning.
+
+### Status values
+
+| Status | Meaning | Refreshes? | User operations allowed |
+|--------|---------|-----------|------------------------|
+| `INITIALIZING` | The stream table has been registered but has not yet completed its first full refresh. `is_populated` is `false`. | First refresh is in progress or queued | `ALTER STREAM TABLE`, `DROP STREAM TABLE`, `refresh_stream_table()` |
+| `ACTIVE` | Normal operating state. The scheduler picks it up on each cycle. `is_populated` is `true`. | Yes — DIFFERENTIAL or FULL per schedule | All operations |
+| `SUSPENDED` | Paused — either by a user call (`ALTER STREAM TABLE … SUSPEND`) or automatically after too many consecutive errors. | No | `ALTER STREAM TABLE … RESUME`, `DROP STREAM TABLE` |
+| `ERROR` | An unrecoverable error was detected during refresh. The stream table is suspended and cannot auto-resume. | No | Inspect `pgt_refresh_history`, fix the root cause, then `ALTER STREAM TABLE … RESUME` |
+
+### State transitions
+
+```
+                      ┌─────────────┐
+        create_stream_table()       │ INITIALIZING │
+                      └──────┬──────┘
+                             │  first successful refresh
+                             ▼
+                        ┌────────┐
+            resume ───► │ ACTIVE │ ◄─── resume
+                        └───┬────┘
+                            │ consecutive_errors ≥ max_consecutive_errors
+                            │   OR user suspension
+                            ▼
+                       ┌───────────┐
+                       │ SUSPENDED │
+                       └───────────┘
+                            │ unrecoverable internal error
+                            ▼
+                         ┌───────┐
+                         │ ERROR │
+                         └───────┘
+```
+
+### Key catalog fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_populated` | `bool` | `false` until the first successful refresh completes. Queries against an unpopulated stream table return 0 rows. |
+| `consecutive_errors` | `int` | Number of consecutive refresh failures. Reset to 0 on success. When this reaches `pg_trickle.max_consecutive_errors` (default `3`), the stream table is automatically suspended. |
+| `needs_reinit` | `bool` | Set to `true` when a DDL change to a source table is detected (column added/removed/renamed). The next refresh will run as a full reinitialisation rather than an incremental update. |
+| `data_timestamp` | `timestamptz` | Timestamp bound to which the stream table's data is current. Advances after each successful refresh. |
+| `last_refresh_at` | `timestamptz` | Wall-clock time of the last completed refresh attempt (success or failure). |
+
+### Auto-suspend behaviour
+
+When `consecutive_errors` reaches `pg_trickle.max_consecutive_errors` (default
+`3`), pg_trickle suspends the stream table automatically and logs a `WARNING`.
+To resume:
+
+```sql
+-- Inspect the error
+SELECT pgt_name, status, consecutive_errors, last_refresh_error
+FROM pgtrickle.pgt_stream_tables
+WHERE status = 'SUSPENDED';
+
+-- Fix the root cause, then resume
+ALTER STREAM TABLE my_summary RESUME;
+```
+
+Use `pg_trickle.max_consecutive_errors = 0` to disable auto-suspension (not
+recommended for production).
+
+### Reinitialisation
+
+When `needs_reinit = true`, the next scheduled or manual refresh performs a full
+reinit: the storage table is truncated, `is_populated` is reset to `false`, and
+a full refresh runs. After completion `needs_reinit` is reset to `false` and
+`is_populated` returns to `true`.
+
+Trigger `needs_reinit` manually with:
+
+```sql
+UPDATE pgtrickle.pgt_stream_tables
+SET needs_reinit = true
+WHERE pgt_name = 'my_view';
+-- Then trigger a refresh:
+SELECT pgtrickle.refresh_stream_table('my_view');
+```
+
+See also: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [FAQ.md](FAQ.md).
+
+---
+
 ## Catalog Tables
 
 ### pgtrickle.pgt_stream_tables
@@ -3714,6 +3864,39 @@ FROM pgtrickle.validate_query(
 
 ---
 
+## Advanced and Diagnostic Functions
+
+The following functions are useful for operational troubleshooting, query
+validation, and introspection. They are not needed for day-to-day streaming
+table management.
+
+| Function | Returns | Purpose |
+|----------|---------|---------|
+| `pgtrickle.preflight()` | `text` (JSON) | Pre-deployment health check — returns one JSON object per check with `pass`, `check`, `detail`. |
+| `pgtrickle.validate_query(sql text)` | `SetOf row` | Validates whether a SQL query is IVM-compatible. Returns analysis results including unsupported patterns. |
+| `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
+| `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
+| `pgtrickle.stream_table_lineage(st_name text)` | `SetOf row` | Returns the lineage graph for a single stream table — direct and transitive source tables with metadata. |
+| `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / `hold`), and a human-readable explanation. |
+| `pgtrickle.cluster_worker_summary()` | `SetOf row` | Shows active background workers across all pg_trickle-enabled databases (requires `pg_monitor`). |
+| `pgtrickle.drain()` | — | Initiates a graceful drain: the scheduler finishes in-flight refreshes then stops. Useful before `pg_upgrade` or a rolling restart. |
+| `pgtrickle.is_drained()` | `bool` | Returns `true` when all scheduler workers have completed their current cycle and are waiting. |
+| `pgtrickle.st_refresh_stats()` | `SetOf row` | Per-stream-table refresh metrics: counts, durations, error rates. Primary monitoring function. |
+| `pgtrickle.pgtrickle_refresh_stats()` | `SetOf row` | Cluster-wide aggregate refresh statistics. |
+| `pgtrickle.recommend_refresh_mode(st_name text)` | `jsonb` | Returns a recommendation (`DIFFERENTIAL` / `FULL`) for a specific stream table based on current change rate. |
+| `pgtrickle.recommend_schedule(st_name text)` | `jsonb` | Returns a schedule recommendation with confidence score and reasoning. |
+| `pgtrickle.schedule_recommendations()` | `SetOf row` | Bulk version of `recommend_schedule()` — one row per registered stream table. |
+| `pgtrickle.setup_self_monitoring()` | — | Creates the five self-monitoring stream tables that track pg_trickle's own performance. |
+| `pgtrickle.self_monitoring_status()` | `SetOf row` | Shows whether each self-monitoring stream table exists, its status, and last refresh time. |
+| `pgtrickle.teardown_self_monitoring()` | — | Drops all self-monitoring stream tables. Safe to call even if some are missing. |
+
+See also:
+- [Delta SQL Profiling](#delta-sql-profiling-v0130) — `explain_delta`, `dedup_stats`, `shared_buffer_stats`
+- [Stream Table Lifecycle](#stream-table-lifecycle) — status values and transitions
+- [GUC_CATALOG.md](GUC_CATALOG.md) — complete parameter reference
+
+---
+
 ## Delta SQL Profiling
 
 ### `pgtrickle.explain_delta(st_name text, format text DEFAULT 'text')`
@@ -4294,619 +4477,129 @@ SELECT pgtrickle.drop_snapshot('pgtrickle.orders_agg_replica_init');
 
 ---
 
-## Transactional Outbox & Consumer Groups
+## pg_tide Outbox Integration
 
-The outbox pattern lets you reliably publish stream table deltas to external
-consumers — even if the consumer is temporarily unavailable. Each refresh
-writes a header row to a dedicated outbox table. Consumers poll for new rows,
-process them, and commit their offset. The pattern provides:
-
-- **At-least-once delivery** with explicit offset commits
-- **Kafka-style consumer groups** for parallel consumption with independent offsets
-- **Visibility leases** to prevent duplicate processing within a group
-- **Claim-check delivery** for large deltas (automatic when delta exceeds a
-  configurable row threshold)
-- **Consumer lag metrics** (`consumer_lag()`) for monitoring
+The full transactional outbox, inbox, consumer-group, and relay APIs live in
+the standalone [`pg_tide`](https://github.com/trickle-labs/pg-tide) extension.
+Current pg_trickle exposes only the stream-table integration hooks that connect
+a refreshed stream table to a pg_tide outbox.
 
 ### Quickstart
 
 ```sql
--- 1. Enable the outbox on a stream table
-SELECT pgtrickle.enable_outbox('public.orders_agg');
+-- 1. Install pg_tide in the same database.
+CREATE EXTENSION pg_tide;
 
--- 2. Create a consumer group
-SELECT pgtrickle.create_consumer_group('my_group', 'public.orders_agg');
+-- 2. Create a stream table.
+SELECT pgtrickle.create_stream_table(
+    name     => 'public.orders_agg',
+    query    => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
+    schedule => '5s'
+);
 
--- 3. Poll for new messages (returns rows since last committed offset)
-SELECT * FROM pgtrickle.poll_outbox('my_group', 'worker-1');
-
--- 4. Process the rows, then commit the highest offset you processed
-SELECT pgtrickle.commit_offset('my_group', 'worker-1', 42);
+-- 3. Attach a pg_tide outbox to the stream table.
+SELECT pgtrickle.attach_outbox('public.orders_agg');
 ```
 
-### `pgtrickle.enable_outbox(name, retention_hours)`
+After attachment, each non-empty refresh publishes a compact delta-summary
+event to pg_tide inside the same transaction as the stream-table update.
+Payloads have the current pg_trickle envelope:
 
-Enable the outbox pattern for a stream table.
+```json
+{
+  "v": 1,
+  "refresh_id": "...",
+  "inserted": 12,
+  "deleted": 3,
+  "source": "public.orders_agg"
+}
+```
+
+Use pg_tide's own SQL API to poll, relay, retain, and manage consumers. The old
+pg_trickle functions `enable_outbox`, `disable_outbox`, `poll_outbox`,
+`commit_offset`, `create_consumer_group`, and `create_inbox` are not part of the
+current pg_trickle SQL API.
+
+### `pgtrickle.attach_outbox(name, retention_hours, inline_threshold_rows)`
+
+Attach a pg_tide outbox to a stream table.
 
 ```sql
-pgtrickle.enable_outbox(
-    name            TEXT,       -- stream table name
-    retention_hours INT DEFAULT 24  -- how long to keep outbox rows
+pgtrickle.attach_outbox(
+    p_name                  TEXT,
+    p_retention_hours       INT DEFAULT 24,
+    p_inline_threshold_rows INT DEFAULT 10000
 ) → void
 ```
 
-Creates an outbox table `pgtrickle.pgt_outbox_<st>` and a convenience view
-`pgtrickle.pgt_outbox_latest_<st>`. Records configuration in
-`pgtrickle.pgt_outbox_config`.
-
-> **Restriction:** Not compatible with `IMMEDIATE` refresh mode — use
-> `SCHEDULED` or `AUTO` instead.
-
-### `pgtrickle.disable_outbox(name, if_exists)`
-
-Disable the outbox pattern and drop the associated outbox table.
+The function checks stream-table ownership, verifies that `pg_tide` is
+installed, calls `tide.outbox_create(text, integer, integer)`, and records the
+mapping in `pgtrickle.pgt_outbox_config`.
 
 ```sql
-pgtrickle.disable_outbox(
-    name      TEXT,
-    if_exists BOOLEAN DEFAULT false
-) → void
-```
-
-### `pgtrickle.outbox_status(name)`
-
-Return a JSONB summary of outbox state for a stream table.
-
-```sql
-pgtrickle.outbox_status(name TEXT) → JSONB
-```
-
-Returns: `enabled`, `outbox_table`, `retention_hours`, `pending_rows`,
-`oldest_row_age`, `consumer_groups`.
-
-### `pgtrickle.outbox_rows_consumed(stream_table, outbox_id)`
-
-Mark an outbox row as consumed and release its claim-check rows (if any).
-
-```sql
-pgtrickle.outbox_rows_consumed(
-    stream_table TEXT,
-    outbox_id    BIGINT
-) → void
-```
-
-Use this when consuming outbox rows **without** a consumer group. For
-consumer-group mode, use `commit_offset()` instead.
-
-**Example:**
-```sql
--- Simple (non-group) consumer: fetch latest, process, release
-SELECT outbox_id, payload
-FROM pgtrickle.pgt_outbox_latest_orders_agg
-LIMIT 10;
-
--- After successful processing, release the outbox row:
-SELECT pgtrickle.outbox_rows_consumed('public.orders_agg', 77);
-```
-
-### Consumer Groups
-
-Consumer groups give independent consumers their own offset pointer into the
-outbox. Multiple consumers in the same group share a single offset (competing
-consumers); multiple groups each get the full message stream.
-
-#### `pgtrickle.create_consumer_group(name, outbox, auto_offset_reset)`
-
-```sql
-pgtrickle.create_consumer_group(
-    name              TEXT,
-    outbox            TEXT,
-    auto_offset_reset TEXT DEFAULT 'latest'  -- 'latest' | 'earliest'
-) → void
-```
-
-`auto_offset_reset = 'latest'` means a new group starts consuming from the
-newest row. Use `'earliest'` to replay from the beginning.
-
-#### `pgtrickle.drop_consumer_group(name, if_exists)`
-
-```sql
-pgtrickle.drop_consumer_group(
-    name      TEXT,
-    if_exists BOOLEAN DEFAULT false
-) → void
-```
-
-Drops the group and all its offsets and leases.
-
-**Example:**
-```sql
--- Remove a consumer group (error if not found)
-SELECT pgtrickle.drop_consumer_group('retired-group');
-
--- Idempotent removal
-SELECT pgtrickle.drop_consumer_group('retired-group', if_exists => true);
-```
-
-#### `pgtrickle.poll_outbox(group, consumer, batch_size, visibility_seconds)`
-
-Fetch the next batch of unprocessed messages for a consumer.
-
-```sql
-pgtrickle.poll_outbox(
-    group              TEXT,
-    consumer           TEXT,
-    batch_size         INT DEFAULT 100,
-    visibility_seconds INT DEFAULT 30
-) → SETOF record(
-    outbox_id      BIGINT,
-    pgt_id         UUID,
-    created_at     TIMESTAMPTZ,
-    inserted_count BIGINT,
-    deleted_count  BIGINT,
-    is_claim_check BOOLEAN,
-    payload        JSONB
-)
-```
-
-`poll_outbox` grants a **visibility lease** for `visibility_seconds`. The
-consumer must call `commit_offset()` or `extend_lease()` before the lease
-expires, otherwise the rows become visible again to other consumers.
-
-When `is_claim_check = true`, the `payload` is `NULL` and the actual delta
-rows are in a separate table (call `outbox_rows_consumed()` to release them
-after processing).
-
-**Example:**
-```sql
--- Fetch up to 50 messages with a 60-second visibility window
-SELECT outbox_id, inserted_count, deleted_count, payload
-FROM pgtrickle.poll_outbox(
-    'analytics-group',
-    'worker-1',
-    batch_size         => 50,
-    visibility_seconds => 60
+SELECT pgtrickle.attach_outbox(
+    p_name                  => 'public.orders_agg',
+    p_retention_hours       => 48,
+    p_inline_threshold_rows => 10000
 );
 ```
 
-#### `pgtrickle.commit_offset(group, consumer, last_offset)`
+### `pgtrickle.detach_outbox(name, if_exists)`
 
-Commit the highest outbox offset the consumer has successfully processed.
+Remove the pg_trickle-to-pg_tide mapping for a stream table.
 
 ```sql
-pgtrickle.commit_offset(
-    group       TEXT,
-    consumer    TEXT,
-    last_offset BIGINT
+pgtrickle.detach_outbox(
+    p_name      TEXT,
+    p_if_exists BOOLEAN DEFAULT false
 ) → void
 ```
 
-**Example:**
+`detach_outbox()` does not drop the pg_tide outbox table or delete delivered
+messages. Use pg_tide's drop/retention APIs for outbox storage cleanup.
+
 ```sql
--- After successfully processing messages up through offset 142:
-SELECT pgtrickle.commit_offset('analytics-group', 'worker-1', 142);
+SELECT pgtrickle.detach_outbox('public.orders_agg', p_if_exists => true);
 ```
 
-#### `pgtrickle.extend_lease(group, consumer, extension_seconds)`
+### `pgtrickle.attach_embedding_outbox(name, vector_column, retention_hours, inline_threshold_rows)`
 
-Extend the visibility lease when processing takes longer than expected.
+Attach a pg_tide outbox and mark its events as embedding-change events.
 
 ```sql
-pgtrickle.extend_lease(
-    group             TEXT,
-    consumer          TEXT,
-    extension_seconds INT DEFAULT 30
+pgtrickle.attach_embedding_outbox(
+    p_name                  TEXT,
+    p_vector_column         TEXT,
+    p_retention_hours       INT DEFAULT 24,
+    p_inline_threshold_rows INT DEFAULT 10000
 ) → void
 ```
 
-**Example:**
-```sql
--- Extend the lease by 2 minutes when a large batch takes longer than expected
-SELECT pgtrickle.extend_lease('analytics-group', 'worker-1', extension_seconds => 120);
-```
-
-#### `pgtrickle.seek_offset(group, consumer, new_offset)`
-
-Jump to a specific offset for replay or recovery.
+Embedding outbox events include `event_type = 'embedding_change'` and the
+configured vector-column name in the pg_tide headers and payload.
 
 ```sql
-pgtrickle.seek_offset(
-    group      TEXT,
-    consumer   TEXT,
-    new_offset BIGINT
-) → void
+SELECT pgtrickle.attach_embedding_outbox(
+    p_name          => 'public.product_embeddings',
+    p_vector_column => 'embedding'
+);
 ```
 
-**Example:**
-```sql
--- Rewind consumer to replay from offset 100 (disaster recovery)
-SELECT pgtrickle.seek_offset('analytics-group', 'worker-1', 100);
-
--- Fast-forward past known-bad messages to offset 500
-SELECT pgtrickle.seek_offset('analytics-group', 'worker-1', 500);
-```
-
-#### `pgtrickle.consumer_heartbeat(group, consumer)`
-
-Signal that a consumer is still alive. Prevents the consumer from being marked
-as dead (controlled by `pg_trickle.consumer_dead_threshold_hours`).
-
-```sql
-pgtrickle.consumer_heartbeat(
-    group    TEXT,
-    consumer TEXT
-) → void
-```
-
-**Example:**
-```sql
--- Call periodically from a long-running consumer to stay alive
-SELECT pgtrickle.consumer_heartbeat('analytics-group', 'worker-1');
-```
-
-#### `pgtrickle.consumer_lag(group)`
-
-Return per-consumer lag metrics for a consumer group.
-
-```sql
-pgtrickle.consumer_lag(group TEXT) → SETOF record(
-    consumer         TEXT,
-    committed_offset BIGINT,
-    latest_offset    BIGINT,
-    lag              BIGINT,
-    last_seen        TIMESTAMPTZ
-)
-```
-
-**Example:**
-```sql
--- Monitor lag for all consumers in a group
-SELECT consumer, lag, last_seen
-FROM pgtrickle.consumer_lag('analytics-group')
-ORDER BY lag DESC;
-
--- Alert if any consumer is more than 1000 messages behind
-SELECT consumer, lag
-FROM pgtrickle.consumer_lag('analytics-group')
-WHERE lag > 1000;
-```
-
-### Outbox Catalog Tables
+### Outbox Catalog Table
 
 #### `pgtrickle.pgt_outbox_config`
 
-Maps stream tables to their `pg_tide` outbox names. Populated by
-`attach_outbox()`; one row per stream table with an outbox enabled.
+Maps stream tables to their pg_tide outbox names. Populated by
+`attach_outbox()` and `attach_embedding_outbox()`; one row per stream table
+with an attached outbox.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `stream_table_oid` | `OID` | PostgreSQL OID of the stream table (PRIMARY KEY) |
 | `stream_table_name` | `TEXT` | Qualified name (`schema.table`) of the stream table |
-| `tide_outbox_name` | `TEXT` | Name of the corresponding `pg_tide` outbox |
+| `tide_outbox_name` | `TEXT` | Name of the corresponding pg_tide outbox |
+| `embedding_vector_column` | `TEXT` | Optional vector column used by embedding outbox events |
 | `created_at` | `TIMESTAMPTZ` | When the outbox was attached |
-
-#### `pgtrickle.pgt_consumer_groups`
-
-Named consumer groups that track consumption progress on an outbox.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `group_name` | `TEXT` | Consumer group name (PRIMARY KEY) |
-| `outbox_name` | `TEXT` | Name of the outbox being consumed |
-| `auto_offset_reset` | `TEXT` | Starting position for new groups: `'latest'` or `'earliest'` |
-| `created_at` | `TIMESTAMPTZ` | When the group was created |
-
-#### `pgtrickle.pgt_consumer_offsets`
-
-Per-consumer committed offsets and heartbeat tracking within a group.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `group_name` | `TEXT` | Consumer group (FK → `pgt_consumer_groups`) |
-| `consumer_id` | `TEXT` | Consumer identifier within the group |
-| `committed_offset` | `BIGINT` | Highest outbox offset successfully committed |
-| `last_committed_at` | `TIMESTAMPTZ` | When the last commit occurred |
-| `last_heartbeat_at` | `TIMESTAMPTZ` | Last heartbeat signal timestamp |
-
-Primary key: `(group_name, consumer_id)`
-
-#### `pgtrickle.pgt_consumer_leases`
-
-Visibility leases for in-flight outbox message batches (prevents duplicate delivery).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `group_name` | `TEXT` | Consumer group (FK → `pgt_consumer_offsets`) |
-| `consumer_id` | `TEXT` | Consumer holding the lease |
-| `batch_start` | `BIGINT` | First offset in the leased batch |
-| `batch_end` | `BIGINT` | Last offset in the leased batch |
-| `lease_expires` | `TIMESTAMPTZ` | Lease expiry time; expired leases become visible again |
-
-Primary key: `(group_name, consumer_id)`
-
----
-
-## Transactional Inbox
-
-The inbox pattern provides a reliable, idempotent message receiver inside
-PostgreSQL. Incoming events are written to an inbox table; pg_trickle
-automatically creates stream tables that give you views of pending messages,
-dead-letter messages, and statistics — all updated incrementally.
-
-### What gets created
-
-When you call `create_inbox('orders_inbox', ...)`, pg_trickle creates:
-
-| Table / View | Purpose |
-|---|---|
-| `pgtrickle.orders_inbox` | The raw inbox table (one row per event) |
-| `orders_inbox_pending` stream table | Events with `processed_at IS NULL` and `retry_count < max_retries` |
-| `orders_inbox_dlq` stream table | Dead-letter events (`retry_count >= max_retries`) |
-| `orders_inbox_stats` stream table | Event counts grouped by `event_type` |
-
-### `pgtrickle.create_inbox(name, ...)`
-
-Create a new transactional inbox with its associated stream tables.
-
-```sql
-pgtrickle.create_inbox(
-    name             TEXT,
-    schema           TEXT    DEFAULT 'pgtrickle',
-    max_retries      INT     DEFAULT 3,
-    with_dead_letter BOOLEAN DEFAULT true,
-    with_stats       BOOLEAN DEFAULT true,
-    schedule_seconds INT     DEFAULT 5
-) → void
-```
-
-```sql
-SELECT pgtrickle.create_inbox('orders_inbox');
--- Creates: pgtrickle.orders_inbox, orders_inbox_pending, orders_inbox_dlq, orders_inbox_stats
-```
-
-### `pgtrickle.drop_inbox(name, if_exists, cascade)`
-
-Drop an inbox and all associated stream tables.
-
-```sql
-pgtrickle.drop_inbox(
-    name      TEXT,
-    if_exists BOOLEAN DEFAULT false,
-    cascade   BOOLEAN DEFAULT false
-) → void
-```
-
-### `pgtrickle.enable_inbox_tracking(name, table_ref, ...)`
-
-Bring-your-own-table (BYOT) mode: register an existing table as an inbox
-without creating a new one.
-
-```sql
-pgtrickle.enable_inbox_tracking(
-    name             TEXT,
-    table_ref        TEXT,            -- fully-qualified existing table
-    max_retries      INT     DEFAULT 3,
-    with_dead_letter BOOLEAN DEFAULT true,
-    with_stats       BOOLEAN DEFAULT true,
-    schedule_seconds INT     DEFAULT 5
-) → void
-```
-
-### `pgtrickle.inbox_health(name)`
-
-Return a JSONB health summary for an inbox.
-
-```sql
-pgtrickle.inbox_health(name TEXT) → JSONB
-```
-
-Returns: `inbox_name`, `pending_count`, `dlq_count`, `processed_24h`,
-`oldest_pending_age`, `stream_table_statuses`.
-
-### `pgtrickle.inbox_status(name)`
-
-Return a tabular status summary for one or all inboxes.
-
-```sql
-pgtrickle.inbox_status(
-    name TEXT DEFAULT NULL  -- NULL = all inboxes
-) → SETOF record(
-    inbox_name   TEXT,
-    pending      BIGINT,
-    dlq          BIGINT,
-    max_retries  INT,
-    created_at   TIMESTAMPTZ
-)
-```
-
-### `pgtrickle.replay_inbox_messages(name, event_ids)`
-
-Reset specific messages back to pending state for re-processing.
-
-```sql
-pgtrickle.replay_inbox_messages(
-    name      TEXT,
-    event_ids TEXT[]  -- list of event_id values to replay
-) → BIGINT            -- number of messages reset
-```
-
-**Example:**
-```sql
--- Replay two specific messages that failed processing
-SELECT pgtrickle.replay_inbox_messages(
-    'orders_inbox',
-    ARRAY['evt-001', 'evt-002']
-);
--- Returns: 2
-
--- Replay all dead-letter messages for manual retry
-SELECT pgtrickle.replay_inbox_messages(
-    'orders_inbox',
-    ARRAY(SELECT event_id FROM orders_inbox_dlq)
-);
-```
-
-### Per-Aggregate Ordering (INBOX-B1)
-
-By default, multiple workers can process inbox messages concurrently. If
-messages for the same aggregate must be processed in order, enable per-aggregate
-ordering:
-
-#### `pgtrickle.enable_inbox_ordering(inbox, aggregate_id_col, seq_col)`
-
-```sql
-pgtrickle.enable_inbox_ordering(
-    inbox            TEXT,
-    aggregate_id_col TEXT,  -- column that identifies the aggregate (e.g. 'customer_id')
-    seq_col          TEXT   -- monotonic sequence column (e.g. 'event_sequence')
-) → void
-```
-
-Creates a `next_<inbox>` stream table that surfaces only the lowest-sequence
-unprocessed message per aggregate. Workers consume from `next_<inbox>` to
-avoid concurrent processing of the same aggregate.
-
-#### `pgtrickle.disable_inbox_ordering(inbox, if_exists)`
-
-```sql
-pgtrickle.disable_inbox_ordering(inbox TEXT, if_exists BOOLEAN DEFAULT false) → void
-```
-
-### Priority Tiers (INBOX-B2)
-
-#### `pgtrickle.enable_inbox_priority(inbox, priority_col, tiers)`
-
-Register a priority column for cost-model–aware scheduling.
-
-```sql
-pgtrickle.enable_inbox_priority(
-    inbox        TEXT,
-    priority_col TEXT,    -- column name that holds the priority value
-    tiers        INT DEFAULT 3
-) → void
-```
-
-#### `pgtrickle.disable_inbox_priority(inbox, if_exists)`
-
-```sql
-pgtrickle.disable_inbox_priority(inbox TEXT, if_exists BOOLEAN DEFAULT false) → void
-```
-
-### Sequence Gap Detection (INBOX-B3)
-
-#### `pgtrickle.inbox_ordering_gaps(inbox_name)`
-
-Detect gaps in the per-aggregate sequence — useful for identifying lost or
-out-of-order messages.
-
-```sql
-pgtrickle.inbox_ordering_gaps(inbox_name TEXT) → SETOF record(
-    aggregate_id TEXT,
-    expected_seq BIGINT,
-    actual_seq   BIGINT,
-    gap_size     BIGINT
-)
-```
-
-**Example:**
-```sql
--- Find any ordering gaps (missing events) across all aggregates
-SELECT aggregate_id, expected_seq, actual_seq, gap_size
-FROM pgtrickle.inbox_ordering_gaps('orders_inbox')
-ORDER BY gap_size DESC;
-
--- Alert if any gap is larger than 1
-DO $$
-DECLARE gap RECORD;
-BEGIN
-    FOR gap IN
-        SELECT * FROM pgtrickle.inbox_ordering_gaps('orders_inbox')
-        WHERE gap_size > 1
-    LOOP
-        RAISE WARNING 'Sequence gap for aggregate %: expected %, got % (gap=%)'
-            USING DETAIL = gap.aggregate_id || ' seq ' || gap.expected_seq;
-    END LOOP;
-END;
-$$;
-```
-
-### Consistent-Hash Partitioning (INBOX-B4)
-
-#### `pgtrickle.inbox_is_my_partition(aggregate_id, worker_id, total_workers)`
-
-Distribute inbox processing across multiple workers without external
-coordination. Returns `true` when this worker should process messages for the
-given aggregate.
-
-```sql
-pgtrickle.inbox_is_my_partition(
-    aggregate_id  TEXT,
-    worker_id     INT,   -- 0-based worker index
-    total_workers INT
-) → BOOLEAN
-```
-
-Uses FNV-1a consistent hashing so the same aggregate always routes to the same
-worker, preventing concurrent processing.
-
-```sql
--- Worker 2 of 4 processes only its assigned aggregates:
-SELECT * FROM orders_inbox_pending
-WHERE pgtrickle.inbox_is_my_partition(customer_id::text, 2, 4);
-```
-
-### Inbox Catalog Tables
-
-#### `pgtrickle.pgt_inbox_config`
-
-Catalog of named transactional inbox configurations.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `inbox_name` | `TEXT` | Inbox name (PRIMARY KEY) |
-| `inbox_schema` | `TEXT` | Schema where the inbox table is created (default: `pgtrickle`) |
-| `max_retries` | `INT` | Maximum retry attempts before a message moves to DLQ (default: 3) |
-| `schedule` | `TEXT` | Refresh schedule for associated stream tables (default: `'1s'`) |
-| `with_dead_letter` | `BOOL` | Whether a dead-letter-queue stream table is created (default: `true`) |
-| `with_stats` | `BOOL` | Whether a stats stream table is created (default: `true`) |
-| `retention_hours` | `INT` | How long processed messages are retained (default: 72) |
-| `id_column` | `TEXT` | Column name for the unique event ID (default: `'event_id'`) |
-| `processed_at_column` | `TEXT` | Column name for the processing timestamp (default: `'processed_at'`) |
-| `retry_count_column` | `TEXT` | Column name for the retry counter (default: `'retry_count'`) |
-| `error_column` | `TEXT` | Column name for the last error message (default: `'error'`) |
-| `received_at_column` | `TEXT` | Column name for the receipt timestamp (default: `'received_at'`) |
-| `event_type_column` | `TEXT` | Column name for the event type (default: `'event_type'`) |
-| `is_managed` | `BOOL` | Whether pg_trickle manages the inbox lifecycle (default: `true`) |
-| `created_at` | `TIMESTAMPTZ` | When the inbox was created |
-
-#### `pgtrickle.pgt_inbox_ordering_config`
-
-Per-inbox ordering configuration for per-aggregate sequenced processing (INBOX-B1).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `inbox_name` | `TEXT` | Inbox name (PK, FK → `pgt_inbox_config`) |
-| `aggregate_id_col` | `TEXT` | Column that identifies the aggregate (e.g., `'customer_id'`) |
-| `sequence_num_col` | `TEXT` | Monotonic sequence column (e.g., `'event_sequence'`) |
-| `created_at` | `TIMESTAMPTZ` | When ordering was enabled |
-
-#### `pgtrickle.pgt_inbox_priority_config`
-
-Priority tier configuration for inbox message scheduling (INBOX-B2).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `inbox_name` | `TEXT` | Inbox name (PK, FK → `pgt_inbox_config`) |
-| `priority_col` | `TEXT` | Column that holds the priority value |
-| `tiers` | `JSONB` | Priority tier definitions (threshold → schedule mapping) |
-| `created_at` | `TIMESTAMPTZ` | When priority was enabled |
-
----
-
-> **Note:** The relay pipeline SQL API (`set_relay_outbox`, `set_relay_inbox`,
-> `enable_relay`, `disable_relay`, `delete_relay`, `get_relay_config`,
-> `list_relay_configs`) was moved to the
-> [`pg_tide`](https://github.com/trickle-labs/pg-tide) extension.
 
 ---
 

@@ -1,0 +1,201 @@
+# check_docs_truth_allowlist.yml
+# Exemptions from the check_docs_truth.py drift gate.
+#
+# Each entry has:
+#   pattern: exact token to exempt  (or prefix: for prefix match)
+#   reason:  why this is OK
+#   files:   optional list of files where the exemption applies (absent = all files)
+#
+# Review this list before merging PRs that ADD new entries.
+# Remove entries whose underlying issue has been fixed.
+
+# ---------------------------------------------------------------------------
+# Per-stream-table catalog settings documented as GUC-like in older prose
+# (they live in pgtrickle.pgt_stream_tables, not in postgresql.conf)
+# ---------------------------------------------------------------------------
+guc_exemptions:
+  - pattern: pg_trickle.diamond_consistency
+    reason: >
+      Diamond consistency is a per-stream-table setting stored in
+      pgtrickle.pgt_stream_tables.diamond_consistency, not a GUC.
+      Older docs refer to it as a GUC-like option. Fix gradually.
+
+  - pattern: pg_trickle.diamond_schedule_policy
+    reason: >
+      Diamond schedule policy is a per-stream-table setting in
+      pgtrickle.pgt_stream_tables.diamond_schedule_policy, not a GUC.
+
+  - pattern: pg_trickle.control
+    reason: >
+      Used in RELEASE.md and SECURITY_MODEL.md as a general namespace
+      reference ("pg_trickle control plane"), not a real GUC.
+
+  - pattern: pg_trickle.pgt_refresh_history
+    reason: >
+      BACKUP_AND_RESTORE.md uses this as a table name reference
+      (pgtrickle.pgt_refresh_history), not a GUC. Allowed as table context.
+
+  - pattern: pg_trickle.event_driven_wake
+    reason: >
+      Planned future GUC for event-driven wake-up scheduling.
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.wake_debounce_ms
+    reason: >
+      Planned future GUC for event-driven wake debounce.
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.max_shared_memory_kb
+    reason: >
+      Planned future GUC for tuning shared memory budget.
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.adaptive_full_threshold
+    reason: >
+      Stale GUC name — the actual GUC is pg_trickle.differential_max_change_ratio.
+      Kept in allowlist to prevent CI noise; fix doc text gradually.
+
+  - pattern: pg_trickle.sla_scheduling
+    reason: >
+      Stale GUC name — the actual GUC is pg_trickle.sla_window_hours and related.
+      Kept in allowlist to prevent CI noise.
+
+  - pattern: pg_trickle.max_differential_joins
+    reason: >
+      Planned future GUC for capping join fanout in DIFFERENTIAL mode.
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.differential_change_ratio_threshold
+    reason: >
+      Stale GUC name — the actual GUC is pg_trickle.differential_max_change_ratio.
+      Kept in allowlist to prevent CI noise.
+
+  - pattern: pg_trickle.fixed_point_max_iterations
+    reason: >
+      Planned future GUC for SCC fixpoint iteration limit.
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.citus_slot_max_lag_bytes
+    reason: >
+      Planned future GUC for Citus CDC lag cap.
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.enable_refresh_broker
+    reason: >
+      Planned future GUC for multi-database refresh broker (research doc).
+      Not yet implemented in src/config.rs.
+
+  - pattern: pg_trickle.self_monitoring_auto_apply
+    reason: >
+      EXISTS in src/config.rs but is registered as a custom enum GUC and the
+      parser currently misses it. Filed to fix gen_catalogs.py custom enum
+      parsing.
+
+# ---------------------------------------------------------------------------
+# SQL functions planned / partially implemented / renamed
+# ---------------------------------------------------------------------------
+sql_function_exemptions:
+  - pattern: pgtrickle.reinitialize
+    reason: >
+      Renamed to pgtrickle.refresh_stream_table(..., mode=>'full').
+      Kept in allowlist; doc updates being scheduled.
+
+  - pattern: pgtrickle.force_refresh
+    reason: >
+      Renamed to pgtrickle.refresh_stream_table(...) with mode override.
+      Tutorial files still use the old name; update scheduled.
+
+  - pattern: pgtrickle.refresh
+    reason: >
+      Short-form alias for pgtrickle.refresh_stream_table().
+      RUNBOOK_DRAIN.md uses the short form; updating.
+
+  - pattern: pgtrickle.refresh_history
+    reason: >
+      Renamed to pgtrickle.get_refresh_history(). PERF_CHEATSHEET uses
+      the old name; fix scheduled.
+
+  - pattern: pgtrickle.suspend_stream_table
+    reason: >
+      Planned API — stream table suspension via SQL function (currently
+      only via ALTER STREAM TABLE). Not yet implemented.
+
+  - pattern: pgtrickle.reinitialize_stream_table
+    reason: >
+      Alias planned for pgtrickle.refresh_stream_table() reinit mode.
+      Not yet implemented; doc uses anticipated API.
+
+  - pattern: pgtrickle.cluster_health_check
+    reason: >
+      Planned multi-database health check function. Not yet implemented.
+
+  - pattern: pgtrickle.diagnose_stream_table
+    reason: >
+      Planned diagnostic function. Use pgtrickle.explain_stream_table()
+      in the meantime.
+
+  - pattern: pgtrickle.canary_begin
+    reason: >
+      Planned canary-refresh workflow API. Not yet implemented.
+
+  - pattern: pgtrickle.canary_diff
+    reason: >
+      Planned canary-refresh workflow API. Not yet implemented.
+
+  - pattern: pgtrickle.canary_promote
+    reason: >
+      Planned canary-refresh workflow API. Not yet implemented.
+
+  - pattern: pgtrickle.pause_all
+    reason: >
+      Old name for pgtrickle.pause_scheduler(). Docs use old name;
+      update scheduled.
+
+  - pattern: pgtrickle.resume_all
+    reason: >
+      Old name for pgtrickle.resume_scheduler(). Docs use old name;
+      update scheduled.
+
+  - pattern: pgtrickle.refresh_if_stale
+    reason: >
+      Planned convenience API. Not yet implemented.
+
+  - pattern: pgtrickle.list_stream_tables
+    reason: >
+      Alias planned for SELECT * FROM pgtrickle.pgt_status().
+      Not yet implemented.
+
+  - pattern: pgtrickle.recommend_refresh_mode_all
+    reason: >
+      Planned bulk variant of pgtrickle.recommend_refresh_mode().
+      Not yet implemented.
+
+  - pattern: pgtrickle.set_stream_table_tier
+    reason: >
+      Planned convenience alias for SLA tier management.
+      Use pgtrickle.bulk_alter_stream_tables() in the meantime.
+
+  - pattern: pgtrickle.clear_watermark
+    reason: >
+      Planned watermark reset function. Not yet implemented.
+
+  - pattern: pgtrickle.set_watermark
+    reason: >
+      Old name for pgtrickle.advance_watermark(). Docs use old name.
+
+  - pattern: pgtrickle.order_totals
+    reason: >
+      Tutorial user-defined stream table example (not a pg_trickle API).
+      The tutorial creates a stream table in the user schema using the
+      schema name 'pgtrickle' as an example; the checker cannot distinguish
+      user stream tables from extension functions.
+
+  - pattern: pgtrickle.create_inbox
+    reason: >
+      Moved to pg_tide v0.46.0. INBOX.md explicitly documents the
+      migration and intentionally references the old name for context.
+
+  - pattern: pgtrickle.shared_buffer_stats
+    reason: >
+      PRE_DEPLOYMENT.md line 167 references this; may need function
+      name verification. Filed to cross-check.

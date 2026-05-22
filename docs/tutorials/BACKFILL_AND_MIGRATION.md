@@ -185,7 +185,7 @@ If problems arise after cutover:
 
 ```sql
 -- 1. Stop the stream table from refreshing
-SELECT pgtrickle.pause_stream_table('orders_summary_st');
+SELECT pgtrickle.pause_scheduler(ARRAY['orders_summary_st']);
 
 -- 2. Revert consumers to the old materialized view
 --    (if you renamed it in Step 4)

@@ -3,7 +3,7 @@
 **dbt-pgtrickle** is the official dbt adapter for pg_trickle. It lets
 you define stream tables as dbt models using standard `{{ config() }}`
 blocks, manage them through `dbt run` / `dbt build`, and run
-incremental refreshes as part of your dbt pipeline.
+differential refreshes as part of your dbt pipeline.
 
 ## Quick example
 

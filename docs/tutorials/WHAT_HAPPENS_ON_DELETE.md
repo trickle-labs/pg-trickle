@@ -459,7 +459,7 @@ After MERGE, bob's rows vanish from the stream table.
 DELETE FROM orders WHERE amount < 50.00;
 ```
 
-This deletes multiple rows across potentially multiple groups. The trigger fires once per row (it's a `FOR EACH ROW` trigger), writing one change buffer entry per deleted row:
+This deletes multiple rows across potentially multiple groups. The statement-level trigger fires once for the entire DELETE, reading all deleted rows from the `__pgt_old` transition table and writing one change buffer entry per deleted row:
 
 ```
 change_id | action | old_cust | old_amt | pk_hash

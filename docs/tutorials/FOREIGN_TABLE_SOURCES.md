@@ -206,7 +206,7 @@ SELECT * FROM inventory_dashboard;
 
 | Constraint | Details |
 |------------|---------|
-| **No trigger CDC** | Foreign tables don't support PostgreSQL row-level triggers. |
+| **No trigger CDC** | Foreign tables do not support any PostgreSQL triggers (neither row-level nor statement-level). |
 | **No WAL CDC** | Foreign tables don't generate local WAL entries. |
 | **Network latency** | Each refresh cycle queries the remote database. Schedule accordingly. |
 | **Remote availability** | If the remote database is down, the refresh will fail (logged in `pgt_refresh_history`). The stream table retains its last successful data. |
@@ -217,9 +217,7 @@ SELECT * FROM inventory_dashboard;
 
 **Q: Why does my foreign table stream table only work in FULL mode?**
 
-Foreign tables cannot install row-level triggers (the mechanism pg_trickle uses
-for trigger-based CDC) and don't generate local WAL records (used by WAL-based
-CDC). FULL refresh works because it simply re-executes the remote query.
+Foreign tables cannot have any PostgreSQL triggers installed (neither row-level nor statement-level), so trigger-based CDC is impossible for foreign tables. They also don't generate local WAL records (used by WAL-based CDC). FULL refresh works because it simply re-executes the remote query.
 Enable `pg_trickle.foreign_table_polling` if you need differential-style
 change detection.
 

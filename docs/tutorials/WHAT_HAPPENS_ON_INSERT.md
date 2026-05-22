@@ -43,9 +43,19 @@ INSERT INTO orders (customer, amount) VALUES ('alice', 49.99);
 
 ### What happens inside PostgreSQL
 
-When `create_stream_table()` was called, pg_trickle installed an **AFTER INSERT OR UPDATE OR DELETE** trigger on the `orders` table. This trigger fires automatically — the user's `INSERT` statement triggers it transparently.
+When `create_stream_table()` was called, pg_trickle installed separate **statement-level AFTER triggers** for INSERT, UPDATE, and DELETE on the `orders` table — each with `REFERENCING` transition tables so the trigger function can read all affected rows at once. For INSERT, the trigger is:
 
-The trigger function (`pgtrickle_changes.pg_trickle_cdc_fn_<oid>()`) executes inside the same transaction as the INSERT and writes a single row into the **change buffer table**:
+```sql
+CREATE TRIGGER pg_trickle_cdc_ins_<name>
+  AFTER INSERT ON orders
+  REFERENCING NEW TABLE AS __pgt_new
+  FOR EACH STATEMENT EXECUTE FUNCTION
+  pgtrickle_changes.pg_trickle_cdc_ins_fn_<name>();
+```
+
+This trigger fires automatically — the user's `INSERT` statement triggers it transparently.
+
+The trigger function (`pgtrickle_changes.pg_trickle_cdc_ins_fn_<name>()`) executes inside the same transaction as the INSERT. It reads all inserted rows from the `__pgt_new` transition table and writes one change buffer row per inserted row into the **change buffer table**:
 
 ```
 pgtrickle_changes.changes_16384    (where 16384 = orders table OID)
