@@ -163,11 +163,11 @@ async fn test_permanent_error_sets_error_status_and_alter_clears() {
         "Scheduler should not attempt further refreshes on ERROR table"
     );
 
-    // ── Fix: use resume_stream_table to clear error, then alter the query ──
-    db.execute("SELECT pgtrickle.resume_stream_table('err1e_st')")
-        .await;
-
-    // ALTER to a valid query (without the dropped 'extra' column)
+    // ── Fix: ALTER directly on the ERROR table with the corrected query ──
+    // Do NOT call resume_stream_table first — the scheduler skips ERROR tables,
+    // so issuing alter_stream_table directly is race-free. alter_stream_table
+    // transitions through SUSPENDED → (full refresh) → ACTIVE and now also
+    // clears any previous error state (ERR-1f), so no separate resume is needed.
     db.alter_st("err1e_st", "query => 'SELECT id, val FROM err1e_src'")
         .await;
 
