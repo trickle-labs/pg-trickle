@@ -390,8 +390,8 @@ pub fn register_ducklake_data_file(
             "INSERT INTO {cat_schema_ref}.ducklake_table_stats (table_id, row_count, file_count) \
              VALUES ($1, $2, 1) \
              ON CONFLICT (table_id) DO UPDATE \
-             SET row_count = {cat_schema_ref}.ducklake_table_stats.row_count + EXCLUDED.row_count, \
-                 file_count = {cat_schema_ref}.ducklake_table_stats.file_count + 1"
+             SET row_count = ducklake_table_stats.row_count + EXCLUDED.row_count, \
+                 file_count = ducklake_table_stats.file_count + 1"
         );
         client
             .update(&stats_sql, None, &[table_id.into(), row_count.into()])
