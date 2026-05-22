@@ -19,6 +19,7 @@ incrementally — only the rows that actually changed are recomputed.
 ## Prerequisites
 
 - PostgreSQL 18 with pg_trickle installed (see [Installation](../installation.md))
+- `max_worker_processes ≥ 32` in `postgresql.conf` (default 8 is often exhausted; see [Installation](../installation.md))
 - `psql` or any SQL client
 
 ---

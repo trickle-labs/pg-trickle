@@ -4,6 +4,18 @@ The shortest possible introduction to pg_trickle. By the end of this
 page you will have created a self-maintaining table, watched it update
 in real time, and dropped it again — without leaving `psql`.
 
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| PostgreSQL 18.x | Required — pg_trickle targets PG 18 |
+| `shared_preload_libraries = 'pg_trickle'` | Must **restart** PostgreSQL after changing (reload is not sufficient) |
+| `max_worker_processes ≥ 32` | The default of 8 is exhausted quickly with multiple databases; silent scheduler failures result |
+| `psql` (or any SQL client) | |
+
+> Already using the Docker image or playground? All of these are pre-configured — skip straight to **Step 2**.
+> For a full install guide see [Installation](installation.md).
+
 > Prefer to **see it first**? Run the
 > [playground](PLAYGROUND.md) (`cd playground && docker compose up -d`)
 > for a pre-loaded environment, or pull the prebuilt image:

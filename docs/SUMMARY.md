@@ -41,8 +41,7 @@
 
 # Operate
 
-- [Pre-Deployment Checklist](PRE_DEPLOYMENT.md)
-- [Scaling Guide](SCALING.md)
+- [Pre-Deployment Checklist](PRE_DEPLOYMENT.md)- [Operator Cheat Sheet](OPS_CHEATSHEET.md)- [Scaling Guide](SCALING.md)
 - [Capacity Planning](CAPACITY_PLANNING.md)
 - [Multi-Database Deployments](MULTI_DATABASE.md)
 - [Backup and Restore](BACKUP_AND_RESTORE.md)
@@ -158,6 +157,8 @@
 - [DVM Operators](DVM_OPERATORS.md)
 - [DVM Rewrite Rules](DVM_REWRITE_RULES.md)
 - [Benchmarks](BENCHMARK.md)
+- [Dependency Policy](DEPENDENCIES.md)
+- [Documentation Ownership](DOCS_OWNERSHIP.md)
 
 # Research
 

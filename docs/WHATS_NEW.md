@@ -7,6 +7,187 @@ exhaustive list of changes per release, see the
 
 ---
 
+## v0.70 — Scheduler, validator & security hardening (May 2026)
+
+The 0.70.0 sprint targets correctness, performance, and observability
+without adding new SQL surface.
+
+- **LATERAL validator fixed**: volatile expressions inside LATERAL SRFs
+  and subqueries are now correctly caught before they silently corrupt
+  differential maintenance
+- **Batched health checks**: `check_slot_health_and_alert()` now issues
+  one query for all change buffers instead of one per buffer (O(1) SPI)
+- **Fused-chain eligibility batched**: dependency lookups for the fused
+  refresh path are now a single query
+- **History prune interval is now GUC-controlled**:
+  `pg_trickle.history_prune_interval_seconds` (default 60 s); set `0` to
+  disable
+- **`delta_work_mem_cap_mb` default raised to 256 MiB**: the previous
+  default of `0` (disabled) allowed unbounded memory during large
+  differential refreshes
+- **Publication name parser unified**: `create_publication` and
+  `alter_publication` share one parser, closing a potential divergence
+- **New function**: `pgtrickle.history_prune_status()` — exposes prune
+  error count and last timing so operators can detect a stalled cleanup
+  loop
+
+## v0.69 — DuckLake sink reliability & security
+
+- **Sink delivery state machine**: every delivery attempt is now tracked
+  (`PENDING → WRITING → DELIVERED / FAILED_RETRYABLE / FAILED_PERMANENT`)
+- Two new GUCs: `pg_trickle.ducklake_sink_max_retries` and
+  `pg_trickle.ducklake_sink_failure_mode`
+- View registration updated on `ALTER QUERY` so DuckLake clients always
+  see the current view definition
+
+## v0.68 — Correctness & durability sprint (Assessment 13)
+
+Four real data-loss or audit-integrity bugs fixed:
+
+- **Fused refresh audit trail restored**: `SCHEDULER_FUSED` was silently
+  rejected by the `initiated_by` CHECK constraint since v0.63; every fused
+  refresh audit record was missing from `pgt_refresh_history`
+- **`change_buffer_durability` GUC is now wired**: the new GUC was
+  registered in v0.36 but never read; `pg_trickle.unlogged_buffers` was
+  the only path that actually worked. Both now function correctly;
+  `unlogged_buffers` emits a deprecation `WARNING`
+- **DuckLake timestamp NULL fix**: `timestamptz` / `timestamp` columns no
+  longer produce `NULL` in exported Parquet files
+- **Worker-pool executor removed**: the pool pre-dated fused chains and
+  was dead code; eliminated 297 lines of stale code. Dynamic per-tick
+  workers remain the only scheduling path
+
+## v0.67 — DuckLake Phase 3b: view registration, provenance & ecosystem
+
+- Stream tables with a DuckLake sink are now auto-registered as native
+  catalog objects in DuckLake — every DuckLake client can discover them
+  without extra wiring
+- Every Parquet delta is traceable to the exact refresh cycle that
+  produced it
+
+## v0.65–0.66 — DuckLake Phase 2 & 3a: change-feed adapter + Parquet sink
+
+- WAL-based change-feed adapter feeds incremental deltas directly into the
+  DuckLake sink
+- Parquet sink infrastructure: S3/MinIO upload, compression, encryption
+  key prefix; new S3 credentials GUCs
+
+## v0.64 — DuckLake Ecosystem Phase 1
+
+- First-class DuckLake integration: stream tables can push Parquet deltas
+  to a DuckLake catalog
+
+## v0.63 — CTE-fused multi-node refresh
+
+The scheduler now composes the delta SQL for an entire topological batch
+into a **single** `WITH … MERGE; MERGE; …` statement, giving the PostgreSQL
+planner visibility across the whole batch and eliminating per-node SPI
+round-trips. For DAGs with N DIFFERENTIAL nodes, change-buffer I/O goes
+from O(N) to O(1) (combined with the v0.62 fan-out optimisation).
+
+- New GUCs: `pg_trickle.enable_fused_refresh`,
+  `pg_trickle.fused_refresh_max_delta_rows`
+
+## v0.62 — Change-buffer fan-out + `pg_aqueduct` prerequisites
+
+- **Change-buffer fan-out**: each source's change buffer is now scanned
+  once per tick and the delta routed to every dependent stream table,
+  replacing per-consumer rescans
+- New `pgtrickle.pause_scheduler` / `pgtrickle.resume_scheduler` SQL
+  functions for migration tooling
+- New `pgtrickle.stream_table_spec(name)` — stable JSON projection of a
+  stream table's specification
+
+## v0.59–0.61 — Performance, DX & pre-1.0 polish
+
+- Seven hot-path performance improvements including batched CDC
+  buffer-growth monitoring
+- `pgtrickle.explain_stream_table(name)` — shows defining query, cached
+  refresh metadata, and current state flags
+- Extensive documentation additions; LATERAL joins, inline aggregates,
+  and circular dependency tutorials completed
+
+## v0.58 — Security & correctness hardening
+
+- Ownership checks for outbox and publication APIs (HIGH-severity fix)
+- `NOT IN` + NULL row constructor handled correctly — no more phantom
+  deletes when one side of the predicate contains NULL
+- Recursive-CTE depth guard applied consistently to DIFFERENTIAL mode
+- WAL decoder TOCTOU advisory lock closes a race in concurrent WAL polling
+
+## v0.50–0.57 — Embedding programme, pg_tide extraction & operational hardening
+
+- **pgvector incremental aggregates**: `vector_avg` and `halfvec_avg`
+  maintained differentially; ANN index rebuild after refresh
+- **Hybrid search**: `pgtrickle.vector_status()` and per-tenant ANN
+  indexing patterns
+- **`pg_tide` extracted**: the outbox, inbox, and relay are now a
+  standalone companion extension
+- `pgtrickle.reliability_counters()` and operational health counters
+  exposed via Prometheus
+- Extensive CI coverage (light E2E path using `cargo pgrx package` +
+  stock postgres container; dbt integration tests)
+
+## v0.46–0.49 — pg_tide & embedding pipeline infrastructure
+
+- Transactional outbox and inbox extracted into the `pg_tide` companion
+  extension
+- Embedding pipeline infrastructure: `attach_embedding_outbox()`,
+  vector column tracking
+- Repository migrated to `trickle-labs/pg-trickle`
+
+## v0.43–0.45 — D+I change-buffer schema, GUC tuning & scalability
+
+- Change buffer tables moved to dedicated `pgtrickle_changes` schema
+- New `pg_trickle.cdc_trigger_mode = 'statement'` default — bulk DML
+  now uses one trigger invocation per statement, not per row
+- `worker_allocation_status()` and per-database worker quota GUC
+
+## v0.41–0.42 — DVM correctness & repair API
+
+- Structural cache keys fix: DAG-position is now part of the cache key,
+  preventing cross-node plan sharing
+- New `pgtrickle.repair_stream_table(name)` — detects and heals schema
+  drift between the catalog entry and the actual storage table
+
+## v0.38–0.40 — EC-01 join correctness + observability
+
+- EC-01 join correctness sprint: phantom-row cleanup, cross-node row-id
+  validation
+- `pgtrickle.explain_delta()` — returns the actual query plan for the
+  next differential refresh cycle
+
+## v0.37 — pgVector incremental aggregates + distributed trace propagation
+
+- `vector_avg` / `halfvec_avg` aggregate functions maintained
+  incrementally
+- OpenTelemetry trace propagation: set `pg_trickle.trace_id` in a
+  session and every refresh span is linked to your application trace
+
+## v0.36 — Temporal IVM, columnar backends & drain mode
+
+- **Temporal IVM**: `temporal := true` on `create_stream_table` adds
+  `__pgt_valid_from` / `__pgt_valid_to` columns for SCD Type-2 patterns
+- **Columnar storage backends**: `storage_backend` parameter accepts
+  `'citus'` (Citus columnar) or `'pg_mooncake'`
+- **Drain mode**: `pgtrickle.drain()` gracefully quiesces the scheduler
+  before maintenance windows or `pg_upgrade`
+- **L0 process-local template cache**: eliminates the ~45 ms cold-start
+  penalty per new backend connection in pooled deployments
+- **Online schema evolution**: compatible `ALTER QUERY` (column additions
+  only) no longer requires a full reinit
+
+## v0.35 — Reactive subscriptions & relay resilience
+
+- `pgtrickle.subscribe(stream_table, channel)` — NOTIFY-based reactive
+  delivery after every non-empty refresh cycle
+- `pgtrickle.sla_summary()` — p50/p99 freshness latency and error-budget
+  remaining over a configurable window
+- `pg_trickle.cdc_paused` GUC — pause all CDC capture without dropping
+  triggers (useful during maintenance)
+- Relay: `${ENV:VAR_NAME}` secret interpolation and exponential reconnect
+  backoff
+
 ## v0.34 — Citus self-driving (April 2026)
 
 The Citus integration grew up. The per-worker WAL slot lifecycle —

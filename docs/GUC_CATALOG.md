@@ -131,7 +131,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.tick_watermark_enabled` | `bool` | `true` | Disable only if you need stream tables to always advance to the very latest available LSN regardless of cross-source consistency. |
 | `pg_trickle.tiered_scheduling` | `bool` | `true` | Default changed to `true` in v0.12.0 (PERF-3) — prevents large deployments from wasting CPU refreshing cold STs at full speed. |
 | `pg_trickle.trace_id` | `text` | `None` | F10 (v0.37.0): Session-level W3C traceparent header for trace context propagation. |
-| `pg_trickle.unlogged_buffers` | `bool` | `false` | Default `false` — change buffers remain WAL-logged and crash-safe. |
+| `pg_trickle.unlogged_buffers` | `bool` | `false` | **Deprecated (COR-003/ARCH-001, v0.68.0):** Use `pg_trickle.change_buffer_durability` instead. |
 | `pg_trickle.use_prepared_statements` | `bool` | `true` | Disable if prepared-statement parameter sniffing produces poor plans (e.g., highly skewed LSN distributions). |
 | `pg_trickle.use_sqlstate_classification` | `bool` | `true` | The SQLSTATE-based classification is locale-safe: it works correctly regardless of `lc_messages`. |
 | `pg_trickle.user_triggers` | `text` | `"auto"` | - `"auto"` (default): Detect user-defined row-level triggers on the   stream table and automatically use explicit DML (DELETE + UPDATE +   INSERT) so triggers fire with correct `TG_OP`, `OLD`, and `NEW`. |
