@@ -18,37 +18,39 @@ use std::time::Duration;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/// DuckLake catalog tables DDL.
+/// DuckLake catalog tables DDL — individual statements.
 ///
 /// These are the minimal stubs of the DuckLake catalog tables that
 /// `register_ducklake_data_file()` writes into.  A real DuckLake deployment
 /// would have additional columns and constraints; we only create what the
 /// pg_trickle sink needs.
-const DUCKLAKE_CATALOG_DDL: &str = r#"
-CREATE TABLE IF NOT EXISTS ducklake_data_file (
-    data_file_id    BIGSERIAL PRIMARY KEY,
-    table_id        BIGINT NOT NULL,
-    begin_snapshot  BIGINT NOT NULL,
-    path            TEXT,
-    row_count       BIGINT,
-    file_size_bytes BIGINT,
-    encryption_key_id TEXT
-);
-
-CREATE TABLE IF NOT EXISTS ducklake_table_stats (
-    table_id   BIGINT PRIMARY KEY,
-    row_count  BIGINT NOT NULL DEFAULT 0,
-    file_count BIGINT NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS ducklake_snapshot (
-    table_id      BIGINT NOT NULL,
-    snapshot_id   BIGINT NOT NULL,
-    snapshot_time TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_by    TEXT,
-    PRIMARY KEY (table_id, snapshot_id)
-);
-"#;
+///
+/// Each DDL statement is a separate entry because `sqlx::query()` (used by
+/// `E2eDb::execute`) is a prepared statement and cannot execute multiple
+/// commands at once.  Use `db.execute_seq(DUCKLAKE_CATALOG_DDL)` to run them.
+const DUCKLAKE_CATALOG_DDL: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS ducklake_data_file (\
+        data_file_id    BIGSERIAL PRIMARY KEY,\
+        table_id        BIGINT NOT NULL,\
+        begin_snapshot  BIGINT NOT NULL,\
+        path            TEXT,\
+        row_count       BIGINT,\
+        file_size_bytes BIGINT,\
+        encryption_key_id TEXT\
+    )",
+    "CREATE TABLE IF NOT EXISTS ducklake_table_stats (\
+        table_id   BIGINT PRIMARY KEY,\
+        row_count  BIGINT NOT NULL DEFAULT 0,\
+        file_count BIGINT NOT NULL DEFAULT 0\
+    )",
+    "CREATE TABLE IF NOT EXISTS ducklake_snapshot (\
+        table_id      BIGINT NOT NULL,\
+        snapshot_id   BIGINT NOT NULL,\
+        snapshot_time TIMESTAMPTZ NOT NULL DEFAULT now(),\
+        created_by    TEXT,\
+        PRIMARY KEY (table_id, snapshot_id)\
+    )",
+];
 
 /// Configure the scheduler for fast-cycling tests (100 ms interval).
 async fn configure_fast_scheduler(db: &E2eDb) {
@@ -114,7 +116,7 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
     configure_fast_scheduler(&db).await;
 
     // Create the minimal DuckLake catalog tables the sink writes into.
-    db.execute(DUCKLAKE_CATALOG_DDL).await;
+    db.execute_seq(DUCKLAKE_CATALOG_DDL).await;
 
     // Source table with initial rows.
     db.execute("CREATE TABLE dl_sink_src (id INT PRIMARY KEY, val TEXT)")
@@ -209,7 +211,7 @@ async fn test_ducklake_sink_catalog_not_modified_when_upload_fails() {
     configure_fast_scheduler(&db).await;
 
     // Create the minimal DuckLake catalog tables.
-    db.execute(DUCKLAKE_CATALOG_DDL).await;
+    db.execute_seq(DUCKLAKE_CATALOG_DDL).await;
 
     // Source table with data so the sink actually tries to write something.
     db.execute("CREATE TABLE dl_sink_fail_src (id INT PRIMARY KEY, val TEXT)")
@@ -292,7 +294,7 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
     configure_fast_scheduler(&db).await;
 
     // Create the minimal DuckLake catalog tables.
-    db.execute(DUCKLAKE_CATALOG_DDL).await;
+    db.execute_seq(DUCKLAKE_CATALOG_DDL).await;
 
     // Source table with a timestamptz column.
     db.execute(
