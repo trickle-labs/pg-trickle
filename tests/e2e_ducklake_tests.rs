@@ -173,20 +173,22 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
     )
     .await;
 
-    // Trigger a CDC-driven scheduler refresh.  The initial population refresh
-    // (refresh #1) is recorded by initialize_st BEFORE update_sink_config sets
-    // the ducklake sink config, so the sink does not run then.  A FULL-mode
-    // stream table with no post-creation CDC changes would only ever get
-    // NoData refreshes (not counted as COMPLETED).  Insert a new row so the
-    // scheduler sees a CDC event and runs a real FULL COMPLETED refresh (#2)
-    // that actually calls run_ducklake_sink.
-    db.execute("INSERT INTO dl_sink_src VALUES (3, 'gamma')").await;
+    // Insert a new row so the manual refresh below finds 3 rows to write.
+    // (The initial population refresh in initialize_st runs before
+    //  update_sink_config sets the ducklake sink config, so the sink does
+    //  not run during initialize_st.)
+    db.execute("INSERT INTO dl_sink_src VALUES (3, 'gamma')")
+        .await;
 
-    // Wait for at least 2 COMPLETED refreshes: the first is the initial population
-    // (created by initialize_st before update_sink_config is called, so no ducklake
-    // sink runs then). The second is the CDC-triggered scheduler refresh that
-    // actually calls run_ducklake_sink with the configured sink path/table_id.
-    let refreshes = wait_for_n_refreshes(&db, "dl_sink_write_st", 2, Duration::from_secs(60)).await;
+    // Explicitly trigger a manual refresh so the ducklake sink runs.
+    // refresh_stream_table() now calls run_ducklake_sink() after a successful
+    // refresh, so this is the second COMPLETED refresh and the first one that
+    // actually writes a Parquet file.
+    db.execute("SELECT pgtrickle.refresh_stream_table('dl_sink_write_st')")
+        .await;
+
+    // Verify at least 2 COMPLETED refreshes: initialize_st (#1) + manual (#2).
+    let refreshes = wait_for_n_refreshes(&db, "dl_sink_write_st", 2, Duration::from_secs(10)).await;
     assert!(
         refreshes >= 2,
         "dl_sink_write_st must have at least 2 COMPLETED refreshes, got {refreshes}"
@@ -375,17 +377,21 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
     )
     .await;
 
-    // Trigger a CDC-driven scheduler refresh.  The initial population (refresh #1)
-    // runs before update_sink_config, so the ducklake sink is not active then.
-    // A FULL-mode stream table with no post-creation CDC changes would only get
-    // NoData refreshes (not COMPLETED).  Insert a new row to produce a CDC event
-    // so the scheduler runs a real FULL COMPLETED refresh (#2) with the sink active.
-    db.execute("INSERT INTO dl_ts_src VALUES (3, '2024-12-01 00:00:00+00')").await;
+    // Insert a third row so the manual refresh below writes 3 rows to Parquet.
+    // (The initial population refresh in initialize_st runs before
+    //  update_sink_config sets the ducklake sink config, so the sink does
+    //  not run during initialize_st.)
+    db.execute("INSERT INTO dl_ts_src VALUES (3, '2024-12-01 00:00:00+00')")
+        .await;
 
-    // Wait for at least 2 COMPLETED refreshes: the first is the initial population
-    // (before the sink config is active), the second is the CDC-triggered scheduler
-    // refresh that calls run_ducklake_sink and registers the Parquet file.
-    let refreshes = wait_for_n_refreshes(&db, "dl_ts_sink_st", 2, Duration::from_secs(60)).await;
+    // Explicitly trigger a manual refresh so the ducklake sink runs.
+    // refresh_stream_table() calls run_ducklake_sink() after a successful
+    // refresh, writing all 3 rows (including the timestamp) to Parquet.
+    db.execute("SELECT pgtrickle.refresh_stream_table('dl_ts_sink_st')")
+        .await;
+
+    // Verify at least 2 COMPLETED refreshes: initialize_st (#1) + manual (#2).
+    let refreshes = wait_for_n_refreshes(&db, "dl_ts_sink_st", 2, Duration::from_secs(10)).await;
     assert!(
         refreshes >= 2,
         "dl_ts_sink_st must have at least 2 COMPLETED refreshes, got {refreshes}"
