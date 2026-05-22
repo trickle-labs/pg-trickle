@@ -18,7 +18,9 @@ on:
       - 'tests/**'
   # A46-15: Weekly scheduled coverage to track module-level coverage trends.
   schedule:
-    - cron: '0 2 * * 1'  # Every Monday at 02:00 UTC
+    - cron: '0 2 * * 1'  # Every Monday at 02:00 UTC (unit coverage)
+    # CI-003: E2E coverage runs weekly on Sunday at 02:00 UTC (see e2e-coverage job)
+    - cron: '0 2 * * 0'  # Every Sunday at 02:00 UTC (E2E coverage)
   workflow_dispatch:
 
 concurrency:
@@ -84,13 +86,14 @@ jobs:
   # ── E2E coverage (Docker-based, weekly + manual) ──────────────────────
   # Runs the full E2E test suite against a coverage-instrumented Docker
   # image, extracts profraw files, merges with unit profdata, and uploads
-  # combined coverage. Expensive (~110 min with scheduling tests), so
-  # scheduled weekly only.
+  # combined coverage. Expensive (~90 min), so scheduled weekly (Sunday
+  # 02:00 UTC) and available via workflow_dispatch.
+  # CI-003: gate on schedule OR workflow_dispatch (not push/PR).
   e2e-coverage:
     name: E2E coverage
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    timeout-minutes: 120
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
 

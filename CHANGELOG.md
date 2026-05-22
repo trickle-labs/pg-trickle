@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.71.0 — CI Truthfulness, Test Harness & Documentation Cleanup](#0710--ci-truthfulness-test-harness--documentation-cleanup)
 - [0.70.0 — Scheduler, Validator & Security Hardening](#0700--scheduler-validator--security-hardening)
 - [0.69.0 — DuckLake Sink Reliability & Security](#0690--ducklake-sink-reliability--security)
 - [0.68.0 — Assessment-13 Correctness & Durability Sprint](#0680--assessment-13-correctness--durability-sprint)
@@ -85,6 +86,102 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.71.0] — CI Truthfulness, Test Harness & Documentation Cleanup
+
+### What's New
+
+v0.71.0 is an infrastructure quality sprint with no user-visible schema changes.
+It tightens CI coverage of fuzz targets and linting, prevents silent drift
+between the test harness schema and the extension catalog, and cleans up
+long-standing technical debt in dependency advisory policy and documentation.
+
+**CI-001: Dynamic Fuzz Target Matrix**
+
+`fuzz-smoke.yml` now runs `scripts/check_fuzz_targets.py` before any fuzz
+execution. The script scans `fuzz/fuzz_targets/*.rs` and fails CI if any target
+is absent from the targets list. Three previously missing fuzz targets
+(`sql_builder_fuzz`, `merge_sql_fuzz`, `row_id_fuzz`) are now included.
+
+**CI-002: `fuzz-all` Hard Failures**
+
+The `fuzz-all` justfile recipe previously swallowed per-target errors with
+`|| true`. It now uses a failure accumulator and exits non-zero if any target
+fails. A `fuzz-all-best-effort` alias restores the old lenient behaviour for
+developer convenience.
+
+**CI-003: E2E Coverage on Schedule**
+
+The `e2e-coverage` job in `coverage.yml` now also runs on a weekly cron
+(`0 2 * * 0`, Sunday 02:00 UTC). The job timeout was trimmed from 120 to 90
+minutes to enforce an upper bound.
+
+**CI-004: `docs-lint` Wired into `just lint`**
+
+`just lint` now runs `clippy`, `fmt-check`, `security-definer-check`, and
+`docs-lint` in a single invocation. A `just lint-all` alias is provided for
+back-compat. The `AGENTS.md` and `CONTRIBUTING.md` contributor guides are
+updated to document the new gate.
+
+**DEP-001: Advisory Expiry Metadata**
+
+All five RUSTSEC ignore entries in `deny.toml` now carry structured
+`# Review-By:` metadata. `scripts/check_deny_expiry.py` fails CI if any
+advisory is past its review date, preventing "silent forever-ignores".
+The check runs as a new step in `dependency-policy.yml`.
+
+**CODE-001 / DOC-001: SQL API Catalog Quality Gate**
+
+`scripts/gen_catalogs.py` was rewritten to parse the pgrx-generated SQL output
+as the primary source of function signatures (regex fallback for offline builds).
+`validate_catalog()` now rejects truncated return types. The catalog was
+regenerated; `refresh_efficiency()` now correctly shows `SetOf row (failable)`
+instead of the truncated `Result<`.
+
+**CODE-002: Tarjan SCC Error Propagation**
+
+Three `unwrap()` calls inside `tarjan_strongconnect()` are replaced with
+`ok_or_else(...)` + `?`. `compute_sccs()` and `condensation_order()` now return
+`Result<Vec<Scc>, PgTrickleError>`. Call sites in the scheduler loop and SQL API
+helpers use `unwrap_or_else(|e| { pgrx::warning!(...); Vec::new() })` to avoid
+cascading signature changes into the public API.
+
+**TEST-005: Generated Test Harness Schema**
+
+`tests/common/mod.rs` used to hand-maintain `CATALOG_DDL`, causing `initiated_by`
+and `unit_kind` CHECK constraints to lag behind the extension catalog (missing
+`SELF_MONITOR`, `SCHEDULER_FUSED`, `cyclic_scc`, `repeatable_read_group`, and
+`fused_chain`). These enum values are now included via a generated file:
+
+- `scripts/gen_test_schema.py` extracts table DDL from the latest archive SQL
+  and emits a Rust raw-string literal to `tests/generated/schema.rs`.
+- `build.rs` regenerates the file on every `cargo build`.
+- `ci.yml` verifies the committed file matches the script output with
+  `gen_test_schema.py --check`.
+
+**ARCH-003 / DOC-002: PLAN.md Archival**
+
+The 2,233-line v0.9.0 implementation plan in `plans/PLAN.md` has been moved to
+`plans/archive/PLAN_HISTORICAL.md`. `plans/PLAN.md` is now a short Architecture
+& Roadmap Index linking to active planning documents.
+
+**DOC-003: plans/INDEX.md Generation**
+
+`scripts/gen_plans_index.py` now generates `plans/INDEX.md` by scanning all 156
+files in `plans/**/*.md`, categorising by prefix, and sorting by modification
+time. `docs-drift.yml` checks the index is up to date on every push.
+
+### Schema Changes
+
+None. This is a version-bump-only release; `sql/pg_trickle--0.70.0--0.71.0.sql`
+contains no DDL.
+
+### Upgrade Notes
+
+Run `ALTER EXTENSION pg_trickle UPDATE TO '0.71.0';`. No table or function
+changes — the upgrade is instantaneous.
 
 ---
 

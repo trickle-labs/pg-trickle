@@ -22,20 +22,45 @@ allow = [
 version = 2
 yanked = "warn"
 ignore = [
+  # Owner: geir-gronmo
+  # Added: 2026-05-22
+  # Review-By: 2026-08-22
+  # Upstream: https://github.com/dtolnay/paste/issues/108
+  # Remove-When: pgrx updates paste dependency to a maintained alternative
   # paste is used internally by pgrx macros; we have no upstream control over
   # this dep. Not a vulnerability, only a maintenance status notice.
   "RUSTSEC-2024-0436",
+  # Owner: geir-gronmo
+  # Added: 2026-05-22
+  # Review-By: 2026-08-22
+  # Upstream: https://github.com/rustls/rustls/issues/2104
+  # Remove-When: bollard/testcontainers updates to rustls-pki-types
   # rustls-pemfile v2 is pulled in by testcontainers/bollard (dev-only path).
   # Maintenance moved to rustls-pki-types; will be resolved when bollard updates.
   "RUSTSEC-2025-0134",
+  # Owner: geir-gronmo
+  # Added: 2026-05-22
+  # Review-By: 2026-08-22
+  # Upstream: https://github.com/pyfisch/cbor/issues/172
+  # Remove-When: transitive dep chain updated to use ciborium
   # serde_cbor is pulled in transitively (dev path). Not a security vulnerability,
   # only unmaintained. Use of ciborium is the upstream recommendation but we
   # have no direct control over this dep.
   "RUSTSEC-2021-0127",
+  # Owner: geir-gronmo
+  # Added: 2026-05-22
+  # Review-By: 2026-08-22
+  # Upstream: https://github.com/rust-random/rand/issues/1514
+  # Remove-When: sqlx 0.8.x updates to rand >=0.9.3
   # rand 0.8.5 is pulled in by sqlx-postgres v0.8.x (dev-only path). The unsoundness
   # requires a custom logger + specific log feature interaction. sqlx 0.8.x does not
   # expose a patched 0.8.x; resolved in rand >=0.9.3 (our non-sqlx deps are updated).
   "RUSTSEC-2026-0097",
+  # Owner: geir-gronmo
+  # Added: 2026-05-22
+  # Review-By: 2026-08-22
+  # Upstream: https://github.com/rustls/webpki/issues/320
+  # Remove-When: upstream updates to rustls-webpki >=0.103.13
   # rustls-webpki reachable panic in CRL parsing. Pulled in transitively via
   # ureq (dev / test path). We do not parse CRLs; unaffected in practice.
   # Will be resolved when upstream updates to rustls-webpki >=0.103.13.

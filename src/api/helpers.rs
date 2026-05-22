@@ -1625,7 +1625,7 @@ pub(super) fn check_for_cycles_alter(
 /// assignments consistent.
 pub(super) fn assign_scc_ids_from_dag() -> Result<(), PgTrickleError> {
     let dag = StDag::build_from_catalog(config::pg_trickle_default_schedule_seconds())?;
-    let sccs = dag.compute_sccs();
+    let sccs = dag.compute_sccs()?;
 
     let mut next_scc_id: i32 = 1;
     for scc in &sccs {

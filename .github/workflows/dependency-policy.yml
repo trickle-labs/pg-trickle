@@ -54,3 +54,11 @@ jobs:
 
       - name: Run cargo-deny policy checks
         run: cargo deny check advisories bans sources
+
+      - name: Set up Python for advisory expiry check
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check advisory ignore expiry dates (DEP-001)
+        run: python3 scripts/check_deny_expiry.py

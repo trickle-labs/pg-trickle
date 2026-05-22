@@ -34,6 +34,7 @@ cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
 cargo build
 
 # Format + lint (required before every PR)
+# CI-004: `just lint` now includes docs-lint as the final step.
 just fmt
 just lint
 

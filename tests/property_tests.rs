@@ -1189,7 +1189,7 @@ fn prop_scc_partition_covers_all_st_nodes() {
     dag.add_edge(NodeId::StreamTable(3), NodeId::StreamTable(1)); // cycle
     dag.add_edge(NodeId::StreamTable(4), NodeId::StreamTable(5));
 
-    let sccs = dag.compute_sccs();
+    let sccs = dag.compute_sccs().expect("SCC invariant: test");
 
     // Collect all nodes across SCCs.
     let mut seen: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
@@ -1255,7 +1255,7 @@ fn prop_condensation_order_no_back_edges() {
         dag.add_edge(NodeId::StreamTable(i), NodeId::StreamTable(i + 1));
     }
 
-    let order = dag.condensation_order();
+    let order = dag.condensation_order().expect("SCC invariant: test");
     // Build position map (first node of each SCC as key).
     let pos: std::collections::HashMap<NodeId, usize> = order
         .iter()
@@ -1291,7 +1291,7 @@ fn prop_self_loop_is_cyclic_scc() {
     });
     dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(1));
 
-    let sccs = dag.compute_sccs();
+    let sccs = dag.compute_sccs().expect("SCC invariant: test");
     assert_eq!(sccs.len(), 1);
     assert!(sccs[0].is_cyclic, "self-loop must be flagged as cyclic");
 }

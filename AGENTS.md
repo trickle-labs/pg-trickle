@@ -26,7 +26,7 @@ After **any** code change:
 
 ```bash
 just fmt          # Format code
-just lint         # clippy + fmt-check (must pass with zero warnings)
+just lint         # clippy + fmt-check + docs-lint (must pass with zero warnings)
 ```
 
 After changes to SQL-facing code, run the relevant test tier:

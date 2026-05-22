@@ -1,0 +1,20 @@
+-- pg_trickle 0.70.0 -> 0.71.0 upgrade migration
+--
+-- v0.71.0 — CI Truthfulness, Test Harness & Documentation Cleanup
+--
+-- No schema changes in this release.  The upgrade migration is a version
+-- bump only.  All changes are internal tooling, documentation, and code
+-- quality improvements:
+--
+--   CI-001: Dynamic fuzz target matrix — workflow now covers all nine targets.
+--   CI-002: fuzz-all failure propagation — || true removed; crashes surface.
+--   CI-003: E2E coverage schedule aligned to weekly Sunday 02:00 UTC cron.
+--   CI-004: docs-lint added as final step of `just lint`.
+--   DEP-001: RUSTSEC advisory ignores gain expiry/review metadata.
+--   DOC-001/CODE-001: SQL API catalog generator rewritten; validates return types.
+--   CODE-002: tarjan_strongconnect() unwraps converted to PgTrickleError.
+--   TEST-005: Test harness schema generated from sql/archive rather than hand-written.
+--   ARCH-003/DOC-002: plans/PLAN.md archived; replaced with Architecture Index.
+--   DOC-003: plans/INDEX.md regenerated from actual files under plans/.
+--
+-- This migration intentionally contains no DDL.
