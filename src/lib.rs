@@ -532,6 +532,38 @@ CREATE INDEX IF NOT EXISTS idx_provenance_snapshot
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ducklake_provenance', '');
 
+-- v0.69.0 ARCH-002/REL-001: per-delivery tracking for the DuckLake sink write path.
+-- Records each sink write attempt with its status and outcome for observability and retry logic.
+-- Only present in migration sql/pg_trickle--0.68.0--0.69.0.sql for upgrades;
+-- added here so fresh installs (CREATE EXTENSION) also get the table.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_sink_delivery (
+    delivery_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    stream_table_id  bigint NOT NULL
+                       REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                       ON DELETE CASCADE,
+    refresh_id       bigint,
+    status           text NOT NULL
+                       CHECK (status IN (
+                           'PENDING',
+                           'WRITING',
+                           'DELIVERED',
+                           'FAILED_RETRYABLE',
+                           'FAILED_PERMANENT'
+                       )),
+    attempt_count    int NOT NULL DEFAULT 0,
+    bytes_written    bigint,
+    rows_written     bigint,
+    started_at       timestamptz NOT NULL DEFAULT now(),
+    finished_at      timestamptz,
+    last_error       text
+);
+
+CREATE INDEX IF NOT EXISTS pgt_ducklake_sink_delivery_st_started
+    ON pgtrickle.pgt_ducklake_sink_delivery (stream_table_id, started_at DESC);
+
+COMMENT ON TABLE pgtrickle.pgt_ducklake_sink_delivery IS
+    'ARCH-002/REL-001 (v0.69.0): per-delivery tracking for the DuckLake sink write path.';
+
 
 "#,
     name = "pg_trickle_catalog",
