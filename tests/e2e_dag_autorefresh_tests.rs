@@ -266,9 +266,11 @@ async fn test_autorefresh_calculated_schedule() {
     // Mutate
     db.execute("INSERT INTO arc_src VALUES (2, 200)").await;
 
-    // Wait for L2 to auto-refresh (CALCULATED schedule should trigger it)
+    // Wait for L2 to auto-refresh (CALCULATED schedule should trigger it).
+    // 90s timeout gives headroom for loaded CI environments where the scheduler
+    // worker may need up to 60s to respawn after a transient crash (SCAL-002).
     let refreshed = db
-        .wait_for_auto_refresh("arc_l2", Duration::from_secs(60))
+        .wait_for_auto_refresh("arc_l2", Duration::from_secs(90))
         .await;
     assert!(
         refreshed,
