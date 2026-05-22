@@ -6,6 +6,36 @@ catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).
 
 ---
 
+## Coverage policy
+
+| Source | What it contains | When to use |
+|--------|-----------------|-------------|
+| **This file** | Curated narrative for the GUCs you are most likely to touch, with examples and cross-references | Day-to-day tuning and troubleshooting |
+| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 129 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
+
+This file does **not** attempt to document every GUC — it focuses on the ones
+that have the most impact in production. If you do not see a GUC here, check
+GUC_CATALOG.md for its default and a brief description.
+
+### GUC categories at a glance
+
+| Category | Documented here | Full list in GUC_CATALOG.md |
+|----------|-----------------|-----------------------------|
+| Scheduler / timing | ✅ | ✅ |
+| CDC mode | ✅ | ✅ |
+| WAL CDC | ✅ | ✅ |
+| Refresh performance | ✅ | ✅ |
+| Parallel refresh | ✅ | ✅ |
+| Change buffer durability | ✅ see [`pg_trickle.change_buffer_durability`](#pg_tricklechange_buffer_durability) | ✅ |
+| CDC pause / hold | ✅ see [`pg_trickle.cdc_paused`](#pg_tricklecdc_paused) | ✅ |
+| Force full refresh | ✅ see [`pg_trickle.force_full_refresh`](#pg_trickleforce_full_refresh) | ✅ |
+| WAL polling limits | ✅ see [`pg_trickle.wal_max_changes_per_poll`](#pg_tricklewal_max_changes_per_poll) | ✅ |
+| Fused refresh | ✅ see [`pg_trickle.enable_fused_refresh`](#pg_trickleenable_fused_refresh) | ✅ |
+| Guardrails & limits | ✅ | ✅ |
+| Advanced / internal | links to GUC_CATALOG.md | ✅ |
+
+---
+
 ## Quick-tuning by goal
 
 Not sure which GUC to change? Start here.
@@ -2910,6 +2940,156 @@ SET pg_trickle.parallel_refresh_mode = 'on';
 
 -- Change persistently (requires reload)
 ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 500;
+SELECT pg_reload_conf();
+```
+
+---
+
+## Change Buffer Durability
+
+### pg_trickle.change_buffer_durability
+
+| | |
+|---|---|
+| **Type** | `text` |
+| **Default** | `"logged"` |
+| **Valid values** | `"logged"`, `"unlogged"` |
+
+Controls whether the change buffer tables used by trigger-based CDC are created
+as regular `LOGGED` tables or as PostgreSQL `UNLOGGED` tables.
+
+- **`"logged"` (default)** — Change buffers are crash-safe. In the event of a
+  PostgreSQL crash, buffered CDC rows are preserved and will be processed on the
+  next scheduler cycle. **Recommended for production.**
+- **`"unlogged"`** — Change buffers are faster to write (no WAL overhead) but
+  are emptied on crash. If PostgreSQL crashes between a source INSERT and the
+  next refresh cycle, those changes are lost and the affected stream tables are
+  forced to reinitialize. Suitable only for non-critical derived tables where
+  occasional stale data after a crash is acceptable.
+
+> **Note:** `pg_trickle.unlogged_buffers` is a compatibility alias retained for
+> backward compatibility. `true` maps to `"unlogged"`, `false` to `"logged"`.
+> Prefer the new `change_buffer_durability` GUC.
+
+```
+SET pg_trickle.change_buffer_durability = 'logged';   -- default, crash-safe
+SET pg_trickle.change_buffer_durability = 'unlogged'; -- faster, not crash-safe
+```
+
+---
+
+## CDC Pause
+
+### pg_trickle.cdc_paused
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `false` |
+
+Global switch to temporarily stop capturing DML changes into change buffers.
+When `on`, the trigger still fires but captured rows are **discarded** (default)
+or **held** depending on `pg_trickle.cdc_capture_mode`.
+
+Use `pgtrickle.cdc_pause_status()` to inspect the current state.
+
+Typical use case: maintenance windows where you want to prevent change buffers
+from growing unbounded without disabling the extension entirely.
+
+```sql
+-- Pause CDC during maintenance
+ALTER SYSTEM SET pg_trickle.cdc_paused = on;
+SELECT pg_reload_conf();
+
+-- Resume after maintenance
+ALTER SYSTEM SET pg_trickle.cdc_paused = off;
+SELECT pg_reload_conf();
+```
+
+---
+
+## Force Full Refresh
+
+### pg_trickle.force_full_refresh
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `false` |
+
+When `on`, forces ALL stream tables to use FULL refresh mode regardless of their
+individual `refresh_mode` catalog setting. Useful for SRE diagnosis when you
+need to temporarily eliminate the differential pipeline to isolate a correctness
+issue.
+
+> **Warning:** This is a cluster-wide override. Setting it in production will
+> dramatically increase refresh time and I/O for any table that is normally
+> DIFFERENTIAL. Do not leave it on for more than a short diagnostic window.
+
+```sql
+-- Force full refresh cluster-wide (diagnostic only)
+ALTER SYSTEM SET pg_trickle.force_full_refresh = on;
+SELECT pg_reload_conf();
+
+-- Restore normal mode
+ALTER SYSTEM SET pg_trickle.force_full_refresh = off;
+SELECT pg_reload_conf();
+```
+
+---
+
+## WAL Polling Limits
+
+### pg_trickle.wal_max_changes_per_poll
+
+| | |
+|---|---|
+| **Type** | `int4` |
+| **Default** | `10000` |
+
+Maximum number of WAL change records to read in a single polling batch (WAL CDC
+mode). Limiting this prevents the WAL decoder from consuming excessive memory
+on busy tables. If a source table generates more than this many changes between
+polls, subsequent polls will continue draining the backlog.
+
+### pg_trickle.wal_max_lag_bytes
+
+| | |
+|---|---|
+| **Type** | `int4` |
+| **Default** | `65536` (64 KiB) |
+
+Maximum number of bytes the WAL decoder is allowed to lag behind the write LSN
+before a warning is emitted. Does not stop processing; used for alerting only.
+See also `pg_trickle.slot_lag_warning_threshold_mb` for slot-based thresholds.
+
+```
+SET pg_trickle.wal_max_changes_per_poll = 50000; -- raise cap on low-change tables
+SET pg_trickle.wal_max_lag_bytes = 131072;        -- 128 KiB lag warning threshold
+```
+
+---
+
+## Fused Refresh
+
+### pg_trickle.enable_fused_refresh
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `true` |
+
+Controls whether pg_trickle uses the "fused refresh" optimisation: when multiple
+stream tables in the same DAG are ready to refresh, their delta pipelines are
+merged into a single query plan so that shared source scans and joins are
+executed only once.
+
+Disable (`false`) if a specific DAG shape causes unexpected planner behaviour
+or if you need to isolate which refresh is consuming resources.
+
+```sql
+-- Temporarily disable fused refresh for diagnosis
+ALTER SYSTEM SET pg_trickle.enable_fused_refresh = off;
 SELECT pg_reload_conf();
 ```
 
