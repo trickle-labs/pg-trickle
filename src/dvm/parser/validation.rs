@@ -614,12 +614,21 @@ pub(crate) fn tree_collect_volatility(
             // 2. On failure (e.g. outer-scope refs, no FROM clause), fall back
             //    to raw AST walk via `scan_sql_for_volatility` which detects
             //    volatile FuncCall nodes without needing catalog resolution.
+            //
+            // Special case: JSON_TABLE and similar SQL/JSON table-valued
+            // functions contain the COLUMNS keyword in their deparsed form.
+            // The wrapped SQL `SELECT JSON_TABLE(... COLUMNS (...))` is not a
+            // valid standalone statement — raw_parser ereports on COLUMNS in
+            // expression context. These constructs are stable (non-volatile),
+            // so skip scanning entirely when the COLUMNS keyword is present.
             #[cfg(not(test))]
             {
-                let wrapped = format!("SELECT {_func_sql}");
-                match parse_defining_query_full(&wrapped) {
-                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
-                    Err(_) => scan_sql_for_volatility(&wrapped, worst)?,
+                if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
+                    let wrapped = format!("SELECT {_func_sql}");
+                    match parse_defining_query_full(&wrapped) {
+                        Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
+                        Err(_) => scan_sql_for_volatility(&wrapped, worst)?,
+                    }
                 }
             }
             tree_collect_volatility(child, worst)?;
