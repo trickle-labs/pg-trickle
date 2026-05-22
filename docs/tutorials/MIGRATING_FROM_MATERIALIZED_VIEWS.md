@@ -25,7 +25,7 @@ If you are migrating from a different system, start here:
 | | Materialized View | Stream Table |
 |-|-------------------|-------------|
 | Refresh | Manual (`REFRESH MATERIALIZED VIEW`) | Automatic (scheduler) or manual |
-| Incremental refresh | Not supported | Built-in differential mode |
+| Differential refresh | Not supported | Built-in differential mode |
 | Blocking reads | `REFRESH` without `CONCURRENTLY` blocks readers | Never blocks readers |
 | Dependency ordering | Manual | Automatic (DAG-aware topological refresh) |
 | Monitoring | None | Built-in views, stats, NOTIFY alerts |

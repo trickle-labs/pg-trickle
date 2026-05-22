@@ -282,3 +282,4 @@ was chosen for single-transaction atomicity — see ADR-001 and ADR-002 in
 - [ ] Error messages include context (table name, query fragment)
 - [ ] GUC variables are documented with sensible defaults
 - [ ] Background workers handle `SIGTERM` and check `pg_trickle.enabled`
+- [ ] Every `pub static PGS_*: GucSetting<...>` has a `///` doc comment (required for `gen_catalogs.py` to include it in `docs/GUC_CATALOG.md`)

@@ -80,7 +80,7 @@ Note: each test starts its own container, so parallel execution requires suffici
 
 | Rate | Description |
 |------|-------------|
-| 1% | Low churn — the sweet spot for incremental refresh |
+| 1% | Low churn — the sweet spot for differential refresh |
 | 10% | Moderate churn — tests delta query scalability |
 | 50% | High churn — stress test; approaches full-refresh cost |
 
@@ -181,7 +181,7 @@ Both modes start from the same data to ensure a fair comparison. The 3-cycle des
 └────────────┴──────────┴────────┴─────────────────┴──────────────────────┘
 ```
 
-The **Speedup** value in parentheses is `FULL avg / DIFFERENTIAL avg` — how many times faster the incremental refresh is compared to a full refresh.
+The **Speedup** value in parentheses is `FULL avg / DIFFERENTIAL avg` — how many times faster the differential refresh is compared to a full refresh.
 
 ---
 

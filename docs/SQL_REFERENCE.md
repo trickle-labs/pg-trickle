@@ -143,16 +143,25 @@ Create a new stream table.
 
 ```sql
 pgtrickle.create_stream_table(
-    name                  text,
-    query                 text,
-    schedule              text      DEFAULT 'calculated',
-    refresh_mode          text      DEFAULT 'AUTO',
-    initialize            bool      DEFAULT true,
-    diamond_consistency   text      DEFAULT NULL,
-    diamond_schedule_policy text    DEFAULT NULL,
-    cdc_mode              text      DEFAULT NULL,
-    append_only           bool      DEFAULT false,
-    pooler_compatibility_mode bool  DEFAULT false
+    name                      text,
+    query                     text,
+    schedule                  text      DEFAULT 'calculated',
+    refresh_mode              text      DEFAULT 'AUTO',
+    initialize                bool      DEFAULT true,
+    diamond_consistency       text      DEFAULT NULL,
+    diamond_schedule_policy   text      DEFAULT NULL,
+    cdc_mode                  text      DEFAULT NULL,
+    append_only               bool      DEFAULT false,
+    pooler_compatibility_mode bool      DEFAULT false,
+    partition_by              text      DEFAULT NULL,
+    max_differential_joins    integer   DEFAULT NULL,
+    max_delta_fraction        float8    DEFAULT NULL,
+    output_distribution_column text     DEFAULT NULL,
+    temporal                  bool      DEFAULT false,
+    storage_backend           text      DEFAULT NULL,
+    sink                      text      DEFAULT NULL,
+    ducklake_sink_path        text      DEFAULT NULL,
+    ducklake_sink_table_id    bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -170,6 +179,15 @@ pgtrickle.create_stream_table(
 | `cdc_mode` | `text` | `NULL` (use `pg_trickle.cdc_mode`) | Optional per-stream-table CDC override: `'auto'`, `'trigger'`, or `'wal'`. This affects all deferred TABLE sources of the stream table. |
 | `append_only` | `bool` | `false` | When `true`, differential refreshes use a fast INSERT path instead of MERGE. Skips DELETE/UPDATE/IS DISTINCT FROM checks. If a DELETE or Update is later detected in the change buffer, the flag is automatically reverted to `false`. Not compatible with `FULL`, `IMMEDIATE`, or keyless sources. |
 | `pooler_compatibility_mode` | `bool` | `false` | When `true`, the refresh engine uses inline SQL instead of `PREPARE`/`EXECUTE` and suppresses all `NOTIFY` emissions for this stream table. Enable this when the stream table is accessed through a transaction-mode connection pooler (e.g. PgBouncer). |
+| `partition_by` | `text` | `NULL` | Partition key column. When set, the storage table is created with `PARTITION BY RANGE (column)`. Only effective at creation time. |
+| `max_differential_joins` | `integer` | `NULL` (use global default) | Per-stream-table cap on the number of join combinations examined during differential refresh. Overrides `pg_trickle.max_differential_joins`. |
+| `max_delta_fraction` | `float8` | `NULL` (use global default) | Per-stream-table threshold (0.0–1.0) for the AUTO cost model. If the estimated delta-to-table-size ratio exceeds this fraction, AUTO falls back to FULL. Overrides `pg_trickle.differential_max_change_ratio`. |
+| `output_distribution_column` | `text` | `NULL` | Citus only: distribution column for the stream table storage table. Must be a column present in the query output. |
+| `temporal` | `bool` | `false` | When `true`, enables temporal IVM mode — the stream table tracks effective-time ranges and can answer as-of queries. |
+| `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
+| `sink` | `text` | `NULL` | DuckLake sink type. Pass `'ducklake'` to enable continuous Parquet export to an object store via DuckLake. |
+| `ducklake_sink_path` | `text` | `NULL` | Object-store path for DuckLake Parquet output (e.g. `'s3://my-bucket/my_table/'`). Required when `sink => 'ducklake'`. |
+| `ducklake_sink_table_id` | `bigint` | `NULL` | DuckLake catalog table ID. When set, registers the stream table in the DuckLake catalog at the given ID. |
 
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
@@ -725,16 +743,25 @@ The existing definition is never modified.
 
 ```sql
 pgtrickle.create_stream_table_if_not_exists(
-    name                    text,
-    query                   text,
-    schedule                text      DEFAULT 'calculated',
-    refresh_mode            text      DEFAULT 'AUTO',
-    initialize              bool      DEFAULT true,
-    diamond_consistency     text      DEFAULT NULL,
-    diamond_schedule_policy text      DEFAULT NULL,
-    cdc_mode                text      DEFAULT NULL,
-    append_only             bool      DEFAULT false,
-    pooler_compatibility_mode bool    DEFAULT false
+    name                      text,
+    query                     text,
+    schedule                  text      DEFAULT 'calculated',
+    refresh_mode              text      DEFAULT 'AUTO',
+    initialize                bool      DEFAULT true,
+    diamond_consistency       text      DEFAULT NULL,
+    diamond_schedule_policy   text      DEFAULT NULL,
+    cdc_mode                  text      DEFAULT NULL,
+    append_only               bool      DEFAULT false,
+    pooler_compatibility_mode bool      DEFAULT false,
+    partition_by              text      DEFAULT NULL,
+    max_differential_joins    integer   DEFAULT NULL,
+    max_delta_fraction        float8    DEFAULT NULL,
+    output_distribution_column text     DEFAULT NULL,
+    temporal                  bool      DEFAULT false,
+    storage_backend           text      DEFAULT NULL,
+    sink                      text      DEFAULT NULL,
+    ducklake_sink_path        text      DEFAULT NULL,
+    ducklake_sink_table_id    bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -764,20 +791,26 @@ Create a stream table if it does not exist, or replace the existing one if the d
 
 ```sql
 pgtrickle.create_or_replace_stream_table(
-    name                    text,
-    query                   text,
-    schedule                text      DEFAULT 'calculated',
-    refresh_mode            text      DEFAULT 'AUTO',
-    initialize              bool      DEFAULT true,
-    diamond_consistency     text      DEFAULT NULL,
-    diamond_schedule_policy text      DEFAULT NULL,
-    cdc_mode                text      DEFAULT NULL,
-    append_only             bool      DEFAULT false,
-    pooler_compatibility_mode bool    DEFAULT false
+    name                      text,
+    query                     text,
+    schedule                  text      DEFAULT 'calculated',
+    refresh_mode              text      DEFAULT 'AUTO',
+    initialize                bool      DEFAULT true,
+    diamond_consistency       text      DEFAULT NULL,
+    diamond_schedule_policy   text      DEFAULT NULL,
+    cdc_mode                  text      DEFAULT NULL,
+    append_only               bool      DEFAULT false,
+    pooler_compatibility_mode bool      DEFAULT false,
+    partition_by              text      DEFAULT NULL,
+    max_differential_joins    integer   DEFAULT NULL,
+    max_delta_fraction        float8    DEFAULT NULL,
+    output_distribution_column text     DEFAULT NULL,
+    temporal                  bool      DEFAULT false,
+    storage_backend           text      DEFAULT NULL
 ) → void
 ```
 
-**Parameters:** Same as [`create_stream_table`](#pgtricklecreate_stream_table).
+**Parameters:** Same as [`create_stream_table`](#pgtricklecreate_stream_table) (DuckLake `sink`, `ducklake_sink_path`, and `ducklake_sink_table_id` are not available via this function — use `create_stream_table` or `alter_stream_table` instead).
 
 **Behavior:**
 
@@ -785,7 +818,7 @@ pgtrickle.create_or_replace_stream_table(
 |---|---|
 | Stream table does **not** exist | **Create** — identical to `create_stream_table(...)` |
 | Stream table exists, query **and** all config identical | **No-op** — logs INFO, returns immediately |
-| Stream table exists, query identical but config differs | **Alter config** — delegates to `alter_stream_table(...)` for schedule, refresh_mode, diamond settings, cdc_mode, append_only, pooler_compatibility_mode |
+| Stream table exists, query identical but config differs | **Alter config** — delegates to `alter_stream_table(...)` for schedule, refresh_mode, diamond settings, cdc_mode, append_only, pooler_compatibility_mode, partition_by, max_differential_joins, max_delta_fraction, output_distribution_column, temporal, storage_backend |
 | Stream table exists, query differs | **Replace query** — in-place ALTER QUERY migration plus any config changes; a full refresh is applied |
 
 The `initialize` parameter is honoured on **create** only. On replace, the stream table is always repopulated via a full refresh.
@@ -870,17 +903,28 @@ Alter properties of an existing stream table.
 
 ```sql
 pgtrickle.alter_stream_table(
-    name                  text,
-    query                 text      DEFAULT NULL,
-    schedule              text      DEFAULT NULL,
-    refresh_mode          text      DEFAULT NULL,
-    status                text      DEFAULT NULL,
-    diamond_consistency   text      DEFAULT NULL,
-    diamond_schedule_policy text    DEFAULT NULL,
-    cdc_mode              text      DEFAULT NULL,
-    append_only           bool      DEFAULT NULL,
-    pooler_compatibility_mode bool  DEFAULT NULL,
-    tier                  text      DEFAULT NULL
+    name                       text,
+    query                      text      DEFAULT NULL,
+    schedule                   text      DEFAULT NULL,
+    refresh_mode               text      DEFAULT NULL,
+    status                     text      DEFAULT NULL,
+    diamond_consistency        text      DEFAULT NULL,
+    diamond_schedule_policy    text      DEFAULT NULL,
+    cdc_mode                   text      DEFAULT NULL,
+    append_only                bool      DEFAULT NULL,
+    pooler_compatibility_mode  bool      DEFAULT NULL,
+    tier                       text      DEFAULT NULL,
+    fuse                       text      DEFAULT NULL,
+    fuse_ceiling               bigint    DEFAULT NULL,
+    fuse_sensitivity           integer   DEFAULT NULL,
+    partition_by               text      DEFAULT NULL,
+    max_differential_joins     integer   DEFAULT NULL,
+    max_delta_fraction         float8    DEFAULT NULL,
+    post_refresh_action        text      DEFAULT NULL,
+    reindex_drift_threshold    float8    DEFAULT NULL,
+    sink                       text      DEFAULT NULL,
+    ducklake_sink_path         text      DEFAULT NULL,
+    ducklake_sink_table_id     bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -899,6 +943,17 @@ pgtrickle.alter_stream_table(
 | `append_only` | `bool` | `NULL` | Enable or disable the append-only INSERT fast path. Pass `NULL` to leave unchanged. When `true`, rejected for FULL, IMMEDIATE, or keyless source stream tables. |
 | `pooler_compatibility_mode` | `bool` | `NULL` | Enable or disable pooler-safe mode. When `true`, prepared statements are bypassed and NOTIFY emissions are suppressed. Pass `NULL` to leave unchanged. |
 | `tier` | `text` | `NULL` | Refresh tier for tiered scheduling (`'hot'`, `'warm'`, `'cold'`, or `'frozen'`). Only effective when `pg_trickle.tiered_scheduling` GUC is enabled. Hot (1×), Warm (2×), Cold (10×), Frozen (skip). Pass `NULL` to leave unchanged. |
+| `fuse` | `text` | `NULL` | Fuse (circuit breaker) mode: `'off'`, `'on'`, or `'auto'`. `'auto'` blows the fuse when FULL would be cheaper than DIFFERENTIAL. Pass `NULL` to leave unchanged. |
+| `fuse_ceiling` | `bigint` | `NULL` | Change-count threshold that triggers the fuse. `NULL` uses the global `pg_trickle.fuse_default_ceiling`. |
+| `fuse_sensitivity` | `integer` | `NULL` | Number of consecutive over-ceiling cycles before the fuse blows. `NULL` means 1 (blow immediately). |
+| `partition_by` | `text` | `NULL` | Partition key column for the storage table. Pass `NULL` to leave unchanged. |
+| `max_differential_joins` | `integer` | `NULL` | Per-stream-table cap on join combinations during differential refresh. Pass `NULL` to leave unchanged. |
+| `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
+| `post_refresh_action` | `text` | `NULL` | Action to take after each successful refresh: `'reindex'` (rebuild indexes when drift exceeds threshold) or `NULL` (no action). |
+| `reindex_drift_threshold` | `float8` | `NULL` | Index drift ratio threshold (0.0–1.0) for `post_refresh_action = 'reindex'`. Pass `NULL` to leave unchanged. |
+| `sink` | `text` | `NULL` | DuckLake sink type. Pass `'ducklake'` to enable, `'none'` to detach. Pass `NULL` to leave unchanged. |
+| `ducklake_sink_path` | `text` | `NULL` | Object-store path for DuckLake Parquet output. Pass `NULL` to leave unchanged. |
+| `ducklake_sink_table_id` | `bigint` | `NULL` | DuckLake catalog table ID. Pass `NULL` to leave unchanged. |
 
 If you switch a stream table to `refresh_mode => 'IMMEDIATE'` while the
 cluster-wide `pg_trickle.cdc_mode` GUC is set to `'wal'`, pg_trickle logs an

@@ -626,6 +626,124 @@ cannot be used across major version boundaries. See
 
 ---
 
+## DuckLake / Sink Errors
+
+These errors are raised by the DuckLake CDC source and Parquet sink subsystem
+introduced in v0.65.0–v0.66.0.
+
+### DuckLakeSnapshotExpired
+
+**Message:** `DuckLake snapshot expired: <details>`
+
+**Description:** A DuckLake snapshot referenced during change-feed processing
+has expired and is no longer accessible in the object store or catalog.
+
+**Common causes:**
+- The DuckLake snapshot was compacted or garbage-collected while a stream table
+  was still mid-refresh
+- Object-store retention policy deleted the snapshot files before the refresh
+  frontier advanced past them
+
+**Suggested fix:** Call `pgtrickle.reinitialize_stream_table('<name>')` to
+discard the stale frontier and restart from a fresh snapshot. Increase
+snapshot retention in your DuckLake catalog configuration to prevent
+recurrence.
+
+---
+
+### DuckLakeChangeFeedError
+
+**Message:** `DuckLake change-feed error: <details>`
+
+**Description:** An error occurred in the DuckLake change-feed pipeline while
+reading or processing incremental changes from the DuckLake catalog.
+
+**Common causes:**
+- DuckLake catalog table is unavailable or has an unexpected schema
+- Object-store connectivity issue during Parquet file fetch
+- Change-feed cursor has advanced past available snapshot history
+
+**Suggested fix:** Check object-store connectivity and DuckLake catalog
+health. Review the PostgreSQL log for the underlying I/O error. If the
+cursor is corrupt, reinitialize:
+```sql
+SELECT pgtrickle.reinitialize_stream_table('<name>');
+```
+
+---
+
+### DucklakeParquetError
+
+**Message:** `DuckLake sink Parquet error: <details>`
+
+**Description:** Parquet serialisation of the differential output failed when
+writing to the DuckLake sink.
+
+**Common causes:**
+- Type mismatch between the stream table column types and the Parquet schema
+- Unsupported PostgreSQL type in the output (e.g. composite types, arrays of
+  arrays)
+- Out-of-memory during Parquet row-group encoding
+
+**Suggested fix:** Check that all output columns have types supported by the
+Parquet/Arrow type mapping. Inspect the error detail for the offending column.
+
+---
+
+### DucklakeUploadError
+
+**Message:** `DuckLake sink upload error: <details>`
+
+**Description:** The Parquet file upload to the object store failed.
+
+**Common causes:**
+- Object-store credentials expired or are missing
+- Network connectivity issue between the PostgreSQL host and the object store
+- Object-store bucket does not exist or the configured path is not writable
+
+**Suggested fix:** Verify object-store credentials and connectivity:
+```sql
+SELECT pgtrickle.ducklake_sink_status();
+```
+Check the `last_error` column for the underlying transport error.
+
+---
+
+### DucklakeCatalogError
+
+**Message:** `DuckLake catalog write error: <details>`
+
+**Description:** Writing to the DuckLake catalog (e.g. registering a new
+Parquet file or updating table metadata) failed.
+
+**Common causes:**
+- DuckLake catalog database is unreachable
+- Insufficient privileges to write to the DuckLake catalog tables
+- Schema version mismatch between pg_trickle and the DuckLake catalog
+
+**Suggested fix:** Check DuckLake catalog connectivity and schema version.
+Ensure the PostgreSQL user has write access to the DuckLake catalog tables.
+
+---
+
+### DucklakeSinkError
+
+**Message:** `DuckLake sink error: <details>`
+
+**Description:** Generic DuckLake sink error not covered by a more specific
+variant. See the message detail for the underlying cause.
+
+**Common causes:**
+- Misconfigured `ducklake_sink_path`
+- DuckLake extension not installed in the target database
+- Internal sink pipeline error
+
+**Suggested fix:** Review the error detail. Check `ducklake_sink_path` and
+ensure the DuckLake extension is installed. Re-run
+`pgtrickle.reinitialize_stream_table('<name>')` if the sink state is corrupt.
+
+---
+
 ## Outbox / pg_tide Errors
 
 ### OutboxAlreadyEnabled

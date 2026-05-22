@@ -167,7 +167,7 @@ auto-rewrite pipeline) that power the extension.
 
 ### What is pg_trickle?
 
-pg_trickle is a PostgreSQL 18 extension that implements **stream tables** — declarative, automatically-refreshing materialized views with **Differential View Maintenance (DVM)**. You define a SQL query and a refresh schedule; the extension handles change capture, delta computation, and incremental refresh automatically.
+pg_trickle is a PostgreSQL 18 extension that implements **stream tables** — declarative, automatically-refreshing materialized views with **Differential View Maintenance (DVM)**. You define a SQL query and a refresh schedule; the extension handles change capture, delta computation, and differential refresh automatically.
 
 It is inspired by the [DBSP](https://arxiv.org/abs/2203.16684) differential dataflow framework. See [DBSP_COMPARISON.md](research/DBSP_COMPARISON.md) for a detailed comparison.
 
@@ -187,7 +187,7 @@ pg_trickle's DVM engine implements IVM using differentiation rules for each SQL 
 | Feature | Materialized Views | Stream Tables |
 |---|---|---|
 | Refresh | Manual (`REFRESH MATERIALIZED VIEW`) | Automatic (scheduler) or manual |
-| Incremental refresh | Not supported natively | Built-in differential mode |
+| Differential refresh | Not supported natively | Built-in differential mode |
 | Change detection | None — always full recompute | CDC triggers track row-level changes |
 | Dependency ordering | None | DAG-aware topological refresh |
 | Monitoring | None | Built-in views, stats, NOTIFY alerts |
@@ -934,7 +934,7 @@ For example, a stream table defined as `SELECT dept, AVG(salary) FROM employees 
 
 When a new employee is inserted, the refresh updates `__pgt_count += 1`, `__pgt_sum_x += new_salary`, and recomputes `avg`. No rescan of the source table is needed.
 
-### How does HAVING work with incremental refresh?
+### How does HAVING work with differential refresh?
 
 `HAVING` is fully supported in DIFFERENTIAL mode. The DVM engine tracks **threshold transitions** — groups entering or exiting the HAVING condition:
 

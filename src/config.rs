@@ -900,6 +900,11 @@ impl SelfMonitoringAutoApply {
     }
 }
 
+/// Automatic application mode for self-monitoring stream tables.
+/// Controls whether pg_trickle acts on self-monitoring recommendations automatically.
+/// - `'off'` (default): self-monitoring stream tables are not auto-applied
+/// - `'threshold_only'`: apply only when health thresholds are exceeded
+/// - `'full'`: always apply self-monitoring recommendations automatically
 pub static PGS_SELF_MONITORING_AUTO_APPLY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
 

@@ -140,7 +140,7 @@
 
 # Reference
 
-- [Blog](blog/README.md)
+- [Blog](../blog/README.md)
 - [FAQ](FAQ.md)
 - [What's New](WHATS_NEW.md)
 - [Changelog](changelog.md)
