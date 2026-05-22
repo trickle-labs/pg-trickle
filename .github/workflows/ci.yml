@@ -402,6 +402,9 @@ jobs:
       - name: Check SQL reference completeness (DX-2)
         run: python3 scripts/gen_sql_reference.py
 
+      - name: Check test schema is up to date (TEST-005)
+        run: python3 scripts/gen_test_schema.py --check
+
       - name: Validate upgrade script completeness
         run: |
           # Auto-discovers all upgrade steps from sql/pg_trickle--X--Y.sql files.

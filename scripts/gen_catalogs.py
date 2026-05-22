@@ -7,12 +7,18 @@ SQL-callable functions, then writes:
   docs/GUC_CATALOG.md      — all GUC names, types, defaults, and doc comments
   docs/SQL_API_CATALOG.md  — all pgtrickle schema SQL-callable functions
 
+Source of truth (in priority order):
+  1. pgrx-generated SQL file if available (target/*/release/pg_trickle.sql or
+     target/release/pg_trickle.sql).  Produced by `cargo pgrx schema`.
+  2. Regex extraction from Rust source (improved multiline return-type handling).
+
 Run:
   python3 scripts/gen_catalogs.py
 
 CI drift check:
   python3 scripts/gen_catalogs.py --check
-  (exits non-zero if committed catalogs differ from generated output)
+  (exits non-zero if committed catalogs differ from generated output, or if
+  any return type fails the quality gate)
 """
 
 import argparse
@@ -182,7 +188,114 @@ def extract_gucs(config_rs: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# SQL API extraction
+# SQL API extraction — pgrx SQL output parser (DOC-001/CODE-001)
+# ---------------------------------------------------------------------------
+
+def _find_pgrx_sql_output() -> Path | None:
+    """Locate the pgrx-generated SQL file if a recent build exists."""
+    candidates = [
+        REPO_ROOT / "target" / "release" / "pg_trickle.sql",
+        REPO_ROOT / "target" / "pg18" / "release" / "pg_trickle.sql",
+        REPO_ROOT / "target" / "pg17" / "release" / "pg_trickle.sql",
+    ]
+    # Also check pgrx package output layout
+    for pg in ("pg18", "pg17"):
+        candidates.append(
+            REPO_ROOT / "target" / f"pg_trickle-pg{pg[-2:]}" / f"pg_trickle--{pg}.sql"
+        )
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _angle_bracket_depth(s: str) -> int:
+    """Return net depth of < > in string (positive = unclosed open brackets)."""
+    return s.count("<") - s.count(">")
+
+
+def _normalize_return_type(raw: str) -> str:
+    """Normalise a Rust return type string for display in the catalog.
+
+    Rules (applied in order):
+    1. Strip leading/trailing whitespace and trailing ``{``.
+    2. Collapse internal whitespace.
+    3. Result<TableIterator<...>, ...>  → SetOf row (failable)
+    4. TableIterator<...>               → SetOf row
+    5. Result<(), ...>                  → void (failable)
+    6. crate::error::PgTrickleError     → PgTrickleError
+    7. Option<T>                        → T (nullable)
+    """
+    s = raw.rstrip("{").strip()
+    s = re.sub(r"\s+", " ", s)
+    # Strip lifetime annotations like 'static, from inside brackets
+    s = re.sub(r"'\w+,\s*", "", s)
+
+    if not s:
+        return s
+
+    # Result<TableIterator<...>, ...> → "SetOf row (failable)"
+    if s.startswith("Result<") and "TableIterator<" in s:
+        return "SetOf row (failable)"
+
+    # TableIterator<...> → "SetOf row"
+    if s.startswith("TableIterator"):
+        return "SetOf row"
+
+    # Normalize full module paths for PgTrickleError
+    s = re.sub(r"crate::error::PgTrickleError", "PgTrickleError", s)
+    s = re.sub(r"crate::\w+::PgTrickleError", "PgTrickleError", s)
+
+    # Option<T> → T (nullable)
+    s = re.sub(r"Option\s*<([A-Za-z0-9_:]+)>", r"\1 (nullable)", s)
+
+    return s
+
+
+def extract_sql_functions_from_pgrx_sql(sql_path: Path) -> list[dict]:
+    """Parse pgrx-generated SQL to extract CREATE FUNCTION statements.
+
+    Uses a simple context-free parser that tracks parenthesis depth so that
+    multi-line argument lists and return types with nested generics are fully
+    captured.
+    """
+    text = sql_path.read_text(encoding="utf-8")
+    functions = []
+
+    # Split on CREATE FUNCTION / CREATE OR REPLACE FUNCTION boundaries
+    # The pgrx SQL uses LANGUAGE c with dollar-quoted bodies or no body.
+    pattern = re.compile(
+        r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+'
+        r'"?(\w+)"?\."?(\w+)"?\s*\(([^;]*?)\)\s+'
+        r'RETURNS\s+([^;]+?)\s+'
+        r'LANGUAGE\s+\w+',
+        re.IGNORECASE | re.DOTALL,
+    )
+    for m in pattern.finditer(text):
+        schema = m.group(1)
+        fn_name = m.group(2)
+        # args are in PostgreSQL syntax, simplify for display
+        args_str = re.sub(r"\s+", " ", m.group(3).strip())
+        ret_raw = re.sub(r"\s+", " ", m.group(4).strip()).rstrip(";{").strip()
+
+        # Normalise TABLE(...) → SetOf row
+        if ret_raw.upper().startswith("TABLE"):
+            ret_raw = "SetOf row"
+
+        functions.append({
+            "schema": schema,
+            "fn_name": fn_name,
+            "args": args_str,
+            "returns": ret_raw,
+            "file": str(sql_path.relative_to(REPO_ROOT)),
+            "description": "",
+        })
+
+    return functions
+
+
+# ---------------------------------------------------------------------------
+# SQL API extraction — improved Rust source regex parser
 # ---------------------------------------------------------------------------
 
 _PG_EXTERN_RE = re.compile(r'#\[(?:pgrx::)?pg_extern\s*\(([^)]*)\)\]')
@@ -229,24 +342,40 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
                     break
 
             # Find the fn signature in the next few lines.
-            # Join up to 10 lines so that multi-line argument lists (e.g.
-            # when pgrx::default!() spans multiple lines) are handled by
-            # the single-line regex.
+            # Join up to 25 lines to capture complex multiline return types
+            # such as Result<TableIterator<'static, (name!(...), ...)>, Error>.
+            # DOC-001/CODE-001: keep extending the window while the return type
+            # has unbalanced angle brackets (e.g. ``Result<`` alone).
             fn_name = None
             args_str = ""
             ret_str = ""
-            for scan in range(idx + 1, min(idx + 10, len(lines))):
-                # Try matching the current line alone first (fast path), then
-                # with up to 9 subsequent lines joined (handles multi-line args).
-                for window in range(1, min(10, len(lines) - scan + 1)):
+            for scan in range(idx + 1, min(idx + 5, len(lines))):
+                best_fn: str | None = None
+                best_args = ""
+                best_ret = ""
+                for window in range(1, min(25, len(lines) - scan + 1)):
                     joined = " ".join(lines[scan : scan + window])
                     fm = _FN_SIG_RE.search(joined)
                     if fm:
-                        fn_name = fm.group(1)
-                        args_str = fm.group(2).strip()
-                        ret_str = (fm.group(3) or "").strip().rstrip("{").strip()
-                        break
-                if fn_name:
+                        candidate_ret = (fm.group(3) or "").strip()
+                        if best_fn is None:
+                            best_fn = fm.group(1)
+                            best_args = fm.group(2).strip()
+                            best_ret = candidate_ret
+                        else:
+                            # Prefer the longer / more complete return type
+                            if len(candidate_ret) > len(best_ret):
+                                best_ret = candidate_ret
+                        # Stop extending when angle brackets are balanced
+                        if _angle_bracket_depth(candidate_ret) == 0:
+                            best_fn = fm.group(1)
+                            best_args = fm.group(2).strip()
+                            best_ret = candidate_ret
+                            break
+                if best_fn:
+                    fn_name = best_fn
+                    args_str = best_args
+                    ret_str = best_ret
                     break
 
             if not fn_name:
@@ -256,21 +385,8 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
             if sql_name_override:
                 fn_name = sql_name_override
 
-            # Simplify return type: collapse TableIterator<...> to "SetOf row"
-            # and clean trailing brace / whitespace
-            ret_clean = ret_str
-            if ret_clean:
-                ret_clean = ret_clean.rstrip("{").strip()
-                # TableIterator<...> — use prefix match since nested <> make
-                # a simple [^>]* regex fail on complex type arguments.
-                if ret_clean.startswith("TableIterator"):
-                    ret_clean = "SetOf row"
-                # Option<T> → T (nullable) — simple single-level generics
-                ret_clean = re.sub(
-                    r"Option\s*<([A-Za-z0-9_:]+)>",
-                    r"\1 (nullable)",
-                    ret_clean,
-                )
+            # Normalise return type using the shared normaliser.
+            ret_clean = _normalize_return_type(ret_str)
 
             # Simplify argument list for display
             simple_args = re.sub(r"\s+", " ", args_str)
@@ -301,6 +417,34 @@ GENERATED_HEADER = """\
      Run `python3 scripts/gen_catalogs.py` to regenerate.
      CI fails if this file is out of date with source code. -->
 """
+
+
+def validate_catalog(funcs: list[dict]) -> list[str]:
+    """DOC-001/CODE-001: Quality gate — return list of error messages.
+
+    Fails on:
+    - Return type that ends with ``<`` (truncated nested generic).
+    - Return type with unbalanced ``<>`` brackets.
+    - Non-empty return type containing a bare ``<`` at position > 0 that
+      suggests mid-capture truncation (e.g. ``Result<``).
+    """
+    errors: list[str] = []
+    for f in funcs:
+        ret = f.get("returns", "") or ""
+        fn_id = f"{f['schema']}.{f['fn_name']}()"
+
+        if ret.endswith("<"):
+            errors.append(f"{fn_id}: return type truncated (ends with '<'): {ret!r}")
+            continue
+
+        depth = _angle_bracket_depth(ret)
+        if depth != 0:
+            errors.append(
+                f"{fn_id}: return type has unbalanced angle brackets "
+                f"(depth={depth}): {ret!r}"
+            )
+
+    return errors
 
 
 def write_guc_catalog(gucs: list[dict], path: Path) -> str:
@@ -355,7 +499,7 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Check mode: exit 1 if catalogs are out of date.",
+        help="Check mode: exit 1 if catalogs are out of date or fail quality gate.",
     )
     args = parser.parse_args()
 
@@ -368,9 +512,16 @@ def main() -> int:
     gucs = extract_gucs(config_rs)
     print(f"  Found {len(gucs)} GUC statics.", flush=True)
 
-    print("Extracting SQL functions from src/ …", flush=True)
-    funcs = extract_sql_functions(SRC_DIR)
-    print(f"  Found {len(funcs)} #[pg_extern] functions.", flush=True)
+    # DOC-001/CODE-001: prefer pgrx SQL output if available; fall back to regex.
+    pgrx_sql = _find_pgrx_sql_output()
+    if pgrx_sql:
+        print(f"Extracting SQL functions from pgrx SQL output: {pgrx_sql.relative_to(REPO_ROOT)} …", flush=True)
+        funcs = extract_sql_functions_from_pgrx_sql(pgrx_sql)
+        print(f"  Found {len(funcs)} functions.", flush=True)
+    else:
+        print("Extracting SQL functions from src/ (pgrx SQL output not found) …", flush=True)
+        funcs = extract_sql_functions(SRC_DIR)
+        print(f"  Found {len(funcs)} #[pg_extern] functions.", flush=True)
 
     guc_content = write_guc_catalog(gucs, GUC_CATALOG_PATH)
     sql_content = write_sql_catalog(funcs, SQL_CATALOG_PATH)
@@ -390,6 +541,18 @@ def main() -> int:
                 drift = True
             else:
                 print(f"  OK: {path.relative_to(REPO_ROOT)}")
+
+        # Quality gate: run against the COMMITTED catalog (reproducibility
+        # check above already verified it matches generated output).
+        qual_errors = validate_catalog(funcs)
+        if qual_errors:
+            print("\nQUALITY GATE FAILURES:", file=sys.stderr)
+            for e in qual_errors:
+                print(f"  {e}", file=sys.stderr)
+            drift = True
+        else:
+            print(f"  Quality gate: {len(funcs)} function(s) — all return types valid.")
+
         return 1 if drift else 0
 
     DOCS_DIR.mkdir(exist_ok=True)

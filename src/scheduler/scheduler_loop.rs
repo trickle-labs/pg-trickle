@@ -1146,7 +1146,13 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // Collect SCC member IDs so Step C can skip them.
             let mut scc_member_ids: HashSet<i64> = HashSet::new();
             if allow_circular {
-                let sccs = dag_ref.condensation_order();
+                let sccs = dag_ref.condensation_order().unwrap_or_else(|e| {
+                    pgrx::warning!(
+                        "pg_trickle: SCC computation error in scheduler (returning empty SCC list): {}",
+                        e
+                    );
+                    Vec::new()
+                });
                 for scc in &sccs {
                     if !scc.is_cyclic {
                         continue; // Singletons handled below in Step C

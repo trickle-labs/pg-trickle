@@ -49,6 +49,9 @@ jobs:
         run: |
           python3 scripts/gen_catalogs.py --check
 
+      - name: Check plans/INDEX.md is up to date (DOC-003)
+        run: python3 scripts/gen_plans_index.py --check
+
       - name: Stale-term docs lint (A42-4)
         run: |
           set -euo pipefail

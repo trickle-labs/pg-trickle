@@ -56,8 +56,13 @@ clippy:
     cargo clippy --all-targets --features pg{{pg}} -- -D warnings
 
 # Check formatting and run clippy
+# CI-004: docs-lint is now the final step; all local lint checks match CI.
 [group: "lint"]
-lint: fmt-check clippy security-definer-check
+lint: fmt-check clippy security-definer-check docs-lint
+
+# Alias for consistency with prior documentation.
+[group: "lint"]
+lint-all: lint
 
 # A45-5: SECURITY DEFINER CI check — validate search_path on all SECURITY
 # DEFINER functions in Rust sources and SQL migration files.
@@ -185,16 +190,38 @@ test-all: test-unit test-integration test-e2e test-pgrx
 #   parser_fuzz, cron_fuzz, guc_fuzz, cdc_fuzz, wal_fuzz,
 #   dag_fuzz, sql_builder_fuzz, merge_sql_fuzz, row_id_fuzz
 # Corpus directories: fuzz/corpus/<target_name>/
+# CI-002: target failures accumulate; exits 1 if any target fails.
 [group: "test"]
 fuzz-all duration="60":
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -uo pipefail
+    targets=(parser_fuzz cron_fuzz guc_fuzz cdc_fuzz wal_fuzz dag_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+    FAILED_TARGETS=()
+    for target in "${targets[@]}"; do
+        echo "=== Fuzzing $target for {{duration}}s ==="
+        if ! cargo +nightly fuzz run "$target" -- -max_total_time={{duration}} -jobs=1 -workers=1; then
+            FAILED_TARGETS+=("$target")
+            echo "FAIL: $target"
+        fi
+    done
+    echo "=== fuzz-all complete ==="
+    if [ "${#FAILED_TARGETS[@]}" -gt 0 ]; then
+        echo "FAILED targets: ${FAILED_TARGETS[*]}"
+        exit 1
+    fi
+
+# Run all fuzz targets, ignoring failures (exploratory local runs).
+# CI-002: use fuzz-all for gated checks; use this only for local exploration.
+[group: "test"]
+fuzz-all-best-effort duration="60":
+    #!/usr/bin/env bash
+    set -uo pipefail
     targets=(parser_fuzz cron_fuzz guc_fuzz cdc_fuzz wal_fuzz dag_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
     for target in "${targets[@]}"; do
         echo "=== Fuzzing $target for {{duration}}s ==="
         cargo +nightly fuzz run "$target" -- -max_total_time={{duration}} -jobs=1 -workers=1 || true
     done
-    echo "=== fuzz-all complete ==="
+    echo "=== fuzz-all-best-effort complete ==="
 
 # Run PgBouncer compatibility E2E tests (requires E2E image + Docker)
 [group: "test"]

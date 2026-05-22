@@ -1184,7 +1184,7 @@ impl StDag {
     ///
     /// - Tarjan, R.E. (1972). "Depth-first search and linear graph
     ///   algorithms." SIAM Journal on Computing, 1(2), 146–160.
-    pub fn compute_sccs(&self) -> Vec<Scc> {
+    pub fn compute_sccs(&self) -> Result<Vec<Scc>, PgTrickleError> {
         let mut index_counter: u32 = 0;
         let mut stack: Vec<NodeId> = Vec::new();
         let mut on_stack: HashSet<NodeId> = HashSet::new();
@@ -1202,19 +1202,22 @@ impl StDag {
                     &mut indices,
                     &mut lowlinks,
                     &mut result,
-                );
+                )?;
             }
         }
 
         // Tarjan's emits SCCs in reverse topological order of the condensation
         // graph. Reverse so upstream SCCs come first.
         result.reverse();
-        result
+        Ok(result)
     }
 
     /// Recursive DFS helper for Tarjan's algorithm.
+    ///
+    /// # Errors
+    /// Returns `PgTrickleError::InternalError` if an SCC invariant is violated
+    /// (unreachable in correct usage; guarded by `debug_assert!` in debug builds).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::unwrap_used)] // SCC invariant: v and w are always inserted into maps before use
     fn tarjan_strongconnect(
         &self,
         v: NodeId,
@@ -1224,7 +1227,7 @@ impl StDag {
         indices: &mut HashMap<NodeId, u32>,
         lowlinks: &mut HashMap<NodeId, u32>,
         result: &mut Vec<Scc>,
-    ) {
+    ) -> Result<(), PgTrickleError> {
         // Set the depth index and lowlink for v.
         indices.insert(v, *index_counter);
         lowlinks.insert(v, *index_counter);
@@ -1245,16 +1248,34 @@ impl StDag {
                         indices,
                         lowlinks,
                         result,
-                    );
+                    )?;
                     let w_lowlink = lowlinks[&w];
-                    let v_lowlink = lowlinks.get_mut(&v).unwrap(); // nosemgrep: rust.panic-in-sql-path — SCC invariant: v is always in lowlinks
+                    debug_assert!(
+                        lowlinks.contains_key(&v),
+                        "SCC invariant: lowlinks must contain v after recursive call"
+                    );
+                    let v_lowlink = lowlinks.get_mut(&v).ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "SCC invariant violated: lowlinks missing v after recursive call"
+                                .to_string(),
+                        )
+                    })?;
                     if w_lowlink < *v_lowlink {
                         *v_lowlink = w_lowlink;
                     }
                 } else if on_stack.contains(&w) {
                     // Successor w is on the stack → it's in the current SCC.
                     let w_index = indices[&w];
-                    let v_lowlink = lowlinks.get_mut(&v).unwrap(); // nosemgrep: rust.panic-in-sql-path — SCC invariant: v is always in lowlinks
+                    debug_assert!(
+                        lowlinks.contains_key(&v),
+                        "SCC invariant: lowlinks must contain v for on-stack check"
+                    );
+                    let v_lowlink = lowlinks.get_mut(&v).ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "SCC invariant violated: lowlinks missing v for on-stack check"
+                                .to_string(),
+                        )
+                    })?;
                     if w_index < *v_lowlink {
                         *v_lowlink = w_index;
                     }
@@ -1266,7 +1287,16 @@ impl StDag {
         if lowlinks[&v] == indices[&v] {
             let mut scc_nodes = Vec::new();
             loop {
-                let w = stack.pop().unwrap(); // nosemgrep: rust.panic-in-sql-path — SCC loop invariant: stack is non-empty when root node found
+                debug_assert!(
+                    !stack.is_empty(),
+                    "SCC loop invariant: stack must be non-empty when root node found"
+                );
+                let w = stack.pop().ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "SCC loop invariant violated: stack empty while popping SCC members"
+                            .to_string(),
+                    )
+                })?;
                 on_stack.remove(&w);
                 scc_nodes.push(w);
                 if w == v {
@@ -1291,6 +1321,8 @@ impl StDag {
                 is_cyclic,
             });
         }
+
+        Ok(())
     }
 
     /// Return SCCs in refresh order (upstream first), with cyclic SCCs
@@ -1301,7 +1333,11 @@ impl StDag {
     ///
     /// This is the condensation DAG in topological order — the replacement
     /// for `topological_order()` when circular dependencies are allowed.
-    pub fn condensation_order(&self) -> Vec<Scc> {
+    ///
+    /// # Errors
+    /// Returns `PgTrickleError::InternalError` if an SCC invariant is violated
+    /// (unreachable in correct usage).
+    pub fn condensation_order(&self) -> Result<Vec<Scc>, PgTrickleError> {
         self.compute_sccs()
     }
 }
@@ -1696,7 +1732,13 @@ impl ExecutionUnitDag {
         let mut assigned_pgt_ids: HashSet<i64> = HashSet::new();
 
         // Step 0: Identify Cyclic SCCs and eagerly build execution units for them.
-        for scc in st_dag.condensation_order() {
+        for scc in st_dag.condensation_order().unwrap_or_else(|e| {
+            pgrx::warning!(
+                "pg_trickle: SCC computation error in build_from_st_dag (returning empty SCC list): {}",
+                e
+            );
+            Vec::new()
+        }) {
             if scc.is_cyclic {
                 let mut pgt_ids: Vec<i64> = scc
                     .nodes
@@ -3802,7 +3844,7 @@ mod tests {
         dag.add_edge(a, b);
         dag.add_edge(b, c);
 
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         // All SCCs should be singletons (no cycle).
         assert!(
             sccs.iter().all(|scc| !scc.is_cyclic),
@@ -3826,7 +3868,7 @@ mod tests {
         dag.add_edge(a, b);
         dag.add_edge(b, a);
 
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         let cyclic_sccs: Vec<_> = sccs.iter().filter(|scc| scc.is_cyclic).collect();
         assert_eq!(cyclic_sccs.len(), 1, "expected one cyclic SCC");
         assert_eq!(cyclic_sccs[0].nodes.len(), 2, "SCC should contain A and B");
@@ -3862,7 +3904,7 @@ mod tests {
         dag.add_edge(d, e);
         dag.add_edge(e, d);
 
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         let cyclic_sccs: Vec<_> = sccs.iter().filter(|scc| scc.is_cyclic).collect();
         assert_eq!(cyclic_sccs.len(), 2, "expected two cyclic SCCs");
 
@@ -3884,7 +3926,7 @@ mod tests {
         dag.add_st_node(make_st(1, "A"));
         dag.add_edge(a, a);
 
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         assert_eq!(sccs.len(), 1);
         assert!(sccs[0].is_cyclic, "self-loop should be cyclic");
         assert_eq!(sccs[0].nodes.len(), 1);
@@ -3906,7 +3948,7 @@ mod tests {
         dag.add_edge(b, c);
         dag.add_edge(c, a);
 
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         let cyclic_sccs: Vec<_> = sccs.iter().filter(|scc| scc.is_cyclic).collect();
         assert_eq!(cyclic_sccs.len(), 1);
         assert_eq!(cyclic_sccs[0].nodes.len(), 3);
@@ -3929,7 +3971,7 @@ mod tests {
         dag.add_edge(a, b);
         dag.add_edge(a, c);
 
-        let sccs = dag.condensation_order();
+        let sccs = dag.condensation_order().expect("SCC invariant: test");
         // base should appear in an SCC before A, and A before B/C.
         let pos_of = |node: NodeId| -> usize {
             sccs.iter()
@@ -3944,7 +3986,7 @@ mod tests {
     #[test]
     fn test_scc_empty_dag() {
         let dag = StDag::new();
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         assert!(sccs.is_empty());
     }
 
@@ -3966,7 +4008,7 @@ mod tests {
         dag.add_edge(b, c);
         dag.add_edge(c, b);
 
-        let sccs = dag.compute_sccs();
+        let sccs = dag.compute_sccs().expect("SCC invariant: test");
         let cyclic_sccs: Vec<_> = sccs.iter().filter(|scc| scc.is_cyclic).collect();
         assert_eq!(cyclic_sccs.len(), 1, "B-C should form one cyclic SCC");
         assert_eq!(cyclic_sccs[0].nodes.len(), 2);
