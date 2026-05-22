@@ -2013,6 +2013,104 @@ fn list_sources(
     TableIterator::new(rows)
 }
 
+// ── OBS-001 (v0.69.0): DuckLake sink health metrics ──────────────────────
+
+/// Return the last delivery status for each stream table that has a DuckLake
+/// sink configured.
+///
+/// Exposed as `pgtrickle.ducklake_sink_status()`.
+/// Returns one row per stream table, showing the most recent delivery outcome.
+#[allow(clippy::type_complexity)]
+#[pg_extern(schema = "pgtrickle", name = "ducklake_sink_status")]
+fn ducklake_sink_status() -> TableIterator<
+    'static,
+    (
+        name!(stream_table_name, String),
+        name!(last_delivery_status, Option<String>),
+        name!(last_delivery_at, Option<TimestampWithTimeZone>),
+        name!(last_bytes_written, Option<i64>),
+        name!(last_rows_written, Option<i64>),
+        name!(failed_attempts, i64),
+        name!(last_error, Option<String>),
+    ),
+> {
+    let rows: Vec<_> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT
+                     st.pgt_name,
+                     last_d.status,
+                     last_d.finished_at,
+                     last_d.bytes_written,
+                     last_d.rows_written,
+                     COALESCE(fail_counts.cnt, 0)::bigint,
+                     last_d.last_error
+                 FROM pgtrickle.pgt_stream_tables st
+                 LEFT JOIN LATERAL (
+                     SELECT status, finished_at, bytes_written, rows_written, last_error
+                     FROM pgtrickle.pgt_ducklake_sink_delivery d
+                     WHERE d.stream_table_id = st.pgt_id
+                     ORDER BY started_at DESC
+                     LIMIT 1
+                 ) last_d ON true
+                 LEFT JOIN LATERAL (
+                     SELECT COUNT(*) AS cnt
+                     FROM pgtrickle.pgt_ducklake_sink_delivery d2
+                     WHERE d2.stream_table_id = st.pgt_id
+                       AND d2.status IN ('FAILED_RETRYABLE', 'FAILED_PERMANENT')
+                 ) fail_counts ON true
+                 WHERE st.ducklake_sink_mode IS NOT NULL
+                 ORDER BY st.pgt_name",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()));
+
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => {
+                // pgt_ducklake_sink_delivery may not exist on older installs.
+                return vec![];
+            }
+        };
+
+        let mut out = Vec::new();
+        for row in result {
+            let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
+            let name = row
+                .get::<String>(1)
+                .map_err(map_spi)
+                .unwrap_or_default()
+                .unwrap_or_default();
+            let status = row.get::<String>(2).map_err(map_spi).unwrap_or(None);
+            let finished_at = row
+                .get::<TimestampWithTimeZone>(3)
+                .map_err(map_spi)
+                .unwrap_or(None);
+            let bytes_written = row.get::<i64>(4).map_err(map_spi).unwrap_or(None);
+            let rows_written = row.get::<i64>(5).map_err(map_spi).unwrap_or(None);
+            let failed_attempts = row
+                .get::<i64>(6)
+                .map_err(map_spi)
+                .unwrap_or(Some(0))
+                .unwrap_or(0);
+            let last_error = row.get::<String>(7).map_err(map_spi).unwrap_or(None);
+            out.push((
+                name,
+                status,
+                finished_at,
+                bytes_written,
+                rows_written,
+                failed_attempts,
+                last_error,
+            ));
+        }
+        out
+    });
+
+    TableIterator::new(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::alert::build_alert_payload;

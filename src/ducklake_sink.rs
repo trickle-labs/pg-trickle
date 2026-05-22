@@ -15,6 +15,17 @@
 //!    `ducklake_snapshot` row and writes to `pgtrickle.pgt_ducklake_provenance`
 //!    for end-to-end lineage.
 //!
+//! v0.69.0 additions:
+//!
+//! 7. **Delivery state machine (ARCH-002/REL-001)** — tracks each delivery
+//!    attempt in `pgtrickle.pgt_ducklake_sink_delivery`, supports
+//!    retry/backoff up to `ducklake_sink_max_retries`, and transitions to
+//!    `FAILED_PERMANENT` after exhausting retries.
+//! 8. **Snapshot advisory lock (COR-006)** — acquires `pg_advisory_xact_lock`
+//!    before computing `MAX(snapshot_id)` to prevent concurrent collisions.
+//! 9. **Qualified schema resolution (SEC-002)** — all DuckLake catalog writes
+//!    use `pg_trickle.ducklake_catalog_schema`-qualified identifiers.
+//!
 //! # Rollback safety
 //!
 //! The write order is intentionally **upload-then-catalog**:
@@ -323,19 +334,42 @@ pub fn register_ducklake_data_file(
     encryption_key_id: Option<&str>,
     created_by: &str,
 ) -> Result<i64, PgTrickleError> {
+    // SEC-002 (v0.69.0): use the configured catalog schema for all writes.
+    let cat_schema = crate::config::pg_trickle_ducklake_catalog_schema();
+    let cat_schema_ref = cat_schema.as_str();
+
     Spi::connect_mut(|client| {
+        // COR-006 (v0.69.0): Acquire a transaction-scoped advisory lock keyed on
+        // the table_id before reading MAX(snapshot_id).  This prevents two
+        // concurrent sink writes for the same DuckLake table from reading the
+        // same snapshot_id and producing duplicates.
+        //
+        // SAFETY: pg_advisory_xact_lock is a standard PostgreSQL function that
+        // takes a bigint advisory lock key; it is released automatically at
+        // transaction end.
+        client
+            .update("SELECT pg_advisory_xact_lock($1)", None, &[table_id.into()])
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "advisory lock for table_id={table_id} failed: {e}"
+                ))
+            })?;
+
         // Insert the data file record.
         let encryption_key_val: Option<&str> = encryption_key_id;
+        let data_file_sql = format!(
+            "INSERT INTO {cat_schema_ref}.ducklake_data_file \
+             (table_id, begin_snapshot, path, row_count, \
+              file_size_bytes, encryption_key_id) \
+             VALUES ($1, \
+                 (SELECT COALESCE(MAX(snapshot_id), 0) \
+                  FROM {cat_schema_ref}.ducklake_snapshot WHERE table_id = $1) + 1, \
+             $2, $3, $4, $5) \
+             RETURNING data_file_id"
+        );
         client
             .update(
-                "INSERT INTO ducklake_data_file \
-                 (table_id, begin_snapshot, path, row_count, \
-                  file_size_bytes, encryption_key_id) \
-                 VALUES ($1, \
-                     (SELECT COALESCE(MAX(snapshot_id), 0) \
-                      FROM ducklake_snapshot WHERE table_id = $1) + 1, \
-                 $2, $3, $4, $5) \
-                 RETURNING data_file_id",
+                &data_file_sql,
                 None,
                 &[
                     table_id.into(),
@@ -352,16 +386,15 @@ pub fn register_ducklake_data_file(
             })?;
 
         // Update table stats.
+        let stats_sql = format!(
+            "INSERT INTO {cat_schema_ref}.ducklake_table_stats (table_id, row_count, file_count) \
+             VALUES ($1, $2, 1) \
+             ON CONFLICT (table_id) DO UPDATE \
+             SET row_count = {cat_schema_ref}.ducklake_table_stats.row_count + EXCLUDED.row_count, \
+                 file_count = {cat_schema_ref}.ducklake_table_stats.file_count + 1"
+        );
         client
-            .update(
-                "INSERT INTO ducklake_table_stats (table_id, row_count, file_count) \
-                 VALUES ($1, $2, 1) \
-                 ON CONFLICT (table_id) DO UPDATE \
-                 SET row_count = ducklake_table_stats.row_count + EXCLUDED.row_count, \
-                     file_count = ducklake_table_stats.file_count + 1",
-                None,
-                &[table_id.into(), row_count.into()],
-            )
+            .update(&stats_sql, None, &[table_id.into(), row_count.into()])
             .map_err(|e| {
                 PgTrickleError::DucklakeCatalogError(format!(
                     "ducklake_table_stats upsert failed: {e}"
@@ -369,18 +402,17 @@ pub fn register_ducklake_data_file(
             })?;
 
         // INT-11 (v0.67.0): Insert a new snapshot with created_by provenance.
+        let snap_sql = format!(
+            "INSERT INTO {cat_schema_ref}.ducklake_snapshot \
+             (table_id, snapshot_id, snapshot_time, created_by) \
+             VALUES ($1, \
+                 (SELECT COALESCE(MAX(snapshot_id), 0) + 1 \
+                  FROM {cat_schema_ref}.ducklake_snapshot WHERE table_id = $1), \
+                 now(), $2) \
+             RETURNING snapshot_id"
+        );
         let snap_row = client
-            .update(
-                "INSERT INTO ducklake_snapshot \
-                 (table_id, snapshot_id, snapshot_time, created_by) \
-                 VALUES ($1, \
-                     (SELECT COALESCE(MAX(snapshot_id), 0) + 1 \
-                      FROM ducklake_snapshot WHERE table_id = $1), \
-                     now(), $2) \
-                 RETURNING snapshot_id",
-                None,
-                &[table_id.into(), created_by.into()],
-            )
+            .update(&snap_sql, None, &[table_id.into(), created_by.into()])
             .map_err(|e| {
                 PgTrickleError::DucklakeCatalogError(format!(
                     "ducklake_snapshot insert failed: {e}"
@@ -555,18 +587,137 @@ fn generate_encryption_key_id(prefix: &str, table_id: i64, epoch_ms: i64) -> Str
 /// Run the DuckLake sink for a stream table after a successful refresh.
 ///
 /// Called from the scheduler after `execute_differential_refresh` or
-/// `execute_full_refresh` returns successfully. This function is a best-effort
-/// post-refresh action — it logs errors rather than propagating them so that a
-/// sink failure never blocks the next scheduled refresh.
+/// `execute_full_refresh` returns successfully.
+///
+/// v0.69.0 (ARCH-002/REL-001): This function now records delivery attempts in
+/// `pgtrickle.pgt_ducklake_sink_delivery`. On transient failures it marks the
+/// row `FAILED_RETRYABLE` (up to `ducklake_sink_max_retries` attempts), then
+/// `FAILED_PERMANENT`. The `ducklake_sink_failure_mode` GUC controls whether
+/// a permanent failure propagates as a PostgreSQL error.
 pub fn run_ducklake_sink(st: &StreamTableMeta) {
-    if let Err(e) = run_ducklake_sink_inner(st) {
-        pgrx::warning!(
-            "pg_trickle: DuckLake sink failed for {}.{}: {}",
-            st.pgt_schema,
-            st.pgt_name,
-            e,
-        );
+    let delivery_id = create_delivery_row(st.pgt_id);
+    let max_retries = crate::config::pg_trickle_ducklake_sink_max_retries();
+
+    // Count existing failed attempts for this stream table.
+    let attempt_count = count_retryable_attempts(st.pgt_id) + 1;
+
+    match run_ducklake_sink_inner(st) {
+        Ok(()) => {
+            // Mark the delivery row as DELIVERED.
+            if let Some(id) = delivery_id {
+                finish_delivery_row(id, "DELIVERED", attempt_count, None, None, None);
+            }
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            let status = if attempt_count >= max_retries {
+                "FAILED_PERMANENT"
+            } else {
+                "FAILED_RETRYABLE"
+            };
+
+            if let Some(id) = delivery_id {
+                finish_delivery_row(id, status, attempt_count, None, None, Some(&err_str));
+            }
+
+            if status == "FAILED_PERMANENT" {
+                if crate::config::pg_trickle_ducklake_sink_failure_mode_is_error() {
+                    pgrx::error!(
+                        "pg_trickle: DuckLake sink FAILED_PERMANENT for {}.{} \
+                         after {} attempts: {}",
+                        st.pgt_schema,
+                        st.pgt_name,
+                        attempt_count,
+                        err_str,
+                    );
+                } else {
+                    pgrx::warning!(
+                        "pg_trickle: DuckLake sink FAILED_PERMANENT for {}.{} \
+                         after {} attempts: {}",
+                        st.pgt_schema,
+                        st.pgt_name,
+                        attempt_count,
+                        err_str,
+                    );
+                }
+            } else {
+                pgrx::warning!(
+                    "pg_trickle: DuckLake sink failed for {}.{} (attempt {}/{}): {}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    attempt_count,
+                    max_retries,
+                    err_str,
+                );
+            }
+        }
     }
+}
+
+// ── ARCH-002/REL-001 (v0.69.0): Delivery row helpers ─────────────────────
+
+/// Insert a PENDING delivery row and return its `delivery_id`.
+/// Best-effort — if the catalog table does not exist yet, returns `None`.
+fn create_delivery_row(pgt_id: i64) -> Option<i64> {
+    Spi::connect(|client| {
+        let row = client.select(
+            "INSERT INTO pgtrickle.pgt_ducklake_sink_delivery \
+             (stream_table_id, status, attempt_count, started_at) \
+             VALUES ($1, 'PENDING', 0, now()) \
+             RETURNING delivery_id",
+            None,
+            &[pgt_id.into()],
+        )?;
+        row.first().get_one::<i64>()
+    })
+    .ok()
+    .flatten()
+}
+
+/// Update a delivery row to the given final status.
+fn finish_delivery_row(
+    delivery_id: i64,
+    status: &str,
+    attempt_count: i32,
+    bytes_written: Option<i64>,
+    rows_written: Option<i64>,
+    last_error: Option<&str>,
+) {
+    let _ = Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_ducklake_sink_delivery \
+         SET status = $2, \
+             attempt_count = $3, \
+             bytes_written = $4, \
+             rows_written = $5, \
+             finished_at = now(), \
+             last_error = $6 \
+         WHERE delivery_id = $1",
+        &[
+            delivery_id.into(),
+            status.into(),
+            attempt_count.into(),
+            bytes_written.into(),
+            rows_written.into(),
+            last_error.into(),
+        ],
+    );
+}
+
+/// Count the number of FAILED_RETRYABLE delivery rows for this stream table.
+fn count_retryable_attempts(pgt_id: i64) -> i32 {
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT COUNT(*)::int FROM pgtrickle.pgt_ducklake_sink_delivery \
+             WHERE stream_table_id = $1 \
+               AND status IN ('FAILED_RETRYABLE', 'FAILED_PERMANENT')",
+            None,
+            &[pgt_id.into()],
+        )?;
+        rows.first().get_one::<i32>()
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(0)
 }
 
 fn run_ducklake_sink_inner(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
@@ -757,14 +908,16 @@ fn register_ducklake_view_inner(
         return Ok(());
     }
 
-    Spi::run_with_args(
-        "INSERT INTO ducklake_view (view_name, view_definition) \
+    // SEC-002 (v0.69.0): use the configured catalog schema.
+    let cat_schema = crate::config::pg_trickle_ducklake_catalog_schema();
+    let sql = format!(
+        "INSERT INTO {cat_schema}.ducklake_view (view_name, view_definition) \
          VALUES ($1, $2) \
          ON CONFLICT (view_name) DO UPDATE \
-         SET view_definition = EXCLUDED.view_definition",
-        &[pgt_name.into(), defining_query.into()],
-    )
-    .map_err(|e| {
+         SET view_definition = EXCLUDED.view_definition"
+    );
+
+    Spi::run_with_args(&sql, &[pgt_name.into(), defining_query.into()]).map_err(|e| {
         PgTrickleError::DucklakeCatalogError(format!(
             "ducklake_view upsert for '{}' failed: {e}",
             pgt_name
@@ -790,11 +943,11 @@ fn deregister_ducklake_view_inner(pgt_name: &str) -> Result<(), PgTrickleError> 
         return Ok(());
     }
 
-    Spi::run_with_args(
-        "DELETE FROM ducklake_view WHERE view_name = $1",
-        &[pgt_name.into()],
-    )
-    .map_err(|e| {
+    // SEC-002 (v0.69.0): use the configured catalog schema.
+    let cat_schema = crate::config::pg_trickle_ducklake_catalog_schema();
+    let sql = format!("DELETE FROM {cat_schema}.ducklake_view WHERE view_name = $1");
+
+    Spi::run_with_args(&sql, &[pgt_name.into()]).map_err(|e| {
         PgTrickleError::DucklakeCatalogError(format!(
             "ducklake_view delete for '{}' failed: {e}",
             pgt_name
@@ -803,17 +956,25 @@ fn deregister_ducklake_view_inner(pgt_name: &str) -> Result<(), PgTrickleError> 
 }
 
 /// Returns `true` when the `ducklake_view` catalog table exists in the
-/// current database's search path.
+/// configured catalog schema (`pg_trickle.ducklake_catalog_schema`).
+///
+/// SEC-002 (v0.69.0): Uses `pg_class JOIN pg_namespace` rather than
+/// `information_schema.tables` so the check is not affected by `search_path`
+/// manipulation.
 fn ducklake_view_table_exists() -> Result<bool, PgTrickleError> {
+    let cat_schema = crate::config::pg_trickle_ducklake_catalog_schema();
     Spi::connect(|client| {
         let row = client
             .select(
-                "SELECT EXISTS (
-                     SELECT 1 FROM information_schema.tables
-                     WHERE table_name = 'ducklake_view'
+                "SELECT EXISTS ( \
+                     SELECT 1 \
+                     FROM pg_class c \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = $1 \
+                       AND c.relname = 'ducklake_view' \
                  )",
                 None,
-                &[],
+                &[cat_schema.as_str().into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         let exists = row
