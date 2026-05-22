@@ -12,10 +12,13 @@ example one partition per month for an `orders` table. This is a common
 technique for managing very large datasets. pg_trickle handles partitioned
 source tables transparently:
 
-- **CDC triggers fire on all partitions.** PostgreSQL 13+ automatically
-  clones row-level triggers from the parent to every child partition. All
-  DML (INSERT, UPDATE, DELETE) on any partition is captured in a single
-  change buffer keyed by the parent table's OID.
+- **CDC triggers fire on all partitions.** pg_trickle installs statement-level
+  AFTER triggers directly on the partitioned root table. PostgreSQL routes all
+  DML — whether targeted at the root or at a child partition directly — through
+  the root's triggers. The trigger's `REFERENCING NEW TABLE / OLD TABLE`
+  transition tables contain all affected rows regardless of which partition was
+  written to. All captured changes are recorded in a single change buffer keyed
+  by the parent table's OID.
 
 - **ATTACH PARTITION is detected automatically.** When you add a new
   partition with pre-existing data, pg_trickle's DDL event trigger detects

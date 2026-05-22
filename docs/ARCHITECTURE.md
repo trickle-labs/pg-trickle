@@ -701,8 +701,8 @@ The `pgtrickle.diamond_groups()` SQL function exposes detected groups for operat
 - `outbox_create()` / `poll_outbox()` — outbox provisioning and polling API.
 - Consumer groups and visibility lease management.
 - Claim-check mode for large payloads.
-- `create_inbox()` / `enable_inbox_ordering()` — inbox provisioning.
-- FNV-1a consistent hashing (`inbox_is_my_partition()`) for horizontal scaling.
+- `create_inbox()` / `enable_inbox_ordering()` — inbox provisioning (moved to **pg_tide** v0.46.0).
+- FNV-1a consistent hashing (`inbox_is_my_partition()`) for horizontal scaling (moved to **pg_tide** v0.46.0).
 - The `pgtrickle-relay` binary — forwards outbox rows to Kafka, NATS, SQS, and
   other transports.
 
