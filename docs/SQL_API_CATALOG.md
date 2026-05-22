@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**121 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**122 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -42,6 +42,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.drop_stream_table()` | `pgtrickle` | `` | default flipped from `true` to `false` to prevent accidental cascading drops. |
 | `pgtrickle.drop_stream_table_publication()` | `pgtrickle` | `` | CDC-PUB-2: Drop the logical replication publication for a stream table. |
 | `pgtrickle.drop_watermark_group()` | `pgtrickle` | `Result<(), PgTrickleError>` | Drop a watermark group by name. |
+| `pgtrickle.ducklake_sink_status()` | `pgtrickle` | `TableIterator<` | Exposed as `pgtrickle.ducklake_sink_status()`. |
 | `pgtrickle.embedding_stream_table()` | `pgtrickle` | `` | # Returns A single-column table with one row per action taken (or SQL line for dry_run). |
 | `pgtrickle.exec_stream_ddl()` | `pgtrickle` | `bool` | # Example ```sql SELECT pgtrickle.exec_stream_ddl(   'CREATE STREAM TABLE revenue AS SELECT SUM(amount) FROM orders' ); ```. |
 | `pgtrickle.explain_dag()` | `pgtrickle` | `` | Node colours: user STs = blue, self-monitoring STs = green, suspended = red, fused = orange. |

@@ -923,6 +923,15 @@ fn alter_stream_table_query(
         }
     );
 
+    // COR-005 (v0.69.0): Re-register the DuckLake view with the updated query
+    // so that DuckLake clients see the new view definition immediately.
+    // Reload the ST to pick up any catalog changes made during ALTER QUERY.
+    if let Ok(updated_st) = crate::catalog::StreamTableMeta::get_by_name(schema, table_name)
+        && updated_st.ducklake_sink_mode.is_some()
+    {
+        crate::ducklake_sink::register_ducklake_view(table_name, new_query);
+    }
+
     Ok(())
 }
 

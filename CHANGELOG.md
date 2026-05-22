@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.69.0 — DuckLake Sink Reliability & Security](#0690--ducklake-sink-reliability--security)
 - [0.68.0 — Assessment-13 Correctness & Durability Sprint](#0680--assessment-13-correctness--durability-sprint)
 - [0.67.0 — DuckLake Phase 3b: View Registration, Provenance & Ecosystem](#0670--ducklake-phase-3b-view-registration-provenance--ecosystem)
 - [0.66.0 — DuckLake Phase 3a: Parquet Sink Infrastructure](#0660--ducklake-phase-3a-parquet-sink-infrastructure)
@@ -83,6 +84,94 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.69.0] — DuckLake Sink Reliability & Security
+
+### What's New
+
+v0.69.0 focuses exclusively on the DuckLake integration surface — making sink
+delivery observable, resilient to transient failures, and safe against
+concurrent writes and `search_path` manipulation.
+
+**ARCH-002 / REL-001: Sink Delivery State Machine**
+
+`run_ducklake_sink()` is now a state-machine driver. Every delivery attempt is
+tracked in a new catalog table `pgtrickle.pgt_ducklake_sink_delivery`:
+
+```
+PENDING → WRITING → DELIVERED
+                 ↘ FAILED_RETRYABLE (up to max_retries attempts)
+                 ↘ FAILED_PERMANENT
+```
+
+Two new GUCs control behaviour:
+
+- `pg_trickle.ducklake_sink_max_retries` (int, default `3`): maximum
+  `FAILED_RETRYABLE` transitions before `FAILED_PERMANENT`.
+- `pg_trickle.ducklake_sink_failure_mode` (`warn` | `error`, default `warn`):
+  whether a `FAILED_PERMANENT` delivery propagates as a PostgreSQL error or is
+  silently warned.
+
+**COR-005: View Registration on Query-Only ALTER**
+
+When `pgtrickle.alter_stream_table(name, query => '...')` changes a stream
+table's defining query, the matching `ducklake_view` entry is now updated with
+the new view definition. Before this fix DuckLake clients continued to see the
+old query.
+
+**COR-006: Snapshot ID Advisory Lock**
+
+`register_ducklake_data_file()` now acquires a transaction-scoped advisory lock
+(`pg_advisory_xact_lock(table_id)`) before computing `MAX(snapshot_id)`. This
+prevents two concurrent sink writes for the same DuckLake table from receiving
+the same snapshot ID.
+
+**SEC-002: Qualified Schema Resolution**
+
+All DuckLake catalog writes now use a fully-qualified schema prefix derived
+from the new `pg_trickle.ducklake_catalog_schema` GUC (default `"main"`).
+Previously, `INSERT INTO ducklake_view ...` and friends were resolved via
+`search_path`, which could be manipulated to redirect catalog writes to a
+different schema. The `ducklake_view_table_exists()` check has also been
+upgraded from `information_schema.tables` to `pg_class JOIN pg_namespace` for
+the same reason.
+
+**OBS-001: Sink Health Metrics**
+
+New SQL function `pgtrickle.ducklake_sink_status()`:
+
+```sql
+SELECT *
+FROM pgtrickle.ducklake_sink_status();
+-- stream_table_name | last_delivery_status | last_delivery_at | last_bytes_written | last_rows_written | failed_attempts | last_error
+-- revenue_by_region | DELIVERED            | 2026-05-21 ...   |            124 208 |               150 |               0 | NULL
+```
+
+**DEP-002: Dependency Policy Documentation**
+
+`docs/DEPENDENCIES.md` documents the criteria for adding, updating, and
+removing Rust crate dependencies in pg_trickle, including the DuckLake sink
+crate inventory and CI enforcement via `cargo deny`.
+
+### Upgrade Notes
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.69.0';
+```
+
+The migration creates `pgtrickle.pgt_ducklake_sink_delivery` with an index.
+No existing data is modified. Existing DuckLake deployments continue to work
+without configuration changes; the new GUCs default to backward-compatible
+values.
+
+If your DuckLake installation uses a schema other than `main`, set:
+
+```sql
+ALTER SYSTEM SET pg_trickle.ducklake_catalog_schema = 'your_schema';
+SELECT pg_reload_conf();
+```
 
 ---
 
