@@ -585,15 +585,16 @@ pub(crate) fn tree_collect_volatility(
             // calls. Previously only `child` (the left-hand scan) was checked;
             // volatile expressions inside `func_sql` (e.g. `random()`) would
             // bypass the volatile_function_policy check silently.
+            //
+            // Note: parse failure is NOT treated as volatile. LATERAL functions
+            // with outer-scope column references (e.g. `func(outer.col)`) will
+            // fail to parse standalone; that's expected and not a sign of
+            // volatility.
             #[cfg(not(test))]
             {
                 let wrapped = format!("SELECT {_func_sql}");
-                match parse_defining_query_full(&wrapped) {
-                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
-                    Err(_) => {
-                        // Conservative: treat an unparseable body as volatile.
-                        *worst = max_volatility(*worst, 'v');
-                    }
+                if let Ok(inner) = parse_defining_query_full(&wrapped) {
+                    tree_collect_volatility(&inner.tree, worst)?;
                 }
             }
             tree_collect_volatility(child, worst)?;
@@ -606,14 +607,15 @@ pub(crate) fn tree_collect_volatility(
             // COR-002 (v0.70.0): Scan the LATERAL subquery body for volatile
             // expressions. The subquery body is stored as raw SQL and was
             // previously not scanned by the volatility walker.
+            //
+            // Note: parse failure is NOT treated as volatile. Correlated LATERAL
+            // subqueries reference outer-scope columns (e.g. `d.id`), which are
+            // not present when parsing the body in isolation — causing expected
+            // parse failures that must not be misclassified as volatile.
             #[cfg(not(test))]
             {
-                match parse_defining_query_full(_subquery_sql) {
-                    Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
-                    Err(_) => {
-                        // Conservative: treat an unparseable body as volatile.
-                        *worst = max_volatility(*worst, 'v');
-                    }
+                if let Ok(inner) = parse_defining_query_full(_subquery_sql) {
+                    tree_collect_volatility(&inner.tree, worst)?;
                 }
             }
             tree_collect_volatility(child, worst)?;
