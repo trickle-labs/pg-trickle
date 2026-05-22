@@ -1,5 +1,7 @@
 # Inbox Pattern
 
+> **Status: Stable (manual pattern)** — Building an inbox from regular PostgreSQL tables and stream tables is a stable pattern. The managed `pg_tide` inbox API is available in [pg_tide](https://github.com/trickle-labs/pg-tide).
+
 The managed transactional inbox API (`create_inbox`, inbox DLQ helpers,
 consumer partitioning helpers, and inbox retention GUCs) moved to the
 standalone [`pg_tide`](https://github.com/trickle-labs/pg-tide) extension.

@@ -1,5 +1,7 @@
 # Tutorial 2: O(Δ) Refresh on DuckLake Tables
 
+> **Status: Experimental** — DuckLake foreign table CDC integration is early-access. The change-feed adapter API may change before stabilization.
+
 *How pg_trickle's change-feed adapter reads only the rows that changed — even when the source is a DuckLake foreign table with 10 million rows*
 
 ---

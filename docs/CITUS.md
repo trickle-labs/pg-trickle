@@ -1,5 +1,7 @@
 # Citus Distributed Tables
 
+> **Status: Beta** — Distributed source tables and output targets work in production. The per-worker slot lifecycle is automated. API may receive minor changes in future minor versions.
+
 pg_trickle supports [Citus](https://www.citusdata.com/) distributed
 tables as **sources** for incremental view maintenance and as
 **output targets** for stream tables. Once configured, distribution

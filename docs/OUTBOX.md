@@ -1,5 +1,7 @@
 # pg_tide Outbox Integration
 
+> **Status: Stable** — The `attach_outbox`, `detach_outbox`, and `attach_embedding_outbox` APIs are stable. The full outbox consumer pipeline is in [pg_tide](https://github.com/trickle-labs/pg-tide).
+
 pg_trickle no longer implements the full transactional outbox, consumer-group,
 inbox, or relay stack itself. That functionality moved to the standalone
 [`pg_tide`](https://github.com/trickle-labs/pg-tide) extension in v0.46.0.
