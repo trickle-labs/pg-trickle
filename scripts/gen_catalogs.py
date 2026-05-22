@@ -209,6 +209,12 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
             if m_schema:
                 schema = m_schema.group(1)
 
+            # Prefer the SQL-visible name from name = "..." over the Rust fn name
+            sql_name_override: str | None = None
+            m_name = re.search(r'\bname\s*=\s*"([^"]+)"', attrs)
+            if m_name:
+                sql_name_override = m_name.group(1)
+
             # Collect doc comments before the #[pg_extern]
             doc_lines = []
             back = idx - 1
@@ -246,6 +252,26 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
             if not fn_name:
                 continue
 
+            # Use SQL name override (from name = "...") if present
+            if sql_name_override:
+                fn_name = sql_name_override
+
+            # Simplify return type: collapse TableIterator<...> to "SetOf row"
+            # and clean trailing brace / whitespace
+            ret_clean = ret_str
+            if ret_clean:
+                ret_clean = ret_clean.rstrip("{").strip()
+                # TableIterator<...> — use prefix match since nested <> make
+                # a simple [^>]* regex fail on complex type arguments.
+                if ret_clean.startswith("TableIterator"):
+                    ret_clean = "SetOf row"
+                # Option<T> → T (nullable) — simple single-level generics
+                ret_clean = re.sub(
+                    r"Option\s*<([A-Za-z0-9_:]+)>",
+                    r"\1 (nullable)",
+                    ret_clean,
+                )
+
             # Simplify argument list for display
             simple_args = re.sub(r"\s+", " ", args_str)
 
@@ -257,7 +283,7 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
                     "schema": schema,
                     "fn_name": fn_name,
                     "args": simple_args,
-                    "returns": ret_str,
+                    "returns": ret_clean,
                     "file": str(rs_file.relative_to(REPO_ROOT)),
                     "description": first_sentence,
                 }
