@@ -173,11 +173,14 @@ async fn test_ducklake_sink_parquet_file_written_after_refresh() {
     )
     .await;
 
-    // Wait for the scheduler to run at least one refresh.
-    let refreshes = wait_for_n_refreshes(&db, "dl_sink_write_st", 1, Duration::from_secs(60)).await;
+    // Wait for at least 2 COMPLETED refreshes: the first is the initial population
+    // (created by initialize_st before update_sink_config is called, so no ducklake
+    // sink runs then). The second is the first scheduler-triggered refresh that
+    // actually calls run_ducklake_sink with the configured sink path/table_id.
+    let refreshes = wait_for_n_refreshes(&db, "dl_sink_write_st", 2, Duration::from_secs(60)).await;
     assert!(
-        refreshes >= 1,
-        "dl_sink_write_st must have at least 1 COMPLETED refresh, got {refreshes}"
+        refreshes >= 2,
+        "dl_sink_write_st must have at least 2 COMPLETED refreshes, got {refreshes}"
     );
 
     // Wait for the DuckLake sink to write at least one catalog entry.
@@ -363,11 +366,13 @@ async fn test_ducklake_sink_timestamp_roundtrip() {
     )
     .await;
 
-    // Wait for at least one refresh.
-    let refreshes = wait_for_n_refreshes(&db, "dl_ts_sink_st", 1, Duration::from_secs(60)).await;
+    // Wait for at least 2 COMPLETED refreshes: the first is the initial population
+    // (before the sink config is active), the second is the first scheduler-triggered
+    // refresh that calls run_ducklake_sink and registers the Parquet file.
+    let refreshes = wait_for_n_refreshes(&db, "dl_ts_sink_st", 2, Duration::from_secs(60)).await;
     assert!(
-        refreshes >= 1,
-        "dl_ts_sink_st must refresh at least once, got {refreshes}"
+        refreshes >= 2,
+        "dl_ts_sink_st must have at least 2 COMPLETED refreshes, got {refreshes}"
     );
 
     // Wait for the DuckLake sink to write at least one catalog entry before
