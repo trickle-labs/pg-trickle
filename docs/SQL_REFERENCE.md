@@ -87,6 +87,11 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [pgtrickle.pg\_stat\_stream\_tables](#pgtricklepg_stat_stream_tables)
   - [pgtrickle.quick\_health](#pgtricklequick_health)
   - [pgtrickle.pgt\_cdc\_status](#pgtricklepgt_cdc_status)
+- [Stream Table Lifecycle](#stream-table-lifecycle)
+  - [Status values](#status-values)
+  - [State transitions](#state-transitions)
+  - [Auto-suspend behaviour](#auto-suspend-behaviour)
+  - [Reinitialisation](#reinitialisation)
 - [Catalog Tables](#catalog-tables)
   - [pgtrickle.pgt\_stream\_tables](#pgtricklepgt_stream_tables)
   - [pgtrickle.pgt\_dependencies](#pgtricklepgt_dependencies)
@@ -94,6 +99,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [pgtrickle.pgt\_change\_tracking](#pgtricklepgt_change_tracking)
   - [pgtrickle.pgt\_source\_gates](#pgtricklepgt_source_gates)
   - [pgtrickle.pgt\_refresh\_groups](#pgtricklepgt_refresh_groups)
+- [Advanced and Diagnostic Functions](#advanced-and-diagnostic-functions)
 - [Delta SQL Profiling](#delta-sql-profiling-v0130)
   - [pgtrickle.explain\_delta](#pgtrickleexplain_delta)
   - [pgtrickle.dedup\_stats](#pgtricklededup_stats)
@@ -2945,6 +2951,95 @@ events when a source moves between CDC modes (payload is a JSON object with
 
 ---
 
+## Stream Table Lifecycle
+
+Each stream table progresses through well-defined states stored in
+`pgtrickle.pgt_stream_tables.status`.  Understanding the lifecycle helps with
+troubleshooting, automation, and capacity planning.
+
+### Status values
+
+| Status | Meaning | Refreshes? | User operations allowed |
+|--------|---------|-----------|------------------------|
+| `INITIALIZING` | The stream table has been registered but has not yet completed its first full refresh. `is_populated` is `false`. | First refresh is in progress or queued | `ALTER STREAM TABLE`, `DROP STREAM TABLE`, `refresh_stream_table()` |
+| `ACTIVE` | Normal operating state. The scheduler picks it up on each cycle. `is_populated` is `true`. | Yes — DIFFERENTIAL or FULL per schedule | All operations |
+| `SUSPENDED` | Paused — either by a user call (`ALTER STREAM TABLE … SUSPEND`) or automatically after too many consecutive errors. | No | `ALTER STREAM TABLE … RESUME`, `DROP STREAM TABLE` |
+| `ERROR` | An unrecoverable error was detected during refresh. The stream table is suspended and cannot auto-resume. | No | Inspect `pgt_refresh_history`, fix the root cause, then `ALTER STREAM TABLE … RESUME` |
+
+### State transitions
+
+```
+                      ┌─────────────┐
+        create_stream_table()       │ INITIALIZING │
+                      └──────┬──────┘
+                             │  first successful refresh
+                             ▼
+                        ┌────────┐
+            resume ───► │ ACTIVE │ ◄─── resume
+                        └───┬────┘
+                            │ consecutive_errors ≥ max_consecutive_errors
+                            │   OR user suspension
+                            ▼
+                       ┌───────────┐
+                       │ SUSPENDED │
+                       └───────────┘
+                            │ unrecoverable internal error
+                            ▼
+                         ┌───────┐
+                         │ ERROR │
+                         └───────┘
+```
+
+### Key catalog fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_populated` | `bool` | `false` until the first successful refresh completes. Queries against an unpopulated stream table return 0 rows. |
+| `consecutive_errors` | `int` | Number of consecutive refresh failures. Reset to 0 on success. When this reaches `pg_trickle.max_consecutive_errors` (default `3`), the stream table is automatically suspended. |
+| `needs_reinit` | `bool` | Set to `true` when a DDL change to a source table is detected (column added/removed/renamed). The next refresh will run as a full reinitialisation rather than an incremental update. |
+| `data_timestamp` | `timestamptz` | Timestamp bound to which the stream table's data is current. Advances after each successful refresh. |
+| `last_refresh_at` | `timestamptz` | Wall-clock time of the last completed refresh attempt (success or failure). |
+
+### Auto-suspend behaviour
+
+When `consecutive_errors` reaches `pg_trickle.max_consecutive_errors` (default
+`3`), pg_trickle suspends the stream table automatically and logs a `WARNING`.
+To resume:
+
+```sql
+-- Inspect the error
+SELECT pgt_name, status, consecutive_errors, last_refresh_error
+FROM pgtrickle.pgt_stream_tables
+WHERE status = 'SUSPENDED';
+
+-- Fix the root cause, then resume
+ALTER STREAM TABLE my_summary RESUME;
+```
+
+Use `pg_trickle.max_consecutive_errors = 0` to disable auto-suspension (not
+recommended for production).
+
+### Reinitialisation
+
+When `needs_reinit = true`, the next scheduled or manual refresh performs a full
+reinit: the storage table is truncated, `is_populated` is reset to `false`, and
+a full refresh runs. After completion `needs_reinit` is reset to `false` and
+`is_populated` returns to `true`.
+
+Trigger `needs_reinit` manually with:
+
+```sql
+UPDATE pgtrickle.pgt_stream_tables
+SET needs_reinit = true
+WHERE pgt_name = 'my_view';
+-- Then trigger a refresh:
+SELECT pgtrickle.refresh_stream_table('my_view');
+```
+
+See also: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [FAQ.md](FAQ.md).
+
+---
+
 ## Catalog Tables
 
 ### pgtrickle.pgt_stream_tables
@@ -3711,6 +3806,39 @@ FROM pgtrickle.validate_query(
 > still DIFFERENTIAL (only changed groups are rescanned), but has higher
 > per-group cost than algebraic strategies. If this is performance-sensitive,
 > consider pre-aggregating with a simpler aggregate and post-processing.
+
+---
+
+## Advanced and Diagnostic Functions
+
+The following functions are useful for operational troubleshooting, query
+validation, and introspection. They are not needed for day-to-day streaming
+table management.
+
+| Function | Returns | Purpose |
+|----------|---------|---------|
+| `pgtrickle.preflight()` | `text` (JSON) | Pre-deployment health check — returns one JSON object per check with `pass`, `check`, `detail`. |
+| `pgtrickle.validate_query(sql text)` | `SetOf row` | Validates whether a SQL query is IVM-compatible. Returns analysis results including unsupported patterns. |
+| `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
+| `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
+| `pgtrickle.stream_table_lineage(st_name text)` | `SetOf row` | Returns the lineage graph for a single stream table — direct and transitive source tables with metadata. |
+| `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / `hold`), and a human-readable explanation. |
+| `pgtrickle.cluster_worker_summary()` | `SetOf row` | Shows active background workers across all pg_trickle-enabled databases (requires `pg_monitor`). |
+| `pgtrickle.drain()` | — | Initiates a graceful drain: the scheduler finishes in-flight refreshes then stops. Useful before `pg_upgrade` or a rolling restart. |
+| `pgtrickle.is_drained()` | `bool` | Returns `true` when all scheduler workers have completed their current cycle and are waiting. |
+| `pgtrickle.st_refresh_stats()` | `SetOf row` | Per-stream-table refresh metrics: counts, durations, error rates. Primary monitoring function. |
+| `pgtrickle.pgtrickle_refresh_stats()` | `SetOf row` | Cluster-wide aggregate refresh statistics. |
+| `pgtrickle.recommend_refresh_mode(st_name text)` | `jsonb` | Returns a recommendation (`DIFFERENTIAL` / `FULL`) for a specific stream table based on current change rate. |
+| `pgtrickle.recommend_schedule(st_name text)` | `jsonb` | Returns a schedule recommendation with confidence score and reasoning. |
+| `pgtrickle.schedule_recommendations()` | `SetOf row` | Bulk version of `recommend_schedule()` — one row per registered stream table. |
+| `pgtrickle.setup_self_monitoring()` | — | Creates the five self-monitoring stream tables that track pg_trickle's own performance. |
+| `pgtrickle.self_monitoring_status()` | `SetOf row` | Shows whether each self-monitoring stream table exists, its status, and last refresh time. |
+| `pgtrickle.teardown_self_monitoring()` | — | Drops all self-monitoring stream tables. Safe to call even if some are missing. |
+
+See also:
+- [Delta SQL Profiling](#delta-sql-profiling-v0130) — `explain_delta`, `dedup_stats`, `shared_buffer_stats`
+- [Stream Table Lifecycle](#stream-table-lifecycle) — status values and transitions
+- [GUC_CATALOG.md](GUC_CATALOG.md) — complete parameter reference
 
 ---
 
