@@ -33,9 +33,9 @@ necessary I/O.
 
 Introduce a "refresh broker" — a singleton background worker that:
 
-1. De-duplicates change-buffer scans across databases in the same cluster.
+1. De-duplicates change buffer scans across databases in the same cluster.
 2. Distributes scan results to per-database schedulers via shared memory.
-3. Reduces total change-buffer I/O proportionally to the number of databases
+3. Reduces total change buffer I/O proportionally to the number of databases
    sharing a source.
 
 ---

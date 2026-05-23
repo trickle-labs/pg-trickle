@@ -3928,6 +3928,11 @@ table management.
 | `pgtrickle.setup_self_monitoring()` | — | Creates the five self-monitoring stream tables that track pg_trickle's own performance. |
 | `pgtrickle.self_monitoring_status()` | `SetOf row` | Shows whether each self-monitoring stream table exists, its status, and last refresh time. |
 | `pgtrickle.teardown_self_monitoring()` | — | Drops all self-monitoring stream tables. Safe to call even if some are missing. |
+| `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |
+| `pgtrickle.wal_source_status()` | `SetOf row` | Per-source WAL CDC slot status: LSN lag, slot name, active/inactive state. Only populated when WAL-based CDC is active. |
+| `pgtrickle.worker_allocation_status()` | `SetOf row` | Per-database dynamic background worker allocation: quota, active count, and DB name. |
+| `pgtrickle.vector_status()` | `SetOf row` | One row per stream table that has a `post_refresh_action` configured or any ANN-relevant index. Shows index type, dimensions, and last rebuild time. |
+| `pgtrickle.st_auto_threshold(st_name text)` | `float8` | Returns the effective `differential_max_change_ratio` for a specific stream table — the per-ST override if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
 
 See also:
 - [Delta SQL Profiling](#delta-sql-profiling-v0130) — `explain_delta`, `dedup_stats`, `shared_buffer_stats`
@@ -4040,6 +4045,31 @@ SELECT * FROM pgtrickle.shared_buffer_stats();
 -- -----------+--------------------+----------------+------------------------------------+-----------------+-------------------+-------------+----------------
 --      16456 | public.orders      |              3 | public.orders_by_region, public... |               5 | 0/1A2B3C4D        |         142 | f
 ```
+
+---
+
+### `pgtrickle.explain_diff_sql(st_name text)`
+
+Returns the raw differential (delta) SQL string that pg_trickle would execute
+on the next DIFFERENTIAL refresh of `st_name`, without running it. Useful for
+auditing generated SQL, spotting missing indexes, or understanding why a
+particular query pattern is or is not differentiable.
+
+Unlike `pgtrickle.explain_delta()` which returns a query *plan*, this function
+returns the SQL text itself. The two complement each other: use
+`explain_diff_sql` to read the generated query, then pass it to `EXPLAIN
+ANALYZE` or `explain_delta` to profile it.
+
+**Returns:** `text` — the differential SQL string (may be `NULL` if the stream
+table is in FULL mode or has never been successfully differentiated).
+
+**Example:**
+
+```sql
+SELECT pgtrickle.explain_diff_sql('public.revenue_by_region');
+```
+
+**See also:** [`pgtrickle.explain_delta()`](#pgtrickleexplain_deltast_name-text-format-text-default-text)
 
 ---
 

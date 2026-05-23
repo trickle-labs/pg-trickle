@@ -11,7 +11,7 @@ catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).
 | Source | What it contains | When to use |
 |--------|-----------------|-------------|
 | **This file** | Curated narrative for the GUCs you are most likely to touch, with examples and cross-references | Day-to-day tuning and troubleshooting |
-| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 129 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
+| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 130 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
 
 This file does **not** attempt to document every GUC — it focuses on the ones
 that have the most impact in production. If you do not see a GUC here, check

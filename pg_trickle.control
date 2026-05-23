@@ -1,4 +1,4 @@
-comment = 'Streaming stream tables with differential view maintenance for PostgreSQL'
+comment = 'Self-maintaining stream tables with differential view maintenance for PostgreSQL'
 default_version = '@CARGO_VERSION@'
 module_pathname = 'pg_trickle'
 relocatable = false

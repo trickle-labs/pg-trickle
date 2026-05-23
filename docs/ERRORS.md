@@ -936,7 +936,9 @@ log entries.
 
 **Warning:** `[pg_trickle] DIFF refresh for <table> took Xms vs last FULL Yms — DIFF is Nx slower`
 
-**Description:** Emitted when `pg_trickle.log_delta_sql = on` and a DIFF
+> Note: `DIFF` is the abbreviated form of `DIFFERENTIAL` used in log output.
+
+**Description:** Emitted when `pg_trickle.log_delta_sql = on` and a DIFFERENTIAL
 refresh takes longer than the last recorded FULL refresh.
 
 **Common causes:**

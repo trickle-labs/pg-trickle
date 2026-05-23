@@ -685,6 +685,9 @@ fn normalize_merge_join_strategy(value: Option<String>) -> MergeJoinStrategy {
 /// `pgtrickle.convert_buffers_to_unlogged()` to convert existing buffers.
 ///
 /// Default `false` — change buffers remain WAL-logged and crash-safe.
+///
+/// **Deprecated (COR-003/ARCH-001, v0.68.0):** Use `pg_trickle.change_buffer_durability` instead.
+/// Setting this GUC emits a deprecation WARNING at runtime.
 pub static PGS_UNLOGGED_BUFFERS: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// DUR-2: Change buffer durability mode.
