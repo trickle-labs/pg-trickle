@@ -21,6 +21,34 @@
 --   COR-004: create_replication_slot_pristine now checks for an XID-assigned
 --     transaction before creating the slot. No schema change.
 
+-- Ensure pgt_ducklake_sink_delivery exists for instances that were created
+-- before v0.69.0 or whose archive was generated without this table.
+-- Uses IF NOT EXISTS so it is a no-op on instances that already have it.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_sink_delivery (
+    delivery_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    stream_table_id  bigint NOT NULL
+                       REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                       ON DELETE CASCADE,
+    refresh_id       bigint,
+    status           text NOT NULL
+                       CHECK (status IN (
+                           'PENDING',
+                           'WRITING',
+                           'DELIVERED',
+                           'FAILED_RETRYABLE',
+                           'FAILED_PERMANENT'
+                       )),
+    attempt_count    int NOT NULL DEFAULT 0,
+    bytes_written    bigint,
+    rows_written     bigint,
+    started_at       timestamptz NOT NULL DEFAULT now(),
+    finished_at      timestamptz,
+    last_error       text
+);
+
+CREATE INDEX IF NOT EXISTS pgt_ducklake_sink_delivery_st_started
+    ON pgtrickle.pgt_ducklake_sink_delivery (stream_table_id, started_at DESC);
+
 -- Correct any outbox rows that were written with the old pgt_id-as-OID bug.
 -- Rows where stream_table_oid already equals pgt_relid are left untouched.
 UPDATE pgtrickle.pgt_outbox_config oc
