@@ -43,7 +43,7 @@ postgres = "0.19"
 # P-1: single-pass placeholder resolution (O(1) in SQL length for k sources)
 aho-corasick = "1"
 # P-8: O(1) LRU eviction for the MERGE template cache (>=0.16.3 fixes RUSTSEC unsound advisory)
-lru = "0.16"
+lru = "0.18"
 # F-4 (v0.66.0): Parquet delta export — Arrow array/schema types + Parquet writer.
 arrow-array = { version = "58", default-features = false }
 arrow-schema = { version = "58", default-features = false }
