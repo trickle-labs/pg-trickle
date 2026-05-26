@@ -277,6 +277,47 @@ arc resolves every finding before v1.0.
 | [v0.70.0](roadmap/v0.70.0.md) | Scheduler, Validator & Security Hardening: LATERAL body volatility scanning (COR-002), batched monitor buffer health (PERF-001), batched fused eligibility loads (PERF-002), history prune GUC wired + start_time index (PERF-003), work-mem cap conservative default (PERF-004), launcher DB cache (SCAL-002), publication name-parser unified (SEC-001), prune failure visibility (OBS-002), LATERAL volatile tests (TEST-001), cache_stats() E2E tests (TEST-002) | ✅ Released | Large | [Full details](roadmap/v0.70.0.md-full.md) |
 | [v0.71.0](roadmap/v0.71.0.md) | CI Truthfulness, Test Harness & Documentation Cleanup: fuzz smoke covers all 9 targets (CI-001), fuzz-all failure propagation (CI-002), E2E coverage schedule (CI-003), docs-lint in just lint (CI-004), advisory expiry metadata (DEP-001), SQL API catalog generator rewritten (DOC-001/CODE-001), Tarjan SCC unwrap→error (CODE-002), generated test harness schema (TEST-005), PLAN.md archived (ARCH-003/DOC-002), INDEX.md regenerated (DOC-003) | ✅ Released | Medium | [Full details](roadmap/v0.71.0.md-full.md) |
 
+### Assessment-14-Driven Hardening Arc (v0.72.x – v0.75.x)
+
+Driven by the findings in the v0.71.0 overall assessment
+([plans/PLAN_OVERALL_ASSESSMENT_14.md](plans/PLAN_OVERALL_ASSESSMENT_14.md)).
+The assessment found 0 critical, 6 HIGH, 28 MEDIUM, and 8 LOW findings across
+correctness and data integrity (scheduler frontier persistence best-effort only,
+outbox catalog key stores `pgt_id` instead of stream-table OID, dead DUR-1
+tentative-frontier recovery code with invalid SQL, WAL transition handoff race,
+pristine-transaction precondition unenforced for slot creation), performance and
+scalability (monitoring functions O(N×history) per stream table, multi-SPI
+cleanup loops per source OID, holdback probe every tick, launcher dual catalog
+scans, Aho-Corasick automaton rebuilt per resolution, no byte-size cap on
+template cache), reliability (cleanup failures log-only with no durable state,
+full E2E schedule/manual only, dead recovery code), security (cargo audit vs.
+CI advisory split, IVM AFTER trigger includes `public` in SECURITY DEFINER
+search path), test coverage (outbox key invariant untested, frontier recovery
+untested, fixed stabilization sleeps, no path-filtered full E2E on risky PRs,
+no per-module coverage summary), API ergonomics (missing `metrics_summary()`
+SQL reference, Rust return types in generated catalog, inconsistent parameter
+naming), documentation (corrupted PLAN.md index, stale README GUC count,
+missing metrics section), architecture (two competing frontier durability
+designs, cleanup without backpressure, launcher state memory-only, no IVM
+comparison matrix), and developer experience (benchmark workflow disabled,
+`just lint` narrower than CI gates, stale version tags in Dockerfile examples,
+advisory policy split). This four-release arc resolves every finding.
+
+**v0.72.0 is the hard correctness gate for this arc.** It will not ship until
+the outbox `stream_table_oid` schema mismatch is fixed or explicitly migrated
+with a deprecation path, the DUR-1 tentative-frontier recovery is either wired
+into every refresh path or cleanly removed with a documented decision, the WAL
+transition handoff acquires an explicit serialization gate, and the pristine-
+transaction precondition for logical slot creation is enforced at runtime. These
+are catalog contract and durability invariants that must be proven before v1.0.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.72.0](roadmap/v0.72.0.md) | Frontier Durability & Catalog Correctness: fix `pgt_outbox_config.stream_table_oid` catalog key (COR-002/API-001), wire or remove DUR-1 tentative-frontier recovery (COR-001/REL-001/ARCH-001), remove invalid recovery SQL, WAL transition explicit handoff gate (COR-003), runtime pristine-transaction guard before slot creation (COR-004), outbox OID invariant tests (TEST-001), frontier recovery tests (TEST-003), ADR documenting chosen frontier durability model (CODE-001) | Planned | Large | [Full details](roadmap/v0.72.0.md) |
+| [v0.73.0](roadmap/v0.73.0.md) | Monitoring Scalability & Operational Resilience: incremental refresh-history summary table (PERF-001), batched per-OID frontier cleanup (PERF-002), holdback probe caching and cost metrics (PERF-003), combined launcher database+activity discovery (PERF-004), cached Aho-Corasick automata with delta templates (PERF-005), byte-size cap and `cache_stats()` memory column (PERF-006), consolidated per-stream-table scheduler state struct (PERF-007), persistent `pgt_cleanup_status` table with retry schedule and backpressure policy (ARCH-002/REL-002), launcher state in shared memory with health metrics (ARCH-003) | Planned | Large | [Full details](roadmap/v0.73.0.md) |
+| [v0.74.0](roadmap/v0.74.0.md) | Test Coverage, CI Integrity & Security Hardening: replace fixed WAL/safety stabilization sleeps with condition-based polling (TEST-002), path-filtered full E2E + reduced TPC-H slice on risky PRs (TEST-004/REL-003), `just coverage-summary` recipe with per-module risk output (TEST-005), `#[cfg(test)]` unit tests for `src/refresh/merge/mod.rs`, `src/refresh/codegen.rs`, `src/api/metrics_ext.rs` (CODE-002), centralize advisory ignores in `deny.toml` and make `just security` reproduce CI (SEC-001/DEVEX-004), restrict IVM AFTER trigger search path or add targeted shadowing tests (SEC-002), SQL builder helpers audit and lint for raw `format!()` SQL (SEC-003), re-enable push-to-main benchmark baselines (DEVEX-001), add `just lint-ci` recipe covering generated doc/schema/version/docs-truth checks (DEVEX-002), replace stale version tags in Dockerfile examples and justfile (DEVEX-003) | Planned | Large | [Full details](roadmap/v0.74.0.md) |
+| [v0.75.0](roadmap/v0.75.0.md) | API Polish, Documentation Excellence & Developer Experience: add `pgtrickle.metrics_summary` full SQL reference section with columns, examples, and cost caveats (API-002/DOC-003), normalize SQL function parameter naming convention and document it (API-003), convert generated API catalog return types to SQL-facing forms (API-004), add schedule-mode comparison table to SQL reference (API-005), introduce typed `PgtId`/`StreamTableOid` wrappers to prevent cross-domain casts (CODE-003), repair corrupted `plans/PLAN.md` architecture-doc table and add fragment-corruption lint (DOC-001), update README GUC count to generated phrase and add stale-version scanner (DOC-002/DOC-004), add `docs/COMPARISONS.md` covering pg_ivm, Materialize, Feldera, DuckDB/DuckLake, and pg_trickle across SQL coverage, consistency, CDC, performance, and operational model (ARCH-004) | Planned | Large | [Full details](roadmap/v0.75.0.md) |
+
 ### Beyond v1.0
 
 | Version | Theme | Status | Scope | Full details |
@@ -385,6 +426,14 @@ v0.70    ─── Scheduler/validator hardening: LATERAL validation, batched mo
     │
 v0.71    ─── CI truth + doc cleanup: fuzz all 9 targets, catalog generator rewrite, test harness schema generated, PLAN.md archived
     │
+v0.72    ─── Frontier durability & catalog correctness: outbox OID fix, DUR-1 recovery wire-or-remove, WAL handoff gate, slot pristine guard
+    │
+v0.73    ─── Monitoring scalability & operational resilience: O(Δ) history table, batched cleanup, Aho-Corasick cache, persistent cleanup queue, launcher shmem
+    │
+v0.74    ─── Test coverage, CI integrity & security: path-filtered full E2E, per-module coverage, IVM search_path, unified advisory policy, re-enable benchmarks
+    │
+v0.75    ─── API polish & documentation excellence: metrics_summary reference, typed PgtId wrappers, IVM comparison matrix, stale-tag scanner
+    │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
 
@@ -468,8 +517,26 @@ code quality and test coverage sweep. v0.61.0 delivers the final developer-exper
 and documentation polish, closing the last remaining items so that v1.0 is a clean,
 fully verified stable release.
 
-**v0.49.0 targets test infrastructure quality** — the single highest-risk
-category from the v10 assessment. All concurrency tests currently rely on
+**v0.72.0 through v0.75.0 form the Assessment-14-Driven Hardening Arc**, driven
+by the findings in the v0.71.0 overall assessment
+(plans/PLAN_OVERALL_ASSESSMENT_14.md). The assessment found 0 critical, 6 HIGH,
+28 MEDIUM, and 8 LOW findings. v0.72.0 is the hardest gate: it closes every
+finding that threatens catalog correctness or durability invariants — the
+outbox `stream_table_oid` schema mismatch, the dead DUR-1 tentative-frontier
+code, the WAL transition handoff race, and the unenforced slot precondition.
+v0.73.0 eliminates the scalability and reliability gaps introduced by
+per-stream-table SPI fan-out patterns: the monitoring O(N×history) aggregation
+is replaced with an incremental summary table, cleanup gains a persistent retry
+queue with backpressure, Aho-Corasick automata are cached across refresh cycles,
+and the launcher's in-memory-only state migrates into shared memory. v0.74.0
+closes the test-coverage, CI-integrity, and security gaps: path-filtered full
+E2E on risky PRs, advisory-policy consolidation, IVM trigger search-path
+restriction, benchmark CI re-enablement, and a `just lint-ci` recipe that
+surfaces every CI gate locally. v0.75.0 completes the arc with API polish,
+documentation excellence, and the long-overdue IVM comparison matrix —
+leaving v1.0 with nothing remaining but the package-registry and signature
+infrastructure.
+ All concurrency tests currently rely on
 `sleep(50ms)` for synchronization, which provides false confidence: tests may
 pass locally while missing real race conditions on slow CI runners or under
 load. This release replaces sleep-based synchronization with `pg_locks`-polling
