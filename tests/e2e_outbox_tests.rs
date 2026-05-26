@@ -295,3 +295,71 @@ async fn test_attach_outbox_publish_called_on_refresh() {
         publish_count
     );
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TEST-001 (v0.72.0): Outbox catalog OID invariant
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// TEST-001a: `pgt_outbox_config.stream_table_oid` must equal the stream
+/// table's `pgt_relid` (the real PostgreSQL relation OID in `pg_class`), not
+/// the internal `pgt_id` cast to OID.
+///
+/// This is the regression test for COR-002/API-001 (v0.72.0): before the fix
+/// the column stored `pgt_id::oid`, which made user joins to `pg_class` or
+/// `pgt_stream_tables.pgt_relid` return no rows.
+#[tokio::test]
+async fn test_outbox_stream_table_oid_equals_pgt_relid() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob_oid_src", "ob_oid_st").await;
+    install_pg_tide_stub(&db).await;
+
+    db.execute("SELECT pgtrickle.attach_outbox('ob_oid_st')")
+        .await;
+
+    // The catalog invariant: stream_table_oid must equal pgt_relid.
+    let matches: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 \
+               FROM pgtrickle.pgt_outbox_config oc \
+               JOIN pgtrickle.pgt_stream_tables st \
+                    ON oc.stream_table_oid = st.pgt_relid \
+               WHERE oc.stream_table_name = 'public.ob_oid_st' \
+             )",
+        )
+        .await;
+
+    assert!(
+        matches,
+        "pgt_outbox_config.stream_table_oid must equal pgt_stream_tables.pgt_relid \
+         (not pgt_id::oid). Join returned no rows — catalog OID mismatch detected."
+    );
+}
+
+/// TEST-001b: `stream_table_oid` must also be present in `pg_class.oid`, so
+/// users can join to `pg_class` for table metadata.
+#[tokio::test]
+async fn test_outbox_stream_table_oid_exists_in_pg_class() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob_pgclass_src", "ob_pgclass_st").await;
+    install_pg_tide_stub(&db).await;
+
+    db.execute("SELECT pgtrickle.attach_outbox('ob_pgclass_st')")
+        .await;
+
+    let found_in_pg_class: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 \
+               FROM pgtrickle.pgt_outbox_config oc \
+               JOIN pg_catalog.pg_class c ON c.oid = oc.stream_table_oid \
+               WHERE oc.stream_table_name = 'public.ob_pgclass_st' \
+             )",
+        )
+        .await;
+
+    assert!(
+        found_in_pg_class,
+        "pgt_outbox_config.stream_table_oid must be present in pg_class.oid"
+    );
+}
