@@ -1,4 +1,4 @@
--- pg_trickle 0.71.0 -> 0.72.0 upgrade migration
+-- pg_trickle 0.71.0 -> 0.72.0 upgrade migration (v0.72.0 — Frontier Durability & Catalog Correctness)
 --
 -- v0.72.0 — Frontier Durability & Catalog Correctness
 --
