@@ -317,6 +317,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     ducklake_sink_path TEXT DEFAULT NULL,
     -- v0.66.0 F-4: DuckLake table_id for catalog registration (NULL = file-only)
     ducklake_sink_table_id BIGINT DEFAULT NULL,
+    -- v0.73.0 HOT-1: fillfactor for storage heap (NULL = PG default 100). Range 10-100.
+    storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
