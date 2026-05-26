@@ -1336,7 +1336,8 @@ async fn bench_cdc_trigger_overhead() {
         .query_scalar(
             "SELECT count(*) FROM pg_trigger t \
              JOIN pg_class c ON c.oid = t.tgrelid \
-             WHERE c.relname = 'cdc_src' AND t.tgname LIKE 'pgt_%'",
+                         WHERE c.relname = 'cdc_src' \
+                             AND (t.tgname LIKE 'pg_trickle_%' OR t.tgname LIKE 'pgt_%')",
         )
         .await;
     assert!(

@@ -1082,6 +1082,19 @@ pub static PGS_WORKER_POOL_SIZE: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// Recommended range: 64–1024 depending on number of stream tables per database.
 pub static PGS_TEMPLATE_CACHE_MAX_ENTRIES: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+/// PERF-006 (v0.73.0): Maximum memory (bytes) for the per-backend L1 template
+/// cache.
+///
+/// Set to 0 to disable byte-based eviction and rely only on
+/// `template_cache_max_entries`.
+pub static PGS_TEMPLATE_CACHE_MAX_BYTES: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// PERF-003 (v0.73.0): Cache interval (milliseconds) for the xmin holdback
+/// probe result.
+///
+/// Set to 0 to disable caching and probe on every scheduler tick.
+pub static PGS_FRONTIER_HOLDBACK_PROBE_CACHE_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
+
 /// PUB-1: Warn when a publication subscriber lags behind the change buffer
 /// by more than this many bytes of WAL.
 ///
@@ -2745,6 +2758,30 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_int_guc(
+        c"pg_trickle.template_cache_max_bytes",
+        c"PERF-006: Maximum L1 template cache memory per backend in bytes (0 = disabled).",
+        c"When > 0, cache inserts evict least-recently-used entries until the total \
+           estimated template bytes fit under this cap.",
+        &PGS_TEMPLATE_CACHE_MAX_BYTES,
+        0,
+        2_147_483_647,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.frontier_holdback_probe_cache_ms",
+        c"PERF-003: Holdback probe cache interval in milliseconds (0 = disabled).",
+        c"When > 0, reuses the previous xmin-holdback probe result for up to this \
+           many milliseconds to reduce catalog-scan overhead.",
+        &PGS_FRONTIER_HOLDBACK_PROBE_CACHE_MS,
+        0,
+        60_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_trickle.publication_lag_warn_bytes",
         c"PUB-1: Emit WARNING when subscriber WAL lag exceeds this many bytes (0 = disabled).",
         c"When a downstream publication subscriber's confirmed_flush_lsn lags behind \
@@ -4160,6 +4197,16 @@ pub fn pg_trickle_worker_pool_size() -> i32 {
 /// CACHE-2: Returns the L1 template cache max entries (0 = unbounded).
 pub fn pg_trickle_template_cache_max_entries() -> i32 {
     PGS_TEMPLATE_CACHE_MAX_ENTRIES.get()
+}
+
+/// PERF-006: Returns the L1 template cache max bytes (0 = disabled).
+pub fn pg_trickle_template_cache_max_bytes() -> usize {
+    PGS_TEMPLATE_CACHE_MAX_BYTES.get().max(0) as usize
+}
+
+/// PERF-003: Returns the holdback-probe cache interval in milliseconds.
+pub fn pg_trickle_frontier_holdback_probe_cache_ms() -> i32 {
+    PGS_FRONTIER_HOLDBACK_PROBE_CACHE_MS.get()
 }
 
 /// PUB-1: Returns the publication subscriber lag warning threshold in bytes (0 = disabled).

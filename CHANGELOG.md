@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.73.0 — Monitoring Scalability & Operational Resilience](#0730--monitoring-scalability--operational-resilience)
 - [0.72.0 — Frontier Durability & Catalog Correctness](#0720--frontier-durability--catalog-correctness)
 - [0.71.0 — CI Truthfulness, Test Harness & Documentation Cleanup](#0710--ci-truthfulness-test-harness--documentation-cleanup)
 - [0.70.0 — Scheduler, Validator & Security Hardening](#0700--scheduler-validator--security-hardening)
@@ -87,6 +88,50 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.73.0] — Monitoring Scalability & Operational Resilience
+
+### What's New
+
+v0.73.0 focuses on scaling scheduler and monitoring hot paths under high stream
+counts while improving operator visibility into cleanup retries and launcher
+health. The release adds targeted cacheing, shared-memory telemetry, and new
+catalog tables that shift expensive repeated scans into incremental summaries.
+
+#### PERF-001 — Incremental refresh summary table
+
+Introduced `pgtrickle.pgt_refresh_summary` and moved refresh stats aggregation
+to summary-backed queries. This removes repeated per-stream scans over
+`pgt_refresh_history` for high-frequency monitoring calls.
+
+#### PERF-002 / ARCH-002 / REL-002 — Cleanup pipeline scalability and durability
+
+Frontier cleanup metadata lookups now batch OID discovery, reducing SPI query
+churn. Added durable `pgtrickle.pgt_cleanup_status` state with retry/backoff
+metadata so deferred cleanup progress and failures survive worker restarts.
+
+#### PERF-003 / ARCH-003 — Holdback and launcher observability
+
+Added short-lived holdback probe-result caching and exported probe telemetry
+(calls, cache hits, last/average latency). Launcher scans now use a combined
+database/activity query and publish scan duration and coverage metrics in shared
+memory for `metrics_text` and SQL APIs.
+
+#### PERF-005 / PERF-006 / PERF-007 — Hot-path cache improvements
+
+Delta template placeholder replacement now reuses cached Aho-Corasick resolver
+automata per template shape. Template merge cache entries are now bounded by a
+configurable byte cap with current memory usage exported in `cache_stats()`.
+Scheduler-state handling was consolidated around a single metrics/state path to
+reduce duplicated per-stream bookkeeping overhead.
+
+### Breaking Changes
+
+No user-facing SQL API removals. Monitoring and metrics outputs include new
+columns/series for cache bytes, holdback probe metrics, and launcher scan
+health.
 
 ---
 

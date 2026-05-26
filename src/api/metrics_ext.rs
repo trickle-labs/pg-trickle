@@ -37,6 +37,9 @@ pub fn metrics_summary() -> TableIterator<
         name!(total_rows_processed, Option<i64>),
         name!(active_workers, Option<i32>),
         name!(ivm_lock_parse_error_count, Option<i64>),
+        name!(holdback_probe_calls, Option<i64>),
+        name!(holdback_probe_cache_hits, Option<i64>),
+        name!(holdback_probe_avg_ms, Option<f64>),
     ),
 > {
     let rows = metrics_summary_impl();
@@ -55,10 +58,20 @@ fn metrics_summary_impl() -> Vec<(
     Option<i64>,
     Option<i32>,
     Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<f64>,
 )> {
     let active_workers = crate::shmem::active_worker_count() as i32;
     // PERF-3 (v0.31.0): Read the IVM lock-mode parse error counter.
     let ivm_parse_errors = crate::shmem::read_ivm_lock_parse_errors() as i64;
+    let (probe_calls, probe_cache_hits, probe_total_ms, _) =
+        crate::shmem::read_holdback_probe_metrics();
+    let probe_avg_ms = if probe_calls > 0 {
+        probe_total_ms as f64 / probe_calls as f64
+    } else {
+        0.0
+    };
 
     let row = Spi::connect(|client| {
         let result = client.select(
@@ -67,22 +80,13 @@ fn metrics_summary_impl() -> Vec<(
                COUNT(*)                                                              AS total, \
                COUNT(*) FILTER (WHERE status = 'ACTIVE')                            AS active, \
                COUNT(*) FILTER (WHERE status = 'SUSPENDED')                         AS suspended, \
-               COALESCE(SUM(h.refresh_count), 0)                                     AS total_refreshes, \
-               COALESCE(SUM(h.success_count), 0)                                     AS successful_refreshes, \
-               COALESCE(SUM(h.fail_count), 0)                                        AS failed_refreshes, \
-               COALESCE(SUM(h.total_rows), 0)                                        AS total_rows \
+                             COALESCE(SUM(h.total_refreshes), 0)                                   AS total_refreshes, \
+                             COALESCE(SUM(h.successful_refreshes), 0)                              AS successful_refreshes, \
+                             COALESCE(SUM(h.failed_refreshes), 0)                                  AS failed_refreshes, \
+                             COALESCE(SUM(h.total_rows_inserted + h.total_rows_deleted), 0)        AS total_rows \
              FROM pgtrickle.pgt_stream_tables s \
-             LEFT JOIN LATERAL ( \
-               SELECT \
-                 COUNT(*)                                          AS refresh_count, \
-                 COUNT(*) FILTER (WHERE status = 'COMPLETED')     AS success_count, \
-                 COUNT(*) FILTER (WHERE status = 'FAILED')        AS fail_count, \
-                 COALESCE(SUM( \
-                   COALESCE(rows_inserted, 0) + COALESCE(rows_deleted, 0) \
-                 ), 0)                                             AS total_rows \
-               FROM pgtrickle.pgt_refresh_history \
-               WHERE pgt_id = s.pgt_id \
-             ) h ON true",
+                         LEFT JOIN pgtrickle.pgt_refresh_summary h \
+                             ON h.pgt_id = s.pgt_id",
             None,
             &[],
         );
@@ -125,6 +129,9 @@ fn metrics_summary_impl() -> Vec<(
                 rp,
                 Some(active_workers),
                 Some(ivm_parse_errors),
+                Some(probe_calls as i64),
+                Some(probe_cache_hits as i64),
+                Some(probe_avg_ms),
             )]
         }
         None => Vec::new(),

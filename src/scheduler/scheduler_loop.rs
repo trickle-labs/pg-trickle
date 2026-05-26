@@ -133,55 +133,68 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
         .unwrap_or_else(std::time::Instant::now);
 
     loop {
-        // ── Collect all connectable, non-template databases  ──────────────
-        let databases: Vec<String> = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-            Spi::connect(|client| -> Vec<String> {
-                match client.select(
-                    "SELECT datname::text FROM pg_database \
-                     WHERE NOT datistemplate AND datallowconn",
-                    None,
-                    &[],
-                ) {
-                    Ok(result) => {
-                        let mut out = Vec::new();
-                        for row in result {
-                            if let Some(db) = row.get_by_name::<String, _>("datname").ok().flatten()
-                            {
-                                out.push(db);
+        // PERF-004: Combined launcher discovery query (databases + active scheduler flag).
+        let scan_start = std::time::Instant::now();
+        let discovered: Vec<(String, bool)> =
+            BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                Spi::connect(|client| -> Vec<(String, bool)> {
+                    match client.select(
+                        "SELECT
+                        d.datname::text AS datname,
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_stat_activity a
+                            WHERE a.backend_type = 'pg_trickle scheduler'
+                              AND a.datname = d.datname
+                        ) AS has_scheduler
+                     FROM pg_database d
+                     WHERE NOT d.datistemplate
+                       AND d.datallowconn",
+                        None,
+                        &[],
+                    ) {
+                        Ok(result) => {
+                            let mut out = Vec::new();
+                            for row in result {
+                                let db = row.get_by_name::<String, _>("datname").ok().flatten();
+                                let has_scheduler = row
+                                    .get_by_name::<bool, _>("has_scheduler")
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(false);
+                                if let Some(db_name) = db {
+                                    out.push((db_name, has_scheduler));
+                                }
                             }
+                            out
                         }
-                        out
+                        Err(_) => Vec::new(),
                     }
-                    Err(_) => vec![],
+                })
+            }));
+        let databases: Vec<String> = discovered.iter().map(|(db, _)| db.clone()).collect();
+        let active: HashSet<String> = discovered
+            .iter()
+            .filter_map(|(db, has_scheduler)| {
+                if *has_scheduler {
+                    Some(db.clone())
+                } else {
+                    None
                 }
             })
-        }));
+            .collect();
 
-        // ── Databases that already have a running scheduler worker  ────────
-        let active: HashSet<String> = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-            Spi::connect(|client| -> HashSet<String> {
-                match client.select(
-                    "SELECT datname::text \
-                     FROM pg_stat_activity \
-                     WHERE backend_type = 'pg_trickle scheduler' \
-                       AND datname IS NOT NULL",
-                    None,
-                    &[],
-                ) {
-                    Ok(result) => {
-                        let mut out = HashSet::new();
-                        for row in result {
-                            if let Some(db) = row.get_by_name::<String, _>("datname").ok().flatten()
-                            {
-                                out.insert(db);
-                            }
-                        }
-                        out
-                    }
-                    Err(_) => HashSet::new(),
-                }
-            })
-        }));
+        let scan_ms = scan_start.elapsed().as_millis() as u64;
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::shmem::set_launcher_scan_metrics(
+            scan_ms,
+            databases.len() as u64,
+            active.len() as u64,
+            now_epoch,
+        );
 
         // If any backend bumped the DAG signal (create_st, alter, drop,
         // CREATE EXTENSION finalize, manual rescan nudge, etc.) since our last

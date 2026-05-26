@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**130 configuration parameters** extracted from `src/config.rs`.
+**132 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -66,6 +66,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.force_full_refresh` | `bool` | `false` | Useful for SRE diagnosis when a cluster-wide `refresh_strategy = 'full'` still has DIFFERENTIAL STs due to explicit per-ST row values. |
 | `pg_trickle.foreign_table_polling` | `bool` | `false` | When enabled, foreign tables used in DIFFERENTIAL / IMMEDIATE mode defining queries will be supported via a snapshot-comparison approach: before each refresh cycle the scheduler materializes a snapshot of the foreign table into a local shadow table, then computes EXCEPT ALL deltas against the previous snapshot. |
 | `pg_trickle.frontier_holdback_mode` | `text` | `"xmin"` | \| Value \| Meaning \| \|-------\|---------\| \| `"xmin"` (default) \| Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
+| `pg_trickle.frontier_holdback_probe_cache_ms` | `int4` | `250` | Set to 0 to disable caching and probe on every scheduler tick. |
 | `pg_trickle.frontier_holdback_warn_seconds` | `int4` | `60` | Set to 0 to disable the warning (not recommended for production). |
 | `pg_trickle.fuse_default_ceiling` | `int4` | `0` | Set to 0 to disable the global default ceiling (per-ST ceiling only). |
 | `pg_trickle.fused_refresh_max_delta_rows` | `int4` | `500000` | Default: 500 000. |
@@ -126,6 +127,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.spill_threshold_blocks` | `int4` | `0` | Set to 0 to disable spill detection (default). |
 | `pg_trickle.template_cache` | `bool` | `true` | In transaction-pooling mode, rely on L2 rather than L0 warm-up for cross-connection performance. |
 | `pg_trickle.template_cache_max_age_hours` | `int4` | `168` | Prevents stale entries accumulating after ALTER QUERY without DROP or source-OID renumbering. |
+| `pg_trickle.template_cache_max_bytes` | `int4` | `0` | Set to 0 to disable byte-based eviction and rely only on `template_cache_max_entries`. |
 | `pg_trickle.template_cache_max_entries` | `int4` | `0` | When the cache reaches this size, the least-recently-used entry is evicted. |
 | `pg_trickle.temporal_stream_tables` | `bool` | `false` | Default: `false` (standard non-temporal storage). |
 | `pg_trickle.tick_watermark_enabled` | `bool` | `true` | Disable only if you need stream tables to always advance to the very latest available LSN regardless of cross-source consistency. |

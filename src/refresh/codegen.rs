@@ -156,6 +156,65 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
 }
 
+fn upsert_cleanup_status(
+    source_oid: u32,
+    buffer_table: &str,
+    operation: &str,
+    error_message: &str,
+    backlog_rows: i64,
+) {
+    let _ = Spi::run_with_args(
+        "INSERT INTO pgtrickle.pgt_cleanup_status (
+             source_relid,
+             buffer_table,
+             attempt_count,
+             blocked,
+             last_error,
+             last_operation,
+             last_attempt_at,
+             next_retry_at,
+             backlog_rows,
+             updated_at
+         )
+         VALUES (
+             $1,
+             $2,
+             1,
+             false,
+             $3,
+             $4,
+             now(),
+             now() + interval '5 seconds',
+             $5,
+             now()
+         )
+         ON CONFLICT (source_relid) DO UPDATE SET
+             buffer_table = EXCLUDED.buffer_table,
+             attempt_count = pgtrickle.pgt_cleanup_status.attempt_count + 1,
+             blocked = (pgtrickle.pgt_cleanup_status.attempt_count + 1) >= 3,
+             last_error = EXCLUDED.last_error,
+             last_operation = EXCLUDED.last_operation,
+             last_attempt_at = now(),
+             next_retry_at = now() + make_interval(secs => LEAST(300, 5 * (pgtrickle.pgt_cleanup_status.attempt_count + 1))),
+             backlog_rows = EXCLUDED.backlog_rows,
+             updated_at = now()",
+        &[
+            pg_sys::Oid::from(source_oid).into(),
+            buffer_table.into(),
+            error_message.into(),
+            operation.into(),
+            backlog_rows.into(),
+        ],
+    );
+}
+
+fn clear_cleanup_status(source_oid: u32) {
+    let _ = Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_cleanup_status WHERE source_relid = $1",
+        &[pg_sys::Oid::from(source_oid).into()],
+    );
+}
+
 // ── DAG-4: ST bypass tables for fused-chain execution ───────────────
 
 thread_local! {
@@ -383,6 +442,14 @@ pub(crate) fn drain_pending_cleanups() {
                     );
                 }
             });
+
+            let backlog_rows = Spi::get_one::<i64>(&format!(
+                "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
+                schema = change_schema,
+            ))
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
+            upsert_cleanup_status(oid, &buf_name, operation, msg, backlog_rows);
         };
 
         if can_truncate {
@@ -394,6 +461,7 @@ pub(crate) fn drain_pending_cleanups() {
                     CLEANUP_FAILURE_COUNTS.with(|m| {
                         m.borrow_mut().remove(&oid);
                     });
+                    clear_cleanup_status(oid);
                 }
                 Err(e) => record_cleanup_failure(oid, "TRUNCATE", &e.to_string()),
             }
@@ -408,6 +476,7 @@ pub(crate) fn drain_pending_cleanups() {
                     CLEANUP_FAILURE_COUNTS.with(|m| {
                         m.borrow_mut().remove(&oid);
                     });
+                    clear_cleanup_status(oid);
                 }
                 Err(e) => record_cleanup_failure(oid, "DELETE", &e.to_string()),
             }
@@ -434,40 +503,63 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
 
     let use_truncate = crate::config::pg_trickle_cleanup_use_truncate();
 
-    for &oid in source_oids {
+    let values_list = source_oids
+        .iter()
+        .map(|oid| {
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
+            format!("({oid}::oid, '{buf_name}')")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let metadata = Spi::connect(|client| -> Vec<(u32, bool, Option<String>)> {
+        let sql = format!(
+            "WITH src(source_oid, buf_name) AS (
+                 VALUES {values_list}
+             )
+             SELECT
+                 s.source_oid::int8,
+                 EXISTS(
+                     SELECT 1
+                     FROM pg_class c
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = '{schema}'
+                       AND c.relname = s.buf_name
+                       AND c.relkind IN ('r', 'p')
+                 ) AS table_exists,
+                 (
+                     SELECT MIN((st.frontier->'sources'->(s.source_oid::text)->>'lsn')::pg_lsn)::text
+                     FROM pgtrickle.pgt_stream_tables st
+                     JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id
+                     WHERE dep.source_relid = s.source_oid
+                       AND dep.source_type IN ('TABLE', 'FOREIGN_TABLE', 'MATVIEW')
+                       AND st.frontier IS NOT NULL
+                       AND st.frontier->'sources'->(s.source_oid::text)->>'lsn' IS NOT NULL
+                 ) AS min_lsn
+             FROM src s",
+            values_list = values_list,
+            schema = change_schema,
+        );
+
+        let mut out = Vec::new();
+        if let Ok(rows) = client.select(&sql, None, &[]) {
+            for row in rows {
+                let oid = row.get::<i64>(1).unwrap_or(None).unwrap_or(0) as u32;
+                let table_exists = row.get::<bool>(2).unwrap_or(None).unwrap_or(false);
+                let min_lsn = row.get::<String>(3).unwrap_or(None);
+                out.push((oid, table_exists, min_lsn));
+            }
+        }
+        out
+    });
+
+    for (oid, table_exists, min_lsn) in metadata {
         // CITUS-4: Compute stable buffer name.
         let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
-        // Check that the change buffer table exists
-        // PERF-2: Accept both 'r' (regular) and 'p' (partitioned) relkinds.
-        let table_exists = Spi::get_one::<bool>(&format!(
-            "SELECT EXISTS(\
-               SELECT 1 FROM pg_class c \
-               JOIN pg_namespace n ON n.oid = c.relnamespace \
-               WHERE n.nspname = '{schema}' \
-                 AND c.relname = '{buf_name}' \
-                 AND c.relkind IN ('r', 'p')\
-             )",
-            schema = change_schema,
-        ))
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
 
         if !table_exists {
             continue;
         }
-
-        // Compute the minimum frontier LSN across ALL stream tables that
-        // depend on this source OID.
-        let min_lsn: Option<String> = Spi::get_one::<String>(&format!(
-            "SELECT MIN((st.frontier->'sources'->'{oid}'->>'lsn')::pg_lsn)::TEXT \
-             FROM pgtrickle.pgt_stream_tables st \
-             JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id \
-             WHERE dep.source_relid = {oid} \
-               AND dep.source_type IN ('TABLE', 'FOREIGN_TABLE', 'MATVIEW') \
-               AND st.frontier IS NOT NULL \
-               AND st.frontier->'sources'->'{oid}'->>'lsn' IS NOT NULL",
-        ))
-        .unwrap_or(None);
 
         let safe_lsn = match min_lsn {
             Some(lsn) if lsn != "0/0" => lsn,
@@ -499,11 +591,25 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
                         n,
                         buf_name,
                     );
+                    clear_cleanup_status(oid);
                 }
                 Err(e) => {
                     pgrx::debug1!(
                         "[pg_trickle] Frontier cleanup partition detach failed: {}",
                         e,
+                    );
+                    let backlog_rows = Spi::get_one::<i64>(&format!(
+                        "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
+                        schema = change_schema,
+                    ))
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0);
+                    upsert_cleanup_status(
+                        oid,
+                        &buf_name,
+                        "DETACH_PARTITIONS",
+                        &e.to_string(),
+                        backlog_rows,
                     );
                 }
                 _ => {}
@@ -532,6 +638,15 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
                 schema = change_schema,
             )) {
                 pgrx::debug1!("[pg_trickle] Frontier-based cleanup TRUNCATE failed: {}", e);
+                let backlog_rows = Spi::get_one::<i64>(&format!(
+                    "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
+                    schema = change_schema,
+                ))
+                .unwrap_or(Some(0))
+                .unwrap_or(0);
+                upsert_cleanup_status(oid, &buf_name, "TRUNCATE", &e.to_string(), backlog_rows);
+            } else {
+                clear_cleanup_status(oid);
             }
         } else {
             let delete_sql = format!(
@@ -541,6 +656,15 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
             );
             if let Err(e) = Spi::run(&delete_sql) {
                 pgrx::debug1!("[pg_trickle] Frontier-based cleanup DELETE failed: {}", e);
+                let backlog_rows = Spi::get_one::<i64>(&format!(
+                    "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
+                    schema = change_schema,
+                ))
+                .unwrap_or(Some(0))
+                .unwrap_or(0);
+                upsert_cleanup_status(oid, &buf_name, "DELETE", &e.to_string(), backlog_rows);
+            } else {
+                clear_cleanup_status(oid);
             }
         }
     }
@@ -1709,10 +1833,56 @@ pub(crate) fn maybe_evict_lru_cache_entry() {
         let mut c = cache.borrow_mut();
         if c.cap() != desired_cap {
             c.resize(desired_cap);
+            crate::shmem::set_template_cache_bytes(current_merge_cache_bytes(&c) as u64);
         }
         // LruCache::put() will automatically evict the LRU entry when at
         // capacity — no additional action needed here.
     });
+}
+
+fn estimate_cached_merge_template_bytes(entry: &CachedMergeTemplate) -> usize {
+    entry.merge_sql_template.len()
+        + entry.parameterized_merge_sql.len()
+        + entry.cleanup_sql_template.len()
+        + entry.trigger_delete_template.len()
+        + entry.trigger_update_template.len()
+        + entry.trigger_insert_template.len()
+        + entry.trigger_using_template.len()
+        + entry.delta_sql_template.len()
+        + entry
+            .source_oids
+            .len()
+            .saturating_mul(std::mem::size_of::<u32>())
+}
+
+fn current_merge_cache_bytes(cache: &LruCache<i64, CachedMergeTemplate>) -> usize {
+    cache
+        .iter()
+        .map(|(_, entry)| estimate_cached_merge_template_bytes(entry))
+        .sum()
+}
+
+fn enforce_template_cache_byte_cap(
+    cache: &mut LruCache<i64, CachedMergeTemplate>,
+    incoming_bytes: usize,
+) {
+    let max_bytes = crate::config::pg_trickle_template_cache_max_bytes();
+    if max_bytes == 0 {
+        return;
+    }
+
+    loop {
+        let current = current_merge_cache_bytes(cache);
+        if current.saturating_add(incoming_bytes) <= max_bytes {
+            break;
+        }
+
+        if cache.pop_lru().is_some() {
+            crate::shmem::increment_template_cache_evictions();
+        } else {
+            break;
+        }
+    }
 }
 
 /// PERF-2 (v0.63.0): Retrieve the delta SQL template and source OIDs from the
@@ -1742,7 +1912,9 @@ pub(crate) fn get_fused_refresh_template(
 
 pub fn invalidate_merge_cache(pgt_id: i64) {
     MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache.borrow_mut().pop(&pgt_id);
+        let mut c = cache.borrow_mut();
+        c.pop(&pgt_id);
+        crate::shmem::set_template_cache_bytes(current_merge_cache_bytes(&c) as u64);
     });
     // D-2: Also deallocate any prepared statement for this ST.
     if PREPARED_MERGE_STMTS.with(|s| s.borrow_mut().remove(&pgt_id)) {
@@ -1763,7 +1935,10 @@ pub fn invalidate_merge_cache(pgt_id: i64) {
 /// backends also invalidate their L1 caches on the next refresh.
 pub fn flush_local_template_cache() {
     // Flush L1: MERGE template cache.
-    MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow_mut().clear());
+    MERGE_TEMPLATE_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+        crate::shmem::set_template_cache_bytes(0);
+    });
     // Flush all prepared statements.
     PREPARED_MERGE_STMTS.with(|s| {
         for pgt_id in s.borrow().iter().copied() {
@@ -2405,25 +2580,28 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // via string substitution, then executes the resolved SQL.
     // P-8: Resize LRU cache if needed, then put() (automatically evicts LRU at capacity).
     maybe_evict_lru_cache_entry();
+    let new_entry = CachedMergeTemplate {
+        defining_query_hash: query_hash,
+        // PERF-3: convert to Arc<str> so cache-hit clones are O(1).
+        merge_sql_template: merge_template.into(),
+        parameterized_merge_sql: parameterized_merge_sql.into(),
+        source_oids: source_oids.clone(),
+        cleanup_sql_template: cleanup_template.into(),
+        trigger_delete_template: trigger_delete_template.into(),
+        trigger_update_template: trigger_update_template.into(),
+        trigger_insert_template: trigger_insert_template.into(),
+        trigger_using_template: using_clause.clone().into(),
+        delta_sql_template: delta_sql_template.clone().into(),
+        is_all_algebraic: delta_result.is_all_algebraic,
+        is_deduplicated: delta_result.is_deduplicated,
+    };
+    let incoming_bytes = estimate_cached_merge_template_bytes(&new_entry);
+
     MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache.borrow_mut().put(
-            st.pgt_id,
-            CachedMergeTemplate {
-                defining_query_hash: query_hash,
-                // PERF-3: convert to Arc<str> so cache-hit clones are O(1).
-                merge_sql_template: merge_template.into(),
-                parameterized_merge_sql: parameterized_merge_sql.into(),
-                source_oids: source_oids.clone(),
-                cleanup_sql_template: cleanup_template.into(),
-                trigger_delete_template: trigger_delete_template.into(),
-                trigger_update_template: trigger_update_template.into(),
-                trigger_insert_template: trigger_insert_template.into(),
-                trigger_using_template: using_clause.clone().into(),
-                delta_sql_template: delta_sql_template.clone().into(),
-                is_all_algebraic: delta_result.is_all_algebraic,
-                is_deduplicated: delta_result.is_deduplicated,
-            },
-        );
+        let mut c = cache.borrow_mut();
+        enforce_template_cache_byte_cap(&mut c, incoming_bytes);
+        c.put(st.pgt_id, new_entry);
+        crate::shmem::set_template_cache_bytes(current_merge_cache_bytes(&c) as u64);
     });
 
     pgrx::log!(
