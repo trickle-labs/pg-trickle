@@ -670,6 +670,7 @@ fn alter_stream_table_query(
                 &vq.covar_aux_columns,
                 &vq.nonnull_aux_columns,
                 st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
+                st.storage_fillfactor,          // HOT-1: preserve fillfactor
             )?
         }
     };
@@ -1009,6 +1010,7 @@ fn alter_stream_table_partition_key(
         &covar_aux,
         &nonnull_aux,
         new_partition_key,
+        st.storage_fillfactor, // HOT-1: preserve fillfactor
     )?;
 
     // Update catalog: new relid + new partition key.
@@ -1121,6 +1123,8 @@ pub(crate) struct CreateStreamTableOptions<'a> {
     pub(crate) ducklake_sink_path: Option<&'a str>,
     /// F-4 (v0.66.0): DuckLake table_id for catalog registration.
     pub(crate) ducklake_sink_table_id: Option<i64>,
+    /// HOT-1 (v0.73.0): heap fillfactor (10–100). `None` = PostgreSQL default (100).
+    pub(crate) storage_fillfactor: Option<i32>,
 }
 
 impl<'a> CreateStreamTableOptions<'a> {
@@ -1158,6 +1162,7 @@ pub(crate) fn create_stream_table_impl(
         ducklake_sink,
         ducklake_sink_path,
         ducklake_sink_table_id,
+        storage_fillfactor,
     } = opts;
     let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
     let mut refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
@@ -1209,6 +1214,16 @@ pub(crate) fn create_stream_table_impl(
     // Parse schema.name
     let (schema, table_name) = parse_qualified_name(name)?;
     let qualified_name = format!("{schema}.{table_name}");
+
+    // HOT-1: validate fillfactor range.
+    if let Some(ff) = storage_fillfactor
+        && !(10..=100).contains(&ff)
+    {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "invalid fillfactor value: {} (expected 10–100)",
+            ff
+        )));
+    }
 
     // Parse and validate schedule
     let schedule_str = if refresh_mode.is_immediate() {
@@ -1341,6 +1356,7 @@ pub(crate) fn create_stream_table_impl(
         &vq.covar_aux_columns,
         &vq.nonnull_aux_columns,
         partition_by,
+        storage_fillfactor,
     )?;
 
     // F4: Fix vector aggregate column dimensions (VectorAvg/VectorSum output
@@ -1462,6 +1478,7 @@ pub(crate) fn create_stream_table_impl(
         max_delta_fraction,
         temporal_mode,
         &storage_backend_str,
+        storage_fillfactor,
     )?;
 
     // ── Phase 2: CDC / IVM trigger setup ──

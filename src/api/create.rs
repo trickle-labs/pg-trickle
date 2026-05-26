@@ -47,6 +47,8 @@ fn create_stream_table(
     sink: default!(Option<&str>, "NULL"),
     ducklake_sink_path: default!(Option<&str>, "NULL"),
     ducklake_sink_table_id: default!(Option<i64>, "NULL"),
+    // HOT-1 (v0.73.0): heap fillfactor for HOT-friendly differential refreshes
+    fillfactor: default!(Option<i32>, "NULL"),
 ) {
     let result = create_stream_table_impl(CreateStreamTableOptions {
         name,
@@ -68,6 +70,7 @@ fn create_stream_table(
         ducklake_sink: sink,
         ducklake_sink_path,
         ducklake_sink_table_id,
+        storage_fillfactor: fillfactor,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -106,6 +109,8 @@ fn create_stream_table_if_not_exists(
     sink: default!(Option<&str>, "NULL"),
     ducklake_sink_path: default!(Option<&str>, "NULL"),
     ducklake_sink_table_id: default!(Option<i64>, "NULL"),
+    // HOT-1 (v0.73.0): heap fillfactor for HOT-friendly differential refreshes
+    fillfactor: default!(Option<i32>, "NULL"),
 ) {
     let result = create_stream_table_if_not_exists_impl(CreateStreamTableOptions {
         name,
@@ -127,6 +132,7 @@ fn create_stream_table_if_not_exists(
         ducklake_sink: sink,
         ducklake_sink_path,
         ducklake_sink_table_id,
+        storage_fillfactor: fillfactor,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -258,6 +264,11 @@ pub(crate) fn bulk_create_impl(
         let ducklake_sink = obj.get("sink").and_then(|v| v.as_str());
         let ducklake_sink_path = obj.get("ducklake_sink_path").and_then(|v| v.as_str());
         let ducklake_sink_table_id = obj.get("ducklake_sink_table_id").and_then(|v| v.as_i64());
+        // HOT-1 (v0.73.0): heap fillfactor
+        let storage_fillfactor = obj
+            .get("fillfactor")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
 
         match create_stream_table_impl(CreateStreamTableOptions {
             name,
@@ -279,6 +290,7 @@ pub(crate) fn bulk_create_impl(
             ducklake_sink,
             ducklake_sink_path,
             ducklake_sink_table_id,
+            storage_fillfactor,
         }) {
             Ok(()) => {
                 // Look up pgt_id for the result
@@ -615,6 +627,7 @@ fn create_or_replace_stream_table_impl(
                 ducklake_sink,
                 ducklake_sink_path,
                 ducklake_sink_table_id,
+                storage_fillfactor: None,
             })
         }
         Err(e) => Err(e),

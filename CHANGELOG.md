@@ -7,7 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
-- [0.73.0 — Monitoring Scalability & Operational Resilience](#0730--monitoring-scalability--operational-resilience)
+- [0.73.0 — Monitoring Scalability, Operational Resilience & HOT-Friendly Storage](#0730--monitoring-scalability-operational-resilience--hot-friendly-storage)
 - [0.72.0 — Frontier Durability & Catalog Correctness](#0720--frontier-durability--catalog-correctness)
 - [0.71.0 — CI Truthfulness, Test Harness & Documentation Cleanup](#0710--ci-truthfulness-test-harness--documentation-cleanup)
 - [0.70.0 — Scheduler, Validator & Security Hardening](#0700--scheduler-validator--security-hardening)
@@ -91,14 +91,14 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [0.73.0] — Monitoring Scalability & Operational Resilience
+## [0.73.0] — Monitoring Scalability, Operational Resilience & HOT-Friendly Storage
 
 ### What's New
 
-v0.73.0 focuses on scaling scheduler and monitoring hot paths under high stream
-counts while improving operator visibility into cleanup retries and launcher
-health. The release adds targeted cacheing, shared-memory telemetry, and new
-catalog tables that shift expensive repeated scans into incremental summaries.
+v0.73.0 scales scheduler and monitoring hot paths under high stream counts,
+improves operator visibility into cleanup retries and launcher health, and
+adds a `fillfactor` option for stream table storage heaps to enable HOT
+(Heap-Only Tuple) updates on update-heavy differential workloads.
 
 #### PERF-001 — Incremental refresh summary table
 
@@ -126,6 +126,29 @@ automata per template shape. Template merge cache entries are now bounded by a
 configurable byte cap with current memory usage exported in `cache_stats()`.
 Scheduler-state handling was consolidated around a single metrics/state path to
 reduce duplicated per-stream bookkeeping overhead.
+
+#### HOT-1 — fillfactor option for stream table storage heaps
+
+Stream tables now accept a `fillfactor` parameter that controls the PostgreSQL
+heap storage fillfactor. pg_trickle's differential refresh path applies changes
+via `MERGE` (one `UPDATE` per changed row). With the default `fillfactor = 100`
+(pages packed full), every update allocates a new heap tuple on a new page and
+a new index entry. Setting `fillfactor` below 100 leaves free space so that
+in-place HOT updates fire — eliminating index tuple churn and reducing WAL
+volume by 30–50 % on update-heavy workloads.
+
+```sql
+SELECT pgtrickle.create_stream_table(
+    'my_summary',
+    'SELECT region, SUM(revenue) FROM orders GROUP BY region',
+    fillfactor => 80
+);
+```
+
+Accepted range: `10`–`100`. `NULL` (default) = PostgreSQL's built-in default
+(100). The setting is stored in `pgtrickle.pgt_stream_tables.storage_fillfactor`
+and preserved across `ALTER STREAM TABLE` rebuilds. `bulk_create()` accepts it
+as a JSON key `"fillfactor"`.
 
 ### Breaking Changes
 
