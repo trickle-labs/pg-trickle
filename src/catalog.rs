@@ -186,6 +186,11 @@ pub struct StreamTableMeta {
     /// under this table ID and a new `ducklake_snapshot` row is inserted.
     /// When `None`, files are written to object storage but not registered.
     pub ducklake_sink_table_id: Option<i64>,
+    /// HOT-1 (v0.73.0): fillfactor for the storage heap table.
+    /// `None` means use PostgreSQL's default (100 — pages packed full).
+    /// Set to 70–90 on update-heavy differential workloads so that in-place
+    /// HOT updates are possible, eliminating index tuple churn and extra WAL.
+    pub storage_fillfactor: Option<i32>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -312,6 +317,8 @@ impl StreamTableMeta {
         temporal_mode: bool,
         // CORR-2/UX-3 (v0.36.0): columnar storage backend ("heap", "citus", "pg_mooncake")
         storage_backend: &str,
+        // HOT-1 (v0.73.0): heap fillfactor for HOT-friendly differential updates
+        storage_fillfactor: Option<i32>,
     ) -> Result<i64, PgTrickleError> {
         // PERF-2: Compute hash of the defining query at INSERT time so that
         // the refresh engine can skip the per-refresh DefaultHasher computation.
@@ -326,9 +333,10 @@ impl StreamTableMeta {
                       diamond_consistency, diamond_schedule_policy, has_keyless_source, \
                       requested_cdc_mode, is_append_only, pooler_compatibility_mode, \
                       st_partition_key, max_differential_joins, max_delta_fraction, \
-                      temporal_mode, storage_backend, defining_query_hash) \
+                      temporal_mode, storage_backend, defining_query_hash, \
+                      storage_fillfactor) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                             $15, $16, $17, $18, $19, $20, $21, $22, $23) \
+                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -355,6 +363,7 @@ impl StreamTableMeta {
                         temporal_mode.into(),
                         storage_backend.into(),
                         query_hash.into(),
+                        storage_fillfactor.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -393,7 +402,8 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+                     storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -436,7 +446,8 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+                     storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -484,7 +495,8 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+                     storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -527,7 +539,8 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+                     storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -574,7 +587,8 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+                     storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1287,6 +1301,7 @@ impl StreamTableMeta {
         let ducklake_sink_mode = table.get::<String>(53).map_err(map_spi)?;
         let ducklake_sink_path = table.get::<String>(54).map_err(map_spi)?;
         let ducklake_sink_table_id = table.get::<i64>(55).map_err(map_spi)?;
+        let storage_fillfactor = table.get::<i32>(56).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1344,6 +1359,7 @@ impl StreamTableMeta {
             ducklake_sink_mode,
             ducklake_sink_path,
             ducklake_sink_table_id,
+            storage_fillfactor,
         })
     }
 
@@ -1474,6 +1490,7 @@ impl StreamTableMeta {
         let ducklake_sink_mode = row.get::<String>(53).map_err(map_spi)?;
         let ducklake_sink_path = row.get::<String>(54).map_err(map_spi)?;
         let ducklake_sink_table_id = row.get::<i64>(55).map_err(map_spi)?;
+        let storage_fillfactor = row.get::<i32>(56).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1531,6 +1548,7 @@ impl StreamTableMeta {
             ducklake_sink_mode,
             ducklake_sink_path,
             ducklake_sink_table_id,
+            storage_fillfactor,
         })
     }
 }

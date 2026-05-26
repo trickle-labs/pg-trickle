@@ -156,6 +156,7 @@ mod tests {
             ducklake_sink_mode: None,
             ducklake_sink_path: None,
             ducklake_sink_table_id: None,
+            storage_fillfactor: None,
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).

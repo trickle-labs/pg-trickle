@@ -85,8 +85,9 @@ async fn test_upgrade_catalog_schema_stability() {
         ("st_partition_key", "text"),
         ("st_placement", "text"), // CITUS-3: v0.32.0
         ("status", "text"),
-        ("storage_backend", "text"),  // v0.36.0: CORR-2/UX-3
-        ("temporal_mode", "boolean"), // v0.36.0: CORR-1/UX-1
+        ("storage_backend", "text"),       // v0.36.0: CORR-2/UX-3
+        ("storage_fillfactor", "integer"), // v0.73.0: HOT-1
+        ("temporal_mode", "boolean"),      // v0.36.0: CORR-1/UX-1
         ("topk_limit", "integer"),
         ("topk_offset", "integer"),
         ("topk_order_by", "text"),

@@ -1663,6 +1663,8 @@ pub(super) fn build_create_table_sql(
     nonnull_aux_columns: &[(String, String)],
     // A1-1: when Some, emit PARTITION BY RANGE (<key>) suffix.
     partition_key: Option<&str>,
+    // HOT-1: when Some, emit WITH (fillfactor=N) storage option.
+    fillfactor: Option<i32>,
 ) -> String {
     let col_defs: Vec<String> = columns
         .iter()
@@ -1755,8 +1757,15 @@ pub(super) fn build_create_table_sql(
         })
         .unwrap_or_default();
 
+    // HOT-1: emit WITH (fillfactor=N) when the caller requests it.
+    // Partitioned parents accept this syntax and propagate it to child
+    // partitions created with PARTITION OF.
+    let storage_clause = fillfactor
+        .map(|ff| format!(" WITH (fillfactor = {})", ff.clamp(10, 100)))
+        .unwrap_or_default();
+
     format!(
-        "CREATE TABLE {}.{} (\n    __pgt_row_id BIGINT,\n{}{}{}{}{}{}\n){}",
+        "CREATE TABLE {}.{} (\n    __pgt_row_id BIGINT,\n{}{}{}{}{}{}\n){}{}",
         quote_identifier(schema),
         quote_identifier(name),
         col_defs.join(",\n"),
@@ -1765,6 +1774,7 @@ pub(super) fn build_create_table_sql(
         sum2_aux_sql,
         covar_aux_sql,
         nonnull_aux_sql,
+        storage_clause,
         partition_clause,
     )
 }

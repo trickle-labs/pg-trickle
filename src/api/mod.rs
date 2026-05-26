@@ -1282,6 +1282,8 @@ fn setup_storage_table(
     nonnull_aux_columns: &[(String, String)],
     // A1-1: partition key column name, or None for non-partitioned STs.
     partition_key: Option<&str>,
+    // HOT-1: heap fillfactor for HOT-friendly differential updates.
+    fillfactor: Option<i32>,
 ) -> Result<pg_sys::Oid, PgTrickleError> {
     let storage_needs_pgt_count = needs_pgt_count;
     let storage_ddl = build_create_table_sql(
@@ -1295,6 +1297,7 @@ fn setup_storage_table(
         covar_aux_columns,
         nonnull_aux_columns,
         partition_key,
+        fillfactor,
     );
     Spi::run(&storage_ddl)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to create storage table: {}", e)))?;
@@ -1458,6 +1461,8 @@ fn insert_catalog_and_deps(
     temporal_mode: bool,
     // CORR-2/UX-3 (v0.36.0): columnar storage backend
     storage_backend: &str,
+    // HOT-1 (v0.73.0): heap fillfactor
+    storage_fillfactor: Option<i32>,
 ) -> Result<i64, PgTrickleError> {
     let pgt_id = StreamTableMeta::insert(
         pgt_relid,
@@ -1484,6 +1489,7 @@ fn insert_catalog_and_deps(
         max_delta_fraction,
         temporal_mode,
         storage_backend,
+        storage_fillfactor,
     )?;
 
     // Build per-source column usage map
@@ -3564,6 +3570,7 @@ mod tests {
             ducklake_sink_mode: None,
             ducklake_sink_path: None,
             ducklake_sink_table_id: None,
+            storage_fillfactor: None,
         }
     }
 

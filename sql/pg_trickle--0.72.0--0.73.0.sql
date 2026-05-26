@@ -95,3 +95,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_cleanup_status (
 
 CREATE INDEX IF NOT EXISTS idx_cleanup_status_next_retry
     ON pgtrickle.pgt_cleanup_status (blocked, next_retry_at);
+-- HOT-1: Add `storage_fillfactor` column to pgtrickle.pgt_stream_tables.
+-- NULL = PostgreSQL default (100). Accepted range: 10-100.
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS storage_fillfactor INT;
