@@ -2160,6 +2160,54 @@ pub fn store_column_snapshot_for_pgt_id(
 // ── Refresh history CRUD ───────────────────────────────────────────────────
 
 impl RefreshRecord {
+    fn upsert_refresh_summary_for_refresh(refresh_id: i64) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "INSERT INTO pgtrickle.pgt_refresh_summary (
+                 pgt_id,
+                 total_refreshes,
+                 successful_refreshes,
+                 failed_refreshes,
+                 total_rows_inserted,
+                 total_rows_deleted,
+                 total_duration_ms,
+                 last_refresh_action,
+                 last_refresh_status,
+                 last_refresh_at
+             )
+             SELECT
+                 h.pgt_id,
+                 1,
+                 CASE WHEN h.status = 'COMPLETED' THEN 1 ELSE 0 END,
+                 CASE WHEN h.status = 'FAILED' THEN 1 ELSE 0 END,
+                 COALESCE(h.rows_inserted, 0),
+                 COALESCE(h.rows_deleted, 0),
+                 CASE
+                     WHEN h.end_time IS NOT NULL THEN
+                         (EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
+                     ELSE 0
+                 END,
+                 h.action,
+                 h.status,
+                 COALESCE(h.end_time, h.start_time)
+             FROM pgtrickle.pgt_refresh_history h
+             WHERE h.refresh_id = $1
+               AND h.status <> 'RUNNING'
+             ON CONFLICT (pgt_id) DO UPDATE SET
+                 total_refreshes = pgtrickle.pgt_refresh_summary.total_refreshes + EXCLUDED.total_refreshes,
+                 successful_refreshes = pgtrickle.pgt_refresh_summary.successful_refreshes + EXCLUDED.successful_refreshes,
+                 failed_refreshes = pgtrickle.pgt_refresh_summary.failed_refreshes + EXCLUDED.failed_refreshes,
+                 total_rows_inserted = pgtrickle.pgt_refresh_summary.total_rows_inserted + EXCLUDED.total_rows_inserted,
+                 total_rows_deleted = pgtrickle.pgt_refresh_summary.total_rows_deleted + EXCLUDED.total_rows_deleted,
+                 total_duration_ms = pgtrickle.pgt_refresh_summary.total_duration_ms + EXCLUDED.total_duration_ms,
+                 last_refresh_action = EXCLUDED.last_refresh_action,
+                 last_refresh_status = EXCLUDED.last_refresh_status,
+                 last_refresh_at = EXCLUDED.last_refresh_at,
+                 updated_at = now()",
+            &[refresh_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
     /// Insert a new refresh history record. Returns the `refresh_id`.
     ///
     /// `initiated_by` indicates what triggered the refresh:
@@ -2187,7 +2235,7 @@ impl RefreshRecord {
         was_full_fallback: bool,
         tick_watermark_lsn: Option<&str>,
     ) -> Result<i64, PgTrickleError> {
-        Spi::get_one_with_args::<i64>(
+        let refresh_id = Spi::get_one_with_args::<i64>(
             "INSERT INTO pgtrickle.pgt_refresh_history \
              (pgt_id, data_timestamp, start_time, action, status, \
               rows_inserted, rows_deleted, error_message, \
@@ -2212,7 +2260,13 @@ impl RefreshRecord {
             ],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
-        .ok_or_else(|| PgTrickleError::InternalError("INSERT did not return refresh_id".into()))
+        .ok_or_else(|| PgTrickleError::InternalError("INSERT did not return refresh_id".into()))?;
+
+        if status != "RUNNING" {
+            Self::upsert_refresh_summary_for_refresh(refresh_id)?;
+        }
+
+        Ok(refresh_id)
     }
 
     /// Complete a refresh record (set end_time and final status).
@@ -2245,7 +2299,9 @@ impl RefreshRecord {
                 refresh_id.into(),
             ],
         )
-        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+
+        Self::upsert_refresh_summary_for_refresh(refresh_id)
     }
 }
 

@@ -2564,6 +2564,17 @@ pub fn classify_holdback(prev_oldest_xmin: u64, current_oldest_xmin: u64) -> boo
 static WARNED_PG_MONITOR_ACCESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+type HoldbackProbeTuple = (String, i64, i64, i64);
+type HoldbackProbeCacheEntry = (u64, HoldbackProbeTuple);
+
+thread_local! {
+    /// PERF-003 (v0.73.0): Short-lived cache for the raw holdback probe tuple.
+    ///
+    /// Stores `(captured_at_ms, (write_lsn, min_xmin, max_age, visible_backends))`.
+    static HOLD_PROBE_CACHE: std::cell::RefCell<Option<HoldbackProbeCacheEntry>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Probe the cluster for the current write LSN and the oldest in-progress
 /// transaction xmin, then compute the safe frontier upper bound.
 ///
@@ -2586,61 +2597,98 @@ pub fn compute_safe_upper_bound(
     prev_watermark_lsn: Option<&str>,
     prev_oldest_xmin: u64,
 ) -> Result<(String, String, u64, u64), PgTrickleError> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let cache_ms = crate::config::pg_trickle_frontier_holdback_probe_cache_ms().max(0) as u64;
+
+    let cached = if cache_ms > 0 {
+        HOLD_PROBE_CACHE.with(|c| {
+            c.borrow().as_ref().and_then(|(ts, tuple)| {
+                if now_ms.saturating_sub(*ts) <= cache_ms {
+                    Some(tuple.clone())
+                } else {
+                    None
+                }
+            })
+        })
+    } else {
+        None
+    };
+
     // PERF-10-03: Single compound SELECT fetches write LSN, xmin probes, and
     // 2PC prepared transaction state in one round-trip (~2ms saved per tick
     // at the 100ms minimum scheduler interval).  Formerly three separate
     // queries: pg_current_wal_lsn(), pg_stat_activity, pg_prepared_xacts.
-    let result = Spi::connect(|client| {
-        let rows = client
-            .select(
-                // xid (type oid 28) is 32-bit in PostgreSQL up to and including
-                // PG18.  Casting via ::text::bigint is safe because 2^32 fits
-                // comfortably in a signed bigint.  If a future PG version exposes
-                // xid8 (64-bit) here, this cast will still work but the 32-bit
-                // wraparound assumption in classify_holdback() should be revisited.
-                "WITH active_xmins AS (
+    let result = if let Some(tuple) = cached {
+        crate::shmem::record_holdback_probe(0, true);
+        tuple
+    } else {
+        let probe_start = std::time::Instant::now();
+        let tuple = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    // xid (type oid 28) is 32-bit in PostgreSQL up to and including
+                    // PG18.  Casting via ::text::bigint is safe because 2^32 fits
+                    // comfortably in a signed bigint.  If a future PG version exposes
+                    // xid8 (64-bit) here, this cast will still work but the 32-bit
+                    // wraparound assumption in classify_holdback() should be revisited.
+                    "WITH active_xmins AS (
+                        SELECT
+                            backend_xmin::text::bigint AS xmin,
+                            EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
+                        FROM pg_stat_activity
+                        WHERE backend_xmin IS NOT NULL
+                          AND state <> 'idle'
+                          AND pid <> pg_backend_pid()
+                        UNION ALL
+                        SELECT
+                            transaction::text::bigint AS xmin,
+                            EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
+                        FROM pg_prepared_xacts
+                    )
                     SELECT
-                        backend_xmin::text::bigint AS xmin,
-                        EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
-                    FROM pg_stat_activity
-                    WHERE backend_xmin IS NOT NULL
-                      AND state <> 'idle'
-                      AND pid <> pg_backend_pid()
-                    UNION ALL
-                    SELECT
-                        transaction::text::bigint AS xmin,
-                        EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
-                    FROM pg_prepared_xacts
+                        pg_current_wal_lsn()::text,
+                        COALESCE(MIN(xmin), 0)::bigint,
+                        COALESCE(MAX(age_secs), 0)::bigint,
+                        (SELECT COUNT(*) FROM pg_stat_activity
+                         WHERE pid <> pg_backend_pid())::bigint AS visible_other_backends
+                    FROM active_xmins",
+                    None,
+                    &[],
                 )
-                SELECT
-                    pg_current_wal_lsn()::text,
-                    COALESCE(MIN(xmin), 0)::bigint,
-                    COALESCE(MAX(age_secs), 0)::bigint,
-                    (SELECT COUNT(*) FROM pg_stat_activity
-                     WHERE pid <> pg_backend_pid())::bigint AS visible_other_backends
-                FROM active_xmins",
-                None,
-                &[],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        let mut write_lsn = String::from("0/0");
-        let mut min_xmin: i64 = 0;
-        let mut max_age: i64 = 0;
-        let mut visible_other_backends: i64 = 0;
+            let mut write_lsn = String::from("0/0");
+            let mut min_xmin: i64 = 0;
+            let mut max_age: i64 = 0;
+            let mut visible_other_backends: i64 = 0;
 
-        for row in rows {
-            write_lsn = row
-                .get::<String>(1)
-                .unwrap_or(None)
-                .unwrap_or_else(|| "0/0".to_string());
-            min_xmin = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
-            max_age = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
-            visible_other_backends = row.get::<i64>(4).unwrap_or(None).unwrap_or(0);
+            for row in rows {
+                write_lsn = row
+                    .get::<String>(1)
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| "0/0".to_string());
+                min_xmin = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
+                max_age = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
+                visible_other_backends = row.get::<i64>(4).unwrap_or(None).unwrap_or(0);
+            }
+
+            Ok::<_, PgTrickleError>((write_lsn, min_xmin, max_age, visible_other_backends))
+        })?;
+
+        let elapsed_ms = probe_start.elapsed().as_millis() as u64;
+        crate::shmem::record_holdback_probe(elapsed_ms, false);
+
+        if cache_ms > 0 {
+            HOLD_PROBE_CACHE.with(|c| {
+                *c.borrow_mut() = Some((now_ms, tuple.clone()));
+            });
         }
 
-        Ok::<_, PgTrickleError>((write_lsn, min_xmin, max_age, visible_other_backends))
-    })?;
+        tuple
+    };
 
     let (write_lsn, min_xmin_i64, age_secs_i64, visible_other_backends) = result;
 

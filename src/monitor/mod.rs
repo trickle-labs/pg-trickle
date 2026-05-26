@@ -85,9 +85,13 @@ fn st_refresh_stats() -> TableIterator<
                     COALESCE(stats.failed_refreshes, 0)::bigint,
                     COALESCE(stats.total_rows_inserted, 0)::bigint,
                     COALESCE(stats.total_rows_deleted, 0)::bigint,
-                    COALESCE(stats.avg_duration_ms, 0)::float8,
-                    last_hist.action,
-                    last_hist.status,
+                    CASE
+                        WHEN COALESCE(stats.total_refreshes, 0) > 0
+                            THEN (stats.total_duration_ms::float8 / stats.total_refreshes::float8)
+                        ELSE 0
+                    END::float8,
+                    stats.last_refresh_action,
+                    stats.last_refresh_status,
                     st.last_refresh_at,
                     EXTRACT(EPOCH FROM (now() - st.data_timestamp))::float8,
                     COALESCE(
@@ -111,28 +115,8 @@ fn st_refresh_stats() -> TableIterator<
                     st.last_error_message::text,
                     st.downstream_publication_name::text
                 FROM pgtrickle.pgt_stream_tables st
-                LEFT JOIN LATERAL (
-                    SELECT
-                        count(*) AS total_refreshes,
-                        count(*) FILTER (WHERE h.status = 'COMPLETED') AS successful_refreshes,
-                        count(*) FILTER (WHERE h.status = 'FAILED') AS failed_refreshes,
-                        COALESCE(sum(h.rows_inserted), 0) AS total_rows_inserted,
-                        COALESCE(sum(h.rows_deleted), 0) AS total_rows_deleted,
-                        CASE WHEN count(*) FILTER (WHERE h.end_time IS NOT NULL) > 0
-                             THEN avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)
-                                  FILTER (WHERE h.end_time IS NOT NULL)
-                             ELSE 0
-                        END AS avg_duration_ms
-                    FROM pgtrickle.pgt_refresh_history h
-                    WHERE h.pgt_id = st.pgt_id
-                ) stats ON true
-                LEFT JOIN LATERAL (
-                    SELECT h2.action, h2.status
-                    FROM pgtrickle.pgt_refresh_history h2
-                    WHERE h2.pgt_id = st.pgt_id
-                    ORDER BY h2.refresh_id DESC
-                    LIMIT 1
-                ) last_hist ON true
+                LEFT JOIN pgtrickle.pgt_refresh_summary stats
+                    ON stats.pgt_id = st.pgt_id
                 ORDER BY st.pgt_schema, st.pgt_name",
                 None,
                 &[],
@@ -209,7 +193,7 @@ fn st_refresh_stats() -> TableIterator<
 /// internal monitoring data.
 ///
 /// Called once per `/metrics` request by `metrics_server::MetricsServer`.
-/// Reads from `pgtrickle.pgt_stream_tables` and `pgt_refresh_history` via SPI.
+/// Reads from `pgtrickle.pgt_stream_tables` and aggregated refresh stats via SPI.
 ///
 /// Output format follows the OpenMetrics 1.0 specification.
 pub(crate) fn collect_metrics_text() -> String {
@@ -220,13 +204,12 @@ pub(crate) fn collect_metrics_text() -> String {
                 s.pgt_name,
                 s.pgt_schema,
                 s.status,
-                COUNT(h.refresh_id) FILTER (WHERE h.status = 'COMPLETED') AS successful,
-                COUNT(h.refresh_id) FILTER (WHERE h.status = 'FAILED')    AS failed,
-                SUM(COALESCE(h.rows_inserted, 0) + COALESCE(h.rows_deleted, 0)) AS total_rows,
+                COALESCE(h.successful_refreshes, 0) AS successful,
+                COALESCE(h.failed_refreshes, 0)     AS failed,
+                COALESCE(h.total_rows_inserted, 0) + COALESCE(h.total_rows_deleted, 0) AS total_rows,
                 s.consecutive_errors
             FROM pgtrickle.pgt_stream_tables s
-            LEFT JOIN pgtrickle.pgt_refresh_history h USING (pgt_id)
-            GROUP BY s.pgt_name, s.pgt_schema, s.status, s.consecutive_errors
+            LEFT JOIN pgtrickle.pgt_refresh_summary h ON h.pgt_id = s.pgt_id
             ORDER BY s.pgt_schema, s.pgt_name
         ";
             client
@@ -327,6 +310,73 @@ pub(crate) fn collect_metrics_text() -> String {
     out.push_str("# TYPE pg_trickle_frontier_holdback_seconds gauge\n");
     out.push_str(&format!(
         "pg_trickle_frontier_holdback_seconds {holdback_age}\n"
+    ));
+
+    // PERF-003: Holdback probe cost and cache effectiveness metrics.
+    let (probe_calls, probe_cache_hits, probe_total_ms, probe_last_ms) =
+        crate::shmem::read_holdback_probe_metrics();
+    let probe_avg_ms = if probe_calls > 0 {
+        probe_total_ms as f64 / probe_calls as f64
+    } else {
+        0.0
+    };
+    out.push_str("# HELP pg_trickle_holdback_probe_calls_total Total xmin holdback probes\n");
+    out.push_str("# TYPE pg_trickle_holdback_probe_calls_total counter\n");
+    out.push_str(&format!(
+        "pg_trickle_holdback_probe_calls_total {probe_calls}\n"
+    ));
+    out.push_str(
+        "# HELP pg_trickle_holdback_probe_cache_hits_total Total xmin holdback probe cache hits\n",
+    );
+    out.push_str("# TYPE pg_trickle_holdback_probe_cache_hits_total counter\n");
+    out.push_str(&format!(
+        "pg_trickle_holdback_probe_cache_hits_total {probe_cache_hits}\n"
+    ));
+    out.push_str(
+        "# HELP pg_trickle_holdback_probe_last_ms Last xmin holdback probe duration in milliseconds\n",
+    );
+    out.push_str("# TYPE pg_trickle_holdback_probe_last_ms gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_holdback_probe_last_ms {probe_last_ms}\n"
+    ));
+    out.push_str(
+        "# HELP pg_trickle_holdback_probe_avg_ms Average xmin holdback probe duration in milliseconds\n",
+    );
+    out.push_str("# TYPE pg_trickle_holdback_probe_avg_ms gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_holdback_probe_avg_ms {probe_avg_ms:.3}\n"
+    ));
+
+    // PERF-004 / ARCH-003: Launcher scan health metrics from shared memory.
+    let (launcher_scan_ms, launcher_db_count, launcher_active_count, launcher_scan_epoch) =
+        crate::shmem::read_launcher_scan_metrics();
+    out.push_str(
+        "# HELP pg_trickle_launcher_last_scan_ms Duration of last launcher discovery scan in milliseconds\n",
+    );
+    out.push_str("# TYPE pg_trickle_launcher_last_scan_ms gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_launcher_last_scan_ms {launcher_scan_ms}\n"
+    ));
+    out.push_str(
+        "# HELP pg_trickle_launcher_last_db_count Number of databases seen in the last launcher scan\n",
+    );
+    out.push_str("# TYPE pg_trickle_launcher_last_db_count gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_launcher_last_db_count {launcher_db_count}\n"
+    ));
+    out.push_str(
+        "# HELP pg_trickle_launcher_last_active_count Number of active scheduler workers seen in the last launcher scan\n",
+    );
+    out.push_str("# TYPE pg_trickle_launcher_last_active_count gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_launcher_last_active_count {launcher_active_count}\n"
+    ));
+    out.push_str(
+        "# HELP pg_trickle_launcher_last_scan_epoch_seconds Unix epoch seconds of the last launcher scan\n",
+    );
+    out.push_str("# TYPE pg_trickle_launcher_last_scan_epoch_seconds gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_launcher_last_scan_epoch_seconds {launcher_scan_epoch}\n"
     ));
 
     // M-6 (v0.55.0): DVM parser metrics
@@ -655,6 +705,7 @@ fn cache_stats() -> TableIterator<
         name!(misses, i64),
         name!(evictions, i64),
         name!(l1_size, i32),
+        name!(l1_bytes, i64),
     ),
 > {
     let (l1_hits, l2_hits, misses, evictions) = if crate::shmem::is_shmem_available() {
@@ -677,8 +728,9 @@ fn cache_stats() -> TableIterator<
     };
 
     let l1_size = crate::dvm::delta_cache_size() as i32;
+    let l1_bytes = crate::shmem::template_cache_bytes() as i64;
 
-    TableIterator::once((l1_hits, l2_hits, misses, evictions, l1_size))
+    TableIterator::once((l1_hits, l2_hits, misses, evictions, l1_size, l1_bytes))
 }
 
 /// OPS-10-02: Reliability counters for Prometheus secondary metrics.

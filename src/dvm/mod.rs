@@ -99,6 +99,12 @@ struct CachedDeltaTemplate {
     is_all_algebraic: bool,
 }
 
+#[derive(Clone)]
+struct CachedPlaceholderResolver {
+    ac: aho_corasick::AhoCorasick,
+    st_source_pgt_ids: Vec<i64>,
+}
+
 thread_local! {
     /// Per-session cache of delta SQL templates, keyed by `pgt_id`.
     ///
@@ -114,6 +120,11 @@ thread_local! {
     /// Local snapshot of the shared `CACHE_GENERATION` counter.
     /// When the shared value advances past this, the entire cache is flushed.
     static LOCAL_DELTA_CACHE_GEN: Cell<u64> = const { Cell::new(0) };
+
+    /// PERF-005 (v0.73.0): Cache compiled placeholder resolver automata for
+    /// `resolve_delta_template()`.
+    static PLACEHOLDER_RESOLVER_CACHE: RefCell<HashMap<u64, CachedPlaceholderResolver>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Hash a string using the default hasher (for cache invalidation).
@@ -211,65 +222,88 @@ fn resolve_delta_template(
         return Ok(sql);
     }
 
-    // P-1: Build the Aho-Corasick automaton over all placeholder tokens
-    // and their replacements in a single pass.
-    let mut patterns: Vec<String> = Vec::with_capacity(source_oids.len() * 2);
-    let mut replacements: Vec<String> = Vec::with_capacity(source_oids.len() * 2);
+    let mut resolver_key_src = template.to_string();
+    for oid in source_oids {
+        resolver_key_src.push('|');
+        resolver_key_src.push_str(&oid.to_string());
+    }
+    let resolver_key = hash_string(&resolver_key_src);
 
+    let resolver = PLACEHOLDER_RESOLVER_CACHE.with(|cache| {
+        if let Some(existing) = cache.borrow().get(&resolver_key) {
+            return Ok::<CachedPlaceholderResolver, PgTrickleError>(existing.clone());
+        }
+
+        let mut patterns: Vec<String> = Vec::with_capacity(source_oids.len() * 2);
+        for &oid in source_oids {
+            patterns.push(format!("__PGS_PREV_LSN_{oid}__"));
+            patterns.push(format!("__PGS_NEW_LSN_{oid}__"));
+        }
+
+        // ST-ST-4: Resolve pgt_-prefixed placeholders for ST source frontiers.
+        let pgt_prefix = "__PGS_PREV_LSN_pgt_";
+        let mut pgt_ids: Vec<i64> = Vec::new();
+        if template.contains(pgt_prefix) {
+            let mut search_from = 0usize;
+            while let Some(pos) = template[search_from..].find(pgt_prefix) {
+                let start = search_from + pos + pgt_prefix.len();
+                let end = template[start..]
+                    .find("__")
+                    .map(|p| start + p)
+                    .unwrap_or(template.len());
+                if let Ok(id) = template[start..end].parse::<i64>()
+                    && !pgt_ids.contains(&id)
+                {
+                    pgt_ids.push(id);
+                }
+                search_from = end;
+            }
+        }
+
+        for pgt_id in &pgt_ids {
+            patterns.push(format!("__PGS_PREV_LSN_pgt_{pgt_id}__"));
+            patterns.push(format!("__PGS_NEW_LSN_pgt_{pgt_id}__"));
+        }
+
+        let ac = aho_corasick::AhoCorasick::new(&patterns)
+            .map_err(|e| PgTrickleError::InternalError(format!("placeholder resolver: {e}")))?;
+
+        let built = CachedPlaceholderResolver {
+            ac,
+            st_source_pgt_ids: pgt_ids,
+        };
+        cache.borrow_mut().insert(resolver_key, built.clone());
+        Ok(built)
+    })?;
+
+    let mut replacements: Vec<String> =
+        Vec::with_capacity(source_oids.len() * 2 + resolver.st_source_pgt_ids.len() * 2);
     for &oid in source_oids {
-        patterns.push(format!("__PGS_PREV_LSN_{oid}__"));
-        patterns.push(format!("__PGS_NEW_LSN_{oid}__"));
         replacements.push(prev_frontier.get_lsn(oid));
         replacements.push(new_frontier.get_lsn(oid));
     }
 
-    // ST-ST-4: Resolve pgt_-prefixed placeholders for ST source frontiers.
-    // Scan once for all pgt_-prefixed tokens, then add them to the Aho-Corasick set.
-    let pgt_prefix = "__PGS_PREV_LSN_pgt_";
-    if template.contains(pgt_prefix) {
-        let mut search_from = 0usize;
-        let mut pgt_ids: Vec<i64> = Vec::new();
-        while let Some(pos) = template[search_from..].find(pgt_prefix) {
-            let start = search_from + pos + pgt_prefix.len();
-            let end = template[start..]
-                .find("__")
-                .map(|p| start + p)
-                .unwrap_or(template.len());
-            if let Ok(id) = template[start..end].parse::<i64>()
-                && !pgt_ids.contains(&id)
-            {
-                pgt_ids.push(id);
-            }
-            search_from = end;
-        }
-
-        for pgt_id in &pgt_ids {
-            let key = format!("pgt_{pgt_id}");
-            let prev_lsn = prev_frontier
-                .sources
-                .get(&key)
-                .map(|sv| sv.lsn.clone())
-                .unwrap_or_else(|| "0/0".to_string());
-            let new_lsn = new_frontier
-                .sources
-                .get(&key)
-                .map(|sv| sv.lsn.clone())
-                .unwrap_or_else(|| "0/0".to_string());
-
-            patterns.push(format!("__PGS_PREV_LSN_pgt_{pgt_id}__"));
-            patterns.push(format!("__PGS_NEW_LSN_pgt_{pgt_id}__"));
-            replacements.push(prev_lsn);
-            replacements.push(new_lsn);
-        }
+    for pgt_id in &resolver.st_source_pgt_ids {
+        let key = format!("pgt_{pgt_id}");
+        let prev_lsn = prev_frontier
+            .sources
+            .get(&key)
+            .map(|sv| sv.lsn.clone())
+            .unwrap_or_else(|| "0/0".to_string());
+        let new_lsn = new_frontier
+            .sources
+            .get(&key)
+            .map(|sv| sv.lsn.clone())
+            .unwrap_or_else(|| "0/0".to_string());
+        replacements.push(prev_lsn);
+        replacements.push(new_lsn);
     }
 
-    // Single-pass replacement via Aho-Corasick automaton.
-    let sql = if patterns.is_empty() {
+    // Single-pass replacement via cached Aho-Corasick automaton.
+    let sql = if replacements.is_empty() {
         template.to_string()
     } else {
-        let ac = aho_corasick::AhoCorasick::new(&patterns)
-            .map_err(|e| PgTrickleError::InternalError(format!("placeholder resolver: {e}")))?;
-        ac.replace_all(template, replacements.as_slice())
+        resolver.ac.replace_all(template, replacements.as_slice())
     };
 
     // A41-2: Assert no placeholders remain.
@@ -283,6 +317,9 @@ pub fn invalidate_delta_cache(pgt_id: i64) {
     DELTA_TEMPLATE_CACHE.with(|cache| {
         cache.borrow_mut().remove(&pgt_id);
     });
+    PLACEHOLDER_RESOLVER_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
 }
 
 /// CACHE-3: Flush all entries from the thread-local delta template cache.
@@ -291,6 +328,7 @@ pub fn invalidate_delta_cache(pgt_id: i64) {
 /// full `pgtrickle.clear_caches()` operation.
 pub fn flush_all_delta_caches() {
     DELTA_TEMPLATE_CACHE.with(|cache| cache.borrow_mut().clear());
+    PLACEHOLDER_RESOLVER_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// UX-1 / CACHE-OBS: Return the current number of entries in the L1

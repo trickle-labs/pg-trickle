@@ -200,6 +200,12 @@ pub static TEMPLATE_CACHE_L1_HITS: PgAtomic<AtomicU64> =
 pub static TEMPLATE_CACHE_EVICTIONS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_template_cache_evictions") };
 
+/// PERF-006 (v0.73.0): Current estimated bytes used by the per-backend
+/// template cache (gauge).
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static TEMPLATE_CACHE_BYTES: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_template_cache_bytes") };
+
 /// OPS-10-02: Counter of delta template cache entries evicted because
 /// `defining_query_hash` mismatched (stale entry after ALTER STREAM TABLE
 /// or source schema change).  A sustained spike indicates rapid schema
@@ -232,6 +238,26 @@ pub static FRONTIER_HOLDBACK_LSN_BYTES: PgAtomic<AtomicU64> =
 // SAFETY: PgAtomic::new requires a static CStr name.
 pub static FRONTIER_HOLDBACK_AGE_SECS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_frontier_holdback_age") };
+
+/// PERF-003 (v0.73.0): Total xmin-holdback probe calls.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static HOLDBACK_PROBE_CALLS_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_holdback_probe_calls") };
+
+/// PERF-003 (v0.73.0): Total xmin-holdback probe cache hits.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static HOLDBACK_PROBE_CACHE_HITS_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_holdback_probe_cache_hits") };
+
+/// PERF-003 (v0.73.0): Cumulative milliseconds spent in holdback probes.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static HOLDBACK_PROBE_TOTAL_MS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_holdback_probe_total_ms") };
+
+/// PERF-003 (v0.73.0): Duration in milliseconds of the most recent holdback probe.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static HOLDBACK_PROBE_LAST_MS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_holdback_probe_last_ms") };
 
 /// PERF-3 (v0.31.0): Counter of IVM lock-mode parse failures.
 ///
@@ -392,6 +418,26 @@ pub fn increment_history_prune_errors() {
 // in init_shared_memory(); must stay in sync with the pg_shmem_init! call below.
 pub static LAUNCHER_INSTALL_EPOCH: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_launcher_install_epoch") };
+
+/// PERF-004 / ARCH-003 (v0.73.0): Duration (ms) of the last launcher discovery scan.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LAUNCHER_LAST_SCAN_MS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_launcher_last_scan_ms") };
+
+/// PERF-004 / ARCH-003 (v0.73.0): Number of databases seen in the last launcher scan.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LAUNCHER_LAST_DB_COUNT: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_launcher_last_db_count") };
+
+/// PERF-004 / ARCH-003 (v0.73.0): Number of active scheduler workers seen in the last launcher scan.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LAUNCHER_LAST_ACTIVE_COUNT: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_launcher_last_active_count") };
+
+/// PERF-004 / ARCH-003 (v0.73.0): Unix epoch seconds of the last launcher scan.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LAUNCHER_LAST_SCAN_EPOCH_SECS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_launcher_last_scan_epoch") };
 
 /// SCAL-002: Bump the launcher install epoch (called from DDL event trigger).
 pub fn bump_launcher_install_epoch() {
@@ -639,6 +685,7 @@ pub fn init_shared_memory() {
     pg_shmem_init!(TEMPLATE_CACHE_MISSES);
     pg_shmem_init!(TEMPLATE_CACHE_L1_HITS);
     pg_shmem_init!(TEMPLATE_CACHE_EVICTIONS);
+    pg_shmem_init!(TEMPLATE_CACHE_BYTES);
     // OPS-10-02: Stale hash-mismatch evictions and DAG cycle counter.
     pg_shmem_init!(TEMPLATE_CACHE_STALE_EVICTIONS);
     pg_shmem_init!(DAG_CYCLES_DETECTED);
@@ -646,6 +693,10 @@ pub fn init_shared_memory() {
     pg_shmem_init!(L0_POPULATED_VERSION);
     pg_shmem_init!(FRONTIER_HOLDBACK_LSN_BYTES);
     pg_shmem_init!(FRONTIER_HOLDBACK_AGE_SECS);
+    pg_shmem_init!(HOLDBACK_PROBE_CALLS_TOTAL);
+    pg_shmem_init!(HOLDBACK_PROBE_CACHE_HITS_TOTAL);
+    pg_shmem_init!(HOLDBACK_PROBE_TOTAL_MS);
+    pg_shmem_init!(HOLDBACK_PROBE_LAST_MS);
     // PERF-3 (v0.31.0): IVM lock-mode parse error counter.
     pg_shmem_init!(IVM_LOCK_PARSE_ERRORS);
     // PERF-3: Cost-model cache.
@@ -677,6 +728,10 @@ pub fn init_shared_memory() {
     pg_shmem_init!(HISTORY_PRUNE_ERRORS);
     // SCAL-002 (v0.70.0): Launcher install epoch for fast CREATE/DROP EXTENSION detection.
     pg_shmem_init!(LAUNCHER_INSTALL_EPOCH);
+    pg_shmem_init!(LAUNCHER_LAST_SCAN_MS);
+    pg_shmem_init!(LAUNCHER_LAST_DB_COUNT);
+    pg_shmem_init!(LAUNCHER_LAST_ACTIVE_COUNT);
+    pg_shmem_init!(LAUNCHER_LAST_SCAN_EPOCH_SECS);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1334,6 +1389,113 @@ pub fn increment_template_cache_evictions() {
     TEMPLATE_CACHE_EVICTIONS
         .get()
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// PERF-006: Update current estimated template-cache bytes.
+pub fn set_template_cache_bytes(bytes: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    TEMPLATE_CACHE_BYTES
+        .get()
+        .store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// PERF-006: Read current estimated template-cache bytes.
+pub fn template_cache_bytes() -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    TEMPLATE_CACHE_BYTES
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// PERF-003: Record holdback-probe duration and cache-hit information.
+pub fn record_holdback_probe(duration_ms: u64, cache_hit: bool) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    HOLDBACK_PROBE_CALLS_TOTAL
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    HOLDBACK_PROBE_TOTAL_MS
+        .get()
+        .fetch_add(duration_ms, std::sync::atomic::Ordering::Relaxed);
+    HOLDBACK_PROBE_LAST_MS
+        .get()
+        .store(duration_ms, std::sync::atomic::Ordering::Relaxed);
+
+    if cache_hit {
+        HOLDBACK_PROBE_CACHE_HITS_TOTAL
+            .get()
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// PERF-003: Read holdback-probe metrics.
+pub fn read_holdback_probe_metrics() -> (u64, u64, u64, u64) {
+    if !is_shmem_available() {
+        return (0, 0, 0, 0);
+    }
+
+    (
+        HOLDBACK_PROBE_CALLS_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        HOLDBACK_PROBE_CACHE_HITS_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        HOLDBACK_PROBE_TOTAL_MS
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        HOLDBACK_PROBE_LAST_MS
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// PERF-004 / ARCH-003: Update launcher discovery-scan health metrics.
+pub fn set_launcher_scan_metrics(scan_ms: u64, db_count: u64, active_count: u64, epoch_secs: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    LAUNCHER_LAST_SCAN_MS
+        .get()
+        .store(scan_ms, std::sync::atomic::Ordering::Relaxed);
+    LAUNCHER_LAST_DB_COUNT
+        .get()
+        .store(db_count, std::sync::atomic::Ordering::Relaxed);
+    LAUNCHER_LAST_ACTIVE_COUNT
+        .get()
+        .store(active_count, std::sync::atomic::Ordering::Relaxed);
+    LAUNCHER_LAST_SCAN_EPOCH_SECS
+        .get()
+        .store(epoch_secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// PERF-004 / ARCH-003: Read launcher discovery-scan health metrics.
+pub fn read_launcher_scan_metrics() -> (u64, u64, u64, u64) {
+    if !is_shmem_available() {
+        return (0, 0, 0, 0);
+    }
+
+    (
+        LAUNCHER_LAST_SCAN_MS
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        LAUNCHER_LAST_DB_COUNT
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        LAUNCHER_LAST_ACTIVE_COUNT
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        LAUNCHER_LAST_SCAN_EPOCH_SECS
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 /// OPS-10-02: Increment the template cache stale evictions counter.

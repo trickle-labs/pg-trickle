@@ -379,6 +379,39 @@ CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt
 -- PERF-1: Fast lookup by (pgt_id, start_time) for self-monitoring and scheduler_overhead queries.
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_start ON pgtrickle.pgt_refresh_history (pgt_id, start_time);
 
+-- v0.73.0 PERF-001: Incremental summary table for refresh-history metrics.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_summary (
+    pgt_id BIGINT PRIMARY KEY
+          REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    total_refreshes BIGINT NOT NULL DEFAULT 0,
+    successful_refreshes BIGINT NOT NULL DEFAULT 0,
+    failed_refreshes BIGINT NOT NULL DEFAULT 0,
+    total_rows_inserted BIGINT NOT NULL DEFAULT 0,
+    total_rows_deleted BIGINT NOT NULL DEFAULT 0,
+    total_duration_ms BIGINT NOT NULL DEFAULT 0,
+    last_refresh_action TEXT,
+    last_refresh_status TEXT,
+    last_refresh_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- v0.73.0 ARCH-002 / REL-002: Persistent cleanup retry/backpressure status.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_cleanup_status (
+    source_relid OID PRIMARY KEY,
+    buffer_table TEXT NOT NULL,
+    attempt_count INT NOT NULL DEFAULT 0,
+    blocked BOOLEAN NOT NULL DEFAULT false,
+    last_error TEXT,
+    last_operation TEXT,
+    last_attempt_at TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ,
+    backlog_rows BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cleanup_status_next_retry
+    ON pgtrickle.pgt_cleanup_status (blocked, next_retry_at);
+
 -- Per-source CDC slot tracking
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     source_relid        OID PRIMARY KEY,
