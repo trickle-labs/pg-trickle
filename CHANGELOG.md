@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.72.0 — Frontier Durability & Catalog Correctness](#0720--frontier-durability--catalog-correctness)
 - [0.71.0 — CI Truthfulness, Test Harness & Documentation Cleanup](#0710--ci-truthfulness-test-harness--documentation-cleanup)
 - [0.70.0 — Scheduler, Validator & Security Hardening](#0700--scheduler-validator--security-hardening)
 - [0.69.0 — DuckLake Sink Reliability & Security](#0690--ducklake-sink-reliability--security)
@@ -86,6 +87,54 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.72.0] — Frontier Durability & Catalog Correctness
+
+### What's New
+
+v0.72.0 closes four correctness-critical findings from Assessment 14. These
+were wiring gaps where a safety mechanism appeared to exist in the code but
+was either never connected, contained invalid SQL, or silenced its own error
+path. No new features are introduced; all changes are correctness fixes.
+
+#### COR-001 / REL-001 / ARCH-001 — Dead frontier code removed; store failure is now fatal
+
+The catalog layer contained a "DUR-1" two-phase tentative-frontier design with
+three functions that had no production call sites. The recovery query in one of
+those functions contained invalid SQL that would always fail at runtime.
+Meanwhile, the real scheduler hot-path silenced frontier-store errors.
+
+All three dead DUR-1 functions are removed. The scheduler now propagates
+frontier-store failures so that a store failure aborts the entire refresh
+transaction, preventing partial commits. See ADR-004 for the full rationale.
+
+#### COR-002 / API-001 — Outbox `stream_table_oid` now stores the correct OID
+
+`pgtrickle.pgt_outbox_config.stream_table_oid` was storing `pgt_id` (an
+internal sequential counter) instead of `pgt_relid` (the actual `pg_class`
+OID). All joins against `pg_class` from the outbox were silently wrong.
+All five write and read paths are corrected. The migration SQL fixes existing
+rows.
+
+#### COR-003 — WAL transition handoff is now atomic
+
+`complete_wal_transition` dropped the CDC trigger before updating the catalog
+mode to WAL, creating a race window where writes could be missed. The steps are
+reversed and wrapped in `pg_advisory_lock` so the catalog is updated before
+the trigger is removed.
+
+#### COR-004 — Replication slot creation guarded against XID-assigned transactions
+
+`create_replication_slot_pristine` now checks for an XID-assigned transaction
+before calling the slot-creation primitive and returns an actionable error
+instead of crashing with a PostgreSQL internal error.
+
+### Breaking Changes
+
+None for users. Operators who inspect `pgt_outbox_config.stream_table_oid`
+directly should note that the migration SQL corrects existing rows.
 
 ---
 

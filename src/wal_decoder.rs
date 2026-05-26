@@ -236,6 +236,27 @@ pub fn check_publication_health(source_oid: pg_sys::Oid) -> Result<(), PgTrickle
 /// they access the catalog (which could assign an XID); instead the caller
 /// must verify prerequisites before calling this function.
 pub fn create_replication_slot_pristine(slot_name: &str) -> Result<String, PgTrickleError> {
+    // COR-004 (v0.72.0): Guard against transactions that have already been
+    // assigned a transaction ID.  `CreateInitDecodingContext` (called inside
+    // `create_replication_slot_internal`) rejects XID-assigned transactions,
+    // so we detect the condition early and return an actionable error instead
+    // of letting PostgreSQL abort with an opaque internal message.
+    //
+    // SAFETY: `GetCurrentTransactionIdIfAny()` reads `MyProc->xid` without
+    // any side effects.  It is safe to call at any point from a PostgreSQL
+    // background worker or executor context.
+    unsafe {
+        let xid = pg_sys::GetCurrentTransactionIdIfAny();
+        if xid != pg_sys::InvalidTransactionId {
+            return Err(PgTrickleError::ReplicationSlotError(format!(
+                "cannot create logical replication slot '{}': current transaction has \
+                 an assigned XID ({}). create_replication_slot_pristine() must be called \
+                 in a fresh transaction with no prior SPI queries or catalog reads. \
+                 Separate prerequisite checks from slot creation.",
+                slot_name, xid
+            )));
+        }
+    }
     create_replication_slot_internal(slot_name)
 }
 
@@ -1287,21 +1308,56 @@ pub fn check_and_complete_transition(
 /// Complete the WAL transition — drop the trigger and switch to WAL mode.
 ///
 /// Called when the WAL decoder has caught up past the handoff point.
+///
+/// COR-003 (v0.72.0): The handoff is now serialized by:
+///
+/// 1. Acquiring a session-level advisory lock keyed by `source_oid` so that
+///    concurrent calls for the same source cannot interleave.
+/// 2. Updating the catalog mode to `WAL` **before** dropping the trigger.
+///    This ensures that once the catalog is flipped, any DML that observes
+///    the new mode will write through WAL (duplication is handled by the
+///    dedup logic at refresh time).  After `DROP TRIGGER` takes `ACCESS
+///    EXCLUSIVE`, no new trigger invocations can start.
+/// 3. Releasing the advisory lock after both steps complete.
 fn complete_wal_transition(
     source_oid: pg_sys::Oid,
     _pgt_id: i64,
     change_schema: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
+    // COR-003: Use the source OID as the advisory lock key.  A negative
+    // cast avoids collisions with other positive-domain keys already used
+    // in the codebase (refresh advisory locks use pgt_id, which is a
+    // positive BIGINT sequence value).
+    let lock_key = -(oid_u32 as i64);
 
-    // Step 1: Drop the CDC trigger (WAL decoder now covers all changes)
-    cdc::drop_change_trigger(source_oid, change_schema)?;
+    // Acquire a session-level advisory lock to serialize concurrent transition
+    // completion for the same source.  Session-level (not xact-level) so the
+    // lock spans the two SPI calls below even if they run in sub-transactions.
+    Spi::run_with_args("SELECT pg_advisory_lock($1)", &[lock_key.into()])
+        .map_err(|e| PgTrickleError::SpiError(format!("advisory lock for COR-003: {}", e)))?;
 
-    // Step 2: Update catalog to WAL mode
-    StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Wal, None, None)?;
+    // Step 1: Update catalog to WAL mode FIRST.
+    // After this point the scheduler knows the source is in WAL mode.  Any
+    // concurrent DML that fires before DROP TRIGGER takes effect will write
+    // through both trigger and WAL (dedup at refresh) — this is the safe side.
+    let mode_result =
+        StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Wal, None, None);
+
+    // Step 2: Drop the CDC trigger (WAL decoder now covers all changes).
+    // DROP TRIGGER takes ACCESS EXCLUSIVE — it waits for all in-flight DML
+    // that might be executing the trigger body before proceeding.
+    let trigger_result = cdc::drop_change_trigger(source_oid, change_schema);
+
+    // Release the advisory lock regardless of outcome.
+    let _ = Spi::run_with_args("SELECT pg_advisory_unlock($1)", &[lock_key.into()]);
+
+    // Propagate any errors after the lock is released.
+    mode_result?;
+    trigger_result?;
 
     info!(
-        "pg_trickle: completed WAL transition for source OID {} — trigger dropped, WAL active",
+        "pg_trickle: completed WAL transition for source OID {} — catalog set to WAL, trigger dropped",
         oid_u32
     );
 

@@ -57,23 +57,34 @@ pub(crate) fn outbox_table_name_for(st_name: &str) -> String {
     }
 }
 
-/// Check whether the outbox is attached for a given stream table OID.
+/// Check whether the outbox is attached for a given stream table (by pgt_id).
+///
+/// COR-002 (v0.72.0): `stream_table_oid` now stores the real `pgt_relid` (the
+/// PostgreSQL relation OID visible in `pg_class`).  We join through
+/// `pgt_stream_tables` to translate `pgt_id` → `pgt_relid` for the lookup.
 pub(crate) fn is_outbox_enabled(pgt_id: i64) -> bool {
     Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_outbox_config \
-         WHERE stream_table_oid = $1::oid)",
-        &[pgrx::pg_sys::Oid::from(pgt_id as u32).into()],
+        "SELECT EXISTS( \
+           SELECT 1 FROM pgtrickle.pgt_outbox_config oc \
+           JOIN pgtrickle.pgt_stream_tables st ON oc.stream_table_oid = st.pgt_relid \
+           WHERE st.pgt_id = $1)",
+        &[pgt_id.into()],
     )
     .unwrap_or(None)
     .unwrap_or(false)
 }
 
-/// Return the `pg_tide` outbox name attached to the given stream table OID.
+/// Return the `pg_tide` outbox name attached to the given stream table (by pgt_id).
+///
+/// COR-002 (v0.72.0): joins through `pgt_stream_tables` to resolve `pgt_id` →
+/// `pgt_relid`, then looks up the outbox config by the correct relation OID.
 pub(crate) fn get_outbox_table_name(pgt_id: i64) -> Option<String> {
     Spi::get_one_with_args::<String>(
-        "SELECT tide_outbox_name FROM pgtrickle.pgt_outbox_config \
-         WHERE stream_table_oid = $1::oid",
-        &[pgrx::pg_sys::Oid::from(pgt_id as u32).into()],
+        "SELECT oc.tide_outbox_name \
+         FROM pgtrickle.pgt_outbox_config oc \
+         JOIN pgtrickle.pgt_stream_tables st ON oc.stream_table_oid = st.pgt_relid \
+         WHERE st.pgt_id = $1",
+        &[pgt_id.into()],
     )
     .unwrap_or(None)
 }
@@ -144,12 +155,15 @@ fn attach_outbox_impl(
     .map_err(|e| PgTrickleError::SpiError(format!("tide.outbox_create failed: {e}")))?;
 
     // Register in catalog.
+    // COR-002 (v0.72.0): Store the real PostgreSQL relation OID (`pgt_relid`)
+    // as `stream_table_oid` so users can join to `pg_class.oid` or
+    // `pgt_stream_tables.pgt_relid` as the schema documents.
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_outbox_config \
          (stream_table_oid, stream_table_name, tide_outbox_name) \
-         VALUES ($1::oid, $2, $3)",
+         VALUES ($1, $2, $3)",
         &[
-            pgrx::pg_sys::Oid::from(meta.pgt_id as u32).into(),
+            meta.pgt_relid.into(),
             format!("{}.{}", schema, st_name).as_str().into(),
             outbox_name.as_str().into(),
         ],
@@ -185,11 +199,12 @@ fn detach_outbox_impl(name: &str, if_exists: bool) -> Result<(), PgTrickleError>
     // SEC-1: Ownership check — same guard as alter/drop/pause/resume.
     check_stream_table_ownership(meta.pgt_relid, &schema, &st_name)?;
 
+    // COR-002 (v0.72.0): Delete by `pgt_relid` (the real relation OID).
     let deleted = Spi::get_one_with_args::<i64>(
         "WITH d AS (DELETE FROM pgtrickle.pgt_outbox_config \
-         WHERE stream_table_oid = $1::oid RETURNING 1) \
+         WHERE stream_table_oid = $1 RETURNING 1) \
          SELECT COUNT(*) FROM d",
-        &[pgrx::pg_sys::Oid::from(meta.pgt_id as u32).into()],
+        &[meta.pgt_relid.into()],
     )
     .unwrap_or(None)
     .unwrap_or(0);
@@ -306,12 +321,13 @@ fn attach_embedding_outbox_impl(
 
     // Store the vector_column hint in the catalog so write_embedding_outbox_row
     // can retrieve it.
+    // COR-002 (v0.72.0): Match on `pgt_relid` (the real relation OID).
     let (schema, st_name) = resolve_st_name(name)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_outbox_config \
          SET embedding_vector_column = $1 \
          WHERE stream_table_oid = (\
-           SELECT pgt_id::oid FROM pgtrickle.pgt_stream_tables \
+           SELECT pgt_relid FROM pgtrickle.pgt_stream_tables \
            WHERE pgt_schema = $2 AND pgt_name = $3 \
          )",
         &[
@@ -391,12 +407,16 @@ pub(crate) fn write_embedding_outbox_row(
 
 /// VA-4: Return the embedding vector column for this stream table if an
 /// embedding outbox is attached, otherwise `None`.
+///
+/// COR-002 (v0.72.0): joins through `pgt_stream_tables` to resolve `pgt_id` →
+/// `pgt_relid` before matching `pgt_outbox_config`.
 pub(crate) fn get_embedding_vector_column(pgt_id: i64) -> Option<String> {
     Spi::get_one_with_args::<String>(
-        "SELECT embedding_vector_column FROM pgtrickle.pgt_outbox_config \
-         WHERE stream_table_oid = $1::oid \
-           AND embedding_vector_column IS NOT NULL",
-        &[pgrx::pg_sys::Oid::from(pgt_id as u32).into()],
+        "SELECT oc.embedding_vector_column \
+         FROM pgtrickle.pgt_outbox_config oc \
+         JOIN pgtrickle.pgt_stream_tables st ON oc.stream_table_oid = st.pgt_relid \
+         WHERE st.pgt_id = $1 AND oc.embedding_vector_column IS NOT NULL",
+        &[pgt_id.into()],
     )
     .unwrap_or(None)
 }

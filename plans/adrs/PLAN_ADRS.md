@@ -100,6 +100,24 @@ outer-join stream tables.
 
 ---
 
+### ADR-004: Frontier Durability Model — Single-Phase Canonical Path
+
+| Field | Value |
+|-------|-------|
+| **Status** | ✅ Accepted — see [ADR-004.md](ADR-004.md) |
+| **Category** | Correctness / Durability |
+| **Implemented** | v0.72.0 |
+
+**Decision:** The DUR-1 two-phase tentative-frontier design (never shipped,
+dead code) is removed. The canonical single-phase frontier path
+(`store_frontier` / `store_frontier_and_complete_refresh`) is the only
+mechanism for advancing the frontier. Frontier-store failures are fatal —
+they abort the refresh transaction, preventing partial commits. PostgreSQL WAL
+atomicity guarantees that the frontier and the data change are committed
+together.
+
+---
+
 ### ADR-002: Hybrid CDC — Trigger Bootstrap with WAL Steady-State
 
 | Field | Value |

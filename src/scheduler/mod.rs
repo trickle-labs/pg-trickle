@@ -952,12 +952,18 @@ fn try_fused_chain_refresh(
     let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()").unwrap_or(None);
 
     for nd in &eligible {
+        // COR-001 (v0.72.0): Treat frontier-store failure as refresh failure.
+        // In the fused path the SQL has already been submitted, but since all
+        // operations run in the same SPI transaction, a frontier-store failure
+        // aborts the transaction and rolls back the fused SQL as well.
         if let Err(e) = StreamTableMeta::store_frontier(nd.pgt_id, &nd.new_frontier) {
             pgrx::warning!(
-                "[pg_trickle] PERF-2: failed to store frontier for pgt_id={}: {}",
+                "[pg_trickle] PERF-2: failed to store frontier for pgt_id={}: {}; \
+                 aborting fused batch (transaction will roll back)",
                 nd.pgt_id,
                 e
             );
+            return vec![];
         }
 
         // Record the fused refresh in the audit log.
@@ -3401,23 +3407,22 @@ fn execute_scheduled_refresh(
                 augment_frontier(&mut new_frontier);
                 match refresh::execute_full_refresh(st) {
                     Ok((ins, del)) => {
-                        if let Err(e) = StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
-                            log!(
-                                "pg_trickle: failed to store frontier for {}.{}: {}",
-                                st.pgt_schema,
-                                st.pgt_name,
-                                e
-                            );
+                        // COR-001 (v0.72.0): Treat frontier-store failure as
+                        // refresh failure — propagate the error so the
+                        // transaction aborts (rolling back the data change) and
+                        // the ST is retried on the next scheduler tick.
+                        match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
+                            Err(e) => Err(e),
+                            Ok(()) => {
+                                // G3+G4: advance WAL slots and flush change buffers
+                                // now that the new frontier is stored.
+                                refresh::post_full_refresh_cleanup(st);
+                                if let Some(counter) = drift_counter {
+                                    *counter = 0;
+                                }
+                                Ok((ins, del))
+                            }
                         }
-                        // G3+G4: advance WAL slots and flush change buffers
-                        // now that the new frontier is stored.
-                        refresh::post_full_refresh_cleanup(st);
-
-                        if let Some(counter) = drift_counter {
-                            *counter = 0;
-                        }
-
-                        Ok((ins, del))
                     }
                     Err(e) => Err(e),
                 }
@@ -3428,24 +3433,20 @@ fn execute_scheduled_refresh(
                 augment_frontier(&mut new_frontier);
                 match refresh::execute_reinitialize_refresh(st) {
                     Ok((ins, del)) => {
-                        if let Err(e) = StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
-                            log!(
-                                "pg_trickle: failed to store frontier for {}.{}: {}",
-                                st.pgt_schema,
-                                st.pgt_name,
-                                e
-                            );
+                        // COR-001 (v0.72.0): Propagate frontier-store failure.
+                        match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
+                            Err(e) => Err(e),
+                            Ok(()) => {
+                                // G3+G4: advance WAL slots and flush change buffers
+                                // now that the new frontier is stored.
+                                refresh::post_full_refresh_cleanup(st);
+                                // Drift reset mechanism: reset counter on full reinit
+                                if let Some(counter) = drift_counter {
+                                    *counter = 0;
+                                }
+                                Ok((ins, del))
+                            }
                         }
-                        // G3+G4: advance WAL slots and flush change buffers
-                        // now that the new frontier is stored.
-                        refresh::post_full_refresh_cleanup(st);
-
-                        // Drift reset mechanism: reset counter on full reinit
-                        if let Some(counter) = drift_counter {
-                            *counter = 0;
-                        }
-
-                        Ok((ins, del))
                     }
                     Err(e) => Err(e),
                 }
@@ -3464,20 +3465,19 @@ fn execute_scheduled_refresh(
                     augment_frontier(&mut new_frontier);
                     match refresh::execute_full_refresh(st) {
                         Ok((ins, del)) => {
-                            if let Err(e) =
-                                StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
-                            {
-                                log!("pg_trickle: failed to store frontier: {}", e);
+                            // COR-001 (v0.72.0): Propagate frontier-store failure.
+                            match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
+                                Err(e) => Err(e),
+                                Ok(()) => {
+                                    // G3+G4: advance WAL slots and flush change buffers
+                                    // now that the new frontier is stored.
+                                    refresh::post_full_refresh_cleanup(st);
+                                    if let Some(counter) = drift_counter {
+                                        *counter = 0;
+                                    }
+                                    Ok((ins, del))
+                                }
                             }
-                            // G3+G4: advance WAL slots and flush change buffers
-                            // now that the new frontier is stored.
-                            refresh::post_full_refresh_cleanup(st);
-
-                            if let Some(counter) = drift_counter {
-                                *counter = 0;
-                            }
-
-                            Ok((ins, del))
                         }
                         Err(e) => Err(e),
                     }
@@ -3488,17 +3488,16 @@ fn execute_scheduled_refresh(
 
                     match refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier) {
                         Ok((ins, del)) => {
-                            if let Err(e) =
-                                StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
-                            {
-                                log!("pg_trickle: failed to store frontier: {}", e);
+                            // COR-001 (v0.72.0): Propagate frontier-store failure.
+                            match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
+                                Err(e) => Err(e),
+                                Ok(()) => {
+                                    if let Some(counter) = drift_counter {
+                                        *counter += 1;
+                                    }
+                                    Ok((ins, del))
+                                }
                             }
-
-                            if let Some(counter) = drift_counter {
-                                *counter += 1;
-                            }
-
-                            Ok((ins, del))
                         }
                         // DI-7: When QueryTooComplex is returned (e.g. join
                         // count exceeds max_differential_joins), fall back to
@@ -3512,16 +3511,18 @@ fn execute_scheduled_refresh(
                             );
                             match refresh::execute_full_refresh(st) {
                                 Ok((ins, del)) => {
-                                    if let Err(e) =
-                                        StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
+                                    // COR-001 (v0.72.0): Propagate frontier-store failure.
+                                    match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
                                     {
-                                        log!("pg_trickle: failed to store frontier: {}", e);
+                                        Err(e) => Err(e),
+                                        Ok(()) => {
+                                            refresh::post_full_refresh_cleanup(st);
+                                            if let Some(counter) = drift_counter {
+                                                *counter = 0;
+                                            }
+                                            Ok((ins, del))
+                                        }
                                     }
-                                    refresh::post_full_refresh_cleanup(st);
-                                    if let Some(counter) = drift_counter {
-                                        *counter = 0;
-                                    }
-                                    Ok((ins, del))
                                 }
                                 Err(e) => Err(e),
                             }
