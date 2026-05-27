@@ -559,7 +559,7 @@ impl E2eDb {
             });
 
         let show_sql = format!("SHOW {setting}");
-        sqlx::query_scalar(sqlx::AssertSqlSafe(&show_sql))
+        sqlx::query_scalar(sqlx::AssertSqlSafe(show_sql.as_str()))
             .fetch_one(&mut *conn)
             .await
             .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, show_sql))
@@ -833,7 +833,7 @@ impl E2eDb {
                 OR table_name = '{st_table}') \
              AND column_name NOT LIKE '__pgt_%'"
         );
-        let (raw_cols, cast_cols): (Option<String>, Option<String>) = sqlx::query_as(sqlx::AssertSqlSafe(&cols_sql))
+        let (raw_cols, cast_cols): (Option<String>, Option<String>) = sqlx::query_as(sqlx::AssertSqlSafe(cols_sql.as_str()))
             .fetch_one(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("cols query failed: {e}"));
