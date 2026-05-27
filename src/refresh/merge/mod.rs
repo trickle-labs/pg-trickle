@@ -567,17 +567,17 @@ pub fn execute_differential_refresh(
 
             // Only check when reltuples > 0 (avoids division by zero and
             // ANALYZE-not-yet-run edge case).
-            if estimated_rows > 0.0 {
+            if estimated_rows > 0.0
+                && delta_fraction_exceeds_threshold(total_changes, estimated_rows, max_frac)
+            {
                 let fraction = total_changes as f64 / estimated_rows;
-                if fraction > max_frac {
-                    return Err(PgTrickleError::QueryTooComplex(format!(
-                        "delta fraction ({:.2}%) exceeds max_delta_fraction ({:.2}%) \
-                         for {schema}.{name} ({total_changes} changes / \
-                         {estimated_rows:.0} estimated rows); falling back to FULL refresh",
-                        fraction * 100.0,
-                        max_frac * 100.0,
-                    )));
-                }
+                return Err(PgTrickleError::QueryTooComplex(format!(
+                    "delta fraction ({:.2}%) exceeds max_delta_fraction ({:.2}%) \
+                     for {schema}.{name} ({total_changes} changes / \
+                     {estimated_rows:.0} estimated rows); falling back to FULL refresh",
+                    fraction * 100.0,
+                    max_frac * 100.0,
+                )));
             }
         }
     }
@@ -2993,5 +2993,72 @@ fn read_trace_context_from_change_buffer(
         crate::otel::TraceContext::parse(&result)
     } else {
         None
+    }
+}
+
+// CODE-002: Pure helper — delta fraction threshold check.
+//
+// Returns `true` when `total_changes / estimated_rows > max_frac`.
+// Extracted so the threshold logic can be unit-tested without a PostgreSQL backend.
+//
+// Precondition: caller must ensure `estimated_rows > 0.0` to avoid division
+// by zero (the condition in execute_differential_refresh guards this).
+pub(crate) fn delta_fraction_exceeds_threshold(
+    total_changes: i64,
+    estimated_rows: f64,
+    max_frac: f64,
+) -> bool {
+    if total_changes <= 0 || estimated_rows <= 0.0 {
+        return false;
+    }
+    let fraction = total_changes as f64 / estimated_rows;
+    fraction > max_frac
+}
+
+// CODE-002: Unit tests for pure helpers in merge module.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── delta_fraction_exceeds_threshold ────────────────────────────
+
+    #[test]
+    fn test_delta_fraction_zero_changes_is_false() {
+        assert!(!delta_fraction_exceeds_threshold(0, 1000.0, 0.1));
+    }
+
+    #[test]
+    fn test_delta_fraction_zero_estimated_rows_is_false() {
+        assert!(!delta_fraction_exceeds_threshold(100, 0.0, 0.1));
+    }
+
+    #[test]
+    fn test_delta_fraction_exactly_at_threshold_is_false() {
+        // 100 changes / 1000 rows = 0.10 — exactly at threshold, not exceeding.
+        assert!(!delta_fraction_exceeds_threshold(100, 1000.0, 0.10));
+    }
+
+    #[test]
+    fn test_delta_fraction_above_threshold_is_true() {
+        // 101 changes / 1000 rows = 0.101 > 0.10
+        assert!(delta_fraction_exceeds_threshold(101, 1000.0, 0.10));
+    }
+
+    #[test]
+    fn test_delta_fraction_well_below_threshold_is_false() {
+        // 10 changes / 10000 rows = 0.001 (0.1%) — well below 10% threshold
+        assert!(!delta_fraction_exceeds_threshold(10, 10_000.0, 0.10));
+    }
+
+    #[test]
+    fn test_delta_fraction_all_rows_changed_is_true() {
+        // 1000/1000 = 1.0 > any reasonable threshold
+        assert!(delta_fraction_exceeds_threshold(1000, 1000.0, 0.10));
+    }
+
+    #[test]
+    fn test_delta_fraction_threshold_of_one_means_more_than_100_percent() {
+        // max_frac = 1.0 means > 100% — impossible with natural data, so always false
+        assert!(!delta_fraction_exceeds_threshold(1000, 1000.0, 1.0));
     }
 }

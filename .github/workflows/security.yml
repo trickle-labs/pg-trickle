@@ -42,19 +42,21 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2023-0071: rsa Marvin Attack — pulled in transitively via
-          # sqlx -> sqlx-mysql -> rsa, but pg_trickle only uses the "postgres"
-          # feature of sqlx. sqlx-mysql is never compiled into the extension.
-          # Suppress until an upstream fix is available.
-          # RUSTSEC-2026-0104: rustls-webpki reachable panic in CRL parsing.
-          # Pulled in transitively via ureq (dev/test path). We do not parse CRLs.
-          # Will be resolved when upstream updates to >=0.103.13.
-          # RUSTSEC-2026-0118, RUSTSEC-2026-0119, RUSTSEC-2026-0120: hickory-dns DoS advisories
-          # published 2026-05-01 affecting hickory-proto 0.26.0 and hickory-net 0.26.0 (NSEC3
-          # unbounded loop and O(n²) name compression). These crates are only transitive test
-          # dependencies via sqlx's integration tests and are not reachable in the extension.
-          # Will be resolved when upstream releases hickory-dns 0.26.1.
+          # SEC-001: Advisory ignores are centralized in deny.toml.
+          # This list must stay in sync with the [advisories] ignore list in deny.toml.
+          # See deny.toml for the rationale comment on each advisory.
           ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0104,RUSTSEC-2026-0118,RUSTSEC-2026-0119,RUSTSEC-2026-0120
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Run cargo deny (advisory check via deny.toml)
+        # SEC-001: cargo deny reads deny.toml as the single source of truth
+        # for advisory ignores. This step confirms deny.toml and cargo-audit
+        # ignores stay in sync.
+        run: cargo deny check advisories
 
   audit-scheduled:
     if: github.event_name == 'schedule'

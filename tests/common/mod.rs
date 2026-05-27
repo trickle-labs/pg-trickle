@@ -62,7 +62,7 @@ impl TestDb {
 
     /// Execute a SQL statement.
     pub async fn execute(&self, sql: &str) {
-        sqlx::query(sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
             .execute(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("SQL execution failed: {}\nSQL: {}", e, sql));
@@ -70,7 +70,10 @@ impl TestDb {
 
     /// Execute a SQL statement, returning Ok/Err instead of panicking.
     pub async fn try_execute(&self, sql: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(sql).execute(&self.pool).await.map(|_| ())
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
     }
 
     /// Get a single scalar value from a query.
@@ -79,7 +82,7 @@ impl TestDb {
         T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
         (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
     {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
@@ -94,7 +97,7 @@ impl TestDb {
         T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
         (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
     {
-        sqlx::query_scalar::<_, Option<T>>(sql)
+        sqlx::query_scalar::<_, Option<T>>(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_optional(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
@@ -177,11 +180,11 @@ impl TestDb {
             )
         };
 
-        let cols_a: Vec<(String, String)> = sqlx::query_as(&type_sql(table_a))
+        let cols_a: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(type_sql(table_a)))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("type query for {table_a} failed: {e}"));
-        let cols_b: Vec<(String, String)> = sqlx::query_as(&type_sql(table_b))
+        let cols_b: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(type_sql(table_b)))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("type query for {table_b} failed: {e}"));
@@ -439,7 +442,10 @@ pub async fn wait_for_query_count(
 ) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let count: i64 = sqlx::query_scalar(sql).fetch_one(pool).await.unwrap_or(0);
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
         if count >= min_count {
             return true;
         }

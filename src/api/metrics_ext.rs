@@ -67,11 +67,7 @@ fn metrics_summary_impl() -> Vec<(
     let ivm_parse_errors = crate::shmem::read_ivm_lock_parse_errors() as i64;
     let (probe_calls, probe_cache_hits, probe_total_ms, _) =
         crate::shmem::read_holdback_probe_metrics();
-    let probe_avg_ms = if probe_calls > 0 {
-        probe_total_ms as f64 / probe_calls as f64
-    } else {
-        0.0
-    };
+    let probe_avg_ms = compute_probe_avg_ms(probe_calls, probe_total_ms);
 
     let row = Spi::connect(|client| {
         let result = client.select(
@@ -135,5 +131,61 @@ fn metrics_summary_impl() -> Vec<(
             )]
         }
         None => Vec::new(),
+    }
+}
+
+/// CODE-002: Pure helper — compute average probe latency in milliseconds.
+///
+/// Returns 0.0 when `probe_calls` is 0 to avoid division by zero.
+pub(crate) fn compute_probe_avg_ms(probe_calls: u64, probe_total_ms: u64) -> f64 {
+    if probe_calls > 0 {
+        probe_total_ms as f64 / probe_calls as f64
+    } else {
+        0.0
+    }
+}
+
+// CODE-002: Unit tests for pure helpers in metrics_ext.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_probe_avg_ms_zero_calls_returns_zero() {
+        assert_eq!(compute_probe_avg_ms(0, 0), 0.0);
+    }
+
+    #[test]
+    fn test_compute_probe_avg_ms_zero_calls_nonzero_total_returns_zero() {
+        // If probe_calls == 0 we never divide, regardless of probe_total_ms.
+        assert_eq!(compute_probe_avg_ms(0, 99999), 0.0);
+    }
+
+    #[test]
+    fn test_compute_probe_avg_ms_single_call() {
+        assert_eq!(compute_probe_avg_ms(1, 42), 42.0);
+    }
+
+    #[test]
+    fn test_compute_probe_avg_ms_multiple_calls() {
+        // 10 calls, 100ms total → 10ms average
+        assert_eq!(compute_probe_avg_ms(10, 100), 10.0);
+    }
+
+    #[test]
+    fn test_compute_probe_avg_ms_fractional_result() {
+        // 3 calls, 10ms total → 3.333... ms average
+        let result = compute_probe_avg_ms(3, 10);
+        assert!(
+            (result - 10.0 / 3.0).abs() < 1e-9,
+            "expected 10/3, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_compute_probe_avg_ms_large_values() {
+        // Ensure no overflow or precision loss with large-ish counts.
+        let result = compute_probe_avg_ms(1_000_000, 5_000_000);
+        assert_eq!(result, 5.0);
     }
 }

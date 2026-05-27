@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.74.0 — Test Coverage, CI Integrity & Security Hardening](#0740--test-coverage-ci-integrity--security-hardening)
 - [0.73.0 — Monitoring Scalability, Operational Resilience & HOT-Friendly Storage](#0730--monitoring-scalability-operational-resilience--hot-friendly-storage)
 - [0.72.0 — Frontier Durability & Catalog Correctness](#0720--frontier-durability--catalog-correctness)
 - [0.71.0 — CI Truthfulness, Test Harness & Documentation Cleanup](#0710--ci-truthfulness-test-harness--documentation-cleanup)
@@ -88,6 +89,98 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.74.0] — Test Coverage, CI Integrity & Security Hardening
+
+### What's New
+
+v0.74.0 is the first release in the final pre-1.0 hardening arc.
+It focuses on test quality, CI truthfulness, and security best practices.
+No schema changes were made in this release.
+
+#### TEST-002 — Condition-based polling replaces fixed stabilization sleeps
+
+Eight `tokio::time::sleep` calls in WAL CDC, safety, and background-worker
+tests were replaced with deterministic condition-polling loops. Tests now
+complete as soon as the expected system state is reached, reducing flakiness
+and cutting average CI wall time for affected test files.
+
+#### TEST-004 — Security-gate CI job for risky path changes
+
+A new `e2e-security-gate` CI job runs targeted E2E tests
+(`e2e_safety_tests`, `e2e_ivm_tests`, `e2e_failure_recovery_tests`,
+`e2e_wal_cdc_tests`) automatically whenever a PR touches security-sensitive
+paths (`src/ivm.rs`, `src/cdc/**`, `src/refresh/**`, `sql/*.sql`).
+Uses `dorny/paths-filter` to avoid running the gate on unrelated PRs.
+
+#### TEST-005 — `just coverage-summary` recipe
+
+New `just coverage-summary` recipe runs `cargo llvm-cov` to produce a
+per-module coverage summary. Ignores test files themselves so the output
+reflects production code coverage.
+
+#### CODE-002 — Unit tests for pure logic in core modules
+
+Added `#[cfg(test)]` unit-test suites to three core modules that previously
+had no DB-free tests:
+- `src/refresh/codegen.rs`: 15 tests for `build_content_hash_expr`,
+  `parameterize_lsn_template`, `build_prepare_type_list`, `build_execute_params`.
+- `src/refresh/merge/mod.rs`: 7 tests for `delta_fraction_exceeds_threshold`
+  (extracted from `execute_differential_refresh`).
+- `src/api/metrics_ext.rs`: 6 tests for `compute_probe_avg_ms`
+  (extracted from `metrics_summary_impl`).
+
+#### SEC-001 — Centralized advisory ignores and `just security` recipe
+
+Advisory ignores previously scattered across CI environment variables are now
+centralized in `deny.toml` with full metadata comments (CVE, rationale, review
+date). Added `cargo-deny` check step to `security.yml`. New `just security`
+recipe lets developers reproduce the exact advisory check that CI runs.
+
+#### SEC-002 — IVM trigger shadowing test
+
+Added `test_sec002_ivm_trigger_not_shadowed_by_public_pgtrickle` E2E test that
+creates a `pgtrickle.pg_trickle_capture_change()` function in a shadowing
+schema and verifies it cannot intercept the IVM trigger.
+
+#### SEC-003 — SQL builder injection audit and lint
+
+New `scripts/check_sql_builder.sh` script scans `src/` for `format!()` patterns
+that interpolate values into SQL strings (potential injection vectors). Integrated
+as `just check-sql-builder`. Zero vectors found in the current codebase.
+
+#### DEVEX-001 — Re-enabled push-to-main benchmark baselines
+
+The `benchmarks.yml` CI workflow push trigger (accidentally disabled) is
+restored. Criterion baselines are now recorded on every push to `main`,
+allowing the PR regression gate to compare against a valid baseline.
+
+#### DEVEX-002 — `just lint-ci` recipe
+
+New `just lint-ci` recipe chains `lint`, `check-version-sync`, and
+`check-meta-version` into a single command that mirrors what CI enforces.
+
+#### DEVEX-003 — Version tag updates
+
+Version strings in `Dockerfile.hub`, `Dockerfile.ghcr`, and `justfile` updated
+from `0.73.0` to `0.74.0`. Build targets and upgrade image defaults aligned.
+
+#### DEP-001 — sqlx 0.8.6 → 0.9.0
+
+Full upgrade of `sqlx` to 0.9.0 across all test files. The 0.9.0 release
+requires dynamic SQL strings to be wrapped in `sqlx::AssertSqlSafe(T)`.
+Audited and fixed 25+ test files. No production code changes required.
+
+#### DEP-002 — lru 0.16.4 → 0.18.0
+
+Minor version bump. API compatibility verified; no code changes required.
+
+#### DEP-003 — object_store 0.10.2 → 0.13.2
+
+Three-version jump for the DuckLake Parquet sink dependency. Full E2E test
+suite passed on the upgraded version.
 
 ---
 

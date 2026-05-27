@@ -2610,3 +2610,146 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
         name
     );
 }
+
+// CODE-002: Unit tests for pure SQL-generation helpers.
+// These run without a PostgreSQL backend using `just test-unit`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::version::{Frontier, SourceVersion};
+
+    // ── build_content_hash_expr ─────────────────────────────────────
+
+    #[test]
+    fn test_build_content_hash_expr_zero_cols_returns_row_id() {
+        let result = build_content_hash_expr("t.", &[]);
+        assert_eq!(result, "t.__pgt_row_id");
+    }
+
+    #[test]
+    fn test_build_content_hash_expr_single_col() {
+        let result = build_content_hash_expr("t.", &["name".to_string()]);
+        assert_eq!(result, "pgtrickle.pg_trickle_hash(t.\"name\"::TEXT)");
+    }
+
+    #[test]
+    fn test_build_content_hash_expr_single_col_with_prefix() {
+        let result = build_content_hash_expr("old.", &["val".to_string()]);
+        assert_eq!(result, "pgtrickle.pg_trickle_hash(old.\"val\"::TEXT)");
+    }
+
+    #[test]
+    fn test_build_content_hash_expr_multi_col() {
+        let cols = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = build_content_hash_expr("t.", &cols);
+        assert_eq!(
+            result,
+            "pgtrickle.pg_trickle_hash_multi(ARRAY[t.\"a\"::TEXT, t.\"b\"::TEXT, t.\"c\"::TEXT])"
+        );
+    }
+
+    #[test]
+    fn test_build_content_hash_expr_col_with_double_quote() {
+        // Column names containing double-quotes must be escaped.
+        let cols = vec!["my\"col".to_string()];
+        let result = build_content_hash_expr("d.", &cols);
+        assert!(
+            result.contains("\"my\"\"col\""),
+            "double-quote in col name should be escaped: got {result}"
+        );
+    }
+
+    // ── parameterize_lsn_template ───────────────────────────────────
+
+    #[test]
+    fn test_parameterize_lsn_template_single_source() {
+        let template = "SELECT * FROM t WHERE lsn > '__PGS_PREV_LSN_42__'::pg_lsn AND lsn <= '__PGS_NEW_LSN_42__'::pg_lsn";
+        let result = parameterize_lsn_template(template, &[42]);
+        assert_eq!(result, "SELECT * FROM t WHERE lsn > $1 AND lsn <= $2");
+    }
+
+    #[test]
+    fn test_parameterize_lsn_template_multiple_sources() {
+        let template = "'__PGS_PREV_LSN_1__'::pg_lsn AND '__PGS_NEW_LSN_1__'::pg_lsn AND '__PGS_PREV_LSN_2__'::pg_lsn AND '__PGS_NEW_LSN_2__'::pg_lsn";
+        let result = parameterize_lsn_template(template, &[1, 2]);
+        assert_eq!(result, "$1 AND $2 AND $3 AND $4");
+    }
+
+    #[test]
+    fn test_parameterize_lsn_template_no_sources() {
+        let template = "SELECT 1";
+        let result = parameterize_lsn_template(template, &[]);
+        assert_eq!(
+            result, "SELECT 1",
+            "empty source list should leave template unchanged"
+        );
+    }
+
+    // ── build_prepare_type_list ─────────────────────────────────────
+
+    #[test]
+    fn test_build_prepare_type_list_zero_sources() {
+        assert_eq!(build_prepare_type_list(0), "");
+    }
+
+    #[test]
+    fn test_build_prepare_type_list_one_source() {
+        assert_eq!(build_prepare_type_list(1), "pg_lsn, pg_lsn");
+    }
+
+    #[test]
+    fn test_build_prepare_type_list_three_sources() {
+        let result = build_prepare_type_list(3);
+        assert_eq!(result, "pg_lsn, pg_lsn, pg_lsn, pg_lsn, pg_lsn, pg_lsn");
+        assert_eq!(
+            result.split(", ").count(),
+            6,
+            "3 sources * 2 params each = 6 types"
+        );
+    }
+
+    // ── build_execute_params ────────────────────────────────────────
+
+    fn make_frontier(entries: &[(u32, &str)]) -> Frontier {
+        let mut f = Frontier::new();
+        for &(oid, lsn) in entries {
+            f.sources.insert(
+                oid.to_string(),
+                SourceVersion {
+                    lsn: lsn.to_string(),
+                    snapshot_ts: "2026-01-01T00:00:00Z".to_string(),
+                    snapshot_id: None,
+                },
+            );
+        }
+        f
+    }
+
+    #[test]
+    fn test_build_execute_params_single_source() {
+        let prev = make_frontier(&[(10, "0/1000")]);
+        let new = make_frontier(&[(10, "0/2000")]);
+        let result = build_execute_params(&[10], &prev, &new);
+        assert_eq!(result, "'0/1000'::pg_lsn, '0/2000'::pg_lsn");
+    }
+
+    #[test]
+    fn test_build_execute_params_multiple_sources() {
+        let prev = make_frontier(&[(1, "0/A"), (2, "0/B")]);
+        let new = make_frontier(&[(1, "0/C"), (2, "0/D")]);
+        let result = build_execute_params(&[1, 2], &prev, &new);
+        assert_eq!(
+            result,
+            "'0/A'::pg_lsn, '0/C'::pg_lsn, '0/B'::pg_lsn, '0/D'::pg_lsn"
+        );
+    }
+
+    #[test]
+    fn test_build_execute_params_missing_source_defaults_to_zero() {
+        let prev = Frontier::new();
+        let new = Frontier::new();
+        // OID not in frontier — should default to "0/0"
+        let result = build_execute_params(&[99], &prev, &new);
+        assert_eq!(result, "'0/0'::pg_lsn, '0/0'::pg_lsn");
+    }
+}
