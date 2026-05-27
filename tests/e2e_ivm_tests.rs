@@ -894,11 +894,13 @@ async fn test_sec002_ivm_trigger_not_shadowed_by_public_pgtrickle() {
     // Set up source table and IMMEDIATE stream table.
     db.execute("CREATE TABLE sec002_src (id INT PRIMARY KEY, val TEXT)")
         .await;
+    // schedule=NULL, mode='IMMEDIATE' — matches how other IVM tests create
+    // IMMEDIATE stream tables (see create_immediate_st helper above).
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
-            name => 'sec002_st', \
-            query => $$SELECT id, val FROM sec002_src$$, \
-            schedule => 'immediate'\
+            'sec002_st', \
+            $$SELECT id, val FROM sec002_src$$, \
+            NULL, 'IMMEDIATE'\
         )",
     )
     .await;
