@@ -65,6 +65,29 @@ ignore = [
   # ureq (dev / test path). We do not parse CRLs; unaffected in practice.
   # Will be resolved when upstream updates to rustls-webpki >=0.103.13.
   "RUSTSEC-2026-0104",
+  # Owner: geir-gronmo
+  # Added: 2026-06-01
+  # Review-By: 2026-09-01
+  # Upstream: https://github.com/RustCrypto/RSA/issues/19
+  # Remove-When: sqlx-mysql updates to rsa >=0.9.8 or pg_trickle removes MySQL feature
+  # rsa Marvin Attack (RUSTSEC-2023-0071) — pulled in transitively via
+  # sqlx -> sqlx-mysql -> rsa, but pg_trickle only enables the "postgres"
+  # feature of sqlx. sqlx-mysql is never compiled into the extension binary.
+  # Suppress until upstream provides a patched rsa crate.
+  "RUSTSEC-2023-0071",
+  # Owner: geir-gronmo
+  # Added: 2026-06-01
+  # Review-By: 2026-09-01
+  # Upstream: https://github.com/hickory-dns/hickory-dns/issues/2630
+  # Remove-When: hickory-dns 0.26.1 released and propagated through deps
+  # RUSTSEC-2026-0118: hickory-proto NSEC3 unbounded DoS loop (0.26.0).
+  # RUSTSEC-2026-0119: hickory-proto O(n²) name compression (0.26.0).
+  # RUSTSEC-2026-0120: hickory-dns network-reachable panic (0.26.0).
+  # These are only transitive test dependencies via sqlx integration tests;
+  # not reachable from the pg_trickle extension in production.
+  "RUSTSEC-2026-0118",
+  "RUSTSEC-2026-0119",
+  "RUSTSEC-2026-0120",
 ]
 
 [bans]

@@ -170,7 +170,7 @@ impl PgBouncerTestDb {
 
     /// Execute SQL on the direct admin connection.
     async fn admin_execute(&self, sql: &str) {
-        sqlx::query(sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
             .execute(&self.admin_pool)
             .await
             .unwrap_or_else(|e| panic!("admin SQL failed: {e}\nSQL: {sql}"));
@@ -178,7 +178,7 @@ impl PgBouncerTestDb {
 
     /// Execute SQL through PgBouncer.
     async fn bouncer_execute(&self, sql: &str) {
-        sqlx::query(sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
             .execute(&self.bouncer_pool)
             .await
             .unwrap_or_else(|e| panic!("bouncer SQL failed: {e}\nSQL: {sql}"));
@@ -190,7 +190,7 @@ impl PgBouncerTestDb {
         T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
         (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
     {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(&self.bouncer_pool)
             .await
             .unwrap_or_else(|e| panic!("bouncer scalar query failed: {e}\nSQL: {sql}"))
@@ -202,7 +202,7 @@ impl PgBouncerTestDb {
         T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
         (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
     {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(&self.admin_pool)
             .await
             .unwrap_or_else(|e| panic!("admin scalar query failed: {e}\nSQL: {sql}"))

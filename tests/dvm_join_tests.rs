@@ -179,7 +179,7 @@ async fn reset_join_fixture(db: &TestDb) {
 /// Query delta rows: (action, o.id, o.prod_id, o.amount, p.id, p.name)
 /// ordered by action, then o.id.
 async fn query_join_rows(db: &TestDb, sql: &str) -> Vec<(String, i32, i32, i32, i32, String)> {
-    sqlx::query_as::<_, (String, i32, i32, i32, i32, String)>(&format!(
+    sqlx::query_as::<_, (String, i32, i32, i32, i32, String)>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "o__id",
                   "o__prod_id",
@@ -188,7 +188,7 @@ async fn query_join_rows(db: &TestDb, sql: &str) -> Vec<(String, i32, i32, i32, 
                   "p__name"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "o__id""#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated inner-join delta SQL")
@@ -578,8 +578,9 @@ async fn query_3way_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, i32, i32, i32, i32, i32, String, i32, String)> {
-    sqlx::query_as::<_, (String, i32, i32, i32, i32, i32, String, i32, String)>(&format!(
-        r#"SELECT __pgt_action,
+    sqlx::query_as::<_, (String, i32, i32, i32, i32, i32, String, i32, String)>(
+        sqlx::AssertSqlSafe(format!(
+            r#"SELECT __pgt_action,
                   "join__o__id",
                   "join__o__prod_id",
                   "join__o__amount",
@@ -590,7 +591,8 @@ async fn query_3way_rows(
                   "c__label"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "join__o__id""#
-    ))
+        )),
+    )
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated 3-way join delta SQL")

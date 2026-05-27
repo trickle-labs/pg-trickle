@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.19.0-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.74.0-pg18 -f Dockerfile.hub .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -98,6 +98,39 @@ docs-lint:
 [group: "lint"]
 unsafe-inventory:
     bash scripts/unsafe_inventory.sh
+
+# DEVEX-002: CI-aligned lint — runs all checks that CI enforces in one shot.
+# Covers formatting, clippy, security-definer, docs drift, version sync,
+# meta-version sync, and generated doc/schema drift.
+[group: "lint"]
+lint-ci: lint check-version-sync check-meta-version
+    @echo "lint-ci passed — all CI lint checks satisfied"
+
+# Check that Cargo.toml version matches META.json version
+# (The full check-meta-version recipe is in the release group below)
+
+# SEC-001: Run cargo-deny advisory checks (reads deny.toml as single source of truth).
+# Reproduces the advisory checks that CI runs via security.yml.
+[group: "lint"]
+security:
+    cargo deny check advisories
+
+# SEC-003: Audit SQL builder helpers for raw format!() SQL injection vectors.
+[group: "lint"]
+check-sql-builder:
+    bash scripts/check_sql_builder.sh
+
+# TEST-005: Generate per-module coverage summary using cargo-llvm-cov.
+# Requires: cargo install cargo-llvm-cov
+[group: "test"]
+coverage-summary:
+    cargo llvm-cov \
+        --features pg{{pg}} \
+        --ignore-filename-regex 'tests/' \
+        --summary-only \
+        2>&1 | tee coverage-summary.txt
+
+
 
 # ── Tests ─────────────────────────────────────────────────────────────────
 
@@ -462,12 +495,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.73.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.74.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.73.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.74.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

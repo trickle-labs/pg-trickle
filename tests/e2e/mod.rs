@@ -180,10 +180,12 @@ async fn create_database(admin_connection_string: &str, db_name: &str) {
         .await
         .unwrap_or_else(|e| panic!("Failed to connect for CREATE DATABASE {db_name}: {e}"));
 
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to CREATE DATABASE {db_name}: {e}"));
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE \"{db_name}\""
+    )))
+    .execute(&admin_pool)
+    .await
+    .unwrap_or_else(|e| panic!("Failed to CREATE DATABASE {db_name}: {e}"));
 
     admin_pool.close().await;
 }
@@ -222,18 +224,23 @@ async fn create_database_from_template(
         if attempt > 0 {
             // Terminate any backends connected to the template DB
             // (e.g. background workers that auto-connected after extension install).
-            let _ = sqlx::query(&terminate_sql).execute(&admin_pool).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(terminate_sql.clone()))
+                .execute(&admin_pool)
+                .await;
             tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
         }
 
-        match sqlx::query(&create_sql).execute(&admin_pool).await {
+        match sqlx::query(sqlx::AssertSqlSafe(create_sql.clone()))
+            .execute(&admin_pool)
+            .await
+        {
             Ok(_) => {
                 // The cloned DB inherits the template's per-database
                 // pg_trickle.enabled = off setting.  Reset it so the
                 // extension is active in the test database.
-                let _ = sqlx::query(&format!(
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                     "ALTER DATABASE \"{db_name}\" RESET pg_trickle.enabled"
-                ))
+                )))
                 .execute(&admin_pool)
                 .await;
                 admin_pool.close().await;
@@ -281,9 +288,9 @@ async fn create_extension_template(admin_connection_string: &str, port: u16) -> 
     // Disable the scheduler on the template DB so background workers don't
     // connect to it.  Without this, `CREATE DATABASE … TEMPLATE` fails
     // because PostgreSQL requires zero connections to the source database.
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER DATABASE \"{template_name}\" SET pg_trickle.enabled = off"
-    ))
+    )))
     .execute(&template_pool)
     .await
     .unwrap_or_else(|e| panic!("Failed to disable pg_trickle on template DB: {e}"));
@@ -299,11 +306,11 @@ async fn create_extension_template(admin_connection_string: &str, port: u16) -> 
         .connect(admin_connection_string)
         .await
         .unwrap_or_else(|e| panic!("Failed to connect for template cleanup: {e}"));
-    let _ = sqlx::query(&format!(
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pg_terminate_backend(pid) \
          FROM pg_stat_activity \
          WHERE datname = '{template_name}' AND pid <> pg_backend_pid()"
-    ))
+    )))
     .execute(&admin_pool)
     .await;
     admin_pool.close().await;
@@ -832,7 +839,7 @@ impl E2eDb {
 
     /// Execute a SQL statement (panics on error).
     pub async fn execute(&self, sql: &str) {
-        sqlx::query(sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
             .execute(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("SQL failed: {}\nSQL: {}", e, sql));
@@ -840,7 +847,10 @@ impl E2eDb {
 
     /// Execute a SQL statement, returning Ok/Err instead of panicking.
     pub async fn try_execute(&self, sql: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(sql).execute(&self.pool).await.map(|_| ())
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
     }
 
     /// Execute multiple SQL statements sequentially on the **same** connection.
@@ -855,7 +865,7 @@ impl E2eDb {
             .await
             .expect("Failed to acquire DB connection for execute_seq");
         for sql in stmts {
-            sqlx::query(sql)
+            sqlx::query(sqlx::AssertSqlSafe((*sql).to_owned()))
                 .execute(&mut *conn)
                 .await
                 .unwrap_or_else(|e| panic!("SQL failed: {}\nSQL: {}", e, sql));
@@ -877,12 +887,15 @@ impl E2eDb {
             .await
             .expect("Failed to acquire DB connection for try_execute_with_config");
         for stmt in config {
-            sqlx::query(stmt)
+            sqlx::query(sqlx::AssertSqlSafe((*stmt).to_owned()))
                 .execute(&mut *conn)
                 .await
                 .unwrap_or_else(|e| panic!("Config SQL failed: {}\nSQL: {}", e, stmt));
         }
-        sqlx::query(sql).execute(&mut *conn).await.map(|_| ())
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
     }
 
     /// Execute `setup_sql` on a connection, then try `target_sql` and return its
@@ -903,16 +916,18 @@ impl E2eDb {
             .acquire()
             .await
             .expect("Failed to acquire DB connection for try_execute_with_role");
-        sqlx::query(setup_sql)
+        sqlx::query(sqlx::AssertSqlSafe(setup_sql.to_owned()))
             .execute(&mut *conn)
             .await
             .unwrap_or_else(|e| panic!("setup SQL failed: {}\nSQL: {}", e, setup_sql));
-        let result = sqlx::query(target_sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(target_sql.to_owned()))
             .execute(&mut *conn)
             .await
             .map(|_| ());
         // Always reset, even if target failed.
-        let _ = sqlx::query(teardown_sql).execute(&mut *conn).await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(teardown_sql.to_owned()))
+            .execute(&mut *conn)
+            .await;
         result
     }
 
@@ -951,11 +966,11 @@ impl E2eDb {
             .acquire()
             .await
             .expect("Failed to acquire connection for set_and_show_setting");
-        sqlx::query(set_sql)
+        sqlx::query(sqlx::AssertSqlSafe(set_sql.to_owned()))
             .execute(&mut *conn)
             .await
             .unwrap_or_else(|e| panic!("SET failed: {e}\nSQL: {set_sql}"));
-        let result: (String,) = sqlx::query_as(&format!("SHOW {setting}"))
+        let result: (String,) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SHOW {setting}")))
             .fetch_one(&mut *conn)
             .await
             .unwrap_or_else(|e| panic!("SHOW {setting} failed: {e}"));
@@ -997,7 +1012,7 @@ impl E2eDb {
         T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
         (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
     {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
@@ -1012,7 +1027,7 @@ impl E2eDb {
         T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
         (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
     {
-        sqlx::query_scalar::<_, Option<T>>(sql)
+        sqlx::query_scalar::<_, Option<T>>(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_optional(&self.pool)
             .await
             .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
@@ -1059,7 +1074,10 @@ impl E2eDb {
     ///
     /// Useful for capturing EXPLAIN output where each row is a text line.
     pub async fn query_text(&self, sql: &str) -> Option<String> {
-        let rows: Vec<(String,)> = sqlx::query_as(sql).fetch_all(&self.pool).await.ok()?;
+        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.to_owned()))
+            .fetch_all(&self.pool)
+            .await
+            .ok()?;
         if rows.is_empty() {
             return None;
         }
@@ -1225,10 +1243,11 @@ impl E2eDb {
                 OR table_name = '{st_table}') \
              AND column_name NOT LIKE '__pgt_%'"
         );
-        let (raw_cols, cast_cols): (Option<String>, Option<String>) = sqlx::query_as(&cols_sql)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or_else(|e| panic!("cols query failed: {e}"));
+        let (raw_cols, cast_cols): (Option<String>, Option<String>) =
+            sqlx::query_as(sqlx::AssertSqlSafe(cols_sql))
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or_else(|e| panic!("cols query failed: {e}"));
         let raw_cols = raw_cols.unwrap_or_else(|| "*".to_string());
         let cast_cols = cast_cols.unwrap_or_else(|| "*".to_string());
 
@@ -1303,27 +1322,27 @@ impl E2eDb {
         if !matches {
             // Dump the actual ST contents and expected query result for
             // diagnostic purposes before panicking.
-            let st_rows: Vec<(String,)> = sqlx::query_as(&format!(
+            let st_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT row_to_json(t)::text FROM (SELECT {raw_cols} FROM {st_relation}) t"
-            ))
+            )))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_default();
-            let dq_rows: Vec<(String,)> = sqlx::query_as(&format!(
+            let dq_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT row_to_json(t)::text FROM ({defining_query}) t"
-            ))
+            )))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_default();
-            let extra_in_st: Vec<(String,)> = sqlx::query_as(&format!(
+            let extra_in_st: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT row_to_json(t)::text FROM (SELECT {raw_cols} FROM {st_relation} EXCEPT ALL ({defining_query})) t"
-            ))
+            )))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_default();
-            let missing_from_st: Vec<(String,)> = sqlx::query_as(&format!(
+            let missing_from_st: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT row_to_json(t)::text FROM (({defining_query}) EXCEPT ALL SELECT {raw_cols} FROM {st_relation}) t"
-            ))
+            )))
             .fetch_all(&self.pool)
             .await
             .unwrap_or_default();

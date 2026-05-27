@@ -142,7 +142,7 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
         for i in 1..=20 {
             let grp = if i % 2 == 0 { "x" } else { "y" };
             let sql = format!("INSERT INTO conc_dag_src (grp, val) VALUES ('{grp}', {i})");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .execute(&pool)
                 .await
                 .expect("concurrent INSERT should succeed");

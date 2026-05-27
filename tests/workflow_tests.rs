@@ -169,10 +169,10 @@ async fn test_workflow_cdc_changes_tracked_in_buffer() {
     assert_eq!(change_count, 3);
 
     // Verify changes are ordered by LSN
-    let lsns: Vec<String> = sqlx::query_scalar(&format!(
+    let lsns: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT lsn::text FROM pgtrickle_changes.changes_{} ORDER BY lsn",
         src_oid
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .unwrap();

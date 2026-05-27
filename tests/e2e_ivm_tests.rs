@@ -854,10 +854,12 @@ async fn test_ivm_concurrent_inserts_immediate() {
             let base = batch * 10 + 1;
             for i in 0..10 {
                 let id = base + i;
-                sqlx::query(&format!("INSERT INTO conc_src VALUES ({id}, {id})"))
-                    .execute(&p)
-                    .await
-                    .expect("concurrent INSERT should succeed");
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO conc_src VALUES ({id}, {id})"
+                )))
+                .execute(&p)
+                .await
+                .expect("concurrent INSERT should succeed");
             }
         });
         handles.push(handle);
@@ -874,4 +876,72 @@ async fn test_ivm_concurrent_inserts_immediate() {
         "IMMEDIATE ST should have 50 rows after concurrent inserts"
     );
     db.assert_st_matches_query("conc_imm", query).await;
+}
+
+// ── SEC-002: IVM AFTER trigger search_path shadowing ────────────────────
+
+/// SEC-002: Verify that a user-created schema named `pgtrickle` cannot shadow
+/// the real pg_trickle functions during AFTER trigger execution.
+///
+/// Creates a public function `pgtrickle.pg_trickle_capture_change` in a test
+/// schema and inserts into a source table.  The IVM trigger must call the
+/// actual extension function — not the impersonator — and the ST must be
+/// correctly maintained.
+#[tokio::test]
+async fn test_sec002_ivm_trigger_not_shadowed_by_public_pgtrickle() {
+    let db = e2e::E2eDb::new().await.with_extension().await;
+
+    // Set up source table and IMMEDIATE stream table.
+    db.execute("CREATE TABLE sec002_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    // schedule=NULL, mode='IMMEDIATE' — matches how other IVM tests create
+    // IMMEDIATE stream tables (see create_immediate_st helper above).
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+            'sec002_st', \
+            $$SELECT id, val FROM sec002_src$$, \
+            NULL, 'IMMEDIATE'\
+        )",
+    )
+    .await;
+
+    // Create an impersonator schema and function that would corrupt data
+    // if the trigger called it instead of the real extension function.
+    // The function raises an error so we can clearly detect if it's called.
+    db.execute("CREATE SCHEMA IF NOT EXISTS test_shadow_pgtrickle")
+        .await;
+    db.execute(
+        "CREATE OR REPLACE FUNCTION test_shadow_pgtrickle.pg_trickle_capture_change() \
+         RETURNS TRIGGER LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           RAISE EXCEPTION 'SHADOWED: pg_trickle_capture_change called from wrong schema'; \
+         END; \
+         $$",
+    )
+    .await;
+
+    // Insert data — the AFTER trigger should call the REAL pgtrickle function,
+    // not the impostor. If the impostor is called, the INSERT will fail with
+    // our sentinel exception.
+    db.execute("INSERT INTO sec002_src VALUES (1, 'hello')")
+        .await;
+    db.execute("INSERT INTO sec002_src VALUES (2, 'world')")
+        .await;
+
+    // If we reach here, the real trigger fired (not the impostor).
+    // Verify the IMMEDIATE ST was correctly maintained.
+    assert_eq!(
+        db.count("public.sec002_st").await,
+        2,
+        "IMMEDIATE ST should have 2 rows — trigger was NOT shadowed"
+    );
+
+    let val: String = db
+        .query_scalar("SELECT val FROM public.sec002_st WHERE id = 1")
+        .await;
+    assert_eq!(val, "hello", "Row value should be correct after trigger");
+
+    // Cleanup
+    db.execute("DROP SCHEMA IF EXISTS test_shadow_pgtrickle CASCADE")
+        .await;
 }

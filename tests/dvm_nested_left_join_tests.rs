@@ -237,7 +237,7 @@ type NestedLjRow = (
 );
 
 async fn query_nested_lj_rows(db: &TestDb, sql: &str) -> Vec<NestedLjRow> {
-    sqlx::query_as::<_, NestedLjRow>(&format!(
+    sqlx::query_as::<_, NestedLjRow>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "join__e__id",
                   "join__e__dept_id",
@@ -249,7 +249,7 @@ async fn query_nested_lj_rows(db: &TestDb, sql: &str) -> Vec<NestedLjRow> {
                   "m__mgr_name"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "join__e__id""#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated nested left-join delta SQL")

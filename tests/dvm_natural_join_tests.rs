@@ -222,7 +222,7 @@ async fn query_nj_inner_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, i32, i32, String, i32, String)> {
-    sqlx::query_as::<_, (String, i32, i32, String, i32, String)>(&format!(
+    sqlx::query_as::<_, (String, i32, i32, String, i32, String)>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "e__id",
                   "e__dept_id",
@@ -231,7 +231,7 @@ async fn query_nj_inner_rows(
                   "d__label"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "e__id""#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated natural inner-join delta SQL")
@@ -242,8 +242,9 @@ async fn query_nj_left_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, i32, i32, String, Option<i32>, Option<String>)> {
-    sqlx::query_as::<_, (String, i32, i32, String, Option<i32>, Option<String>)>(&format!(
-        r#"SELECT __pgt_action,
+    sqlx::query_as::<_, (String, i32, i32, String, Option<i32>, Option<String>)>(
+        sqlx::AssertSqlSafe(format!(
+            r#"SELECT __pgt_action,
                   "e__id",
                   "e__dept_id",
                   "e__name",
@@ -251,7 +252,8 @@ async fn query_nj_left_rows(
                   "d__label"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "e__id""#
-    ))
+        )),
+    )
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated natural left-join delta SQL")
@@ -279,7 +281,7 @@ async fn query_nj_full_rows(
             Option<i32>,
             Option<String>,
         ),
-    >(&format!(
+    >(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "e__id",
                   "e__dept_id",
@@ -288,7 +290,7 @@ async fn query_nj_full_rows(
                   "d__label"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "e__id" NULLS LAST, "d__dept_id" NULLS LAST"#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated natural full-join delta SQL")

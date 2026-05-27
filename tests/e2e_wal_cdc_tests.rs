@@ -322,8 +322,37 @@ async fn test_wal_cdc_captures_update() {
     let mode = wait_for_cdc_mode(&db, "wal_upd", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should transition to WAL mode");
 
-    // Allow the WAL slot to stabilise (see test_wal_cdc_captures_insert for rationale).
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Allow the WAL slot to stabilise before performing DML — wait until the
+    // replication slot is visible in pg_replication_slots.
+    let slot_ready = {
+        let oid = db.table_oid("wal_upd").await;
+        let stable: String = db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({}::oid)",
+                oid
+            ))
+            .await;
+        let slot_name = format!("pgtrickle_{stable}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let exists: bool = db
+                .query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{slot_name}')"
+                ))
+                .await;
+            if exists {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    assert!(
+        slot_ready,
+        "WAL replication slot should be visible before performing DML"
+    );
 
     db.execute("UPDATE wal_upd SET val = 'new' WHERE id = 1")
         .await;
@@ -371,8 +400,37 @@ async fn test_wal_cdc_captures_delete() {
     let mode = wait_for_cdc_mode(&db, "wal_del", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should transition to WAL mode");
 
-    // Allow the WAL slot to stabilise (see test_wal_cdc_captures_insert for rationale).
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Allow the WAL slot to stabilise before performing DML — wait until the
+    // replication slot is visible in pg_replication_slots.
+    let slot_ready = {
+        let oid = db.table_oid("wal_del").await;
+        let stable: String = db
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({}::oid)",
+                oid
+            ))
+            .await;
+        let slot_name = format!("pgtrickle_{stable}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let exists: bool = db
+                .query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{slot_name}')"
+                ))
+                .await;
+            if exists {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    assert!(
+        slot_ready,
+        "WAL replication slot should be visible before performing DML"
+    );
 
     db.execute("DELETE FROM wal_del WHERE id = 2").await;
 
@@ -417,9 +475,17 @@ async fn test_trigger_mode_no_wal_transition() {
     )
     .await;
 
-    // Wait a moment — should stay in TRIGGER mode
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mode = get_cdc_mode(&db, "trig_only").await;
+    // Confirm mode has NOT transitioned away from TRIGGER by polling for a
+    // short window — if WAL transition were to happen it would appear within
+    // a few scheduler ticks (scheduler_interval_ms is 100ms by default).
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let mode = loop {
+        let m = get_cdc_mode(&db, "trig_only").await;
+        if m.to_uppercase() != "TRIGGER" || std::time::Instant::now() > deadline {
+            break m; // unexpected transition — surface the wrong mode for assertion
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert_eq!(
         mode, "TRIGGER",
         "cdc_mode='trigger' should prevent WAL transition"
@@ -476,10 +542,8 @@ async fn test_wal_fallback_on_missing_slot() {
     // Pin cdc_mode to 'trigger' so the scheduler doesn't immediately
     // re-promote back to WAL after fallback. In 'auto' mode the scheduler
     // would re-create the slot within one tick, making TRIGGER unobservable.
-    db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
         .await;
-    db.execute("SELECT pg_reload_conf()").await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Wait for the health check / poll error to trigger fallback
     let fallback_mode = wait_for_cdc_mode(&db, "wal_fb", "TRIGGER", Duration::from_secs(60)).await;
@@ -576,9 +640,16 @@ async fn test_wal_keyless_table_stays_on_triggers() {
     )
     .await;
 
-    // Wait a moment — should stay on TRIGGER because no PK
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mode = get_cdc_mode(&db, "wal_keyless").await;
+    // Confirm mode has NOT transitioned away from TRIGGER by polling for a
+    // short window — keyless tables (no PK) cannot transition to WAL.
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let mode = loop {
+        let m = get_cdc_mode(&db, "wal_keyless").await;
+        if m.to_uppercase() != "TRIGGER" || std::time::Instant::now() > deadline {
+            break m;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert_eq!(
         mode, "TRIGGER",
         "Keyless table should stay on TRIGGER mode (WAL requires PK)"
@@ -723,12 +794,9 @@ async fn test_ec34_check_cdc_health_detects_missing_slot() {
     // Prevent the scheduler from re-promoting back to WAL after fallback.
     // Without this, the auto CDC mode immediately re-creates the slot and
     // transitions back to WAL, making the TRIGGER state unobservable.
-    db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
         .await;
-    db.execute("SELECT pg_reload_conf()").await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // After fallback completes, verify data integrity
     let fallback_mode =
         wait_for_cdc_mode(&db, "ec34_src", "TRIGGER", Duration::from_secs(60)).await;
     assert_eq!(
@@ -854,8 +922,20 @@ async fn test_wal_transition_pk_drop_falls_back_to_trigger() {
     )
     .await;
 
-    // Wait a short moment for the transition to start.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait a short moment for the transition to start — poll until the WAL slot
+    // is visible, which confirms the background worker has begun the transition.
+    let _ = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if slot_exists(&db, "wal_pk_drop_src").await {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
 
     // Drop the primary key — this makes the source ineligible for WAL CDC.
     db.execute("ALTER TABLE wal_pk_drop_src DROP CONSTRAINT wal_pk_drop_src_pkey")
@@ -903,8 +983,20 @@ async fn test_wal_transition_replica_identity_drop_falls_back_to_trigger() {
     )
     .await;
 
-    // Brief pause before changing REPLICA IDENTITY.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Brief pause before changing REPLICA IDENTITY — poll until the WAL slot
+    // is visible, confirming the background worker has begun the WAL transition.
+    let _ = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if slot_exists(&db, "wal_ri_drop_src").await {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
 
     // Reset replica identity to default — this breaks WAL CDC eligibility.
     db.execute("ALTER TABLE wal_ri_drop_src REPLICA IDENTITY DEFAULT")

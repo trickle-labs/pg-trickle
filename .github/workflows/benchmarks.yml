@@ -12,9 +12,10 @@
 # =============================================================================
 name: Benchmarks
 
-# Disabled: Bencher integration not currently active.
-# To re-enable, restore push/pull_request triggers.
+# DEVEX-001: Re-enabled push-to-main benchmark baseline tracking.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

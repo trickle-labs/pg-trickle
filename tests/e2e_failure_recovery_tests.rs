@@ -439,9 +439,12 @@ async fn test_cancel_backend_during_refresh_recovers() {
 
     // Give the refresh a moment to start, then cancel it
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let cancel_result = sqlx::query(&format!("SELECT pg_cancel_backend({})", refresh_pid))
-        .execute(&mut *conn_cancel)
-        .await;
+    let cancel_result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT pg_cancel_backend({})",
+        refresh_pid
+    )))
+    .execute(&mut *conn_cancel)
+    .await;
     assert!(
         cancel_result.is_ok(),
         "pg_cancel_backend() call should succeed"

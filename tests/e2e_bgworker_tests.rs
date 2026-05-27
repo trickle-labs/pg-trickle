@@ -624,7 +624,17 @@ async fn test_pool_worker_does_not_run_while_disabled() {
 
     // Wait long enough for the scheduler to have attempted a refresh IF it
     // were enabled (scheduler_interval_ms=100, so 3 seconds is ~30 wakeups).
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // This is a negative-assertion wait: we're confirming absence of an event.
+    // We use wait_for_condition with an always-false SQL to get a deterministic
+    // timeout window instead of a bare sleep.
+    let _ = db
+        .wait_for_condition(
+            "no refreshes while disabled (3s stability window)",
+            "SELECT false",
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+        )
+        .await;
 
     // Verify: no new successful refreshes should have occurred.
     let count_disabled: i64 = db

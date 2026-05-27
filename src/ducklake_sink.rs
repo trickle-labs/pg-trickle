@@ -243,7 +243,8 @@ fn upload_local(base_path: &str, file_name: &str, data: Vec<u8>) -> Result<Strin
 }
 
 fn upload_s3(base_path: &str, file_name: &str, data: Vec<u8>) -> Result<String, PgTrickleError> {
-    use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path};
+    // DEP-003 (v0.74.0): `put` moved from `ObjectStore` to `ObjectStoreExt` in 0.13.
+    use object_store::{ObjectStoreExt, aws::AmazonS3Builder, path::Path};
 
     // Parse s3://bucket/prefix/ into bucket + prefix.
     let stripped = base_path.strip_prefix("s3://").unwrap_or(base_path);

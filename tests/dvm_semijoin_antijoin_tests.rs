@@ -199,9 +199,9 @@ async fn reset_semijoin_fixture(db: &TestDb) {
 }
 
 async fn query_rows(db: &TestDb, sql: &str) -> Vec<(String, i32, i32, i32)> {
-    sqlx::query_as::<_, (String, i32, i32, i32)>(&format!(
+    sqlx::query_as::<_, (String, i32, i32, i32)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, id, cust_id, amount FROM ({sql}) delta ORDER BY id"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated delta SQL")

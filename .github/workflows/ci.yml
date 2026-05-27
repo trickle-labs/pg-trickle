@@ -1289,3 +1289,81 @@ jobs:
         with:
           report_paths: 'target/nextest/ci/junit.xml'
           commit: ${{ github.event.pull_request.head.sha }}
+
+  # ── TEST-004: Security-sensitive path gate ───────────────────────────
+  # Detects whether the PR touches IVM, CDC, refresh, or SQL migration paths
+  # and runs the full E2E + security-focused tests in that case.
+  detect-security-changes:
+    name: Detect security-sensitive path changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      security_changed: ${{ steps.filter.outputs.security_changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            security_changed:
+              - 'src/ivm.rs'
+              - 'src/cdc/**'
+              - 'src/refresh/**'
+              - 'sql/*.sql'
+
+  e2e-security-gate:
+    name: E2E security gate (security-sensitive path changes)
+    needs: detect-security-changes
+    if: needs.detect-security-changes.outputs.security_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af
+
+      - uses: actions/checkout@v5
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Restore Docker image cache (postgres:18.3)
+        uses: actions/cache@v5
+        id: cache-docker-postgres-sec
+        with:
+          path: /tmp/docker-images/postgres-18.3.tar
+          key: docker-postgres-18.3
+
+      - name: Load or pull postgres:18.3
+        run: |
+          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.3.tar
+          else
+            docker pull postgres:18.3
+            mkdir -p /tmp/docker-images
+            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+          fi
+
+      - name: Build E2E Docker image (security gate)
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run security-focused E2E tests
+        run: |
+          cargo nextest run --profile ci \
+            --test e2e_safety_tests \
+            --test e2e_ivm_tests \
+            --test e2e_failure_recovery_tests \
+            --test e2e_wal_cdc_tests
+
+      - name: Publish Test Report
+        uses: mikepenz/action-junit-report@v6
+        if: always()
+        with:
+          report_paths: 'target/nextest/ci/junit.xml'
+          commit: ${{ github.event.pull_request.head.sha }}

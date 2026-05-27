@@ -211,7 +211,7 @@ async fn query_fj_rows(
             Option<i32>,
             Option<String>,
         ),
-    >(&format!(
+    >(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "o__id",
                   "o__prod_id",
@@ -220,7 +220,7 @@ async fn query_fj_rows(
                   "p__name"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "o__id" NULLS LAST, "p__id" NULLS LAST"#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated full-join delta SQL")

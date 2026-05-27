@@ -154,8 +154,21 @@ async fn test_scheduler_isolates_failing_st_from_healthy_st() {
     // The DDL hook marks bad_st for reinit. The parallel worker attempts
     // the reinit query, which fails because important_col is gone.
     // The worker may crash (PG ERROR → exit), so the FAILED history record
-    // may be rolled back. Wait a bit for the scheduler to process the crash.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // may be rolled back. Poll for the scheduler to still be alive after
+    // processing the crash (up to 10 s for slow/emulated environments).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sched: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE backend_type = 'pg_trickle scheduler'",
+            )
+            .await;
+        if sched >= 1 || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     // ── Verify: scheduler is still alive ───────────────────────────────
     let sched_count: i64 = db

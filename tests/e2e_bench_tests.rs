@@ -2074,7 +2074,7 @@ async fn run_concurrent_writers(
                         batch_size,
                     );
                     let start = Instant::now();
-                    sqlx::query(&sql)
+                    sqlx::query(sqlx::AssertSqlSafe(sql))
                         .execute(&pool)
                         .await
                         .expect("writer insert");

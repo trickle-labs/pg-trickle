@@ -213,7 +213,7 @@ async fn query_nested_nj_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, i32, i32, i32, i32, i32, String, i32, String)> {
-    sqlx::query_as::<_, _>(&format!(
+    sqlx::query_as::<_, _>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "join__s__id",
                   "join__s__branch_id",
@@ -225,7 +225,7 @@ async fn query_nested_nj_rows(
                   "r__name"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "join__s__id""#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated nested natural-join delta SQL")
