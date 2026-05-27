@@ -24,7 +24,7 @@
     fuse_sensitivity: int|null — fuse consecutive-observation threshold
     append_only: bool (default false) — skip delete bookkeeping for insert-only sources
     temporal: bool (default false) — enable temporal IVM mode
-    storage_backend: 'heap'|'citus'|'pg_mooncake'|'unlogged'|null — columnar/storage backend
+    storage_backend: 'heap'|'citus'|'unlogged'|null — columnar/storage backend
     diamond_consistency: 'STRICT'|'RELAXED'|null — diamond dependency consistency policy
     diamond_schedule_policy: 'ATOMIC'|'INDEPENDENT'|null — diamond scheduling policy
     pooler_compatibility_mode: bool (default false) — pgBouncer/Odyssey compatibility

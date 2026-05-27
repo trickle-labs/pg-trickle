@@ -1360,7 +1360,6 @@ pub static PGS_ONLINE_SCHEMA_EVOLUTION: GucSetting<bool> = GucSetting::<bool>::n
 ///
 /// - `"none"` (default): Heap storage (standard PostgreSQL tables).
 /// - `"citus"`: Citus columnar via `CREATE TABLE … USING columnar`.
-/// - `"pg_mooncake"`: pg_mooncake columnar tables.
 ///
 /// When set, `create_stream_table()` uses the specified columnar backend and
 /// routes differential refresh to the `delete_insert` strategy (columnar
@@ -1482,8 +1481,6 @@ pub enum ColumnarBackend {
     None,
     /// Citus columnar extension.
     Citus,
-    /// pg_mooncake columnar tables.
-    PgMooncake,
 }
 
 impl ColumnarBackend {
@@ -1491,20 +1488,18 @@ impl ColumnarBackend {
         match self {
             ColumnarBackend::None => "none",
             ColumnarBackend::Citus => "citus",
-            ColumnarBackend::PgMooncake => "pg_mooncake",
         }
     }
 
     /// Returns `true` if this backend is append-only (requires `delete_insert` strategy).
     pub fn is_append_only(self) -> bool {
-        matches!(self, ColumnarBackend::Citus | ColumnarBackend::PgMooncake)
+        matches!(self, ColumnarBackend::Citus)
     }
 }
 
 pub fn normalize_columnar_backend(value: Option<String>) -> ColumnarBackend {
     match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("citus") => ColumnarBackend::Citus,
-        Some("pg_mooncake") => ColumnarBackend::PgMooncake,
         _ => ColumnarBackend::None,
     }
 }
@@ -3068,10 +3063,9 @@ pub fn register_gucs() {
     // CORR-2 / UX-3: Columnar storage backend.
     GucRegistry::define_string_guc(
         c"pg_trickle.columnar_backend",
-        c"CORR-2: Columnar storage backend: none (default), citus, or pg_mooncake.",
+        c"CORR-2: Columnar storage backend: none (default) or citus.",
         c"'none' (default) uses standard heap tables. \
           'citus' uses Citus columnar (CREATE TABLE ... USING columnar). \
-          'pg_mooncake' uses pg_mooncake columnar tables. \
           Columnar backends use the delete_insert refresh strategy (append-only).",
         &PGS_COLUMNAR_BACKEND,
         GucContext::Suset,
@@ -4976,13 +4970,10 @@ mod tests {
             normalize_columnar_backend(Some("CITUS".to_string())),
             ColumnarBackend::Citus
         );
+        // Removed variants default to None
         assert_eq!(
             normalize_columnar_backend(Some("pg_mooncake".to_string())),
-            ColumnarBackend::PgMooncake
-        );
-        assert_eq!(
-            normalize_columnar_backend(Some("PG_MOONCAKE".to_string())),
-            ColumnarBackend::PgMooncake
+            ColumnarBackend::None
         );
     }
 
@@ -4990,14 +4981,12 @@ mod tests {
     fn test_columnar_backend_is_append_only() {
         assert!(!ColumnarBackend::None.is_append_only());
         assert!(ColumnarBackend::Citus.is_append_only());
-        assert!(ColumnarBackend::PgMooncake.is_append_only());
     }
 
     #[test]
     fn test_columnar_backend_as_str() {
         assert_eq!(ColumnarBackend::None.as_str(), "none");
         assert_eq!(ColumnarBackend::Citus.as_str(), "citus");
-        assert_eq!(ColumnarBackend::PgMooncake.as_str(), "pg_mooncake");
     }
 
     // ── DucklakeCompactionPolicy tests (v0.65.0) ─────────────────────────

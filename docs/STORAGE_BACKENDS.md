@@ -2,9 +2,6 @@
 
 > **Status per backend** — Heap: **Stable** · Unlogged: **Stable** · columnar/Hydra: **Beta** · DuckDB: **Experimental** · TimescaleDB: **Beta** · pgvector: **Stable**
 
-pg_trickle supports multiple storage backends for stream table output. Each
-backend has different prerequisites, semantics, and performance characteristics.
-
 ---
 
 ## Available Backends
@@ -45,16 +42,6 @@ and fast analytical query performance for time-series and immutable data.
 - **Partitioning support:** Yes (range/list partitioning on columnar tables)
 - **Limitations:** No UPDATE/DELETE, no UNIQUE constraints, no FK constraints
 
-### pg_mooncake Columnstore (`pg_mooncake`)
-
-Columnstore tables via the `pg_mooncake` extension. Similar semantics to Citus
-columnar — append-only with high compression.
-
-- **Required extensions:** `pg_mooncake`
-- **Recommended for:** Analytical workloads requiring fast scans over large data
-- **Refresh mode support:** FULL only
-- **Partitioning support:** Limited (depends on pg_mooncake version)
-
 ---
 
 ## Choosing a Backend
@@ -65,11 +52,11 @@ Is data loss on crash acceptable and write speed critical?
   └─ No  → Continue ↓
 
 Is the output append-only (no deletes/updates in the stream)?
-  └─ Yes → Citus columnar or pg_mooncake (high compression, fast scans)
+  └─ Yes → Citus columnar (high compression, fast scans)
   └─ No  → Heap (default) — supports DIFFERENTIAL refresh
 
 Is high-speed analytical querying over large history the priority?
-  └─ Yes → Citus columnar or pg_mooncake
+  └─ Yes → Citus columnar
   └─ No  → Heap (simpler, fully supported)
 ```
 
@@ -97,7 +84,6 @@ the derived stream table output is rebuilt.
 | Unlogged     | Server crash                        | Table truncated on recovery; full rebuild needed |
 | Citus columnar | Citus extension not loaded        | Error at CREATE STREAM TABLE time              |
 | Citus columnar | Full disk                         | Transaction rollback; partial segments may remain |
-| pg_mooncake  | Extension not loaded                | Error at CREATE STREAM TABLE time              |
 
 For UNLOGGED stream tables, pg_trickle detects the truncation during the next
 refresh cycle and performs a full rebuild automatically.
@@ -108,7 +94,7 @@ refresh cycle and performs a full rebuild automatically.
 
 | GUC | Default | Description |
 |-----|---------|-------------|
-| `pg_trickle.columnar_backend` | `none` | Columnar backend: `none`, `citus`, `pg_mooncake` |
+| `pg_trickle.columnar_backend` | `none` | Columnar backend: `none` or `citus` |
 | `pg_trickle.change_buffer_durability` | `unlogged` | Durability of CDC change buffers: `logged` or `unlogged` |
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for the full GUC reference.
@@ -120,7 +106,6 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for the full GUC reference.
 | Backend      | Extension       | Minimum version | Install command           |
 |-------------|-----------------|-----------------|---------------------------|
 | Citus columnar | `citus`       | 11.0            | `CREATE EXTENSION citus;` |
-| pg_mooncake  | `pg_mooncake`   | 0.1             | `CREATE EXTENSION pg_mooncake;` |
 
 All extensions must be installed in the same database as pg_trickle before
 creating stream tables with that backend.

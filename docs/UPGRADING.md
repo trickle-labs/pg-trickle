@@ -848,7 +848,7 @@ No breaking changes. All v0.34.0 functions continue to work.
 | Column | Type | Default | Purpose |
 |--------|------|---------|---------|
 | `temporal_mode` | `BOOLEAN NOT NULL` | `FALSE` | Enable temporal IVM (SCD Type 2) tracking |
-| `storage_backend` | `TEXT NOT NULL` | `'heap'` | Storage backend: `'heap'`, `'citus'`, or `'pg_mooncake'` |
+| `storage_backend` | `TEXT NOT NULL` | `'heap'` | Storage backend: `'heap'` or `'citus'` |
 | `column_lineage` | `JSONB` | `NULL` | Column-level lineage mapping output columns to source tables/columns |
 
 **New SQL functions:**
@@ -869,7 +869,7 @@ No breaking changes. All v0.34.0 functions continue to work.
 **Behavioral notes:**
 
 - **Temporal IVM (CORR-1):** Stream tables created with `temporal := true` maintain SCD Type 2 history. Each row carries `__pgt_valid_from TIMESTAMPTZ` and `__pgt_valid_to TIMESTAMPTZ`. Existing tables are unaffected.
-- **Alternative storage backends:** `storage_backend = 'citus'` creates the stream table storage as a Citus distributed table; `'pg_mooncake'` uses columnar storage. Both require the respective extensions to be installed.
+- **Alternative storage backends:** `storage_backend = 'citus'` creates the stream table storage as a Citus distributed table. Requires the Citus extension to be installed.
 - **Drain mode (A35):** `pgtrickle.drain()` is a safety mechanism for maintenance windows. The scheduler completes all in-flight refreshes, then stops dispatching new ones until the drain is cancelled or the server restarts.
 - **WAL slot backpressure (A12):** The `pg_trickle.enforce_backpressure` GUC is now wired — when slot lag exceeds `slot_lag_critical_threshold_mb`, CDC writes are suppressed. See `CONFIGURATION.md` for details and the **discard semantics** of `cdc_paused`.
 
