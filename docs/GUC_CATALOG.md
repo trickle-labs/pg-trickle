@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**132 configuration parameters** extracted from `src/config.rs`.
+**122 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 

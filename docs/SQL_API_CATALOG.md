@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**124 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**123 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
