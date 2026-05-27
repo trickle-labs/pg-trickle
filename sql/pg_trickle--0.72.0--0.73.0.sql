@@ -99,3 +99,71 @@ CREATE INDEX IF NOT EXISTS idx_cleanup_status_next_retry
 -- NULL = PostgreSQL default (100). Accepted range: 10-100.
 ALTER TABLE pgtrickle.pgt_stream_tables
     ADD COLUMN IF NOT EXISTS storage_fillfactor INT;
+
+-- HOT-1: Update create_stream_table with fillfactor parameter ──────────────
+--
+-- The 0.72.0 binary registered create_stream_table with 19 parameters.
+-- The 0.73.0 binary adds fillfactor at position 20.  pgrx unboxes arguments
+-- by ordinal position, so the catalog function signature MUST match the Rust
+-- function signature exactly.
+-- DROP the old 19-parameter overload and replace it with the 20-parameter one.
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(
+    TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN,
+    TEXT, INT, FLOAT8, TEXT, BOOLEAN, TEXT, TEXT, TEXT, BIGINT
+);
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
+    "name"                       TEXT,
+    "query"                      TEXT,
+    "schedule"                   TEXT    DEFAULT 'calculated',
+    "refresh_mode"               TEXT    DEFAULT 'AUTO',
+    "initialize"                 BOOLEAN DEFAULT true,
+    "diamond_consistency"        TEXT    DEFAULT NULL,
+    "diamond_schedule_policy"    TEXT    DEFAULT NULL,
+    "cdc_mode"                   TEXT    DEFAULT NULL,
+    "append_only"                BOOLEAN DEFAULT false,
+    "pooler_compatibility_mode"  BOOLEAN DEFAULT false,
+    "partition_by"               TEXT    DEFAULT NULL,
+    "max_differential_joins"     INT     DEFAULT NULL,
+    "max_delta_fraction"         FLOAT8  DEFAULT NULL,
+    "output_distribution_column" TEXT    DEFAULT NULL,
+    "temporal"                   BOOLEAN DEFAULT false,
+    "storage_backend"            TEXT    DEFAULT NULL,
+    "sink"                       TEXT    DEFAULT NULL,
+    "ducklake_sink_path"         TEXT    DEFAULT NULL,
+    "ducklake_sink_table_id"     BIGINT  DEFAULT NULL,
+    "fillfactor"                 INT     DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
+
+-- HOT-1: Update create_stream_table_if_not_exists with fillfactor parameter ─
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table_if_not_exists"(
+    TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN,
+    TEXT, INT, FLOAT8, TEXT, BOOLEAN, TEXT, TEXT, TEXT, BIGINT
+);
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
+    "name"                       TEXT,
+    "query"                      TEXT,
+    "schedule"                   TEXT    DEFAULT 'calculated',
+    "refresh_mode"               TEXT    DEFAULT 'AUTO',
+    "initialize"                 BOOLEAN DEFAULT true,
+    "diamond_consistency"        TEXT    DEFAULT NULL,
+    "diamond_schedule_policy"    TEXT    DEFAULT NULL,
+    "cdc_mode"                   TEXT    DEFAULT NULL,
+    "append_only"                BOOLEAN DEFAULT false,
+    "pooler_compatibility_mode"  BOOLEAN DEFAULT false,
+    "partition_by"               TEXT    DEFAULT NULL,
+    "max_differential_joins"     INT     DEFAULT NULL,
+    "max_delta_fraction"         FLOAT8  DEFAULT NULL,
+    "output_distribution_column" TEXT    DEFAULT NULL,
+    "temporal"                   BOOLEAN DEFAULT false,
+    "storage_backend"            TEXT    DEFAULT NULL,
+    "sink"                       TEXT    DEFAULT NULL,
+    "ducklake_sink_path"         TEXT    DEFAULT NULL,
+    "ducklake_sink_table_id"     BIGINT  DEFAULT NULL,
+    "fillfactor"                 INT     DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
