@@ -533,7 +533,7 @@ async fn test_upgrade_chain_new_functions_exist() {
     ];
 
     for func_call in &new_functions {
-        let result = sqlx::query(func_call).fetch_all(&db.pool).await;
+        let result = sqlx::query(*func_call).fetch_all(&db.pool).await;
         assert!(
             result.is_ok(),
             "Function call failed after upgrade: {func_call}: {:?}",
@@ -660,7 +660,7 @@ async fn test_upgrade_chain_views_queryable() {
         "pgtrickle.pg_stat_stream_tables",
     ];
     for view in &views {
-        let result = sqlx::query(&format!("SELECT count(*) FROM {view}"))
+        let result = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {view}")))
             .fetch_one(&db.pool)
             .await;
         assert!(

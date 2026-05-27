@@ -179,10 +179,11 @@ pub async fn assert_st_query_invariant(
             OR table_name = '{st_table}') \
          AND column_name NOT LIKE '__pgt_%'"
     );
-    let (raw_cols, cast_cols): (Option<String>, Option<String>) = sqlx::query_as(&cols_sql)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap_or_else(|error| panic!("cols query failed for '{st_table}': {error}"));
+    let (raw_cols, cast_cols): (Option<String>, Option<String>) =
+        sqlx::query_as(sqlx::AssertSqlSafe(cols_sql))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap_or_else(|error| panic!("cols query failed for '{st_table}': {error}"));
     let raw_cols = raw_cols.unwrap_or_else(|| "*".to_string());
     let cast_cols = cast_cols.unwrap_or_else(|| "*".to_string());
     let selected_cols = if raw_cols == cast_cols {

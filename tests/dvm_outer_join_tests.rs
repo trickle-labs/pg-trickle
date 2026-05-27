@@ -190,8 +190,9 @@ async fn query_lj_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, i32, i32, i32, Option<i32>, Option<String>)> {
-    sqlx::query_as::<_, (String, i32, i32, i32, Option<i32>, Option<String>)>(&format!(
-        r#"SELECT __pgt_action,
+    sqlx::query_as::<_, (String, i32, i32, i32, Option<i32>, Option<String>)>(sqlx::AssertSqlSafe(
+        format!(
+            r#"SELECT __pgt_action,
                   "o__id",
                   "o__prod_id",
                   "o__amount",
@@ -199,6 +200,7 @@ async fn query_lj_rows(
                   "p__name"
            FROM ({sql}) delta
            ORDER BY __pgt_action, "o__id""#
+        ),
     ))
     .fetch_all(&db.pool)
     .await

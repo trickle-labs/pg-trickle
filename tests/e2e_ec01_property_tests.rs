@@ -81,23 +81,23 @@ async fn assert_full_diff_equal(db: &E2eDb, full_st: &str, diff_st: &str, seed: 
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
-    let extra_rows: Vec<(String,)> = sqlx::query_as(&format!(
+    let extra_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT row_to_json(x)::text FROM ( \
              SELECT __pgt_row_id, {cols} FROM public.{diff_st} \
              EXCEPT ALL \
              SELECT __pgt_row_id, {cols} FROM public.{full_st} \
          ) x LIMIT 10"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
-    let missing_rows: Vec<(String,)> = sqlx::query_as(&format!(
+    let missing_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT row_to_json(x)::text FROM ( \
              SELECT __pgt_row_id, {cols} FROM public.{full_st} \
              EXCEPT ALL \
              SELECT __pgt_row_id, {cols} FROM public.{diff_st} \
          ) x LIMIT 10"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();

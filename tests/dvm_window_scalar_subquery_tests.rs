@@ -410,9 +410,9 @@ async fn query_window_rows(
     sql: &str,
     value_column: &str,
 ) -> Vec<(String, i32, String, i32, i64)> {
-    sqlx::query_as::<_, (String, i32, String, i32, i64)>(&format!(
+    sqlx::query_as::<_, (String, i32, String, i32, i64)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, id, region, amount, {value_column} FROM ({sql}) delta ORDER BY __pgt_action, id, {value_column}"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated window delta SQL")
@@ -422,28 +422,28 @@ async fn query_multi_window_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, i32, String, i32, i64, i64)> {
-    sqlx::query_as::<_, (String, i32, String, i32, i64, i64)>(&format!(
+    sqlx::query_as::<_, (String, i32, String, i32, i64, i64)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, id, region, amount, rn, running_total \
          FROM ({sql}) delta ORDER BY __pgt_action, id"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated multi-window delta SQL")
 }
 
 async fn query_scalar_rows(db: &TestDb, sql: &str) -> Vec<(String, i32, i32, i32)> {
-    sqlx::query_as::<_, (String, i32, i32, i32)>(&format!(
+    sqlx::query_as::<_, (String, i32, i32, i32)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, id, amount, current_tax FROM ({sql}) delta ORDER BY __pgt_action, id"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated scalar-subquery delta SQL")
 }
 
 async fn query_shared_scalar_rows(db: &TestDb, sql: &str) -> Vec<(String, i32, i32, i32)> {
-    sqlx::query_as::<_, (String, i32, i32, i32)>(&format!(
+    sqlx::query_as::<_, (String, i32, i32, i32)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, id, amount, ref_amount FROM ({sql}) delta ORDER BY __pgt_action, id"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated shared-source scalar-subquery delta SQL")

@@ -118,10 +118,12 @@ async fn create_database(admin_connection_string: &str, db_name: &str) {
         .await
         .unwrap_or_else(|e| panic!("Failed to connect for CREATE DATABASE {db_name}: {e}"));
 
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to CREATE DATABASE {db_name}: {e}"));
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE \"{db_name}\""
+    )))
+    .execute(&admin_pool)
+    .await
+    .unwrap_or_else(|e| panic!("Failed to CREATE DATABASE {db_name}: {e}"));
 
     admin_pool.close().await;
 }
@@ -142,9 +144,11 @@ async fn drop_database_if_exists(admin_cs: &str, db_name: &str) {
     .bind(db_name)
     .execute(&pool)
     .await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
-        .execute(&pool)
-        .await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS \"{db_name}\""
+    )))
+    .execute(&pool)
+    .await;
     pool.close().await;
 }
 
@@ -160,9 +164,9 @@ async fn create_database_from_template(
         .await
         .unwrap_or_else(|e| panic!("Failed to connect for CREATE DATABASE {db_name}: {e}"));
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE DATABASE \"{db_name}\" TEMPLATE \"{template}\""
-    ))
+    )))
     .execute(&admin_pool)
     .await
     .unwrap_or_else(|e| panic!("Failed to CREATE DATABASE {db_name} from template: {e}"));

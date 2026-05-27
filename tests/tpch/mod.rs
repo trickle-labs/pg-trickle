@@ -238,20 +238,20 @@ pub async fn assert_invariant(
         ))
         .await;
 
-    let extra_rows: Vec<(String,)> = sqlx::query_as(&format!(
+    let extra_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT row_to_json(x)::text FROM \
          (SELECT {cols} FROM {st_table} EXCEPT ALL ({query})) x \
          LIMIT 5"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();
 
-    let missing_rows: Vec<(String,)> = sqlx::query_as(&format!(
+    let missing_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT row_to_json(x)::text FROM \
          (({query}) EXCEPT ALL SELECT {cols} FROM {st_table}) x \
          LIMIT 5"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .unwrap_or_default();

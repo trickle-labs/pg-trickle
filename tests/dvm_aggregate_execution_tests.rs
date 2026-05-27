@@ -238,10 +238,10 @@ async fn query_multi_agg_rows(
     db: &TestDb,
     sql: &str,
 ) -> Vec<(String, String, String, i64, i64, i32)> {
-    sqlx::query_as::<_, (String, String, String, i64, i64, i32)>(&format!(
+    sqlx::query_as::<_, (String, String, String, i64, i64, i32)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, region, label, cnt, total_amt, max_amt \
          FROM ({sql}) delta ORDER BY __pgt_action DESC, region, label"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute multi-group aggregate delta SQL")
@@ -446,10 +446,10 @@ async fn query_bigint_aggregate_rows(
     sql: &str,
     aggregate_column: &str,
 ) -> Vec<(String, String, i64, i64)> {
-    sqlx::query_as::<_, (String, String, i64, i64)>(&format!(
+    sqlx::query_as::<_, (String, String, i64, i64)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, region, __pgt_count, {aggregate_column} \
          FROM ({sql}) delta ORDER BY __pgt_action, region"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated aggregate delta SQL")
@@ -460,10 +460,10 @@ async fn query_numeric_aggregate_rows(
     sql: &str,
     aggregate_column: &str,
 ) -> Vec<(String, String, i64, String)> {
-    sqlx::query_as::<_, (String, String, i64, String)>(&format!(
+    sqlx::query_as::<_, (String, String, i64, String)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, region, __pgt_count, ({aggregate_column})::numeric(10,2)::text \
          FROM ({sql}) delta ORDER BY __pgt_action, region"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated aggregate delta SQL")
@@ -474,10 +474,10 @@ async fn query_text_aggregate_rows(
     sql: &str,
     aggregate_column: &str,
 ) -> Vec<(String, String, i64, String)> {
-    sqlx::query_as::<_, (String, String, i64, String)>(&format!(
+    sqlx::query_as::<_, (String, String, i64, String)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, region, __pgt_count, ({aggregate_column})::text \
          FROM ({sql}) delta ORDER BY __pgt_action, region"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated aggregate delta SQL")
@@ -488,10 +488,10 @@ async fn query_json_aggregate_rows(
     sql: &str,
     aggregate_column: &str,
 ) -> Vec<(String, String, i64, String)> {
-    sqlx::query_as::<_, (String, String, i64, String)>(&format!(
+    sqlx::query_as::<_, (String, String, i64, String)>(sqlx::AssertSqlSafe(format!(
         "SELECT __pgt_action, region, __pgt_count, (({aggregate_column})::jsonb)::text \
          FROM ({sql}) delta ORDER BY __pgt_action, region"
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated aggregate delta SQL")

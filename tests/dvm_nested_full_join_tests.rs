@@ -235,7 +235,7 @@ type NestedFjRow = (
 );
 
 async fn query_nested_fj_rows(db: &TestDb, sql: &str) -> Vec<NestedFjRow> {
-    sqlx::query_as::<_, NestedFjRow>(&format!(
+    sqlx::query_as::<_, NestedFjRow>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
                   "join__o__id",
                   "join__o__prod_id",
@@ -250,7 +250,7 @@ async fn query_nested_fj_rows(db: &TestDb, sql: &str) -> Vec<NestedFjRow> {
                     "join__o__id" NULLS LAST,
                     "join__p__id" NULLS LAST,
                     "c__id" NULLS LAST"#
-    ))
+    )))
     .fetch_all(&db.pool)
     .await
     .expect("failed to execute generated nested full-join delta SQL")

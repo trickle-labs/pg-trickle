@@ -21,7 +21,7 @@ use tokio::task::JoinSet;
 
 /// Run a SQL statement through the pool, returning Ok/Err.
 async fn pool_exec(pool: &sqlx::PgPool, sql: &str) -> Result<(), String> {
-    sqlx::query(sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
         .execute(pool)
         .await
         .map(|_| ())

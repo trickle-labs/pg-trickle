@@ -393,7 +393,7 @@ async fn bench_concurrent_writers(db: &E2eDb) -> ScenarioResult {
             let cs = conn_str.clone();
             handles.push(tokio::spawn(async move {
                 let pool = sqlx::PgPool::connect(&cs).await.unwrap();
-                sqlx::query(&format!(
+                sqlx::query(sqlx::AssertSqlSafe(format!(
                     "INSERT INTO bench_src (region, category, amount, score)
                      SELECT
                          CASE (i % 5) WHEN 0 THEN 'north' WHEN 1 THEN 'south'
@@ -403,7 +403,7 @@ async fn bench_concurrent_writers(db: &E2eDb) -> ScenarioResult {
                          (i * 17 + 13) % 10000,
                          (i * 31 + 7) % 100
                      FROM generate_series(1, {ROWS_PER_WRITER}) AS s(i)"
-                ))
+                )))
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -433,7 +433,7 @@ async fn bench_concurrent_writers(db: &E2eDb) -> ScenarioResult {
             let cs = conn_str.clone();
             handles.push(tokio::spawn(async move {
                 let pool = sqlx::PgPool::connect(&cs).await.unwrap();
-                sqlx::query(&format!(
+                sqlx::query(sqlx::AssertSqlSafe(format!(
                     "INSERT INTO bench_src (region, category, amount, score)
                      SELECT
                          CASE (i % 5) WHEN 0 THEN 'north' WHEN 1 THEN 'south'
@@ -443,7 +443,7 @@ async fn bench_concurrent_writers(db: &E2eDb) -> ScenarioResult {
                          (i * 17 + 13) % 10000,
                          (i * 31 + 7) % 100
                      FROM generate_series(1, {ROWS_PER_WRITER}) AS s(i)"
-                ))
+                )))
                 .execute(&pool)
                 .await
                 .unwrap();

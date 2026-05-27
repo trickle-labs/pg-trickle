@@ -290,10 +290,10 @@ async fn test_notify_pg_trickle_alert() {
     // Send the notification from a separate connection acquired from the pool
     // so the LISTEN connection isn't re-used (sqlx routes LISTEN on its own
     // dedicated connection).
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pg_notify('pg_trickle_alert', '{}')",
         payload
-    ))
+    )))
     .execute(&db.pool)
     .await
     .expect("pg_notify failed");

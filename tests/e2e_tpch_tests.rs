@@ -496,19 +496,19 @@ async fn assert_tpch_invariant(
             .await;
 
         // Detailed column-level diagnostics: show extra/missing rows
-        let extra_rows: Vec<(String,)> = sqlx::query_as(&format!(
+        let extra_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT row_to_json(x)::text FROM \
              (SELECT {cols} FROM {st_table} EXCEPT ALL ({query})) x \
              LIMIT 10"
-        ))
+        )))
         .fetch_all(&db.pool)
         .await
         .unwrap_or_default();
-        let missing_rows: Vec<(String,)> = sqlx::query_as(&format!(
+        let missing_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT row_to_json(x)::text FROM \
              (({query}) EXCEPT ALL SELECT {cols} FROM {st_table}) x \
              LIMIT 10"
-        ))
+        )))
         .fetch_all(&db.pool)
         .await
         .unwrap_or_default();
@@ -763,14 +763,14 @@ async fn test_tpch_differential_correctness() {
         }
 
         // Diagnostic: show source OIDs from deps and change buffer tables
-        let dep_rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+        let dep_rows: Vec<(i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT d.source_relid::bigint, c.relname::text \
                  FROM pgtrickle.pgt_dependencies d \
                  JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id \
                  LEFT JOIN pg_class c ON c.oid = d.source_relid \
                  WHERE st.pgt_name = '{st_name}' AND d.source_type = 'TABLE' \
                  ORDER BY d.source_relid"
-        ))
+        )))
         .fetch_all(&db.pool)
         .await
         .unwrap_or_default();
@@ -2491,7 +2491,10 @@ async fn test_tpch_immediate_rollback() {
                 if !has_sql {
                     continue;
                 }
-                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+                    .execute(&mut *txn)
+                    .await
+                {
                     rf_err = Some(e.to_string());
                     break;
                 }
@@ -2509,11 +2512,12 @@ async fn test_tpch_immediate_rollback() {
             }
 
             // Within transaction: verify ST was updated by the IVM trigger
-            let mid_count: i64 =
-                sqlx::query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
-                    .fetch_one(&mut *txn)
-                    .await
-                    .unwrap_or(pre_count);
+            let mid_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM public.{st_name}"
+            )))
+            .fetch_one(&mut *txn)
+            .await
+            .unwrap_or(pre_count);
 
             println!("  RF1 (INSERT) mid-txn rows: {mid_count}");
 
@@ -2550,7 +2554,10 @@ async fn test_tpch_immediate_rollback() {
                 if !has_sql {
                     continue;
                 }
-                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+                    .execute(&mut *txn)
+                    .await
+                {
                     rf_err = Some(e.to_string());
                     break;
                 }
@@ -2562,11 +2569,12 @@ async fn test_tpch_immediate_rollback() {
                 println!("  SKIP RF2 — IVM trigger error: {msg}");
                 skipped.push((name, format!("RF2 trigger error: {msg}")));
             } else {
-                let mid_count: i64 =
-                    sqlx::query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
-                        .fetch_one(&mut *txn)
-                        .await
-                        .unwrap_or(pre_count);
+                let mid_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM public.{st_name}"
+                )))
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(pre_count);
                 println!("  RF2 (DELETE) mid-txn rows: {mid_count}");
 
                 txn.rollback().await.expect("RF2 rollback");
@@ -2602,7 +2610,10 @@ async fn test_tpch_immediate_rollback() {
                 if !has_sql {
                     continue;
                 }
-                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+                    .execute(&mut *txn)
+                    .await
+                {
                     rf_err = Some(e.to_string());
                     break;
                 }
@@ -2614,11 +2625,12 @@ async fn test_tpch_immediate_rollback() {
                 println!("  SKIP RF3 — IVM trigger error: {msg}");
                 skipped.push((name, format!("RF3 trigger error: {msg}")));
             } else {
-                let mid_count: i64 =
-                    sqlx::query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
-                        .fetch_one(&mut *txn)
-                        .await
-                        .unwrap_or(pre_count);
+                let mid_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM public.{st_name}"
+                )))
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(pre_count);
                 println!("  RF3 (UPDATE) mid-txn rows: {mid_count}");
 
                 txn.rollback().await.expect("RF3 rollback");
@@ -3149,7 +3161,10 @@ async fn test_tpch_immediate_savepoint_rollback() {
                 if !has_sql {
                     continue;
                 }
-                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+                    .execute(&mut *txn)
+                    .await
+                {
                     let err_str = e.to_string();
                     let short = err_str.split(':').next_back().unwrap_or(&err_str).trim();
                     println!("  SKIP RF1 — trigger error: {}", short);
@@ -3163,7 +3178,7 @@ async fn test_tpch_immediate_savepoint_rollback() {
                 continue;
             }
 
-            let mid_count1: i64 = sqlx::query_scalar(&count_sql)
+            let mid_count1: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.clone()))
                 .fetch_one(&mut *txn)
                 .await
                 .unwrap_or(pre_count);
@@ -3182,7 +3197,10 @@ async fn test_tpch_immediate_savepoint_rollback() {
                 if !has_sql {
                     continue;
                 }
-                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+                    .execute(&mut *txn)
+                    .await
+                {
                     let err_str = e.to_string();
                     let short = err_str.split(':').next_back().unwrap_or(&err_str).trim();
                     println!("  SKIP RF2 — trigger error: {}", short);
@@ -3196,7 +3214,7 @@ async fn test_tpch_immediate_savepoint_rollback() {
                 continue;
             }
 
-            let mid_count2: i64 = sqlx::query_scalar(&count_sql)
+            let mid_count2: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.clone()))
                 .fetch_one(&mut *txn)
                 .await
                 .unwrap_or(mid_count1);
@@ -3206,7 +3224,7 @@ async fn test_tpch_immediate_savepoint_rollback() {
                 .execute(&mut *txn)
                 .await
                 .expect("rollback to sp");
-            let mid_count3: i64 = sqlx::query_scalar(&count_sql)
+            let mid_count3: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.clone()))
                 .fetch_one(&mut *txn)
                 .await
                 .unwrap_or(mid_count2);
