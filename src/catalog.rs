@@ -12,7 +12,89 @@ use crate::dag::{DiamondConsistency, DiamondSchedulePolicy, RefreshMode, StStatu
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
 
-/// PERF-2: Compute a deterministic hash of the defining query string.
+// ---------------------------------------------------------------------------
+// CODE-003 (v0.75.0): Typed domain wrappers for stream-table identifiers.
+//
+// `PgtId` and `StreamTableOid` represent two different identifier domains:
+//
+//   PgtId          — the internal sequence-based `pgt_id` column in
+//                    `pgtrickle.pgt_stream_tables`.  This value is NOT a
+//                    PostgreSQL relation OID and MUST NOT be stored in columns
+//                    typed as `oid` or joined to `pg_class.oid`.
+//
+//   StreamTableOid — the PostgreSQL relation OID (`pgt_relid`) of the storage
+//                    table.  This IS a valid `pg_class.oid` and can be passed
+//                    to `::regclass`, joined to catalog views, etc.
+//
+// Use these wrappers in new code so that cross-domain casts become a visible
+// `.into()` call rather than an invisible `as` cast.
+// ---------------------------------------------------------------------------
+
+/// Internal sequence-based identifier for a stream table row in
+/// `pgtrickle.pgt_stream_tables`.
+///
+/// **Not** a PostgreSQL relation OID.  Do not store in `oid`-typed columns or
+/// join against `pg_class`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PgtId(pub i64);
+
+impl From<i64> for PgtId {
+    fn from(v: i64) -> Self {
+        PgtId(v)
+    }
+}
+
+impl From<PgtId> for i64 {
+    fn from(p: PgtId) -> Self {
+        p.0
+    }
+}
+
+/// PostgreSQL relation OID for a stream table's storage table.
+///
+/// This is the `pgt_relid` column value — a real `pg_class.oid`.  It can be
+/// cast to `::regclass`, joined to catalog views, and stored in `oid`-typed
+/// columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamTableOid(pub pg_sys::Oid);
+
+impl From<pg_sys::Oid> for StreamTableOid {
+    fn from(v: pg_sys::Oid) -> Self {
+        StreamTableOid(v)
+    }
+}
+
+impl From<StreamTableOid> for pg_sys::Oid {
+    fn from(s: StreamTableOid) -> Self {
+        s.0
+    }
+}
+
+#[cfg(test)]
+mod domain_type_tests {
+    use super::{PgtId, StreamTableOid};
+
+    // CODE-003: verify that PgtId and StreamTableOid cannot be assigned to each
+    // other without an explicit conversion — different types, different domains.
+    #[test]
+    fn test_pgt_id_roundtrip() {
+        let id = PgtId(42);
+        let raw: i64 = id.into();
+        assert_eq!(raw, 42);
+        let back = PgtId::from(raw);
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn test_stream_table_oid_roundtrip() {
+        use pgrx::pg_sys::Oid;
+        let raw_oid = Oid::from(16384u32);
+        let wrapped = StreamTableOid(raw_oid);
+        let unwrapped: Oid = wrapped.into();
+        assert_eq!(unwrapped, raw_oid);
+    }
+}
+
 ///
 /// Uses `DefaultHasher` (same algorithm used historically in codegen.rs) so
 /// that values stored in the catalog are consistent with those computed at

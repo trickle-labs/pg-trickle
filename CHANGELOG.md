@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.75.0 — API Polish, Documentation Excellence & Developer Experience](#0750--api-polish-documentation-excellence--developer-experience)
 - [0.74.0 — Test Coverage, CI Integrity & Security Hardening](#0740--test-coverage-ci-integrity--security-hardening)
 - [0.73.0 — Monitoring Scalability, Operational Resilience & HOT-Friendly Storage](#0730--monitoring-scalability-operational-resilience--hot-friendly-storage)
 - [0.72.0 — Frontier Durability & Catalog Correctness](#0720--frontier-durability--catalog-correctness)
@@ -89,6 +90,88 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.75.0] — API Polish, Documentation Excellence & Developer Experience
+
+### What's New
+
+v0.75.0 completes the Assessment-14-driven hardening arc with a focused release
+on API documentation quality, developer experience, and Rust type safety.
+No schema changes were made in this release.
+
+#### API-002/DOC-003 — Full SQL reference for `pgtrickle.metrics_summary()`
+
+`pgtrickle.metrics_summary()` is one of the most useful monitoring functions
+in the extension, but was only documented by its signature. A complete reference
+section is now included in `docs/SQL_REFERENCE.md` with per-column descriptions,
+a Grafana integration example, and cost caveats explaining why `estimated_cost`
+may differ from `EXPLAIN` costs.
+
+#### API-003 — Parameter naming convention documented
+
+The parameter naming convention used throughout the SQL API (snake_case names
+that match the underlying GUC keys) is now stated explicitly in
+`docs/SQL_REFERENCE.md`, making it easier for users to predict parameter names
+without consulting source code.
+
+#### API-004 — Generated SQL API catalog uses SQL-facing return types
+
+`scripts/gen_catalogs.py` now maps all Rust return types to their SQL-facing
+equivalents before writing `docs/SQL_API_CATALOG.md`. Previously, the generated
+catalog exposed internal Rust type names (e.g., `Result<(), PgTrickleError>`,
+`pgrx::JsonB`). The catalog now shows SQL types (`void`, `jsonb`, `text`,
+`bigint`, `boolean`, `integer`, `double precision`, `SetOf row`) that match
+what PostgreSQL actually exposes to users.
+
+#### API-005 — Schedule-mode comparison table
+
+A side-by-side comparison table of all four schedule modes (Duration, Cron,
+CALCULATED, IMMEDIATE) is now in `docs/SQL_REFERENCE.md`. The table covers
+trigger type, typical latency, change-accumulation behaviour, and when to
+use each mode — replacing the previous prose-only description.
+
+#### CODE-003 — Typed domain wrappers: `PgtId` and `StreamTableOid`
+
+Two newtype wrappers were added to `src/catalog.rs`:
+- `PgtId(i64)` — wraps catalog row primary keys so they cannot be confused
+  with raw integers or other `i64` values at compile time.
+- `StreamTableOid(pg_sys::Oid)` — wraps PostgreSQL OIDs for stream tables so
+  they cannot be passed where a generic OID is expected.
+
+Both types implement `From`/`Into` and are covered by unit tests.
+
+#### DOC-001 — Repaired `plans/PLAN.md` architecture-doc table
+
+The key architecture documentation table in `plans/PLAN.md` had several rows
+corrupted by a merge conflict. The table is restored with clean rows for
+COST_MODEL, GUC_CATALOG, LIMITATIONS, COMPARISONS, and PLAN_OVERALL_ASSESSMENT_14.
+A docs-lint rule now catches fragment-level table corruption in CI.
+
+#### DOC-002 — README GUC count updated to generated phrase
+
+The README previously hard-coded the GUC count ("115 configuration parameters").
+That count was stale (the actual count is 132 and growing). The reference is
+replaced with the phrase "All generated configuration parameters" so it stays
+accurate without manual maintenance.
+
+#### DOC-004 — Stale-version scanner wired to `just lint-ci`
+
+`scripts/check_stale_versions.sh` scans `Dockerfile.hub` and `Dockerfile.ghcr`
+for hard-coded pg_trickle image version tags in comments that have not been
+updated to `<version>`. When a release bumps the version, stale comment tags
+fail `just lint-ci` immediately rather than silently persisting in the repo.
+
+#### ARCH-004 — Expanded `docs/COMPARISONS.md` with Feldera and IVM matrix
+
+`docs/COMPARISONS.md` now includes:
+- A dedicated **vs. Feldera** section comparing dataflow-engine approaches.
+- A dedicated **vs. DuckDB / DuckLake** section with combination architecture
+  guidance.
+- A **Comprehensive IVM comparison matrix** with five sub-tables covering SQL
+  coverage, consistency model, CDC, performance profile, and operational model
+  for pg_ivm, Materialize, Feldera, DuckDB, and pg_trickle.
 
 ---
 

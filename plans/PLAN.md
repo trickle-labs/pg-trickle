@@ -19,9 +19,11 @@
 |---|---|
 | [docs/DVM_OPERATORS.md](../docs/DVM_OPERATORS.md) | Differential view maintenance operators |
 | [docs/DVM_REWRITE_RULES.md](../docs/DVM_REWRITE_RULES.md) | Rewrite rules for DVM |
-| [docs/COST_MODEL.md](../docs/COST_MODEL.md) | Refresh cost mode| [docs/COST_MODEL.md](../docs/COST_MODEL.md) | Refresh cost mode| [docs/COST_MO[d| [docs/COST_MODEL.md](../docs/COST_MODEL.m.md) | GUC reference |
-| [docs/LIMITATIONS.md](../docs/LIMITATIONS.md) | K| [docs/LIMITATIONS.md](../docs/LIMITATIONS.md) | K| [docs/LIMITATIONS.md](../docs/LIMITles | [docs/LIMITATIONS.md](../e
-rrrrrrrrrrrrrrrrrrrrrrenrrrrrrrLAN_OVERALL_ASSESSMENT_13.md](PLAN_OVERALL_ASSESSMENT_13.md).
+| [docs/COST_MODEL.md](../docs/COST_MODEL.md) | Refresh cost model and AUTO-mode decision logic |
+| [docs/GUC_CATALOG.md](../docs/GUC_CATALOG.md) | Generated GUC reference |
+| [docs/LIMITATIONS.md](../docs/LIMITATIONS.md) | Known limitations and unsupported SQL patterns |
+| [docs/COMPARISONS.md](../docs/COMPARISONS.md) | pg_trickle vs pg_ivm, Materialize, Feldera, DuckDB/DuckLake |
+| [plans/PLAN_OVERALL_ASSESSMENT_14.md](PLAN_OVERALL_ASSESSMENT_14.md) | v0.74.0 deep-assessment findings (drives v0.72–v0.75 arc) |
 
 ## Historical Archive
 

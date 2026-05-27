@@ -27,6 +27,8 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.get\_staleness](#pgtrickleget_staleness)
     - [pgtrickle.explain\_refresh\_mode](#pgtrickleexplain_refresh_mode)
     - [pgtrickle.cache\_stats](#pgtricklecache_stats)
+    - [pgtrickle.history\_prune\_status](#pgtricklehistory_prune_status)
+    - [pgtrickle.metrics\_summary](#pgtricklemetrics_summary)
   - [CDC Diagnostics](#cdc-diagnostics)
     - [pgtrickle.slot\_health](#pgtrickleslot_health)
     - [pgtrickle.check\_cdc\_health](#pgtricklecheck_cdc_health)
@@ -131,6 +133,12 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 
 ## Functions
 
+> **Parameter naming convention:** Core lifecycle functions use bare,
+> user-facing argument names (`name`, `query`, `schedule`, `refresh_mode`).
+> Internal wrappers and compatibility overloads use a `p_` prefix
+> (`p_name`, `p_retention_hours`). When calling functions with named
+> arguments in SQL, prefer bare names: `pgtrickle.create_stream_table(name => 'x', query => 'SELECT 1')`.
+
 ### Core Lifecycle
 
 Create, modify, and manage the lifecycle of stream tables.
@@ -222,6 +230,20 @@ in-transaction maintenance.
 | Weekday range | — | `'0 6 * * 1-5'` | 6 AM on weekdays |
 
 > **Note:** Cron-scheduled stream tables do not participate in CALCULATED schedule resolution. The `stale` column in monitoring views returns `NULL` for cron-scheduled tables.
+
+**Schedule mode quick-reference:**
+
+| Mode | `schedule` value | `refresh_mode` | Refresh trigger | Use when |
+|------|-----------------|----------------|-----------------|----------|
+| **Duration** | `'30s'`, `'5m'`, `'1h'` | Any | Scheduler ticks when staleness ≥ duration | You want data freshened on a fixed cadence |
+| **Cron** | `'*/5 * * * *'`, `'@hourly'` | Any | Scheduler fires at each cron tick | You need time-based scheduling (off-peak ETL, daily reports) |
+| **CALCULATED** | `'calculated'` | `AUTO`/`DIFFERENTIAL` | Fired when a downstream dependent is due | Intermediate nodes in a DAG; let dependents drive timing |
+| **IMMEDIATE** | *(ignored; set to `NULL`)* | `'IMMEDIATE'` | Every source-table write, within the same transaction | Zero-lag dashboards, read-your-writes; query must be IVM-eligible |
+
+> **Note:** IMMEDIATE mode does not use the scheduler at all — `schedule` is
+> cleared and the `active_workers` counter is unaffected. See
+> [IMMEDIATE Mode Query Restrictions](#immediate-mode-query-restrictions) for
+> supported query patterns.
 
 **Example:**
 
@@ -1549,6 +1571,84 @@ SELECT * FROM pgtrickle.history_prune_status();
 > **Note:** Counters are stored in shared memory. Requires
 > `shared_preload_libraries = 'pg_trickle'`. The prune interval is controlled
 > by `pg_trickle.history_prune_interval_seconds` (default 60 s; 0 disables).
+
+---
+
+### pgtrickle.metrics_summary
+
+Return a cluster-wide aggregation of key pg_trickle counters for the current
+database. Designed as the primary data source for Grafana cluster-overview
+dashboards. Aggregates refresh counts, error counts, and worker utilisation
+from `pgtrickle.pgt_refresh_summary` (the incremental summary table) and
+the shared-memory hold-back probe metrics.
+
+```sql
+pgtrickle.metrics_summary() → SETOF record(
+    db_name                      text,
+    total_stream_tables          bigint,
+    active_stream_tables         bigint,
+    suspended_stream_tables      bigint,
+    total_refreshes              bigint,
+    successful_refreshes         bigint,
+    failed_refreshes             bigint,
+    total_rows_processed         bigint,
+    active_workers               integer,
+    ivm_lock_parse_error_count   bigint,
+    holdback_probe_calls         bigint,
+    holdback_probe_cache_hits    bigint,
+    holdback_probe_avg_ms        double precision
+)
+```
+
+| Column | Description |
+|--------|-------------|
+| `db_name` | Name of the current database (`current_database()`). Useful for multi-database Grafana panels that union results from several pg_trickle instances. |
+| `total_stream_tables` | Total number of stream tables registered in `pgtrickle.pgt_stream_tables`. |
+| `active_stream_tables` | Number of stream tables with `status = 'ACTIVE'`. |
+| `suspended_stream_tables` | Number of stream tables with `status = 'SUSPENDED'` (fuse blown or manually paused). |
+| `total_refreshes` | Cumulative refresh attempts (successful + failed) aggregated from `pgt_refresh_summary`. |
+| `successful_refreshes` | Cumulative successful refreshes. |
+| `failed_refreshes` | Cumulative failed refreshes. A non-zero value indicates stream tables that need attention. |
+| `total_rows_processed` | Cumulative rows inserted + deleted across all differential refreshes. |
+| `active_workers` | Current number of active background worker processes (from shared memory). |
+| `ivm_lock_parse_error_count` | Cumulative count of IMMEDIATE-mode lock-mode downgrades due to query parse failures (v0.31.0+). |
+| `holdback_probe_calls` | Total hold-back probes executed since last extension restart. |
+| `holdback_probe_cache_hits` | Probes satisfied from the hold-back cache without a full snapshot scan. |
+| `holdback_probe_avg_ms` | Average hold-back probe latency in milliseconds. High values (> 50 ms) indicate contention on the watermark table. |
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.metrics_summary();
+```
+
+| db_name | total_stream_tables | active_stream_tables | suspended_stream_tables | total_refreshes | successful_refreshes | failed_refreshes | total_rows_processed | active_workers | ivm_lock_parse_error_count | holdback_probe_calls | holdback_probe_cache_hits | holdback_probe_avg_ms |
+|---------|---------------------|----------------------|------------------------|-----------------|---------------------|------------------|---------------------|----------------|---------------------------|---------------------|--------------------------|----------------------|
+| mydb | 12 | 11 | 1 | 4820 | 4818 | 2 | 193400 | 3 | 0 | 142 | 138 | 0.8 |
+
+**Grafana usage:**
+
+```sql
+-- Panel query for cluster overview dashboard
+SELECT
+    db_name,
+    total_stream_tables,
+    active_stream_tables,
+    failed_refreshes,
+    active_workers,
+    holdback_probe_avg_ms
+FROM pgtrickle.metrics_summary();
+```
+
+> **Cost caveat:** `metrics_summary()` joins `pgt_stream_tables` against
+> `pgt_refresh_summary` (one row per stream table). Cost is O(N stream tables)
+> — typically a few milliseconds for hundreds of stream tables. For very large
+> installations (thousands of stream tables), scrape at a longer interval
+> (e.g., every 30 s) rather than on every Prometheus scrape tick.
+>
+> **Note:** `active_workers` and holdback-probe metrics come from shared
+> memory. They require `shared_preload_libraries = 'pg_trickle'` and return
+> 0 / 0.0 when the extension is loaded dynamically.
 
 ---
 

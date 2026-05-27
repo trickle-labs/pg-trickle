@@ -222,9 +222,14 @@ def _normalize_return_type(raw: str) -> str:
     2. Collapse internal whitespace.
     3. Result<TableIterator<...>, ...>  → SetOf row (failable)
     4. TableIterator<...>               → SetOf row
-    5. Result<(), ...>                  → void (failable)
-    6. crate::error::PgTrickleError     → PgTrickleError
-    7. Option<T>                        → T (nullable)
+    5. Result<(), ...>                  → void
+    6. Result<T, ...>                   → SQL type of T
+    7. pgrx::JsonB                      → jsonb
+    8. crate::error::PgTrickleError     → PgTrickleError
+    9. Option<T>                        → T (nullable)
+    10. Rust primitive types             → SQL equivalents
+    11. &'static str / &str             → text
+    12. InitDecision (internal struct)  → (internal)
     """
     s = raw.rstrip("{").strip()
     s = re.sub(r"\s+", " ", s)
@@ -242,12 +247,51 @@ def _normalize_return_type(raw: str) -> str:
     if s.startswith("TableIterator"):
         return "SetOf row"
 
+    # Result<(), ...> → "void"
+    if re.match(r"Result\s*<\s*\(\s*\)\s*,", s):
+        return "void"
+
+    # Result<String, ...> → "text"
+    if re.match(r"Result\s*<\s*String\s*,", s):
+        return "text"
+
+    # Result<i64, ...> → "bigint"
+    if re.match(r"Result\s*<\s*i64\s*,", s):
+        return "bigint"
+
+    # Result<i32, ...> → "integer"
+    if re.match(r"Result\s*<\s*i32\s*,", s):
+        return "integer"
+
+    # Result<bool, ...> → "boolean"
+    if re.match(r"Result\s*<\s*bool\s*,", s):
+        return "boolean"
+
+    # pgrx::JsonB → "jsonb"
+    s = re.sub(r"pgrx::JsonB\b", "jsonb", s)
+
     # Normalize full module paths for PgTrickleError
     s = re.sub(r"crate::error::PgTrickleError", "PgTrickleError", s)
     s = re.sub(r"crate::\w+::PgTrickleError", "PgTrickleError", s)
 
-    # Option<T> → T (nullable)
-    s = re.sub(r"Option\s*<([A-Za-z0-9_:]+)>", r"\1 (nullable)", s)
+    # Rust primitive types → SQL equivalents (API-004, v0.75.0)
+    # Apply BEFORE Option<T> unwrapping so Option<String> → text (nullable)
+    s = re.sub(r"\bString\b", "text", s)
+    s = re.sub(r"&\s*'?\w*\s*str\b", "text", s)
+    s = re.sub(r"\bi64\b", "bigint", s)
+    s = re.sub(r"\bi32\b", "integer", s)
+    s = re.sub(r"\bi16\b", "smallint", s)
+    s = re.sub(r"\bu64\b", "bigint", s)
+    s = re.sub(r"\bu32\b", "bigint", s)
+    s = re.sub(r"\bf64\b", "double precision", s)
+    s = re.sub(r"\bf32\b", "real", s)
+    s = re.sub(r"\bbool\b", "boolean", s)
+
+    # Internal Rust structs not visible as SQL types
+    s = re.sub(r"\bInitDecision\b", "(internal)", s)
+
+    # Option<T> → T (nullable) — apply after primitive type conversions
+    s = re.sub(r"Option\s*<([A-Za-z0-9_: ]+?)>", r"\1 (nullable)", s)
 
     return s
 
