@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     column_lineage  JSONB,
     -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
+    -- HOT-1 (v0.73.0): fillfactor option for stream table storage heaps
+    storage_fillfactor INT DEFAULT NULL
+                     CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
     -- v0.65.0 CDC-6: DuckLake compaction policy override
     ducklake_compaction_policy TEXT DEFAULT NULL
                      CHECK (ducklake_compaction_policy IN ('fallback', 'error')),

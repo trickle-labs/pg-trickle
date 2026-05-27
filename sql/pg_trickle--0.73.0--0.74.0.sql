@@ -16,4 +16,12 @@
 --   DEVEX-002: just lint-ci recipe
 --   DEVEX-003: Stale version tag updates
 
--- No schema changes in this release.
+-- HOT-1 was introduced in v0.73.0 but the 0.73.0 archive SQL was generated
+-- before the column was added. Apply idempotently so both fresh 0.73.0
+-- installs (missing the column) and upgrade-path installs (already present)
+-- succeed.
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS storage_fillfactor INT
+        CONSTRAINT pgt_storage_fillfactor_range
+        CHECK (storage_fillfactor IS NULL OR
+               (storage_fillfactor >= 10 AND storage_fillfactor <= 100));
