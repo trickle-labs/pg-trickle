@@ -490,7 +490,10 @@ impl E2eDb {
 
     /// Execute a SQL statement, returning Ok/Err instead of panicking.
     pub async fn try_execute(&self, sql: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&self.pool).await.map(|_| ())
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
     }
 
     /// Execute multiple SQL statements sequentially on the **same** connection.
@@ -535,7 +538,10 @@ impl E2eDb {
                 .await
                 .unwrap_or_else(|e| panic!("Config SQL failed: {}\nSQL: {}", e, stmt));
         }
-        sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&mut *conn).await.map(|_| ())
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
     }
 
     /// Reload PostgreSQL configuration and wait briefly for SIGHUP settings to apply.
@@ -740,7 +746,10 @@ impl E2eDb {
     /// Execute a query returning text rows and join them into a single `String`.
     /// Useful for capturing `EXPLAIN` output.
     pub async fn query_text(&self, sql: &str) -> Option<String> {
-        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql)).fetch_all(&self.pool).await.ok()?;
+        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await
+            .ok()?;
         if rows.is_empty() {
             return None;
         }
@@ -833,10 +842,11 @@ impl E2eDb {
                 OR table_name = '{st_table}') \
              AND column_name NOT LIKE '__pgt_%'"
         );
-        let (raw_cols, cast_cols): (Option<String>, Option<String>) = sqlx::query_as(sqlx::AssertSqlSafe(cols_sql.as_str()))
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or_else(|e| panic!("cols query failed: {e}"));
+        let (raw_cols, cast_cols): (Option<String>, Option<String>) =
+            sqlx::query_as(sqlx::AssertSqlSafe(cols_sql.as_str()))
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or_else(|e| panic!("cols query failed: {e}"));
         let raw_cols = raw_cols.unwrap_or_else(|| "*".to_string());
         let cast_cols = cast_cols.unwrap_or_else(|| "*".to_string());
 
