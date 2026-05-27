@@ -28,7 +28,6 @@ TABLES = [
     "pgt_refresh_history",
     "pgt_change_tracking",
     "pgt_scheduler_jobs",
-    "pgt_ducklake_provenance",
 ]
 
 # Views to extract from the archive SQL (must come after tables they reference).

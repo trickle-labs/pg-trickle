@@ -73,15 +73,6 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     column_lineage  JSONB,
     
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
-    
-    ducklake_compaction_policy TEXT DEFAULT NULL
-                     CHECK (ducklake_compaction_policy IN ('fallback', 'error')),
-    
-    ducklake_sink_mode TEXT DEFAULT NULL
-                     CHECK (ducklake_sink_mode IS NULL OR ducklake_sink_mode IN ('append', 'replace')),
-    ducklake_sink_path TEXT DEFAULT NULL,
-    
-    ducklake_sink_table_id BIGINT DEFAULT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -98,7 +89,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     column_snapshot JSONB,
     schema_fingerprint TEXT,
     cdc_mode     TEXT NOT NULL DEFAULT 'TRIGGER'
-                  CHECK (cdc_mode IN ('TRIGGER', 'TRANSITIONING', 'WAL', 'DUCKLAKE_CHANGE_FEED')),
+                  CHECK (cdc_mode IN ('TRIGGER', 'TRANSITIONING', 'WAL')),
     slot_name    TEXT,
     decoder_confirmed_lsn PG_LSN,
     transition_started_at TIMESTAMPTZ,
@@ -181,21 +172,6 @@ CREATE INDEX IF NOT EXISTS idx_sched_jobs_unit_status
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_finished
     ON pgtrickle.pgt_scheduler_jobs (finished_at)
     WHERE finished_at IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_provenance (
-    provenance_id       BIGSERIAL PRIMARY KEY,
-    stream_table_oid    BIGINT NOT NULL,
-    stream_table_name   TEXT NOT NULL,
-    ducklake_snapshot_id BIGINT NOT NULL,
-    refresh_id          BIGINT NOT NULL DEFAULT 0,
-    delta_row_count     BIGINT NOT NULL DEFAULT 0,
-    written_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_provenance_st_oid
-    ON pgtrickle.pgt_ducklake_provenance (stream_table_oid, written_at DESC);
-CREATE INDEX IF NOT EXISTS idx_provenance_snapshot
-    ON pgtrickle.pgt_ducklake_provenance (ducklake_snapshot_id);
 
 CREATE OR REPLACE FUNCTION pgtrickle.parse_duration_seconds(input TEXT)
 RETURNS BIGINT LANGUAGE plpgsql IMMUTABLE AS $$

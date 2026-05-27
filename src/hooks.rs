@@ -1016,9 +1016,6 @@ fn handle_alter_table_wal_fallback(source_oid: pg_sys::Oid, identity: &str, chan
             CdcMode::Trigger => {
                 // Already on triggers — nothing to do
             }
-            CdcMode::DuckLakeChangeFeed => {
-                // DuckLake change-feed sources do not use WAL slots or triggers.
-            }
         }
     }
 }

@@ -2394,7 +2394,6 @@ There are no `pg_trickle.outbox_*`, `pg_trickle.inbox_*`, or
 
 Use `pg_tide` configuration for retention, polling, consumer leases,
 dead-letter handling, and relay delivery. See [OUTBOX.md](OUTBOX.md) and
-[tutorial-pg-tide-ducklake-pipeline.md](tutorial-pg-tide-ducklake-pipeline.md)
 for the pg_trickle-side integration points.
 
 ---

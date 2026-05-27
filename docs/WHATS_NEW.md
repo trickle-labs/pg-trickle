@@ -7,6 +7,16 @@ exhaustive list of changes per release, see the
 
 ---
 
+## v0.76 — Complete DuckLake Integration Removal (May 2026)
+
+All DuckLake-specific code has been removed. The `DUCKLAKE_CHANGE_FEED` CDC
+mode, the Parquet/S3 sink, all `ducklake_*` GUCs, catalog columns, and tables
+are gone. pg_ducklake uses native table AM (not FDW), making the detection
+heuristic obsolete; pg_duckpipe covers the outbound direction. Users who need
+DuckLake egress should evaluate `pg_duckpipe` or `pg_tide`.
+
+---
+
 ## v0.70 — Scheduler, validator & security hardening (May 2026)
 
 The 0.70.0 sprint targets correctness, performance, and observability

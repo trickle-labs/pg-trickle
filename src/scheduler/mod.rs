@@ -3735,14 +3735,6 @@ fn execute_scheduled_refresh(
                 execute_post_refresh_action(st, rows_changed);
             }
 
-            // F-2/F-4 (v0.66.0): Run the DuckLake sink after a successful refresh.
-            // The sink serialises the stream table output to Parquet and uploads
-            // it to the configured object store. Failures are logged as warnings
-            // and never block the next scheduled refresh.
-            if st.ducklake_sink_mode.is_some() {
-                crate::ducklake_sink::run_ducklake_sink(st);
-            }
-
             RefreshOutcome::Success
         }
         Err(e) => {

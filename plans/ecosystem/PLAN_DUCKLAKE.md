@@ -1,11 +1,31 @@
 # pg_trickle × DuckLake Integration Plan
 
-Date: 2026-05-19 (revised)
-Status: PROPOSED — expanded after deeper research into the DuckLake v1.0
-specification, the DuckDB Labs public roadmap, and the wider lakehouse
-ecosystem.
+Date: 2026-05-27 (revised)
+Status: REMOVED — all DuckLake integration code was removed in v0.76.0.
+
+## Decision (v0.76.0)
+
+All DuckLake-specific code has been removed from pg_trickle. Rationale:
+
+1. **pg_ducklake uses native table AM, not FDW.** The `DUCKLAKE_CHANGE_FEED`
+   detection heuristic checked `pg_foreign_data_wrapper.fdwname LIKE '%ducklake%'`
+   but pg_ducklake creates tables via `CREATE TABLE ... USING ducklake` (native
+   table AM), which never appear in `pg_foreign_table`. The source-side CDC
+   adapter was architecturally obsolete.
+
+2. **pg_duckpipe covers the outbound direction.** The pg_duckpipe extension
+   (relytcloud) provides dedicated WAL-based PostgreSQL→DuckLake CDC with
+   backpressure, per-table flush threads, and sync groups.
+
+3. **Sink code is orthogonal to IVM.** The 1,258-line `ducklake_sink.rs` added
+   five heavy Cargo dependencies and an async-in-sync tokio shim that fights
+   PostgreSQL's signal handling — all orthogonal to IVM performance.
+
+Users who need DuckLake egress should evaluate `pg_duckpipe` or `pg_tide`.
 
 ---
+
+## Historical Context (preserved for reference)
 
 ## Executive Summary (for everyone, including non-technical readers)
 

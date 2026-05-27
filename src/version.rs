@@ -39,9 +39,6 @@ pub struct SourceVersion {
     pub lsn: String,
     /// Snapshot timestamp as ISO 8601 string.
     pub snapshot_ts: String,
-    /// DuckLake snapshot ID. Only populated for DuckLake change-feed sources.
-    #[serde(default)]
-    pub snapshot_id: Option<i64>,
 }
 
 impl Frontier {
@@ -67,14 +64,8 @@ impl Frontier {
 
     /// Update the frontier for a specific source.
     pub fn set_source(&mut self, source_oid: u32, lsn: String, snapshot_ts: String) {
-        self.sources.insert(
-            source_oid.to_string(),
-            SourceVersion {
-                lsn,
-                snapshot_ts,
-                snapshot_id: None,
-            },
-        );
+        self.sources
+            .insert(source_oid.to_string(), SourceVersion { lsn, snapshot_ts });
     }
 
     /// Set the overall data timestamp.
@@ -82,40 +73,10 @@ impl Frontier {
         self.data_timestamp = Some(ts);
     }
 
-    /// Update the frontier for a DuckLake change-feed source.
-    ///
-    /// Key format: `"ducklake:{schema}.{table}"`.
-    pub fn set_ducklake_source(&mut self, table_key: &str, snapshot_id: i64) {
-        let key = format!("ducklake:{table_key}");
-        self.sources.insert(
-            key,
-            SourceVersion {
-                lsn: "0/0".to_string(),
-                snapshot_ts: String::new(),
-                snapshot_id: Some(snapshot_id),
-            },
-        );
-    }
-
-    /// Get the latest DuckLake snapshot ID for a source, or None if not tracked.
-    ///
-    /// Key format: `"ducklake:{schema}.{table}"`.
-    pub fn get_ducklake_snapshot_id(&self, table_key: &str) -> Option<i64> {
-        let key = format!("ducklake:{table_key}");
-        self.sources.get(&key).and_then(|sv| sv.snapshot_id)
-    }
-
     /// Set the frontier for an ST source, keyed by `pgt_{pgt_id}`.
     pub fn set_st_source(&mut self, pgt_id: i64, lsn: String, snapshot_ts: String) {
         let key = format!("pgt_{pgt_id}");
-        self.sources.insert(
-            key,
-            SourceVersion {
-                lsn,
-                snapshot_ts,
-                snapshot_id: None,
-            },
-        );
+        self.sources.insert(key, SourceVersion { lsn, snapshot_ts });
     }
 
     /// Get the LSN for an ST source, or "0/0" if not tracked.
@@ -578,75 +539,5 @@ mod tests {
         assert_eq!(u64_to_lsn(0x1_0000_0500), "1/00000500");
         assert_eq!(u64_to_lsn(1), "0/00000001");
         assert_eq!(u64_to_lsn(0), "0/00000000");
-    }
-
-    // ── DuckLake frontier tests (v0.65.0) ────────────────────────────────
-
-    #[test]
-    fn test_ducklake_set_and_get_snapshot_id() {
-        let mut f = Frontier::new();
-        f.set_ducklake_source("lake.events", 42);
-        let id = f.get_ducklake_snapshot_id("lake.events");
-        assert_eq!(
-            id,
-            Some(42),
-            "snapshot_id should round-trip through Frontier"
-        );
-    }
-
-    #[test]
-    fn test_ducklake_snapshot_id_missing_returns_none() {
-        let f = Frontier::new();
-        assert!(
-            f.get_ducklake_snapshot_id("lake.events").is_none(),
-            "absent DuckLake source should return None"
-        );
-    }
-
-    #[test]
-    fn test_ducklake_frontier_key_format() {
-        // The internal key must be "ducklake:{schema}.{table}" so that WAL
-        // sources (keyed by OID) and DuckLake sources never collide.
-        let mut f = Frontier::new();
-        f.set_ducklake_source("lake.events", 99);
-        // WAL source with an OID that parses as a number must not collide.
-        f.set_source(99, "0/1".to_string(), "ts".to_string());
-        // The ducklake key is distinct from the OID key.
-        assert_eq!(f.get_ducklake_snapshot_id("lake.events"), Some(99));
-        assert_eq!(f.get_lsn(99), "0/1");
-    }
-
-    #[test]
-    fn test_ducklake_snapshot_id_json_roundtrip() {
-        // snapshot_id must survive JSON serialisation (used for JSONB column).
-        let mut f = Frontier::new();
-        f.set_ducklake_source("lake.users", 7);
-        let json = f.to_json().expect("serialise should not fail");
-        let f2 = Frontier::from_json(&json).expect("deserialise should not fail");
-        assert_eq!(
-            f2.get_ducklake_snapshot_id("lake.users"),
-            Some(7),
-            "snapshot_id must survive JSON round-trip"
-        );
-    }
-
-    #[test]
-    fn test_ducklake_snapshot_id_backward_compat_old_json() {
-        // Old frontier JSON without snapshot_id must deserialise with None.
-        // This uses #[serde(default)] on SourceVersion::snapshot_id.
-        let old_json = r#"{
-            "sources": {
-                "ducklake:lake.orders": { "lsn": "0/0", "snapshot_ts": "" }
-            },
-            "data_timestamp": null
-        }"#;
-        let f = Frontier::from_json(old_json).expect("old JSON must deserialise");
-        // OID-keyed lookup must fail (not a ducklake source), and the ducklake
-        // lookup must return None (snapshot_id was absent → defaulted to None).
-        let id = f.get_ducklake_snapshot_id("lake.orders");
-        assert!(
-            id.is_none(),
-            "old frontier without snapshot_id must deserialise as None"
-        );
     }
 }

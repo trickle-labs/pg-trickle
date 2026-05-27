@@ -247,26 +247,6 @@ pub struct StreamTableMeta {
     /// full query string on every differential refresh.
     /// 0 means not yet computed (triggers one-time cache rebuild).
     pub defining_query_hash: i64,
-    /// F-8 (v0.65.0): Per-stream-table DuckLake compaction safety policy.
-    /// Controls behaviour when a DuckLake source's change-feed history no
-    /// longer covers `last_consumed_snapshot_id` (snapshot was compacted).
-    /// `None` means use the global `pg_trickle.ducklake_compaction_policy` GUC.
-    /// `Some("fallback")` — fall back to a full refresh and log a warning.
-    /// `Some("error")` — raise a clear actionable error instead.
-    pub ducklake_compaction_policy: Option<String>,
-    /// F-2 (v0.66.0): DuckLake sink output mode.
-    /// `None` = no sink. `Some("append")` = accumulate Parquet deltas.
-    /// `Some("replace")` = overwrite on every refresh cycle.
-    pub ducklake_sink_mode: Option<String>,
-    /// F-4 (v0.66.0): Object-store path for Parquet delta files.
-    /// Required when `ducklake_sink_mode` is `Some`. Supports s3://, gs://,
-    /// az://, and file:// schemes.
-    pub ducklake_sink_path: Option<String>,
-    /// F-4 (v0.66.0): DuckLake `table_id` for catalog registration.
-    /// When `Some`, each Parquet file is registered in `ducklake_data_file`
-    /// under this table ID and a new `ducklake_snapshot` row is inserted.
-    /// When `None`, files are written to object storage but not registered.
-    pub ducklake_sink_table_id: Option<i64>,
     /// HOT-1 (v0.73.0): fillfactor for the storage heap table.
     /// `None` means use PostgreSQL's default (100 — pages packed full).
     /// Set to 70–90 on update-heavy differential workloads so that in-place
@@ -284,10 +264,6 @@ pub enum CdcMode {
     Transitioning,
     /// Only the WAL decoder populates the buffer table; trigger dropped.
     Wal,
-    /// F-1 (v0.65.0): DuckLake change-feed adapter — calls `table_changes()`
-    /// and processes O(Δ) rows rather than re-scanning the foreign table.
-    /// Tracks `last_consumed_snapshot_id` in the frontier rather than LSN.
-    DuckLakeChangeFeed,
 }
 
 impl CdcMode {
@@ -297,7 +273,6 @@ impl CdcMode {
             CdcMode::Trigger => "TRIGGER",
             CdcMode::Transitioning => "TRANSITIONING",
             CdcMode::Wal => "WAL",
-            CdcMode::DuckLakeChangeFeed => "DUCKLAKE_CHANGE_FEED",
         }
     }
 
@@ -307,7 +282,6 @@ impl CdcMode {
             "TRIGGER" => CdcMode::Trigger,
             "TRANSITIONING" => CdcMode::Transitioning,
             "WAL" => CdcMode::Wal,
-            "DUCKLAKE_CHANGE_FEED" => CdcMode::DuckLakeChangeFeed,
             _ => CdcMode::Trigger,
         }
     }
@@ -482,8 +456,7 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+
                      storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
@@ -526,8 +499,7 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+
                      storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
@@ -575,8 +547,7 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+
                      storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
@@ -619,8 +590,7 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+
                      storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
@@ -667,8 +637,7 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy, \
-                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id, \
+
                      storage_fillfactor \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
@@ -1378,11 +1347,7 @@ impl StreamTableMeta {
         let rows_changed_since_last_reindex = table.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
         let last_reindex_at = table.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
         let defining_query_hash = table.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
-        let ducklake_compaction_policy = table.get::<String>(52).map_err(map_spi)?;
-        let ducklake_sink_mode = table.get::<String>(53).map_err(map_spi)?;
-        let ducklake_sink_path = table.get::<String>(54).map_err(map_spi)?;
-        let ducklake_sink_table_id = table.get::<i64>(55).map_err(map_spi)?;
-        let storage_fillfactor = table.get::<i32>(56).map_err(map_spi)?;
+        let storage_fillfactor = table.get::<i32>(52).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1436,10 +1401,6 @@ impl StreamTableMeta {
             rows_changed_since_last_reindex,
             last_reindex_at,
             defining_query_hash,
-            ducklake_compaction_policy,
-            ducklake_sink_mode,
-            ducklake_sink_path,
-            ducklake_sink_table_id,
             storage_fillfactor,
         })
     }
@@ -1567,11 +1528,7 @@ impl StreamTableMeta {
         let rows_changed_since_last_reindex = row.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
         let last_reindex_at = row.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
         let defining_query_hash = row.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
-        let ducklake_compaction_policy = row.get::<String>(52).map_err(map_spi)?;
-        let ducklake_sink_mode = row.get::<String>(53).map_err(map_spi)?;
-        let ducklake_sink_path = row.get::<String>(54).map_err(map_spi)?;
-        let ducklake_sink_table_id = row.get::<i64>(55).map_err(map_spi)?;
-        let storage_fillfactor = row.get::<i32>(56).map_err(map_spi)?;
+        let storage_fillfactor = row.get::<i32>(52).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1625,10 +1582,6 @@ impl StreamTableMeta {
             rows_changed_since_last_reindex,
             last_reindex_at,
             defining_query_hash,
-            ducklake_compaction_policy,
-            ducklake_sink_mode,
-            ducklake_sink_path,
-            ducklake_sink_table_id,
             storage_fillfactor,
         })
     }

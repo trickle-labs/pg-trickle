@@ -631,26 +631,6 @@ cannot be used across major version boundaries. See
 These errors are raised by the DuckLake CDC source and Parquet sink subsystem
 introduced in v0.65.0–v0.66.0.
 
-### DuckLakeSnapshotExpired
-
-**Message:** `DuckLake snapshot expired: <details>`
-
-**Description:** A DuckLake snapshot referenced during change-feed processing
-has expired and is no longer accessible in the object store or catalog.
-
-**Common causes:**
-- The DuckLake snapshot was compacted or garbage-collected while a stream table
-  was still mid-refresh
-- Object-store retention policy deleted the snapshot files before the refresh
-  frontier advanced past them
-
-**Suggested fix:** Call `pgtrickle.reinitialize_stream_table('<name>')` to
-discard the stale frontier and restart from a fresh snapshot. Increase
-snapshot retention in your DuckLake catalog configuration to prevent
-recurrence.
-
----
-
 ### DuckLakeChangeFeedError
 
 **Message:** `DuckLake change-feed error: <details>`
@@ -703,7 +683,6 @@ Parquet/Arrow type mapping. Inspect the error detail for the offending column.
 
 **Suggested fix:** Verify object-store credentials and connectivity:
 ```sql
-SELECT pgtrickle.ducklake_sink_status();
 ```
 Check the `last_error` column for the underlying transport error.
 
@@ -734,11 +713,9 @@ Ensure the PostgreSQL user has write access to the DuckLake catalog tables.
 variant. See the message detail for the underlying cause.
 
 **Common causes:**
-- Misconfigured `ducklake_sink_path`
 - DuckLake extension not installed in the target database
 - Internal sink pipeline error
 
-**Suggested fix:** Review the error detail. Check `ducklake_sink_path` and
 ensure the DuckLake extension is installed. Re-run
 `pgtrickle.reinitialize_stream_table('<name>')` if the sink state is corrupt.
 

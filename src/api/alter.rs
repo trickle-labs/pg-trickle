@@ -5,35 +5,6 @@
 use super::refresh_ops::execute_manual_full_refresh;
 use super::*;
 
-// ── F-2 (v0.66.0): DuckLake sink mode resolver ────────────────────────────
-
-/// Resolve the user-supplied `sink` string to a catalog value for
-/// `ducklake_sink_mode`.
-///
-/// | Input         | Output               |
-/// |---------------|----------------------|
-/// | `"ducklake"`  | `Some("append")`     |
-/// | `"append"`    | `Some("append")`     |
-/// | `"replace"`   | `Some("replace")`    |
-/// | `"none"`, `""`| `None` (clears sink) |
-/// | `None`        | unchanged (skip)     |
-///
-/// Returns an error for unrecognised values.
-fn resolve_sink_mode(sink: Option<&str>) -> Result<Option<&str>, PgTrickleError> {
-    match sink {
-        None => Ok(None),
-        Some(s) => match s.to_ascii_lowercase().as_str() {
-            "ducklake" | "append" => Ok(Some("append")),
-            "replace" => Ok(Some("replace")),
-            "none" | "" => Ok(None),
-            other => Err(PgTrickleError::InvalidArgument(format!(
-                "invalid sink value: '{}' (expected 'ducklake', 'append', 'replace', or 'none')",
-                other
-            ))),
-        },
-    }
-}
-
 // ── Schema comparison for ALTER QUERY ──────────────────────────────────────
 
 /// Classification of how the output schema changed between old and new query.
@@ -930,15 +901,6 @@ fn alter_stream_table_query(
         }
     );
 
-    // COR-005 (v0.69.0): Re-register the DuckLake view with the updated query
-    // so that DuckLake clients see the new view definition immediately.
-    // Reload the ST to pick up any catalog changes made during ALTER QUERY.
-    if let Ok(updated_st) = crate::catalog::StreamTableMeta::get_by_name(schema, table_name)
-        && updated_st.ducklake_sink_mode.is_some()
-    {
-        crate::ducklake_sink::register_ducklake_view(table_name, new_query);
-    }
-
     Ok(())
 }
 
@@ -1117,12 +1079,6 @@ pub(crate) struct CreateStreamTableOptions<'a> {
     /// CORR-2/UX-3 (v0.36.0): columnar storage backend
     /// (`"heap"`, `"citus"`, or `"none"`).
     pub(crate) storage_backend: Option<&'a str>,
-    /// F-2 (v0.66.0): DuckLake sink output mode (`"ducklake"`, `"none"`, or `NULL`).
-    pub(crate) ducklake_sink: Option<&'a str>,
-    /// F-4 (v0.66.0): Object-store path for the DuckLake sink (e.g. `"s3://…"`).
-    pub(crate) ducklake_sink_path: Option<&'a str>,
-    /// F-4 (v0.66.0): DuckLake table_id for catalog registration.
-    pub(crate) ducklake_sink_table_id: Option<i64>,
     /// HOT-1 (v0.73.0): heap fillfactor (10–100). `None` = PostgreSQL default (100).
     pub(crate) storage_fillfactor: Option<i32>,
 }
@@ -1159,9 +1115,6 @@ pub(crate) fn create_stream_table_impl(
         output_distribution_column,
         temporal_mode,
         storage_backend,
-        ducklake_sink,
-        ducklake_sink_path,
-        ducklake_sink_table_id,
         storage_fillfactor,
     } = opts;
     let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
@@ -1613,21 +1566,6 @@ pub(crate) fn create_stream_table_impl(
     // Signal scheduler to rebuild DAG
     shmem::signal_dag_invalidation(pgt_id);
 
-    // F-2/F-4 (v0.66.0): Persist DuckLake sink configuration when provided.
-    if ducklake_sink.is_some() || ducklake_sink_path.is_some() || ducklake_sink_table_id.is_some() {
-        let resolved_mode = resolve_sink_mode(ducklake_sink)?;
-        crate::ducklake_sink::update_sink_config(
-            pgt_id,
-            resolved_mode,
-            ducklake_sink_path,
-            ducklake_sink_table_id,
-        )?;
-        // F-6 (v0.67.0): Register view in DuckLake catalog when sink is active.
-        if resolved_mode.is_some() {
-            crate::ducklake_sink::register_ducklake_view(&table_name, query);
-        }
-    }
-
     pgrx::info!(
         "Stream table {}.{} created (pgt_id={}, mode={}, initialized={})",
         schema,
@@ -1664,10 +1602,6 @@ fn alter_stream_table(
     // VP-1/VP-2 (v0.47.0): post-refresh action and drift threshold
     post_refresh_action: default!(Option<&str>, "NULL"),
     reindex_drift_threshold: default!(Option<f64>, "NULL"),
-    // F-2/F-4 (v0.66.0): DuckLake sink parameters
-    sink: default!(Option<&str>, "NULL"),
-    ducklake_sink_path: default!(Option<&str>, "NULL"),
-    ducklake_sink_table_id: default!(Option<i64>, "NULL"),
 ) {
     let result = alter_stream_table_impl(
         name,
@@ -1689,9 +1623,6 @@ fn alter_stream_table(
         max_delta_fraction,
         post_refresh_action,
         reindex_drift_threshold,
-        sink,
-        ducklake_sink_path,
-        ducklake_sink_table_id,
     );
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -1720,10 +1651,6 @@ pub(crate) fn alter_stream_table_impl(
     // VP-1/VP-2 (v0.47.0): post-refresh action and drift threshold
     post_refresh_action: Option<&str>,
     reindex_drift_threshold: Option<f64>,
-    // F-2/F-4 (v0.66.0): DuckLake sink parameters
-    sink: Option<&str>,
-    ducklake_sink_path: Option<&str>,
-    ducklake_sink_table_id: Option<i64>,
 ) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let mut st = StreamTableMeta::get_by_name(&schema, &table_name)?;
@@ -2226,25 +2153,6 @@ pub(crate) fn alter_stream_table_impl(
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     }
 
-    // F-2/F-4 (v0.66.0): Update DuckLake sink configuration when provided.
-    if sink.is_some() || ducklake_sink_path.is_some() || ducklake_sink_table_id.is_some() {
-        let resolved_mode = resolve_sink_mode(sink)?;
-        crate::ducklake_sink::update_sink_config(
-            st.pgt_id,
-            resolved_mode,
-            ducklake_sink_path,
-            ducklake_sink_table_id,
-        )?;
-        // F-6 (v0.67.0): Keep DuckLake view registration in sync.
-        if resolved_mode.is_some() {
-            let current_query = query.unwrap_or(&st.defining_query);
-            crate::ducklake_sink::register_ducklake_view(&st.pgt_name, current_query);
-        } else {
-            // Sink disabled — remove the view entry.
-            crate::ducklake_sink::deregister_ducklake_view(&st.pgt_name);
-        }
-    }
-
     Ok(())
 }
 
@@ -2344,11 +2252,6 @@ fn drop_stream_table_impl_inner(
     );
     Spi::run(&drop_sql)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to drop storage table: {}", e)))?;
-
-    // F-6 (v0.67.0): Remove DuckLake view entry if sink was configured.
-    if st.ducklake_sink_mode.is_some() {
-        crate::ducklake_sink::deregister_ducklake_view(&st.pgt_name);
-    }
 
     // Delete catalog entries (cascade handles pgt_dependencies)
     StreamTableMeta::delete(st.pgt_id)?;

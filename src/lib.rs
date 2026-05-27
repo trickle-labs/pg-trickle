@@ -30,7 +30,6 @@ pub mod citus;
 pub mod config;
 pub mod dag;
 mod diagnostics;
-pub mod ducklake_sink;
 pub mod dvm;
 pub mod error;
 pub mod fuzz_pub;
@@ -308,15 +307,6 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     column_lineage  JSONB,
     -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
-    -- v0.65.0 CDC-6: DuckLake compaction policy override
-    ducklake_compaction_policy TEXT DEFAULT NULL
-                     CHECK (ducklake_compaction_policy IN ('fallback', 'error')),
-    -- v0.66.0 F-2/F-4: DuckLake sink output mode and path
-    ducklake_sink_mode TEXT DEFAULT NULL
-                     CHECK (ducklake_sink_mode IS NULL OR ducklake_sink_mode IN ('append', 'replace')),
-    ducklake_sink_path TEXT DEFAULT NULL,
-    -- v0.66.0 F-4: DuckLake table_id for catalog registration (NULL = file-only)
-    ducklake_sink_table_id BIGINT DEFAULT NULL,
     -- v0.73.0 HOT-1: fillfactor for storage heap (NULL = PG default 100). Range 10-100.
     storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -337,7 +327,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     column_snapshot JSONB,
     schema_fingerprint TEXT,
     cdc_mode     TEXT NOT NULL DEFAULT 'TRIGGER'
-                  CHECK (cdc_mode IN ('TRIGGER', 'TRANSITIONING', 'WAL', 'DUCKLAKE_CHANGE_FEED')),
+                  CHECK (cdc_mode IN ('TRIGGER', 'TRANSITIONING', 'WAL')),
     slot_name    TEXT,
     decoder_confirmed_lsn PG_LSN,
     transition_started_at TIMESTAMPTZ,
@@ -547,57 +537,6 @@ CREATE UNLOGGED TABLE IF NOT EXISTS pgtrickle.pgt_template_cache (
     all_algebraic BOOLEAN NOT NULL DEFAULT FALSE,
     cached_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
--- v0.67.0 INT-11: DuckLake snapshot provenance audit trail.
--- Records which stream table produced each DuckLake snapshot for end-to-end lineage.
-CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_provenance (
-    provenance_id       BIGSERIAL PRIMARY KEY,
-    stream_table_oid    BIGINT NOT NULL,
-    stream_table_name   TEXT NOT NULL,
-    ducklake_snapshot_id BIGINT NOT NULL,
-    refresh_id          BIGINT NOT NULL DEFAULT 0,
-    delta_row_count     BIGINT NOT NULL DEFAULT 0,
-    written_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_provenance_st_oid
-    ON pgtrickle.pgt_ducklake_provenance (stream_table_oid, written_at DESC);
-CREATE INDEX IF NOT EXISTS idx_provenance_snapshot
-    ON pgtrickle.pgt_ducklake_provenance (ducklake_snapshot_id);
-
-SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ducklake_provenance', '');
-
--- v0.69.0 ARCH-002/REL-001: per-delivery tracking for the DuckLake sink write path.
--- Records each sink write attempt with its status and outcome for observability and retry logic.
--- Only present in migration sql/pg_trickle--0.68.0--0.69.0.sql for upgrades;
--- added here so fresh installs (CREATE EXTENSION) also get the table.
-CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_sink_delivery (
-    delivery_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    stream_table_id  bigint NOT NULL
-                       REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
-                       ON DELETE CASCADE,
-    refresh_id       bigint,
-    status           text NOT NULL
-                       CHECK (status IN (
-                           'PENDING',
-                           'WRITING',
-                           'DELIVERED',
-                           'FAILED_RETRYABLE',
-                           'FAILED_PERMANENT'
-                       )),
-    attempt_count    int NOT NULL DEFAULT 0,
-    bytes_written    bigint,
-    rows_written     bigint,
-    started_at       timestamptz NOT NULL DEFAULT now(),
-    finished_at      timestamptz,
-    last_error       text
-);
-
-CREATE INDEX IF NOT EXISTS pgt_ducklake_sink_delivery_st_started
-    ON pgtrickle.pgt_ducklake_sink_delivery (stream_table_id, started_at DESC);
-
-COMMENT ON TABLE pgtrickle.pgt_ducklake_sink_delivery IS
-    'ARCH-002/REL-001 (v0.69.0): per-delivery tracking for the DuckLake sink write path.';
 
 
 "#,

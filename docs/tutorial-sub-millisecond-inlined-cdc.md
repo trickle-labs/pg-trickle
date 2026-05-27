@@ -68,7 +68,6 @@ DuckLake catalog
 pg_trickle stream table: category_stats
   │  1-minute DIFFERENTIAL refresh
   │  CDC source 1: ducklake_inlined_data_table_42_1 → TRIGGER mode (sub-ms)
-  │  CDC source 2: lake.raw_events               → DUCKLAKE_CHANGE_FEED
   ▼
 category_stats (PostgreSQL table)
 ```
@@ -156,7 +155,6 @@ Expected output:
 source                           | cdc_mode
 ---------------------------------+----------------------
 ducklake_inlined_data_table_42_1 | TRIGGER
-lake.raw_events                  | DUCKLAKE_CHANGE_FEED
 ```
 
 The inlined categories table uses fast trigger CDC; the large events table uses

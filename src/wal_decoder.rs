@@ -1793,9 +1793,6 @@ pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Resul
                     }
                 }
             }
-            CdcMode::DuckLakeChangeFeed => {
-                // no-op: DuckLake sources are polled via table_changes(), not WAL-decoded.
-            }
         }
     }
 

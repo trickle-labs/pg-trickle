@@ -617,16 +617,6 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
-        PgTrickleError::DuckLakeSnapshotExpired(_) | PgTrickleError::DuckLakeChangeFeedError(_) => {
-            pgrx::error!("{}", e);
-        }
-        // F-2/F-4 (v0.66.0): DuckLake sink errors — surface as system errors.
-        PgTrickleError::DucklakeParquetError(_)
-        | PgTrickleError::DucklakeUploadError(_)
-        | PgTrickleError::DucklakeCatalogError(_)
-        | PgTrickleError::DucklakeSinkError(_) => {
-            pgrx::error!("{}", e);
-        }
     }
 }
 
@@ -3566,10 +3556,6 @@ mod tests {
             rows_changed_since_last_reindex: 0,
             last_reindex_at: None,
             defining_query_hash: 0,
-            ducklake_compaction_policy: None,
-            ducklake_sink_mode: None,
-            ducklake_sink_path: None,
-            ducklake_sink_table_id: None,
             storage_fillfactor: None,
         }
     }
