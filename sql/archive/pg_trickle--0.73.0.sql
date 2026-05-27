@@ -604,7 +604,8 @@ CREATE  FUNCTION pgtrickle."create_stream_table_if_not_exists"(
 	"storage_backend" TEXT DEFAULT NULL, /* Option < & str > */
 	"sink" TEXT DEFAULT NULL, /* Option < & str > */
 	"ducklake_sink_path" TEXT DEFAULT NULL, /* Option < & str > */
-	"ducklake_sink_table_id" bigint DEFAULT NULL /* Option < i64 > */
+	"ducklake_sink_table_id" bigint DEFAULT NULL, /* Option < i64 > */
+	"fillfactor" INT DEFAULT NULL /* Option < i32 > */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
@@ -867,7 +868,8 @@ CREATE  FUNCTION pgtrickle."create_stream_table"(
 	"storage_backend" TEXT DEFAULT NULL, /* Option < & str > */
 	"sink" TEXT DEFAULT NULL, /* Option < & str > */
 	"ducklake_sink_path" TEXT DEFAULT NULL, /* Option < & str > */
-	"ducklake_sink_table_id" bigint DEFAULT NULL /* Option < i64 > */
+	"ducklake_sink_table_id" bigint DEFAULT NULL, /* Option < i64 > */
+	"fillfactor" INT DEFAULT NULL /* Option < i32 > */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
