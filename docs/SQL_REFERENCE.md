@@ -168,8 +168,6 @@ pgtrickle.create_stream_table(
     temporal                  bool      DEFAULT false,
     storage_backend           text      DEFAULT NULL,
     sink                      text      DEFAULT NULL,
-    ducklake_sink_path        text      DEFAULT NULL,
-    ducklake_sink_table_id    bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -193,9 +191,6 @@ pgtrickle.create_stream_table(
 | `output_distribution_column` | `text` | `NULL` | Citus only: distribution column for the stream table storage table. Must be a column present in the query output. |
 | `temporal` | `bool` | `false` | When `true`, enables temporal IVM mode — the stream table tracks effective-time ranges and can answer as-of queries. |
 | `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
-| `sink` | `text` | `NULL` | DuckLake sink type. Pass `'ducklake'` to enable continuous Parquet export to an object store via DuckLake. |
-| `ducklake_sink_path` | `text` | `NULL` | Object-store path for DuckLake Parquet output (e.g. `'s3://my-bucket/my_table/'`). Required when `sink => 'ducklake'`. |
-| `ducklake_sink_table_id` | `bigint` | `NULL` | DuckLake catalog table ID. When set, registers the stream table in the DuckLake catalog at the given ID. |
 
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
@@ -782,8 +777,6 @@ pgtrickle.create_stream_table_if_not_exists(
     temporal                  bool      DEFAULT false,
     storage_backend           text      DEFAULT NULL,
     sink                      text      DEFAULT NULL,
-    ducklake_sink_path        text      DEFAULT NULL,
-    ducklake_sink_table_id    bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -832,7 +825,6 @@ pgtrickle.create_or_replace_stream_table(
 ) → void
 ```
 
-**Parameters:** Same as [`create_stream_table`](#pgtricklecreate_stream_table) (DuckLake `sink`, `ducklake_sink_path`, and `ducklake_sink_table_id` are not available via this function — use `create_stream_table` or `alter_stream_table` instead).
 
 **Behavior:**
 
@@ -945,8 +937,6 @@ pgtrickle.alter_stream_table(
     post_refresh_action        text      DEFAULT NULL,
     reindex_drift_threshold    float8    DEFAULT NULL,
     sink                       text      DEFAULT NULL,
-    ducklake_sink_path         text      DEFAULT NULL,
-    ducklake_sink_table_id     bigint    DEFAULT NULL
 ) → void
 ```
 
@@ -973,9 +963,6 @@ pgtrickle.alter_stream_table(
 | `max_delta_fraction` | `float8` | `NULL` | Per-stream-table AUTO cost model threshold (0.0–1.0). Pass `NULL` to leave unchanged. |
 | `post_refresh_action` | `text` | `NULL` | Action to take after each successful refresh: `'reindex'` (rebuild indexes when drift exceeds threshold) or `NULL` (no action). |
 | `reindex_drift_threshold` | `float8` | `NULL` | Index drift ratio threshold (0.0–1.0) for `post_refresh_action = 'reindex'`. Pass `NULL` to leave unchanged. |
-| `sink` | `text` | `NULL` | DuckLake sink type. Pass `'ducklake'` to enable, `'none'` to detach. Pass `NULL` to leave unchanged. |
-| `ducklake_sink_path` | `text` | `NULL` | Object-store path for DuckLake Parquet output. Pass `NULL` to leave unchanged. |
-| `ducklake_sink_table_id` | `bigint` | `NULL` | DuckLake catalog table ID. Pass `NULL` to leave unchanged. |
 
 If you switch a stream table to `refresh_mode => 'IMMEDIATE'` while the
 cluster-wide `pg_trickle.cdc_mode` GUC is set to `'wal'`, pg_trickle logs an

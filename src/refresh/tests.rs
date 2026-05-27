@@ -73,10 +73,6 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         rows_changed_since_last_reindex: 0,
         last_reindex_at: None,
         defining_query_hash: 0,
-        ducklake_compaction_policy: None,
-        ducklake_sink_mode: None,
-        ducklake_sink_path: None,
-        ducklake_sink_table_id: None,
         storage_fillfactor: None,
     }
 }

@@ -171,32 +171,6 @@ pub enum PgTrickleError {
     #[error("snapshot schema version mismatch: {0}")]
     SnapshotSchemaVersionMismatch(String),
 
-    // ── DuckLake CDC errors (v0.65.0) ─────────────────────────────────────
-    /// v0.65.0: A DuckLake snapshot has expired and is no longer accessible.
-    #[error("DuckLake snapshot expired: {0}")]
-    DuckLakeSnapshotExpired(String),
-
-    /// v0.65.0: An error occurred in the DuckLake change-feed pipeline.
-    #[error("DuckLake change-feed error: {0}")]
-    DuckLakeChangeFeedError(String),
-
-    // ── v0.66.0: DuckLake sink errors ────────────────────────────────────
-    /// v0.66.0: Parquet serialisation failed.
-    #[error("DuckLake sink Parquet error: {0}")]
-    DucklakeParquetError(String),
-
-    /// v0.66.0: Object-store upload failed.
-    #[error("DuckLake sink upload error: {0}")]
-    DucklakeUploadError(String),
-
-    /// v0.66.0: DuckLake catalog write failed.
-    #[error("DuckLake catalog write error: {0}")]
-    DucklakeCatalogError(String),
-
-    /// v0.66.0: Generic DuckLake sink error.
-    #[error("DuckLake sink error: {0}")]
-    DucklakeSinkError(String),
-
     // ── Outbox/pg_tide integration errors (v0.46.0) ──────────────────────
     /// v0.46.0: Outbox already attached for this stream table.
     #[error("outbox already attached for stream table: {0}")]
@@ -617,11 +591,6 @@ impl PgTrickleError {
             | PgTrickleError::SnapshotSourceNotFound(_)
             | PgTrickleError::SnapshotSchemaVersionMismatch(_) => PgTrickleErrorKind::User,
 
-            // v0.65.0: DuckLake CDC errors — snapshot expired is user-facing;
-            // change-feed error is system-level (may be retried).
-            PgTrickleError::DuckLakeSnapshotExpired(_) => PgTrickleErrorKind::User,
-            PgTrickleError::DuckLakeChangeFeedError(_) => PgTrickleErrorKind::System,
-
             // v0.46.0: Outbox/pg_tide integration errors.
             PgTrickleError::OutboxAlreadyEnabled(_)
             | PgTrickleError::OutboxNotEnabled(_)
@@ -635,13 +604,6 @@ impl PgTrickleError {
 
             // C-4: Dropped ST source is a schema-level error (requires reinitialize).
             PgTrickleError::StSourceFrontierMissing(_) => PgTrickleErrorKind::Schema,
-
-            // F-2/F-4 (v0.66.0): DuckLake sink errors — parquet and upload errors
-            // are system-level; catalog errors are also system-level.
-            PgTrickleError::DucklakeParquetError(_)
-            | PgTrickleError::DucklakeUploadError(_)
-            | PgTrickleError::DucklakeCatalogError(_)
-            | PgTrickleError::DucklakeSinkError(_) => PgTrickleErrorKind::System,
         }
     }
 }

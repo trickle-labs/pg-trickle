@@ -2718,7 +2718,6 @@ mod tests {
                 SourceVersion {
                     lsn: lsn.to_string(),
                     snapshot_ts: "2026-01-01T00:00:00Z".to_string(),
-                    snapshot_id: None,
                 },
             );
         }
