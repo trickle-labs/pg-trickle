@@ -318,9 +318,35 @@ are catalog contract and durability invariants that must be proven before v1.0.
 | [v0.74.0](roadmap/v0.74.0.md) | Test Coverage, CI Integrity & Security Hardening: replace fixed WAL/safety stabilization sleeps with condition-based polling (TEST-002), path-filtered full E2E + reduced TPC-H slice on risky PRs (TEST-004/REL-003), `just coverage-summary` recipe with per-module risk output (TEST-005), `#[cfg(test)]` unit tests for `src/refresh/merge/mod.rs`, `src/refresh/codegen.rs`, `src/api/metrics_ext.rs` (CODE-002), centralize advisory ignores in `deny.toml` and make `just security` reproduce CI (SEC-001/DEVEX-004), restrict IVM AFTER trigger search path or add targeted shadowing tests (SEC-002), SQL builder helpers audit and lint for raw `format!()` SQL (SEC-003), re-enable push-to-main benchmark baselines (DEVEX-001), add `just lint-ci` recipe covering generated doc/schema/version/docs-truth checks (DEVEX-002), replace stale version tags in Dockerfile examples and justfile (DEVEX-003), upgrade deps: sqlx 0.9.0 (query safety), lru 0.18.0, object_store 0.13.2 (DuckLake E2E) (DEP-001/002/003) | ✅ Released | Large | [Full details](roadmap/v0.74.0.md) |
 | [v0.75.0](roadmap/v0.75.0.md) | API Polish, Documentation Excellence & Developer Experience: add `pgtrickle.metrics_summary` full SQL reference section with columns, examples, and cost caveats (API-002/DOC-003), normalize SQL function parameter naming convention and document it (API-003), convert generated API catalog return types to SQL-facing forms (API-004), add schedule-mode comparison table to SQL reference (API-005), introduce typed `PgtId`/`StreamTableOid` wrappers to prevent cross-domain casts (CODE-003), repair corrupted `plans/PLAN.md` architecture-doc table and add fragment-corruption lint (DOC-001), update README GUC count to generated phrase and add stale-version scanner (DOC-002/DOC-004), add `docs/COMPARISONS.md` covering pg_ivm, Materialize, Feldera, DuckDB/DuckLake, and pg_trickle across SQL coverage, consistency, CDC, performance, and operational model (ARCH-004) | ✅ Released | Large | [Full details](roadmap/v0.75.0.md) |
 
-### RockLake Compatibility Arc (v0.76.x)
+### DuckLake Sink Removal & RockLake Compatibility Arc (v0.76.x)
 
-RockLake (formerly SlateDuck) is the first DuckLake catalog backend that is not PostgreSQL or SQLite: it stores the 28 DuckLake catalog tables in SlateDB on object storage and exposes them over the standard PG-wire protocol. Phase 2 and Phase 3 of the DuckLake integration (v0.65–v0.67) were developed and tested against a PostgreSQL-backed DuckLake catalog. This arc validates and certifies full pg_trickle compatibility with RockLake as the catalog backend, targeting RockLake v0.27.14+.
+This arc has two themes that both flow from the same architectural insight: pg_trickle's DuckLake
+integration has grown in two directions that deserve different homes.
+
+**The source side** (`DUCKLAKE_CHANGE_FEED` CDC mode, `table_changes()` polling, snapshot frontier,
+row-ID plumbing) is core to pg_trickle's mission — it teaches the DVM engine to consume delta feeds
+from a data lake. This stays and is extended by RockLake compatibility work in v0.76.0.
+
+**The sink side** (`ducklake_sink.rs`, Parquet serialisation via `arrow-rs`, S3 object-store upload,
+DuckLake catalog transaction writer, `pgt_ducklake_provenance`, `pgt_ducklake_sink_delivery`) is a
+relay concern — it takes computed results and pushes them to an external storage system. That is
+exactly what `pg_tide` (`trickle-labs/pg-tide`) was extracted to do. Keeping it in pg_trickle
+adds 1,258 lines of Arrow/Parquet/object_store code, three heavy Cargo dependencies
+(`arrow-array`, `arrow-schema`, `parquet`, `object_store`, `bytes`), and an async-in-sync tokio
+shim that fights PostgreSQL's signal handling — all orthogonal to IVM performance.
+
+v0.76.1 removes the sink entirely. Users who need DuckLake egress should use the
+[pg-tide DuckLake sink](https://github.com/trickle-labs/pg-tide) once it ships that feature.
+
+---
+
+**RockLake compatibility (v0.76.0):**
+
+RockLake (formerly SlateDuck) is the first DuckLake catalog backend that is not PostgreSQL or SQLite:
+it stores the 28 DuckLake catalog tables in SlateDB on object storage and exposes them over the
+standard PG-wire protocol. Phase 2 and Phase 3 of the DuckLake integration (v0.65–v0.67) were
+developed and tested against a PostgreSQL-backed DuckLake catalog. This release validates and certifies
+full pg_trickle compatibility with RockLake as the catalog backend, targeting RockLake v0.27.14+.
 
 A deep cross-project compatibility audit ([RockLake plans/pg-trickle-ducklake-support.md](https://github.com/trickle-labs/slateduck/blob/main/plans/pg-trickle-ducklake-support.md)) identified two issues that the Phase 2/3 work did not address:
 
@@ -331,6 +357,7 @@ A deep cross-project compatibility audit ([RockLake plans/pg-trickle-ducklake-su
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|--------------|
 | [v0.76.0](roadmap/v0.76.0.md) | RockLake Compatibility Certification: `ducklake_latest_snapshot_id` CDC startup test + `42883` diagnostic (CDC-001); skip inlined-data trigger attachment for remote FDW catalog backends, force `DUCKLAKE_CHANGE_FEED` polling (CDC-002); Tier A/B/C RockLake integration test suite; `docs/integration/rocklake.md` compatibility guide | Planning | Medium | [Full details](roadmap/v0.76.0.md) |
+| [v0.76.1](roadmap/v0.76.1.md) | DuckLake Sink Removal: delete `src/ducklake_sink.rs` and all sink infrastructure (SINK-001); migrate users with deprecation notice pointing to pg-tide (SINK-002); drop `ducklake_sink_mode`, `ducklake_sink_path`, `ducklake_sink_table_id`, `ducklake_compaction_policy` columns + `pgt_ducklake_provenance` + `pgt_ducklake_sink_delivery` tables with upgrade SQL (SINK-003); remove `arrow-array`, `arrow-schema`, `parquet`, `object_store`, `bytes` Cargo deps + tokio `rt` feature from main crate (SINK-004); update `catalog.rs` `StreamTableMeta`, `refresh_ops.rs`, `lib.rs` (SINK-005); add ADR-006 documenting source/sink boundary decision (SINK-006) | Planning | Medium | [Full details](roadmap/v0.76.1.md) |
 
 ### Beyond v1.0
 
@@ -448,7 +475,9 @@ v0.74    ─── Test coverage, CI integrity & security: path-filtered full E2
     │
 v0.75    ─── API polish & documentation excellence: metrics_summary reference, typed PgtId wrappers, IVM comparison matrix, stale-tag scanner
     │
-v0.76    ─── RockLake compatibility: CDC startup handshake test, 42883 diagnostic, skip FDW inlined-data triggers, force DUCKLAKE_CHANGE_FEED, Tier A/B/C integration suite
+v0.76.0  ─── RockLake compatibility: CDC startup handshake test, 42883 diagnostic, skip FDW inlined-data triggers, force DUCKLAKE_CHANGE_FEED, Tier A/B/C integration suite
+    │
+v0.76.1  ─── DuckLake sink removal: delete ducklake_sink.rs + Arrow/Parquet/object_store deps, drop sink catalog tables/columns, add ADR-006
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
