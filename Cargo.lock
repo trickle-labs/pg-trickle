@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "pg_trickle"
-version = "0.74.0"
+version = "0.75.0"
 dependencies = [
  "aho-corasick",
  "arrow-array",

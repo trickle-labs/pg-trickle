@@ -21,7 +21,9 @@ summary — strengths, weaknesses, and "use this instead if…".
 | `REFRESH MATERIALIZED VIEW` | ✅ | ✕ | ✕ | Periodic full recomputation, no automation |
 | [pg_ivm](https://github.com/sraoss/pg_ivm) | ✅ | ✅ (limited) | ✕ | Incremental views with a smaller SQL surface |
 | [Materialize](https://materialize.com/) | ✕ (own engine) | ✅ | Whole new database | Cross-source streaming SQL |
+| [Feldera](https://www.feldera.com/) | ✕ (own engine) | ✅ | Separate service | DBSP-based incremental SQL for data pipelines |
 | [RisingWave](https://risingwave.com/) | ✕ (own engine) | ✅ | Whole new database | Streaming SQL with PostgreSQL wire compat |
+| [DuckDB + DuckLake](https://ducklake.select/) | ✕ | ✅ (via pg_trickle) | Object storage | Analytical queries on a Parquet/Iceberg lake |
 | [Apache Flink](https://flink.apache.org/) | ✕ | ✅ | JVM cluster + state backend | Stateful event processing at scale |
 | [Debezium](https://debezium.io/) + sink | ✕ | (CDC only) | Kafka + Connect | Replicating change events out of PostgreSQL |
 | [ksqlDB](https://ksqldb.io/) | ✕ | ✅ | Kafka cluster | Streaming SQL on top of Kafka |
@@ -198,6 +200,145 @@ It works, until:
 
 When that happens, [pg_trickle's quick start](QUICKSTART_5MIN.md) is
 ~5 minutes of setup.
+
+---
+
+## vs. Feldera
+
+[Feldera](https://www.feldera.com/) is an open-source incremental SQL
+engine built on [DBSP](https://arxiv.org/abs/2203.16684) — the same
+Z-set / differential dataflow theory that underlies pg_trickle's DVM
+engine. Both systems are implementations of the same mathematical
+model, but they occupy very different deployment shapes.
+
+| | Feldera | pg_trickle |
+|---|---|---|
+| Deployment | Separate service (Docker / cloud) | Extension inside PostgreSQL |
+| Data lives in | Feldera's own storage / external connectors | PostgreSQL |
+| Source coverage | Kafka, PostgreSQL CDC, S3, HTTP, and more via connectors | PostgreSQL tables (incl. Citus, foreign tables, DuckLake) |
+| SQL surface | SQL:2016 subset (aggregates, joins, window functions, UDFs) | Very similar surface plus WITH RECURSIVE, LATERAL, GROUPING SETS |
+| Theoretical basis | DBSP Z-sets (same as pg_trickle) | DBSP Z-sets |
+| Latency | Sub-second streaming (push model) | Sub-second with `1s` schedule; in-transaction with IMMEDIATE |
+| Consistency model | Epoch-based snapshot consistency | PostgreSQL MVCC + per-refresh transaction |
+| Operational model | API-driven pipeline management | SQL DDL (`CREATE STREAM TABLE`, `ALTER STREAM TABLE`) |
+| Pricing | Open-source + managed cloud offering | Open-source, runs anywhere PostgreSQL runs |
+| Ecosystem | Kafka-native; Rust/Python SDK | PostgreSQL-native; dbt, CNPG, Grafana |
+
+**Shared DNA:** Both systems use Z-set multiset semantics, support
+nested deltas, and handle the same set of SQL operators (INNER JOIN,
+LEFT JOIN, aggregates, subqueries, etc.) in an incremental manner.
+Feldera's open-source codebase and pg_trickle have independently
+implemented the same core delta rules from the DBSP paper.
+
+**Use Feldera if:** you want a dedicated streaming pipeline service
+with first-class Kafka integration, and you are comfortable managing
+a separate service. Feldera shines when your data arrives from
+multiple heterogeneous sources and you want a unified pipeline API.
+
+**Use pg_trickle if:** your data already lives in PostgreSQL and you
+want the incremental computation to live there too — no extra service
+to deploy, no Kafka required.
+
+---
+
+## vs. DuckDB / DuckLake
+
+[DuckDB](https://duckdb.org/) is an in-process OLAP engine.
+[DuckLake](https://ducklake.select/) is a PostgreSQL-catalog-backed
+Delta Lake / Iceberg format that DuckDB can write and query.
+
+These two projects occupy a *complementary* position to pg_trickle,
+not a competing one. The combination `PostgreSQL + pg_trickle + DuckLake + DuckDB`
+gives you a full modern data stack in a surprisingly small footprint:
+
+| Layer | Tool | Role |
+|---|---|---|
+| OLTP storage | PostgreSQL | Transactional writes |
+| Incremental aggregation | pg_trickle | Keeps derived tables fresh |
+| Historical / analytical archive | DuckLake (on S3) | Long-retention Parquet store |
+| Ad-hoc OLAP queries | DuckDB | Fast analytical queries |
+
+Pg_trickle v0.66+ supports a **DuckLake sink** that writes stream-table
+results directly into DuckLake as Parquet snapshots, closing the full
+bidirectional loop.
+
+| | DuckDB/DuckLake alone | pg_trickle + DuckLake |
+|---|---|---|
+| Incremental maintenance | ✕ (DuckDB re-reads full snapshot) | ✅ (O(Δ) differential refresh) |
+| Lives in PostgreSQL | ✕ | ✅ |
+| Writes to object storage | ✅ (DuckLake native) | ✅ (via DuckLake sink, v0.66+) |
+| Change capture from PostgreSQL | ✕ | ✅ (trigger CDC or WAL CDC) |
+| SQL coverage for IVM | N/A | Full DBSP coverage |
+
+---
+
+## Comprehensive IVM comparison matrix
+
+This table covers the five most commonly evaluated IVM systems across
+eight axes. Ratings are approximate and based on publicly available
+information as of 2026.
+
+### SQL coverage
+
+| Feature | pg_ivm | Materialize | Feldera | DuckDB (MV) | pg_trickle |
+|---|---|---|---|---|---|
+| INNER JOIN | ✅ | ✅ | ✅ | ✅ | ✅ |
+| LEFT / RIGHT JOIN | ✅ (basic) | ✅ | ✅ | ✅ | ✅ |
+| FULL OUTER JOIN | ✕ | ✅ | ✅ | ✅ | ✅ |
+| Aggregates (COUNT, SUM, AVG…) | ✅ | ✅ | ✅ | ✅ | ✅ (39 aggregate functions) |
+| DISTINCT | ✕ | ✅ | ✅ | ✅ | ✅ |
+| HAVING | ✕ | ✅ | ✅ | ✅ | ✅ |
+| Scalar subqueries | ✕ | ✅ | ✕ | ✅ | ✅ |
+| EXISTS / NOT EXISTS | ✕ | ✅ | ✅ | ✅ | ✅ |
+| NOT IN / anti-join | ✕ | ✅ | ✅ | ✅ | ✅ |
+| WITH RECURSIVE | ✕ | ✕ | ✅ | ✅ | ✅ |
+| Window functions | ✕ | ✅ | ✅ | ✅ | ✅ |
+| LATERAL | ✕ | ✅ | ✕ | ✅ | ✅ |
+| GROUPING SETS / CUBE / ROLLUP | ✕ | ✕ | ✕ | ✅ | ✅ |
+| JSON aggregates | ✕ | ✕ | ✕ | ✅ | ✅ |
+
+### Consistency model
+
+| | pg_ivm | Materialize | Feldera | DuckDB (MV) | pg_trickle |
+|---|---|---|---|---|---|
+| Isolation level | PostgreSQL MVCC | Linearizable (own store) | Epoch-based snapshot | Per-query snapshot | PostgreSQL MVCC |
+| Results always fresh? | Yes (immediate) | Yes (streaming) | Yes (epoch-based) | No (manual refresh) | Configurable (IMMEDIATE / scheduled) |
+| Read-your-writes | ✅ | ✅ | ✕ | ✕ | ✅ (IMMEDIATE mode) |
+| Atomic multi-view refresh | ✕ | ✕ | ✅ (pipeline epoch) | ✕ | ✅ (diamond consistency groups) |
+
+### Change data capture (CDC)
+
+| | pg_ivm | Materialize | Feldera | DuckDB (MV) | pg_trickle |
+|---|---|---|---|---|---|
+| Capture mechanism | Statement-level triggers | Logical replication slot | External connectors (Kafka, HTTP, …) | Full re-scan | Row-level AFTER triggers OR WAL CDC |
+| Multi-source | ✕ | ✅ | ✅ | ✕ | ✅ (Citus, foreign tables, DuckLake) |
+| Kafka source | ✕ | ✅ | ✅ | ✕ | ✕ (use Debezium + pg_trickle) |
+| Cost of capture | Medium (trigger overhead) | Medium (replication lag) | Low (connector-based) | High (full scan) | Low to medium (trigger or WAL) |
+
+### Performance profile
+
+| | pg_ivm | Materialize | Feldera | DuckDB (MV) | pg_trickle |
+|---|---|---|---|---|---|
+| Refresh cost per change | O(Δ) | O(Δ) | O(Δ) | O(full table) | O(Δ) |
+| Minimum refresh latency | In-transaction | Sub-second | Sub-second | Manual trigger | In-transaction (IMMEDIATE) or ≥ 1 s (scheduled) |
+| Throughput at scale | Medium (single PG) | High (distributed) | High (parallel pipeline) | High (columnar OLAP) | Medium-high (parallel refresh pool) |
+| TPC-H 22/22 differentially | ✕ | ✅ | ✅ | ✕ | ✅ (v0.23.0+) |
+
+### Operational model
+
+| | pg_ivm | Materialize | Feldera | DuckDB (MV) | pg_trickle |
+|---|---|---|---|---|---|
+| Deployment unit | PostgreSQL extension | Separate database service | Separate service (Docker / cloud) | In-process library | PostgreSQL extension |
+| Admin surface | SQL DDL | Platform API + SQL | Pipeline YAML + SQL | SQL | SQL (`CREATE STREAM TABLE`) |
+| Monitoring | None built-in | Materialize console | Metrics endpoint | None built-in | 30+ SQL functions, Prometheus, Grafana |
+| Backup / restore | PostgreSQL pg_dump | Managed (cloud) | External | DuckDB export | PostgreSQL pg_dump (v0.8.0+) |
+| High availability | PostgreSQL HA | Built-in (cloud) | External | External | CNPG / Patroni + pg_trickle HA guide |
+| Multi-tenant | RLS on base tables | Isolated environments | Isolated pipelines | File-level isolation | RLS on stream tables (v0.5.0+) |
+| dbt integration | ✕ | ✅ (dbt-materialize) | ✕ | ✅ (dbt-duckdb) | ✅ (dbt-pgtrickle, v0.15.0+) |
+
+> **Disclaimer:** Feature support changes rapidly in all these projects.
+> Verify current capabilities in each project's own documentation before
+> making a production architecture decision.
 
 ---
 

@@ -555,7 +555,7 @@ the plain-language overview, or jump straight to a topic below.
 | [Security Guide](docs/SECURITY_GUIDE.md) | Roles, grants, RLS, auditing |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptoms → diagnosis → fix |
 | [Error Reference](docs/ERRORS.md) | Every PgTrickleError variant with SQLSTATE |
-| [GUC Catalog](docs/GUC_CATALOG.md) | All 115 configuration parameters with types and defaults |
+| [GUC Catalog](docs/GUC_CATALOG.md) | All generated configuration parameters with types and defaults |
 
 ### Distributed & streaming
 

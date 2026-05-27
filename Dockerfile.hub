@@ -12,14 +12,14 @@
 # which is scratch-based and extension-files only.
 #
 # Build (from project root):
-#   docker build -t pgtrickle/pg_trickle:0.11.0-pg18 -f Dockerfile.hub .
+#   docker build -t pgtrickle/pg_trickle:<version>-pg18 -f Dockerfile.hub .
 #
 # Run (getting started):
-#   docker run --rm -e POSTGRES_PASSWORD=secret pgtrickle/pg_trickle:0.11.0-pg18
+#   docker run --rm -e POSTGRES_PASSWORD=secret pgtrickle/pg_trickle:<version>-pg18
 #
 # Scale up memory at runtime without rebuilding:
 #   docker run --rm -e POSTGRES_PASSWORD=secret \
-#     pgtrickle/pg_trickle:0.11.0-pg18 \
+#     pgtrickle/pg_trickle:<version>-pg18 \
 #     -c shared_buffers=2GB -c work_mem=64MB -c effective_cache_size=6GB
 #
 # Default GUC settings are documented in docker/pg_trickle-defaults.conf.
@@ -28,7 +28,7 @@
 # ── Stage 1: Prepare build environment ─────────────────────────────────────
 FROM postgres:18-bookworm AS build-env
 
-ARG VERSION=0.74.0
+ARG VERSION=0.75.0
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -101,7 +101,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # ── Stage 2: Runtime image ────────────────────────────────────────────────────
 FROM postgres:18-bookworm
 
-ARG VERSION=0.74.0
+ARG VERSION=0.75.0
 ARG REPO_URL=https://github.com/trickle-labs/pg-trickle
 
 LABEL org.opencontainers.image.title="pg_trickle" \
