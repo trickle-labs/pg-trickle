@@ -169,7 +169,7 @@ from O(N) to O(1) (combined with the v0.62 fan-out optimisation).
 - **Temporal IVM**: `temporal := true` on `create_stream_table` adds
   `__pgt_valid_from` / `__pgt_valid_to` columns for SCD Type-2 patterns
 - **Columnar storage backends**: `storage_backend` parameter accepts
-  `'citus'` (Citus columnar) or `'pg_mooncake'`
+  `'citus'` (Citus columnar)
 - **Drain mode**: `pgtrickle.drain()` gracefully quiesces the scheduler
   before maintenance windows or `pg_upgrade`
 - **L0 process-local template cache**: eliminates the ~45 ms cold-start

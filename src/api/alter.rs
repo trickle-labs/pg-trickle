@@ -1115,7 +1115,7 @@ pub(crate) struct CreateStreamTableOptions<'a> {
     /// CORR-1/UX-1 (v0.36.0): temporal IVM mode.
     pub(crate) temporal_mode: bool,
     /// CORR-2/UX-3 (v0.36.0): columnar storage backend
-    /// (`"heap"`, `"citus"`, `"pg_mooncake"`, or `"none"`).
+    /// (`"heap"`, `"citus"`, or `"none"`).
     pub(crate) storage_backend: Option<&'a str>,
     /// F-2 (v0.66.0): DuckLake sink output mode (`"ducklake"`, `"none"`, or `NULL`).
     pub(crate) ducklake_sink: Option<&'a str>,
@@ -1437,10 +1437,10 @@ pub(crate) fn create_stream_table_impl(
         Some(b) => {
             let b = b.to_lowercase();
             match b.as_str() {
-                "heap" | "citus" | "pg_mooncake" | "none" => b,
+                "heap" | "citus" | "none" => b,
                 other => {
                     return Err(PgTrickleError::InvalidArgument(format!(
-                        "invalid storage_backend '{}': expected 'heap', 'citus', 'pg_mooncake', or 'none'",
+                        "invalid storage_backend '{}': expected 'heap', 'citus', or 'none'",
                         other
                     )));
                 }
@@ -1452,7 +1452,6 @@ pub(crate) fn create_stream_table_impl(
             match pg_trickle_columnar_backend() {
                 ColumnarBackend::None => "heap".to_string(),
                 ColumnarBackend::Citus => "citus".to_string(),
-                ColumnarBackend::PgMooncake => "pg_mooncake".to_string(),
             }
         }
     };

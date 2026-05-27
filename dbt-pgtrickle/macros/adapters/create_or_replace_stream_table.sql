@@ -16,7 +16,7 @@
                              Only applied on creation; ignored if the stream table already exists.
     append_only (bool): Skip delete bookkeeping for insert-only sources (default false)
     temporal (bool): Enable temporal IVM mode (default false)
-    storage_backend (str|none): Columnar backend ('heap','citus','pg_mooncake','unlogged')
+    storage_backend (str|none): Columnar backend ('heap','citus','unlogged')
     diamond_consistency (str|none): Diamond dependency consistency ('STRICT','RELAXED')
     diamond_schedule_policy (str|none): Diamond scheduling policy ('ATOMIC','INDEPENDENT')
     pooler_compatibility_mode (bool): pgBouncer/Odyssey compatibility (default false)

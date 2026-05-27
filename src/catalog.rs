@@ -225,7 +225,6 @@ pub struct StreamTableMeta {
     /// CORR-2 (v0.36.0): Storage backend for the stream table output.
     /// 'heap' = standard PostgreSQL heap (default).
     /// 'citus' = Citus columnar extension.
-    /// 'pg_mooncake' = pg_mooncake columnar tables.
     pub storage_backend: String,
     /// VP-1 (v0.47.0): Action to run after a successful refresh commit.
     /// 'none' = no action (default), 'analyze' = run ANALYZE,
