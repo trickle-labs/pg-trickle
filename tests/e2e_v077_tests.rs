@@ -214,14 +214,14 @@ async fn test_d2_savepoint_rollback_no_ghost_rows() {
 
     // Begin a transaction, INSERT inside a SAVEPOINT, then roll back the SAVEPOINT.
     // The 3 original rows must still be present; no ghost row for id=99.
-    db.execute(
-        "BEGIN;\
-         INSERT INTO d2_src VALUES (99, 'ghost');\
-         SAVEPOINT sp1;\
-         INSERT INTO d2_src VALUES (100, 'also_ghost');\
-         ROLLBACK TO SAVEPOINT sp1;\
-         ROLLBACK",
-    )
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO d2_src VALUES (99, 'ghost')",
+        "SAVEPOINT sp1",
+        "INSERT INTO d2_src VALUES (100, 'also_ghost')",
+        "ROLLBACK TO SAVEPOINT sp1",
+        "ROLLBACK",
+    ])
     .await;
 
     let count = db.count("public.d2_st").await;
@@ -262,14 +262,14 @@ async fn test_d2_partial_savepoint_rollback_committed_rows_visible() {
     assert_eq!(db.count("public.d2b_st").await, 1, "D-2b: pre-condition");
 
     // Commit a row, then roll back a subsequent SAVEPOINT.
-    db.execute(
-        "BEGIN;\
-         INSERT INTO d2b_src VALUES (2, 'committed');\
-         SAVEPOINT sp1;\
-         INSERT INTO d2b_src VALUES (3, 'rolled_back');\
-         ROLLBACK TO SAVEPOINT sp1;\
-         COMMIT",
-    )
+    db.execute_seq(&[
+        "BEGIN",
+        "INSERT INTO d2b_src VALUES (2, 'committed')",
+        "SAVEPOINT sp1",
+        "INSERT INTO d2b_src VALUES (3, 'rolled_back')",
+        "ROLLBACK TO SAVEPOINT sp1",
+        "COMMIT",
+    ])
     .await;
 
     let count = db.count("public.d2b_st").await;
@@ -318,17 +318,17 @@ async fn test_d2_nested_savepoints_full_rollback_no_ghost_rows() {
     assert_eq!(db.count("public.d2c_st").await, 5, "D-2c: pre-condition");
 
     // Nested savepoints — rollback to outer savepoint discards inner work.
-    db.execute(
-        "BEGIN;\
-         SAVEPOINT outer_sp;\
-         INSERT INTO d2c_src VALUES (10, 10);\
-         SAVEPOINT inner_sp;\
-         INSERT INTO d2c_src VALUES (11, 11);\
-         RELEASE SAVEPOINT inner_sp;\
-         INSERT INTO d2c_src VALUES (12, 12);\
-         ROLLBACK TO SAVEPOINT outer_sp;\
-         ROLLBACK",
-    )
+    db.execute_seq(&[
+        "BEGIN",
+        "SAVEPOINT outer_sp",
+        "INSERT INTO d2c_src VALUES (10, 10)",
+        "SAVEPOINT inner_sp",
+        "INSERT INTO d2c_src VALUES (11, 11)",
+        "RELEASE SAVEPOINT inner_sp",
+        "INSERT INTO d2c_src VALUES (12, 12)",
+        "ROLLBACK TO SAVEPOINT outer_sp",
+        "ROLLBACK",
+    ])
     .await;
 
     let count = db.count("public.d2c_st").await;
