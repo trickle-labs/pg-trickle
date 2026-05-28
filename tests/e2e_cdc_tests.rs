@@ -1164,12 +1164,15 @@ async fn test_t4_truncate_lsn_insert_ordering_regression() {
     // The TRUNCATE trigger must record an LSN ≤ the INSERT LSNs; if the
     // C-1 bug were present, it would record a stale LSN that makes the
     // engine believe all post-TRUNCATE INSERTs happened before the TRUNCATE.
-    db.execute(
-        "BEGIN;\
-         TRUNCATE t4_src;\
-         INSERT INTO t4_src SELECT g, 'post_' || g FROM generate_series(100, 115) g;\
-         COMMIT",
-    )
+    // Use execute_seq so all statements share the same connection (required
+    // for transaction semantics) without hitting the prepared-statement
+    // restriction that bans multiple commands in a single query string.
+    db.execute_seq(&[
+        "BEGIN",
+        "TRUNCATE t4_src",
+        "INSERT INTO t4_src SELECT g, 'post_' || g FROM generate_series(100, 115) g",
+        "COMMIT",
+    ])
     .await;
 
     // Refresh — must detect TRUNCATE marker and fall back to FULL.
