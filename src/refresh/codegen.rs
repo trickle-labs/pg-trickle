@@ -1688,23 +1688,39 @@ pub(crate) fn resolve_lsn_placeholders(
     new_frontier: &Frontier,
     zero_change_oids: &std::collections::HashSet<u32>,
 ) -> Result<String, PgTrickleError> {
-    // C-2: Assert every source OID has both LSN placeholder tokens in the
-    // template before we start substituting.  If a placeholder is absent the
-    // codegen produced a delta template that silently ignores a source table —
-    // any changes to that table would be missed and the ST would drift.
+    // C-2: For every source OID whose LSN placeholders appear in the template,
+    // assert that BOTH halves (PREV and NEW) are present before substituting.
+    // If a template contains one half but not the other, the codegen produced
+    // an asymmetric LSN window that would miss changes or double-count them.
+    //
+    // We intentionally do NOT require that every OID in source_oids has tokens
+    // in the template — valid delta SQL may omit a source table entirely (e.g.
+    // delete-rederivation paths that reference only some sources).
     //
     // Exception: ST-to-ST sources use a "pgt_" key prefix and are handled
     // by the separate pgt_prefix block below — skip the check for those.
     for &oid in source_oids {
         let prev_tok = format!("__PGS_PREV_LSN_{oid}__");
         let new_tok = format!("__PGS_NEW_LSN_{oid}__");
-        if !template.contains(&prev_tok) || !template.contains(&new_tok) {
+        let has_prev = template.contains(&prev_tok);
+        let has_new = template.contains(&new_tok);
+        if has_prev && !has_new {
+            return Err(PgTrickleError::UnresolvedPlaceholder {
+                token: new_tok.clone(),
+                context: format!(
+                    "C-2: source OID {oid} has PREV LSN placeholder but NEW LSN \
+                     placeholder ({new_tok}) is absent — asymmetric LSN window in \
+                     the delta template"
+                ),
+            });
+        }
+        if has_new && !has_prev {
             return Err(PgTrickleError::UnresolvedPlaceholder {
                 token: prev_tok.clone(),
                 context: format!(
-                    "C-2: source OID {oid} LSN placeholder ({prev_tok}) is absent \
-                     from the delta template — codegen may have silently dropped \
-                     this source table"
+                    "C-2: source OID {oid} has NEW LSN placeholder but PREV LSN \
+                     placeholder ({prev_tok}) is absent — asymmetric LSN window in \
+                     the delta template"
                 ),
             });
         }
