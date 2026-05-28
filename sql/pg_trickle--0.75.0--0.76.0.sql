@@ -17,6 +17,15 @@ UPDATE pgtrickle.pgt_stream_tables
 SET    storage_backend = 'heap'
 WHERE  storage_backend = 'pg_mooncake';
 
+-- HOT-1 compatibility backfill:
+-- The archived 0.75.0 install SQL predates storage_fillfactor. Ensure direct
+-- 0.75.0 -> 0.76.0 upgrades add the column so catalog reads/writes succeed.
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS storage_fillfactor INT
+        CONSTRAINT pgt_storage_fillfactor_range
+        CHECK (storage_fillfactor IS NULL OR
+               (storage_fillfactor >= 10 AND storage_fillfactor <= 100));
+
 -- ── DuckLake integration removal ──────────────────────────────────────────
 -- All DuckLake sink and change-feed source integration has been removed in
 -- v0.76.0. The pg_ducklake extension uses a native table AM (not FDW), making
