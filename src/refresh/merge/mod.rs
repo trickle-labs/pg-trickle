@@ -437,6 +437,35 @@ pub fn execute_differential_refresh(
         return Ok((0, 0));
     }
 
+    // ── C-3/DVM-1: CASE/IN-list aggregate drift detection ─────────────
+    // Queries with SUM/COUNT(CASE…) + IN-list WHERE predicates have known
+    // DVM drift: the incremental delta rule produces non-deterministic
+    // results.  Force FULL fallback with an explicit reason code until the
+    // root-cause delta rule is implemented in v0.78.0.
+    if crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query) {
+        crate::refresh::set_refresh_reason("CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK");
+        return Err(PgTrickleError::QueryTooComplex(format!(
+            "CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK: {schema}.{name} uses a CASE \
+             aggregate with an IN-list WHERE predicate — known DVM drift, \
+             forcing FULL refresh (fix planned for v0.78.0)"
+        )));
+    }
+
+    // ── DVM-2/P-1: Correlated aggregate subquery in WHERE detection ───
+    // Queries with a scalar correlated aggregate subquery in the WHERE
+    // clause (e.g. col > (SELECT SUM(…) FROM t WHERE t.k = outer.k))
+    // produce O(delta × table) DVM delta SQL.  Force FULL fallback with an
+    // explicit reason code until the pre-aggregation CTE rewrite lands in
+    // v0.78.0.
+    if crate::refresh::classify_correlated_aggregate_subquery_in_where(&st.defining_query) {
+        crate::refresh::set_refresh_reason("CORRELATED_SUBQUERY_DELTA_QUADRATIC");
+        return Err(PgTrickleError::QueryTooComplex(format!(
+            "CORRELATED_SUBQUERY_DELTA_QUADRATIC: {schema}.{name} has a correlated \
+             aggregate subquery in WHERE — O(delta × table) complexity, \
+             forcing FULL refresh (fix planned for v0.78.0)"
+        )));
+    }
+
     // ── DI-7: Join-count complexity guard ────────────────────────────
     // Parse the defining query (lightweight — no differentiation) to count
     // Scan nodes in the join tree. Used for:
@@ -2866,6 +2895,35 @@ pub fn execute_differential_refresh(
     // The trace context was stored in __pgt_trace_context at CDC capture time.
     // We read it from the change buffer's earliest recent row and emit a child span.
     emit_trace_span_if_enabled(st, "DIFFERENTIAL", start_ns);
+
+    // DVM-3: Delta invariant validation (enabled by GUC; off by default).
+    // When enabled, compare the stream table's row count against a full
+    // recomputation of the defining query.  A mismatch indicates the
+    // differential delta produced an incorrect result and is logged as a WARNING.
+    if crate::config::pg_trickle_validate_delta_invariants() {
+        let st_count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*)::bigint FROM \"{schema_esc}\".\"{name_esc}\"",
+            schema_esc = schema.replace('"', "\"\""),
+            name_esc = name.replace('"', "\"\""),
+        ))
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+
+        let dq_count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*)::bigint FROM ({dq}) AS __pgt_dvm3_validate",
+            dq = st.defining_query,
+        ))
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+
+        if st_count != dq_count {
+            pgrx::warning!(
+                "[pg_trickle] DVM-3: delta invariant violation for {schema}.{name}: \
+                 stream table has {st_count} rows but defining query returns \
+                 {dq_count} rows after applying delta (+{effective_count} effective rows)",
+            );
+        }
+    }
 
     Ok((effective_count, 0))
 }

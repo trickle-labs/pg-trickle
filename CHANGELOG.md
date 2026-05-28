@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.77.0 — Correctness Stop-the-Line & DVM Proof Infrastructure](#0770--correctness-stop-the-line--dvm-proof-infrastructure)
 - [0.75.0 — API Polish, Documentation Excellence & Developer Experience](#0750--api-polish-documentation-excellence--developer-experience)
 - [0.74.0 — Test Coverage, CI Integrity & Security Hardening](#0740--test-coverage-ci-integrity--security-hardening)
 - [0.73.0 — Monitoring Scalability, Operational Resilience & HOT-Friendly Storage](#0730--monitoring-scalability-operational-resilience--hot-friendly-storage)
@@ -90,6 +91,94 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.77.0] — Correctness Stop-the-Line & DVM Proof Infrastructure
+
+### What's New
+
+v0.77.0 is the first release of the Assessment-15 Hardening Arc.
+It delivers a correctness hard gate: no new features, no schema changes —
+only fixes to known DVM bugs, safety assertions that fail loudly on
+correctness violations, and tests that prove the fixes are permanent.
+
+#### C-1 — TRUNCATE LSN fix
+
+The TRUNCATE CDC trigger was using `pg_current_wal_lsn()` (the WAL write
+position) instead of `pg_current_wal_insert_lsn()` (the insert position).
+Inside a transaction, the insert position is always at or ahead of the write
+position. This meant that when a TRUNCATE and subsequent INSERTs were committed
+in the same transaction, the refresh engine could silently lose the
+post-TRUNCATE rows. Fixed.
+
+Two regression tests (`test_t4_truncate_lsn_insert_ordering_regression` and
+`test_t4b_truncate_then_insert_separate_transactions`) verify the fix.
+
+#### C-2 — Source-placeholder coverage assertion
+
+The delta template resolver now verifies that every source OID has both
+`__PGS_PREV_LSN_{oid}__` and `__PGS_NEW_LSN_{oid}__` placeholder tokens in
+the generated delta SQL. If a token is missing, it means a source table was
+silently dropped from the delta — changes to that table would be missed and
+the stream table would drift. The resolver now fails fast and triggers a
+full reinitialisation.
+
+#### C-3/DVM-1 — TPC-H q12 CASE/IN-list drift → forced FULL
+
+Queries with `SUM(CASE…)` or `COUNT(CASE…)` combined with an `IN (…)` predicate
+in WHERE can produce non-deterministic incremental results (the delta rule
+double-counts rows under certain orderings). v0.77.0 detects this pattern
+and forces FULL refresh with reason code `CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK`.
+The root-cause delta rule fix is planned for v0.78.0.
+
+#### DVM-2/P-1 — TPC-H q20 correlated aggregate subquery → forced FULL
+
+Queries with a comparison against a correlated aggregate scalar subquery in
+WHERE (e.g., `qty > (SELECT SUM(…) FROM lineitem WHERE l_partkey = ps_partkey)`)
+produce O(delta × table) DVM delta SQL. At SF=10 this takes 45+ minutes per
+refresh cycle. v0.77.0 detects this pattern and forces FULL refresh with
+reason code `CORRELATED_SUBQUERY_DELTA_QUADRATIC`. The pre-aggregation CTE
+rewrite is planned for v0.78.0.
+
+#### D-1 — Multi-consumer cleanup advisory lock
+
+When two stream tables share a source table, concurrent cleanup workers could
+race on the min-frontier computation + DELETE. v0.77.0 adds a non-blocking
+`pg_try_advisory_xact_lock(oid::bigint)` call — one worker owns the cleanup
+window per source OID per transaction; the other skips and retries next tick.
+
+#### D-2 — IMMEDIATE mode SAVEPOINT/rollback tests
+
+Three new E2E tests verify that IMMEDIATE mode stream tables correctly handle
+transaction rollbacks: full rollback, partial SAVEPOINT rollback (committed
+rows visible, rolled-back rows absent), and nested SAVEPOINT rollback.
+
+#### DVM-3 — `pg_trickle.validate_delta_invariants` GUC
+
+New boolean GUC (default: `false`). When enabled, after every DIFFERENTIAL
+refresh the extension compares the stream table row count against a full
+recomputation of the defining query and emits a WARNING on any discrepancy.
+Enable only for debugging or CI validation — significant performance impact.
+
+#### T-1 — DVM algebra property generators
+
+12 new property-based unit tests cover the C-3/DVM-1 and DVM-2/P-1 detection
+functions: canonical true-positive patterns (q12, q20), case-insensitive
+variants, and false-positive guards (benign aggregates, simple scans).
+
+#### C-4 — Semgrep CI rule formalised
+
+The existing `rust.panic-in-sql-path` semgrep rule already blocks
+`.unwrap()`, `.expect()`, and `panic!()` in non-test code on every PR.
+v0.77.0 formally annotates it as the Assessment-15 C-4 hard gate.
+
+### Upgrade notes
+
+No schema changes. The upgrade is a no-op:
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.77.0';
+```
 
 ---
 

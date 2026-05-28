@@ -95,21 +95,12 @@ const LARGE_SCALE_SKIP_THRESHOLD: f64 = 10.0;
 /// SF≥10. They are pre-skipped to prevent the 90-minute nextest slow-timeout
 /// from killing the whole test function.
 ///
-/// Root cause: the DVM delta SQL for these queries contains a correlated scalar
-/// subquery in the WHERE clause. The subquery is re-evaluated for every row in
-/// the CDC delta, giving O(delta × table) complexity. At SF-10 with accumulated
-/// CDC events this becomes quadratic and exceeds the per-test timeout.
-const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &[
-    // q20: Semi-Join + nested correlated scalar subquery
-    //   `ps_availqty > (SELECT 0.5 * SUM(l_quantity) FROM lineitem
-    //                   WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey AND ...)`
-    // DVM re-executes the lineitem subquery for every changed row in the delta.
-    // At SF=10 (6M lineitems), cycle 2 takes 45+ minutes and triggers the
-    // 90-minute nextest slow-timeout, killing the whole test function.
-    // Tracked for fix: replace correlated subquery with a pre-aggregated CTE
-    // in the DVM delta rewrite (DVM rewrite rule for semi-join EXISTS/IN).
-    "q20",
-];
+/// v0.77.0: This list is now empty. Previously q20 was listed here because
+/// the correlated aggregate subquery in its WHERE clause produced O(delta ×
+/// table) DVM delta SQL. As of v0.77.0 the DVM-2/P-1 fallback detection in
+/// execute_differential_refresh forces q20 to run as FULL at all scale factors,
+/// so large-scale performance is no longer a concern.
+const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &[];
 
 /// Queries allowed to be skipped in IMMEDIATE mode.
 /// Queries that fail `create_stream_table(..., 'IMMEDIATE')` due to IVM
@@ -1943,17 +1934,19 @@ async fn test_tpch_sustained_churn() {
     //   q10 — 4-table join + GROUP BY aggregate
     //   q14 — 2-table join + CASE aggregate (CASE WHEN path)
     //   q22 — NOT EXISTS correlated subquery
-    // NOTE: q12 excluded — known DVM drift (CASE WHEN IN-list produces
-    // non-deterministic incremental results).
     // NOTE: q05 excluded — reliably exceeds temp_file_limit (6-table join).
     // P2.10: Added q04 to cover the EXISTS subquery operator path, which was
     // previously untested in sustained churn.
+    // v0.77.0 (C-3/DVM-1): q12 re-added. Its CASE/IN-list pattern forces a
+    // FULL fallback via classify_case_in_list_aggregate_drift, so it now
+    // produces correct results in DIFFERENTIAL mode at all scale factors.
     let churn_queries: Vec<(&str, &str)> = vec![
         ("q01", include_str!("tpch/queries/q01.sql")),
         ("q03", include_str!("tpch/queries/q03.sql")),
         ("q04", include_str!("tpch/queries/q04.sql")),
         ("q06", include_str!("tpch/queries/q06.sql")),
         ("q10", include_str!("tpch/queries/q10.sql")),
+        ("q12", include_str!("tpch/queries/q12.sql")),
         ("q14", include_str!("tpch/queries/q14.sql")),
         ("q22", include_str!("tpch/queries/q22.sql")),
     ];

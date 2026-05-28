@@ -335,6 +335,36 @@ pub(crate) fn drain_pending_cleanups() {
             continue;
         }
 
+        // D-1: Per-source advisory lock around min-frontier computation + DML.
+        //
+        // Without this lock, two concurrent refresh workers serving different
+        // stream tables that share the same source OID can both compute the
+        // same min-frontier, then both delete the same rows.  That is safe
+        // (DELETE of already-deleted rows is a no-op) but wastes work and
+        // can cause spurious "no rows found" in timing-sensitive tests.
+        //
+        // With the lock: exactly one worker owns the cleanup window for each
+        // source OID per transaction.  The other worker skips and lets the
+        // owner handle cleanup; the skipped rows will be cleaned in the next
+        // cycle.  `pg_try_advisory_xact_lock` is non-blocking (returns false
+        // on contention) and the lock is released automatically at transaction
+        // end — no explicit unlock required.
+        //
+        // The lock key is the source OID cast to bigint.  OIDs are 32-bit, so
+        // the bigint is always non-negative and unique per source table.
+        let lock_acquired =
+            Spi::get_one::<bool>(&format!("SELECT pg_try_advisory_xact_lock({oid}::bigint)"))
+                .unwrap_or(Some(true))
+                .unwrap_or(true);
+        if !lock_acquired {
+            pgrx::debug1!(
+                "[pg_trickle] D-1: cleanup advisory lock contended for OID {}, \
+                 skipping this cycle",
+                oid,
+            );
+            continue;
+        }
+
         // Compute the minimum frontier LSN across ALL stream tables that
         // depend on this source OID.  Only entries at or below this LSN
         // have been consumed by every consumer and are safe to delete.
@@ -1658,6 +1688,28 @@ pub(crate) fn resolve_lsn_placeholders(
     new_frontier: &Frontier,
     zero_change_oids: &std::collections::HashSet<u32>,
 ) -> Result<String, PgTrickleError> {
+    // C-2: Assert every source OID has both LSN placeholder tokens in the
+    // template before we start substituting.  If a placeholder is absent the
+    // codegen produced a delta template that silently ignores a source table —
+    // any changes to that table would be missed and the ST would drift.
+    //
+    // Exception: ST-to-ST sources use a "pgt_" key prefix and are handled
+    // by the separate pgt_prefix block below — skip the check for those.
+    for &oid in source_oids {
+        let prev_tok = format!("__PGS_PREV_LSN_{oid}__");
+        let new_tok = format!("__PGS_NEW_LSN_{oid}__");
+        if !template.contains(&prev_tok) || !template.contains(&new_tok) {
+            return Err(PgTrickleError::UnresolvedPlaceholder {
+                token: prev_tok.clone(),
+                context: format!(
+                    "C-2: source OID {oid} LSN placeholder ({prev_tok}) is absent \
+                     from the delta template — codegen may have silently dropped \
+                     this source table"
+                ),
+            });
+        }
+    }
+
     let mut sql = template.to_string();
     for &oid in source_oids {
         if zero_change_oids.contains(&oid) {

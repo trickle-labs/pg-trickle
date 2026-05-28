@@ -1647,6 +1647,20 @@ pub static PGS_ENABLE_CHANGE_BUFFER_FANOUT: GucSetting<bool> = GucSetting::<bool
 /// Default: 30 seconds. Range: 1–3600.
 pub static PGS_SCHEDULER_DRAIN_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
 
+/// DVM-3 (v0.77.0): After each DIFFERENTIAL refresh, compare stream table row
+/// count against a full recomputation and emit a WARNING on any discrepancy.
+///
+/// When `true`, after every successful differential MERGE the scheduler runs
+/// `SELECT count(*) FROM (defining_query) AS __pgt_validate` and compares the
+/// result against `SELECT count(*) FROM stream_table`.  A mismatch indicates
+/// that the differential delta produced an incorrect result.
+///
+/// **Performance impact:** significant — runs the full defining query after
+/// every differential refresh.  Enable only for debugging or in CI validation.
+///
+/// Default: `false`.
+pub static PGS_VALIDATE_DELTA_INVARIANTS: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -3218,6 +3232,21 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // ── v0.77.0 GUCs ───────────────────────────────────────────────────────
+
+    // DVM-3: Delta invariant validation GUC.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.validate_delta_invariants",
+        c"DVM-3: Validate DIFFERENTIAL refresh results against full recomputation (v0.77.0).",
+        c"When true, after every successful differential MERGE the scheduler compares \
+          the stream table row count against a full recomputation of the defining query \
+          and emits a WARNING on any discrepancy. Significant performance impact — \
+          enable only for debugging or in CI validation. Default: false.",
+        &PGS_VALIDATE_DELTA_INVARIANTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 /// PERF-1 (v0.62.0): Returns whether the change-buffer fan-out deduplication is enabled.
@@ -3233,6 +3262,11 @@ pub fn pg_trickle_scheduler_drain_timeout() -> i32 {
 /// PERF-2 (v0.63.0): Returns whether CTE-fused multi-node refresh is enabled.
 pub fn pg_trickle_enable_fused_refresh() -> bool {
     PGS_ENABLE_FUSED_REFRESH.get()
+}
+
+/// DVM-3 (v0.77.0): Returns whether differential refresh result validation is enabled.
+pub fn pg_trickle_validate_delta_invariants() -> bool {
+    PGS_VALIDATE_DELTA_INVARIANTS.get()
 }
 
 /// PERF-2 (v0.63.0): Returns the maximum delta-row cardinality for fusion eligibility.

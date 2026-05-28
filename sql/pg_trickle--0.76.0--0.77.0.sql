@@ -1,0 +1,39 @@
+-- pg_trickle 0.76.0 -> 0.77.0 upgrade migration
+-- v0.77.0: Correctness Stop-the-Line & DVM Proof Infrastructure
+
+-- This release is a pure correctness and testing hardening release.
+-- It introduces no schema changes, no new catalog columns, and no new
+-- SQL functions.  All changes are in the Rust extension binary.
+--
+-- Summary of changes in v0.77.0:
+--
+--   C-1: TRUNCATE CDC trigger now uses pg_current_wal_insert_lsn()
+--        (was pg_current_wal_lsn()) — ensures correct LSN ordering when
+--        post-TRUNCATE INSERTs arrive in the same transaction.
+--
+--   C-2: Source-placeholder coverage assertion in the delta template
+--        resolver: returns an error (triggering reinit) if a source OID
+--        is missing from the generated delta SQL.
+--
+--   C-3/DVM-1: CASE aggregate with IN-list WHERE predicate (q12-like)
+--              forces FULL refresh with reason code
+--              CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK.
+--
+--   DVM-2/P-1: Correlated aggregate scalar subquery in WHERE (q20-like)
+--              forces FULL refresh with reason code
+--              CORRELATED_SUBQUERY_DELTA_QUADRATIC.
+--
+--   D-1: Per-source advisory lock in drain_pending_cleanups to prevent
+--        concurrent cleanup workers from racing on the min-frontier
+--        computation.
+--
+--   DVM-3: New GUC pg_trickle.validate_delta_invariants (default: false).
+--          When true, after each DIFFERENTIAL refresh a row-count
+--          comparison is run against the defining query and a WARNING is
+--          emitted on any discrepancy.
+--
+-- No catalog migration is required for this release.
+-- The upgrade is safe to apply with zero downtime.
+
+-- intentional no-op: no schema changes in v0.77.0
+SELECT 1;
