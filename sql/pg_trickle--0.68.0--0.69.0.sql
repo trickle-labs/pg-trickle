@@ -76,6 +76,5 @@ RETURNS TABLE (
     "failed_attempts"      bigint,
     "last_error"           TEXT
 )
-STRICT
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'ducklake_sink_status_wrapper';
+LANGUAGE sql
+AS $$ SELECT NULL::text, NULL::text, NULL::timestamptz, NULL::bigint, NULL::bigint, NULL::bigint, NULL::text WHERE false $$;
