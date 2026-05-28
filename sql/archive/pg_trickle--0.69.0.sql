@@ -2469,9 +2469,8 @@ CREATE  FUNCTION pgtrickle."ducklake_sink_status"() RETURNS TABLE (
 	"failed_attempts" bigint,  /* i64 */
 	"last_error" TEXT  /* Option < String > */
 )
-STRICT  
-LANGUAGE c /* Rust */
-AS 'MODULE_PATHNAME', 'ducklake_sink_status_wrapper';
+LANGUAGE sql
+AS $$ SELECT NULL::text, NULL::text, NULL::timestamptz, NULL::bigint, NULL::bigint, NULL::bigint, NULL::text WHERE false $$;
 /* </end connected objects> */
 
 /* <begin connected objects> */

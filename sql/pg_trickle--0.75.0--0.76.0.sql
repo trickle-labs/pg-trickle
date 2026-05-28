@@ -55,6 +55,11 @@ ALTER TABLE pgtrickle.pgt_dependencies
 DROP TABLE IF EXISTS pgtrickle.pgt_ducklake_sink_delivery;
 DROP TABLE IF EXISTS pgtrickle.pgt_ducklake_provenance;
 
+-- Remove the ducklake_sink_status() monitoring function (added in v0.69.0).
+-- The C symbol (ducklake_sink_status_wrapper) was removed from the binary in
+-- v0.76.0, so the function would fail if called. Drop it explicitly.
+DROP FUNCTION IF EXISTS pgtrickle.ducklake_sink_status();
+
 -- Migrate any DUCKLAKE_CHANGE_FEED rows back to TRIGGER (safe fallback).
 UPDATE pgtrickle.pgt_dependencies
 SET    cdc_mode = 'TRIGGER'
