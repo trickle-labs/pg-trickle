@@ -347,6 +347,50 @@ pg_trickle. The decision is driven by three architectural insights:
 |---------|-------|--------|-------|--------------|
 | [v0.76.0](roadmap/v0.76.0.md) | Complete DuckLake Integration Removal: delete `src/ducklake_sink.rs` + all sink infrastructure; remove `DUCKLAKE_CHANGE_FEED` CDC mode and all polling/trigger functions; drop `ducklake_*` columns, `pgt_ducklake_provenance`, `pgt_ducklake_sink_delivery` tables; remove `arrow-array`, `arrow-schema`, `parquet`, `object_store`, `bytes` Cargo deps; remove all DuckLake GUCs and accessors; update upgrade SQL | ✅ Released | Medium | [Full details](roadmap/v0.76.0.md) |
 
+### Assessment-15-Driven Hardening Arc (v0.77.x – v0.80.x)
+
+Driven by the findings in the v0.76.0 overall assessment
+([plans/PLAN_OVERALL_ASSESSMENT_15.md](plans/PLAN_OVERALL_ASSESSMENT_15.md)).
+The assessment found 1 critical, 5 HIGH, 13 MEDIUM, and 8 LOW findings across
+correctness (TRUNCATE CDC captures the wrong WAL position, q12 CASE/IN-list DVM
+drift excluded from churn tests, q20 correlated subquery O(delta×table) at
+scale, placeholder source-coverage validation gap), data durability (multi-consumer
+change-buffer cleanup has no explicit per-source lock around min-frontier plus
+DELETE, IMMEDIATE mode SAVEPOINT coverage absent), performance (correlated scalar
+subqueries in WHERE can be O(delta×table) at high scale factors, regex-only query
+complexity classifier can misclassify complex forms, cost model queries recent
+rows from `pgt_refresh_history` per stream table instead of using the precomputed
+summary table, placeholder resolver cache uses a 64-bit hash key with no collision
+guard), code quality (28 consecutive unused-import suppressions in SQL codegen
+modules, too-many-arguments suppressions across create/alter paths, global
+`#![allow(dead_code)]` weakens cleanup pressure, deprecated `consume_slot_changes()`
+retained with a full count path), API ergonomics (parameter-heavy create/alter
+surfaces, no first-class pause/resume verbs), test coverage (DVM aggregate/join/
+window algebra property tests absent, SF-10 TPC-H breadth intentionally limited,
+fuzz smoke too short, TRUNCATE LSN regression test missing, dbt adapter matrix
+incomplete), security (dynamic SQL semgrep enforcement absent, RLS warning not
+emitted on create, search_path tests should remain wired), observability (no DVM
+fallback reason codes, no invalidation ring overflow threshold alert in
+`health_check()`, cleanup backlog trends not exposed as metrics), documentation
+(SQL reference drift risk, DVM support matrix missing), dependencies (CI gate docs
+absent, cargo-deny review dates need attention), and upgrade safety (rollback
+runbook less visible than forward upgrade, upgrade E2E cutoff policy not prominently
+documented). This four-release arc resolves every finding before v1.0.
+
+**v0.77.0 is the critical correctness gate for this arc.** It will not ship until
+the TRUNCATE LSN bug is fixed and regression-tested, the q12 and q20 TPC-H
+limitations have explicit fallback paths with reason codes, the multi-consumer
+change-buffer cleanup invariant is proven or locked, and the DVM delta invariant
+validator GUC is in place and running in the CI test tiers. These are correctness
+and durability foundations that must be proven before v1.0.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.77.0](roadmap/v0.77.0.md) | Correctness Stop-the-Line & DVM Proof Infrastructure: fix TRUNCATE LSN (C-1, pg_current_wal_insert_lsn), TRUNCATE marker E2E regression test (T-4), q12 CASE/IN-list forced FULL fallback + minimized regression (C-3/DVM-1), q20 correlated subquery forced fallback with reason code (DVM-2/P-1), multi-consumer cleanup advisory lock or formal proof + overlap E2E (D-1), IMMEDIATE mode SAVEPOINT/rollback E2E tests (D-2), source-placeholder coverage assertion in codegen (C-2), `pg_trickle.validate_delta_invariants` GUC (DVM-3), DVM algebra property generators comparing DIFFERENTIAL vs FULL after every cycle covering aggregate/join/CASE/window (T-1), semgrep CI rule blocking unwrap/expect/panic outside test modules (C-4) | Planned | Large | — |
+| [v0.78.0](roadmap/v0.78.0.md) | DVM Engine Root-Cause Fixes + Scheduler Intelligence: root-cause fix for CASE/IN-list aggregate drift or definitive rejection path (DVM-1), correlated aggregate subquery pre-aggregation rewrite into CTEs joined once per refresh for safe patterns (DVM-2), FULL fallback with CORRELATED_SUBQUERY_DELTA_QUADRATIC reason for unsafe patterns (P-1), OpTree-based query complexity classifier replacing regex with parsed OpTree structure stored in catalog and compared in logs (P-2), cost model history lookups moved from per-ST pgt_refresh_history rows to precomputed rolling summary with batch lookup per scheduler tick (P-3), placeholder resolver cache collision guard storing canonical key with verification before automaton reuse (P-4), rotating SF-10 TPC-H subset with per-query EXPLAIN latency regression thresholds (T-2), nightly extended fuzz workflow at 300 seconds per target with corpus size tracking (T-3) | Planned | Large | — |
+| [v0.79.0](roadmap/v0.79.0.md) | Code Quality, API Ergonomics & Security: remove unused-import suppressions in src/refresh/codegen.rs and src/refresh/merge/mod.rs module-by-module (Q-1), convert internal create/alter API implementations to typed parameter structs eliminating too-many-arguments in business logic (Q-2), replace global #![allow(dead_code)] with narrower per-module allowances on pgrx/export boundaries (Q-3), remove or #[deprecated] consume_slot_changes() replacing with clearly named status function (Q-4), add SQL convenience helpers create_stream_table_fast_append_only/set_stream_table_refresh_policy/set_stream_table_storage_policy (A-1), add first-class pause_stream_table/resume_stream_table wrappers (A-2), add/strengthen semgrep CI rules for dynamic SQL distinguishing identifier/literal/OID boundaries (S-1), emit runtime WARNING when source has RLS enabled at create_stream_table time (S-2), CI test inspecting SECURITY DEFINER trigger functions for SET search_path (S-3), cleanup chaos test forcing three consecutive DELETE failures with alert and status verification (D-3), dbt adapter compatibility matrix with alter/drop/rebuild flow and version matrix tests (T-5) | Planned | Large | — |
+| [v0.80.0](roadmap/v0.80.0.md) | Operational Excellence, Documentation Completeness & Final v1.0 Gate: add DVM fallback/performance reason codes to refresh history and health output — CORRELATED_SUBQUERY_DELTA_QUADRATIC, CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK, REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN (O-1), add health_check() threshold alert when invalidation ring overflow count increases in recent time window (O-2), add cleanup backlog trend metrics integrated into pgt_metrics_summary (O-3), docs lint comparing #[pg_extern] exports with SQL_REFERENCE.md entries (DOC-1), create docs/DVM_SUPPORT_MATRIX.md with every query pattern, fallback behavior, IMMEDIATE restrictions, and known-unsupported forms including q12/q20 entries (DOC-2), operational rollback runbook (backup requirements, snapshot recommendation, restore path, why downgrades are unsafe) (U-1), document upgrade E2E cutoff policy prominently in CHANGELOG and release notes (U-2), CI gate documentation in CONTRIBUTING.md describing which workflows gate PRs (B-1), review-by dates on cargo-deny advisory suppressions and require cargo-deny in PR gates (B-2), fuzz test for DVM snapshot fingerprint cache stability under OpTree refactoring (P-5), document internal event trigger functions in ARCHITECTURE comments (A-3) | Planned | Large | — |
+
 ### Beyond v1.0
 
 | Version | Theme | Status | Scope | Full details |
@@ -464,6 +508,14 @@ v0.74    ─── Test coverage, CI integrity & security: path-filtered full E2
 v0.75    ─── API polish & documentation excellence: metrics_summary reference, typed PgtId wrappers, IVM comparison matrix, stale-tag scanner
     │
 v0.76.0  ─── Complete DuckLake integration removal: sink + source + CDC mode + catalog tables/columns + GUCs + deps
+    │
+v0.77    ─── Correctness stop-the-line: TRUNCATE LSN fix, q12 FULL fallback, q20 reason code, cleanup lock proof, IMMEDIATE SAVEPOINT tests, DVM property algebra, validate_delta_invariants GUC
+    │
+v0.78    ─── DVM root-cause fixes + scheduler intelligence: CASE/IN-list fix, correlated subquery pre-aggregation, OpTree complexity classifier, cost model summary table, cache collision guard, extended fuzz
+    │
+v0.79    ─── Code quality, API ergonomics & security: remove lint suppressions, typed param structs, dead_code narrowed, pause/resume, semgrep dynamic SQL, RLS warning, dbt matrix, cleanup chaos test
+    │
+v0.80    ─── Operational excellence & final v1.0 gate: DVM reason codes, ring overflow alert, backlog trends, pg_extern docs lint, DVM_SUPPORT_MATRIX, rollback runbook, upgrade cutoff docs, CI gate docs
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
@@ -704,4 +756,61 @@ selection heuristic (semi-naive vs. DRed vs. recomputation fallback) is
 documented for the first time with an example EXPLAIN output; and a note is
 added to `docs/CONFIGURATION.md` clarifying that CDC triggers fire even when
 `pg_trickle.enabled = false` (by design, to keep buffers ready for re-enable).
+
+**v0.77.0 through v0.80.0 form the Assessment-15-Driven Hardening Arc**,
+the final hardening programme before v1.0, driven by the findings in the
+v0.76.0 overall assessment (plans/PLAN_OVERALL_ASSESSMENT_15.md). The
+assessment found one critical issue (TRUNCATE CDC captures the wrong WAL
+position), five HIGH issues (q12 CASE/IN-list DVM drift, q20 O(delta×table)
+correlated subquery scalability cliff, multi-consumer cleanup has no explicit
+per-source lock, regex-only query complexity classifier, DVM algebra property
+tests absent), thirteen MEDIUM issues, and eight LOW issues spanning code
+quality, API ergonomics, security, observability, documentation, and upgrade
+safety.
+
+**v0.77.0 is the correctness hard gate.** It will not ship until the TRUNCATE
+LSN bug is fixed and verified with an E2E regression, q12 drift has an
+explicit fallback with a minimized regression test, q20's correlated subquery
+cliff is surfaced with a reason code and fallback, multi-consumer cleanup
+correctness is proven or locked with an overlap test, and the DVM algebra
+property test suite is generating aggregate/join/CASE/window differential
+workloads compared against FULL recomputation. The `validate_delta_invariants`
+GUC and semgrep unwrap/panic CI rule are also required to ship this release.
+
+**v0.78.0 delivers the DVM root-cause fixes** that v0.77.0 gates behind
+fallbacks: the CASE/IN-list aggregate drift is resolved at the rewrite/delta
+rule level, correlated aggregate subqueries are pre-aggregated into CTEs for
+safe patterns, and the full O(Δ) treatment for q20-style queries is either
+implemented or a clean rejection path is documented. The regex query
+complexity classifier is replaced by an OpTree-based classifier stored in
+the catalog, cost model lookups shift from per-ST history scanning to the
+precomputed summary table with batched scheduler reads, and the placeholder
+resolver cache gains a collision guard. SF-10 TPC-H gains a rotating subset
+with per-query latency regression thresholds, and the fuzz budget is raised
+to a nightly 300-second extended workflow.
+
+**v0.79.0 sweeps code quality, API ergonomics, and security** — the
+maintainability debt that accumulates between hardening arcs. Unused-import
+suppressions in the SQL codegen modules are removed, internal API
+implementations switch from many-argument functions to typed parameter
+structs, the global `#![allow(dead_code)]` is replaced with narrower
+per-boundary allowances, and `consume_slot_changes()` is removed. User-facing
+convenience goes up: first-class `pause_stream_table()` / `resume_stream_table()`
+wrappers are added, along with mode-preset helper functions for common stream
+table configurations. Security enforcement tightens with semgrep CI rules for
+dynamic SQL identifier boundaries, a runtime RLS warning on create, and an
+automated SECURITY DEFINER search_path test. A cleanup chaos test and dbt
+adapter matrix round out this release.
+
+**v0.80.0 is the final v1.0 gate**, completing every remaining observability,
+documentation, and operational reliability item. DVM fallback reason codes
+surface in refresh history and `health_check()`, the invalidation ring gains
+a threshold alert for overflow increases within a time window, and cleanup
+backlog trends are integrated into `pgt_metrics_summary`. Documentation
+receives its final pass: a `pg_extern` export lint guards against SQL reference
+drift, and `docs/DVM_SUPPORT_MATRIX.md` consolidates every query pattern,
+fallback behavior, and known limitation into a single user-facing document.
+Operational runbooks for upgrade rollback and the upgrade E2E cutoff policy,
+CI gate documentation for contributors, and cargo-deny advisory review-by
+dates complete the pre-v1.0 checklist.
 
