@@ -34,6 +34,11 @@ WHERE  storage_backend = 'pg_mooncake';
 --   pg_trickle.ducklake_catalog_schema
 -- Remove these from postgresql.conf / ALTER SYSTEM after upgrading.
 
+-- stream_tables_info in v0.75.0 is defined as SELECT st.* FROM
+-- pgt_stream_tables. Drop/recreate it so ALTER TABLE can remove DuckLake
+-- columns without dependency errors during extension upgrade.
+DROP VIEW IF EXISTS pgtrickle.stream_tables_info;
+
 -- Remove DuckLake columns from pgt_stream_tables.
 ALTER TABLE pgtrickle.pgt_stream_tables
     DROP COLUMN IF EXISTS ducklake_compaction_policy;
@@ -59,6 +64,19 @@ DROP TABLE IF EXISTS pgtrickle.pgt_ducklake_provenance;
 -- The C symbol (ducklake_sink_status_wrapper) was removed from the binary in
 -- v0.76.0, so the function would fail if called. Drop it explicitly.
 DROP FUNCTION IF EXISTS pgtrickle.ducklake_sink_status();
+
+-- Recreate stream_tables_info with the v0.76.0 definition.
+CREATE OR REPLACE VIEW pgtrickle.stream_tables_info AS
+SELECT st.*,
+      now() - st.last_refresh_at AS staleness,
+      CASE WHEN st.schedule IS NOT NULL
+              AND st.schedule !~ '[\s@]'
+          THEN EXTRACT(EPOCH FROM (now() - st.last_refresh_at)) >
+              pgtrickle.parse_duration_seconds(st.schedule)
+          ELSE NULL::boolean
+      END AS stale,
+      CASE WHEN st.topk_limit IS NOT NULL THEN TRUE ELSE FALSE END AS is_topk
+FROM pgtrickle.pgt_stream_tables st;
 
 -- Migrate any DUCKLAKE_CHANGE_FEED rows back to TRIGGER (safe fallback).
 UPDATE pgtrickle.pgt_dependencies
