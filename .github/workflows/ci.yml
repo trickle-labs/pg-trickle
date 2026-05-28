@@ -304,7 +304,7 @@ jobs:
     name: E2E tests
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Free up disk space
         run: |
@@ -374,11 +374,93 @@ jobs:
         run: |
           cargo nextest run --profile ci --test e2e_tpch_tests --run-ignored all
 
+      - name: Publish Test Report
+        uses: mikepenz/action-junit-report@v6
+        if: always()
+        with:
+          report_paths: 'target/nextest/ci/junit.xml'
+          commit: ${{github.event.pull_request.head.sha}}
+
+  # ── E2E sequential tests (PGT_PARALLEL_MODE=off) ────────────────────────
+  # Runs the refresh/scheduler/concurrent subset with parallelism disabled.
+  # Split into its own job so the main E2E suite reports results quickly
+  # and this gate gets a fresh timeout budget.
+  e2e-sequential-tests:
+    name: E2E tests (sequential mode)
+    runs-on: ubuntu-latest
+    needs: [e2e-tests]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 45
+    steps:
+      - name: Free up disk space
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af
+          df -h
+
+      - uses: actions/checkout@v5
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Restore Docker image cache (postgres:18.3)
+        uses: actions/cache@v5
+        id: cache-docker-postgres-e2e-seq
+        with:
+          path: /tmp/docker-images/postgres-18.3.tar
+          key: docker-postgres-18.3
+
+      - name: Load or pull postgres:18.3
+        run: |
+          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.3.tar
+          else
+            docker pull postgres:18.3
+            mkdir -p /tmp/docker-images
+            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        continue-on-error: true  # GHCR login is optional (cache pull only); transient timeouts must not fail the job
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image from GHCR
+        run: |
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+            echo "Builder image pulled from GHCR — skipping local build"
+          else
+            echo "::warning::Builder image not in GHCR (first run?). Will build locally."
+          fi
+
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+
       - name: Run E2E tests with sequential refresh mode
         env:
           PGT_PARALLEL_MODE: "off"
         run: |
-          cargo nextest run --profile ci --test 'e2e_*'
+          # Only run tests sensitive to parallel vs sequential scheduling.
+          # Running all 125 e2e_* files in sequential mode takes ~90 min;
+          # this targeted subset covers the refresh/scheduler/concurrent paths.
+          cargo nextest run --profile ci \
+            --test e2e_refresh_tests \
+            --test e2e_scheduler_tests \
+            --test e2e_tier_scheduler_tests \
+            --test e2e_bgworker_tests \
+            --test e2e_concurrent_tests \
+            --test e2e_dag_autorefresh_tests \
+            --test e2e_dag_concurrent_tests
+
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v6
         if: always()
