@@ -2208,7 +2208,16 @@ pub fn get_slot_positions(
 /// **Deprecated:** This function performs a full `SELECT count(*)`
 /// on the change buffer table which is wasteful. It is no longer called
 /// from the refresh pipeline. Kept for potential diagnostic use only.
-#[allow(dead_code)]
+///
+/// Q-4 (v0.79.0): Formally marked `#[deprecated]`; prefer
+/// `pending_change_count()` or inspect the buffer table directly.
+#[deprecated(
+    since = "0.79.0",
+    note = "Use `pending_change_count(source_oid, change_schema)` or query \
+            `{change_schema}.changes_{oid}` directly. \
+            consume_slot_changes() performs a full COUNT(*) and is never \
+            called from the refresh pipeline."
+)]
 pub fn consume_slot_changes(
     source_oid: pg_sys::Oid,
     change_schema: &str,

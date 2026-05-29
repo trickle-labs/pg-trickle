@@ -2,36 +2,23 @@
 //
 // Contains: SQL template builders, MERGE SQL cache, prepared-statement
 // helpers, change-buffer cleanup, planner hints, ST-to-ST delta capture.
+//
+// Q-1 (v0.79.0): Removed per-import #[allow(unused_imports)] shims and the
+// unused `use super::*` glob. Imports are now concrete; rustc/clippy will
+// warn if any become stale, catching stale imports early.
 
-#[allow(unused_imports)]
-use crate::catalog::{StDependency, StreamTableMeta};
-#[allow(unused_imports)]
-use crate::dag::RefreshMode;
-#[allow(unused_imports)]
+use crate::catalog::StreamTableMeta;
+
 use crate::dvm;
-#[allow(unused_imports)]
 use crate::error::PgTrickleError;
-#[allow(unused_imports)]
 use crate::version::Frontier;
-#[allow(unused_imports)]
 use lru::LruCache;
-#[allow(unused_imports)]
 use pgrx::prelude::*;
-#[allow(unused_imports)]
 use std::cell::{Cell, RefCell};
-#[allow(unused_imports)]
 use std::collections::HashMap;
-#[allow(unused_imports)]
 use std::collections::HashSet;
-#[allow(unused_imports)]
 use std::num::NonZeroUsize;
-#[allow(unused_imports)]
 use std::sync::Arc;
-#[allow(unused_imports)]
-use std::time::Instant;
-
-#[allow(unused_imports)]
-use super::*;
 
 // ── MERGE SQL template cache ────────────────────────────────────────
 

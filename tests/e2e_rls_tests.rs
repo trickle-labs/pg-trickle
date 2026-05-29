@@ -522,3 +522,72 @@ async fn test_force_rls_on_source_triggers_reinit() {
         "ST should be marked for reinit after FORCE RLS on source"
     );
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// S-3 (v0.79.0) — Global SECURITY DEFINER + search_path invariant
+// ══════════════════════════════════════════════════════════════════════
+
+/// S-3 (v0.79.0): Assert that **every** SECURITY DEFINER trigger function
+/// registered by the pg_trickle extension has a locked `search_path` in its
+/// `proconfig`.
+///
+/// This is a global invariant: regardless of function naming prefix, no
+/// SECURITY DEFINER trigger function should be missing a search_path
+/// constraint.  Missing search_path in a SECURITY DEFINER context is a
+/// classic search-path hijacking vector.
+///
+/// The test creates one stream table (installing both CDC and IVM trigger
+/// functions) then queries `pg_proc` for any SECURITY DEFINER *trigger*
+/// function (`prorettype` matching the `trigger` pseudo-type) that lacks a
+/// `search_path=...` entry in its `proconfig`.
+#[tokio::test]
+async fn test_all_security_definer_trigger_fns_have_search_path() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Create a source table and stream tables in both IMMEDIATE and DIFFERENTIAL
+    // modes so that both IVM and CDC trigger functions are installed.
+    db.execute("CREATE TABLE s3_src (id INT PRIMARY KEY, val TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO s3_src VALUES (1, 'a'), (2, 'b')")
+        .await;
+
+    // DIFFERENTIAL: installs CDC (statement-level) trigger functions.
+    db.create_st(
+        "s3_diff_st",
+        "SELECT id, val FROM s3_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // IMMEDIATE: installs IVM (row-level) trigger functions.
+    db.create_st("s3_imm_st", "SELECT id, val FROM s3_src", "1m", "IMMEDIATE")
+        .await;
+
+    // Query for SECURITY DEFINER trigger functions that are missing search_path.
+    // prorettype = 2279 is the OID of the `trigger` pseudo-type, which identifies
+    // trigger functions independent of naming convention.
+    let missing: Vec<String> = sqlx::query_scalar(
+        "SELECT proname::text \
+         FROM pg_proc \
+         WHERE prosecdef = true \
+           AND prorettype = 2279 \
+           AND NOT EXISTS ( \
+               SELECT 1 \
+               FROM unnest(COALESCE(proconfig, ARRAY[]::text[])) AS cfg \
+               WHERE cfg LIKE 'search_path=%' \
+           ) \
+         ORDER BY proname",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap_or_default();
+
+    assert!(
+        missing.is_empty(),
+        "S-3: found SECURITY DEFINER trigger functions without a locked \
+         search_path ({} violation(s)): {}",
+        missing.len(),
+        missing.join(", ")
+    );
+}

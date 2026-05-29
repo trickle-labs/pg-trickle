@@ -119,3 +119,27 @@ models:
         description: "Number of orders"
         tests:
           - not_null
+
+  - name: order_totals_compat
+    description: >
+      T-5 (v0.79.0): dbt adapter compatibility matrix model.
+      Used to exercise create, alter, drop, and rebuild flows against the
+      dbt adapter.  Initial schedule is '1m'; the test script changes it to
+      '3m' to exercise the ALTER path, then restores it.
+    tests:
+      - dbt_pgtrickle.stream_table_healthy:
+          warn_seconds: 600
+    columns:
+      - name: customer_id
+        description: "Customer identifier"
+        tests:
+          - not_null
+          - unique
+      - name: total_amount
+        description: "Sum of all order amounts"
+        tests:
+          - not_null
+      - name: order_count
+        description: "Number of orders"
+        tests:
+          - not_null

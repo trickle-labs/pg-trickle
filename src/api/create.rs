@@ -2,7 +2,10 @@
 // Extracted from src/api/mod.rs in v0.55.0 module decomposition.
 // All shared helpers, types, and utilities are in api/mod.rs (use super::*).
 
-use super::alter::{CreateStreamTableOptions, alter_stream_table_impl, create_stream_table_impl};
+use super::alter::{
+    AlterStreamTableOptions, CreateStreamTableOptions, alter_stream_table_impl,
+    create_stream_table_impl,
+};
 use super::*;
 
 /// Create a new stream table.
@@ -542,27 +545,21 @@ fn create_or_replace_stream_table_impl(
 
             // Delegate to alter_stream_table_impl with the appropriate
             // combination of query + config changes.
-            alter_stream_table_impl(
+            alter_stream_table_impl(AlterStreamTableOptions {
                 name,
-                if query_changed { Some(query) } else { None },
-                config_diff.schedule,
-                config_diff.refresh_mode,
-                None, // status: keep current
-                config_diff.diamond_consistency,
-                config_diff.diamond_schedule_policy,
-                config_diff.cdc_mode,
-                config_diff.append_only,
-                config_diff.pooler_compatibility_mode,
-                None, // tier: not set via create_or_replace
-                None, // fuse: not set via create_or_replace
-                None, // fuse_ceiling: not set via create_or_replace
-                None, // fuse_sensitivity: not set via create_or_replace
-                None, // partition_by: not changed via create_or_replace
+                query: if query_changed { Some(query) } else { None },
+                schedule: config_diff.schedule,
+                refresh_mode: config_diff.refresh_mode,
+                status: None, // keep current
+                diamond_consistency: config_diff.diamond_consistency,
+                diamond_schedule_policy: config_diff.diamond_schedule_policy,
+                cdc_mode: config_diff.cdc_mode,
+                append_only: config_diff.append_only,
+                pooler_compatibility_mode: config_diff.pooler_compatibility_mode,
                 max_differential_joins,
                 max_delta_fraction,
-                None, // post_refresh_action: not set via create_or_replace
-                None, // reindex_drift_threshold: not set via create_or_replace
-            )?;
+                ..Default::default()
+            })?;
 
             pgrx::info!(
                 "Stream table {}.{} replaced (query_changed={}, config_changed={}).",
@@ -597,5 +594,52 @@ fn create_or_replace_stream_table_impl(
             })
         }
         Err(e) => Err(e),
+    }
+}
+
+// ── A-1 (v0.79.0): create_stream_table_fast_append_only ───────────────────
+
+/// Create a stream table optimised for append-only sources.
+///
+/// A-1: Convenience wrapper around [`create_stream_table`] that presets:
+/// - `append_only = true` — source rows are only ever inserted, never updated
+///   or deleted.  The differential path can skip DELETE maintenance.
+/// - `refresh_mode = 'DIFFERENTIAL'` — always use differential refresh.
+/// - `initialize = true` — populate the table immediately.
+///
+/// All other parameters default to the same values as `create_stream_table`.
+///
+/// # Example
+/// ```sql
+/// SELECT pgtrickle.create_stream_table_fast_append_only(
+///     'my_schema.event_counts',
+///     'SELECT user_id, count(*) AS n FROM events GROUP BY user_id'
+/// );
+/// ```
+#[pg_extern(schema = "pgtrickle")]
+fn create_stream_table_fast_append_only(
+    name: &str,
+    query: &str,
+    schedule: default!(Option<&str>, "'calculated'"),
+    cdc_mode: default!(Option<&str>, "NULL"),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+) {
+    let result = create_stream_table_impl(CreateStreamTableOptions {
+        name,
+        query,
+        schedule,
+        refresh_mode_str: "DIFFERENTIAL",
+        initialize: true,
+        append_only: true,
+        requested_cdc_mode: cdc_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        ..Default::default()
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
     }
 }

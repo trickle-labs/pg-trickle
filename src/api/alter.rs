@@ -1603,7 +1603,7 @@ fn alter_stream_table(
     post_refresh_action: default!(Option<&str>, "NULL"),
     reindex_drift_threshold: default!(Option<f64>, "NULL"),
 ) {
-    let result = alter_stream_table_impl(
+    let result = alter_stream_table_impl(AlterStreamTableOptions {
         name,
         query,
         schedule,
@@ -1623,35 +1623,67 @@ fn alter_stream_table(
         max_delta_fraction,
         post_refresh_action,
         reindex_drift_threshold,
-    );
+    });
     if let Err(e) = result {
         raise_error_with_context(e);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+// Q-2 (v0.79.0): Centralized options struct for alter_stream_table entry points.
+/// All `alter_stream_table` entry points construct this struct first and then
+/// call [`alter_stream_table_impl`].  This mirrors the `CreateStreamTableOptions`
+/// pattern and eliminates `#[allow(clippy::too_many_arguments)]` from the
+/// business-logic function.  The pg_extern wrapper retains individual parameters
+/// as required by pgrx.
+#[derive(Debug, Default)]
+pub(crate) struct AlterStreamTableOptions<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) query: Option<&'a str>,
+    pub(crate) schedule: Option<&'a str>,
+    pub(crate) refresh_mode: Option<&'a str>,
+    pub(crate) status: Option<&'a str>,
+    pub(crate) diamond_consistency: Option<&'a str>,
+    pub(crate) diamond_schedule_policy: Option<&'a str>,
+    pub(crate) cdc_mode: Option<&'a str>,
+    pub(crate) append_only: Option<bool>,
+    pub(crate) pooler_compatibility_mode: Option<bool>,
+    pub(crate) tier: Option<&'a str>,
+    pub(crate) fuse: Option<&'a str>,
+    pub(crate) fuse_ceiling: Option<i64>,
+    pub(crate) fuse_sensitivity: Option<i32>,
+    pub(crate) partition_by: Option<&'a str>,
+    pub(crate) max_differential_joins: Option<i32>,
+    pub(crate) max_delta_fraction: Option<f64>,
+    /// VP-1/VP-2 (v0.47.0): post-refresh action.
+    pub(crate) post_refresh_action: Option<&'a str>,
+    /// VP-2 (v0.47.0): reindex drift threshold.
+    pub(crate) reindex_drift_threshold: Option<f64>,
+}
+
 pub(crate) fn alter_stream_table_impl(
-    name: &str,
-    query: Option<&str>,
-    schedule: Option<&str>,
-    refresh_mode: Option<&str>,
-    status: Option<&str>,
-    diamond_consistency: Option<&str>,
-    diamond_schedule_policy: Option<&str>,
-    cdc_mode: Option<&str>,
-    append_only: Option<bool>,
-    pooler_compatibility_mode: Option<bool>,
-    tier: Option<&str>,
-    fuse: Option<&str>,
-    fuse_ceiling_arg: Option<i64>,
-    fuse_sensitivity_arg: Option<i32>,
-    partition_by: Option<&str>,
-    max_differential_joins: Option<i32>,
-    max_delta_fraction: Option<f64>,
-    // VP-1/VP-2 (v0.47.0): post-refresh action and drift threshold
-    post_refresh_action: Option<&str>,
-    reindex_drift_threshold: Option<f64>,
+    opts: AlterStreamTableOptions<'_>,
 ) -> Result<(), PgTrickleError> {
+    let AlterStreamTableOptions {
+        name,
+        query,
+        schedule,
+        refresh_mode,
+        status,
+        diamond_consistency,
+        diamond_schedule_policy,
+        cdc_mode,
+        append_only,
+        pooler_compatibility_mode,
+        tier,
+        fuse,
+        fuse_ceiling: fuse_ceiling_arg,
+        fuse_sensitivity: fuse_sensitivity_arg,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        post_refresh_action,
+        reindex_drift_threshold,
+    } = opts;
     let (schema, table_name) = parse_qualified_name(name)?;
     let mut st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     let qualified_name = format!("{schema}.{table_name}");
@@ -2576,4 +2608,107 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     );
     pgrx::info!("{}", summary);
     Ok(summary)
+}
+
+// ── A-1 (v0.79.0): Convenience helpers ─────────────────────────────────────
+
+/// Set the refresh policy (mode) for an existing stream table.
+///
+/// A-1: Convenience wrapper around `alter_stream_table` that only sets the
+/// refresh mode, keeping all other settings unchanged.
+///
+/// # Example
+/// ```sql
+/// SELECT pgtrickle.set_stream_table_refresh_policy('my_schema.my_st', 'DIFFERENTIAL');
+/// ```
+#[pg_extern(schema = "pgtrickle")]
+fn set_stream_table_refresh_policy(name: &str, refresh_mode: &str) {
+    let result = alter_stream_table_impl(AlterStreamTableOptions {
+        name,
+        refresh_mode: Some(refresh_mode),
+        ..Default::default()
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+/// Set the storage policy for an existing stream table.
+///
+/// A-1: Convenience wrapper around `alter_stream_table` that sets both
+/// `append_only` mode and the refresh `tier` in a single call.  Use this
+/// to switch a stream table between normal and append-only storage behavior,
+/// or to promote/demote it between scheduling tiers.
+///
+/// - `append_only`: `true` for append-only mode (no DELETEs/UPDATEs in output);
+///   `false` for full UPSERT/DELETE behaviour.
+/// - `tier`: One of `'hot'`, `'warm'`, `'frozen'`, or `NULL` to keep current.
+///
+/// # Example
+/// ```sql
+/// SELECT pgtrickle.set_stream_table_storage_policy('my_schema.my_st', true, 'hot');
+/// ```
+#[pg_extern(schema = "pgtrickle")]
+fn set_stream_table_storage_policy(
+    name: &str,
+    append_only: default!(Option<bool>, "NULL"),
+    tier: default!(Option<&str>, "NULL"),
+) {
+    let result = alter_stream_table_impl(AlterStreamTableOptions {
+        name,
+        append_only,
+        tier,
+        ..Default::default()
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+// ── A-2 (v0.79.0): pause_stream_table ──────────────────────────────────────
+
+/// Pause an active stream table, suspending automated and manual refreshes.
+///
+/// A-2: First-class wrapper that sets the stream table status to SUSPENDED.
+/// Use `pgtrickle.resume_stream_table()` to re-enable refreshes.
+///
+/// Only ACTIVE stream tables can be paused. Already-SUSPENDED or ERROR
+/// stream tables will return an error.
+///
+/// # Example
+/// ```sql
+/// SELECT pgtrickle.pause_stream_table('my_schema.my_st');
+/// SELECT pgtrickle.resume_stream_table('my_schema.my_st');
+/// ```
+#[pg_extern(schema = "pgtrickle")]
+fn pause_stream_table(name: &str) {
+    let result = pause_stream_table_impl(name);
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+
+    if st.status != StStatus::Active {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "stream table {}.{} is not ACTIVE (current status: {}); \
+             only ACTIVE stream tables can be paused",
+            schema,
+            table_name,
+            st.status.as_str(),
+        )));
+    }
+
+    StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
+
+    pgrx::info!(
+        "Stream table {}.{} paused (pgt_id={}); use pgtrickle.resume_stream_table() to re-enable.",
+        schema,
+        table_name,
+        st.pgt_id
+    );
+    Ok(())
 }

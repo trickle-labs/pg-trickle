@@ -189,10 +189,33 @@ echo "── Waiting for stream tables to populate ──"
 ./scripts/wait_for_populated.sh order_totals 30
 ./scripts/wait_for_populated.sh order_extremes 30
 ./scripts/wait_for_populated.sh customer_stats 30
+./scripts/wait_for_populated.sh order_totals_compat 30
 
 echo ""
 echo "── dbt test (initial) ──"
+dbt test --select assert_compat_model_created assert_compat_data_correct
 dbt test
+
+echo ""
+echo "── T-5: dbt ALTER flow ─────────────────────────────────────────────"
+echo "   Change order_totals_compat schedule from '1m' to '3m', then run"
+echo "   dbt run — the adapter must issue ALTER STREAM TABLE (not recreate)."
+# Patch schedule in the model file.
+COMPAT_MODEL="models/marts/order_totals_compat.sql"
+cp "$COMPAT_MODEL" "${COMPAT_MODEL}.bak"
+sed -i.tmp "s/schedule='1m'/schedule='3m'/" "$COMPAT_MODEL"
+rm -f "${COMPAT_MODEL}.tmp"
+
+dbt run --select order_totals_compat
+echo "  (dbt alter run completed)"
+
+# Verify the alter was applied in the catalog.
+dbt test --select assert_compat_alter_applied
+echo "  (alter assertion passed)"
+
+# Restore the original model definition.
+mv "${COMPAT_MODEL}.bak" "$COMPAT_MODEL"
+echo "── T-5: ALTER flow complete ────────────────────────────────────────"
 
 echo ""
 echo "── dbt run (idempotent no-op — same config, same query) ──"
@@ -208,6 +231,7 @@ echo "── Waiting for stream tables to populate (after recreate) ──"
 ./scripts/wait_for_populated.sh order_totals 30
 ./scripts/wait_for_populated.sh order_extremes 30
 ./scripts/wait_for_populated.sh customer_stats 30
+./scripts/wait_for_populated.sh order_totals_compat 30
 
 echo ""
 echo "── dbt test (after full-refresh) ──"
