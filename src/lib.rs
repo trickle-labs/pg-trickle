@@ -309,6 +309,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
     -- v0.73.0 HOT-1: fillfactor for storage heap (NULL = PG default 100). Range 10-100.
     storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
+    -- v0.78.0 P-2: OpTree-derived complexity label, back-filled lazily on first refresh.
+    query_complexity_class TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -385,6 +387,19 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_summary (
     last_refresh_status TEXT,
     last_refresh_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- v0.78.0 P-3: Per-stream-table cost model summary.
+-- Populated by batch_update_cost_model_summary() on each scheduler tick.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_cost_model_summary (
+    pgt_id       BIGINT      NOT NULL
+                             REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                             ON DELETE CASCADE,
+    avg_full_ms  DOUBLE PRECISION,
+    avg_diff_ms  DOUBLE PRECISION,
+    sample_count INTEGER     NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT pgt_cost_model_summary_pk PRIMARY KEY (pgt_id)
 );
 
 -- v0.73.0 ARCH-002 / REL-002: Persistent cleanup retry/backpressure status.
