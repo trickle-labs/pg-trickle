@@ -151,6 +151,43 @@ pub(crate) struct RefreshHistoryStats {
 /// Returns `None` when insufficient history exists (fewer than 3
 /// completed DIFFERENTIAL refreshes or no completed FULL refresh).
 pub(crate) fn query_refresh_history_stats(pgt_id: i64) -> Option<RefreshHistoryStats> {
+    // P-3 (v0.78.0): Try the pre-computed summary table first.  It is
+    // populated by batch_update_cost_model_summary() once per scheduler tick,
+    // eliminating N per-ST subquery scans on pgt_refresh_history.
+    // Fall back to the legacy live query if the summary table doesn't exist
+    // yet (pre-migration) or has no entry for this ST.
+    let summary: Option<(f64, f64, i32)> = Spi::connect(|client| {
+        Ok::<_, pgrx::spi::SpiError>((|| {
+            let row = client
+                .select(
+                    "SELECT avg_full_ms, avg_diff_ms, sample_count \
+                     FROM pgtrickle.pgt_cost_model_summary \
+                     WHERE pgt_id = $1",
+                    None,
+                    &[pgt_id.into()],
+                )
+                .ok()?
+                .first();
+            let avg_full_ms: f64 = row.get::<f64>(1).ok()??;
+            let avg_diff_ms: f64 = row.get::<f64>(2).ok()??;
+            let sample_count: i32 = row.get::<i32>(3).ok()??;
+            if avg_full_ms > 0.0 && avg_diff_ms > 0.0 && sample_count >= 3 {
+                Some((avg_full_ms, avg_diff_ms, sample_count))
+            } else {
+                None
+            }
+        })())
+    })
+    .unwrap_or(None);
+
+    if let Some((avg_full_ms, avg_diff_ms, _)) = summary {
+        return Some(RefreshHistoryStats {
+            avg_ms_per_delta: avg_diff_ms,
+            avg_full_ms,
+        });
+    }
+
+    // Legacy path: live subquery on pgt_refresh_history.
     let stats: Option<(f64, f64)> = Spi::connect(|client| {
         let sql = format!(
             "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms \
@@ -354,6 +391,53 @@ pub(crate) fn compute_adaptive_threshold(current: f64, incr_ms: f64, full_ms: f6
     };
 
     adjusted.clamp(0.01, 0.80)
+}
+
+/// P-3 (v0.78.0): Batch-update the cost-model summary table.
+///
+/// Runs a single aggregating INSERT ... ON CONFLICT DO UPDATE that
+/// replaces N per-ST history subqueries with one grouped query.
+/// Called once per scheduler tick instead of once per stream table.
+///
+/// The summary table `pgtrickle.pgt_cost_model_summary` must already
+/// exist (created by the v0.77.0→0.78.0 migration).
+pub(crate) fn batch_update_cost_model_summary() {
+    let sql = "
+        INSERT INTO pgtrickle.pgt_cost_model_summary
+            (pgt_id, avg_full_ms, avg_diff_ms, sample_count, updated_at)
+        SELECT
+            pgt_id,
+            AVG(full_ms)                         AS avg_full_ms,
+            AVG(diff_ms)                         AS avg_diff_ms,
+            COUNT(*)::int                        AS sample_count,
+            now()                                AS updated_at
+        FROM (
+            SELECT
+                pgt_id,
+                CASE WHEN action = 'FULL' THEN
+                    EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0
+                END AS full_ms,
+                CASE WHEN action = 'DIFFERENTIAL' AND delta_row_count > 0 THEN
+                    EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0
+                    / GREATEST(delta_row_count, 1)
+                END AS diff_ms
+            FROM pgtrickle.pgt_refresh_history
+            WHERE status = 'COMPLETED'
+              AND end_time IS NOT NULL
+              AND action IN ('FULL', 'DIFFERENTIAL')
+        ) sub
+        WHERE full_ms IS NOT NULL OR diff_ms IS NOT NULL
+        GROUP BY pgt_id
+        HAVING COUNT(*) >= 3
+        ON CONFLICT (pgt_id) DO UPDATE
+            SET avg_full_ms   = EXCLUDED.avg_full_ms,
+                avg_diff_ms   = EXCLUDED.avg_diff_ms,
+                sample_count  = EXCLUDED.sample_count,
+                updated_at    = EXCLUDED.updated_at
+    ";
+    if let Err(e) = pgrx::Spi::run(sql) {
+        pgrx::warning!("[pg_trickle] P-3: failed to batch-update pgt_cost_model_summary: {e}");
+    }
 }
 
 /// Execute a reinitialize refresh: full recompute after schema change.

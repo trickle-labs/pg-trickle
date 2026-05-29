@@ -684,9 +684,9 @@ fn execute_manual_differential_refresh(
 
     // Execute the differential refresh via the DVM engine.
     // DI-7: When QueryTooComplex is returned (e.g. join count exceeds
-    // max_differential_joins, or CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK), fall
-    // back to FULL refresh immediately — mirrors the scheduler path in
-    // scheduler_loop.rs so manual refresh behaves consistently.
+    // max_differential_joins, or CORRELATED_SUBQUERY_DELTA_QUADRATIC / DVM-2
+    // cannot safely rewrite the query), fall back to FULL refresh immediately —
+    // mirrors the scheduler path in scheduler_loop.rs.
     let (rows_inserted, rows_deleted) =
         match refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier) {
             Ok(counts) => counts,

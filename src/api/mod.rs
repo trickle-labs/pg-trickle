@@ -3557,6 +3557,7 @@ mod tests {
             last_reindex_at: None,
             defining_query_hash: 0,
             storage_fillfactor: None,
+            query_complexity_class: None,
         }
     }
 

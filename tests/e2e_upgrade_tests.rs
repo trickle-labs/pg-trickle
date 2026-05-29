@@ -91,6 +91,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("reindex_drift_threshold", "double precision"),
         ("rows_changed_since_last_reindex", "bigint"),
         ("last_reindex_at", "timestamp with time zone"),
+        ("query_complexity_class", "text"), // v0.78.0: P-2
     ];
 
     for (col_name, expected_type) in &expected_columns {
@@ -474,7 +475,7 @@ async fn test_upgrade_chain_new_functions_exist() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -558,7 +559,7 @@ async fn test_upgrade_chain_stream_tables_survive() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -634,7 +635,7 @@ async fn test_upgrade_chain_views_queryable() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -677,7 +678,7 @@ async fn test_upgrade_chain_event_triggers_present() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -720,7 +721,7 @@ async fn test_upgrade_chain_version_consistency() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     // This assertion only holds when the SQL extension version being tested
     // matches the compiled binary version loaded in the container.
@@ -774,7 +775,7 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -842,7 +843,7 @@ async fn test_upgrade_schema_additions_from_sql() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.77.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -1197,4 +1198,57 @@ async fn test_upgrade_v019_catalog_indexes_present() {
         )
         .await;
     assert!(deps_idx, "idx_deps_pgt_id index should exist");
+}
+
+/// TEST-v0.78.0: Verify v0.78.0 schema additions exist after upgrade.
+///
+/// Checks that P-2 (query_complexity_class column) and P-3
+/// (pgt_cost_model_summary table) are present after upgrading to 0.78.0.
+#[tokio::test]
+async fn test_upgrade_v078_catalog_additions() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // P-2: query_complexity_class column on pgt_stream_tables
+    let has_complexity_col: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM information_schema.columns \
+                WHERE table_schema = 'pgtrickle' \
+                  AND table_name = 'pgt_stream_tables' \
+                  AND column_name = 'query_complexity_class' \
+            )",
+        )
+        .await;
+    assert!(
+        has_complexity_col,
+        "query_complexity_class column should exist on pgt_stream_tables"
+    );
+
+    // P-3: pgt_cost_model_summary table
+    let has_summary_table: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM information_schema.tables \
+                WHERE table_schema = 'pgtrickle' \
+                  AND table_name = 'pgt_cost_model_summary' \
+            )",
+        )
+        .await;
+    assert!(
+        has_summary_table,
+        "pgt_cost_model_summary table should exist after v0.78.0 upgrade"
+    );
+
+    // P-3: Verify table structure — pgt_id primary key
+    let has_pk: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM information_schema.table_constraints \
+                WHERE table_schema = 'pgtrickle' \
+                  AND table_name = 'pgt_cost_model_summary' \
+                  AND constraint_type = 'PRIMARY KEY' \
+            )",
+        )
+        .await;
+    assert!(has_pk, "pgt_cost_model_summary should have a primary key");
 }
