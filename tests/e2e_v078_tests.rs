@@ -48,7 +48,7 @@ async fn test_dvm1_case_in_list_append_only_differential() {
               FROM src_ao_casein
               GROUP BY l_shipmode$$,
             refresh_mode => 'differential',
-            is_append_only => true
+            append_only => true
         )",
     )
     .await;
