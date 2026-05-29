@@ -9,12 +9,16 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 - [Functions](#functions)
   - [Core Lifecycle](#core-lifecycle)
     - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
+    - [pgtrickle.create\_stream\_table\_fast\_append\_only](#pgtricklecreate_stream_table_fast_append_only)
     - [pgtrickle.create\_stream\_table\_if\_not\_exists](#pgtricklecreate_stream_table_if_not_exists)
     - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
     - [pgtrickle.bulk\_create](#pgtricklebulk_create)
     - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
     - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
     - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
+    - [pgtrickle.pause\_stream\_table](#pgtricklepause_stream_table)
+    - [pgtrickle.set\_stream\_table\_refresh\_policy](#pgtrickleset_stream_table_refresh_policy)
+    - [pgtrickle.set\_stream\_table\_storage\_policy](#pgtrickleset_stream_table_storage_policy)
     - [pgtrickle.refresh\_stream\_table](#pgtricklerefresh_stream_table)
     - [pgtrickle.repair\_stream\_table](#pgtricklerepair_stream_table)
   - [Status & Monitoring](#status--monitoring)
@@ -752,6 +756,57 @@ SELECT pgtrickle.create_stream_table(
 
 ---
 
+---
+
+### pgtrickle.create_stream_table_fast_append_only
+
+Convenience wrapper for creating an append-only DIFFERENTIAL stream table
+in a single call. Equivalent to calling `pgtrickle.create_stream_table` with
+`append_only => true` and `refresh_mode => 'DIFFERENTIAL'`.
+
+```sql
+pgtrickle.create_stream_table_fast_append_only(
+    name               text,
+    query              text,
+    schedule           text    DEFAULT 'calculated',
+    cdc_mode           text    DEFAULT NULL,
+    partition_by       text    DEFAULT NULL,
+    max_differential_joins  integer          DEFAULT NULL,
+    max_delta_fraction       double precision DEFAULT NULL
+) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `text` | — | Name of the stream table to create. |
+| `query` | `text` | — | SQL SELECT query to materialize. |
+| `schedule` | `text` | `'calculated'` | Refresh schedule (cron, interval, or `'calculated'`). |
+| `cdc_mode` | `text` | `NULL` | CDC mode override (`'TRIGGER'`, `'WAL'`, or `NULL` for auto). |
+| `partition_by` | `text` | `NULL` | Partition expression (passed to `CREATE TABLE … PARTITION BY`). |
+| `max_differential_joins` | `integer` | `NULL` | Cap on the number of delta joins per refresh cycle. |
+| `max_delta_fraction` | `double precision` | `NULL` | Max fraction of source rows to process as a delta before falling back to full refresh. |
+
+**Example:**
+
+```sql
+-- Append-only event log of completed orders
+SELECT pgtrickle.create_stream_table_fast_append_only(
+    'completed_orders',
+    'SELECT id, total, completed_at FROM orders WHERE status = ''completed'''
+);
+```
+
+**Notes:**
+- Implicitly sets `append_only = true` and `refresh_mode = 'DIFFERENTIAL'`.
+- Append-only tables never issue DELETE during refresh — safe for audit logs and
+  event streams.
+- The stream table is initialized immediately; use `schedule` to control ongoing
+  cadence.
+
+---
+
 ### pgtrickle.create_stream_table_if_not_exists
 
 Create a stream table if it does not already exist. If a stream table with the
@@ -1172,6 +1227,109 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 - Resets `consecutive_errors` to `0` and sets `status = 'ACTIVE'`.
 - Emits a `resumed` event on the `pg_trickle_alert` NOTIFY channel.
 - After resuming, the scheduler will include the ST in its next cycle.
+
+---
+
+---
+
+### pgtrickle.pause_stream_table
+
+Pause an active stream table, preventing the scheduler from including it in
+future refresh cycles. Unlike `SUSPEND` (which is set automatically after
+repeated errors), `PAUSE` is an explicit operator action.
+
+```sql
+pgtrickle.pause_stream_table(name text) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `text` | Name of the stream table to pause (schema-qualified or unqualified). |
+
+**Example:**
+
+```sql
+-- Pause a stream table for maintenance
+SELECT pgtrickle.pause_stream_table('order_totals');
+-- ... do maintenance work ...
+SELECT pgtrickle.resume_stream_table('order_totals');
+```
+
+**Notes:**
+- Only active (`ACTIVE`) stream tables can be paused; errors if the ST is already
+  `SUSPENDED` or in `ERROR` state.
+- Use `pgtrickle.resume_stream_table(name)` to re-enable automated refreshes.
+- Emits a `paused` event on the `pg_trickle_alert` NOTIFY channel.
+
+---
+
+### pgtrickle.set_stream_table_refresh_policy
+
+Update the refresh mode of an existing stream table without recreating it.
+
+```sql
+pgtrickle.set_stream_table_refresh_policy(
+    name         text,
+    refresh_mode text
+) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `text` | Name of the stream table to update. |
+| `refresh_mode` | `text` | New refresh mode: `'DIFFERENTIAL'`, `'FULL'`, or `'AUTO'`. |
+
+**Example:**
+
+```sql
+-- Switch from FULL to DIFFERENTIAL refresh
+SELECT pgtrickle.set_stream_table_refresh_policy('order_totals', 'DIFFERENTIAL');
+```
+
+**Notes:**
+- Valid values are `'DIFFERENTIAL'`, `'FULL'`, and `'AUTO'`.
+- The change takes effect on the next scheduled or manual refresh.
+- Equivalent to `pgtrickle.alter_stream_table(name, refresh_mode => '...')` but
+  with a cleaner, intent-revealing name.
+
+---
+
+### pgtrickle.set_stream_table_storage_policy
+
+Update the storage policy (append-only flag and/or storage tier) of an existing
+stream table.
+
+```sql
+pgtrickle.set_stream_table_storage_policy(
+    name        text,
+    append_only boolean          DEFAULT NULL,
+    tier        text             DEFAULT NULL
+) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `text` | — | Name of the stream table to update. |
+| `append_only` | `boolean` | `NULL` | Set or clear the append-only flag. `NULL` leaves the current value unchanged. |
+| `tier` | `text` | `NULL` | Storage tier override. `NULL` leaves unchanged. |
+
+**Example:**
+
+```sql
+-- Enable append-only mode on an existing stream table
+SELECT pgtrickle.set_stream_table_storage_policy('event_log', append_only => true);
+```
+
+**Notes:**
+- Pass `NULL` for parameters you do not want to change.
+- `append_only = true` prevents DELETE operations during refresh; safe for
+  insert-only event streams and audit logs.
 
 ---
 
