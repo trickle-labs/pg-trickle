@@ -3070,9 +3070,40 @@ fn refresh_single_st(
     // the entire tick transaction.  On panic the subtransaction rolls back
     // (undoing TRUNCATE + partial writes) and we set ERROR status in the
     // still-valid outer transaction.
+    //
+    // IMPORTANT: pgrx SPI calls (SPI_execute_with_args etc.) do NOT wrap
+    // themselves in pg_guard_ffi_boundary.  When a user trigger fires
+    // RAISE EXCEPTION inside a SPI call, PostgreSQL longjmps directly to
+    // PG_exception_stack — which is the outermost boundary set by the
+    // #[pg_guard] wrapper on pg_trickle_scheduler_main.  That longjmp
+    // bypasses all Rust stack frames (including catch_unwind) between the
+    // SPI call site and the bgworker entry, so catch_unwind never fires.
+    //
+    // Fix: wrap execute_scheduled_refresh in pg_guard_ffi_boundary INSIDE
+    // the catch_unwind closure.  This installs a LOCAL PG exception handler
+    // that intercepts the trigger longjmp before it reaches the outermost
+    // boundary, converts it to panic_any(), and lets catch_unwind catch the
+    // resulting Rust panic so ERR-1e code can run.
+    //
+    // We also save PG_exception_stack so we can restore it if
+    // execute_scheduled_refresh has a pure Rust panic (not a PG error): in
+    // that case pg_guard_ffi_boundary does not restore PG_exception_stack,
+    // and we must do so before calling subtxn.rollback() to avoid a stale
+    // pointer being dereferenced if RollbackAndReleaseCurrentSubTransaction
+    // itself raises a PG error.
+    // SAFETY: bgworker main thread only.
+    let saved_pg_exception_stack = unsafe { pgrx::pg_sys::PG_exception_stack };
     let subtxn = SubTransaction::begin();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        execute_scheduled_refresh(&st, action, tick_watermark, drift_counter)
+        // SAFETY: pg_guard_ffi_boundary installs a LOCAL PG exception handler.
+        // After catching a trigger longjmp, it restores PG_exception_stack and
+        // calls panic_any(); the surrounding catch_unwind catches that panic.
+        // Only call this from the main PostgreSQL thread (bgworker entry).
+        unsafe {
+            pgrx::pg_sys::ffi::pg_guard_ffi_boundary(|| {
+                execute_scheduled_refresh(&st, action, tick_watermark, drift_counter)
+            })
+        }
     }));
     let result = match result {
         Ok(outcome) => {
@@ -3080,6 +3111,12 @@ fn refresh_single_st(
             outcome
         }
         Err(panic_payload) => {
+            // Restore PG_exception_stack. For PG errors, pg_guard_ffi_boundary
+            // already restored it — this is a no-op. For pure Rust panics, it
+            // was left pointing to pg_guard_ffi_boundary's now-dead jump_buffer;
+            // restoring it prevents a dangling-pointer longjmp if
+            // subtxn.rollback() itself raises a PG error.
+            unsafe { pgrx::pg_sys::PG_exception_stack = saved_pg_exception_stack; }
             subtxn.rollback();
             let error_msg = extract_panic_message(&panic_payload);
             log!(
