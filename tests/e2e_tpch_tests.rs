@@ -83,6 +83,9 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // DI-11 deep-join planner hints (disable nestloop, raise work_mem,
     // bump join_collapse_limit, temp_file_limit=-1) resolved Q05/Q09.
     // All 22 TPC-H queries pass DIFFERENTIAL mode at SF<10.
+    // v0.77.0: q12 uses CASE aggregate + IN-list predicate and is currently
+    // forced to FULL refresh by CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK.
+    "q12",
 ];
 
 /// Scale factor threshold above which LARGE_SCALE_DIFFERENTIAL_SKIP applies.
