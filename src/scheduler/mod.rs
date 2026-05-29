@@ -3115,7 +3115,17 @@ fn refresh_single_st(
                             count,
                         );
                     }
-                    _ => {}
+                    Ok(_count) => {
+                        // Still under threshold — will retry on next tick.
+                    }
+                    Err(e) => {
+                        pgrx::warning!(
+                            "pg_trickle: ERR-1e: failed to persist consecutive_errors \
+                             for pgt_id={} after panic-path failure: {}",
+                            pgt_id,
+                            e,
+                        );
+                    }
                 }
             }
             if is_retryable {

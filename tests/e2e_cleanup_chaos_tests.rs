@@ -134,17 +134,14 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     let initial_count: i64 = db.count("public.chaos_st").await;
     assert_eq!(initial_count, 3, "initial population should have 3 rows");
 
-    // ── 2. Insert additional rows → pending changes in CDC buffer ────
-    db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
-        .await;
-
-    // ── 3. Install the chaos trigger on the stream table ────────────
+    // ── 2. Install the chaos trigger BEFORE inserting new rows ───────
     //
-    // A BEFORE INSERT trigger that always raises an error simulates a
-    // transient failure during differential refresh DML.  With
-    // pg_trickle.user_triggers = 'auto', the scheduler uses the explicit
-    // DML path so this trigger fires during the INSERT step of each
-    // differential refresh attempt.
+    // Installing the trigger first eliminates a race condition where the
+    // scheduler could process rows 4,5 in the window between insertion
+    // and trigger creation (which would produce a successful refresh,
+    // draining the CDC buffer and resetting consecutive_errors to 0).
+    // With the trigger already present, the scheduler cannot successfully
+    // INSERT the new rows — every attempt panics and is rolled back.
     db.execute(
         "CREATE OR REPLACE FUNCTION public.chaos_insert_blocker() \
          RETURNS trigger LANGUAGE plpgsql AS $$ \
@@ -161,12 +158,35 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     )
     .await;
 
+    // ── 3. Insert additional rows → pending changes in CDC buffer ────
+    //
+    // Now that the trigger is installed, inserting rows 4,5 guarantees
+    // that every subsequent DIFFERENTIAL refresh attempt will fail when
+    // the scheduler tries to INSERT the new rows.
+    db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
+        .await;
+
+    // ── 3b. Pre-seed consecutive_errors to max_consecutive_errors − 1 ─
+    //
+    // After subtransaction rollback the scheduler persists
+    // `consecutive_errors` via SPI in the outer transaction.  Pre-seeding
+    // to one below the threshold means only a single successful
+    // increment_errors() call is required to trigger suspension, making
+    // the test resilient to any transient SPI hiccup on prior attempts.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET consecutive_errors = 2 \
+         WHERE pgt_name = 'chaos_st'",
+    )
+    .await;
+
     // ── 4. Wait for auto-suspension ──────────────────────────────────
     //
-    // The scheduler will attempt differential refreshes.  Each attempt will
-    // fail because the chaos trigger blocks the INSERT step.  After
-    // max_consecutive_errors (= 3) failures the scheduler suspends the ST.
-    let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(90)).await;
+    // The scheduler will attempt a DIFFERENTIAL refresh.  The chaos trigger
+    // blocks the INSERT step, causing a panic.  After subtxn rollback the
+    // scheduler increments consecutive_errors (2 → 3 ≥ max_consecutive_errors)
+    // and sets the status to SUSPENDED.
+    let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(60)).await;
     assert!(
         suspended,
         "chaos_st should have entered SUSPENDED after consecutive refresh failures"
