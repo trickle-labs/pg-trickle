@@ -1,0 +1,100 @@
+name: Fuzz nightly (T-3)
+
+# T-3 (v0.78.0): Nightly extended fuzz run — 300 s per target.
+# Provides deeper coverage than the 30 s smoke run (fuzz-smoke.yml)
+# and archives the grown corpus as a CI artifact for trend tracking.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # Nightly at 02:00 UTC (offset from smoke @ 03:00)
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: 'Seconds to fuzz each target (default: 300)'
+        required: false
+        default: '300'
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-nightly:
+    name: Nightly extended fuzz run (300 s/target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pgrx environment (with nightly Rust for cargo-fuzz)
+        uses: ./.github/actions/setup-pgrx
+        with:
+          rust-toolchain: nightly
+          pg-version: "18"
+          pg-install-mode: system
+
+      - name: Cache cargo registry and fuzz build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: fuzz-nightly-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.toml', 'Cargo.toml') }}
+          restore-keys: |
+            fuzz-nightly-${{ runner.os }}-
+            fuzz-${{ runner.os }}-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Extended fuzz run (300 s per target)
+        env:
+          FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '300' }}
+        run: |
+          set -euo pipefail
+          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+          for TARGET in "${TARGETS[@]}"; do
+            echo "=== Fuzzing $TARGET for ${FUZZ_SECONDS}s ==="
+            CORPUS_DIR="fuzz/corpus/$TARGET"
+            mkdir -p "$CORPUS_DIR"
+
+            # Run extended fuzz, seeding from existing corpus.
+            cargo fuzz run "$TARGET" "$CORPUS_DIR" -- -max_total_time="${FUZZ_SECONDS}" 2>&1 || {
+              echo "FAIL: $TARGET found a crash during nightly fuzz run"
+              exit 1
+            }
+
+            # Report corpus size for trend tracking.
+            CORPUS_SIZE=$(ls "$CORPUS_DIR" 2>/dev/null | wc -l | tr -d ' ')
+            echo "  corpus size for $TARGET: $CORPUS_SIZE entries"
+            echo "FUZZ_CORPUS_${TARGET}=${CORPUS_SIZE}" >> "$GITHUB_ENV"
+          done
+
+      - name: Log corpus size summary
+        run: |
+          echo "=== Corpus size summary ==="
+          for TARGET in parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz; do
+            COUNT=$(ls "fuzz/corpus/$TARGET" 2>/dev/null | wc -l | tr -d ' ')
+            echo "  $TARGET: $COUNT"
+          done
+
+      - name: Upload grown corpus artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-corpus-${{ github.run_id }}
+          path: fuzz/corpus/
+          retention-days: 30
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-nightly-crashes-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/
+          retention-days: 90

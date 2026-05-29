@@ -437,33 +437,82 @@ pub fn execute_differential_refresh(
         return Ok((0, 0));
     }
 
-    // ── C-3/DVM-1: CASE/IN-list aggregate drift detection ─────────────
-    // Queries with SUM/COUNT(CASE…) + IN-list WHERE predicates have known
-    // DVM drift: the incremental delta rule produces non-deterministic
-    // results.  Force FULL fallback with an explicit reason code until the
-    // root-cause delta rule is implemented in v0.78.0.
-    if crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query) {
+    // ── DVM-1 (v0.78.0): CASE/IN-list aggregate drift — definitive rejection path ──
+    // SUM/COUNT(CASE…) + IN-list WHERE predicates can drift when an UPDATE
+    // changes the CASE-condition column: the algebraic delta evaluates the CASE
+    // with the new value for both the 'D' and 'I' sides, miscounting the old
+    // contribution (DI-8).
+    //
+    // Definitive rejection rule:
+    //   • Append-only sources (no UPDATEs): GROUP_RESCAN (EXCEPT ALL) is
+    //     correct — INSERT/DELETE never change CASE-condition columns.
+    //     Bypass the FULL fallback and let GROUP_RESCAN handle it.
+    //   • Mutable sources: the drift CAN occur via UPDATE.  FULL refresh is the
+    //     definitive rejection path until DI-2 (UPDATE-split) lands.
+    if crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query)
+        && !st.is_append_only
+    {
         crate::refresh::set_refresh_reason("CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK");
         return Err(PgTrickleError::QueryTooComplex(format!(
             "CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK: {schema}.{name} uses a CASE \
-             aggregate with an IN-list WHERE predicate — known DVM drift, \
-             forcing FULL refresh (fix planned for v0.78.0)"
+             aggregate with an IN-list WHERE predicate on a mutable source — \
+             UPDATE can cause CASE-condition drift (DI-8). \
+             Definitive rejection path: use is_append_only=true or wait for DI-2."
         )));
     }
 
-    // ── DVM-2/P-1: Correlated aggregate subquery in WHERE detection ───
-    // Queries with a scalar correlated aggregate subquery in the WHERE
-    // clause (e.g. col > (SELECT SUM(…) FROM t WHERE t.k = outer.k))
-    // produce O(delta × table) DVM delta SQL.  Force FULL fallback with an
-    // explicit reason code until the pre-aggregation CTE rewrite lands in
-    // v0.78.0.
-    if crate::refresh::classify_correlated_aggregate_subquery_in_where(&st.defining_query) {
-        crate::refresh::set_refresh_reason("CORRELATED_SUBQUERY_DELTA_QUADRATIC");
-        return Err(PgTrickleError::QueryTooComplex(format!(
-            "CORRELATED_SUBQUERY_DELTA_QUADRATIC: {schema}.{name} has a correlated \
-             aggregate subquery in WHERE — O(delta × table) complexity, \
-             forcing FULL refresh (fix planned for v0.78.0)"
-        )));
+    // ── DVM-2/P-1 (v0.78.0): Correlated aggregate subquery — attempt CTE rewrite ──
+    // Queries with a scalar correlated aggregate subquery in the top-level WHERE
+    // (e.g. col > (SELECT SUM(…) FROM t WHERE t.k = outer.k)) produce
+    // O(delta × table) DVM delta SQL when evaluated naively.
+    //
+    // Safe patterns: single-level, bare-column equality correlations.
+    //   → Attempt CTE pre-aggregation rewrite (decorrelate_scalar_subquery).
+    //   → If successful: the rewritten query is differentially safe.
+    // Unsafe patterns: nested IN-sublinks, dot-qualified correlation, etc.
+    //   → FULL fallback with CORRELATED_SUBQUERY_DELTA_QUADRATIC reason.
+    let effective_defining_query: std::borrow::Cow<str> =
+        if crate::refresh::classify_correlated_aggregate_subquery_in_where(&st.defining_query) {
+            match crate::dvm::rewrite_scalar_subquery_in_where(&st.defining_query) {
+                Ok(rewritten)
+                    if !crate::refresh::classify_correlated_aggregate_subquery_in_where(
+                        &rewritten,
+                    ) =>
+                {
+                    pgrx::debug1!(
+                        "[pg_trickle] DVM-2: successfully rewrote correlated aggregate \
+                         subquery for {schema}.{name} — using differential path"
+                    );
+                    std::borrow::Cow::Owned(rewritten)
+                }
+                _ => {
+                    // Rewrite did not eliminate the correlated aggregate — unsafe pattern.
+                    crate::refresh::set_refresh_reason("CORRELATED_SUBQUERY_DELTA_QUADRATIC");
+                    return Err(PgTrickleError::QueryTooComplex(format!(
+                        "CORRELATED_SUBQUERY_DELTA_QUADRATIC: {schema}.{name} has a \
+                         correlated aggregate subquery in WHERE that cannot be safely \
+                         pre-aggregated (nested or dot-qualified correlation). \
+                         Definitive rejection path: rewrite manually or use FULL mode."
+                    )));
+                }
+            }
+        } else {
+            std::borrow::Cow::Borrowed(&st.defining_query)
+        };
+
+    // ── P-2 (v0.78.0): Lazy complexity class back-fill ───────────────
+    // If the catalog doesn't yet have a complexity class (newly created
+    // stream table or upgraded from pre-0.78.0), compute and persist it now.
+    // This is a best-effort fire-and-forget — failure is logged but not fatal.
+    if st.query_complexity_class.is_none() {
+        let class = classify_query_complexity_optree(&effective_defining_query);
+        if let Err(e) =
+            crate::catalog::StreamTableMeta::update_query_complexity_class(st.pgt_id, class)
+        {
+            pgrx::warning!(
+                "[pg_trickle] P-2: failed to persist complexity class for {schema}.{name}: {e}"
+            );
+        }
     }
 
     // ── DI-7: Join-count complexity guard ────────────────────────────
@@ -471,7 +520,7 @@ pub fn execute_differential_refresh(
     // Scan nodes in the join tree. Used for:
     //   (a) max_differential_joins guard: reject if too complex for DIFF
     //   (b) deep-join planner hints: SET LOCAL for 5+ table joins
-    let scan_count = dvm::query_total_scan_count(&st.defining_query).unwrap_or_else(|e| {
+    let scan_count = dvm::query_total_scan_count(&effective_defining_query).unwrap_or_else(|e| {
         pgrx::warning!(
             "[pg_trickle] DI-7: failed to count scans for {schema}.{name}: {e}; \
              assuming scan_count=1"
@@ -483,7 +532,7 @@ pub fn execute_differential_refresh(
         && max_joins > 0
     {
         // DI-7 uses the join-specific scan count (stops at Aggregate etc.)
-        let join_sc = dvm::query_join_scan_count(&st.defining_query).unwrap_or(0);
+        let join_sc = dvm::query_join_scan_count(&effective_defining_query).unwrap_or(0);
         if join_sc > max_joins as usize {
             return Err(PgTrickleError::QueryTooComplex(format!(
                 "join scan count ({join_sc}) exceeds max_differential_joins ({max_joins}) \
@@ -1190,7 +1239,7 @@ pub fn execute_differential_refresh(
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
     if !should_fallback && !skip_ratio_check && total_change_count > 0 {
-        let complexity = classify_query_complexity(&st.defining_query);
+        let complexity = classify_query_complexity(&effective_defining_query);
         if let Some(hist) = query_refresh_history_stats(st.pgt_id)
             && cost_model_prefers_full(
                 hist.avg_ms_per_delta,
@@ -1279,7 +1328,9 @@ pub fn execute_differential_refresh(
     if !should_fallback
         && !skip_ratio_check
         && total_change_count > 0
-        && st.defining_query.to_ascii_uppercase().contains("GROUP BY")
+        && effective_defining_query
+            .to_ascii_uppercase()
+            .contains("GROUP BY")
     {
         // Try pg_class.reltuples first (cheap); fall back to COUNT(*) if
         // the stream table has never been analyzed (reltuples = -1 or 0).
@@ -1371,17 +1422,30 @@ pub fn execute_differential_refresh(
     // ── Try the MERGE template cache first ──────────────────────────
     // PERF-2: Use hash pre-computed at CREATE/ALTER time; fall back only for
     // pre-v0.59.0 rows where the stored hash is still 0.
-    let query_hash: u64 = if st.defining_query_hash != 0 {
-        st.defining_query_hash as u64
-    } else {
+    // DVM-2: If the effective query was rewritten, hash the rewritten version
+    // to avoid serving a cached template built from the original query.
+    let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        st.defining_query.hash(&mut hasher);
-        hasher.finish()
+        if std::ptr::eq(
+            effective_defining_query.as_ref() as *const str,
+            st.defining_query.as_ref() as *const str,
+        ) {
+            // No rewrite: use pre-computed catalog hash when available.
+            if st.defining_query_hash != 0 {
+                st.defining_query_hash as u64
+            } else {
+                st.defining_query.hash(&mut hasher);
+                hasher.finish()
+            }
+        } else {
+            // DVM-2 rewrite happened: hash the effective (rewritten) query.
+            effective_defining_query.hash(&mut hasher);
+            hasher.finish()
+        }
     };
 
-    let has_recursive_cte = dvm::query_has_recursive_cte(&st.defining_query)?;
-
+    let has_recursive_cte = dvm::query_has_recursive_cte(&effective_defining_query)?;
     // Non-recursive CTEs (WITH … AS (…)) are fully supported by the DVM
     // engine: parse_defining_query_full() builds CteScan nodes and the
     // diff engine processes them via diff_cte_scan().  There is no need for
@@ -1474,7 +1538,7 @@ pub fn execute_differential_refresh(
         pgrx::debug1!("[pg_trickle] cache MISS for pgt_id={}", st.pgt_id);
         let delta_result = if has_recursive_cte {
             dvm::generate_delta_query(
-                &st.defining_query,
+                &effective_defining_query,
                 prev_frontier,
                 new_frontier,
                 schema,
@@ -1483,7 +1547,7 @@ pub fn execute_differential_refresh(
         } else {
             dvm::generate_delta_query_cached(
                 st.pgt_id,
-                &st.defining_query,
+                &effective_defining_query,
                 prev_frontier,
                 new_frontier,
                 schema,
@@ -2621,10 +2685,11 @@ pub fn execute_differential_refresh(
     // matching so comma-joins (`FROM a, b`) and joins inside subqueries are
     // also covered. Falls back to `true` (run cleanup, fail-safe) if the
     // query cannot be parsed.
-    let query_has_join = dvm::query_has_join(&st.defining_query).unwrap_or(true);
+    let query_has_join = dvm::query_has_join(&effective_defining_query).unwrap_or(true);
     // Skip full-query reconciliation for recursive CTEs — it bypasses the
     // ivm_recursive_max_depth guard and would insert suppressed rows.
-    let query_has_recursive_cte = dvm::query_has_recursive_cte(&st.defining_query).unwrap_or(false);
+    let query_has_recursive_cte =
+        dvm::query_has_recursive_cte(&effective_defining_query).unwrap_or(false);
     let phantom_cleanup_count = if query_has_join
         && !query_has_recursive_cte
         && !resolved.is_deduplicated
@@ -2639,7 +2704,7 @@ pub fn execute_differential_refresh(
         super::phd1::cleanup_cross_cycle_phantoms(
             st.pgt_id,
             &quoted_table,
-            &st.defining_query,
+            &effective_defining_query,
             10_000,
         )?
     } else {
@@ -2823,7 +2888,7 @@ pub fn execute_differential_refresh(
         // derived from recent refresh history.  The cost model computes
         // the crossover delta ratio where INCR cost equals FULL cost,
         // adjusted for query complexity class.
-        let complexity = classify_query_complexity(&st.defining_query);
+        let complexity = classify_query_complexity(&effective_defining_query);
         let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
             Some(cost_threshold) => {
                 // Weighted blend: 60% ratio-based, 40% cost-based.
@@ -2911,7 +2976,7 @@ pub fn execute_differential_refresh(
 
         let dq_count = Spi::get_one::<i64>(&format!(
             "SELECT count(*)::bigint FROM ({dq}) AS __pgt_dvm3_validate",
-            dq = st.defining_query,
+            dq = effective_defining_query,
         ))
         .unwrap_or(Some(0))
         .unwrap_or(0);

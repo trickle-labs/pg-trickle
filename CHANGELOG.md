@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.78.0 — DVM Engine Root-Cause Fixes + Scheduler Intelligence](#0780--dvm-engine-root-cause-fixes--scheduler-intelligence)
 - [0.77.0 — Correctness Stop-the-Line & DVM Proof Infrastructure](#0770--correctness-stop-the-line--dvm-proof-infrastructure)
 - [0.75.0 — API Polish, Documentation Excellence & Developer Experience](#0750--api-polish-documentation-excellence--developer-experience)
 - [0.74.0 — Test Coverage, CI Integrity & Security Hardening](#0740--test-coverage-ci-integrity--security-hardening)
@@ -91,6 +92,101 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.78.0] — DVM Engine Root-Cause Fixes + Scheduler Intelligence
+
+### What's New
+
+v0.78.0 completes the Assessment-15 Hardening Arc by fixing root-cause DVM
+engine bugs and adding scheduler intelligence that eliminates per-stream-table
+subquery overhead.
+
+#### DVM-1 — CASE/IN-list aggregate drift: append-only bypass
+
+The CASE/IN-list aggregate fallback (introduced in v0.77.0) was overly
+conservative: it forced FULL refresh even for append-only sources where the
+bug cannot manifest (INSERT-only workloads are handled correctly by
+GROUP_RESCAN). v0.78.0 restricts the fallback to mutable sources while
+allowing append-only sources to take the differential path. Correctness
+is preserved; append-only performance is restored.
+
+#### DVM-2 — Correlated aggregate subquery rewrite (q20-like)
+
+Queries with a correlated aggregate scalar subquery in the WHERE clause
+(e.g., `WHERE col > (SELECT 0.5 * SUM(...) FROM t2 WHERE t2.key = t1.key)`)
+previously always fell back to FULL refresh. v0.78.0 attempts a CTE
+pre-aggregation rewrite first. Queries that can be safely decorrelated now
+run differentially; remaining unsafe patterns fall back with the new
+`CORRELATED_SUBQUERY_DELTA_QUADRATIC` reason code for auditability.
+
+#### P-1 — Auditable fallback reason code
+
+All correlated aggregate scalar subquery FULL fallbacks now record
+`CORRELATED_SUBQUERY_DELTA_QUADRATIC` in `pgt_refresh_history.fallback_reason`,
+making it easy to identify affected stream tables via monitoring.
+
+#### P-2 — Query complexity class in catalog
+
+A new `query_complexity_class` column on `pgtrickle.pgt_stream_tables` stores
+the OpTree-derived complexity label (`Scan`, `Filter`, `Aggregate`, `Join`,
+`JoinAggregate`) computed at CREATE/ALTER time. For stream tables created
+before v0.78.0, the class is back-filled lazily on the first refresh.
+
+#### P-3 — Batch cost model summary table
+
+A new `pgtrickle.pgt_cost_model_summary` table caches per-stream-table
+refresh performance aggregates. The scheduler updates it in a single batch
+query per tick, replacing N per-stream-table history subqueries with one
+grouped upsert. This reduces scheduler overhead significantly for
+deployments with many stream tables.
+
+#### P-4 — Placeholder resolver cache collision guard
+
+The Aho-Corasick placeholder resolver cache now stores the canonical key
+string alongside its hash. On hash collision the old entry is evicted and
+rebuilt with a `WARNING` log, preventing stale automata from causing silent
+incorrect delta SQL.
+
+#### T-2 — TPC-H differential latency regression gate
+
+A new `test_t2_latency_regression` test in the TPC-H test suite runs a
+rotating subset of TPC-H queries and asserts end-to-end differential refresh
+latency stays below per-query thresholds. Catches FULL fallback regressions
+and O(N²) delta path regressions before they reach production.
+
+#### T-3 — Nightly 300 s fuzz workflow
+
+A new `fuzz-nightly.yml` workflow runs each fuzz target for 300 seconds
+(10× the smoke run) on a nightly schedule. The grown corpus is archived as
+a CI artifact, enabling trend analysis of corpus growth over time.
+
+### Schema Changes
+
+```sql
+-- P-2: new column on pgt_stream_tables
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS query_complexity_class TEXT;
+
+-- P-3: new cost model summary table
+CREATE TABLE pgtrickle.pgt_cost_model_summary (
+    pgt_id       BIGINT      PRIMARY KEY
+                             REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                             ON DELETE CASCADE,
+    avg_full_ms  DOUBLE PRECISION,
+    avg_diff_ms  DOUBLE PRECISION,
+    sample_count INTEGER     NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### Upgrade Notes
+
+The upgrade migration (`pg_trickle--0.77.0--0.78.0.sql`) adds the two schema
+changes above. Existing stream tables will have `query_complexity_class = NULL`
+until their first refresh after upgrade. The cost model summary table starts
+empty and is populated on the first scheduler tick.
 
 ---
 

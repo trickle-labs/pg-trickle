@@ -1198,3 +1198,56 @@ async fn test_upgrade_v019_catalog_indexes_present() {
         .await;
     assert!(deps_idx, "idx_deps_pgt_id index should exist");
 }
+
+/// TEST-v0.78.0: Verify v0.78.0 schema additions exist after upgrade.
+///
+/// Checks that P-2 (query_complexity_class column) and P-3
+/// (pgt_cost_model_summary table) are present after upgrading to 0.78.0.
+#[tokio::test]
+async fn test_upgrade_v078_catalog_additions() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // P-2: query_complexity_class column on pgt_stream_tables
+    let has_complexity_col: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM information_schema.columns \
+                WHERE table_schema = 'pgtrickle' \
+                  AND table_name = 'pgt_stream_tables' \
+                  AND column_name = 'query_complexity_class' \
+            )",
+        )
+        .await;
+    assert!(
+        has_complexity_col,
+        "query_complexity_class column should exist on pgt_stream_tables"
+    );
+
+    // P-3: pgt_cost_model_summary table
+    let has_summary_table: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM information_schema.tables \
+                WHERE table_schema = 'pgtrickle' \
+                  AND table_name = 'pgt_cost_model_summary' \
+            )",
+        )
+        .await;
+    assert!(
+        has_summary_table,
+        "pgt_cost_model_summary table should exist after v0.78.0 upgrade"
+    );
+
+    // P-3: Verify table structure — pgt_id primary key
+    let has_pk: bool = db
+        .query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM information_schema.table_constraints \
+                WHERE table_schema = 'pgtrickle' \
+                  AND table_name = 'pgt_cost_model_summary' \
+                  AND constraint_type = 'PRIMARY KEY' \
+            )",
+        )
+        .await;
+    assert!(has_pk, "pgt_cost_model_summary should have a primary key");
+}

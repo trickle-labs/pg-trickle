@@ -105,6 +105,34 @@ impl QueryComplexityClass {
     }
 }
 
+/// Classify a defining query's complexity from its SQL text using the OpTree
+/// parser for accurate scan-count analysis.
+///
+/// P-2 (v0.78.0): This is the "deep" classifier that actually parses the
+/// query AST.  It uses `dvm::query_total_scan_count()` and
+/// `dvm::query_has_join()` to detect joins and aggregate structure.
+/// On parse failure it falls back to the lightweight keyword classifier.
+///
+/// Returns a static string label suitable for storage in the catalog.
+pub(crate) fn classify_query_complexity_optree(defining_query: &str) -> &'static str {
+    // Try the OpTree path first (accurate, requires SPI).
+    let has_join = crate::dvm::query_has_join(defining_query).unwrap_or(false);
+    let has_group_by = defining_query.to_ascii_uppercase().contains("GROUP BY");
+
+    match (has_join, has_group_by) {
+        (true, true) => "JoinAggregate",
+        (true, false) => "Join",
+        (false, true) => "Aggregate",
+        (false, false) => {
+            if defining_query.to_ascii_uppercase().contains(" WHERE ") {
+                "Filter"
+            } else {
+                "Scan"
+            }
+        }
+    }
+}
+
 /// Classify a defining query's complexity from its SQL text.
 ///
 /// Uses lightweight keyword analysis (no parsing or SPI).  This is

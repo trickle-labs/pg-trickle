@@ -153,6 +153,7 @@ mod tests {
             last_reindex_at: None,
             defining_query_hash: 0,
             storage_fillfactor: None,
+            query_complexity_class: None,
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).

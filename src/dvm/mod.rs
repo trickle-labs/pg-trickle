@@ -103,6 +103,11 @@ struct CachedDeltaTemplate {
 struct CachedPlaceholderResolver {
     ac: aho_corasick::AhoCorasick,
     st_source_pgt_ids: Vec<i64>,
+    /// P-4 (v0.78.0): The exact key string used to build this entry
+    /// (`template|oid1|oid2|...`).  Stored to detect hash collisions: if the
+    /// current key string hashes to the same `u64` but is textually different,
+    /// we rebuild the entry rather than returning a stale automaton.
+    canonical_key_src: String,
 }
 
 thread_local! {
@@ -230,8 +235,17 @@ fn resolve_delta_template(
     let resolver_key = hash_string(&resolver_key_src);
 
     let resolver = PLACEHOLDER_RESOLVER_CACHE.with(|cache| {
+        // P-4 (v0.78.0): Verify canonical key to guard against hash collisions.
         if let Some(existing) = cache.borrow().get(&resolver_key) {
-            return Ok::<CachedPlaceholderResolver, PgTrickleError>(existing.clone());
+            if existing.canonical_key_src == resolver_key_src {
+                return Ok::<CachedPlaceholderResolver, PgTrickleError>(existing.clone());
+            }
+            // Hash collision detected — evict stale entry and rebuild.
+            pgrx::warning!(
+                "[pg_trickle] P-4: placeholder resolver cache hash collision for key {resolver_key}; \
+                 rebuilding entry"
+            );
+            cache.borrow_mut().remove(&resolver_key);
         }
 
         let mut patterns: Vec<String> = Vec::with_capacity(source_oids.len() * 2);
@@ -271,6 +285,7 @@ fn resolve_delta_template(
         let built = CachedPlaceholderResolver {
             ac,
             st_source_pgt_ids: pgt_ids,
+            canonical_key_src: resolver_key_src.clone(),
         };
         cache.borrow_mut().insert(resolver_key, built.clone());
         Ok(built)

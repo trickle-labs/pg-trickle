@@ -3581,3 +3581,118 @@ async fn test_tpch_explain_artifacts() {
 
     println!("[O39-10] EXPLAIN artifact collection complete");
 }
+
+// ── T-2 (v0.78.0): Differential refresh latency regression gate ─────────────
+
+/// T-2 (v0.78.0): Differential refresh latency regression test.
+///
+/// Runs a rotating subset of TPC-H stream tables through a full data load +
+/// differential refresh cycle.  Each query's end-to-end refresh duration must
+/// stay below the configured per-query threshold.
+///
+/// Thresholds are intentionally generous (wall-clock milliseconds) to absorb
+/// CI machine variance while still catching pathological regressions (e.g.
+/// FULL fallback that runs unexpectedly, or an O(N²) delta path).
+///
+/// Queries in the rotating subset are selected by `TPCH_T2_CYCLE` (mod n);
+/// when the env var is absent, all queries below are tested.
+///
+/// Run: `cargo test --test e2e_tpch_tests -- --ignored test_t2_latency_regression --test-threads=1 --nocapture`
+#[tokio::test]
+#[ignore]
+async fn test_t2_latency_regression() {
+    let sf = scale_factor();
+    println!("\n══════════════════════════════════════════════════════════");
+    println!("  T-2: TPC-H Differential Latency Regression — SF={sf}");
+    println!("══════════════════════════════════════════════════════════\n");
+
+    // Per-query thresholds: (query_name, max_refresh_ms).
+    // Set conservatively at ~3× the expected differential refresh time on
+    // CI hardware.  A breach means either a performance regression or an
+    // unexpected FULL fallback.
+    let thresholds: &[(&str, u64)] = &[
+        ("q1", 15_000),
+        ("q3", 15_000),
+        ("q5", 15_000),
+        ("q6", 10_000),
+        ("q10", 15_000),
+        ("q12", 15_000),
+        ("q14", 10_000),
+        ("q18", 20_000),
+        ("q19", 10_000),
+    ];
+
+    // Optional: limit to a rotating subset via TPCH_T2_CYCLE env var.
+    let cycle_idx: Option<usize> = std::env::var("TPCH_T2_CYCLE")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let active: Vec<(&str, u64)> = if let Some(c) = cycle_idx {
+        thresholds
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 == c % 3)
+            .map(|(_, &t)| t)
+            .collect()
+    } else {
+        thresholds.to_vec()
+    };
+
+    let db = E2eDb::new_bench().await.with_extension().await;
+    load_schema(&db).await;
+    load_data(&db).await;
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut next_orderkey: usize = sf_orders() + 1;
+
+    for (qname, max_ms) in &active {
+        // Find matching query definition.
+        let query_def = tpch_queries().into_iter().find(|q| q.name == *qname);
+        let q = match query_def {
+            Some(q) => q,
+            None => {
+                println!("  [{qname}] SKIP — definition not found");
+                continue;
+            }
+        };
+
+        let st_name = format!("t2_lat_{}", qname);
+
+        // Create stream table with differential refresh.
+        let create_sql = format!(
+            "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, \
+             refresh_mode => 'differential')",
+            sql = q.sql
+        );
+        db.execute(&create_sql).await;
+
+        // Run one RF1+RF2 insert/delete cycle.
+        apply_rf1(&db, next_orderkey).await;
+        next_orderkey += rf_count();
+        apply_rf2(&db).await;
+
+        // Measure differential refresh latency.
+        let t0 = std::time::Instant::now();
+        db.execute(&format!(
+            "SELECT pgtrickle.refresh_stream_table('{st_name}')"
+        ))
+        .await;
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+        let status = if elapsed_ms <= *max_ms { "OK" } else { "FAIL" };
+        println!("  [{qname}] elapsed={elapsed_ms}ms threshold={max_ms}ms — {status}");
+
+        if elapsed_ms > *max_ms {
+            failures.push(format!("{qname}: {elapsed_ms}ms > threshold {max_ms}ms"));
+        }
+
+        let _ = db
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
+            .await;
+    }
+
+    if !failures.is_empty() {
+        panic!("T-2 latency regression failures:\n{}", failures.join("\n"));
+    }
+
+    println!("\n[T-2] All latency checks passed.");
+}
