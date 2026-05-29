@@ -1,7 +1,7 @@
 //! D-3 (v0.79.0): Cleanup chaos tests.
 //!
 //! Tests the behaviour of the auto-suspend circuit when the change-buffer
-//! cleanup (the `DELETE FROM pgtrickle_changes.changes_<oid>` step inside
+//! cleanup (the `DELETE FROM pgtrickle_changes.changes_<stable_name>` step inside
 //! every differential refresh) fails repeatedly.
 //!
 //! Test scenario:
@@ -126,12 +126,12 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
         .await;
 
     // ── 3. Discover the change-buffer table ─────────────────────────
-    // The buffer is named pgtrickle_changes.changes_<source_oid>.
-    let source_oid: i32 = db
-        .query_scalar("SELECT 'chaos_src'::regclass::oid::int")
+    // v0.32.0+: buffer tables are named changes_<stable_name>, not changes_<oid>.
+    let source_oid: i64 = db
+        .query_scalar("SELECT 'chaos_src'::regclass::oid::int8")
         .await;
 
-    let buffer_table = format!("pgtrickle_changes.changes_{source_oid}");
+    let buffer_table = db.change_buffer_table(source_oid).await;
 
     // Verify the buffer has at least one pending change before installing chaos.
     let pending: i64 = db
