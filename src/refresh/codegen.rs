@@ -353,6 +353,7 @@ pub(crate) fn drain_pending_cleanups() {
         // The lock key is the source OID cast to bigint.  OIDs are 32-bit, so
         // the bigint is always non-negative and unique per source table.
         let lock_acquired =
+            // nosemgrep: rust.spi.query.dynamic-format — oid is a u32 from internal catalog lookup, not user input
             Spi::get_one::<bool>(&format!("SELECT pg_try_advisory_xact_lock({oid}::bigint)"))
                 .unwrap_or(Some(true))
                 .unwrap_or(true);
