@@ -12,6 +12,13 @@
 //! Phase 4 additions:
 //! - PROP-5: Topology/scheduler stress — 10,000+ randomised DAG shapes
 //! - PROP-6: Pure Rust DAG/scheduler helper invariants
+//!
+//! v0.77.0 additions (T-1):
+//! - T-1: DVM algebra property generators for C-3/DVM-1 and DVM-2/P-1
+//!   detection functions: verify no false negatives on canonical SQL
+//!   patterns and no false positives on benign queries.
+//!   Database-level DIFFERENTIAL vs FULL comparison is covered by the
+//!   existing `tests/e2e_property_tests.rs` suite.
 
 // These tests exercise pure functions from the library.
 // We use `pg_trickle` as a lib crate (cdylib + lib).

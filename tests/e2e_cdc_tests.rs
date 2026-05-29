@@ -1124,3 +1124,124 @@ async fn test_inv_cache1_change_buffer_sequence_cache_is_one() {
         "check_cdc_health() must not alert after CACHE is restored to 1"
     );
 }
+
+// ── T-4 (v0.77.0): TRUNCATE LSN regression ────────────────────────────
+
+/// T-4: TRUNCATE CDC trigger uses pg_current_wal_insert_lsn (not pg_current_wal_lsn).
+///
+/// Regression test for C-1 fix: the TRUNCATE trigger function previously
+/// used `pg_current_wal_lsn()` (the WAL write position, which can lag behind
+/// the insert position within a transaction) instead of
+/// `pg_current_wal_insert_lsn()` (always at or ahead of the write position).
+///
+/// This test verifies the ordering invariant:
+/// 1. After TRUNCATE, rows inserted in the same transaction must be
+///    captured with an LSN strictly greater than the TRUNCATE marker.
+/// 2. After refresh, the stream table contains ONLY the post-TRUNCATE rows.
+/// 3. No pre-TRUNCATE rows survive in the stream table.
+#[tokio::test]
+async fn test_t4_truncate_lsn_insert_ordering_regression() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Populate initial data
+    db.execute("CREATE TABLE t4_src (id INT PRIMARY KEY, val TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO t4_src SELECT g, 'pre_' || g FROM generate_series(1, 20) g")
+        .await;
+
+    db.create_st("t4_st", "SELECT id, val FROM t4_src", "1h", "DIFFERENTIAL")
+        .await;
+
+    // Full-initialise the stream table
+    db.refresh_st("t4_st").await;
+    assert_eq!(
+        db.count("public.t4_st").await,
+        20,
+        "T-4: pre-condition: stream table must have 20 rows after full init"
+    );
+
+    // TRUNCATE and INSERT post-TRUNCATE rows in the same transaction.
+    // The TRUNCATE trigger must record an LSN ≤ the INSERT LSNs; if the
+    // C-1 bug were present, it would record a stale LSN that makes the
+    // engine believe all post-TRUNCATE INSERTs happened before the TRUNCATE.
+    // Use execute_seq so all statements share the same connection (required
+    // for transaction semantics) without hitting the prepared-statement
+    // restriction that bans multiple commands in a single query string.
+    db.execute_seq(&[
+        "BEGIN",
+        "TRUNCATE t4_src",
+        "INSERT INTO t4_src SELECT g, 'post_' || g FROM generate_series(100, 115) g",
+        "COMMIT",
+    ])
+    .await;
+
+    // Refresh — must detect TRUNCATE marker and fall back to FULL.
+    db.refresh_st("t4_st").await;
+
+    // Verify: only post-TRUNCATE rows survive
+    let count = db.count("public.t4_st").await;
+    assert_eq!(
+        count, 16,
+        "T-4: after TRUNCATE+INSERT, stream table must have exactly 16 post-TRUNCATE rows, got {count}"
+    );
+
+    // No pre-TRUNCATE rows
+    let pre_rows: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM public.t4_st WHERE val LIKE 'pre_%'")
+        .await;
+    assert_eq!(
+        pre_rows, 0,
+        "T-4: no pre-TRUNCATE rows must survive in the stream table"
+    );
+
+    // All post-TRUNCATE rows present
+    let post_rows: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM public.t4_st WHERE val LIKE 'post_%'")
+        .await;
+    assert_eq!(
+        post_rows, 16,
+        "T-4: all 16 post-TRUNCATE rows must be present in the stream table"
+    );
+}
+
+/// T-4b: TRUNCATE followed by further INSERTs in a separate transaction.
+///
+/// Verifies that the TRUNCATE LSN ordering invariant holds when the
+/// post-TRUNCATE INSERTs are committed in a different transaction
+/// (the common case in bulk-reload workflows).
+#[tokio::test]
+async fn test_t4b_truncate_then_insert_separate_transactions() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE t4b_src (id INT PRIMARY KEY, val TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO t4b_src SELECT g, 'initial_' || g FROM generate_series(1, 10) g")
+        .await;
+
+    db.create_st(
+        "t4b_st",
+        "SELECT id, val FROM t4b_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st("t4b_st").await;
+    assert_eq!(db.count("public.t4b_st").await, 10, "T-4b pre-condition");
+
+    // Separate transactions: TRUNCATE then INSERT
+    db.execute("TRUNCATE t4b_src").await;
+    db.execute("INSERT INTO t4b_src SELECT g, 'reload_' || g FROM generate_series(50, 55) g")
+        .await;
+
+    db.refresh_st("t4b_st").await;
+
+    let count = db.count("public.t4b_st").await;
+    assert_eq!(
+        count, 6,
+        "T-4b: must have exactly 6 reload rows, got {count}"
+    );
+    let initial_rows: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM public.t4b_st WHERE val LIKE 'initial_%'")
+        .await;
+    assert_eq!(initial_rows, 0, "T-4b: no initial rows must survive");
+}

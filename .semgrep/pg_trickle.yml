@@ -91,6 +91,11 @@ rules:
     pattern-regex: '(SET\s+ROLE\b|RESET\s+ROLE\b)'
 
   - id: rust.panic-in-sql-path
+    # C-4 (v0.77.0): Formally links this rule to the Assessment-15 hardening
+    # arc item that requires a CI gate blocking unwrap/expect/panic outside
+    # test modules.  The rule was introduced in v0.40.0 and is already
+    # enforced on every PR; this annotation makes the roadmap traceability
+    # explicit.
     languages:
       - rust
     severity: WARNING
@@ -101,6 +106,8 @@ rules:
       pgrx::error!() or ereport!() instead. If this code path is genuinely
       unreachable, use pgrx::error!("unreachable: ...") so PostgreSQL can
       clean up the session gracefully rather than aborting the backend.
+      (C-4, v0.77.0: Assessment-15 hard gate — zero unwrap/expect/panic in
+      production paths.)
     patterns:
       - pattern-either:
           - pattern: $X.unwrap()

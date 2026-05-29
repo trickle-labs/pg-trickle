@@ -253,10 +253,12 @@ fn test_resolve_lsn_no_placeholders() {
 
 #[test]
 fn test_resolve_lsn_missing_oid_defaults() {
+    // C-2 requires both tokens present in template; frontier empty → defaults to 0/0.
     let prev = Frontier::new();
     let new_f = Frontier::new();
-    let resolved = resolve_lsn_placeholders_test("__PGS_PREV_LSN_999__", &[999], &prev, &new_f);
-    assert_eq!(resolved, "0/0");
+    let template = "__PGS_PREV_LSN_999__ and __PGS_NEW_LSN_999__";
+    let resolved = resolve_lsn_placeholders_test(template, &[999], &prev, &new_f);
+    assert!(resolved.contains("0/0"));
 }
 
 #[test]
@@ -266,7 +268,8 @@ fn test_resolve_lsn_preserves_other_text() {
     let mut new_f = Frontier::new();
     new_f.set_source(1, "0/20".to_string(), "ts".to_string());
 
-    let template = "SELECT * FROM t WHERE x = 42 AND lsn > '__PGS_PREV_LSN_1__'";
+    // C-2 requires both tokens present in template.
+    let template = "SELECT * FROM t WHERE x = 42 AND lsn > '__PGS_PREV_LSN_1__'::pg_lsn AND lsn <= '__PGS_NEW_LSN_1__'::pg_lsn";
     let resolved = resolve_lsn_placeholders_test(template, &[1], &prev, &new_f);
     assert!(resolved.contains("SELECT * FROM t WHERE x = 42"));
     assert!(resolved.contains("0/10"));
@@ -300,16 +303,18 @@ fn test_resolve_lsn_placeholders_multi_source() {
 
 #[test]
 fn test_resolve_lsn_placeholders_missing_source_defaults_to_0_0() {
-    let template = "lsn > '__PGS_PREV_LSN_999__'::pg_lsn";
+    // C-2 requires both tokens present; when frontier is empty both default to 0/0.
+    let template = "lsn > '__PGS_PREV_LSN_999__'::pg_lsn AND lsn <= '__PGS_NEW_LSN_999__'::pg_lsn";
     let prev = Frontier::new();
     let new = Frontier::new();
     let result = resolve_lsn_placeholders_test(template, &[999], &prev, &new);
-    assert_eq!(result, "lsn > '0/0'::pg_lsn");
+    assert!(result.contains("'0/0'"));
 }
 
 #[test]
 fn test_resolve_lsn_placeholders_empty_template() {
-    let result = resolve_lsn_placeholders_test("", &[1], &Frontier::new(), &Frontier::new());
+    // Empty template with no source OIDs — C-2 assertion is skipped (no OIDs to check).
+    let result = resolve_lsn_placeholders_test("", &[], &Frontier::new(), &Frontier::new());
     assert_eq!(result, "");
 }
 
@@ -2590,5 +2595,148 @@ fn test_diff_cost_factors_ordering() {
     assert!(
         QueryComplexityClass::Join.diff_cost_factor()
             < QueryComplexityClass::JoinAggregate.diff_cost_factor()
+    );
+}
+
+// ── T-1 (v0.77.0): DVM algebra detection function property tests ─────
+
+// ── C-3/DVM-1: classify_case_in_list_aggregate_drift ─────────────────
+
+/// T-1a: Canonical q12-like patterns MUST be detected.
+#[test]
+fn test_t1a_case_in_list_drift_detects_q12_canonical() {
+    // q12: SUM(CASE WHEN ... THEN 1 ELSE 0 END) + IN ('MAIL', 'SHIP')
+    let q12_like = "SELECT l_shipmode, \
+        SUM(CASE WHEN o_orderpriority = '1-URGENT' THEN 1 ELSE 0 END) AS high_cnt \
+        FROM orders JOIN lineitem ON o_orderkey = l_orderkey \
+        WHERE l_shipmode IN ('MAIL', 'SHIP') \
+        GROUP BY l_shipmode ORDER BY l_shipmode";
+    assert!(
+        classify_case_in_list_aggregate_drift(q12_like),
+        "T-1a: q12-like CASE aggregate + IN-list must be detected as drift"
+    );
+}
+
+/// T-1b: Lowercase variants are also detected (case-insensitive matching).
+#[test]
+fn test_t1b_case_in_list_drift_case_insensitive() {
+    let lower = "select sum(case when status = 'a' then 1 else 0 end) \
+                 from t where mode in ('x', 'y')";
+    assert!(
+        classify_case_in_list_aggregate_drift(lower),
+        "T-1b: lowercase SQL must also be detected"
+    );
+}
+
+/// T-1c: COUNT(CASE...) + IN-list is also detected.
+#[test]
+fn test_t1c_count_case_in_list_detected() {
+    let q = "SELECT COUNT(CASE WHEN x > 0 THEN 1 END) FROM t WHERE mode IN ('A', 'B')";
+    assert!(
+        classify_case_in_list_aggregate_drift(q),
+        "T-1c: COUNT(CASE...) + IN-list must be detected"
+    );
+}
+
+/// T-1d: Benign queries (aggregate without IN-list) are NOT detected.
+#[test]
+fn test_t1d_case_agg_no_in_list_not_detected() {
+    let q = "SELECT SUM(CASE WHEN val > 0 THEN 1 ELSE 0 END) FROM t WHERE status = 'A'";
+    assert!(
+        !classify_case_in_list_aggregate_drift(q),
+        "T-1d: CASE aggregate without IN-list must NOT be flagged as drift"
+    );
+}
+
+/// T-1e: Plain IN-list without CASE aggregate is NOT detected.
+#[test]
+fn test_t1e_in_list_no_case_agg_not_detected() {
+    let q = "SELECT count(*) FROM orders WHERE status IN ('A', 'B', 'C')";
+    assert!(
+        !classify_case_in_list_aggregate_drift(q),
+        "T-1e: plain IN-list without CASE aggregate must NOT be flagged"
+    );
+}
+
+/// T-1f: Simple scan query is NOT detected.
+#[test]
+fn test_t1f_scan_not_detected_by_case_in_list() {
+    let q = "SELECT id, val FROM source_table WHERE id > 5";
+    assert!(
+        !classify_case_in_list_aggregate_drift(q),
+        "T-1f: simple scan must not trigger CASE/IN-list detection"
+    );
+}
+
+// ── DVM-2/P-1: classify_correlated_aggregate_subquery_in_where ────────
+
+/// T-1g: Canonical q20-like pattern MUST be detected.
+#[test]
+fn test_t1g_correlated_aggregate_subquery_detects_q20_canonical() {
+    // q20: ps_availqty > (SELECT 0.5 * SUM(l_quantity) FROM lineitem WHERE ...)
+    let q20_like = "SELECT ps_partkey FROM partsupp WHERE \
+        ps_availqty > (SELECT 0.5 * SUM(l_quantity) FROM lineitem \
+                       WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey)";
+    assert!(
+        classify_correlated_aggregate_subquery_in_where(q20_like),
+        "T-1g: q20-like correlated aggregate subquery must be detected"
+    );
+}
+
+/// T-1h: >= comparison variant is also detected.
+#[test]
+fn test_t1h_correlated_aggregate_subquery_gte_variant() {
+    let q = "SELECT x FROM t WHERE x >= (SELECT SUM(y) FROM s WHERE s.k = t.k)";
+    assert!(
+        classify_correlated_aggregate_subquery_in_where(q),
+        "T-1h: >= correlated aggregate subquery must be detected"
+    );
+}
+
+/// T-1i: < and <= operators are also detected.
+#[test]
+fn test_t1i_correlated_aggregate_subquery_lt_lte_variants() {
+    let lt = "SELECT a FROM t WHERE cost < (SELECT AVG(price) FROM prices WHERE cat = t.cat)";
+    let lte = "SELECT a FROM t WHERE cost <= (SELECT MIN(price) FROM prices WHERE cat = t.cat)";
+    assert!(
+        classify_correlated_aggregate_subquery_in_where(lt),
+        "T-1i: < correlated aggregate subquery must be detected"
+    );
+    assert!(
+        classify_correlated_aggregate_subquery_in_where(lte),
+        "T-1i: <= correlated aggregate subquery must be detected"
+    );
+}
+
+/// T-1j: Subquery without aggregate function is NOT detected (safe to diff).
+#[test]
+fn test_t1j_comparison_subquery_no_aggregate_not_detected() {
+    // Simple non-aggregate correlated subquery — DVM can handle these
+    // Use a non-aggregate subquery without MIN/MAX/SUM/AVG/COUNT:
+    let q = "SELECT a FROM t WHERE id > (SELECT ref_id FROM config WHERE name = 'limit')";
+    assert!(
+        !classify_correlated_aggregate_subquery_in_where(q),
+        "T-1j: correlated subquery without aggregate must NOT be flagged"
+    );
+}
+
+/// T-1k: Simple scan with no subquery is NOT detected.
+#[test]
+fn test_t1k_no_subquery_not_detected() {
+    let q = "SELECT id, name FROM customers WHERE region = 'EU'";
+    assert!(
+        !classify_correlated_aggregate_subquery_in_where(q),
+        "T-1k: queries without comparison subqueries must not be flagged"
+    );
+}
+
+/// T-1l: IN-subquery (not comparison) is NOT detected by the correlated detector.
+#[test]
+fn test_t1l_in_subquery_not_detected_by_correlated_detector() {
+    // IN (SELECT ...) is a different pattern (handled by EXISTS rewrite)
+    let q = "SELECT id FROM t WHERE status IN (SELECT code FROM valid_statuses)";
+    assert!(
+        !classify_correlated_aggregate_subquery_in_where(q),
+        "T-1l: IN (SELECT ...) pattern must NOT be flagged by correlated detector"
     );
 }

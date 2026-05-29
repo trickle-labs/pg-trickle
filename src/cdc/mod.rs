@@ -317,7 +317,7 @@ pub fn create_change_trigger(
              END IF;
              INSERT INTO {change_schema}.changes_{name}
                  (lsn, action)
-             VALUES (pg_current_wal_lsn(), 'T');
+             VALUES (pg_current_wal_insert_lsn(), 'T');
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;

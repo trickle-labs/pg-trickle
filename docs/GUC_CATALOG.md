@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**122 configuration parameters** extracted from `src/config.rs`.
+**123 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -127,6 +127,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.use_prepared_statements` | `bool` | `true` | Disable if prepared-statement parameter sniffing produces poor plans (e.g., highly skewed LSN distributions). |
 | `pg_trickle.use_sqlstate_classification` | `bool` | `true` | The SQLSTATE-based classification is locale-safe: it works correctly regardless of `lc_messages`. |
 | `pg_trickle.user_triggers` | `text` | `"auto"` | - `"auto"` (default): Detect user-defined row-level triggers on the   stream table and automatically use explicit DML (DELETE + UPDATE +   INSERT) so triggers fire with correct `TG_OP`, `OLD`, and `NEW`. |
+| `pg_trickle.validate_delta_invariants` | `bool` | `false` | Default: `false`. |
 | `pg_trickle.volatile_function_policy` | `text` | `"reject"` | Controls how volatile functions in defining queries are handled: - `"reject"` (default): Error — volatile functions are rejected. |
 | `pg_trickle.wal_max_changes_per_poll` | `int4` | `10000` | Default: 10 000. |
 | `pg_trickle.wal_max_lag_bytes` | `int4` | `65536` | Default: 65 536 (64 KiB). |

@@ -135,6 +135,53 @@ pub(crate) fn classify_query_complexity(defining_query: &str) -> QueryComplexity
     }
 }
 
+/// C-3/DVM-1: Detect CASE aggregate with IN-list WHERE predicate (q12-like).
+///
+/// Queries with this pattern have known DVM drift: the incremental delta
+/// for CASE aggregates combined with IN-list predicates in WHERE can produce
+/// non-deterministic results. Force FULL refresh until the root-cause
+/// delta rule is fixed in v0.78.0.
+///
+/// Detection criteria: query has both a CASE expression inside an aggregate
+/// function (SUM or COUNT) AND an IN-list predicate with string literals.
+pub(crate) fn classify_case_in_list_aggregate_drift(defining_query: &str) -> bool {
+    let upper = defining_query.to_ascii_uppercase();
+    // Aggregate function containing a CASE expression
+    let has_agg_case = upper.contains("SUM(CASE")
+        || upper.contains("SUM( CASE")
+        || upper.contains("COUNT(CASE")
+        || upper.contains("COUNT( CASE");
+    // IN-list predicate with string literals (e.g. col IN ('A', 'B'))
+    let has_in_list = upper.contains("IN ('") || upper.contains("IN ( '");
+    has_agg_case && has_in_list
+}
+
+/// DVM-2/P-1: Detect correlated aggregate scalar subquery in WHERE (q20-like).
+///
+/// Queries with this pattern produce O(delta × table) DVM delta SQL because
+/// the inner aggregate subquery is re-evaluated for every changed row in the
+/// CDC delta. Force FULL refresh until the pre-aggregation CTE rewrite is
+/// implemented in v0.78.0.
+///
+/// Detection criteria: query has a comparison operator directly followed by
+/// a scalar subquery that contains an aggregate function.
+pub(crate) fn classify_correlated_aggregate_subquery_in_where(defining_query: &str) -> bool {
+    let upper = defining_query.to_ascii_uppercase();
+    // Comparison operator directly followed by a scalar subquery
+    let has_subquery_comparison = upper.contains("> (SELECT")
+        || upper.contains(">= (SELECT")
+        || upper.contains("< (SELECT")
+        || upper.contains("<= (SELECT");
+    if !has_subquery_comparison {
+        return false;
+    }
+    // The subquery must contain an aggregate function (correlated aggregate)
+    upper.contains("SUM(")
+        || upper.contains(" AVG(")
+        || upper.contains(" MIN(")
+        || upper.contains(" MAX(")
+}
+
 // ── G12-ERM-1: Effective refresh mode tracking ──────────────────────────
 
 // Thread-local that records the mode actually used for the current refresh.
