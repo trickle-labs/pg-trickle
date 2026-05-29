@@ -3092,6 +3092,31 @@ fn refresh_single_st(
             let is_retryable = crate::error::classify_error_for_retry(&error_msg);
             if !is_retryable {
                 let _ = StreamTableMeta::set_error_state(pgt_id, &error_msg);
+            } else {
+                // ERR-1e: Track consecutive errors for auto-suspension even when
+                // the failure manifests as a PostgreSQL panic (e.g. a trigger
+                // raising RAISE EXCEPTION during refresh DML).  After
+                // subtxn.rollback() the outer transaction is still valid, so
+                // SPI calls succeed here — mirroring the Rust-error path in
+                // run_refresh_for_st.
+                match StreamTableMeta::increment_errors(pgt_id) {
+                    Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                        let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                        monitor::alert_auto_suspended(
+                            &st.pgt_schema,
+                            &st.pgt_name,
+                            count,
+                            st.pooler_compatibility_mode,
+                        );
+                        log!(
+                            "pg_trickle: suspended {}.{} after {} consecutive errors",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            count,
+                        );
+                    }
+                    _ => {}
+                }
             }
             if is_retryable {
                 RefreshOutcome::RetryableFailure
