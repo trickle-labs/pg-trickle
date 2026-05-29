@@ -1,16 +1,17 @@
 //! D-3 (v0.79.0): Cleanup chaos tests.
 //!
-//! Tests the behaviour of the auto-suspend circuit when the change-buffer
-//! cleanup (the `DELETE FROM pgtrickle_changes.changes_<stable_name>` step inside
-//! every differential refresh) fails repeatedly.
+//! Tests the behaviour of the auto-suspend circuit when differential refreshes
+//! fail repeatedly.
 //!
 //! Test scenario:
 //!   1. Create source table + DIFFERENTIAL stream table.
 //!   2. Insert rows → changes land in the CDC buffer.
-//!   3. Install a BEFORE DELETE trigger on the buffer table that raises an
-//!      error (`chaos trigger`).
-//!   4. Let the scheduler attempt refreshes → each attempt fails at the
-//!      cleanup step, incrementing `consecutive_errors`.
+//!   3. Install a BEFORE INSERT trigger on the stream table that raises an
+//!      error (`chaos trigger`), with `pg_trickle.user_triggers = 'auto'`
+//!      so the trigger fires during DIFFERENTIAL refresh DML.
+//!   4. Let the scheduler attempt refreshes → each attempt fails because
+//!      the chaos trigger blocks the MERGE INSERT step, incrementing
+//!      `consecutive_errors`.
 //!   5. After `max_consecutive_errors` failures the scheduler sets the stream
 //!      table status to SUSPENDED and fires the `auto_suspended` alert.
 //!   6. Remove the chaos trigger.
@@ -36,10 +37,15 @@ async fn setup_chaos_scheduler(db: &E2eDb) {
     // Low threshold so the test does not need many refresh cycles.
     db.execute("ALTER SYSTEM SET pg_trickle.max_consecutive_errors = 3")
         .await;
+    // Enable user triggers so chaos trigger fires during DIFFERENTIAL DML.
+    db.execute("ALTER SYSTEM SET pg_trickle.user_triggers = 'auto'")
+        .await;
     db.reload_config_and_wait().await;
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.max_consecutive_errors", "3")
+        .await;
+    db.wait_for_setting("pg_trickle.user_triggers", "auto")
         .await;
 
     let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
@@ -72,12 +78,19 @@ async fn wait_for_suspended(db: &E2eDb, pgt_name: &str, timeout: Duration) -> bo
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// D-3: Cleanup chaos — consecutive DELETE failures → SUSPENDED → recovery
+// D-3: Refresh chaos — consecutive refresh failures → SUSPENDED → recovery
 // ══════════════════════════════════════════════════════════════════════
 
-/// D-3 (v0.79.0): Force consecutive change-buffer cleanup failures via a chaos
-/// trigger, assert the stream table auto-suspends, then remove the trigger,
-/// resume, and verify the stream table recovers and produces correct output.
+/// D-3 (v0.79.0): Force consecutive differential refresh failures via a chaos
+/// trigger on the stream table, assert the stream table auto-suspends, then
+/// remove the trigger, resume, and verify the stream table recovers and
+/// produces correct output.
+///
+/// The chaos trigger is a BEFORE INSERT trigger on `chaos_st`.  With
+/// `pg_trickle.user_triggers = 'auto'`, pg_trickle uses the explicit DML path
+/// (DELETE + UPDATE + INSERT) instead of MERGE, so the BEFORE INSERT trigger
+/// fires when the scheduler tries to apply new rows.  Each failed attempt
+/// increments `consecutive_errors` until the auto-suspend threshold is reached.
 #[tokio::test]
 async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     let db = E2eDb::new().await.with_extension().await;
@@ -125,53 +138,38 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
         .await;
 
-    // ── 3. Discover the change-buffer table ─────────────────────────
-    // v0.32.0+: buffer tables are named changes_<stable_name>, not changes_<oid>.
-    let source_oid: i64 = db
-        .query_scalar("SELECT 'chaos_src'::regclass::oid::int8")
-        .await;
-
-    let buffer_table = db.change_buffer_table(source_oid).await;
-
-    // Verify the buffer has at least one pending change before installing chaos.
-    let pending: i64 = db
-        .query_scalar(&format!("SELECT count(*) FROM {buffer_table}"))
-        .await;
-    assert!(
-        pending > 0,
-        "CDC buffer should have pending changes before installing chaos trigger"
-    );
-
-    // ── 4. Install the chaos trigger on the change-buffer table ─────
+    // ── 3. Install the chaos trigger on the stream table ────────────
     //
-    // A BEFORE DELETE trigger that always raises an error simulates a
-    // transient storage/constraint failure during change-buffer cleanup.
+    // A BEFORE INSERT trigger that always raises an error simulates a
+    // transient failure during differential refresh DML.  With
+    // pg_trickle.user_triggers = 'auto', the scheduler uses the explicit
+    // DML path so this trigger fires during the INSERT step of each
+    // differential refresh attempt.
     db.execute(
-        "CREATE OR REPLACE FUNCTION pgtrickle_changes.chaos_delete_blocker() \
+        "CREATE OR REPLACE FUNCTION public.chaos_insert_blocker() \
          RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN \
-             RAISE EXCEPTION 'D-3 chaos: change-buffer DELETE deliberately blocked'; \
+             RAISE EXCEPTION 'D-3 chaos: refresh INSERT deliberately blocked'; \
          END $$",
     )
     .await;
 
-    db.execute(&format!(
-        "CREATE TRIGGER chaos_block_delete \
-         BEFORE DELETE ON {buffer_table} \
-         FOR EACH ROW EXECUTE FUNCTION pgtrickle_changes.chaos_delete_blocker()",
-    ))
+    db.execute(
+        "CREATE TRIGGER chaos_block_insert \
+         BEFORE INSERT ON public.chaos_st \
+         FOR EACH ROW EXECUTE FUNCTION public.chaos_insert_blocker()",
+    )
     .await;
 
-    // ── 5. Wait for auto-suspension ──────────────────────────────────
+    // ── 4. Wait for auto-suspension ──────────────────────────────────
     //
     // The scheduler will attempt differential refreshes.  Each attempt will
-    // fail (MERGE succeeds, then the cleanup DELETE fires the chaos trigger
-    // and the transaction rolls back).  After max_consecutive_errors (= 3)
-    // failures the scheduler suspends the ST.
-    let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(60)).await;
+    // fail because the chaos trigger blocks the INSERT step.  After
+    // max_consecutive_errors (= 3) failures the scheduler suspends the ST.
+    let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(90)).await;
     assert!(
         suspended,
-        "chaos_st should have entered SUSPENDED after consecutive cleanup failures"
+        "chaos_st should have entered SUSPENDED after consecutive refresh failures"
     );
 
     // Verify the consecutive_errors counter reached the threshold.
@@ -189,15 +187,13 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
         "chaos_st should still have 3 rows (rolled-back refreshes)"
     );
 
-    // ── 6. Remove the chaos trigger ──────────────────────────────────
-    db.execute(&format!(
-        "DROP TRIGGER IF EXISTS chaos_block_delete ON {buffer_table}",
-    ))
-    .await;
-    db.execute("DROP FUNCTION IF EXISTS pgtrickle_changes.chaos_delete_blocker()")
+    // ── 5. Remove the chaos trigger ──────────────────────────────────
+    db.execute("DROP TRIGGER IF EXISTS chaos_block_insert ON public.chaos_st")
+        .await;
+    db.execute("DROP FUNCTION IF EXISTS public.chaos_insert_blocker()")
         .await;
 
-    // ── 7. Resume the stream table ───────────────────────────────────
+    // ── 6. Resume the stream table ───────────────────────────────────
     db.execute("SELECT pgtrickle.resume_stream_table('chaos_st')")
         .await;
 
@@ -211,7 +207,7 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
         "consecutive_errors should be reset to 0 after resume"
     );
 
-    // ── 8. Verify recovery — data should match after next refresh ───
+    // ── 7. Verify recovery — data should match after next refresh ───
     // Insert one more row to force a new change.
     db.execute("INSERT INTO chaos_src VALUES (6, 'zeta')").await;
 
@@ -231,10 +227,11 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     };
     assert!(
         recovered,
-        "chaos_st should have recovered and contain all 6 rows after cleanup chaos is resolved"
+        "chaos_st should have recovered and contain all 6 rows after chaos is resolved"
     );
 
     // Verify the final data matches the source.
     db.assert_st_matches_query("chaos_st", "SELECT id, val FROM chaos_src")
         .await;
 }
+
