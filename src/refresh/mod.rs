@@ -194,12 +194,25 @@ pub(crate) fn classify_case_in_list_aggregate_drift(defining_query: &str) -> boo
 /// Detection criteria: query has a comparison operator directly followed by
 /// a scalar subquery that contains an aggregate function.
 pub(crate) fn classify_correlated_aggregate_subquery_in_where(defining_query: &str) -> bool {
-    let upper = defining_query.to_ascii_uppercase();
+    // Normalize whitespace: collapse runs of whitespace (including newlines and
+    // indentation) to single spaces, then remove any space immediately after '('
+    // so that multi-line queries like ">\n  ( SELECT SUM…" and single-line
+    // "> (SELECT SUM…" both match the same patterns.
+    let normalized: String = defining_query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("( ", "(");
+    let upper = normalized.to_ascii_uppercase();
     // Comparison operator directly followed by a scalar subquery
     let has_subquery_comparison = upper.contains("> (SELECT")
+        || upper.contains(">(SELECT")
         || upper.contains(">= (SELECT")
+        || upper.contains(">=(SELECT")
         || upper.contains("< (SELECT")
-        || upper.contains("<= (SELECT");
+        || upper.contains("<(SELECT")
+        || upper.contains("<= (SELECT")
+        || upper.contains("<=(SELECT");
     if !has_subquery_comparison {
         return false;
     }
