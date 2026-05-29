@@ -91,6 +91,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("reindex_drift_threshold", "double precision"),
         ("rows_changed_since_last_reindex", "bigint"),
         ("last_reindex_at", "timestamp with time zone"),
+        ("query_complexity_class", "text"), // v0.78.0: P-2
     ];
 
     for (col_name, expected_type) in &expected_columns {
