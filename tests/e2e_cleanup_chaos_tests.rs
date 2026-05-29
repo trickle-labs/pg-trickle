@@ -234,4 +234,3 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     db.assert_st_matches_query("chaos_st", "SELECT id, val FROM chaos_src")
         .await;
 }
-
