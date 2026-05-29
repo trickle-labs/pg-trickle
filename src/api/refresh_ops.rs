@@ -682,9 +682,35 @@ fn execute_manual_differential_refresh(
     let data_ts = get_data_timestamp_str();
     let new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
 
-    // Execute the differential refresh via the DVM engine
+    // Execute the differential refresh via the DVM engine.
+    // DI-7: When QueryTooComplex is returned (e.g. join count exceeds
+    // max_differential_joins, or CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK), fall
+    // back to FULL refresh immediately — mirrors the scheduler path in
+    // scheduler_loop.rs so manual refresh behaves consistently.
     let (rows_inserted, rows_deleted) =
-        refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier)?;
+        match refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier) {
+            Ok(counts) => counts,
+            Err(crate::error::PgTrickleError::QueryTooComplex(ref msg)) => {
+                pgrx::log!(
+                    "[pg_trickle] DI-7 manual fallback for {}.{}: {}; using FULL refresh",
+                    schema,
+                    table_name,
+                    msg
+                );
+                let (ins, del) = refresh::execute_full_refresh(st)?;
+                StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)?;
+                refresh::post_full_refresh_cleanup(st);
+                pgrx::info!(
+                    "Stream table {}.{} refreshed (FULL fallback: +{} -{})",
+                    schema,
+                    table_name,
+                    ins,
+                    del,
+                );
+                return Ok((ins, del));
+            }
+            Err(e) => return Err(e),
+        };
 
     // Store the new frontier and mark refresh complete in a single SPI call (S3).
     // Matches scheduler behavior: only update data_timestamp when rows were
