@@ -1049,11 +1049,20 @@ fn handle_create_trigger(cmd: &DdlCommand) {
     .unwrap_or(false);
 
     if is_change_buffer {
-        pgrx::error!(
-            "pg_trickle: creating triggers on change buffer tables (schema '{}') is not allowed. \
-             These tables are managed internally by pg_trickle for change data capture.",
-            change_schema
-        );
+        // Superusers bypass this check (PostgreSQL convention: superusers can do anything).
+        // The guard is intended to prevent accidental corruption by regular users.
+        let is_super = Spi::get_one::<bool>(
+            "SELECT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)",
+        )
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+        if !is_super {
+            pgrx::error!(
+                "pg_trickle: creating triggers on change buffer tables (schema '{}') is not allowed. \
+                 These tables are managed internally by pg_trickle for change data capture.",
+                change_schema
+            );
+        }
     }
 
     // Check if the table is a stream table.
