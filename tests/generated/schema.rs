@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     column_lineage  JSONB,
     
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
+    
+    storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
