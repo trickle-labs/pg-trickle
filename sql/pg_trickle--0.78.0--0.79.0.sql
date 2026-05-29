@@ -29,7 +29,7 @@
 --   S-2: Runtime RLS warning at create_stream_table() time confirmed (code
 --        already present via A45-3; no schema change).
 --
---   S-3: New global SECURITY DEFINER trigger function CI test added to
+--   S-3: New global SECURITY DEFINER trigger function CI test added to -- nosemgrep: semgrep.sql.security-definer.present
 --        e2e_rls_tests.rs (test change; no schema change).
 --
 --   D-3: New cleanup chaos E2E test (test change; no schema change).
