@@ -30,7 +30,15 @@
 --
 --   T-3: Nightly 300 s fuzz workflow (CI change only — no schema change).
 
--- P-2: complexity class column for the stream tables catalog.
+-- P-2a: storage_fillfactor column (introduced in v0.78.0).
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS storage_fillfactor INTEGER;
+
+COMMENT ON COLUMN pgtrickle.pgt_stream_tables.storage_fillfactor IS
+    'Optional FILLFACTOR override for the materialised view storage.  '
+    'NULL means use the PostgreSQL default (100).';
+
+-- P-2b: complexity class column for the stream tables catalog.
 ALTER TABLE pgtrickle.pgt_stream_tables
     ADD COLUMN IF NOT EXISTS query_complexity_class TEXT;
 
