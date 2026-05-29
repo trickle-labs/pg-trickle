@@ -3116,7 +3116,9 @@ fn refresh_single_st(
             // was left pointing to pg_guard_ffi_boundary's now-dead jump_buffer;
             // restoring it prevents a dangling-pointer longjmp if
             // subtxn.rollback() itself raises a PG error.
-            unsafe { pgrx::pg_sys::PG_exception_stack = saved_pg_exception_stack; }
+            unsafe {
+                pgrx::pg_sys::PG_exception_stack = saved_pg_exception_stack;
+            }
             subtxn.rollback();
             let error_msg = extract_panic_message(&panic_payload);
             log!(
