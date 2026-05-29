@@ -1495,7 +1495,7 @@ CREATE  FUNCTION pgtrickle."alter_stream_table"(
 	"max_differential_joins" INT DEFAULT NULL, /* Option < i32 > */
 	"max_delta_fraction" double precision DEFAULT NULL, /* Option < f64 > */
 	"post_refresh_action" TEXT DEFAULT NULL, /* Option < & str > */
-	"reindex_drift_threshold" double precision DEFAULT NULL, /* Option < f64 > */
+	"reindex_drift_threshold" double precision DEFAULT NULL /* Option < f64 > */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
