@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**123 configuration parameters** extracted from `src/config.rs`.
+**124 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -120,6 +120,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.template_cache_max_bytes` | `int4` | `0` | Set to 0 to disable byte-based eviction and rely only on `template_cache_max_entries`. |
 | `pg_trickle.template_cache_max_entries` | `int4` | `0` | When the cache reaches this size, the least-recently-used entry is evicted. |
 | `pg_trickle.temporal_stream_tables` | `bool` | `false` | Default: `false` (standard non-temporal storage). |
+| `pg_trickle.test_chaos_for_table` | `text` | `None` | Activate with: `ALTER SYSTEM SET pg_trickle.test_chaos_for_table = 'name'` followed by `SELECT pg_reload_conf()`. |
 | `pg_trickle.tick_watermark_enabled` | `bool` | `true` | Disable only if you need stream tables to always advance to the very latest available LSN regardless of cross-source consistency. |
 | `pg_trickle.tiered_scheduling` | `bool` | `true` | Default changed to `true` in v0.12.0 (PERF-3) — prevents large deployments from wasting CPU refreshing cold STs at full speed. |
 | `pg_trickle.trace_id` | `text` | `None` | F10 (v0.37.0): Session-level W3C traceparent header for trace context propagation. |

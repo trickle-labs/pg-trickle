@@ -16,36 +16,61 @@
 //! All unsafe blocks are documented with `// SAFETY:` comments.
 
 #![deny(unsafe_op_in_unsafe_fn)]
-#![allow(dead_code)]
+// Q-3 (v0.79.0): Global #![allow(dead_code)] replaced with per-module
+// allowances on pgrx/export boundaries — modules where items are
+// intentionally visible to SQL (via pg_extern) or pgrx infrastructure
+// (pg_shmem_init!, BackgroundWorkerBuilder) but appear dead to Rust's
+// static call-graph analysis.
 // SAF-3: Deny .unwrap() in non-test production code.
 // Tests are explicitly exempt (cfg(test) blocks allow free use of unwrap).
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 use pgrx::prelude::*;
 
+// ── pgrx/export-boundary modules (may have intentional dead items) ────────
+// Items in these modules are exposed to PostgreSQL via pg_extern, pgrx macros,
+// or trigger/hook registration — not via Rust call-graph paths.
+#[allow(dead_code)]
 pub mod api;
+#[allow(dead_code)]
 mod catalog;
+#[allow(dead_code)]
 mod cdc;
+#[allow(dead_code)]
 pub mod citus;
+#[allow(dead_code)]
 pub mod config;
+// dag and dvm contain utility/helper functions that may not be called from
+// the main production path but are retained for future use or test support.
+#[allow(dead_code)]
 pub mod dag;
 mod diagnostics;
+#[allow(dead_code)]
 pub mod dvm;
 pub mod error;
 pub mod fuzz_pub;
 mod hash;
+#[allow(dead_code)]
 mod hooks;
+#[allow(dead_code)]
 mod ivm;
 pub mod logging;
+#[allow(dead_code)]
 pub(crate) mod metrics_server;
+#[allow(dead_code)]
 mod monitor;
 pub mod otel;
+#[allow(dead_code)]
 mod refresh;
+#[allow(dead_code)]
 pub mod scheduler;
+#[allow(dead_code)]
 mod shmem;
 pub mod sql_builder;
+#[allow(dead_code)]
 mod template_cache;
 pub mod version;
+#[allow(dead_code)]
 mod wal_decoder;
 
 ::pgrx::pg_module_magic!();

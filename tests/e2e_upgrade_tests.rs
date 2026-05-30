@@ -475,7 +475,7 @@ async fn test_upgrade_chain_new_functions_exist() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -559,7 +559,7 @@ async fn test_upgrade_chain_stream_tables_survive() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -635,7 +635,7 @@ async fn test_upgrade_chain_views_queryable() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -678,7 +678,7 @@ async fn test_upgrade_chain_event_triggers_present() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -721,7 +721,7 @@ async fn test_upgrade_chain_version_consistency() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     // This assertion only holds when the SQL extension version being tested
     // matches the compiled binary version loaded in the container.
@@ -775,7 +775,7 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -843,7 +843,7 @@ async fn test_upgrade_schema_additions_from_sql() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.78.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -1251,4 +1251,41 @@ async fn test_upgrade_v078_catalog_additions() {
         )
         .await;
     assert!(has_pk, "pgt_cost_model_summary should have a primary key");
+}
+
+/// TEST-v0.79.0: Verify v0.79.0 new SQL functions exist after upgrade.
+///
+/// Checks that A-1 and A-2 convenience functions are present:
+///   create_stream_table_fast_append_only()
+///   set_stream_table_refresh_policy()
+///   set_stream_table_storage_policy()
+///   pause_stream_table()
+#[tokio::test]
+async fn test_upgrade_v079_new_functions() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // All four new v0.79.0 functions should exist in the pgtrickle schema.
+    let expected_functions = [
+        "create_stream_table_fast_append_only",
+        "set_stream_table_refresh_policy",
+        "set_stream_table_storage_policy",
+        "pause_stream_table",
+    ];
+
+    for fn_name in &expected_functions {
+        let exists: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS( \
+                    SELECT 1 FROM pg_proc p \
+                    JOIN pg_namespace n ON n.oid = p.pronamespace \
+                    WHERE n.nspname = 'pgtrickle' \
+                      AND p.proname = '{fn_name}' \
+                )"
+            ))
+            .await;
+        assert!(
+            exists,
+            "A-1/A-2 (v0.79.0): function pgtrickle.{fn_name}() should exist after upgrade"
+        );
+    }
 }

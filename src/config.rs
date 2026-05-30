@@ -1661,6 +1661,18 @@ pub static PGS_SCHEDULER_DRAIN_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new
 /// Default: `false`.
 pub static PGS_VALIDATE_DELTA_INVARIANTS: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// D-3 (v0.79.0): TEST-MODE only. When set to a stream table name, the
+/// scheduler simulates a retryable refresh failure for that table on every
+/// tick (by directly calling `increment_errors`) instead of running the
+/// actual refresh. Used by the D-3 E2E test to reliably trigger auto-
+/// suspension without depending on PostgreSQL exception handling from user
+/// triggers. Default: `None` (disabled).
+///
+/// Activate with: `ALTER SYSTEM SET pg_trickle.test_chaos_for_table = 'name'`
+/// followed by `SELECT pg_reload_conf()`.
+pub static PGS_TEST_CHAOS_FOR_TABLE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -3247,6 +3259,32 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // ── v0.79.0 GUCs ───────────────────────────────────────────────────────
+
+    // D-3: Test-mode chaos injection GUC.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.test_chaos_for_table",
+        c"TEST-MODE: simulate refresh failure for named stream table (v0.79.0).",
+        c"When set to a non-empty stream table name, the scheduler skips the actual \
+          refresh for that table and directly increments consecutive_errors on every \
+          tick, simulating repeated refresh failures. Used by the D-3 E2E test to \
+          trigger auto-suspension without relying on PG exception handling from user \
+          triggers. Requires SELECT pg_reload_conf() after ALTER SYSTEM SET. \
+          Default: empty string (disabled). Do not set in production.",
+        &PGS_TEST_CHAOS_FOR_TABLE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+}
+
+/// D-3 (v0.79.0): Returns the stream table name for which refresh failures
+/// should be simulated (test-mode only). Returns empty string when disabled.
+pub fn pg_trickle_test_chaos_for_table() -> String {
+    PGS_TEST_CHAOS_FOR_TABLE
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(|s| s.to_string()))
+        .unwrap_or_default()
 }
 
 /// PERF-1 (v0.62.0): Returns whether the change-buffer fan-out deduplication is enabled.

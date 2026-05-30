@@ -259,6 +259,34 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::RetryableFailure;
     }
 
+    // D-3 TEST-MODE: same chaos check as refresh_single_st — ensures the GUC
+    // is honoured in parallel dispatch mode where execute_worker_singleton is
+    // the code path rather than refresh_single_st.
+    {
+        let chaos_target = config::pg_trickle_test_chaos_for_table();
+        if !chaos_target.is_empty() && chaos_target == st.pgt_name {
+            match StreamTableMeta::increment_errors(pgt_id) {
+                Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                    monitor::alert_auto_suspended(
+                        &st.pgt_schema,
+                        &st.pgt_name,
+                        count,
+                        st.pooler_compatibility_mode,
+                    );
+                    log!(
+                        "pg_trickle: TEST-MODE suspended {}.{} after {} chaos-injected errors",
+                        st.pgt_schema,
+                        st.pgt_name,
+                        count,
+                    );
+                }
+                _ => {}
+            }
+            return RefreshOutcome::RetryableFailure;
+        }
+    }
+
     // BOOT-4: Check bootstrap source gates — skip if any source is gated.
     let gated_oids = load_gated_source_oids();
     if is_any_source_gated(pgt_id, &gated_oids) {
@@ -2865,6 +2893,37 @@ fn refresh_single_st(
         return;
     }
 
+    // D-3 TEST-MODE: When pg_trickle.test_chaos_for_table names this ST,
+    // simulate a retryable refresh failure by directly incrementing
+    // consecutive_errors and returning early — no subtransaction, no SPI
+    // inside a subtransaction, no PG exception handling required.  This lets
+    // the D-3 E2E test reliably trigger auto-suspension without depending on
+    // catching PostgreSQL exceptions from user trigger RAISE EXCEPTION calls.
+    {
+        let chaos_target = config::pg_trickle_test_chaos_for_table();
+        if !chaos_target.is_empty() && chaos_target == st.pgt_name {
+            match StreamTableMeta::increment_errors(pgt_id) {
+                Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                    monitor::alert_auto_suspended(
+                        &st.pgt_schema,
+                        &st.pgt_name,
+                        count,
+                        st.pooler_compatibility_mode,
+                    );
+                    log!(
+                        "pg_trickle: TEST-MODE suspended {}.{} after {} chaos-injected errors",
+                        st.pgt_schema,
+                        st.pgt_name,
+                        count,
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
+
     // BOOT-4: Check bootstrap source gates — skip if any source is gated.
     let gated_oids = load_gated_source_oids();
     if is_any_source_gated(pgt_id, &gated_oids) {
@@ -3070,9 +3129,40 @@ fn refresh_single_st(
     // the entire tick transaction.  On panic the subtransaction rolls back
     // (undoing TRUNCATE + partial writes) and we set ERROR status in the
     // still-valid outer transaction.
+    //
+    // IMPORTANT: pgrx SPI calls (SPI_execute_with_args etc.) do NOT wrap
+    // themselves in pg_guard_ffi_boundary.  When a user trigger fires
+    // RAISE EXCEPTION inside a SPI call, PostgreSQL longjmps directly to
+    // PG_exception_stack — which is the outermost boundary set by the
+    // #[pg_guard] wrapper on pg_trickle_scheduler_main.  That longjmp
+    // bypasses all Rust stack frames (including catch_unwind) between the
+    // SPI call site and the bgworker entry, so catch_unwind never fires.
+    //
+    // Fix: wrap execute_scheduled_refresh in pg_guard_ffi_boundary INSIDE
+    // the catch_unwind closure.  This installs a LOCAL PG exception handler
+    // that intercepts the trigger longjmp before it reaches the outermost
+    // boundary, converts it to panic_any(), and lets catch_unwind catch the
+    // resulting Rust panic so ERR-1e code can run.
+    //
+    // We also save PG_exception_stack so we can restore it if
+    // execute_scheduled_refresh has a pure Rust panic (not a PG error): in
+    // that case pg_guard_ffi_boundary does not restore PG_exception_stack,
+    // and we must do so before calling subtxn.rollback() to avoid a stale
+    // pointer being dereferenced if RollbackAndReleaseCurrentSubTransaction
+    // itself raises a PG error.
+    // SAFETY: bgworker main thread only.
+    let saved_pg_exception_stack = unsafe { pgrx::pg_sys::PG_exception_stack };
     let subtxn = SubTransaction::begin();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        execute_scheduled_refresh(&st, action, tick_watermark, drift_counter)
+        // SAFETY: pg_guard_ffi_boundary installs a LOCAL PG exception handler.
+        // After catching a trigger longjmp, it restores PG_exception_stack and
+        // calls panic_any(); the surrounding catch_unwind catches that panic.
+        // Only call this from the main PostgreSQL thread (bgworker entry).
+        unsafe {
+            pgrx::pg_sys::ffi::pg_guard_ffi_boundary(|| {
+                execute_scheduled_refresh(&st, action, tick_watermark, drift_counter)
+            })
+        }
     }));
     let result = match result {
         Ok(outcome) => {
@@ -3080,6 +3170,14 @@ fn refresh_single_st(
             outcome
         }
         Err(panic_payload) => {
+            // Restore PG_exception_stack. For PG errors, pg_guard_ffi_boundary
+            // already restored it — this is a no-op. For pure Rust panics, it
+            // was left pointing to pg_guard_ffi_boundary's now-dead jump_buffer;
+            // restoring it prevents a dangling-pointer longjmp if
+            // subtxn.rollback() itself raises a PG error.
+            unsafe {
+                pgrx::pg_sys::PG_exception_stack = saved_pg_exception_stack;
+            }
             subtxn.rollback();
             let error_msg = extract_panic_message(&panic_payload);
             log!(
@@ -3092,6 +3190,41 @@ fn refresh_single_st(
             let is_retryable = crate::error::classify_error_for_retry(&error_msg);
             if !is_retryable {
                 let _ = StreamTableMeta::set_error_state(pgt_id, &error_msg);
+            } else {
+                // ERR-1e: Track consecutive errors for auto-suspension even when
+                // the failure manifests as a PostgreSQL panic (e.g. a trigger
+                // raising RAISE EXCEPTION during refresh DML).  After
+                // subtxn.rollback() the outer transaction is still valid, so
+                // SPI calls succeed here — mirroring the Rust-error path in
+                // run_refresh_for_st.
+                match StreamTableMeta::increment_errors(pgt_id) {
+                    Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                        let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                        monitor::alert_auto_suspended(
+                            &st.pgt_schema,
+                            &st.pgt_name,
+                            count,
+                            st.pooler_compatibility_mode,
+                        );
+                        log!(
+                            "pg_trickle: suspended {}.{} after {} consecutive errors",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            count,
+                        );
+                    }
+                    Ok(_count) => {
+                        // Still under threshold — will retry on next tick.
+                    }
+                    Err(e) => {
+                        pgrx::warning!(
+                            "pg_trickle: ERR-1e: failed to persist consecutive_errors \
+                             for pgt_id={} after panic-path failure: {}",
+                            pgt_id,
+                            e,
+                        );
+                    }
+                }
             }
             if is_retryable {
                 RefreshOutcome::RetryableFailure

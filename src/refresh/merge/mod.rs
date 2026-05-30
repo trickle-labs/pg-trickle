@@ -2,29 +2,22 @@
 //
 // Contains: execute_topk_refresh, execute_full_refresh, execute_no_data_refresh,
 // execute_differential_refresh, partition helpers, and capture_delta_explain.
+//
+// Q-1 (v0.79.0): Removed per-import #[allow(unused_imports)] shims. Imports
+// are now concrete; `use super::*` is retained because it provides items
+// defined directly in refresh/mod.rs — set_effective_mode, set_refresh_reason,
+// classify_query_complexity*, classify_case_in_list_aggregate_drift, and
+// classify_correlated_aggregate_subquery_in_where.
 
-#[allow(unused_imports)]
 use crate::catalog::{StDependency, StreamTableMeta};
-#[allow(unused_imports)]
-use crate::dag::RefreshMode;
-#[allow(unused_imports)]
+
 use crate::dvm;
-#[allow(unused_imports)]
 use crate::error::PgTrickleError;
-#[allow(unused_imports)]
 use crate::version::Frontier;
-#[allow(unused_imports)]
 use pgrx::prelude::*;
-#[allow(unused_imports)]
-use std::cell::{Cell, RefCell};
-#[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::collections::HashSet;
-#[allow(unused_imports)]
+
 use std::time::Instant;
 
-#[allow(unused_imports)]
 use super::*;
 
 pub mod columns;

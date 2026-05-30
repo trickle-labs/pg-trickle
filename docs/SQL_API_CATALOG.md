@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**123 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**127 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -33,6 +33,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.create_or_replace_stream_table()` | `pgtrickle` | `` | This is the declarative API for idempotent deployments (dbt, migrations, GitOps). |
 | `pgtrickle.create_refresh_group()` | `pgtrickle` | `` | # Arguments - `group_name`: Unique human-readable name for the group. |
 | `pgtrickle.create_stream_table()` | `pgtrickle` | `` | # Arguments - `name`: Schema-qualified name (`'schema.table'`) or unqualified (`'table'`). |
+| `pgtrickle.create_stream_table_fast_append_only()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.create_stream_table_fast_append_only(     'my_schema.event_counts',     'SELECT user_id, count(*) AS n FROM events GROUP BY user_id' ); ```. |
 | `pgtrickle.create_stream_table_if_not_exists()` | `pgtrickle` | `` | This is useful for migration scripts that should be safe to re-run. |
 | `pgtrickle.create_watermark_group()` | `pgtrickle` | `` | - `group_name`: unique name for this group. |
 | `pgtrickle.dedup_stats()` | `pgtrickle` | `SetOf row` | Example: ```sql SELECT * FROM pgtrickle.dedup_stats(); ```. |
@@ -75,6 +76,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.parallel_job_status()` | `pgtrickle` | `` | Exposed as `pgtrickle.parallel_job_status(max_age_seconds)`. |
 | `pgtrickle.parse_duration_seconds()` | `pgtrickle` | `bigint (nullable)` | Used by SQL views to compare schedule. |
 | `pgtrickle.pause_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.pause_scheduler(ARRAY['public.my_view', 'analytics.summary']); ```. |
+| `pgtrickle.pause_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.pause_stream_table('my_schema.my_st'); SELECT pgtrickle.resume_stream_table('my_schema.my_st'); ```. |
 | `pgtrickle.pg_trickle_hash()` | `pgtrickle` | `bigint` | NULL input is mapped to a deterministic sentinel (`\x00NULL\x00`) — the same encoding used by [`pg_trickle_hash_multi`] — so that rows with NULL-valued group keys receive a non-NULL `__pgt_row_id`. |
 | `pgtrickle.pg_trickle_hash_multi()` | `pgtrickle` | `bigint` | The hash output is identical to the previous xxh64-based implementation **except** that it now uses xxh3 which produces different numeric values. |
 | `pgtrickle.pgt_ivm_apply_delta()` | `pgtrickle` | `void` | Delta SQL templates are cached per (pgt_id, source_oid, has_new, has_old) to avoid re-parsing the defining query on every trigger invocation. |
@@ -101,7 +103,9 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.schedule_recommendations()` | `pgtrickle` | `SetOf row` | PLAN-2 (v0.27.0): Return one schedule recommendation row per registered stream table, sortable by `delta_pct DESC`. |
 | `pgtrickle.scheduler_overhead()` | `pgtrickle` | `SetOf row` | Computes busy-time ratio, queue depth, avg dispatch latency, and the fraction of CPU spent on self-monitoring STs vs user STs from refresh history. |
 | `pgtrickle.self_monitoring_status()` | `pgtrickle` | `SetOf row` | For each of the five expected DF stream tables, reports whether it exists, its current status, refresh mode, and last refresh time. |
+| `pgtrickle.set_stream_table_refresh_policy()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.set_stream_table_refresh_policy('my_schema.my_st', 'DIFFERENTIAL'); ```. |
 | `pgtrickle.set_stream_table_sla()` | `pgtrickle` | `` | Accepts an interval and stores it as `freshness_deadline_ms`. |
+| `pgtrickle.set_stream_table_storage_policy()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.set_stream_table_storage_policy('my_schema.my_st', true, 'hot'); ```. |
 | `pgtrickle.setup_self_monitoring()` | `pgtrickle` | `` | UX-2: Emits a warm-up hint if `pgt_refresh_history` has fewer than 50 rows. |
 | `pgtrickle.shared_buffer_stats()` | `pgtrickle` | `SetOf row` | Example: ```sql SELECT * FROM pgtrickle.shared_buffer_stats(); ```. |
 | `pgtrickle.sla_summary()` | `pgtrickle` | `SetOf row` | Returns per-stream-table statistics: p50/p99 refresh latency, freshness lag, error rate, and remaining error budget. |

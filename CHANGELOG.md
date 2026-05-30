@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.79.0 — Code Quality, API Ergonomics & Security](#0790--code-quality-api-ergonomics--security)
 - [0.78.0 — DVM Engine Root-Cause Fixes + Scheduler Intelligence](#0780--dvm-engine-root-cause-fixes--scheduler-intelligence)
 - [0.77.0 — Correctness Stop-the-Line & DVM Proof Infrastructure](#0770--correctness-stop-the-line--dvm-proof-infrastructure)
 - [0.75.0 — API Polish, Documentation Excellence & Developer Experience](#0750--api-polish-documentation-excellence--developer-experience)
@@ -92,6 +93,104 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.79.0] — Code Quality, API Ergonomics & Security
+
+### What's New
+
+v0.79.0 is a maintainability and security polish release that reduces technical
+debt accumulated between hardening arcs.  No schema migrations are required —
+the changes are primarily code quality improvements, new convenience API
+functions, and security testing coverage.
+
+#### Q-1 — Unused-import suppressions removed
+
+Per-line `#[allow(unused_imports)]` attributes in `src/refresh/codegen.rs` and
+`src/refresh/merge/mod.rs` are removed.  The redundant `use super::*` glob in
+`codegen.rs` (which caused the imports to appear unused) is also removed.
+`merge/mod.rs` retains `use super::*` because it relies on functions defined in
+the parent module.
+
+#### Q-2 — Typed parameter structs for internal API
+
+`alter_stream_table_impl` is refactored to accept a single
+`AlterStreamTableOptions<'_>` struct, matching the existing
+`CreateStreamTableOptions` pattern.  Callers that only need a subset of
+options can use `..Default::default()`.  The public SQL-callable wrappers
+are unchanged (pgrx requires individual parameters on `#[pg_extern]` functions).
+
+#### Q-3 — Per-module dead_code annotations
+
+The global `#![allow(dead_code)]` crate attribute is replaced with narrower
+`#[allow(dead_code)]` attributes on specific module declarations where items
+are intentionally visible to PostgreSQL (via `#[pg_extern]` or pgrx macros)
+but not to Rust's static call-graph analysis.  Pure computation modules gain
+no annotation.
+
+#### Q-4 — `consume_slot_changes()` deprecated
+
+`consume_slot_changes()` in `src/cdc/mod.rs` is formally marked
+`#[deprecated]`.  The function has been a no-op since the extension switched
+from WAL-based CDC to trigger-based CDC.  Prefer `pending_change_count()` or
+inspect the change buffer table directly.
+
+#### A-1 — SQL convenience helpers
+
+Three new SQL functions simplify common operations:
+
+- **`pgtrickle.create_stream_table_fast_append_only(name, query)`** — creates a
+  stream table with `append_only = true` and `refresh_mode = 'DIFFERENTIAL'`.
+  Ideal for event or audit tables that only ever receive INSERT.
+
+- **`pgtrickle.set_stream_table_refresh_policy(name, refresh_mode)`** — changes
+  only the refresh mode of an existing stream table.
+
+- **`pgtrickle.set_stream_table_storage_policy(name, append_only, tier)`** —
+  sets the append-only flag and/or scheduling tier in a single call.
+
+#### A-2 — `pause_stream_table()`
+
+`pgtrickle.pause_stream_table(name)` is a first-class SQL function that sets
+the stream table status to SUSPENDED.  It is the mirror of the existing
+`resume_stream_table()`.
+
+#### S-1 — Semgrep coverage for parameterised SPI helpers
+
+Three new Semgrep rules are added to `.semgrep/pg_trickle.yml`:
+`rust.spi.run_with_args.dynamic-format`,
+`rust.spi.get_one_with_args.dynamic-format`, and
+`rust.spi.connect_mut.dynamic-format`.  These close a gap where dynamic SQL
+could bypass the parameterisation that `run_with_args` and `get_one_with_args`
+are intended to provide.
+
+#### S-2 — RLS warning confirmed
+
+The runtime `WARNING` emitted when a source table has Row Level Security
+enabled (A45-3) is confirmed present and tested in v0.79.0.
+
+#### S-3 — Global SECURITY DEFINER trigger function test
+
+A new test `test_all_security_definer_trigger_fns_have_search_path` asserts
+that **every** SECURITY DEFINER trigger function installed by the extension has
+a locked `search_path` in its `proconfig` — regardless of naming convention.
+This complements the per-pattern tests already in `e2e_rls_tests.rs`.
+
+#### D-3 — Cleanup chaos test
+
+`tests/e2e_cleanup_chaos_tests.rs` tests the auto-suspend circuit under
+consecutive change-buffer cleanup failures.  A `BEFORE DELETE` chaos trigger
+on the CDC buffer table blocks cleanup for three consecutive refreshes; the
+test asserts the stream table enters SUSPENDED, then verifies full recovery
+after the trigger is removed and the stream table is resumed.
+
+#### T-5 — dbt adapter compatibility matrix
+
+The dbt integration test suite is extended with a new `order_totals_compat`
+model and three assertion SQL files that cover the CREATE, ALTER, DROP, and
+REBUILD flows.  The test script exercises the ALTER path explicitly by
+temporarily changing the model schedule from `1m` to `3m` mid-run.
 
 ---
 

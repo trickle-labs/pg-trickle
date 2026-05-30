@@ -143,3 +143,65 @@ rules:
         # mod tests { ... }` above cannot match.  These files are compiled
         # only for `cargo test` and never loaded into a PostgreSQL backend.
         - /src/**/tests.rs
+
+  # ── S-1 (v0.79.0): Parameterised-SPI coverage gaps ─────────────────────────
+  #
+  # The rules above already catch `Spi::run(&format!(...))` and
+  # `Spi::get_one::<T>(&format!(...))`.  Two additional SPI entry points that
+  # accept a static SQL string AND a slice of arguments (run_with_args,
+  # get_one_with_args) can still be called with a dynamically-formatted first
+  # argument, bypassing the argument parameterisation that should prevent
+  # injection.  These rules close that gap.
+
+  - id: rust.spi.run_with_args.dynamic-format
+    # S-1 (v0.79.0): Detect dynamic SQL passed to the "safe" parameterised
+    # SPI helper.  The args slice provides parameterisation for the SQL
+    # placeholders, but if the query string itself is constructed with
+    # format!() it may still contain user-controlled identifier text.
+    languages:
+      - rust
+    severity: WARNING
+    message: >-
+      Dynamic SQL passed to Spi::run_with_args() defeats the purpose of the
+      parameterised call.  Identifier fragments (schema names, table names)
+      must be quoted with the repo's quoting helpers before interpolation;
+      literal values must use $N placeholders and the args slice, not
+      format!().  Review each format!() call to confirm it constructs only
+      safe, server-controlled identifiers.
+    patterns:
+      - pattern-either:
+          - pattern: Spi::run_with_args(&format!($FMT, ...), $ARGS)
+          - pattern: pgrx::Spi::run_with_args(&format!($FMT, ...), $ARGS)
+
+  - id: rust.spi.get_one_with_args.dynamic-format
+    # S-1 (v0.79.0): Same concern as above for the scalar-result variant.
+    languages:
+      - rust
+    severity: WARNING
+    message: >-
+      Dynamic SQL passed to Spi::get_one_with_args() defeats the purpose of
+      the parameterised call.  Identifier fragments must be quoted; literal
+      values must use $N placeholders.  Review the format!() call.
+    patterns:
+      - pattern-either:
+          - pattern: Spi::get_one_with_args::<$T>(&format!($FMT, ...), $ARGS)
+          - pattern: pgrx::Spi::get_one_with_args::<$T>(&format!($FMT, ...), $ARGS)
+
+  - id: rust.spi.connect_mut.dynamic-format
+    # S-1 (v0.79.0): Spi::connect_mut() closures call client.select(),
+    # client.update(), and client.execute() which also accept a SQL string.
+    # Flag any SpiClient method call that receives a format!() result.
+    languages:
+      - rust
+    severity: WARNING
+    message: >-
+      Dynamic SQL passed to a SpiClient method (select/update/execute) inside
+      Spi::connect_mut() should be reviewed.  Identifier construction via
+      format!() must use the repo's quoting helpers; literal values must be
+      passed via the args slice with $N placeholders.
+    patterns:
+      - pattern-either:
+          - pattern: $CLIENT.select(&format!($FMT, ...), ...)
+          - pattern: $CLIENT.update(&format!($FMT, ...), ...)
+          - pattern: $CLIENT.execute(&format!($FMT, ...), ...)
+
