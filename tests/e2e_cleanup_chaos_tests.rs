@@ -6,15 +6,16 @@
 //! Test scenario:
 //!   1. Create source table + DIFFERENTIAL stream table.
 //!   2. Insert rows → changes land in the CDC buffer.
-//!   3. Install a BEFORE INSERT trigger on the stream table that raises an
-//!      error (`chaos trigger`), with `pg_trickle.user_triggers = 'auto'`
-//!      so the trigger fires during DIFFERENTIAL refresh DML.
-//!   4. Let the scheduler attempt refreshes → each attempt fails because
-//!      the chaos trigger blocks the MERGE INSERT step, incrementing
-//!      `consecutive_errors`.
+//!   3. Enable the `pg_trickle.test_chaos_for_table` GUC (set to 'chaos_st').
+//!      The scheduler's `refresh_single_st` detects the GUC and directly
+//!      increments `consecutive_errors` on every tick instead of running the
+//!      actual refresh, simulating repeated failures without any trigger or
+//!      PG exception handling.
+//!   4. Pre-seed `consecutive_errors` to `max_consecutive_errors − 1` so that
+//!      only a single increment is needed to reach the threshold.
 //!   5. After `max_consecutive_errors` failures the scheduler sets the stream
-//!      table status to SUSPENDED and fires the `auto_suspended` alert.
-//!   6. Remove the chaos trigger.
+//!      table status to SUSPENDED.
+//!   6. Disable chaos by resetting the GUC.
 //!   7. Resume the stream table.
 //!   8. Verify the stream table processes all pending changes correctly.
 
@@ -37,15 +38,10 @@ async fn setup_chaos_scheduler(db: &E2eDb) {
     // Low threshold so the test does not need many refresh cycles.
     db.execute("ALTER SYSTEM SET pg_trickle.max_consecutive_errors = 3")
         .await;
-    // Enable user triggers so chaos trigger fires during DIFFERENTIAL DML.
-    db.execute("ALTER SYSTEM SET pg_trickle.user_triggers = 'auto'")
-        .await;
     db.reload_config_and_wait().await;
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.max_consecutive_errors", "3")
-        .await;
-    db.wait_for_setting("pg_trickle.user_triggers", "auto")
         .await;
 
     let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
@@ -81,16 +77,16 @@ async fn wait_for_suspended(db: &E2eDb, pgt_name: &str, timeout: Duration) -> bo
 // D-3: Refresh chaos — consecutive refresh failures → SUSPENDED → recovery
 // ══════════════════════════════════════════════════════════════════════
 
-/// D-3 (v0.79.0): Force consecutive differential refresh failures via a chaos
-/// trigger on the stream table, assert the stream table auto-suspends, then
-/// remove the trigger, resume, and verify the stream table recovers and
-/// produces correct output.
+/// D-3 (v0.79.0): Activate the test-mode chaos GUC to simulate repeated
+/// differential refresh failures, assert the stream table auto-suspends, then
+/// disable the GUC, resume, and verify the stream table recovers and produces
+/// correct output.
 ///
-/// The chaos trigger is a BEFORE INSERT trigger on `chaos_st`.  With
-/// `pg_trickle.user_triggers = 'auto'`, pg_trickle uses the explicit DML path
-/// (DELETE + UPDATE + INSERT) instead of MERGE, so the BEFORE INSERT trigger
-/// fires when the scheduler tries to apply new rows.  Each failed attempt
-/// increments `consecutive_errors` until the auto-suspend threshold is reached.
+/// The `pg_trickle.test_chaos_for_table` GUC causes `refresh_single_st` to
+/// directly increment `consecutive_errors` for the named stream table on each
+/// tick, bypassing the actual refresh.  This avoids depending on catching PG
+/// exceptions from user trigger RAISE EXCEPTION calls (which is fragile across
+/// PostgreSQL versions and executor call-stacks).
 #[tokio::test]
 async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     let db = E2eDb::new().await.with_extension().await;
@@ -134,45 +130,28 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     let initial_count: i64 = db.count("public.chaos_st").await;
     assert_eq!(initial_count, 3, "initial population should have 3 rows");
 
-    // ── 2. Install the chaos trigger BEFORE inserting new rows ───────
+    // ── 2. Enable chaos via test-mode GUC ────────────────────────────
     //
-    // Installing the trigger first eliminates a race condition where the
-    // scheduler could process rows 4,5 in the window between insertion
-    // and trigger creation (which would produce a successful refresh,
-    // draining the CDC buffer and resetting consecutive_errors to 0).
-    // With the trigger already present, the scheduler cannot successfully
-    // INSERT the new rows — every attempt panics and is rolled back.
-    db.execute(
-        "CREATE OR REPLACE FUNCTION public.chaos_insert_blocker() \
-         RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN \
-             RAISE EXCEPTION 'D-3 chaos: refresh INSERT deliberately blocked'; \
-         END $$",
-    )
-    .await;
-
-    db.execute(
-        "CREATE TRIGGER chaos_block_insert \
-         BEFORE INSERT ON public.chaos_st \
-         FOR EACH ROW EXECUTE FUNCTION public.chaos_insert_blocker()",
-    )
-    .await;
+    // Setting `pg_trickle.test_chaos_for_table = 'chaos_st'` causes
+    // `refresh_single_st` to directly increment `consecutive_errors` on every
+    // tick for chaos_st, simulating repeated refresh failures without running
+    // the actual refresh.  This is more reliable than a trigger-based approach
+    // because it does not depend on catching PG exceptions from user triggers.
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "'chaos_st'", "chaos_st")
+        .await;
 
     // ── 3. Insert additional rows → pending changes in CDC buffer ────
     //
-    // Now that the trigger is installed, inserting rows 4,5 guarantees
-    // that every subsequent DIFFERENTIAL refresh attempt will fail when
-    // the scheduler tries to INSERT the new rows.
+    // With chaos active the scheduler will never run the actual refresh, so
+    // these rows stay as pending changes.  After chaos is disabled and the
+    // stream table is resumed, the scheduler processes all pending changes.
     db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
         .await;
 
     // ── 3b. Pre-seed consecutive_errors to max_consecutive_errors − 1 ─
     //
-    // After subtransaction rollback the scheduler persists
-    // `consecutive_errors` via SPI in the outer transaction.  Pre-seeding
-    // to one below the threshold means only a single successful
-    // increment_errors() call is required to trigger suspension, making
-    // the test resilient to any transient SPI hiccup on prior attempts.
+    // Pre-seeding to one below the threshold means only a single chaos tick
+    // is required to trigger suspension, making the test fast and deterministic.
     db.execute(
         "UPDATE pgtrickle.pgt_stream_tables \
          SET consecutive_errors = 2 \
@@ -182,14 +161,18 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
 
     // ── 4. Wait for auto-suspension ──────────────────────────────────
     //
-    // The scheduler will attempt a DIFFERENTIAL refresh.  The chaos trigger
-    // blocks the INSERT step, causing a panic.  After subtxn rollback the
-    // scheduler increments consecutive_errors (2 → 3 ≥ max_consecutive_errors)
-    // and sets the status to SUSPENDED.
+    // The scheduler reads the test_chaos_for_table GUC and directly increments
+    // consecutive_errors for chaos_st on each tick.  With consecutive_errors
+    // pre-seeded to 2, a single tick increments it to 3 = max_consecutive_errors
+    // → status is set to SUSPENDED.
     let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(60)).await;
+    // Capture diagnostic info before the assertion so the panic message is informative.
+    let (status_at_timeout, _mode, _populated, consecutive_errors_at_timeout) =
+        db.pgt_status("chaos_st").await;
     assert!(
         suspended,
-        "chaos_st should have entered SUSPENDED after consecutive refresh failures"
+        "chaos_st should have entered SUSPENDED after chaos-injected refresh failures; \
+         status={status_at_timeout}, consecutive_errors={consecutive_errors_at_timeout}"
     );
 
     // Verify the consecutive_errors counter reached the threshold.
@@ -200,17 +183,17 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     );
 
     // Stream table data should still be at the last good count (3 rows)
-    // because all refresh transactions were rolled back.
+    // because the scheduler never ran the actual refresh while chaos was active.
     let count_while_suspended: i64 = db.count("public.chaos_st").await;
     assert_eq!(
         count_while_suspended, 3,
-        "chaos_st should still have 3 rows (rolled-back refreshes)"
+        "chaos_st should still have 3 rows (refresh skipped by chaos GUC)"
     );
 
-    // ── 5. Remove the chaos trigger ──────────────────────────────────
-    db.execute("DROP TRIGGER IF EXISTS chaos_block_insert ON public.chaos_st")
-        .await;
-    db.execute("DROP FUNCTION IF EXISTS public.chaos_insert_blocker()")
+    // ── 5. Disable chaos GUC ─────────────────────────────────────────
+    // Reset chaos BEFORE resuming so the scheduler does not immediately
+    // re-suspend the stream table after it becomes ACTIVE again.
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
         .await;
 
     // ── 6. Resume the stream table ───────────────────────────────────

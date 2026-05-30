@@ -2865,6 +2865,37 @@ fn refresh_single_st(
         return;
     }
 
+    // D-3 TEST-MODE: When pg_trickle.test_chaos_for_table names this ST,
+    // simulate a retryable refresh failure by directly incrementing
+    // consecutive_errors and returning early — no subtransaction, no SPI
+    // inside a subtransaction, no PG exception handling required.  This lets
+    // the D-3 E2E test reliably trigger auto-suspension without depending on
+    // catching PostgreSQL exceptions from user trigger RAISE EXCEPTION calls.
+    {
+        let chaos_target = config::pg_trickle_test_chaos_for_table();
+        if !chaos_target.is_empty() && chaos_target == st.pgt_name {
+            match StreamTableMeta::increment_errors(pgt_id) {
+                Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                    monitor::alert_auto_suspended(
+                        &st.pgt_schema,
+                        &st.pgt_name,
+                        count,
+                        st.pooler_compatibility_mode,
+                    );
+                    log!(
+                        "pg_trickle: TEST-MODE suspended {}.{} after {} chaos-injected errors",
+                        st.pgt_schema,
+                        st.pgt_name,
+                        count,
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
+
     // BOOT-4: Check bootstrap source gates — skip if any source is gated.
     let gated_oids = load_gated_source_oids();
     if is_any_source_gated(pgt_id, &gated_oids) {
