@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**124 configuration parameters** extracted from `src/config.rs`.
+**129 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -34,6 +34,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.citus_worker_retry_ticks` | `int4` | `5` | Default: 5 ticks. |
 | `pg_trickle.cleanup_use_truncate` | `bool` | `true` | Set to false if the TRUNCATE AccessExclusiveLock on the change buffer is problematic for concurrent DML on the source table. |
 | `pg_trickle.columnar_backend` | `text` | `"none"` | When set, `create_stream_table()` uses the specified columnar backend and routes differential refresh to the `delete_insert` strategy (columnar backends are append-only). |
+| `pg_trickle.commit_timestamp_tracking` | `bool` | `false` | Default: `false` (disabled to avoid overhead when `track_commit_timestamp` is off). |
 | `pg_trickle.compact_threshold` | `int4` | `100000` | Set to 0 to disable compaction. |
 | `pg_trickle.connection_pooler_mode` | `text` | `"off"` | Overrides the per-ST `pooler_compatibility_mode` for all stream tables. |
 | `pg_trickle.cost_cache_capacity` | `int4` | `256` | Default: 256. |
@@ -49,7 +50,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
-| `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline. |
+| `pg_trickle.enable_trace_propagation` | `bool` | `false` | When `true`, trace context is propagated through refresh cycles for distributed tracing with OpenTelemetry. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
 | `pg_trickle.enforce_backpressure` | `bool` | `false` | Default: `false` (alerts only, no throttling). |
@@ -57,18 +58,19 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.foreign_table_polling` | `bool` | `false` | When enabled, foreign tables used in DIFFERENTIAL / IMMEDIATE mode defining queries will be supported via a snapshot-comparison approach: before each refresh cycle the scheduler materializes a snapshot of the foreign table into a local shadow table, then computes EXCEPT ALL deltas against the previous snapshot. |
 | `pg_trickle.frontier_holdback_mode` | `text` | `"xmin"` | \| Value \| Meaning \| \|-------\|---------\| \| `"xmin"` (default) \| Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
 | `pg_trickle.frontier_holdback_probe_cache_ms` | `int4` | `250` | Set to 0 to disable caching and probe on every scheduler tick. |
-| `pg_trickle.frontier_holdback_warn_seconds` | `int4` | `60` | Set to 0 to disable the warning (not recommended for production). |
+| `pg_trickle.frontier_holdback_warn_seconds` | `int4` | `60` | #536: Emit a WARNING when the frontier holdback has been active for longer than this many seconds. |
 | `pg_trickle.fuse_default_ceiling` | `int4` | `0` | Set to 0 to disable the global default ceiling (per-ST ceiling only). |
 | `pg_trickle.fused_refresh_max_delta_rows` | `int4` | `500000` | Default: 500 000. |
 | `pg_trickle.history_prune_interval_seconds` | `int4` | `60` | Default: 60 seconds. |
-| `pg_trickle.history_retention_days` | `int4` | `90` | The scheduler runs a daily cleanup that deletes rows from `pgtrickle.pgt_refresh_history` older than this many days. |
+| `pg_trickle.history_retention_days` | `int4` | `90` | Default: 90 days. |
 | `pg_trickle.invalidation_ring_capacity` | `int4` | `1024` | Default: 1024. |
 | `pg_trickle.ivm_recursive_max_depth` | `int4` | `100` | Set to 0 to disable the depth guard (allow unlimited recursion). |
 | `pg_trickle.ivm_topk_max_limit` | `int4` | `1000` | TopK queries with `LIMIT > threshold` are rejected in IMMEDIATE mode because inline recomputation of large result sets adds unacceptable latency to the trigger path. |
 | `pg_trickle.ivm_use_enr` | `bool` | `false` | When false, the legacy temp-table copy behaviour is used. |
+| `pg_trickle.l1_cache_max_entries` | `int4` | `256` | Note: `pg_trickle.template_cache_max_entries` caps the L2 (MERGE template) cache; this GUC caps the L0/L1 (delta-template / placeholder-resolver) caches that live in `src/dvm/mod.rs`. |
 | `pg_trickle.lag_aware_scheduling` | `bool` | `false` | Off by default — use static quotas. |
 | `pg_trickle.log_delta_sql` | `bool` | `false` | **Do not enable in production** — every refresh will emit potentially large SQL strings to the server log. |
-| `pg_trickle.log_format` | `text` | `"text"` | - `"text"` (default): Unstructured human-readable messages via `pgrx::log!()`. |
+| `pg_trickle.log_format` | `text` | `"text"` | - `"text"` (default): Standard PostgreSQL log format. |
 | `pg_trickle.log_merge_sql` | `bool` | `false` | Intended for debugging MERGE query generation only. |
 | `pg_trickle.matview_polling` | `bool` | `false` | When `true`, materialized views referenced in DIFFERENTIAL/IMMEDIATE defining queries will be supported via a snapshot-comparison approach (same mechanism as foreign table polling). |
 | `pg_trickle.max_buffer_rows` | `int4` | `1000000` | Set to 0 to disable the limit. |
@@ -83,18 +85,19 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.max_parallel_workers` | `int4` | `0` | Default 0 = serial mode (existing behavior preserved). |
 | `pg_trickle.max_parse_depth` | `int4` | `64` | Prevents stack-overflow crashes on pathological queries with deeply nested subqueries, CTEs, or set operations. |
 | `pg_trickle.max_parse_nodes` | `int4` | `0` | Queries that exceed this limit are rejected with `QueryTooComplex` to prevent unbounded memory allocation in the parse advisory warnings cache and CTE registry. |
+| `pg_trickle.merge_batch_size` | `int4` | `50000` | Default: 50 000. |
 | `pg_trickle.merge_join_strategy` | `text` | `"auto"` | Controls the join strategy hint applied via `SET LOCAL` during MERGE: - `"auto"` (default): delta-size heuristics choose the strategy. |
 | `pg_trickle.merge_planner_hints` | `bool` | `true` | Deprecated — use `pg_trickle.planner_aggressive` instead. |
 | `pg_trickle.merge_seqscan_threshold` | `float8` | `0.001` | Set to 0.0 to disable this optimization. |
 | `pg_trickle.merge_strategy` | `text` | `"auto"` | The former `"delete_insert"` value was removed in v0.19.0 (CORR-1). |
 | `pg_trickle.merge_strategy_threshold` | `float8` | `0.01` | Default: 0.01 (1%). |
 | `pg_trickle.merge_work_mem_mb` | `int4` | `64` | A higher value lets PostgreSQL use larger hash tables for the MERGE join, avoiding disk-spilling sort/merge strategies on large deltas. |
-| `pg_trickle.metrics_port` | `int4` | `0` | Example: ```sql ALTER SYSTEM SET pg_trickle.metrics_port = 9188; SELECT pg_reload_conf(); ```. |
-| `pg_trickle.metrics_request_timeout_ms` | `int4` | `5000` | Protects the scheduler from a slow client stalling the tick loop. |
+| `pg_trickle.metrics_port` | `int4` | `0` | Set to 0 (default) to disable the exporter. |
+| `pg_trickle.metrics_request_timeout_ms` | `int4` | `5000` | Default: 5000 (5 seconds). |
 | `pg_trickle.min_schedule_seconds` | `int4` | `1` | Default: 1 s. |
 | `pg_trickle.notify_coalesce_ms` | `int4` | `250` | Default: 250 ms. |
 | `pg_trickle.online_schema_evolution` | `bool` | `false` | Default: `false` (standard ALTER QUERY reinit behaviour). |
-| `pg_trickle.otel_endpoint` | `text` | `None` | F10 (v0.37.0): OTLP/gRPC endpoint for OpenTelemetry span export. |
+| `pg_trickle.otel_endpoint` | `text` | `None` | Set to `NULL` / empty to disable OTEL export (default). |
 | `pg_trickle.parallel_refresh_mode` | `text` | `"on"` | - `"on"` (default as of v0.11.0): Enable true parallel refresh via   dynamic workers. |
 | `pg_trickle.part3_max_scan_count` | `int4` | `5` | Default: 5 (matches the previously hardcoded `PART3_MAX_SCAN_COUNT`). |
 | `pg_trickle.per_database_worker_quota` | `int4` | `0` | Set to 0 (default) to disable per-database quotas — all databases share `max_dynamic_refresh_workers` on a first-come-first-served basis, bounded per coordinator by `max_concurrent_refreshes`. |
@@ -109,13 +112,15 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.schedule_recommendation_min_samples` | `int4` | `20` | When fewer samples are available, `confidence` is returned as 0.0 and the recommendation fields are NULL or conservative defaults. |
 | `pg_trickle.scheduler_drain_timeout` | `int4` | `30` | Default: 30 seconds. |
 | `pg_trickle.scheduler_interval_ms` | `int4` | `1000` | Default: 1,000 ms (1 s). |
-| `pg_trickle.self_monitoring_auto_apply` | `text` | `"off"` | Automatic application mode for self-monitoring stream tables. |
+| `pg_trickle.self_heal_lock_timeout` | `bool` | `true` | When `true`, a refresh error containing "lock timeout" doubles the effective refresh interval for the affected stream table (exponential backoff). |
+| `pg_trickle.self_heal_oom` | `bool` | `true` | When `true`, a refresh error containing "out of memory" causes the scheduler to reduce the effective `merge_work_mem_mb` for the affected stream table by 25% on the next tick and retry. |
+| `pg_trickle.self_monitoring_auto_apply` | `text` | `"off"` | Controls when self-monitoring insights are automatically applied: - `"off"` (default): Never auto-apply. |
 | `pg_trickle.sla_window_hours` | `int4` | `24` | Default: 24 hours. |
 | `pg_trickle.slot_lag_critical_threshold_mb` | `int4` | `1024` | When a WAL-mode source retains more than this amount of WAL, `pgtrickle.check_cdc_health()` reports a `slot_lag_exceeds_threshold` alert for the source. |
 | `pg_trickle.slot_lag_warning_threshold_mb` | `int4` | `100` | When a WAL-mode source retains more than this amount of WAL, pg_trickle: - emits a `slot_lag_warning` NOTIFY event from the scheduler, and - reports a WARN row in `pgtrickle.health_check()`. |
 | `pg_trickle.spill_consecutive_limit` | `int4` | `3` | When a stream table accumulates this many consecutive differential refreshes where `temp_blks_written > spill_threshold_blocks`, the scheduler marks the ST for reinitialization (FULL refresh) on the next cycle. |
 | `pg_trickle.spill_threshold_blocks` | `int4` | `0` | Set to 0 to disable spill detection (default). |
-| `pg_trickle.template_cache` | `bool` | `true` | In transaction-pooling mode, rely on L2 rather than L0 warm-up for cross-connection performance. |
+| `pg_trickle.template_cache` | `bool` | `true` | G14-SHC: Enable the cross-backend template cache backed by an UNLOGGED catalog table (`pgtrickle.pgt_template_cache`). |
 | `pg_trickle.template_cache_max_age_hours` | `int4` | `168` | Prevents stale entries accumulating after ALTER QUERY without DROP or source-OID renumbering. |
 | `pg_trickle.template_cache_max_bytes` | `int4` | `0` | Set to 0 to disable byte-based eviction and rely only on `template_cache_max_entries`. |
 | `pg_trickle.template_cache_max_entries` | `int4` | `0` | When the cache reaches this size, the least-recently-used entry is evicted. |
@@ -123,7 +128,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.test_chaos_for_table` | `text` | `None` | Activate with: `ALTER SYSTEM SET pg_trickle.test_chaos_for_table = 'name'` followed by `SELECT pg_reload_conf()`. |
 | `pg_trickle.tick_watermark_enabled` | `bool` | `true` | Disable only if you need stream tables to always advance to the very latest available LSN regardless of cross-source consistency. |
 | `pg_trickle.tiered_scheduling` | `bool` | `true` | Default changed to `true` in v0.12.0 (PERF-3) — prevents large deployments from wasting CPU refreshing cold STs at full speed. |
-| `pg_trickle.trace_id` | `text` | `None` | F10 (v0.37.0): Session-level W3C traceparent header for trace context propagation. |
+| `pg_trickle.trace_id` | `text` | `None` | Set to `NULL` to disable trace ID injection (default). |
 | `pg_trickle.unlogged_buffers` | `bool` | `false` | **Deprecated (COR-003/ARCH-001, v0.68.0):** Use `pg_trickle.change_buffer_durability` instead. |
 | `pg_trickle.use_prepared_statements` | `bool` | `true` | Disable if prepared-statement parameter sniffing produces poor plans (e.g., highly skewed LSN distributions). |
 | `pg_trickle.use_sqlstate_classification` | `bool` | `true` | The SQLSTATE-based classification is locale-safe: it works correctly regardless of `lc_messages`. |
