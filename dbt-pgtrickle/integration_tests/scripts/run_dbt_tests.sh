@@ -194,7 +194,9 @@ echo "── Waiting for stream tables to populate ──"
 echo ""
 echo "── dbt test (initial) ──"
 dbt test --select assert_compat_model_created assert_compat_data_correct
-dbt test
+# assert_compat_alter_applied requires the post-alter state; exclude it here
+# so the initial full test run (schedule still '1m') does not fail it.
+dbt test --exclude assert_compat_alter_applied
 
 echo ""
 echo "── T-5: dbt ALTER flow ─────────────────────────────────────────────"
@@ -235,7 +237,9 @@ echo "── Waiting for stream tables to populate (after recreate) ──"
 
 echo ""
 echo "── dbt test (after full-refresh) ──"
-dbt test
+# assert_compat_alter_applied requires the post-alter state; after a
+# full-refresh the schedule reverts to '1m', so exclude it here.
+dbt test --exclude assert_compat_alter_applied
 
 echo ""
 echo "── dbt run-operation refresh_all_stream_tables ──"
