@@ -38,10 +38,19 @@ async fn setup_chaos_scheduler(db: &E2eDb) {
     // Low threshold so the test does not need many refresh cycles.
     db.execute("ALTER SYSTEM SET pg_trickle.max_consecutive_errors = 3")
         .await;
+    // Force sequential dispatch so the chaos GUC check in refresh_single_st
+    // is guaranteed to run in the main scheduler BGW process (which processes
+    // ConfigReloadPending and sees GUC changes after ALTER SYSTEM SET +
+    // pg_reload_conf).  In parallel mode refreshes run in spawned worker
+    // processes that may not see the GUC update in time.
+    db.execute("ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'off'")
+        .await;
     db.reload_config_and_wait().await;
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.max_consecutive_errors", "3")
+        .await;
+    db.wait_for_setting("pg_trickle.parallel_refresh_mode", "off")
         .await;
 
     let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
