@@ -493,6 +493,22 @@ pub fn execute_differential_refresh(
             std::borrow::Cow::Borrowed(&st.defining_query)
         };
 
+    // ── O-1 (v0.80.0): CASE aggregate with subquery predicate — classifier uncertain ──
+    // When the CASE expression inside an aggregate contains a scalar subquery or
+    // EXISTS predicate, neither the DVM-1 nor DVM-2 heuristic covers the pattern
+    // but string-based analysis cannot confirm the algebraic delta is correct.
+    // Force FULL refresh and emit the REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN reason
+    // code so operators can identify affected stream tables.
+    if crate::refresh::classify_case_aggregate_subquery_uncertain(&effective_defining_query) {
+        crate::refresh::set_refresh_reason("REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN");
+        return Err(PgTrickleError::QueryTooComplex(format!(
+            "REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN: {schema}.{name} has a CASE \
+             aggregate with a subquery or EXISTS predicate — the string-based \
+             classifier cannot confirm DVM algebraic delta safety. \
+             Falling back to FULL refresh."
+        )));
+    }
+
     // ── P-2 (v0.78.0): Lazy complexity class back-fill ───────────────
     // If the catalog doesn't yet have a complexity class (newly created
     // stream table or upgraded from pre-0.78.0), compute and persist it now.

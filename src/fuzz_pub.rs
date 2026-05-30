@@ -62,3 +62,30 @@ pub fn merge_should_warn_amplification_pub(
 pub fn merge_build_content_hash_expr_pub(prefix: &str, user_cols: &[String]) -> String {
     crate::refresh::codegen::build_content_hash_expr(prefix, user_cols)
 }
+
+// ── P-5 (v0.80.0): DVM classifier fuzz wrappers ──────────────────────────────
+//
+// These thin wrappers expose the DVM query-pattern classifiers so that
+// `snapshot_fingerprint_fuzz` can exercise them against arbitrary SQL strings
+// without requiring a PostgreSQL backend.
+
+/// Detect CASE aggregate with IN-list WHERE predicate (q12-like).
+///
+/// Wraps [`crate::refresh::classify_case_in_list_aggregate_drift`].
+pub fn refresh_classify_case_in_list_pub(query: &str) -> bool {
+    crate::refresh::classify_case_in_list_aggregate_drift(query)
+}
+
+/// Detect correlated aggregate scalar subquery in WHERE (q20-like).
+///
+/// Wraps [`crate::refresh::classify_correlated_aggregate_subquery_in_where`].
+pub fn refresh_classify_correlated_subquery_pub(query: &str) -> bool {
+    crate::refresh::classify_correlated_aggregate_subquery_in_where(query)
+}
+
+/// Detect CASE aggregate with EXISTS/subquery inside predicate (regex classifier uncertain).
+///
+/// Wraps [`crate::refresh::classify_case_aggregate_subquery_uncertain`].
+pub fn refresh_classify_case_aggregate_subquery_uncertain_pub(query: &str) -> bool {
+    crate::refresh::classify_case_aggregate_subquery_uncertain(query)
+}

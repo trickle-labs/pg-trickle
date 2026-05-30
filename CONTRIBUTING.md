@@ -118,6 +118,43 @@ Windows unit jobs stay off the PR critical path and run on push-to-main,
 schedule, or manual dispatch. This keeps typical PR feedback closer to the
 single-digit-minute range while preserving broader scheduled coverage.
 
+#### Workflow trigger matrix
+
+| Workflow / Job | PR | Push to main | Daily schedule | Manual dispatch |
+|----------------|----|--------------|----------------|-----------------|
+| Unit tests (Linux) | ✅ | ✅ | ✅ | ✅ |
+| Unit tests (macOS + Windows) | ❌ | ❌ | ✅ | ✅ |
+| Integration tests | ✅ | ✅ | ✅ | ✅ |
+| Light E2E (3 shards) | ✅ | ✅ | ✅ | ✅ |
+| Full E2E + TPC-H | ❌ | ✅ | ✅ | ✅ |
+| Upgrade completeness check | ✅ | ✅ | ✅ | ✅ |
+| Upgrade E2E | ❌ | ✅ | ✅ | ✅ |
+| Benchmarks | ❌ | ✅ | ✅ | ✅ |
+| Benchmark regression gate | ✅ | ❌ | ❌ | ✅ |
+| DAG bench (calc / throughput) | ❌ | ❌ | ✅ | ✅ |
+| DAG bench (parallel workers) | ❌ | ❌ | ✅ | ✅ |
+| E2E bench — refresh matrix | ❌ | ❌ | Weekly (Sun) | ✅ |
+| E2E bench — zero-change latency | ❌ | ❌ | Weekly (Sun) | ✅ |
+| E2E bench — CDC overhead | ❌ | ❌ | Weekly (Sun) | ✅ |
+| E2E bench — TPC-H FULL vs DIFF | ❌ | ❌ | Weekly (Sun) | ✅ |
+| dbt integration | ❌ | ❌ | ✅ | ✅ |
+| CNPG smoke test | ❌ | ❌ | ✅ | ✅ |
+| Soak test (stability-tests.yml) | ❌ | ❌ | ✅ | ✅ |
+| Multi-database (stability-tests.yml) | ❌ | ❌ | ✅ | ✅ |
+| Lint (fmt + clippy + docs-lint) | ✅ | ✅ | ✅ | ✅ |
+| Unsafe block inventory | ✅ | ✅ | ✅ | ✅ |
+| GUC + SQL API catalog drift (O40-1) | ✅ | ✅ | ✅ | ✅ |
+| cargo-deny (dependency policy) | ✅¹ | ✅ | ✅ | ✅ |
+| cargo audit (security) | ✅ | ✅ | ✅ | ✅ |
+| Semgrep static analysis | ✅ | ✅ | ✅ | ✅ |
+| Secret scanning (gitleaks) | ✅ | ✅ | ✅ | ✅ |
+| Fuzz corpus replay | ✅ | ✅ | ✅ | ✅ |
+| Windows compile check | ✅ | ✅ | ✅ | ✅ |
+
+¹ `cargo-deny` runs on PRs only when `Cargo.toml`, `Cargo.lock`, or `deny.toml`
+change (path filter).  If your PR does not touch these files, the check is skipped
+but not blocking.
+
 To trigger the **full CI matrix** on your PR branch (recommended for DVM
 engine, refresh, or CDC changes):
 

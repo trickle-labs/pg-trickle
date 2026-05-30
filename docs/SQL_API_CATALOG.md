@@ -11,8 +11,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
 | Function | Schema | Returns | Description |
 |----------|--------|---------|-------------|
-| `pgtrickle._on_ddl_end()` | `pgtrickle` | `` | Registered via `extension_sql!()` in lib.rs as: ```sql CREATE FUNCTION pgtrickle._on_ddl_end() RETURNS event_trigger . |
-| `pgtrickle._on_sql_drop()` | `pgtrickle` | `` | Detects when upstream source tables or ST storage tables themselves are dropped and reacts accordingly. |
+| `pgtrickle._on_ddl_end()` | `pgtrickle` | `` | > **Internal**: This function is called by PostgreSQL trigger machinery, > not directly by users. |
+| `pgtrickle._on_sql_drop()` | `pgtrickle` | `` | > **Internal**: This function is called by PostgreSQL trigger machinery, > not directly by users. |
 | `pgtrickle._signal_launcher_rescan()` | `pgtrickle` | `` | Also safe to call manually if the launcher needs a nudge. |
 | `pgtrickle.advance_watermark()` | `pgtrickle` | `void` | - **Monotonic:** rejects watermarks that go backward. |
 | `pgtrickle.alter_stream_table()` | `pgtrickle` | `` | Alter properties of an existing stream table. |
@@ -71,7 +71,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.list_snapshots()` | `pgtrickle` | `SetOf row` | Returns one row per snapshot ordered by creation time descending. |
 | `pgtrickle.list_sources()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.list_sources(name)`. |
 | `pgtrickle.list_subscriptions()` | `pgtrickle` | `SetOf row` | Returns a table with columns (stream_table TEXT, channel TEXT, created_at TIMESTAMPTZ). |
-| `pgtrickle.metrics_summary()` | `pgtrickle` | `SetOf row` | v0.31.0 (PERF-3): Added `ivm_lock_parse_error_count` — cumulative count of IMMEDIATE-mode lock-mode downgrades due to query parse failures. |
+| `pgtrickle.metrics_summary()` | `pgtrickle` | `SetOf row` | v0.80.0 (O-3): Added `cleanup_backlog_count` and `cleanup_blocked_count` — total and blocked entries in `pgt_cleanup_status` for backlog trend monitoring. |
 | `pgtrickle.migrate()` | `pgtrickle` | `text` | This is a convenience function for users who upgrade the extension without using `ALTER EXTENSION pg_trickle UPDATE` — it ensures the catalog schema matches the library expectations. |
 | `pgtrickle.parallel_job_status()` | `pgtrickle` | `` | Exposed as `pgtrickle.parallel_job_status(max_age_seconds)`. |
 | `pgtrickle.parse_duration_seconds()` | `pgtrickle` | `bigint (nullable)` | Used by SQL views to compare schedule. |

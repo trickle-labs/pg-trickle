@@ -18,6 +18,8 @@ use super::*;
 /// - `consecutive_errors`   — any stream tables accumulating errors (not yet suspended)
 /// - `buffer_growth`        — any CDC change buffer with > 10 000 pending rows
 /// - `slot_lag`             — any WAL replication slot retaining > 100 MB of WAL
+/// - `dvm_fallbacks`        — any DVM fallback refreshes in the last hour (reason codes)
+/// - `ring_overflow_trend`  — whether the invalidation ring has overflowed since startup
 ///
 /// Exposed as `pgtrickle.health_check()`.
 #[pg_extern(schema = "pgtrickle", name = "health_check")]
@@ -398,6 +400,71 @@ fn health_check() -> TableIterator<
             )
         };
         rows.push(("attachment_owner_check".to_string(), sev, detail));
+
+        // ── O-1 (v0.80.0): DVM fallback (forced-full) refreshes in recent history
+        // Alert when any stream table was forced to a FULL refresh (was_full_fallback)
+        // within the last hour. Frequent fallbacks indicate queries that should be
+        // reviewed or rewritten to restore differential refresh.
+        let dvm_fallback_result = client
+            .select(
+                "SELECT count(*)::int \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE was_full_fallback = TRUE \
+                   AND start_time >= now() - interval '1 hour'",
+                None,
+                &[],
+            )
+            .ok();
+
+        let fallback_count = dvm_fallback_result
+            .map(|r| {
+                let row = r.first();
+                row.get::<i32>(1).unwrap_or(None).unwrap_or(0)
+            })
+            .unwrap_or(0);
+
+        let (sev, detail) = if fallback_count > 0 {
+            (
+                "WARN".to_string(),
+                format!(
+                    "{} forced-full (DVM fallback) refresh(es) in the last hour. \
+                     Review affected stream tables — consider rewriting queries \
+                     or enabling is_append_only=true where applicable.",
+                    fallback_count
+                ),
+            )
+        } else {
+            (
+                "OK".to_string(),
+                "No forced-full DVM fallback refreshes in the last hour".to_string(),
+            )
+        };
+        rows.push(("dvm_fallbacks".to_string(), sev, detail));
+
+        // ── O-2 (v0.80.0): Invalidation ring overflow trend ──────────────────
+        // Alert when the invalidation ring has overflowed since startup. Each
+        // overflow means a DDL event exceeded ring capacity and forced a full
+        // DAG rebuild (expensive). Suggest raising invalidation_ring_capacity.
+        let overflow_count = crate::shmem::invalidation_ring_overflow_count();
+        let (sev, detail) = if overflow_count > 0 {
+            (
+                "WARN".to_string(),
+                format!(
+                    "{} invalidation ring overflow(s) since startup — DDL burst \
+                     events exceeded ring capacity and triggered full DAG rebuilds. \
+                     Consider raising pg_trickle.invalidation_ring_capacity \
+                     (current: {}).",
+                    overflow_count,
+                    crate::config::pg_trickle_invalidation_ring_capacity(),
+                ),
+            )
+        } else {
+            (
+                "OK".to_string(),
+                "Invalidation ring has not overflowed since startup".to_string(),
+            )
+        };
+        rows.push(("ring_overflow_trend".to_string(), sev.to_string(), detail));
     });
 
     TableIterator::new(rows)

@@ -1451,7 +1451,9 @@ Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
 `consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag`
 (retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB),
 `worker_pool` (all worker tokens in use — parallel mode only), `job_queue`
-(> 10 jobs queued — parallel mode only).
+(> 10 jobs queued — parallel mode only),
+`dvm_fallbacks` (v0.80.0+, WARN if DVM fallback refreshes were recorded in the last hour),
+`ring_overflow_trend` (v0.80.0+, WARN if the DDL invalidation ring has overflowed since last restart).
 
 ---
 
@@ -1741,7 +1743,9 @@ pgtrickle.metrics_summary() → SETOF record(
     ivm_lock_parse_error_count   bigint,
     holdback_probe_calls         bigint,
     holdback_probe_cache_hits    bigint,
-    holdback_probe_avg_ms        double precision
+    holdback_probe_avg_ms        double precision,
+    cleanup_backlog_count        bigint,      -- v0.80.0+
+    cleanup_blocked_count        bigint       -- v0.80.0+
 )
 ```
 
@@ -1760,6 +1764,8 @@ pgtrickle.metrics_summary() → SETOF record(
 | `holdback_probe_calls` | Total hold-back probes executed since last extension restart. |
 | `holdback_probe_cache_hits` | Probes satisfied from the hold-back cache without a full snapshot scan. |
 | `holdback_probe_avg_ms` | Average hold-back probe latency in milliseconds. High values (> 50 ms) indicate contention on the watermark table. |
+| `cleanup_backlog_count` | Total entries currently in `pgt_cleanup_status` awaiting deferred cleanup. Non-zero values indicate pending tombstone or orphan removal work. (v0.80.0+) |
+| `cleanup_blocked_count` | Entries in `pgt_cleanup_status` that are currently blocked (e.g., held by an active transaction). Persistent non-zero values may indicate lock contention. (v0.80.0+) |
 
 **Example:**
 
@@ -1767,9 +1773,9 @@ pgtrickle.metrics_summary() → SETOF record(
 SELECT * FROM pgtrickle.metrics_summary();
 ```
 
-| db_name | total_stream_tables | active_stream_tables | suspended_stream_tables | total_refreshes | successful_refreshes | failed_refreshes | total_rows_processed | active_workers | ivm_lock_parse_error_count | holdback_probe_calls | holdback_probe_cache_hits | holdback_probe_avg_ms |
-|---------|---------------------|----------------------|------------------------|-----------------|---------------------|------------------|---------------------|----------------|---------------------------|---------------------|--------------------------|----------------------|
-| mydb | 12 | 11 | 1 | 4820 | 4818 | 2 | 193400 | 3 | 0 | 142 | 138 | 0.8 |
+| db_name | total_stream_tables | active_stream_tables | suspended_stream_tables | total_refreshes | successful_refreshes | failed_refreshes | total_rows_processed | active_workers | ivm_lock_parse_error_count | holdback_probe_calls | holdback_probe_cache_hits | holdback_probe_avg_ms | cleanup_backlog_count | cleanup_blocked_count |
+|---------|---------------------|----------------------|------------------------|-----------------|---------------------|------------------|---------------------|----------------|---------------------------|---------------------|--------------------------|----------------------|-----------------------|-----------------------|
+| mydb | 12 | 11 | 1 | 4820 | 4818 | 2 | 193400 | 3 | 0 | 142 | 138 | 0.8 | 0 | 0 |
 
 **Grafana usage:**
 
@@ -1781,7 +1787,9 @@ SELECT
     active_stream_tables,
     failed_refreshes,
     active_workers,
-    holdback_probe_avg_ms
+    holdback_probe_avg_ms,
+    cleanup_backlog_count,
+    cleanup_blocked_count
 FROM pgtrickle.metrics_summary();
 ```
 

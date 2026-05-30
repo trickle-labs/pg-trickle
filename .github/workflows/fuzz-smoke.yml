@@ -61,7 +61,7 @@ jobs:
           FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '30' }}
         run: |
           set -euo pipefail
-          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz snapshot_fingerprint_fuzz)
           for TARGET in "${TARGETS[@]}"; do
             echo "=== Replaying corpus for $TARGET ==="
             CORPUS_DIR="fuzz/corpus/$TARGET"
@@ -85,7 +85,7 @@ jobs:
           FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '60' }}
         run: |
           set -euo pipefail
-          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz snapshot_fingerprint_fuzz)
           for TARGET in "${TARGETS[@]}"; do
             echo "=== Fuzzing $TARGET for ${FUZZ_SECONDS}s ==="
             cargo fuzz run "$TARGET" -- -max_total_time="${FUZZ_SECONDS}" 2>&1 || {

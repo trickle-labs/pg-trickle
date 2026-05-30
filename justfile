@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.79.0-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.80.0-pg18 -f Dockerfile.hub .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -73,6 +73,7 @@ security-definer-check:
 # A42-4: Docs linter — check for stale/retired GUC names and doc drift.
 # Fails if any docs/**/*.md references deprecated GUC names as if they are
 # current/active (references inside "Deprecated" sections are allowed).
+# DOC-1 (v0.80.0): Also verifies every #[pg_extern] function is in SQL_REFERENCE.md.
 [group: "lint"]
 docs-lint:
     #!/usr/bin/env bash
@@ -93,6 +94,8 @@ docs-lint:
         exit 1
     fi
     echo "docs-lint passed"
+    # DOC-1: check that every exported #[pg_extern] function appears in SQL_REFERENCE.md
+    python3 scripts/check_pg_extern_docs.py
 
 # Audit unsafe block counts against the committed baseline (.unsafe-baseline)
 [group: "lint"]
@@ -500,12 +503,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.79.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.80.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.79.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.80.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

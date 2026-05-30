@@ -22,6 +22,9 @@ use pgrx::prelude::*;
 ///
 /// v0.31.0 (PERF-3): Added `ivm_lock_parse_error_count` — cumulative count
 /// of IMMEDIATE-mode lock-mode downgrades due to query parse failures.
+///
+/// v0.80.0 (O-3): Added `cleanup_backlog_count` and `cleanup_blocked_count`
+/// — total and blocked entries in `pgt_cleanup_status` for backlog trend monitoring.
 #[pg_extern(schema = "pgtrickle")]
 #[allow(clippy::type_complexity)]
 pub fn metrics_summary() -> TableIterator<
@@ -40,6 +43,8 @@ pub fn metrics_summary() -> TableIterator<
         name!(holdback_probe_calls, Option<i64>),
         name!(holdback_probe_cache_hits, Option<i64>),
         name!(holdback_probe_avg_ms, Option<f64>),
+        name!(cleanup_backlog_count, Option<i64>),
+        name!(cleanup_blocked_count, Option<i64>),
     ),
 > {
     let rows = metrics_summary_impl();
@@ -61,6 +66,8 @@ fn metrics_summary_impl() -> Vec<(
     Option<i64>,
     Option<i64>,
     Option<f64>,
+    Option<i64>,
+    Option<i64>,
 )> {
     let active_workers = crate::shmem::active_worker_count() as i32;
     // PERF-3 (v0.31.0): Read the IVM lock-mode parse error counter.
@@ -87,6 +94,26 @@ fn metrics_summary_impl() -> Vec<(
             &[],
         );
 
+        // O-3 (v0.80.0): Cleanup backlog trend — total and blocked entries.
+        let cleanup = client
+            .select(
+                "SELECT count(*)::bigint, \
+                        count(*) FILTER (WHERE blocked = true)::bigint \
+                 FROM pgtrickle.pgt_cleanup_status",
+                None,
+                &[],
+            )
+            .ok();
+
+        let (cleanup_total, cleanup_blocked) = cleanup
+            .map(|r| {
+                let row = r.first();
+                let total = row.get::<i64>(1).unwrap_or(None);
+                let blocked = row.get::<i64>(2).unwrap_or(None);
+                (total, blocked)
+            })
+            .unwrap_or((Some(0), Some(0)));
+
         match result {
             Ok(rows) => rows.into_iter().next().map(|row| {
                 let db_name = row.get::<String>(1).ok().flatten();
@@ -106,6 +133,8 @@ fn metrics_summary_impl() -> Vec<(
                     successful,
                     failed,
                     rows_processed,
+                    cleanup_total,
+                    cleanup_blocked,
                 )
             }),
             Err(_) => None,
@@ -113,7 +142,7 @@ fn metrics_summary_impl() -> Vec<(
     });
 
     match row {
-        Some((db, total, active, susp, tr, sr, fr, rp)) => {
+        Some((db, total, active, susp, tr, sr, fr, rp, ct, cb)) => {
             vec![(
                 db,
                 total,
@@ -128,6 +157,8 @@ fn metrics_summary_impl() -> Vec<(
                 Some(probe_calls as i64),
                 Some(probe_cache_hits as i64),
                 Some(probe_avg_ms),
+                ct,
+                cb,
             )]
         }
         None => Vec::new(),
