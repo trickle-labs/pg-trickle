@@ -401,50 +401,42 @@ fn health_check() -> TableIterator<
         };
         rows.push(("attachment_owner_check".to_string(), sev, detail));
 
-        // ── O-1 (v0.80.0): DVM fallback reason codes in recent history ──────
-        // Alert when any stream table has been forced to FULL refresh due to a
-        // known DVM-incompatible query pattern within the last hour. These codes
-        // appear in pgt_refresh_history.refresh_reason and indicate queries that
-        // should be reviewed or rewritten to restore differential refresh.
+        // ── O-1 (v0.80.0): DVM fallback (forced-full) refreshes in recent history
+        // Alert when any stream table was forced to a FULL refresh (was_full_fallback)
+        // within the last hour. Frequent fallbacks indicate queries that should be
+        // reviewed or rewritten to restore differential refresh.
         let dvm_fallback_result = client
             .select(
-                "SELECT count(*)::int, \
-                        coalesce(string_agg(DISTINCT refresh_reason, ', ' ORDER BY refresh_reason), '') \
+                "SELECT count(*)::int \
                  FROM pgtrickle.pgt_refresh_history \
-                 WHERE refresh_reason IN ( \
-                         'CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK', \
-                         'CORRELATED_SUBQUERY_DELTA_QUADRATIC', \
-                         'REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN' \
-                       ) \
-                   AND refreshed_at >= now() - interval '1 hour'",
+                 WHERE was_full_fallback = TRUE \
+                   AND start_time >= now() - interval '1 hour'",
                 None,
                 &[],
             )
             .ok();
 
-        let (fallback_count, fallback_reasons) = dvm_fallback_result
+        let fallback_count = dvm_fallback_result
             .map(|r| {
                 let row = r.first();
-                let cnt = row.get::<i32>(1).unwrap_or(None).unwrap_or(0);
-                let reasons = row.get::<String>(2).unwrap_or(None).unwrap_or_default();
-                (cnt, reasons)
+                row.get::<i32>(1).unwrap_or(None).unwrap_or(0)
             })
-            .unwrap_or((0, String::new()));
+            .unwrap_or(0);
 
         let (sev, detail) = if fallback_count > 0 {
             (
                 "WARN".to_string(),
                 format!(
-                    "{} DVM fallback refresh(es) in the last hour due to: {}. \
+                    "{} forced-full (DVM fallback) refresh(es) in the last hour. \
                      Review affected stream tables — consider rewriting queries \
                      or enabling is_append_only=true where applicable.",
-                    fallback_count, fallback_reasons
+                    fallback_count
                 ),
             )
         } else {
             (
                 "OK".to_string(),
-                "No DVM fallback refreshes recorded in the last hour".to_string(),
+                "No forced-full DVM fallback refreshes in the last hour".to_string(),
             )
         };
         rows.push(("dvm_fallbacks".to_string(), sev, detail));
