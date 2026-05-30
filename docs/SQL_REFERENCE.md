@@ -10,6 +10,9 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [Core Lifecycle](#core-lifecycle)
     - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
     - [pgtrickle.create\_stream\_table\_fast\_append\_only](#pgtricklecreate_stream_table_fast_append_only)
+    - [pgtrickle.create\_stream\_table\_realtime](#pgtricklecreate_stream_table_realtime)
+    - [pgtrickle.create\_stream\_table\_batch](#pgtricklecreate_stream_table_batch)
+    - [pgtrickle.create\_stream\_table\_cost\_optimized](#pgtricklecreate_stream_table_cost_optimized)
     - [pgtrickle.create\_stream\_table\_if\_not\_exists](#pgtricklecreate_stream_table_if_not_exists)
     - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
     - [pgtrickle.bulk\_create](#pgtricklebulk_create)
@@ -31,6 +34,9 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.get\_staleness](#pgtrickleget_staleness)
     - [pgtrickle.explain\_refresh\_mode](#pgtrickleexplain_refresh_mode)
     - [pgtrickle.cache\_stats](#pgtricklecache_stats)
+    - [pgtrickle.commit\_latency\_stats](#pgtricklecommit_latency_stats)
+    - [pgtrickle.tune\_recommendations](#pgtrickletune_recommendations)
+    - [pgtrickle.preview\_stream\_table](#pgtricklepreview_stream_table)
     - [pgtrickle.history\_prune\_status](#pgtricklehistory_prune_status)
     - [pgtrickle.metrics\_summary](#pgtricklemetrics_summary)
   - [CDC Diagnostics](#cdc-diagnostics)
@@ -804,6 +810,99 @@ SELECT pgtrickle.create_stream_table_fast_append_only(
   event streams.
 - The stream table is initialized immediately; use `schedule` to control ongoing
   cadence.
+
+---
+
+### pgtrickle.create_stream_table_realtime
+
+Convenience preset for creating a low-latency DIFFERENTIAL stream table with a
+1-second refresh schedule.  Equivalent to calling `pgtrickle.create_stream_table`
+with `schedule => '1s'` and `refresh_mode => 'DIFFERENTIAL'`.
+
+```sql
+pgtrickle.create_stream_table_realtime(
+    name   text,
+    query  text
+) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `text` | — | Name of the stream table to create. |
+| `query` | `text` | — | SQL SELECT query to materialize. |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.create_stream_table_realtime(
+    'live_order_counts',
+    'SELECT status, count(*) FROM orders GROUP BY status'
+);
+```
+
+---
+
+### pgtrickle.create_stream_table_batch
+
+Convenience preset for creating an AUTO-mode stream table with a 5-minute
+refresh schedule.  Equivalent to calling `pgtrickle.create_stream_table` with
+`schedule => '5m'` and `refresh_mode => 'AUTO'`.
+
+```sql
+pgtrickle.create_stream_table_batch(
+    name   text,
+    query  text
+) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `text` | — | Name of the stream table to create. |
+| `query` | `text` | — | SQL SELECT query to materialize. |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.create_stream_table_batch(
+    'hourly_revenue',
+    'SELECT date_trunc(''hour'', created_at) AS hour, sum(amount) FROM orders GROUP BY 1'
+);
+```
+
+---
+
+### pgtrickle.create_stream_table_cost_optimized
+
+Convenience preset for creating a cost-optimized AUTO-mode stream table with a
+15-minute refresh schedule.  Equivalent to calling `pgtrickle.create_stream_table`
+with `schedule => '15m'` and `refresh_mode => 'AUTO'`.
+
+```sql
+pgtrickle.create_stream_table_cost_optimized(
+    name   text,
+    query  text
+) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `text` | — | Name of the stream table to create. |
+| `query` | `text` | — | SQL SELECT query to materialize. |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.create_stream_table_cost_optimized(
+    'daily_kpi_cache',
+    'SELECT date_trunc(''day'', ts) AS day, count(*) AS events FROM activity GROUP BY 1'
+);
+```
 
 ---
 
@@ -1679,6 +1778,88 @@ SELECT * FROM pgtrickle.cache_stats();
 > **Note:** Counters are cluster-wide (shared memory) except `l1_size` which
 > is per-backend. Requires `shared_preload_libraries = 'pg_trickle'`; returns
 > zeros when loaded dynamically.
+
+---
+
+### pgtrickle.commit_latency_stats
+
+Return per-stream-table refresh latency statistics (min, p50, p95, max) in
+milliseconds, computed from `pgtrickle.pgt_refresh_history`.
+
+When `pg_trickle.commit_timestamp_tracking = off` (default) the latency
+measures total refresh duration (`end_time - start_time`).  Enabling
+`commit_timestamp_tracking` with `track_commit_timestamp = on` in
+`postgresql.conf` switches to true commit-to-visible wall-clock latency.
+
+```sql
+pgtrickle.commit_latency_stats() → SETOF record(
+    pgt_schema    text,
+    pgt_name      text,
+    samples       bigint,
+    min_ms        double precision,
+    p50_ms        double precision,
+    p95_ms        double precision,
+    max_ms        double precision,
+    tracking_mode text
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.commit_latency_stats();
+```
+
+---
+
+### pgtrickle.tune_recommendations
+
+Return a set of GUC tuning recommendations derived from observed query history
+and current configuration.  Each row describes one recommendation.
+
+```sql
+pgtrickle.tune_recommendations() → SETOF record(
+    guc_name          text,
+    current_value     text,
+    recommended_value text,
+    reason            text
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.tune_recommendations();
+```
+
+---
+
+### pgtrickle.preview_stream_table
+
+Perform a dry-run parse and analysis of a defining query without creating any
+stream table.  Returns a set of key/value property rows describing the detected
+refresh mode, source tables, query complexity, and IVM support status.
+
+```sql
+pgtrickle.preview_stream_table(query text) → SETOF record(
+    property text,
+    value    text
+)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `query` | `text` | — | SQL SELECT query to analyse. |
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.preview_stream_table(
+    'SELECT user_id, count(*) FROM events GROUP BY user_id'
+);
+```
 
 ---
 

@@ -1884,6 +1884,405 @@ pub(super) fn vector_status() -> TableIterator<
 
 // ── TEST-7 (v0.24.0): Unit tests for diagnostics pure-logic helpers ─────
 
+// ── QW-2 (v0.81.0): GUC tune recommendations ────────────────────────────
+
+// ── QW-1 (v0.81.0): Commit latency statistics ────────────────────────────
+
+/// QW-1 (v0.81.0): Return per-stream-table commit-to-visible latency
+/// statistics computed from `pgtrickle.pgt_refresh_history`.
+///
+/// Each row corresponds to one stream table and reports the minimum,
+/// median (p50), p95, and maximum observed latency (in milliseconds)
+/// between the scheduler tick start and the refresh end time.
+///
+/// When `pg_trickle.commit_timestamp_tracking = off` (the default), the
+/// latency is estimated as `end_time - start_time` (refresh duration only).
+/// Enabling `commit_timestamp_tracking` with `track_commit_timestamp = on`
+/// in `postgresql.conf` would allow the extension to compute the true
+/// commit-to-visible wall-clock latency; this is planned for a future
+/// release.
+///
+/// Returns rows only for stream tables that have at least one completed
+/// refresh in the history table.
+#[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
+#[allow(clippy::type_complexity)]
+pub(super) fn commit_latency_stats() -> TableIterator<
+    'static,
+    (
+        name!(pgt_schema, String),
+        name!(pgt_name, String),
+        name!(samples, i64),
+        name!(min_ms, f64),
+        name!(p50_ms, f64),
+        name!(p95_ms, f64),
+        name!(max_ms, f64),
+        name!(tracking_mode, String),
+    ),
+> {
+    let tracking_enabled = crate::config::pg_trickle_commit_timestamp_tracking();
+    let tracking_mode = if tracking_enabled {
+        "commit_timestamp"
+    } else {
+        "refresh_duration"
+    };
+
+    // Query refresh latency stats per stream table from history.
+    // For now, latency = EXTRACT(EPOCH FROM (end_time - start_time)) * 1000 ms.
+    let rows: Vec<(String, String, i64, f64, f64, f64, f64, String)> = Spi::connect(|client| {
+        let sql = "\
+            SELECT \
+                s.pgt_schema::text, \
+                s.pgt_name::text, \
+                count(*)::bigint AS samples, \
+                min(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS min_ms, \
+                percentile_disc(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS p50_ms, \
+                percentile_disc(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS p95_ms, \
+                max(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS max_ms \
+            FROM pgtrickle.pgt_refresh_history h \
+            JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = h.pgt_id \
+            WHERE h.status = 'COMPLETED' \
+              AND h.end_time IS NOT NULL \
+              AND h.start_time IS NOT NULL \
+            GROUP BY s.pgt_schema, s.pgt_name \
+            ORDER BY s.pgt_schema, s.pgt_name";
+
+        let tbl = client.select(sql, None, &[]).map_err(|_e| {
+            pgrx::spi::SpiError::InvalidPosition
+        })?;
+
+        let mut out = Vec::new();
+        for row in tbl {
+            let schema = row.get::<String>(1).ok().flatten().unwrap_or_default();
+            let name = row.get::<String>(2).ok().flatten().unwrap_or_default();
+            let samples = row.get::<i64>(3).ok().flatten().unwrap_or(0);
+            let min_ms = row.get::<f64>(4).ok().flatten().unwrap_or(0.0);
+            let p50_ms = row.get::<f64>(5).ok().flatten().unwrap_or(0.0);
+            let p95_ms = row.get::<f64>(6).ok().flatten().unwrap_or(0.0);
+            let max_ms = row.get::<f64>(7).ok().flatten().unwrap_or(0.0);
+            out.push((schema, name, samples, min_ms, p50_ms, p95_ms, max_ms, tracking_mode.to_string()));
+        }
+        Ok::<Vec<_>, pgrx::spi::SpiError>(out)
+    }).unwrap_or_default();
+
+    TableIterator::new(rows)
+}
+
+/// QW-2 (v0.81.0): Returns a set of GUC tuning recommendations based on
+/// recent refresh history and current configuration.
+///
+/// Each row describes one recommendation:
+/// - `guc_name`: the GUC parameter name (e.g. `pg_trickle.merge_work_mem_mb`)
+/// - `current_value`: the current value as a string
+/// - `recommended_value`: the suggested value
+/// - `reason`: a human-readable explanation
+///
+/// Returns an empty result set when all observed metrics are within healthy
+/// ranges. This function is read-only and safe to call at any time.
+#[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
+pub(super) fn tune_recommendations() -> TableIterator<
+    'static,
+    (
+        name!(guc_name, String),
+        name!(current_value, String),
+        name!(recommended_value, String),
+        name!(reason, String),
+    ),
+> {
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+
+    // ── Recommendation 1: merge_batch_size based on p99 delta size ──────
+    // If the p99 delta row count in pgt_refresh_history exceeds 100 000 and
+    // merge_batch_size is 0 (disabled), recommend enabling it.
+    let merge_batch_size = crate::config::pg_trickle_merge_batch_size();
+    let p99_delta: Option<i64> = Spi::get_one::<i64>(
+        "SELECT percentile_disc(0.99) WITHIN GROUP (ORDER BY delta_rows) \
+         FROM pgtrickle.pgt_refresh_history \
+         WHERE delta_rows IS NOT NULL AND delta_rows > 0",
+    )
+    .unwrap_or(None);
+    if merge_batch_size == 0
+        && let Some(p99) = p99_delta.filter(|&p| p > 100_000)
+    {
+        rows.push((
+            "pg_trickle.merge_batch_size".to_string(),
+            "0 (disabled)".to_string(),
+            "50000".to_string(),
+            format!(
+                "p99 delta size is {} rows — enabling chunked MERGE (QW-9) \
+                 will route large deltas through DELETE+INSERT, \
+                 reducing peak memory and MERGE join cost.",
+                p99
+            ),
+        ));
+    }
+
+    // ── Recommendation 2: merge_work_mem_mb when p95 latency is high ────
+    // If p95 refresh latency exceeds 10 s and work_mem_mb is already >= 512,
+    // suggest lowering it (high work_mem can cause poor planner choices).
+    let work_mem_mb = crate::config::pg_trickle_delta_work_mem_cap_mb();
+    let p95_ms: Option<f64> = Spi::get_one::<f64>(
+        "SELECT percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms) \
+         FROM pgtrickle.pgt_refresh_history \
+         WHERE duration_ms IS NOT NULL AND status = 'COMPLETED'",
+    )
+    .unwrap_or(None);
+    if work_mem_mb > 512
+        && let Some(p95) = p95_ms.filter(|&p| p > 10_000.0)
+    {
+        rows.push((
+            "pg_trickle.delta_work_mem_cap_mb".to_string(),
+            work_mem_mb.to_string(),
+            "256".to_string(),
+            format!(
+                "p95 refresh latency is {:.0}ms with delta_work_mem_cap_mb={}; \
+                 a very high work_mem setting can cause the planner to choose \
+                 suboptimal hash joins. Try reducing to 256 MB.",
+                p95, work_mem_mb
+            ),
+        ));
+    }
+
+    // ── Recommendation 3: self_heal_oom when OOM errors are in history ───
+    let self_heal_oom = crate::config::pg_trickle_self_heal_oom();
+    if !self_heal_oom {
+        let oom_count: Option<i64> = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
+             WHERE last_error_message ILIKE '%out of memory%' \
+               AND refreshed_at > now() - INTERVAL '7 days'",
+        )
+        .unwrap_or(None);
+        if oom_count.unwrap_or(0) > 0 {
+            rows.push((
+                "pg_trickle.self_heal_oom".to_string(),
+                "off".to_string(),
+                "on".to_string(),
+                format!(
+                    "Detected {} OOM error(s) in the past 7 days. Enabling \
+                     self_heal_oom will intercept these errors before they \
+                     count toward auto-suspension, preventing unnecessary \
+                     stream table downtime.",
+                    oom_count.unwrap_or(0)
+                ),
+            ));
+        }
+    }
+
+    // ── Recommendation 4: concurrent_refreshes vs. worker_count ─────────
+    let max_concurrent = crate::config::pg_trickle_max_concurrent_refreshes();
+    let worker_count = crate::config::pg_trickle_worker_pool_size();
+    if max_concurrent > worker_count && worker_count > 0 {
+        rows.push((
+            "pg_trickle.max_concurrent_refreshes".to_string(),
+            max_concurrent.to_string(),
+            worker_count.to_string(),
+            format!(
+                "max_concurrent_refreshes ({}) exceeds worker_count ({}). \
+                 The extra concurrency slots will never be used. \
+                 Lower max_concurrent_refreshes to match worker_count.",
+                max_concurrent, worker_count
+            ),
+        ));
+    }
+
+    TableIterator::new(rows)
+}
+
+// ── QW-3 (v0.81.0): preview_stream_table ─────────────────────────────────
+
+/// QW-3 (v0.81.0): Analyse a query to preview what a stream table would
+/// look like if created with `create_stream_table`, without creating anything.
+///
+/// Returns a set of key/value analysis rows describing:
+/// - `dvm_supported`: whether the DVM engine can handle this query
+/// - `refresh_strategy`: the planned refresh strategy (DIFFERENTIAL / FULL)
+/// - `source_tables`: comma-separated list of detected source table names
+/// - `op_tree_root`: the root operator type of the parsed operator tree
+/// - `warnings`: any advisory warnings from the DVM parser
+/// - `complexity_estimate`: a rough complexity classification (depth)
+///
+/// # Example
+/// ```sql
+/// SELECT * FROM pgtrickle.preview_stream_table(
+///     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id'
+/// );
+/// ```
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn preview_stream_table(
+    query: &str,
+) -> TableIterator<'static, (name!(property, String), name!(value, String))> {
+    let mut rows: Vec<(String, String)> = Vec::new();
+
+    let parse_result = crate::dvm::parser::parse_defining_query_full(query);
+
+    match parse_result {
+        Err(e) => {
+            rows.push(("dvm_supported".to_string(), "false".to_string()));
+            rows.push(("refresh_strategy".to_string(), "FULL".to_string()));
+            rows.push(("parse_error".to_string(), e.to_string()));
+            rows.push(("source_tables".to_string(), String::new()));
+            rows.push(("op_tree_root".to_string(), "unknown".to_string()));
+            rows.push(("warnings".to_string(), String::new()));
+            rows.push(("complexity_estimate".to_string(), "unknown".to_string()));
+        }
+        Ok(result) => {
+            let ivm_ok = crate::dvm::parser::check_ivm_support_with_registry(&result);
+            let dvm_supported = ivm_ok.is_ok();
+            rows.push(("dvm_supported".to_string(), dvm_supported.to_string()));
+            rows.push((
+                "refresh_strategy".to_string(),
+                if dvm_supported {
+                    "DIFFERENTIAL"
+                } else {
+                    "FULL"
+                }
+                .to_string(),
+            ));
+            if let Err(ref ivm_err) = ivm_ok {
+                rows.push(("dvm_rejection_reason".to_string(), ivm_err.to_string()));
+            }
+
+            let sources = preview_collect_sources(&result.tree);
+            rows.push(("source_tables".to_string(), sources.join(", ")));
+
+            rows.push((
+                "op_tree_root".to_string(),
+                preview_root_type(&result.tree).to_string(),
+            ));
+
+            let warnings_str = result.warnings.join("; ");
+            rows.push(("warnings".to_string(), warnings_str));
+
+            if result.has_recursion {
+                rows.push((
+                    "recursive_cte".to_string(),
+                    "true — FULL refresh only".to_string(),
+                ));
+            }
+
+            let depth = preview_depth(&result.tree);
+            let complexity = if depth <= 2 {
+                "simple"
+            } else if depth <= 5 {
+                "moderate"
+            } else {
+                "complex"
+            };
+            rows.push((
+                "complexity_estimate".to_string(),
+                format!("{complexity} (depth={depth})"),
+            ));
+        }
+    }
+
+    TableIterator::new(rows)
+}
+
+fn preview_collect_sources(tree: &crate::dvm::parser::OpTree) -> Vec<String> {
+    let mut sources = Vec::new();
+    preview_collect_sources_rec(tree, &mut sources);
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+fn preview_collect_sources_rec(tree: &crate::dvm::parser::OpTree, out: &mut Vec<String>) {
+    use crate::dvm::parser::OpTree;
+    match tree {
+        OpTree::Scan { table_name, .. } => out.push(table_name.clone()),
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. }
+        | OpTree::SemiJoin { left, right, .. }
+        | OpTree::AntiJoin { left, right, .. }
+        | OpTree::Intersect { left, right, .. }
+        | OpTree::Except { left, right, .. } => {
+            preview_collect_sources_rec(left, out);
+            preview_collect_sources_rec(right, out);
+        }
+        OpTree::UnionAll { children } => {
+            for child in children {
+                preview_collect_sources_rec(child, out);
+            }
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::Aggregate { child, .. }
+        | OpTree::Window { child, .. }
+        | OpTree::Subquery { child, .. }
+        | OpTree::LateralSubquery { child, .. }
+        | OpTree::LateralFunction { child, .. }
+        | OpTree::ScalarSubquery { child, .. } => preview_collect_sources_rec(child, out),
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => {
+            preview_collect_sources_rec(base, out);
+            preview_collect_sources_rec(recursive, out);
+        }
+        OpTree::CteScan { .. }
+        | OpTree::RecursiveSelfRef { .. }
+        | OpTree::ConstantSelect { .. } => {}
+    }
+}
+
+fn preview_root_type(tree: &crate::dvm::parser::OpTree) -> &'static str {
+    use crate::dvm::parser::OpTree;
+    match tree {
+        OpTree::Scan { .. } => "Scan",
+        OpTree::InnerJoin { .. } => "InnerJoin",
+        OpTree::LeftJoin { .. } => "LeftJoin",
+        OpTree::FullJoin { .. } => "FullJoin",
+        OpTree::SemiJoin { .. } => "SemiJoin",
+        OpTree::AntiJoin { .. } => "AntiJoin",
+        OpTree::Filter { .. } => "Filter",
+        OpTree::Project { .. } => "Project",
+        OpTree::Distinct { .. } => "Distinct",
+        OpTree::Aggregate { .. } => "Aggregate",
+        OpTree::Window { .. } => "Window",
+        OpTree::UnionAll { .. } => "UnionAll",
+        OpTree::Intersect { .. } => "Intersect",
+        OpTree::Except { .. } => "Except",
+        OpTree::Subquery { .. } => "Subquery",
+        OpTree::LateralSubquery { .. } => "LateralSubquery",
+        OpTree::LateralFunction { .. } => "LateralFunction",
+        OpTree::CteScan { .. } => "CteScan",
+        OpTree::ScalarSubquery { .. } => "ScalarSubquery",
+        OpTree::RecursiveCte { .. } => "RecursiveCte",
+        OpTree::RecursiveSelfRef { .. } => "RecursiveSelfRef",
+        OpTree::ConstantSelect { .. } => "ConstantSelect",
+    }
+}
+
+fn preview_depth(tree: &crate::dvm::parser::OpTree) -> usize {
+    use crate::dvm::parser::OpTree;
+    match tree {
+        OpTree::Scan { .. }
+        | OpTree::CteScan { .. }
+        | OpTree::RecursiveSelfRef { .. }
+        | OpTree::ConstantSelect { .. } => 1,
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::Aggregate { child, .. }
+        | OpTree::Window { child, .. }
+        | OpTree::Subquery { child, .. }
+        | OpTree::LateralSubquery { child, .. }
+        | OpTree::ScalarSubquery { child, .. }
+        | OpTree::LateralFunction { child, .. } => 1 + preview_depth(child),
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => 1 + preview_depth(base).max(preview_depth(recursive)),
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. }
+        | OpTree::SemiJoin { left, right, .. }
+        | OpTree::AntiJoin { left, right, .. }
+        | OpTree::Intersect { left, right, .. }
+        | OpTree::Except { left, right, .. } => 1 + preview_depth(left).max(preview_depth(right)),
+        OpTree::UnionAll { children } => 1 + children.iter().map(preview_depth).max().unwrap_or(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

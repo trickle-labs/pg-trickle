@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.81.0 — Observability, Self-Tuning & Quick Wins](#0810--observability-self-tuning--quick-wins)
 - [0.80.0 — Operational Excellence, Documentation Completeness & Final v1.0 Gate](#0800--operational-excellence-documentation-completeness--final-v10-gate)
 - [0.79.0 — Code Quality, API Ergonomics & Security](#0790--code-quality-api-ergonomics--security)
 - [0.78.0 — DVM Engine Root-Cause Fixes + Scheduler Intelligence](#0780--dvm-engine-root-cause-fixes--scheduler-intelligence)
@@ -123,6 +124,121 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.81.0] — Observability, Self-Tuning & Quick Wins
+
+### What's New
+
+v0.81.0 delivers 10 quality-of-life improvements (Assessment-16 Quick Wins
+QW-1 through QW-10) spanning observability, self-tuning, API ergonomics, and
+engine performance.  No schema migrations are required; all new GUCs default to
+safe backward-compatible values.
+
+#### QW-1 — Commit latency statistics (`pgtrickle.commit_latency_stats()`)
+
+A new SQL function returns per-stream-table refresh latency statistics (min, p50,
+p95, max in milliseconds) computed from `pgt_refresh_history`.  When the new
+`pg_trickle.commit_timestamp_tracking` GUC is enabled together with
+PostgreSQL's `track_commit_timestamp = on`, this function reports the full
+commit-to-visible wall-clock latency; otherwise it reports refresh duration
+as a conservative proxy.
+
+#### QW-2 — GUC tuning recommendations (`pgtrickle.tune_recommendations()`)
+
+A new read-only SQL function analyses recent refresh history and current GUC
+settings to produce a ranked list of tuning recommendations.  It detects:
+- Large p99 delta sizes that would benefit from chunked MERGE (QW-9)
+- High `delta_work_mem_cap_mb` values correlated with high p95 latency
+- OOM errors in the past 7 days suggesting `self_heal_oom = on`
+- `max_concurrent_refreshes` set higher than `worker_pool_size`
+
+#### QW-3 — Query preview without creating (`pgtrickle.preview_stream_table()`)
+
+`pgtrickle.preview_stream_table(query text)` analyses a defining query using the
+DVM parser and returns a key/value result set showing: DVM support, planned
+refresh strategy (DIFFERENTIAL or FULL), source tables, operator tree root type,
+parser warnings, and a complexity estimate — all without creating any objects.
+
+#### QW-4 — Additional OpenTelemetry span names
+
+Five new span name constants are exported from `src/otel.rs`:
+`SPAN_SCHEDULER_TICK`, `SPAN_REFRESH_CYCLE`, `SPAN_DELTA_EXECUTE`,
+`SPAN_FRONTIER_ADVANCE`, and `SPAN_CLEANUP`.  The existing
+`emit_trace_span_if_enabled` function now uses `SPAN_DELTA_EXECUTE` for
+DIFFERENTIAL refreshes and `SPAN_REFRESH_CYCLE` for other modes, replacing the
+previous hard-coded `SPAN_MERGE_APPLY` for all cases.
+
+#### QW-5 — Bounded LRU cache for DVM delta templates
+
+The in-process DVM template caches (L0 delta templates, L1 placeholder
+resolvers) now enforce a maximum size.  When the cache is full, the
+least-recently-used entry is evicted.  The new
+`pg_trickle.l1_cache_max_entries` GUC (default: 256) controls the cap.
+Previously the caches grew without bound over the lifetime of a background
+worker session.
+
+#### QW-6 — `DeltaOperator` trait for the DVM engine
+
+All 20+ operator types now implement the `DeltaOperator` trait defined in
+`src/dvm/operators/mod.rs`.  The trait provides a unified interface
+(`generate_delta`, `supports_immediate_mode`, `is_monotone`) for future
+plugin-style extension and cross-operator tooling.  Existing diff functions
+are unchanged; the trait implementations delegate to them via a zero-cost
+`impl_delta_operator!` macro.
+
+#### QW-7 — `src/config.rs` split into sub-modules
+
+The 4 748-line monolithic `src/config.rs` has been decomposed into:
+`src/config/mod.rs`, `src/config/scheduler.rs`, `src/config/cdc.rs`,
+`src/config/dvm.rs`, and `src/config/monitoring.rs`.  All existing public
+symbols are re-exported; no call sites changed.
+
+#### QW-8 — Self-healing circuit breaker
+
+Two new GUCs control automatic error-counter reset on transient failures:
+- `pg_trickle.self_heal_oom` (default: `on`) — when a DIFFERENTIAL refresh
+  fails with "out of memory", the consecutive-error counter is reset instead of
+  counting toward auto-suspension, and a hint is emitted to lower
+  `merge_work_mem_mb` or `delta_work_mem_cap_mb`.
+- `pg_trickle.self_heal_lock_timeout` (default: `on`) — same behaviour for
+  lock-timeout errors.  The stream table retries on the next scheduler tick
+  instead of progressing toward suspension.
+
+#### QW-9 — Chunked MERGE batching
+
+A new `pg_trickle.merge_batch_size` GUC (default: 0 = disabled, i32) routes
+large deltas through the existing PH-D1 DELETE+INSERT path when the estimated
+delta row count exceeds the configured threshold.  This avoids peak-memory
+MERGE join cost for unexpectedly large refresh cycles.
+
+#### QW-10 — Stream table presets
+
+Three convenience wrapper functions are now available:
+- `pgtrickle.create_stream_table_realtime(name, query, …)` — schedule `1s`,
+  mode `DIFFERENTIAL`
+- `pgtrickle.create_stream_table_batch(name, query, …)` — schedule `5m`,
+  mode `AUTO`
+- `pgtrickle.create_stream_table_cost_optimized(name, query, …)` — schedule
+  `15m`, mode `AUTO`
+
+Each wrapper accepts the same CDC/partition/join-limit optional parameters as
+`create_stream_table`.
+
+### Configuration
+
+| GUC | Default | Description |
+|-----|---------|-------------|
+| `pg_trickle.commit_timestamp_tracking` | `off` | Enable commit-to-visible latency tracking |
+| `pg_trickle.l1_cache_max_entries` | `256` | Maximum DVM L1 cache entries |
+| `pg_trickle.merge_batch_size` | `0` | Route deltas > N rows through DELETE+INSERT (0 = off) |
+| `pg_trickle.self_heal_oom` | `on` | Reset error counter on OOM instead of suspending |
+| `pg_trickle.self_heal_lock_timeout` | `on` | Reset error counter on lock-timeout instead of suspending |
+
+### Upgrade
+
+No schema changes.  Standard `ALTER EXTENSION pg_trickle UPDATE` is sufficient.
 
 ---
 

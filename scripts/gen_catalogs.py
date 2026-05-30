@@ -104,8 +104,15 @@ def _build_static_to_guc_name_map(lines: list[str]) -> dict[str, str]:
 
 
 def extract_gucs(config_rs: Path) -> list[dict]:
-    """Extract GUC definitions from src/config.rs."""
-    text = config_rs.read_text(encoding="utf-8")
+    """Extract GUC definitions from src/config.rs or src/config/ directory."""
+    if config_rs.is_dir():
+        # QW-7: config.rs was split into multiple sub-modules; concatenate them all
+        text = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted(config_rs.glob("*.rs"))
+        )
+    else:
+        text = config_rs.read_text(encoding="utf-8")
     lines = text.splitlines()
 
     # Pass 1: build the PGS_* → pg_trickle.* name map from registration calls
@@ -496,7 +503,7 @@ def write_guc_catalog(gucs: list[dict], path: Path) -> str:
     lines = [
         GENERATED_HEADER,
         "# GUC Reference — pg_trickle\n",
-        f"**{len(gucs)} configuration parameters** extracted from `src/config.rs`.\n",
+        f"**{len(gucs)} configuration parameters** extracted from `src/config/`.\n",
         "See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.\n",
         "",
         "| GUC name | Type | Default | Description |",
@@ -549,10 +556,15 @@ def main() -> int:
 
     config_rs = SRC_DIR / "config.rs"
     if not config_rs.exists():
-        print(f"ERROR: {config_rs} not found", file=sys.stderr)
-        return 1
+        # QW-7: config.rs was split into src/config/ sub-modules
+        config_dir = SRC_DIR / "config"
+        if config_dir.is_dir():
+            config_rs = config_dir  # pass the directory; extract_gucs handles it
+        else:
+            print(f"ERROR: {config_rs} not found", file=sys.stderr)
+            return 1
 
-    print("Extracting GUC definitions from src/config.rs …", flush=True)
+    print("Extracting GUC definitions from src/config …", flush=True)
     gucs = extract_gucs(config_rs)
     print(f"  Found {len(gucs)} GUC statics.", flush=True)
 

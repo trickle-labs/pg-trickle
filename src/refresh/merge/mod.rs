@@ -2189,6 +2189,36 @@ pub fn execute_differential_refresh(
             use_delete_insert
         };
 
+    // QW-9 (v0.81.0): Chunked MERGE — when the delta exceeds
+    // `pg_trickle.merge_batch_size` rows and the MERGE strategy has not
+    // already been forced to PH-D1, route the refresh through the
+    // DELETE+INSERT path.  The PH-D1 path materialises the full delta into
+    // a single temp table and applies it via bulk DELETE+INSERT, which is
+    // better suited than a MERGE join for very large deltas.
+    //
+    // Set `pg_trickle.merge_batch_size = 0` to disable (default behaviour).
+    let use_delete_insert = {
+        let batch_size = crate::config::pg_trickle_merge_batch_size();
+        if !use_delete_insert
+            && !use_explicit_dml
+            && st.st_partition_key.is_none()
+            && batch_size > 0
+            && total_change_count > batch_size as i64
+        {
+            pgrx::debug1!(
+                "[pg_trickle] QW-9: chunked MERGE — delta {} rows > batch_size {} for \
+                 {}.{}; routing through PH-D1 DELETE+INSERT",
+                total_change_count,
+                batch_size,
+                schema,
+                name,
+            );
+            true
+        } else {
+            use_delete_insert
+        }
+    };
+
     // When the GUC is on and ALL aggregates are algebraically invertible
     // (COUNT, SUM, AVG, etc.), use explicit DML (DELETE+UPDATE+INSERT)
     // instead of MERGE. The explicit DML path does targeted row-level
@@ -3027,9 +3057,9 @@ fn emit_trace_span_if_enabled(st: &StreamTableMeta, refresh_mode: &str, start_ns
     };
 
     let span_name = match refresh_mode {
-        "DIFFERENTIAL" => crate::otel::SPAN_MERGE_APPLY,
+        "DIFFERENTIAL" => crate::otel::SPAN_DELTA_EXECUTE,
         "FULL" => crate::otel::SPAN_MERGE_APPLY,
-        _ => crate::otel::SPAN_MERGE_APPLY,
+        _ => crate::otel::SPAN_REFRESH_CYCLE,
     };
 
     let span = crate::otel::OtelSpan::new(ctx.clone(), span_name, start_ns, end_ns)

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**127 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**133 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -29,12 +29,16 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.check_cdc_health()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.check_cdc_health()`. |
 | `pgtrickle.clear_caches()` | `pgtrickle` | `bigint` | Use during debugging, emergency migration rollback, or after a query definition change that was not captured by the normal DDL invalidation path. |
 | `pgtrickle.cluster_worker_summary()` | `pgtrickle` | `SetOf row` | Reads from `pg_stat_activity` (shared catalog) so the calling role needs `pg_monitor` or superuser privilege. |
+| `pgtrickle.commit_latency_stats()` | `pgtrickle` | `SetOf row` | Returns rows only for stream tables that have at least one completed refresh in the history table. |
 | `pgtrickle.convert_buffers_to_unlogged()` | `pgtrickle` | `bigint` | **Warning:** After conversion, buffer contents will be lost on crash recovery. |
 | `pgtrickle.create_or_replace_stream_table()` | `pgtrickle` | `` | This is the declarative API for idempotent deployments (dbt, migrations, GitOps). |
 | `pgtrickle.create_refresh_group()` | `pgtrickle` | `` | # Arguments - `group_name`: Unique human-readable name for the group. |
 | `pgtrickle.create_stream_table()` | `pgtrickle` | `` | # Arguments - `name`: Schema-qualified name (`'schema.table'`) or unqualified (`'table'`). |
+| `pgtrickle.create_stream_table_batch()` | `pgtrickle` | `` | Use this preset for analytical workloads where moderate latency is acceptable and cost efficiency matters more than freshness. |
+| `pgtrickle.create_stream_table_cost_optimized()` | `pgtrickle` | `` | Use this preset for reporting and BI queries where freshness can be traded for lower CPU and I/O overhead. |
 | `pgtrickle.create_stream_table_fast_append_only()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.create_stream_table_fast_append_only(     'my_schema.event_counts',     'SELECT user_id, count(*) AS n FROM events GROUP BY user_id' ); ```. |
 | `pgtrickle.create_stream_table_if_not_exists()` | `pgtrickle` | `` | This is useful for migration scripts that should be safe to re-run. |
+| `pgtrickle.create_stream_table_realtime()` | `pgtrickle` | `` | Use this preset for latency-sensitive use cases where sub-second freshness is required and the defining query is fully supported by the DVM engine. |
 | `pgtrickle.create_watermark_group()` | `pgtrickle` | `` | - `group_name`: unique name for this group. |
 | `pgtrickle.dedup_stats()` | `pgtrickle` | `SetOf row` | Example: ```sql SELECT * FROM pgtrickle.dedup_stats(); ```. |
 | `pgtrickle.dependency_tree()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.dependency_tree()`. |
@@ -86,6 +90,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.pgt_status()` | `pgtrickle` | `SetOf row` | Returns a summary row per stream table including schedule configuration, data timestamp, and computed staleness interval. |
 | `pgtrickle.pgtrickle_refresh_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.pgtrickle_refresh_stats()`. |
 | `pgtrickle.preflight()` | `pgtrickle` | `text` | Returns a JSON string with one entry per check: `pass` (bool), `check` (name), `detail` (human-readable message). |
+| `pgtrickle.preview_stream_table()` | `pgtrickle` | `SetOf row` | # Example ```sql SELECT * FROM pgtrickle.preview_stream_table(     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id' ); ```. |
 | `pgtrickle.rebuild_cdc_triggers()` | `pgtrickle` | `text` | Returns `'done'` on success. |
 | `pgtrickle.recommend_refresh_mode()` | `pgtrickle` | `` | Read-only — no side effects. |
 | `pgtrickle.recommend_schedule()` | `pgtrickle` | `jsonb` | PLAN-1 (v0.27.0): Return a schedule recommendation for the given stream table as a JSONB object with keys: `recommended_interval_seconds`, `peak_window_cron`, `confidence` (0–1), `reasoning`. |
@@ -123,6 +128,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.subscribe_distance()` | `pgtrickle` | `void` | The subscription is stored in `pgtrickle.pgt_distance_subscriptions` and survives restarts. |
 | `pgtrickle.teardown_self_monitoring()` | `pgtrickle` | `` | Safe with partial setups: each table is dropped individually, and missing tables are silently skipped (STAB-5). |
 | `pgtrickle.trigger_inventory()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.trigger_inventory()`. |
+| `pgtrickle.tune_recommendations()` | `pgtrickle` | `SetOf row` | Returns an empty result set when all observed metrics are within healthy ranges. |
 | `pgtrickle.ungate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |
 | `pgtrickle.unsubscribe()` | `pgtrickle` | `void` | UX-SUB: Remove a NOTIFY subscription for a stream table / channel pair. |
 | `pgtrickle.unsubscribe_distance()` | `pgtrickle` | `void` | VH-2 (v0.48.0): Remove a distance-predicate subscription. |
