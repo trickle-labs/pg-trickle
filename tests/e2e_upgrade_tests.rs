@@ -475,7 +475,7 @@ async fn test_upgrade_chain_new_functions_exist() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -559,7 +559,7 @@ async fn test_upgrade_chain_stream_tables_survive() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -635,7 +635,7 @@ async fn test_upgrade_chain_views_queryable() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -678,7 +678,7 @@ async fn test_upgrade_chain_event_triggers_present() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -721,7 +721,7 @@ async fn test_upgrade_chain_version_consistency() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     // This assertion only holds when the SQL extension version being tested
     // matches the compiled binary version loaded in the container.
@@ -775,7 +775,7 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -843,7 +843,7 @@ async fn test_upgrade_schema_additions_from_sql() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.79.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.80.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -1288,4 +1288,26 @@ async fn test_upgrade_v079_new_functions() {
             "A-1/A-2 (v0.79.0): function pgtrickle.{fn_name}() should exist after upgrade"
         );
     }
+}
+
+/// TEST-v0.80.0: Verify v0.80.0 metrics_summary() has new cleanup columns.
+///
+/// Checks that O-3 cleanup backlog columns are present:
+///   cleanup_backlog_count
+///   cleanup_blocked_count
+#[tokio::test]
+async fn test_upgrade_v080_metrics_summary_columns() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Verify cleanup_backlog_count column is queryable (O-3).
+    // The value may be 0 or NULL when pgt_cleanup_status is empty, but
+    // the column must exist (query must not fail).
+    let _backlog: Option<i64> = db
+        .query_scalar_opt("SELECT cleanup_backlog_count FROM pgtrickle.metrics_summary()")
+        .await;
+
+    // Verify cleanup_blocked_count column is queryable (O-3).
+    let _blocked: Option<i64> = db
+        .query_scalar_opt("SELECT cleanup_blocked_count FROM pgtrickle.metrics_summary()")
+        .await;
 }
