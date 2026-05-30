@@ -983,11 +983,22 @@ jobs:
           dbt run
           ./scripts/wait_for_populated.sh order_totals 30
           ./scripts/wait_for_populated.sh order_totals_auto 30
-          dbt test
+          ./scripts/wait_for_populated.sh order_totals_compat 30
+          # T-5: alter flow — change schedule from '1m' to '3m', verify catalog,
+          # then restore so the subsequent full test run sees the original config.
+          cp models/marts/order_totals_compat.sql models/marts/order_totals_compat.sql.bak
+          sed -i "s/schedule='1m'/schedule='3m'/" models/marts/order_totals_compat.sql
+          dbt run --select order_totals_compat
+          dbt test --select assert_compat_alter_applied
+          mv models/marts/order_totals_compat.sql.bak models/marts/order_totals_compat.sql
+          # assert_compat_alter_applied requires the alter state; exclude it from
+          # the general test run where the schedule is back to '1m'.
+          dbt test --exclude assert_compat_alter_applied
           dbt run --full-refresh
           ./scripts/wait_for_populated.sh order_totals 30
           ./scripts/wait_for_populated.sh order_totals_auto 30
-          dbt test
+          ./scripts/wait_for_populated.sh order_totals_compat 30
+          dbt test --exclude assert_compat_alter_applied
           dbt run-operation pgtrickle_refresh --args '{model_name: order_totals}'
           dbt run-operation pgtrickle_check_freshness
           dbt run-operation drop_all_stream_tables
@@ -1009,11 +1020,22 @@ jobs:
           dbt run
           ./scripts/wait_for_populated.sh order_totals 30
           ./scripts/wait_for_populated.sh order_totals_auto 30
-          dbt test
+          ./scripts/wait_for_populated.sh order_totals_compat 30
+          # T-5: alter flow — change schedule from '1m' to '3m', verify catalog,
+          # then restore so the subsequent full test run sees the original config.
+          cp models/marts/order_totals_compat.sql models/marts/order_totals_compat.sql.bak
+          sed -i "s/schedule='1m'/schedule='3m'/" models/marts/order_totals_compat.sql
+          dbt run --select order_totals_compat
+          dbt test --select assert_compat_alter_applied
+          mv models/marts/order_totals_compat.sql.bak models/marts/order_totals_compat.sql
+          # assert_compat_alter_applied requires the alter state; exclude it from
+          # the general test run where the schedule is back to '1m'.
+          dbt test --exclude assert_compat_alter_applied
           dbt run --full-refresh
           ./scripts/wait_for_populated.sh order_totals 30
           ./scripts/wait_for_populated.sh order_totals_auto 30
-          dbt test
+          ./scripts/wait_for_populated.sh order_totals_compat 30
+          dbt test --exclude assert_compat_alter_applied
           dbt run-operation pgtrickle_refresh --args '{model_name: order_totals}'
           dbt run-operation pgtrickle_check_freshness
           dbt run-operation drop_all_stream_tables
