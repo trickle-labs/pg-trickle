@@ -97,6 +97,8 @@ struct CachedDeltaTemplate {
     has_key_changed: bool,
     /// B-1: Whether all aggregates are algebraically invertible.
     is_all_algebraic: bool,
+    /// QW-5 (v0.81.0): Insertion-order counter for LRU eviction.
+    last_used: u64,
 }
 
 #[derive(Clone)]
@@ -108,6 +110,8 @@ struct CachedPlaceholderResolver {
     /// current key string hashes to the same `u64` but is textually different,
     /// we rebuild the entry rather than returning a stale automaton.
     canonical_key_src: String,
+    /// QW-5 (v0.81.0): Insertion-order counter for LRU eviction.
+    last_used: u64,
 }
 
 thread_local! {
@@ -130,6 +134,10 @@ thread_local! {
     /// `resolve_delta_template()`.
     static PLACEHOLDER_RESOLVER_CACHE: RefCell<HashMap<u64, CachedPlaceholderResolver>> =
         RefCell::new(HashMap::new());
+
+    /// QW-5 (v0.81.0): Monotone insertion counter for LRU eviction of
+    /// DELTA_TEMPLATE_CACHE and PLACEHOLDER_RESOLVER_CACHE.
+    static L1_CACHE_CLOCK: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Hash a string using the default hasher (for cache invalidation).
@@ -137,6 +145,59 @@ fn hash_string(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+// ── QW-5: L0/L1 cache LRU helpers ────────────────────────────────────────
+
+/// Advance the L1 cache clock and return the new tick value.
+fn l1_next_clock() -> u64 {
+    L1_CACHE_CLOCK.with(|c| {
+        let v = c.get().wrapping_add(1);
+        c.set(v);
+        v
+    })
+}
+
+/// Insert a delta template into DELTA_TEMPLATE_CACHE, evicting the
+/// least-recently-used entry when the cache is at capacity (QW-5).
+fn l1_insert_delta_template(pgt_id: i64, mut entry: CachedDeltaTemplate) {
+    let clock = l1_next_clock();
+    entry.last_used = clock;
+    DELTA_TEMPLATE_CACHE.with(|cache| {
+        #[cfg(not(test))]
+        let max = crate::config::pg_trickle_l1_cache_max_entries();
+        #[cfg(test)]
+        let max = 256_i32;
+        let mut map = cache.borrow_mut();
+        if max > 0
+            && map.len() >= max as usize
+            && let Some(oldest_key) = map.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| *k)
+        {
+            map.remove(&oldest_key);
+        }
+        map.insert(pgt_id, entry);
+    });
+}
+
+/// Insert a placeholder resolver into PLACEHOLDER_RESOLVER_CACHE, evicting
+/// the least-recently-used entry when the cache is at capacity (QW-5).
+fn l1_insert_placeholder_resolver(key: u64, mut entry: CachedPlaceholderResolver) {
+    let clock = l1_next_clock();
+    entry.last_used = clock;
+    PLACEHOLDER_RESOLVER_CACHE.with(|cache| {
+        #[cfg(not(test))]
+        let max = crate::config::pg_trickle_l1_cache_max_entries();
+        #[cfg(test)]
+        let max = 256_i32;
+        let mut map = cache.borrow_mut();
+        if max > 0
+            && map.len() >= max as usize
+            && let Some(oldest_key) = map.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| *k)
+        {
+            map.remove(&oldest_key);
+        }
+        map.insert(key, entry);
+    });
 }
 
 /// A41-2: Check that no `__PGS_[A-Z0-9_]+__` or `__PGT_[A-Z0-9_]+__`
@@ -286,8 +347,9 @@ fn resolve_delta_template(
             ac,
             st_source_pgt_ids: pgt_ids,
             canonical_key_src: resolver_key_src.clone(),
+            last_used: 0, // set by l1_insert_placeholder_resolver
         };
-        cache.borrow_mut().insert(resolver_key, built.clone());
+        l1_insert_placeholder_resolver(resolver_key, built.clone());
         Ok(built)
     })?;
 
@@ -727,11 +789,10 @@ pub fn generate_delta_query_cached(
             is_deduplicated: ct.is_deduplicated,
             has_key_changed: ct.has_key_changed,
             is_all_algebraic: ct.is_all_algebraic,
+            last_used: 0, // set by l1_insert_delta_template
         };
-        // Promote to L1 (thread-local) for subsequent calls.
-        DELTA_TEMPLATE_CACHE.with(|cache| {
-            cache.borrow_mut().insert(pgt_id, entry);
-        });
+        // Promote to L1 (thread-local) for subsequent calls (QW-5: with LRU eviction).
+        l1_insert_delta_template(pgt_id, entry);
         let delta_sql = resolve_delta_template(
             &ct.delta_sql_template,
             &ct.source_oids,
@@ -812,7 +873,7 @@ pub fn generate_delta_query_cached(
 
     let is_all_algebraic = result.tree.is_all_algebraic_agg();
 
-    // Store in cache.
+    // Store in cache (QW-5: with LRU eviction).
     let entry = CachedDeltaTemplate {
         defining_query_hash: query_hash,
         delta_sql_template: template_sql.clone(),
@@ -821,10 +882,9 @@ pub fn generate_delta_query_cached(
         is_deduplicated: diff_dedup,
         has_key_changed: diff_has_key_changed,
         is_all_algebraic,
+        last_used: 0, // set by l1_insert_delta_template
     };
-    DELTA_TEMPLATE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(pgt_id, entry);
-    });
+    l1_insert_delta_template(pgt_id, entry);
 
     // G14-SHC: Persist to L2 (catalog table) for cross-backend sharing.
     let _ = crate::template_cache::store(
@@ -2233,6 +2293,7 @@ mod tests {
             is_deduplicated: true,
             has_key_changed: false,
             is_all_algebraic: false,
+            last_used: 0,
         };
         DELTA_TEMPLATE_CACHE.with(|cache| {
             cache.borrow_mut().insert(pgt_id, entry);
@@ -2258,6 +2319,7 @@ mod tests {
             is_deduplicated: false,
             has_key_changed: false,
             is_all_algebraic: false,
+            last_used: 0,
         };
         DELTA_TEMPLATE_CACHE.with(|cache| {
             cache.borrow_mut().insert(pgt_id, entry);
@@ -2285,6 +2347,7 @@ mod tests {
             is_deduplicated: true,
             has_key_changed: true,
             is_all_algebraic: false,
+            last_used: 0,
         };
         DELTA_TEMPLATE_CACHE.with(|cache| {
             cache.borrow_mut().insert(pgt_id, entry);

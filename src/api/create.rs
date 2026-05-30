@@ -643,3 +643,120 @@ fn create_stream_table_fast_append_only(
         raise_error_with_context(e);
     }
 }
+
+// ── QW-10 (v0.81.0): Stream table presets ────────────────────────────────
+
+/// Create a stream table optimised for real-time DIFFERENTIAL refresh.
+///
+/// Equivalent to `create_stream_table` with:
+/// - `schedule = '1s'`
+/// - `refresh_mode = 'DIFFERENTIAL'`
+/// - `initialize = true`
+///
+/// Use this preset for latency-sensitive use cases where sub-second
+/// freshness is required and the defining query is fully supported by the
+/// DVM engine.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_stream_table_realtime(
+    name: &str,
+    query: &str,
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+) {
+    let result = create_stream_table_impl(CreateStreamTableOptions {
+        name,
+        query,
+        schedule: Some("1s"),
+        refresh_mode_str: "DIFFERENTIAL",
+        initialize: true,
+        append_only,
+        requested_cdc_mode: cdc_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        ..Default::default()
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+/// Create a stream table optimised for batch refresh (every 5 minutes).
+///
+/// Equivalent to `create_stream_table` with:
+/// - `schedule = '5m'`
+/// - `refresh_mode = 'AUTO'`
+/// - `initialize = true`
+///
+/// Use this preset for analytical workloads where moderate latency is
+/// acceptable and cost efficiency matters more than freshness.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_stream_table_batch(
+    name: &str,
+    query: &str,
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+) {
+    let result = create_stream_table_impl(CreateStreamTableOptions {
+        name,
+        query,
+        schedule: Some("5m"),
+        refresh_mode_str: "AUTO",
+        initialize: true,
+        append_only,
+        requested_cdc_mode: cdc_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        ..Default::default()
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+/// Create a cost-optimised stream table (refresh every 15 minutes).
+///
+/// Equivalent to `create_stream_table` with:
+/// - `schedule = '15m'`
+/// - `refresh_mode = 'AUTO'`
+/// - `initialize = true`
+///
+/// Use this preset for reporting and BI queries where freshness can be
+/// traded for lower CPU and I/O overhead.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_stream_table_cost_optimized(
+    name: &str,
+    query: &str,
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+) {
+    let result = create_stream_table_impl(CreateStreamTableOptions {
+        name,
+        query,
+        schedule: Some("15m"),
+        refresh_mode_str: "AUTO",
+        initialize: true,
+        append_only,
+        requested_cdc_mode: cdc_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        ..Default::default()
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}

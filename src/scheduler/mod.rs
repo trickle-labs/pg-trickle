@@ -1616,6 +1616,76 @@ fn check_cdc_transition_health() {
 // PB1: replaces the previous `pg_try_advisory_lock` approach for
 // PgBouncer transaction‐mode compatibility.
 
+// ── QW-8: Self-healing circuit breaker ────────────────────────────────────
+
+/// QW-8 (v0.81.0): Check whether an error should be intercepted by the
+/// self-healing circuit breaker instead of counting toward auto-suspension.
+///
+/// Returns `true` if the error was intercepted (the caller should skip the
+/// `increment_errors` call). Returns `false` if normal error handling should
+/// proceed.
+///
+/// Currently handles two error classes:
+/// - **OOM** (`pg_trickle.self_heal_oom = on`): PostgreSQL "out of memory"
+///   errors often occur during large MERGE operations. When intercepted, the
+///   error counter is reset to zero and a hint is emitted to lower
+///   `pg_trickle.merge_work_mem_mb` or `pg_trickle.delta_work_mem_cap_mb`.
+/// - **Lock timeout** (`pg_trickle.self_heal_lock_timeout = on`): Lock
+///   timeout errors are transient contention spikes. When intercepted, the
+///   error counter is reset so the ST will retry on the next scheduler tick.
+fn apply_self_heal_if_needed(
+    pgt_id: i64,
+    pgt_schema: &str,
+    pgt_name: &str,
+    error_msg: &str,
+) -> bool {
+    let lower = error_msg.to_lowercase();
+
+    let intercepted_oom = config::pg_trickle_self_heal_oom() && lower.contains("out of memory");
+
+    let intercepted_lock = config::pg_trickle_self_heal_lock_timeout()
+        && (lower.contains("lock timeout")
+            || lower.contains("canceling statement due to lock timeout"));
+
+    if intercepted_oom {
+        pgrx::warning!(
+            "pg_trickle: QW-8 OOM self-heal for {}.{} — resetting error counter. \
+             Consider lowering pg_trickle.merge_work_mem_mb or \
+             pg_trickle.delta_work_mem_cap_mb to reduce MERGE memory usage.",
+            pgt_schema,
+            pgt_name,
+        );
+    } else if intercepted_lock {
+        pgrx::warning!(
+            "pg_trickle: QW-8 lock-timeout self-heal for {}.{} — resetting error \
+             counter. The refresh will retry on the next scheduler tick.",
+            pgt_schema,
+            pgt_name,
+        );
+    }
+
+    if intercepted_oom || intercepted_lock {
+        // Reset the consecutive error counter so the ST can retry without
+        // counting this transient failure toward auto-suspension.
+        if let Err(e) = Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET consecutive_errors = 0, updated_at = now() \
+             WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        ) {
+            pgrx::warning!(
+                "pg_trickle: QW-8 self-heal failed to reset consecutive_errors \
+                 for pgt_id={}: {}",
+                pgt_id,
+                e,
+            );
+        }
+        return true;
+    }
+
+    false
+}
+
 // ── FUSE-5: Fuse circuit breaker pre-check ─────────────────────────────────
 
 /// Count total pending change buffer rows across all TABLE/FOREIGN_TABLE
@@ -3191,40 +3261,46 @@ fn refresh_single_st(
             if !is_retryable {
                 let _ = StreamTableMeta::set_error_state(pgt_id, &error_msg);
             } else {
-                // ERR-1e: Track consecutive errors for auto-suspension even when
-                // the failure manifests as a PostgreSQL panic (e.g. a trigger
-                // raising RAISE EXCEPTION during refresh DML).  After
-                // subtxn.rollback() the outer transaction is still valid, so
-                // SPI calls succeed here — mirroring the Rust-error path in
-                // run_refresh_for_st.
-                match StreamTableMeta::increment_errors(pgt_id) {
-                    Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
-                        let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
-                        monitor::alert_auto_suspended(
-                            &st.pgt_schema,
-                            &st.pgt_name,
-                            count,
-                            st.pooler_compatibility_mode,
-                        );
-                        log!(
-                            "pg_trickle: suspended {}.{} after {} consecutive errors",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            count,
-                        );
-                    }
-                    Ok(_count) => {
-                        // Still under threshold — will retry on next tick.
-                    }
-                    Err(e) => {
-                        pgrx::warning!(
-                            "pg_trickle: ERR-1e: failed to persist consecutive_errors \
+                // QW-8: Self-healing circuit breaker — intercept OOM / lock-timeout
+                // errors before counting them toward auto-suspension.
+                let self_healed =
+                    apply_self_heal_if_needed(pgt_id, &st.pgt_schema, &st.pgt_name, &error_msg);
+                if !self_healed {
+                    // ERR-1e: Track consecutive errors for auto-suspension even when
+                    // the failure manifests as a PostgreSQL panic (e.g. a trigger
+                    // raising RAISE EXCEPTION during refresh DML).  After
+                    // subtxn.rollback() the outer transaction is still valid, so
+                    // SPI calls succeed here — mirroring the Rust-error path in
+                    // run_refresh_for_st.
+                    match StreamTableMeta::increment_errors(pgt_id) {
+                        Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                            let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                            monitor::alert_auto_suspended(
+                                &st.pgt_schema,
+                                &st.pgt_name,
+                                count,
+                                st.pooler_compatibility_mode,
+                            );
+                            log!(
+                                "pg_trickle: suspended {}.{} after {} consecutive errors",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                count,
+                            );
+                        }
+                        Ok(_count) => {
+                            // Still under threshold — will retry on next tick.
+                        }
+                        Err(e) => {
+                            pgrx::warning!(
+                                "pg_trickle: ERR-1e: failed to persist consecutive_errors \
                              for pgt_id={} after panic-path failure: {}",
-                            pgt_id,
-                            e,
-                        );
+                                pgt_id,
+                                e,
+                            );
+                        }
                     }
-                }
+                } // end !self_healed
             }
             if is_retryable {
                 RefreshOutcome::RetryableFailure
@@ -3924,34 +4000,41 @@ fn execute_scheduled_refresh(
 
             // Increment error count only for retryable errors that should count
             if counts {
-                match StreamTableMeta::increment_errors(st.pgt_id) {
-                    Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
-                        let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended);
+                // QW-8: Self-healing circuit breaker — intercept OOM / lock-timeout
+                // errors before counting them toward auto-suspension.
+                let error_str = e.to_string();
+                let self_healed =
+                    apply_self_heal_if_needed(st.pgt_id, &st.pgt_schema, &st.pgt_name, &error_str);
+                if !self_healed {
+                    match StreamTableMeta::increment_errors(st.pgt_id) {
+                        Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                            let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended);
 
-                        monitor::alert_auto_suspended(
-                            &st.pgt_schema,
-                            &st.pgt_name,
-                            count,
-                            st.pooler_compatibility_mode,
-                        );
+                            monitor::alert_auto_suspended(
+                                &st.pgt_schema,
+                                &st.pgt_name,
+                                count,
+                                st.pooler_compatibility_mode,
+                            );
 
-                        log!(
-                            "pg_trickle: suspended {}.{} after {} consecutive errors",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            count,
-                        );
+                            log!(
+                                "pg_trickle: suspended {}.{} after {} consecutive errors",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                count,
+                            );
+                        }
+                        _ => {
+                            log!(
+                                "pg_trickle: refresh failed for {}.{} ({}): {} [will retry]",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                action.as_str(),
+                                e,
+                            );
+                        }
                     }
-                    _ => {
-                        log!(
-                            "pg_trickle: refresh failed for {}.{} ({}): {} [will retry]",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            action.as_str(),
-                            e,
-                        );
-                    }
-                }
+                } // end !self_healed
             } else {
                 log!(
                     "pg_trickle: refresh skipped for {}.{}: {}",

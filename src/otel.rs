@@ -37,6 +37,16 @@ pub const SPAN_DVM_PLAN: &str = "pgtrickle.dvm_plan";
 pub const SPAN_MERGE_APPLY: &str = "pgtrickle.merge_apply";
 pub const SPAN_NOTIFY_EMIT: &str = "pgtrickle.notify_emit";
 
+/// QW-4 (v0.81.0): Additional span names for the scheduler hot path.
+///
+/// These spans are emitted when `pg_trickle.otel_endpoint` is set and
+/// `pg_trickle.enable_trace_propagation = on`.
+pub const SPAN_SCHEDULER_TICK: &str = "pgtrickle.scheduler_tick";
+pub const SPAN_REFRESH_CYCLE: &str = "pgtrickle.refresh_cycle";
+pub const SPAN_DELTA_EXECUTE: &str = "pgtrickle.delta_execute";
+pub const SPAN_FRONTIER_ADVANCE: &str = "pgtrickle.frontier_advance";
+pub const SPAN_CLEANUP: &str = "pgtrickle.cleanup";
+
 /// Parsed W3C Trace Context from a `traceparent` header value.
 #[derive(Debug, Clone)]
 pub struct TraceContext {
