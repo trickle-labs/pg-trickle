@@ -991,6 +991,9 @@ jobs:
           dbt run --select order_totals_compat
           dbt test --select assert_compat_alter_applied
           mv models/marts/order_totals_compat.sql.bak models/marts/order_totals_compat.sql
+          # Restore catalog to '1m' so assert_compat_model_created passes in the
+          # general test run (catalog was left at '3m' after the alter above).
+          dbt run --select order_totals_compat
           # assert_compat_alter_applied requires the alter state; exclude it from
           # the general test run where the schedule is back to '1m'.
           dbt test --exclude assert_compat_alter_applied
@@ -1028,6 +1031,9 @@ jobs:
           dbt run --select order_totals_compat
           dbt test --select assert_compat_alter_applied
           mv models/marts/order_totals_compat.sql.bak models/marts/order_totals_compat.sql
+          # Restore catalog to '1m' so assert_compat_model_created passes in the
+          # general test run (catalog was left at '3m' after the alter above).
+          dbt run --select order_totals_compat
           # assert_compat_alter_applied requires the alter state; exclude it from
           # the general test run where the schedule is back to '1m'.
           dbt test --exclude assert_compat_alter_applied
