@@ -3,6 +3,57 @@
 //! Monitors schema changes on upstream tables and handles direct DROP TABLE
 //! on stream table storage tables.
 //!
+//! ## Event trigger subsystem overview
+//!
+//! pg_trickle registers two PostgreSQL event triggers at extension-install time:
+//!
+//! | Trigger name | Event | Handler function |
+//! |---|---|---|
+//! | `pg_trickle_ddl_tracker` | `ddl_command_end` | `pgtrickle._on_ddl_end()` |
+//! | `pg_trickle_sql_drop_tracker` | `sql_drop` | `pgtrickle._on_sql_drop()` |
+//!
+//! ### ddl_command_end — `_on_ddl_end()`
+//!
+//! Fires after every successful DDL statement (`ALTER TABLE`, `CREATE TABLE`,
+//! `DROP TABLE`, `CREATE INDEX`, etc.).  The handler:
+//!
+//! 1. Calls `pg_event_trigger_ddl_commands()` to get the list of affected objects.
+//! 2. For each affected OID, walks `pgtrickle.pgt_dependencies` to find all
+//!    stream tables that depend on it.
+//! 3. Marks affected STs `needs_reinit = true` (ALTER TABLE) or
+//!    `status = 'ERROR'` (DROP TABLE on an upstream source).
+//! 4. Writes an invalidation token to the **invalidation ring** in shared memory
+//!    so the scheduler picks up the change on its next wakeup cycle.
+//!    If the ring overflows (burst of DDL), a full DAG rebuild is triggered
+//!    instead and `pg_trickle_ring_overflows` is incremented in shmem.
+//!
+//! ### sql_drop — `_on_sql_drop()`
+//!
+//! Fires specifically when objects are **dropped** (before the object is gone
+//! from the catalog).  The handler:
+//!
+//! 1. Calls `pg_event_trigger_dropped_objects()` for the list of dropped OIDs.
+//! 2. Handles `DROP TABLE` on upstream source tables — sets dependent STs to
+//!    `ERROR` since the source no longer exists.
+//! 3. Handles `DROP TABLE` on a ST storage table itself — cleans up the
+//!    `pgt_stream_tables` catalog entry and triggers a DAG rebuild.
+//! 4. Handles `DROP FUNCTION` that removes a trigger used by the CDC pipeline.
+//!
+//! ### Cascade invalidation
+//!
+//! When ST `A` depends on base table `T`, and ST `B` depends on ST `A`,
+//! an ALTER TABLE on `T` must invalidate both `A` and `B`. The cascade
+//! is resolved by walking transitive dependencies in `pgtrickle.pgt_dependencies`.
+//!
+//! ### Invalidation ring
+//!
+//! The ring is a fixed-capacity shared-memory circular buffer. Each write
+//! stores the OID of an invalidated object. On the next scheduler wakeup, the
+//! scheduler drains the ring and rebuilds only the affected DAG nodes.
+//! If more objects are invalidated than the ring can hold, the overflow flag is
+//! set and the scheduler falls back to a full DAG rebuild.
+//! Overflow events are counted in `pgt_ring_overflows` (see `shmem.rs`).
+//!
 //! ## Event trigger: `pg_trickle_ddl_tracker`
 //!
 //! Installed via `extension_sql!()` as `ON ddl_command_end`. When any DDL
@@ -39,15 +90,29 @@ use crate::{cdc, config, wal_decoder};
 /// Handler for the `ddl_command_end` event trigger.
 ///
 /// This function is called by PostgreSQL after any DDL statement completes.
-/// It inspects the affected objects and marks downstream STs for reinit
-/// or error as appropriate.
+/// It inspects the affected objects via `pg_event_trigger_ddl_commands()` and:
+/// - Marks dependent stream tables `needs_reinit = true` when their upstream
+///   source tables are altered.
+/// - Sets dependent stream tables to `status = 'ERROR'` when their upstream
+///   source tables are dropped.
+/// - Writes an OID invalidation token to the shared-memory invalidation ring
+///   so the scheduler can do a partial DAG rebuild on its next wakeup.
 ///
-/// Registered via `extension_sql!()` in lib.rs as:
+/// If the ring overflows (too many concurrent DDL statements), the scheduler
+/// falls back to a full DAG rebuild and increments the overflow counter
+/// (visible via `pgtrickle.health_check()` as `ring_overflow_trend`).
+///
+/// # Event trigger registration (installed by extension_sql! in lib.rs)
 /// ```sql
-/// CREATE FUNCTION pgtrickle._on_ddl_end() RETURNS event_trigger ...
+/// CREATE FUNCTION pgtrickle._on_ddl_end() RETURNS event_trigger
+///   LANGUAGE c AS 'MODULE_PATHNAME';
 /// CREATE EVENT TRIGGER pg_trickle_ddl_tracker ON ddl_command_end
 ///     EXECUTE FUNCTION pgtrickle._on_ddl_end();
 /// ```
+///
+/// > **Internal**: This function is called by PostgreSQL trigger machinery,
+/// > not directly by users.  It is exposed as `pg_extern` only because
+/// > PostgreSQL requires C-callable functions for event triggers.
 #[pg_extern(schema = "pgtrickle", name = "_on_ddl_end", sql = false)]
 fn pg_trickle_on_ddl_end() {
     // Query the event trigger context for affected objects.
@@ -1089,8 +1154,30 @@ fn handle_create_trigger(cmd: &DdlCommand) {
 
 /// Handler for the `sql_drop` event trigger.
 ///
-/// Detects when upstream source tables or ST storage tables themselves
-/// are dropped and reacts accordingly.
+/// Fires when PostgreSQL objects are dropped.  The handler uses
+/// `pg_event_trigger_dropped_objects()` to get the list of dropped OIDs and:
+/// - For a dropped upstream source table: marks dependent stream tables as
+///   `status = 'ERROR'` since the source no longer exists.
+/// - For a dropped stream table storage table itself: removes the
+///   `pgt_stream_tables` catalog entry and signals a DAG rebuild.
+/// - For a dropped CDC trigger function: marks the associated stream table
+///   for reinitialization.
+///
+/// The `sql_drop` trigger fires **before** the object is removed from the
+/// PostgreSQL catalog, so the handler can still look up metadata about the
+/// dropped objects via system catalog queries.
+///
+/// # Event trigger registration (installed by extension_sql! in lib.rs)
+/// ```sql
+/// CREATE FUNCTION pgtrickle._on_sql_drop() RETURNS event_trigger
+///   LANGUAGE c AS 'MODULE_PATHNAME';
+/// CREATE EVENT TRIGGER pg_trickle_sql_drop_tracker ON sql_drop
+///     EXECUTE FUNCTION pgtrickle._on_sql_drop();
+/// ```
+///
+/// > **Internal**: This function is called by PostgreSQL trigger machinery,
+/// > not directly by users.  It is exposed as `pg_extern` only because
+/// > PostgreSQL requires C-callable functions for event triggers.
 #[pg_extern(schema = "pgtrickle", name = "_on_sql_drop", sql = false)]
 fn pg_trickle_on_sql_drop() {
     let dropped = match collect_dropped_objects() {

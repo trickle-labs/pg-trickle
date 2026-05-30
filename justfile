@@ -73,6 +73,7 @@ security-definer-check:
 # A42-4: Docs linter — check for stale/retired GUC names and doc drift.
 # Fails if any docs/**/*.md references deprecated GUC names as if they are
 # current/active (references inside "Deprecated" sections are allowed).
+# DOC-1 (v0.80.0): Also verifies every #[pg_extern] function is in SQL_REFERENCE.md.
 [group: "lint"]
 docs-lint:
     #!/usr/bin/env bash
@@ -93,6 +94,8 @@ docs-lint:
         exit 1
     fi
     echo "docs-lint passed"
+    # DOC-1: check that every exported #[pg_extern] function appears in SQL_REFERENCE.md
+    python3 scripts/check_pg_extern_docs.py
 
 # Audit unsafe block counts against the committed baseline (.unsafe-baseline)
 [group: "lint"]

@@ -72,6 +72,13 @@ path = "fuzz_targets/row_id_fuzz.rs"
 test = false
 doc = false
 
+# FUZZ-9 (v0.80.0): P-5 — DVM snapshot fingerprint classifier stability.
+[[bin]]
+name = "snapshot_fingerprint_fuzz"
+path = "fuzz_targets/snapshot_fingerprint_fuzz.rs"
+test = false
+doc = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 pg_trickle = { path = "..", features = [] }

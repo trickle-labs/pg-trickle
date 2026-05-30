@@ -4,9 +4,39 @@ What's new in pg_trickle — written for everyone, not just developers.
 
 For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
+---
+
+## Upgrade E2E Cutoff Policy
+
+> **U-2 (v0.80.0)**: This section documents the automated upgrade test coverage
+> policy.  Always read the [Rollback Runbook](docs/ROLLBACK_RUNBOOK.md) before
+> upgrading.
+
+The upgrade E2E test suite validates pg_extension migration SQL for the
+**last two released versions** to the current version.  Specifically:
+
+| Current version | Tested upgrade paths |
+|-----------------|----------------------|
+| v0.79.0 | v0.77.0 → v0.79.0, v0.78.0 → v0.79.0 |
+| v0.80.0 | v0.78.0 → v0.80.0, v0.79.0 → v0.80.0 |
+
+Upgrades from older versions (e.g. v0.77.0 → v0.80.0) are not covered by
+automated testing but may work.  Always back up your database before any
+upgrade — see [docs/ROLLBACK_RUNBOOK.md](docs/ROLLBACK_RUNBOOK.md).
+
+The cutoff exists because:
+1. Testing every historical version pair grows quadratically in CI time.
+2. Multi-version jumps (skipping more than two releases) carry higher risk
+   and should be done as a series of single-version upgrades anyway.
+3. The migration SQL is cumulative — each file is idempotent and builds on
+   the previous version's schema.
+
+---
+
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.80.0 — Operational Excellence, Documentation Completeness & Final v1.0 Gate](#0800--operational-excellence-documentation-completeness--final-v10-gate)
 - [0.79.0 — Code Quality, API Ergonomics & Security](#0790--code-quality-api-ergonomics--security)
 - [0.78.0 — DVM Engine Root-Cause Fixes + Scheduler Intelligence](#0780--dvm-engine-root-cause-fixes--scheduler-intelligence)
 - [0.77.0 — Correctness Stop-the-Line & DVM Proof Infrastructure](#0770--correctness-stop-the-line--dvm-proof-infrastructure)
@@ -93,6 +123,112 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.80.0] — Operational Excellence, Documentation Completeness & Final v1.0 Gate
+
+### What's New
+
+v0.80.0 is the final item in the Assessment-15-Driven Hardening Arc
+(v0.77.x–v0.80.x) and completes every remaining observability, documentation,
+and build-confidence goal required before the v1.0 milestone.
+
+#### O-1 — DVM fallback reason codes in refresh history and health output
+
+Three machine-readable reason codes are now recorded in
+`pgt_refresh_history.refresh_reason` whenever a stream table's differential
+refresh falls back to FULL due to a known DVM-incompatible query pattern:
+
+| Code | Condition |
+|------|-----------|
+| `CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK` | SUM/COUNT(CASE…) aggregate with IN-list predicate on a mutable source |
+| `CORRELATED_SUBQUERY_DELTA_QUADRATIC` | Correlated aggregate scalar subquery in WHERE (q20-like) |
+| `REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN` | CASE aggregate with EXISTS/subquery inside — string classifier uncertain |
+
+`pgtrickle.health_check()` now includes a `dvm_fallbacks` check that emits
+`WARN` if any of these codes appeared in the last hour.  See
+[docs/DVM_SUPPORT_MATRIX.md](docs/DVM_SUPPORT_MATRIX.md) for pattern details
+and remediation guidance.
+
+#### O-2 — health_check() ring overflow alert
+
+`health_check()` now includes a `ring_overflow_trend` check.  If the
+invalidation ring has overflowed since startup (meaning a DDL burst forced
+a full DAG rebuild), the check emits `WARN` with the overflow count and a
+suggestion to raise `pg_trickle.invalidation_ring_capacity`.
+
+#### O-3 — Cleanup backlog trend in metrics_summary()
+
+`pgtrickle.metrics_summary()` gains two new columns:
+
+| Column | Description |
+|--------|-------------|
+| `cleanup_backlog_count` | Total entries in `pgt_cleanup_status` |
+| `cleanup_blocked_count` | Entries with `blocked = true` (stalled cleanup) |
+
+These allow Grafana dashboards to trend cleanup-worker health over time.
+
+#### DOC-1 — Docs lint: pg_extern exports vs SQL_REFERENCE.md
+
+A new script `scripts/check_pg_extern_docs.py` extracts every
+`#[pg_extern(schema = "pgtrickle")]` export from Rust source files and checks
+that each one appears in either `docs/SQL_REFERENCE.md` or
+`docs/SQL_API_CATALOG.md`.  This check is now part of `just docs-lint` (and
+therefore `just lint`), so undocumented API exports are caught in CI on every PR.
+
+#### DOC-2 — DVM Support Matrix
+
+[docs/DVM_SUPPORT_MATRIX.md](docs/DVM_SUPPORT_MATRIX.md) is a new comprehensive
+reference covering every supported SQL query pattern, fallback behaviour, IMMEDIATE
+restrictions, and known-unsupported forms including q12 (CASE/IN-list) and q20
+(correlated aggregate subquery).
+
+#### U-1 — Operational rollback runbook
+
+[docs/ROLLBACK_RUNBOOK.md](docs/ROLLBACK_RUNBOOK.md) documents:
+- Why downgrades are unsafe (schema migrations, WAL decoder format, shmem layout)
+- Pre-upgrade backup requirements (pg_dump and filesystem snapshot)
+- The recommended snapshot workflow before every upgrade
+- The restore/rollback procedure step-by-step
+
+#### U-2 — Upgrade E2E cutoff policy
+
+The [Upgrade E2E Cutoff Policy](#upgrade-e2e-cutoff-policy) section at the top
+of this file documents which version-to-version upgrade paths are covered by
+automated testing (the last two released versions) and why the cutoff exists.
+
+#### B-1 — CI gate documentation expanded
+
+The CI gate table in `CONTRIBUTING.md` now lists every workflow with its
+trigger conditions (PR / push to main / daily schedule / manual dispatch),
+so contributors can see exactly which jobs must pass before a PR can merge.
+
+#### B-2 — cargo-deny in PR gates (confirmed)
+
+`cargo-deny` runs on every PR that touches `Cargo.toml`, `Cargo.lock`, or
+`deny.toml` via `.github/workflows/dependency-policy.yml`.  All advisory
+suppressions in `deny.toml` carry `# Review-By: YYYY-MM-DD` expiry dates.
+
+#### P-5 — Fuzz test for DVM snapshot fingerprint cache
+
+A new fuzz target `fuzz/fuzz_targets/snapshot_fingerprint_fuzz.rs` exercises
+the `DiffContext::snapshot_fingerprint_cache` under arbitrary OpTree pointer
+mutations, checking that address reuse does not produce stale SQL strings
+(cache-key safety under GC pressure).
+
+#### A-3 — Event trigger function documentation
+
+`src/hooks.rs` now has comprehensive doc comments on the DDL event trigger
+callback functions (`_on_ddl_end`, `_on_sql_drop`) explaining their role in
+the invalidation ring pipeline.  `docs/ARCHITECTURE.md` gains a new section
+describing the event trigger subsystem.
+
+### Migration
+
+No schema changes.  The `sql/pg_trickle--0.79.0--0.80.0.sql` migration is a
+no-op placeholder — v0.80.0 changes are entirely in Rust code, scripts, and
+documentation.
 
 ---
 

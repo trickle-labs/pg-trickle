@@ -184,6 +184,37 @@ pub(crate) fn classify_case_in_list_aggregate_drift(defining_query: &str) -> boo
     has_agg_case && has_in_list
 }
 
+/// O-1 (v0.80.0): Detect CASE aggregate with subquery predicate — classifier uncertain.
+///
+/// When a CASE expression inside an aggregate contains a scalar subquery or
+/// EXISTS predicate (e.g. `SUM(CASE WHEN (SELECT ...) > 0 THEN 1 ELSE 0 END)`),
+/// the algebraic delta safety cannot be confirmed by string analysis alone.
+/// The pattern is outside the two definitive rejection rules (DVM-1, DVM-2) but
+/// is complex enough that the regex-based classifier cannot guarantee correctness.
+/// Force FULL refresh as a conservative safety measure.
+pub(crate) fn classify_case_aggregate_subquery_uncertain(defining_query: &str) -> bool {
+    let upper = defining_query.to_ascii_uppercase();
+    // CASE inside any aggregate function
+    let has_agg_case = upper.contains("SUM(CASE")
+        || upper.contains("SUM( CASE")
+        || upper.contains("COUNT(CASE")
+        || upper.contains("COUNT( CASE")
+        || upper.contains("AVG(CASE")
+        || upper.contains("AVG( CASE")
+        || upper.contains("MAX(CASE")
+        || upper.contains("MAX( CASE")
+        || upper.contains("MIN(CASE")
+        || upper.contains("MIN( CASE");
+    if !has_agg_case {
+        return false;
+    }
+    // The CASE predicate itself contains a scalar subquery or EXISTS
+    upper.contains("WHEN (SELECT")
+        || upper.contains("WHEN(SELECT")
+        || upper.contains("WHEN EXISTS")
+        || upper.contains("WHEN NOT EXISTS")
+}
+
 /// DVM-2/P-1: Detect correlated aggregate scalar subquery in WHERE (q20-like).
 ///
 /// Queries with this pattern produce O(delta × table) DVM delta SQL because
