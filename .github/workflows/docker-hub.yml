@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 40
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set image tag
         id: tag

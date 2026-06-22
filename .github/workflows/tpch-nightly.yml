@@ -61,7 +61,7 @@ jobs:
             # the 8.7-hour workload of all 15 tests.  SF-1 covers the rest.
             filter_expr: "test(test_tpch_differential_correctness)"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx

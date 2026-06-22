@@ -36,7 +36,7 @@ jobs:
       contents: read
       checks: write  # rustsec/audit-check posts results as a GitHub Check Run
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Run cargo audit
         uses: rustsec/audit-check@v2
@@ -67,7 +67,7 @@ jobs:
       contents: read
       issues: write  # scheduled rustsec/audit-check runs open issues for new advisories
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Run cargo audit
         uses: rustsec/audit-check@v2

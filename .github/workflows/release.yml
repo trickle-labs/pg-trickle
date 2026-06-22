@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Check version references are in sync
         run: ./scripts/check_version_sync.sh
@@ -63,7 +63,7 @@ jobs:
             artifact_suffix: windows-amd64
             archive_ext: zip
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -189,7 +189,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download Linux artifact
         uses: actions/download-artifact@v8
@@ -298,7 +298,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download all release artifacts
         uses: actions/download-artifact@v8
@@ -367,7 +367,7 @@ jobs:
             artifact_suffix: linux-arm64
             platform_tag: arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download ${{ matrix.artifact_suffix }} artifact
         uses: actions/download-artifact@v8
