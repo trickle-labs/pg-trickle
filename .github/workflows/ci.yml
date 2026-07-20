@@ -962,7 +962,7 @@ jobs:
             sleep 1
           done
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -1089,7 +1089,7 @@ jobs:
             sleep 1
           done
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 

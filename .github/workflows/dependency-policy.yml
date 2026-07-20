@@ -56,7 +56,7 @@ jobs:
         run: cargo deny check advisories bans sources
 
       - name: Set up Python for advisory expiry check
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
