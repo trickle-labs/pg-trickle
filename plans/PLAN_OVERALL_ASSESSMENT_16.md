@@ -455,6 +455,14 @@ These items require minimal architectural change and deliver immediate value:
 
 ## 6. Version Mapping
 
+> **Superseded.** The v0.82.x–v0.87.x mapping below records this assessment's
+> original recommendation. The roadmap was subsequently reshaped around a
+> product thesis rather than a scaling thesis: v0.82.x–v0.87.x now cover product
+> UX, low-impact refresh, engine performance, freshness SLAs, lifecycle and
+> production polish, and the distributed items (MT-1, MT-2, MT-4, LT-1 through
+> LT-5, LT-8, LT-10) moved to v1.7.0–v1.9.0. See
+> [ROADMAP.md](../ROADMAP.md) for the current plan.
+
 The action plan maps to the following release schedule:
 
 | Version | Theme | Items |

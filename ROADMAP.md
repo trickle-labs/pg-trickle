@@ -391,46 +391,62 @@ and durability foundations that must be proven before v1.0.
 | [v0.79.0](roadmap/v0.79.0.md) | Code Quality, API Ergonomics & Security: remove unused-import suppressions in src/refresh/codegen.rs and src/refresh/merge/mod.rs module-by-module (Q-1), convert internal create/alter API implementations to typed parameter structs eliminating too-many-arguments in business logic (Q-2), replace global #![allow(dead_code)] with narrower per-module allowances on pgrx/export boundaries (Q-3), remove or #[deprecated] consume_slot_changes() replacing with clearly named status function (Q-4), add SQL convenience helpers create_stream_table_fast_append_only/set_stream_table_refresh_policy/set_stream_table_storage_policy (A-1), add first-class pause_stream_table/resume_stream_table wrappers (A-2), add/strengthen semgrep CI rules for dynamic SQL distinguishing identifier/literal/OID boundaries (S-1), emit runtime WARNING when source has RLS enabled at create_stream_table time (S-2), CI test inspecting SECURITY DEFINER trigger functions for SET search_path (S-3), cleanup chaos test forcing three consecutive DELETE failures with alert and status verification (D-3), dbt adapter compatibility matrix with alter/drop/rebuild flow and version matrix tests (T-5) | ✅ Released | Large | [Full details](roadmap/v0.79.0.md-full.md) |
 | [v0.80.0](roadmap/v0.80.0.md) | Operational Excellence, Documentation Completeness & Final v1.0 Gate: add DVM fallback/performance reason codes to refresh history and health output — CORRELATED_SUBQUERY_DELTA_QUADRATIC, CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK, REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN (O-1), add health_check() threshold alert when invalidation ring overflow count increases in recent time window (O-2), add cleanup backlog trend metrics integrated into pgt_metrics_summary (O-3), docs lint comparing #[pg_extern] exports with SQL_REFERENCE.md entries (DOC-1), create docs/DVM_SUPPORT_MATRIX.md with every query pattern, fallback behavior, IMMEDIATE restrictions, and known-unsupported forms including q12/q20 entries (DOC-2), operational rollback runbook (backup requirements, snapshot recommendation, restore path, why downgrades are unsafe) (U-1), document upgrade E2E cutoff policy prominently in CHANGELOG and release notes (U-2), CI gate documentation in CONTRIBUTING.md describing which workflows gate PRs (B-1), review-by dates on cargo-deny advisory suppressions and require cargo-deny in PR gates (B-2), fuzz test for DVM snapshot fingerprint cache stability under OpTree refactoring (P-5), document internal event trigger functions in ARCHITECTURE comments (A-3) | ✅ Released | Large | [Full details](roadmap/v0.80.0.md-full.md) |
 
-### Assessment-16 Scaling Arc and Pre-Scaling Hardening Gate (v0.81.x - v0.87.x)
+### Product Arc & Hardening Gate (v0.81.x – v0.87.x)
 
-Driven by the findings in the v0.80.0 vision audit
-([plans/PLAN_OVERALL_ASSESSMENT_16.md](plans/PLAN_OVERALL_ASSESSMENT_16.md)).
-The assessment identified 7 HIGH, 18 MEDIUM, and 12 LOW findings across
-architecture (single-process compute ceiling, change buffer I/O amplification,
-no state externalization), performance (no vectorized batch processing, SPI
-overhead per refresh, no incremental MERGE), ergonomics (no declarative DDL,
-no auto-schema-evolution, no configuration advisor), and observability (no
-OpenTelemetry traces, no commit-to-visible latency metric). This seven-minor-release
-arc implements the "Blueprint for Infinite Scaling" — transitioning pg_trickle
-from a world-class single-node extension to a distributed, auto-scaling IVM
-system capable of running on a developer laptop or a Kubernetes cluster.
+The core thing users are buying is not "distributed incremental computation".
+It is:
+
+> **"I have an expensive PostgreSQL query. Keep its result fresh automatically,
+> without hammering my database, and make it safe enough that I can forget about
+> it."**
+
+pg_trickle already has unusually broad SQL coverage, automatic FULL fallback,
+DAGs, repair tooling, observability, PgBouncer support and Citus support. This
+arc stops broadening the feature surface and turns that machinery into a
+polished product, in the order users actually care about: correctness, low
+impact on the primary database, freshness, normal SQL, predictability, easy
+troubleshooting, easy lifecycle, performance, zero babysitting, and a stable
+1.0 API.
 
 An August 2026 implementation audit after v0.81.0 found unresolved single-node
-correctness and resilience risks that must not be carried into a multi-process
-architecture. Four patch releases now form a mandatory pre-scaling gate. They
-add no major features: they make the existing frontier, CDC, DVM, SQL API,
-catalog, upgrade, scheduler, and resource contracts fail closed and prove them
-under adversarial concurrency. v0.82.0 is blocked until all four gates pass.
+correctness and resilience risks. Four patch releases now form a mandatory
+hardening gate. They add no features: they make the existing frontier, CDC,
+DVM, SQL API, catalog, upgrade, scheduler, and resource contracts fail closed
+and prove them under adversarial concurrency. **v0.82.0 is blocked until all
+four gates pass** — correctness is the first thing users care about, so nothing
+in the product arc ships on top of an unproven foundation.
 
-| Version | Theme | Status | Scope | Full details |
-|---------|-------|--------|-------|--------------|
-| [v0.81.0](roadmap/v0.81.0.md) | Observability, Self-Tuning & Quick Wins: commit-to-visible latency metric using pg_xact_commit_timestamp (QW-1), configuration advisor function pgtrickle.tune_recommendations() (QW-2), preview/dry-run mode pgtrickle.preview_stream_table() (QW-3), OpenTelemetry trace spans on scheduler_tick/refresh_cycle/delta_execute/merge_apply with OTLP export (QW-4), bounded LRU eviction on thread-local L0/L1 template caches (QW-5), DeltaOperator trait for extensible operator dispatch (QW-6), split config.rs into config/scheduler.rs + config/cdc.rs + config/dvm.rs + config/monitoring.rs (QW-7), self-healing circuit breaker with auto-remediation for OOM/lock-timeout/sustained-lag (QW-8), chunked MERGE for large deltas with configurable merge_batch_size GUC (QW-9), stream table presets ('real-time'/'batch'/'cost-optimized') (QW-10) | ✅ Released | Large | [Full details](roadmap/v0.81.0.md) |
-| [v0.81.1](roadmap/v0.81.1.md) | Frontier & CDC Durability Gate: one safe frontier contract for manual/scheduled refresh, backend_xid/xmin/2PC holdback, database/tick-scoped immutable worker bounds, snapshot-aligned FULL refresh, no blind WAL slot fast-forward, atomic WAL-to-trigger cutover, missing-buffer fail-closed repair, common TopK/fused/fallback finalization, honest sync/UNLOGGED crash semantics | Planned | Large | [Full details](roadmap/v0.81.1.md) |
-| [v0.81.2](roadmap/v0.81.2.md) | DVM Semantic Fidelity Gate: private set-operation state and exact ALL multiplicity, positional/NULL-safe branches, nullable SUM and statistical accumulator correctness, scalar cardinality errors, LATERAL identity/IMMEDIATE safety, fail-closed volatility and AST rewrites, sound circular monotonicity admission, collision-free composite row identity | Planned | Large | [Full details](roadmap/v0.81.2.md) |
-| [v0.81.3](roadmap/v0.81.3.md) | Catalog, Privilege & Upgrade Integrity: fresh/upgrade catalog parity, explicit SQL ACL/ownership matrix, typed identifier and snapshot provenance safety, typed bulk lifecycle APIs and complete CDC cleanup, truthful logical restore, real old-binary upgrades, tag/runtime version equality, checked numeric contracts, generated SQL reference contracts | Planned | Large | [Full details](roadmap/v0.81.3.md) |
-| [v0.81.4](roadmap/v0.81.4.md) | Scheduler & Resource Resilience Gate: authoritative worker limits and race-free tokens, database-scoped pause/health state, persistent drain, enforceable refresh deadlines, complete self-healing/error accounting, bounded queue/catalog maintenance, scheduler-safe metrics/alerts, API resource ceilings and real fuzz/property assurance | Planned | Large | [Full details](roadmap/v0.81.4.md) |
-| [v0.82.0](roadmap/v0.82.0.md) | External Worker Foundation: extract DVM + MERGE into standalone pg_trickle_worker binary connecting via tokio-postgres (MT-1), advisory-lock-based work claiming with heartbeat monitoring and automatic failover (MT-2), DiffContext decomposition into CdcContext/CacheContext/OptimizationContext (MT-7), pg_stat_pgtrickle virtual system view for per-ST cumulative statistics (MT-9), adaptive worker pool sizing based on CPU utilization and refresh queue depth (MT-10), worker registration table pgt_worker_registry with health monitoring | Planned | Large | [Full details](roadmap/v0.82.0.md) |
-| [v0.83.0](roadmap/v0.83.0.md) | Performance Pipeline & CDC Extraction: pipelined refresh execution with portal-based streaming overlapping delta SQL and MERGE application (MT-3), external CDC consumer binary pg_trickle_cdc subscribing to logical replication with zero trigger overhead (MT-4), shared-memory change buffer ring for hot sources >10K writes/s with table-based overflow (MT-5), auto-schema-evolution via DDL event trigger for additive source changes (MT-6), pg_trickle.cdc_mode='external' GUC for zero-write-path-impact mode | Planned | Large | [Full details](roadmap/v0.83.0.md) |
-| [v0.84.0](roadmap/v0.84.0.md) | Vectorized Compute & Adaptive Engine: vectorized aggregate path using Arrow-compatible columnar batches with SIMD operations for pure-aggregate STs (MT-8), incremental window function computation replacing partition-based recomputation with proper incremental algorithms for ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD (LT-7), cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9), parallel delta computation fan-out for multi-source joins (PERF-O4) | Planned | Large | [Full details](roadmap/v0.84.0.md) |
-| [v0.85.0](roadmap/v0.85.0.md) | Kubernetes-Native Deployment: Kubernetes operator with StreamTableCluster CRD managing worker Deployments and HPA policies (LT-1), external change log backend supporting Kafka/NATS JetStream/local WAL files as intermediate storage (LT-2), declarative SQL syntax CREATE STREAM TABLE name AS SELECT via ProcessUtility_hook (LT-6), CDC consumer StatefulSet with exactly-once delivery, metrics adapter exposing CDC lag as Kubernetes custom metric for HPA | Planned | Very Large | [Full details](roadmap/v0.85.0.md) |
-| [v0.86.0](roadmap/v0.86.0.md) | Distributed Delta Computation: partitioned delta computation by source key ranges across multiple workers (LT-3), read-replica DVM execution running delta computation on streaming replicas and applying results to primary (LT-4), zero-copy change buffer protocol using shared memory and UNIX domain sockets for same-host transfer (LT-10), worker affinity and data locality optimization for partition-aligned scheduling | Planned | Very Large | [Full details](roadmap/v0.86.0.md) |
-| [v0.87.0](roadmap/v0.87.0.md) | Enterprise Federation & State Management: multi-cluster federation coordinating stream tables across PostgreSQL clusters with global DAG and cross-cluster frontier synchronization (LT-5), state checkpointing to object storage (S3/GCS) for disaster recovery independent of pg_basebackup (LT-8), global priority queue and resource governor for multi-database clusters, zero-config adaptive mode detection (laptop/server/production/kubernetes) | Planned | Very Large | [Full details](roadmap/v0.87.0.md) |
+The distributed work that previously occupied v0.82.0 and v0.85.0–v0.87.0
+(external workers, external CDC consumers, Kubernetes operators, cross-cluster
+federation, object-storage state) has moved to [Beyond v1.0](#beyond-v10). It
+is optional infrastructure for deployments that have genuinely outgrown one
+machine — not the path to 1.0.
+
+| Version | Theme | User promise | Status | Scope | Full details |
+|---------|-------|--------------|--------|-------|--------------|
+| [v0.81.0](roadmap/v0.81.0.md) | Observability, Self-Tuning & Quick Wins: commit-to-visible latency metric using pg_xact_commit_timestamp (QW-1), configuration advisor function pgtrickle.tune_recommendations() (QW-2), preview/dry-run mode pgtrickle.preview_stream_table() (QW-3), OpenTelemetry trace spans on scheduler_tick/refresh_cycle/delta_execute/merge_apply with OTLP export (QW-4), bounded LRU eviction on thread-local L0/L1 template caches (QW-5), DeltaOperator trait for extensible operator dispatch (QW-6), split config.rs into config/scheduler.rs + config/cdc.rs + config/dvm.rs + config/monitoring.rs (QW-7), self-healing circuit breaker with auto-remediation for OOM/lock-timeout/sustained-lag (QW-8), chunked MERGE for large deltas with configurable merge_batch_size GUC (QW-9), stream table presets ('real-time'/'batch'/'cost-optimized') (QW-10) | — | ✅ Released | Large | [Full details](roadmap/v0.81.0.md) |
+| [v0.81.1](roadmap/v0.81.1.md) | Frontier & CDC Durability Gate: one safe frontier contract for manual/scheduled refresh, backend_xid/xmin/2PC holdback, database/tick-scoped immutable worker bounds, snapshot-aligned FULL refresh, no blind WAL slot fast-forward, atomic WAL-to-trigger cutover, missing-buffer fail-closed repair, common TopK/fused/fallback finalization, honest sync/UNLOGGED crash semantics | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.1.md) |
+| [v0.81.2](roadmap/v0.81.2.md) | DVM Semantic Fidelity Gate: private set-operation state and exact ALL multiplicity, positional/NULL-safe branches, nullable SUM and statistical accumulator correctness, scalar cardinality errors, LATERAL identity/IMMEDIATE safety, fail-closed volatility and AST rewrites, sound circular monotonicity admission, collision-free composite row identity | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.2.md) |
+| [v0.81.3](roadmap/v0.81.3.md) | Catalog, Privilege & Upgrade Integrity: fresh/upgrade catalog parity, explicit SQL ACL/ownership matrix, typed identifier and snapshot provenance safety, typed bulk lifecycle APIs and complete CDC cleanup, truthful logical restore, real old-binary upgrades, tag/runtime version equality, checked numeric contracts, generated SQL reference contracts | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.3.md) |
+| [v0.81.4](roadmap/v0.81.4.md) | Scheduler & Resource Resilience Gate: authoritative worker limits and race-free tokens, database-scoped pause/health state, persistent drain, enforceable refresh deadlines, complete self-healing/error accounting, bounded queue/catalog maintenance, scheduler-safe metrics/alerts, API resource ceilings and real fuzz/property assurance | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.4.md) |
+| [v0.82.0](roadmap/v0.82.0.md) | Product UX & Transparency: declarative CREATE/ALTER/DROP STREAM TABLE via ProcessUtility_hook (UX-1), pgtrickle.explain() reporting refresh mode, estimated changed rows, dominant cost, expected refresh time, current lag, next refresh and FULL fallback threshold in human terms (UX-2), machine-readable "why did AUTO choose FULL?" reason codes on every FULL path (UX-3), creation-time warnings with HINTs for always-FULL queries, cost exceeding the refresh interval, RLS, missing replica identity and excessive write overhead (UX-4), pg_stat_pgtrickle statistics view (UX-5), lag and refresh-mode annotations in EXPLAIN output (UX-6) | "I understand what pg_trickle is doing." | Planned | Large | [Full details](roadmap/v0.82.0.md) |
+| [v0.83.0](roadmap/v0.83.0.md) | Low-Impact Refresh: pipelined refresh execution streaming delta rows through a cursor with per-batch MERGE, bounding peak memory and lock hold time (LOW-1), cheaper capture via statement-level batching, capture-time column pruning and trigger short-circuit for paused consumers (LOW-2), shared-memory change buffer ring for sources above 10K writes/s with table-based overflow (LOW-3), load-aware deferral, refresh spike smoothing, bounded concurrency and lock etiquette (LOW-4), a single memory_budget_mb bounding every accumulation point (LOW-5), and a published pgbench overhead benchmark wired into CI as a blocking regression gate (LOW-6) | "Keeping views fresh won't hurt my application." | Planned | Large | [Full details](roadmap/v0.83.0.md) |
+| [v0.84.0](roadmap/v0.84.0.md) | Fast Incremental Engine: vectorized aggregate path using Arrow-compatible columnar batches with SIMD operations for pure-aggregate STs (MT-8), incremental window function computation replacing partition-based recomputation with proper incremental algorithms for ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD (LT-7), cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9), parallel delta computation fan-out for multi-source joins (PERF-O4), DiffContext decomposition into CdcContext/CacheContext/OptimizationContext (ENG-1) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.84.0.md) |
+| [v0.85.0](roadmap/v0.85.0.md) | Freshness SLAs & Self-Tuning: target_freshness as the primary user-facing control with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), infeasible-SLA detection at creation and continuously thereafter (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.85.0.md) |
+| [v0.86.0](roadmap/v0.86.0.md) | Lifecycle & Schema Evolution: safe ALTER STREAM TABLE ... AS with compatible/rebuildable/rejected classification and shadow-table swap (LC-1), automatic handling of additive source DDL with loud, actionable suspension for destructive changes (LC-2), tested pg_dump/pg_restore, PITR, pg_basebackup and replica promotion behavior (LC-3), database cloning that never steals the original's replication slots (LC-4), pgtrickle.preflight_upgrade() plus quiesce/resume (LC-5), pg_upgrade and extension-upgrade coverage in CI with active workloads (LC-6), and automatic CDC repair as the default path (LC-7) | "Production changes don't break my stream tables." | Planned | Large | [Full details](roadmap/v0.86.0.md) |
+| [v0.87.0](roadmap/v0.87.0.md) | Production Polish: zero-config profile detection for laptop/managed/dedicated instances (PP-1), an enforced ceiling and alert for every resource including predictable disk usage (PP-2), pg_stat_progress-style progress reporting for long operations (PP-3), an audited error surface where every message carries SQLSTATE, DETAIL and an actionable HINT (PP-4), shipped Grafana dashboard, alert rules and collector-validated OTel spans (PP-5), a simple role-based privilege model (PP-6), 72-hour soak, upgrade compatibility matrix and performance regression gates (PP-7), one-command install verified by smoke tests on every package (PP-8), then **feature freeze** | "I can confidently run this for years." | Planned | Large | [Full details](roadmap/v0.87.0.md) |
 
 ### Toward v1.0
 
+After v0.87.0 the project stops adding features. No v0.88, v0.89 or v0.90 gets
+invented to fill the space before 1.0. The remaining pre-1.0 period is spent on
+**bugs → benchmarks → compatibility → upgrades → docs → real-world workloads →
+simplification**, and the real 1.0 gate is *no known correctness issues and
+boring upgrades*.
+
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
-| [v1.0.0](roadmap/v1.0.0.md-full.md) | Stable release — PostgreSQL 19, package registries, signed artifacts, SBOMs, zero breaking changes | Planned | Large | [Full details](roadmap/v1.0.0.md-full.md) |
+| [v1.0.0](roadmap/v1.0.0.md-full.md) | Stability contract — no known correctness issues, boring upgrades, stable API/catalog/GUC surface, PostgreSQL 19, package registries, signed artifacts, SBOMs | Planned | Large | [Full details](roadmap/v1.0.0.md-full.md) |
 
 ### Beyond v1.0
 
@@ -441,6 +457,10 @@ under adversarial concurrency. v0.82.0 is blocked until all four gates pass.
 | [v1.3.0](roadmap/v1.3.0.md-full.md) | Core extraction (`pg_trickle_core`) | Planned | Large | [Full details](roadmap/v1.3.0.md-full.md) |
 | [v1.4.0](roadmap/v1.4.0.md-full.md) | PGlite WASM extension | Planned | Medium | [Full details](roadmap/v1.4.0.md-full.md) |
 | [v1.5.0](roadmap/v1.5.0.md-full.md) | PGlite reactive integration | Planned | Medium | [Full details](roadmap/v1.5.0.md-full.md) |
+| [v1.6.0](roadmap/v1.6.0.md-full.md) | Automatic query acceleration: planner-hook rewriting of ordinary queries onto existing, sufficiently fresh stream tables (QA-1…QA-6), off by default, cost-based, staleness-bounded, and fully disclosed in EXPLAIN | Planned | Large | [Full details](roadmap/v1.6.0.md-full.md) |
+| [v1.7.0](roadmap/v1.7.0.md-full.md) | Decoupled compute (optional): standalone pg_trickle_worker binary with advisory-lock work claiming and heartbeat failover (DC-1…DC-3), external pg_trickle_cdc logical-replication consumer with cdc_mode='external' for zero write-path impact (DC-4, DC-5), zero-copy same-host transfer (DC-6) | Planned | Very Large | [Full details](roadmap/v1.7.0.md-full.md) |
+| [v1.8.0](roadmap/v1.8.0.md-full.md) | Distributed delta computation & Kubernetes-native deployment (optional): partitioned delta computation by source key range, read-replica execution, worker affinity, external change log backend (DD-1…DD-4), StreamTableCluster CRD and operator with freshness-driven HPA (K8-1…K8-4) | Planned | Very Large | [Full details](roadmap/v1.8.0.md-full.md) |
+| [v1.9.0](roadmap/v1.9.0.md-full.md) | Federation & state management (speculative): multi-cluster federation with a global DAG and cross-cluster frontier synchronization (FD-1…FD-4), object-storage state checkpointing and a global resource governor (ST-1, ST-2) — built only if real users ask for it | Planned | Very Large | [Full details](roadmap/v1.9.0.md-full.md) |
 
 ## How these versions fit together
 
@@ -567,19 +587,21 @@ v0.81.3  ─── Catalog, privilege & upgrade integrity: schema parity, ACL ma
     │
 v0.81.4  ─── Scheduler & resource resilience gate: worker caps, database scoping, drain/deadlines, self-healing, bounded maintenance, adversarial assurance
     │
-v0.82    ─── External worker foundation: pg_trickle_worker binary, advisory lock coordination, adaptive pool sizing, pg_stat_pgtrickle view, DiffContext split
+v0.82    ─── Product UX & transparency: declarative CREATE/ALTER STREAM TABLE, pgtrickle.explain(), FULL-reason codes, creation-time warnings, pg_stat_pgtrickle
     │
-v0.83    ─── Performance pipeline & CDC extraction: pipelined refresh, external CDC consumer, shared-memory ring buffers, auto-schema-evolution
+v0.83    ─── Low-impact refresh: pipelined execution, cheaper capture, shared-memory ring buffers, backpressure, memory budget, overhead benchmark gate
     │
-v0.84    ─── Vectorized compute & adaptive engine: Arrow columnar batches, incremental window functions, cost-based operator scheduling, parallel fan-out
+v0.84    ─── Fast incremental engine: Arrow columnar batches, incremental window functions, cost-based operator scheduling, parallel fan-out
     │
-v0.85    ─── Kubernetes-native deployment: K8s operator + CRD, external change log (Kafka/NATS), declarative SQL syntax, HPA metrics adapter
+v0.85    ─── Freshness SLAs & self-tuning: target_freshness as the primary control, closed-loop controller, adaptive workers, freshness() reporting
     │
-v0.86    ─── Distributed delta computation: partitioned deltas across workers, read-replica execution, zero-copy shared-memory protocol
+v0.86    ─── Lifecycle & schema evolution: safe ALTER ... AS, auto schema evolution, PITR/dump/clone, preflight_upgrade(), automatic CDC repair
     │
-v0.87    ─── Enterprise federation & state management: multi-cluster federation, S3/GCS state checkpointing, global resource governor, zero-config adaptive mode
+v0.87    ─── Production polish: zero-config profiles, bounded resources, progress reporting, error-message audit, soak + regression gates, then feature freeze
     │
-v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
+v1.0.0   ─── Stability contract: no known correctness issues, boring upgrades, PostgreSQL 19, package registries, signed artifacts, SBOMs
+    │
+v1.6+    ─── Beyond 1.0 (optional/speculative): automatic query acceleration, decoupled compute, distributed deltas + Kubernetes, federation
 ```
 
 v0.1.0 through v0.27.0 build the complete core engine and harden it for
@@ -876,14 +898,21 @@ Operational runbooks for upgrade rollback and the upgrade E2E cutoff policy,
 CI gate documentation for contributors, and cargo-deny advisory review-by
 dates complete the pre-v1.0 checklist.
 
-**v0.81.0 through v0.87.0 form the Assessment-16-Driven Scaling Arc**, driven
-by the findings in the v0.80.0 vision audit
-(plans/PLAN_OVERALL_ASSESSMENT_16.md). Prior assessments established a strong
-single-node architecture, but the post-v0.81.0 implementation audit found
-correctness and resilience gaps that require explicit closure before that
-architecture is distributed. The broader arc implements the "Blueprint for
-Infinite Scaling" — a backward-compatible transition from a world-class
-single-node extension to a distributed, auto-scaling IVM system.
+**v0.81.0 through v0.87.0 form the Product Arc.** The engine is sound after 16
+assessment arcs, though the post-v0.81.0 implementation audit found correctness
+and resilience gaps that require explicit closure first. What is missing beyond
+those gaps is not capability but product: the machinery is broad, and the
+experience of using it is not yet as good as the machinery deserves. This arc
+therefore stops broadening the feature surface and turns pg_trickle into
+something a DBA installs, points at a query, and trusts.
+
+The product thesis for the arc:
+
+> **pg_trickle should become the best way to make expensive PostgreSQL queries
+> continuously cheap and fresh — while still feeling like PostgreSQL.**
+
+Not Kafka. Not Flink. Not a Kubernetes platform. Not a distributed database.
+Just an unusually powerful PostgreSQL extension.
 
 v0.81.0 delivers immediate observability and ergonomic wins: OpenTelemetry
 trace spans across the refresh hot path, a commit-to-visible latency metric
@@ -893,7 +922,7 @@ deltas, self-healing circuit breakers, and stream table presets for progressive
 disclosure.
 
 The post-v0.81.0 implementation audit adds a mandatory four-release hardening
-gate before scaling work begins. v0.81.1 closes frontier, CDC durability, WAL
+gate before the product arc begins. v0.81.1 closes frontier, CDC durability, WAL
 cutover, crash-recovery, and refresh-finalization paths that could skip or hide
 committed changes. v0.81.2 enforces PostgreSQL semantics in the existing DVM
 surface, including set operations, NULL aggregates, scalar and LATERAL
@@ -902,27 +931,43 @@ fresh and upgraded catalogs identical, defines the privilege boundary, repairs
 lifecycle and restore contracts, and verifies real binary upgrades and release
 versions. v0.81.4 makes scheduler concurrency, database scoping, drain,
 deadlines, remediation, maintenance, metrics, and resource bounds reliable
-under stress. These releases add no major user-facing capability; they are the
-proof boundary that v0.82 must preserve.
+under stress. These releases add no user-facing capability; they are the proof
+boundary that everything after them must preserve.
 
-v0.82.0 introduces the external worker foundation: a standalone
-`pg_trickle_worker` binary that connects via tokio-postgres, claims work via
-advisory locks, and computes deltas outside the PostgreSQL process. The
-in-process scheduler becomes a coordinator that dispatches to external workers
-when available. v0.83.0 eliminates write-path impact with an external CDC
-consumer binary (`pg_trickle_cdc`) that subscribes to logical replication
-without triggers, plus shared-memory ring buffers for hot sources and pipelined
-refresh execution. v0.84.0 introduces vectorized compute using Arrow-compatible
-columnar batches and proper incremental window function algorithms. v0.85.0
-delivers Kubernetes-native deployment with a CRD-based operator, external
-change log backends (Kafka/NATS), and declarative SQL syntax. v0.86.0 enables
-distributed delta computation across workers with partition-aligned scheduling
-and read-replica execution. v0.87.0 completes the arc with multi-cluster
-federation, object-storage state checkpointing, and the zero-config adaptive
-mode that detects deployment context (laptop/server/kubernetes) and configures
-behavior accordingly.
+v0.82.0 makes the system legible: declarative `CREATE STREAM TABLE`
+DDL, a `pgtrickle.explain()` function that answers in plain language what a
+stream table costs and how stale it is, a reason code behind every FULL refresh,
+creation-time warnings for expensive queries, and a `pg_stat_pgtrickle` view
+that ordinary monitoring tools already know how to read. v0.83.0 makes
+pg_trickle nearly invisible to OLTP: pipelined refresh execution, cheaper
+capture on the write path, shared-memory ring buffers for hot sources,
+backpressure that yields to the application, a single memory budget, and a
+published write-overhead benchmark enforced as a CI gate. v0.84.0 is the one
+release where deep complexity is justified, because all of it is inside the
+engine — vectorized aggregates, proper incremental window algorithms,
+cost-based delta planning and selective parallelism, targeting a 5–10×
+throughput improvement with no change to deployment or API.
 
-Each phase is backward-compatible: a developer laptop continues running
-pg_trickle as a single in-process extension with zero additional infrastructure.
-A production Kubernetes cluster deploys the full distributed topology with
-auto-scaling workers.
+v0.85.0 elevates freshness to the primary user-facing control: users state a
+`target_freshness` and a closed-loop controller derives the schedule, the
+DIFFERENTIAL/FULL decision, batch sizes, concurrency and priority, reporting
+whether the SLA is being met. v0.86.0 makes lifecycle boring — safe query
+changes, automatic handling of compatible source-schema changes, tested PITR,
+dump/restore, cloning and major upgrades, and a `preflight_upgrade()` function
+that tells a DBA whether it is safe to proceed. v0.87.0 is the "would a DBA
+recommend this?" release: excellent defaults, bounded resources, progress
+reporting, error messages with remediation, monitoring integration, a simple
+privilege model, soak and regression gates, and one-command install — followed
+by a feature freeze.
+
+**The distributed work has moved past 1.0.** External workers, external CDC
+consumers, Kubernetes operators, distributed delta computation, cross-cluster
+federation and object-storage state coordination now live in v1.7.0–v1.9.0.
+They remain designed and recorded, but they are optional infrastructure for
+deployments that have genuinely outgrown one machine, not the road to a stable
+release. Automatic query acceleration — recognizing that an existing fresh
+stream table can answer an ordinary query — is deliberately placed at v1.6.0
+for the same reason: optimizer integration is complicated and potentially
+surprising, and surprising a DBA is exactly what the 1.0 contract promises not
+to do.
+
