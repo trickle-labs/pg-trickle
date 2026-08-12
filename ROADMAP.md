@@ -391,7 +391,7 @@ and durability foundations that must be proven before v1.0.
 | [v0.79.0](roadmap/v0.79.0.md) | Code Quality, API Ergonomics & Security: remove unused-import suppressions in src/refresh/codegen.rs and src/refresh/merge/mod.rs module-by-module (Q-1), convert internal create/alter API implementations to typed parameter structs eliminating too-many-arguments in business logic (Q-2), replace global #![allow(dead_code)] with narrower per-module allowances on pgrx/export boundaries (Q-3), remove or #[deprecated] consume_slot_changes() replacing with clearly named status function (Q-4), add SQL convenience helpers create_stream_table_fast_append_only/set_stream_table_refresh_policy/set_stream_table_storage_policy (A-1), add first-class pause_stream_table/resume_stream_table wrappers (A-2), add/strengthen semgrep CI rules for dynamic SQL distinguishing identifier/literal/OID boundaries (S-1), emit runtime WARNING when source has RLS enabled at create_stream_table time (S-2), CI test inspecting SECURITY DEFINER trigger functions for SET search_path (S-3), cleanup chaos test forcing three consecutive DELETE failures with alert and status verification (D-3), dbt adapter compatibility matrix with alter/drop/rebuild flow and version matrix tests (T-5) | ✅ Released | Large | [Full details](roadmap/v0.79.0.md-full.md) |
 | [v0.80.0](roadmap/v0.80.0.md) | Operational Excellence, Documentation Completeness & Final v1.0 Gate: add DVM fallback/performance reason codes to refresh history and health output — CORRELATED_SUBQUERY_DELTA_QUADRATIC, CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK, REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN (O-1), add health_check() threshold alert when invalidation ring overflow count increases in recent time window (O-2), add cleanup backlog trend metrics integrated into pgt_metrics_summary (O-3), docs lint comparing #[pg_extern] exports with SQL_REFERENCE.md entries (DOC-1), create docs/DVM_SUPPORT_MATRIX.md with every query pattern, fallback behavior, IMMEDIATE restrictions, and known-unsupported forms including q12/q20 entries (DOC-2), operational rollback runbook (backup requirements, snapshot recommendation, restore path, why downgrades are unsafe) (U-1), document upgrade E2E cutoff policy prominently in CHANGELOG and release notes (U-2), CI gate documentation in CONTRIBUTING.md describing which workflows gate PRs (B-1), review-by dates on cargo-deny advisory suppressions and require cargo-deny in PR gates (B-2), fuzz test for DVM snapshot fingerprint cache stability under OpTree refactoring (P-5), document internal event trigger functions in ARCHITECTURE comments (A-3) | ✅ Released | Large | [Full details](roadmap/v0.80.0.md-full.md) |
 
-### Product Arc & Hardening Gate (v0.81.x – v0.87.x)
+### Product Arc & Hardening Gate (v0.81.0 – v0.93.0)
 
 The core thing users are buying is not "distributed incremental computation".
 It is:
@@ -409,15 +409,29 @@ troubleshooting, easy lifecycle, performance, zero babysitting, and a stable
 1.0 API.
 
 An August 2026 implementation audit after v0.81.0 found unresolved single-node
-correctness and resilience risks. Four patch releases now form a mandatory
-hardening gate. They add no features: they make the existing frontier, CDC,
-DVM, SQL API, catalog, upgrade, scheduler, and resource contracts fail closed
-and prove them under adversarial concurrency. **v0.82.0 is blocked until all
-four gates pass** — correctness is the first thing users care about, so nothing
-in the product arc ships on top of an unproven foundation.
+correctness and resilience risks. Four releases form a mandatory hardening
+gate. They add no features: they make the existing frontier, CDC, DVM, SQL API,
+catalog, upgrade, scheduler, and resource contracts fail closed and prove them
+under adversarial concurrency. **The product arc is blocked until all four
+gates pass** — correctness is the first thing users care about, so nothing
+ships on top of an unproven foundation.
 
-The distributed work that previously occupied v0.82.0 and v0.85.0–v0.87.0
-(external workers, external CDC consumers, Kubernetes operators, cross-cluster
+**These gates are minor releases, not patches.** They were originally numbered
+v0.81.1–v0.81.4. Each is a Large or Very Large body of work, and between them
+they reject query forms that are accepted today, change a persisted row-identity
+encoding, revoke function grants from `PUBLIC`, disable scheduler fusion by
+default, remove or convert `pgtrickle.migrate()`, and narrow documented
+self-healing behaviour. Shipping that as a patch series would tell users the
+opposite of what the releases actually do.
+
+**Gate sequencing is partly parallel.** v0.82.0 → v0.83.0 is a hard ordering:
+DVM semantics only matter once the frontier feeding them is trustworthy.
+v0.84.0 (catalog, privilege, upgrade) and v0.85.0 (scheduler, resources) touch
+disjoint subsystems and can be developed alongside them; only the release order
+is fixed, so a stall in one gate does not idle the other three.
+
+The distributed work that an earlier draft of this arc carried (external
+workers, external CDC consumers, Kubernetes operators, cross-cluster
 federation, object-storage state) has moved to [Beyond v1.0](#beyond-v10). It
 is optional infrastructure for deployments that have genuinely outgrown one
 machine — not the path to 1.0.
@@ -425,28 +439,44 @@ machine — not the path to 1.0.
 | Version | Theme | User promise | Status | Scope | Full details |
 |---------|-------|--------------|--------|-------|--------------|
 | [v0.81.0](roadmap/v0.81.0.md) | Observability, Self-Tuning & Quick Wins: commit-to-visible latency metric using pg_xact_commit_timestamp (QW-1), configuration advisor function pgtrickle.tune_recommendations() (QW-2), preview/dry-run mode pgtrickle.preview_stream_table() (QW-3), OpenTelemetry trace spans on scheduler_tick/refresh_cycle/delta_execute/merge_apply with OTLP export (QW-4), bounded LRU eviction on thread-local L0/L1 template caches (QW-5), DeltaOperator trait for extensible operator dispatch (QW-6), split config.rs into config/scheduler.rs + config/cdc.rs + config/dvm.rs + config/monitoring.rs (QW-7), self-healing circuit breaker with auto-remediation for OOM/lock-timeout/sustained-lag (QW-8), chunked MERGE for large deltas with configurable merge_batch_size GUC (QW-9), stream table presets ('real-time'/'batch'/'cost-optimized') (QW-10) | — | ✅ Released | Large | [Full details](roadmap/v0.81.0.md) |
-| [v0.81.1](roadmap/v0.81.1.md) | Frontier & CDC Durability Gate: one safe frontier contract for manual/scheduled refresh, backend_xid/xmin/2PC holdback, database/tick-scoped immutable worker bounds, snapshot-aligned FULL refresh, no blind WAL slot fast-forward, atomic WAL-to-trigger cutover, missing-buffer fail-closed repair, common TopK/fused/fallback finalization, honest sync/UNLOGGED crash semantics | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.1.md) |
-| [v0.81.2](roadmap/v0.81.2.md) | DVM Semantic Fidelity Gate: private set-operation state and exact ALL multiplicity, positional/NULL-safe branches, nullable SUM and statistical accumulator correctness, scalar cardinality errors, LATERAL identity/IMMEDIATE safety, fail-closed volatility and AST rewrites, sound circular monotonicity admission, collision-free composite row identity | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.2.md) |
-| [v0.81.3](roadmap/v0.81.3.md) | Catalog, Privilege & Upgrade Integrity: fresh/upgrade catalog parity, explicit SQL ACL/ownership matrix, typed identifier and snapshot provenance safety, typed bulk lifecycle APIs and complete CDC cleanup, truthful logical restore, real old-binary upgrades, tag/runtime version equality, checked numeric contracts, generated SQL reference contracts | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.3.md) |
-| [v0.81.4](roadmap/v0.81.4.md) | Scheduler & Resource Resilience Gate: authoritative worker limits and race-free tokens, database-scoped pause/health state, persistent drain, enforceable refresh deadlines, complete self-healing/error accounting, bounded queue/catalog maintenance, scheduler-safe metrics/alerts, API resource ceilings and real fuzz/property assurance | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.81.4.md) |
-| [v0.82.0](roadmap/v0.82.0.md) | Product UX & Transparency: pgtrickle.explain() reporting refresh mode, estimated changed rows, dominant cost, expected refresh time, current lag, next refresh and FULL fallback threshold in human terms (UX-2), machine-readable "why did AUTO choose FULL?" reason codes on every FULL path (UX-3), creation-time warnings with HINTs for always-FULL queries, cost exceeding the refresh interval, RLS, missing replica identity and excessive write overhead (UX-4), pg_stat_pgtrickle statistics view (UX-5), lag and refresh-mode annotations in EXPLAIN output (UX-6) | "I understand what pg_trickle is doing." | Planned | Large | [Full details](roadmap/v0.82.0.md) |
-| [v0.83.0](roadmap/v0.83.0.md) | Low-Impact Refresh: pipelined refresh execution streaming delta rows through a cursor with per-batch MERGE, bounding peak memory and lock hold time (LOW-1), cheaper capture via statement-level batching, capture-time column pruning and trigger short-circuit for paused consumers (LOW-2), shared-memory change buffer ring for sources above 10K writes/s with table-based overflow (LOW-3), load-aware deferral, refresh spike smoothing, bounded concurrency and lock etiquette (LOW-4), a single memory_budget_mb bounding every accumulation point (LOW-5), and a published pgbench overhead benchmark wired into CI as a blocking regression gate (LOW-6) | "Keeping views fresh won't hurt my application." | Planned | Large | [Full details](roadmap/v0.83.0.md) |
-| [v0.84.0](roadmap/v0.84.0.md) | Fast Incremental Engine: vectorized aggregate path using Arrow-compatible columnar batches with SIMD operations for pure-aggregate STs (MT-8), incremental window function computation replacing partition-based recomputation with proper incremental algorithms for ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD (LT-7), cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9), parallel delta computation fan-out for multi-source joins (PERF-O4), DiffContext decomposition into CdcContext/CacheContext/OptimizationContext (ENG-1) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.84.0.md) |
-| [v0.85.0](roadmap/v0.85.0.md) | Freshness SLAs & Self-Tuning: target_freshness as the primary user-facing control with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), infeasible-SLA detection at creation and continuously thereafter (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.85.0.md) |
-| [v0.86.0](roadmap/v0.86.0.md) | Lifecycle & Schema Evolution: safe ALTER STREAM TABLE ... AS with compatible/rebuildable/rejected classification and shadow-table swap (LC-1), automatic handling of additive source DDL with loud, actionable suspension for destructive changes (LC-2), tested pg_dump/pg_restore, PITR, pg_basebackup and replica promotion behavior (LC-3), database cloning that never steals the original's replication slots (LC-4), pgtrickle.preflight_upgrade() plus quiesce/resume (LC-5), pg_upgrade and extension-upgrade coverage in CI with active workloads (LC-6), and automatic CDC repair as the default path (LC-7) | "Production changes don't break my stream tables." | Planned | Large | [Full details](roadmap/v0.86.0.md) |
-| [v0.87.0](roadmap/v0.87.0.md) | Production Polish: zero-config profile detection for laptop/managed/dedicated instances (PP-1), an enforced ceiling and alert for every resource including predictable disk usage (PP-2), pg_stat_progress-style progress reporting for long operations (PP-3), an audited error surface where every message carries SQLSTATE, DETAIL and an actionable HINT (PP-4), shipped Grafana dashboard, alert rules and collector-validated OTel spans (PP-5), a simple role-based privilege model (PP-6), 72-hour soak, upgrade compatibility matrix and performance regression gates (PP-7), one-command install verified by smoke tests on every package (PP-8), then **feature freeze** | "I can confidently run this for years." | Planned | Large | [Full details](roadmap/v0.87.0.md) |
+| [v0.82.0](roadmap/v0.82.0.md) | Frontier & CDC Durability Gate: one safe frontier contract for manual/scheduled refresh, backend_xid/xmin/2PC holdback, database/tick-scoped immutable worker bounds, snapshot-aligned FULL refresh, no blind WAL slot fast-forward, atomic WAL-to-trigger cutover, missing-buffer fail-closed repair, common TopK/fused/fallback finalization, honest sync/UNLOGGED crash semantics | "Can I trust this table?" | Planned | Very Large | [Full details](roadmap/v0.82.0.md) |
+| [v0.83.0](roadmap/v0.83.0.md) | DVM Semantic Fidelity Gate: private set-operation state and exact ALL multiplicity, positional/NULL-safe branches, nullable SUM and statistical accumulator correctness, scalar cardinality errors, LATERAL identity/IMMEDIATE safety, fail-closed volatility and AST rewrites, sound circular monotonicity admission, collision-free composite row identity | "Can I trust this table?" | Planned | Very Large | [Full details](roadmap/v0.83.0.md) |
+| [v0.84.0](roadmap/v0.84.0.md) | Catalog, Privilege & Upgrade Integrity: fresh/upgrade catalog parity, explicit SQL ACL/ownership matrix, typed identifier and snapshot provenance safety, typed bulk lifecycle APIs and complete CDC cleanup, truthful logical restore, real old-binary upgrades, tag/runtime version equality, checked numeric contracts, generated SQL reference contracts | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.84.0.md) |
+| [v0.85.0](roadmap/v0.85.0.md) | Scheduler & Resource Resilience Gate: authoritative worker limits and race-free tokens, database-scoped pause/health state, persistent drain, enforceable refresh deadlines, complete self-healing/error accounting, bounded queue/catalog maintenance, scheduler-safe metrics/alerts, API resource ceilings and real fuzz/property assurance | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.85.0.md) |
+| [v0.86.0](roadmap/v0.86.0.md) | Product UX & Transparency: pgtrickle.explain() reporting refresh mode, estimated changed rows, dominant cost, expected refresh time, current lag, next refresh and FULL fallback threshold in human terms (UX-2), machine-readable "why did AUTO choose FULL?" reason codes on every FULL path (UX-3), creation-time warnings with HINTs for always-FULL queries, cost exceeding the refresh interval, RLS, missing replica identity and excessive write overhead (UX-4), pg_stat_pgtrickle statistics view (UX-5), opt-in lag and refresh-mode annotations in EXPLAIN output (UX-6), and target_freshness accepted, stored, reported and feasibility-checked four releases before the controller has to honour it (UX-7) | "I understand what pg_trickle is doing." | Planned | Large | [Full details](roadmap/v0.86.0.md) |
+| [v0.87.0](roadmap/v0.87.0.md) | Low-Impact Refresh: pipelined refresh execution streaming delta rows through a cursor with per-batch MERGE, superseding the v0.81.0 chunked MERGE (LOW-1), cheaper capture via statement-level batching, capture-time column pruning and trigger short-circuit for paused consumers (LOW-2), load-aware deferral, refresh spike smoothing and bounded concurrency extending the v0.85.0 deadline machinery (LOW-4), a single memory_budget_mb bounding every accumulation point (LOW-5), and a published pgbench overhead benchmark wired into CI as a blocking regression gate (LOW-6). The shared-memory change buffer ring (LOW-3) is deferred past 1.0 | "Keeping views fresh won't hurt my application." | Planned | Large | [Full details](roadmap/v0.87.0.md) |
+| [v0.88.0](roadmap/v0.88.0.md) | Vectorized Aggregates & Delta Planning: DiffContext decomposition into CdcContext/CacheContext/OptimizationContext first (ENG-1), a vectorized columnar path for pure-aggregate stream tables gated on an ADR that revisits the v0.76.0 Arrow dependency removal (MT-8), and cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.88.0.md) |
+| [v0.89.0](roadmap/v0.89.0.md) | Incremental Window Functions: a bounded, crash-safe auxiliary state model (LT-7a), rank-family algorithms (LT-7b), offset and boundary algorithms (LT-7c), aggregate-over-window algorithms (LT-7d), and documented fallback with reason codes and support-matrix entries for uncovered frames (LT-7e) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.89.0.md) |
+| [v0.90.0](roadmap/v0.90.0.md) | Freshness Controller & Self-Tuning: target_freshness becomes authoritative with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), continuous infeasible-SLA detection (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.90.0.md) |
+| [v0.91.0](roadmap/v0.91.0.md) | Lifecycle & Schema Evolution: safe defining-query replacement with compatible/rebuildable/rejected classification and shadow-table swap (LC-1), automatic handling of additive source DDL with loud, actionable suspension for destructive changes (LC-2), tested pg_dump/pg_restore, PITR, pg_basebackup and replica promotion behavior (LC-3), database cloning that never steals the original's replication slots (LC-4), pgtrickle.preflight_upgrade() plus quiesce/resume (LC-5), pg_upgrade and extension-upgrade coverage in CI with active workloads (LC-6), and automatic CDC repair as the default path (LC-7) | "Production changes don't break my stream tables." | Planned | Very Large | [Full details](roadmap/v0.91.0.md) |
+| [v0.92.0](roadmap/v0.92.0.md) | Defaults, Bounds & Diagnosis: zero-config profile detection for laptop/managed/dedicated instances (PP-1), an enforced ceiling and alert for every resource including predictable disk usage (PP-2), pg_stat_progress-style progress reporting for long operations (PP-3), an audited error surface where every message carries SQLSTATE, DETAIL and an actionable HINT (PP-4), and a role-based privilege model packaging the v0.84.0 ACL matrix (PP-6) | "I can confidently run this for years." | Planned | Large | [Full details](roadmap/v0.92.0.md) |
+| [v0.93.0](roadmap/v0.93.0.md) | Monitoring, Assurance & Packaging: shipped Grafana dashboard, alert rules and collector-validated OTel spans (PP-5), 72-hour soak, upgrade compatibility matrix and performance regression gates on one commit (PP-7), one-command install verified by smoke tests on every package (PP-8), then **feature freeze** enforced by CI rather than intention | "I can confidently run this for years." | Planned | Large | [Full details](roadmap/v0.93.0.md) |
 
 ### Toward v1.0
 
-After v0.87.0 the project stops adding features. No v0.88, v0.89 or v0.90 gets
-invented to fill the space before 1.0. The remaining pre-1.0 period is spent on
-**bugs → benchmarks → compatibility → upgrades → docs → real-world workloads →
-simplification**, and the real 1.0 gate is *no known correctness issues and
-boring upgrades*.
+After v0.93.0 the project stops adding features. The remaining pre-1.0 period
+is spent on **bugs → benchmarks → compatibility → upgrades → docs → real-world
+workloads → simplification**, and the real 1.0 gate is *no known correctness
+issues and boring upgrades*.
+
+That period is a **release-candidate series**, not a gap: `v1.0.0-rc.N` ships
+first, and 1.0.0 is tagged only once a candidate has been in the field without
+a new blocker. PostgreSQL 19 support is explicitly **not** a 1.0 blocker — PG 19
+GA and pgrx's PG 19 support are outside this project's control, and holding the
+stability contract for finished PG 18 work hostage to someone else's schedule
+is not a plan.
+
+> **On the version count.** The unreleased part of this arc grew from ten
+> planned releases to twelve. No new scope was invented: four patch-numbered
+> gates became minor releases, and two releases that each contained two
+> independent programmes (the engine work, and production polish) were split.
+> Twelve honestly sized releases are a more realistic plan than ten that hide
+> their size.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
-| [v1.0.0](roadmap/v1.0.0.md-full.md) | Stability contract — no known correctness issues, boring upgrades, stable API/catalog/GUC surface, PostgreSQL 19, package registries, signed artifacts, SBOMs | Planned | Large | [Full details](roadmap/v1.0.0.md-full.md) |
+| v1.0.0-rc.N | Release candidates: no new features, only blockers found by rc users | Planned | — | [Full details](roadmap/v1.0.0.md-full.md) |
+| [v1.0.0](roadmap/v1.0.0.md-full.md) | Stability contract — no known correctness issues, boring upgrades, stable API/catalog/GUC surface, package registries, signed artifacts, SBOMs | Planned | Large | [Full details](roadmap/v1.0.0.md-full.md) |
 
 ### Beyond v1.0
 
@@ -579,27 +609,33 @@ v0.80    ─── Operational excellence & final v1.0 gate: DVM reason codes, r
     │
 v0.81    ─── Observability, self-tuning & quick wins: OTel traces, commit-to-visible metric, config advisor, chunked MERGE, self-healing, presets, DeltaOperator trait
     │
-v0.81.1  ─── Frontier & CDC durability gate: safe bounds, snapshot-aligned FULL, WAL cutover, fail-closed buffers, common finalization, crash semantics
+v0.82    ─── Frontier & CDC durability gate: safe bounds, snapshot-aligned FULL, WAL cutover, fail-closed buffers, common finalization, crash semantics
     │
-v0.81.2  ─── DVM semantic fidelity gate: exact set operations, NULL aggregates, scalar/LATERAL correctness, volatility, monotonicity, row identity
+v0.83    ─── DVM semantic fidelity gate: exact set operations, NULL aggregates, scalar/LATERAL correctness, volatility, monotonicity, row identity
     │
-v0.81.3  ─── Catalog, privilege & upgrade integrity: schema parity, ACL matrix, identifier safety, restore, real upgrades, version and API contracts
+v0.84    ─── Catalog, privilege & upgrade integrity: schema parity, ACL matrix, identifier safety, restore, real upgrades, version and API contracts
     │
-v0.81.4  ─── Scheduler & resource resilience gate: worker caps, database scoping, drain/deadlines, self-healing, bounded maintenance, adversarial assurance
+v0.85    ─── Scheduler & resource resilience gate: worker caps, database scoping, drain/deadlines, self-healing, bounded maintenance, adversarial assurance
     │
-v0.82    ─── Product UX & transparency: declarative CREATE/ALTER STREAM TABLE, pgtrickle.explain(), FULL-reason codes, creation-time warnings, pg_stat_pgtrickle
+v0.86    ─── Product UX & transparency: pgtrickle.explain(), FULL-reason codes, creation-time warnings, pg_stat_pgtrickle, target_freshness accepted
     │
-v0.83    ─── Low-impact refresh: pipelined execution, cheaper capture, shared-memory ring buffers, backpressure, memory budget, overhead benchmark gate
+v0.87    ─── Low-impact refresh: pipelined execution (supersedes chunked MERGE), cheaper capture, backpressure, memory budget, overhead benchmark gate
     │
-v0.84    ─── Fast incremental engine: Arrow columnar batches, incremental window functions, cost-based operator scheduling, parallel fan-out
+v0.88    ─── Vectorized aggregates & delta planning: DiffContext split first, columnar aggregate path behind a dependency ADR, cost-based operator scheduling
     │
-v0.85    ─── Freshness SLAs & self-tuning: target_freshness as the primary control, closed-loop controller, adaptive workers, freshness() reporting
+v0.89    ─── Incremental window functions: bounded auxiliary state, rank/offset/aggregate-over-window algorithms, documented fallback with reason codes
     │
-v0.86    ─── Lifecycle & schema evolution: safe ALTER ... AS, auto schema evolution, PITR/dump/clone, preflight_upgrade(), automatic CDC repair
+v0.90    ─── Freshness controller & self-tuning: target_freshness becomes authoritative, closed-loop controller, adaptive workers, freshness() reporting
     │
-v0.87    ─── Production polish: zero-config profiles, bounded resources, progress reporting, error-message audit, soak + regression gates, then feature freeze
+v0.91    ─── Lifecycle & schema evolution: safe query replacement, auto schema evolution, PITR/dump/clone, preflight_upgrade(), automatic CDC repair
     │
-v1.0.0   ─── Stability contract: no known correctness issues, boring upgrades, PostgreSQL 19, package registries, signed artifacts, SBOMs
+v0.92    ─── Defaults, bounds & diagnosis: zero-config profiles, bounded resources, progress reporting, error-message audit, role-based privileges
+    │
+v0.93    ─── Monitoring, assurance & packaging: Grafana/OTel validation, 72-hour soak, upgrade matrix, regression gates, install smoke tests, feature freeze
+    │
+v1.0-rc  ─── Release candidates: blockers only, no new features
+    │
+v1.0.0   ─── Stability contract: no known correctness issues, boring upgrades, package registries, signed artifacts, SBOMs
     │
 v1.6+    ─── Beyond 1.0 (optional/speculative): automatic query acceleration, decoupled compute, distributed deltas + Kubernetes, federation
 ```
@@ -898,7 +934,7 @@ Operational runbooks for upgrade rollback and the upgrade E2E cutoff policy,
 CI gate documentation for contributors, and cargo-deny advisory review-by
 dates complete the pre-v1.0 checklist.
 
-**v0.81.0 through v0.87.0 form the Product Arc.** The engine is sound after 16
+**v0.81.0 through v0.93.0 form the Product Arc.** The engine is sound after 16
 assessment arcs, though the post-v0.81.0 implementation audit found correctness
 and resilience gaps that require explicit closure first. What is missing beyond
 those gaps is not capability but product: the machinery is broad, and the
@@ -922,43 +958,46 @@ deltas, self-healing circuit breakers, and stream table presets for progressive
 disclosure.
 
 The post-v0.81.0 implementation audit adds a mandatory four-release hardening
-gate before the product arc begins. v0.81.1 closes frontier, CDC durability, WAL
+gate before the product arc begins. v0.82.0 closes frontier, CDC durability, WAL
 cutover, crash-recovery, and refresh-finalization paths that could skip or hide
-committed changes. v0.81.2 enforces PostgreSQL semantics in the existing DVM
+committed changes. v0.83.0 enforces PostgreSQL semantics in the existing DVM
 surface, including set operations, NULL aggregates, scalar and LATERAL
-subqueries, volatility, circular monotonicity, and row identity. v0.81.3 makes
+subqueries, volatility, circular monotonicity, and row identity. v0.84.0 makes
 fresh and upgraded catalogs identical, defines the privilege boundary, repairs
 lifecycle and restore contracts, and verifies real binary upgrades and release
-versions. v0.81.4 makes scheduler concurrency, database scoping, drain,
+versions. v0.85.0 makes scheduler concurrency, database scoping, drain,
 deadlines, remediation, maintenance, metrics, and resource bounds reliable
 under stress. These releases add no user-facing capability; they are the proof
-boundary that everything after them must preserve.
+boundary that everything after them must preserve. They are numbered as minor
+releases because they change user-visible behaviour — rejecting query forms
+that are accepted today, revoking `PUBLIC` grants, changing a persisted
+row-identity encoding — which a patch series must not do.
 
-v0.82.0 makes the system legible: declarative `CREATE STREAM TABLE`
-DDL, a `pgtrickle.explain()` function that answers in plain language what a
-stream table costs and how stale it is, a reason code behind every FULL refresh,
-creation-time warnings for expensive queries, and a `pg_stat_pgtrickle` view
-that ordinary monitoring tools already know how to read. v0.83.0 makes
-pg_trickle nearly invisible to OLTP: pipelined refresh execution, cheaper
-capture on the write path, shared-memory ring buffers for hot sources,
-backpressure that yields to the application, a single memory budget, and a
-published write-overhead benchmark enforced as a CI gate. v0.84.0 is the one
-release where deep complexity is justified, because all of it is inside the
-engine — vectorized aggregates, proper incremental window algorithms,
-cost-based delta planning and selective parallelism, targeting a 5–10×
-throughput improvement with no change to deployment or API.
+v0.86.0 makes the system legible: a `pgtrickle.explain()` function that answers
+in plain language what a stream table costs and how stale it is, a reason code
+behind every FULL refresh, creation-time warnings for expensive queries, a
+`pg_stat_pgtrickle` view that ordinary monitoring tools already know how to
+read, and `target_freshness` accepted as a declared input long before the
+controller has to honour it. v0.87.0 makes pg_trickle nearly invisible to OLTP:
+pipelined refresh execution replacing the v0.81.0 chunked MERGE, cheaper capture
+on the write path, backpressure that yields to the application, a single memory
+budget, and a published write-overhead benchmark enforced as a CI gate. v0.88.0
+and v0.89.0 are where deep complexity is justified, because all of it is inside
+the engine — a vectorized aggregate path and cost-based delta planning first,
+then genuinely incremental window-function algorithms, with no change to
+deployment or API.
 
-v0.85.0 elevates freshness to the primary user-facing control: users state a
-`target_freshness` and a closed-loop controller derives the schedule, the
-DIFFERENTIAL/FULL decision, batch sizes, concurrency and priority, reporting
-whether the SLA is being met. v0.86.0 makes lifecycle boring — safe query
-changes, automatic handling of compatible source-schema changes, tested PITR,
-dump/restore, cloning and major upgrades, and a `preflight_upgrade()` function
-that tells a DBA whether it is safe to proceed. v0.87.0 is the "would a DBA
-recommend this?" release: excellent defaults, bounded resources, progress
-reporting, error messages with remediation, monitoring integration, a simple
-privilege model, soak and regression gates, and one-command install — followed
-by a feature freeze.
+v0.90.0 makes freshness authoritative: the closed-loop controller derives the
+schedule, the DIFFERENTIAL/FULL decision, batch sizes, concurrency and priority
+from the target users already declared, and reports whether the SLA is being
+met. v0.91.0 makes lifecycle boring — safe query changes, automatic handling of
+compatible source-schema changes, tested PITR, dump/restore, cloning and major
+upgrades, and a `preflight_upgrade()` function that tells a DBA whether it is
+safe to proceed. v0.92.0 and v0.93.0 answer "would a DBA recommend this?":
+excellent defaults, bounded resources, progress reporting and error messages
+with remediation, then monitoring integration, soak and regression gates, and
+one-command install — followed by a feature freeze and a release-candidate
+series rather than a jump straight to 1.0.
 
 **The distributed work has moved past 1.0.** External workers, external CDC
 consumers, Kubernetes operators, distributed delta computation, cross-cluster
