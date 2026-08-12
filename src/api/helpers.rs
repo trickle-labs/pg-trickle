@@ -100,27 +100,17 @@ pub(super) fn with_invoker_search_path<T>(
     invoker_search_path: &str,
     f: impl FnOnce() -> Result<T, PgTrickleError>,
 ) -> Result<T, PgTrickleError> {
-    use std::ffi::CString;
     use std::panic::AssertUnwindSafe;
 
-    let invoker_search_path = CString::new(invoker_search_path)
-        .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
+    Spi::run_with_args(
+        "SELECT pg_catalog.set_config('search_path', $1, true)",
+        &[invoker_search_path.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     unsafe {
-        // SAFETY: PostgreSQL copies the supplied C string while applying the
-        // backend-local setting. PgTryBuilder restores the locked value on
-        // both success and PostgreSQL ERROR paths.
-        pg_sys::set_config_option(
-            c"search_path".as_ptr(),
-            invoker_search_path.as_ptr(),
-            pg_sys::GucContext::PGC_USERSET,
-            pg_sys::GucSource::PGC_S_SESSION,
-            pg_sys::GucAction::GUC_ACTION_LOCAL,
-            true,
-            pgrx::PgLogLevel::ERROR as i32,
-            false,
-        );
-
+        // SAFETY: PgTryBuilder runs the cleanup hook on both success and
+        // PostgreSQL ERROR paths while the backend is in a valid state.
         pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
             .finally(|| {
                 pg_sys::set_config_option(
