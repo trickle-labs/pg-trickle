@@ -90,7 +90,7 @@ fn outer_user_id() -> pg_sys::Oid {
 }
 
 /// Capture the search path that invoked a SECURITY DEFINER creation API.
-pub(super) fn invoker_search_path() -> Result<Option<String>, PgTrickleError> {
+pub(super) fn invoker_search_path() -> Result<String, PgTrickleError> {
     use std::ffi::CStr;
 
     unsafe {
@@ -99,7 +99,7 @@ pub(super) fn invoker_search_path() -> Result<Option<String>, PgTrickleError> {
         // for the duration of the call.
         let search_path_handle = pg_sys::get_config_handle(c"search_path".as_ptr());
         if search_path_handle.is_null() || (*search_path_handle).stack.is_null() {
-            return Ok(None);
+            return Ok(format!("{}, public", quote_identifier(&outer_user_name()?)));
         }
         let prior_path = (*(*search_path_handle).stack).prior.val.stringval;
         if prior_path.is_null() {
@@ -110,25 +110,19 @@ pub(super) fn invoker_search_path() -> Result<Option<String>, PgTrickleError> {
         let prior_path = CStr::from_ptr(prior_path)
             .to_str()
             .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
-        Ok(Some(expand_search_path_user(
-            prior_path,
-            &outer_user_name()?,
-        )))
+        Ok(expand_search_path_user(prior_path, &outer_user_name()?))
     }
 }
 
 /// Run caller-controlled SQL with a captured invoker search path, restoring
 /// the locked SECURITY DEFINER path afterwards.
 pub(super) fn with_invoker_search_path<T>(
-    invoker_search_path: Option<&str>,
+    invoker_search_path: &str,
     f: impl FnOnce() -> Result<T, PgTrickleError>,
 ) -> Result<T, PgTrickleError> {
     use std::ffi::CString;
     use std::panic::AssertUnwindSafe;
 
-    let Some(invoker_search_path) = invoker_search_path else {
-        return f();
-    };
     let invoker_search_path = CString::new(invoker_search_path)
         .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
 
@@ -1995,7 +1989,7 @@ pub(super) fn initialize_st(
     sum2_aux_columns: &[(String, String)],
     covar_aux_columns: &[(String, String)],
     nonnull_aux_columns: &[(String, String)],
-    invoker_search_path: Option<&str>,
+    invoker_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the initialization INSERT into the storage table.

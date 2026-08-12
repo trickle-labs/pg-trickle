@@ -6,7 +6,7 @@
 #   scripts/unsafe_inventory.sh --update
 #
 # Files and their unsafe block counts:
-src/api/helpers.rs 13
+src/api/helpers.rs 14
 src/api/snapshot.rs 6
 src/dvm/parser/mod.rs 20
 src/dvm/parser/rewrites.rs 64
@@ -19,4 +19,3 @@ src/scheduler/mod.rs 10
 src/scheduler/scheduler_loop.rs 4
 src/shmem.rs 46
 src/wal_decoder.rs 5
-

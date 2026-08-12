@@ -1212,7 +1212,7 @@ pub(crate) fn create_stream_table_impl(
 
     // ── Query rewrite, validation, and parse ───────────────────────
     let original_query = query.to_string();
-    let (rw, vq) = with_invoker_search_path(invoker_search_path.as_deref(), || {
+    let (rw, vq) = with_invoker_search_path(&invoker_search_path, || {
         let rw = run_query_rewrite_pipeline(query)?;
         let vq = validate_and_parse_query(
             &rw.query,
@@ -1529,7 +1529,7 @@ pub(crate) fn create_stream_table_impl(
             &vq.sum2_aux_columns,
             &vq.covar_aux_columns,
             &vq.nonnull_aux_columns,
-            invoker_search_path.as_deref(),
+            &invoker_search_path,
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
 
