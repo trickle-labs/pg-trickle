@@ -460,6 +460,10 @@ The action plan maps to the following release schedule:
 | Version | Theme | Items |
 |---------|-------|-------|
 | **v0.81.0** | Observability, Self-Tuning & Quick Wins | QW-1 through QW-10 |
+| **v0.81.1** | Frontier and CDC Durability Gate | Pre-scaling implementation audit; see [roadmap/v0.81.1.md](../roadmap/v0.81.1.md) |
+| **v0.81.2** | DVM Semantic Fidelity Gate | Pre-scaling implementation audit; see [roadmap/v0.81.2.md](../roadmap/v0.81.2.md) |
+| **v0.81.3** | Catalog, Privilege, and Upgrade Integrity | Pre-scaling implementation audit; see [roadmap/v0.81.3.md](../roadmap/v0.81.3.md) |
+| **v0.81.4** | Scheduler and Resource Resilience Gate | Pre-scaling implementation audit; see [roadmap/v0.81.4.md](../roadmap/v0.81.4.md) |
 | **v0.82.0** | External Worker Foundation | MT-1, MT-2, MT-7, MT-9, MT-10 |
 | **v0.83.0** | Performance Pipeline & CDC Extraction | MT-3, MT-4, MT-5, MT-6 |
 | **v0.84.0** | Vectorized Compute & Adaptive Engine | MT-8, LT-7, LT-9 |
@@ -508,4 +512,7 @@ detection and progressive opt-in.
 The immediate v0.81.0 release delivers quick wins (OTel tracing, commit-to-visible
 metric, configuration advisor, chunked MERGE, self-healing) that make the current
 single-node engine significantly more observable and self-tuning — valuable
-regardless of whether the distributed scaling path is pursued.
+regardless of whether the distributed scaling path is pursued. The subsequent
+v0.81.1-v0.81.4 implementation-audit gates strengthen existing durability, DVM,
+catalog, privilege, upgrade, scheduler, and resource contracts without adding
+major features. MT-1 and MT-2 begin only after those gates pass.

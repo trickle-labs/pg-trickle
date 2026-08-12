@@ -391,7 +391,7 @@ and durability foundations that must be proven before v1.0.
 | [v0.79.0](roadmap/v0.79.0.md) | Code Quality, API Ergonomics & Security: remove unused-import suppressions in src/refresh/codegen.rs and src/refresh/merge/mod.rs module-by-module (Q-1), convert internal create/alter API implementations to typed parameter structs eliminating too-many-arguments in business logic (Q-2), replace global #![allow(dead_code)] with narrower per-module allowances on pgrx/export boundaries (Q-3), remove or #[deprecated] consume_slot_changes() replacing with clearly named status function (Q-4), add SQL convenience helpers create_stream_table_fast_append_only/set_stream_table_refresh_policy/set_stream_table_storage_policy (A-1), add first-class pause_stream_table/resume_stream_table wrappers (A-2), add/strengthen semgrep CI rules for dynamic SQL distinguishing identifier/literal/OID boundaries (S-1), emit runtime WARNING when source has RLS enabled at create_stream_table time (S-2), CI test inspecting SECURITY DEFINER trigger functions for SET search_path (S-3), cleanup chaos test forcing three consecutive DELETE failures with alert and status verification (D-3), dbt adapter compatibility matrix with alter/drop/rebuild flow and version matrix tests (T-5) | ✅ Released | Large | [Full details](roadmap/v0.79.0.md-full.md) |
 | [v0.80.0](roadmap/v0.80.0.md) | Operational Excellence, Documentation Completeness & Final v1.0 Gate: add DVM fallback/performance reason codes to refresh history and health output — CORRELATED_SUBQUERY_DELTA_QUADRATIC, CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK, REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN (O-1), add health_check() threshold alert when invalidation ring overflow count increases in recent time window (O-2), add cleanup backlog trend metrics integrated into pgt_metrics_summary (O-3), docs lint comparing #[pg_extern] exports with SQL_REFERENCE.md entries (DOC-1), create docs/DVM_SUPPORT_MATRIX.md with every query pattern, fallback behavior, IMMEDIATE restrictions, and known-unsupported forms including q12/q20 entries (DOC-2), operational rollback runbook (backup requirements, snapshot recommendation, restore path, why downgrades are unsafe) (U-1), document upgrade E2E cutoff policy prominently in CHANGELOG and release notes (U-2), CI gate documentation in CONTRIBUTING.md describing which workflows gate PRs (B-1), review-by dates on cargo-deny advisory suppressions and require cargo-deny in PR gates (B-2), fuzz test for DVM snapshot fingerprint cache stability under OpTree refactoring (P-5), document internal event trigger functions in ARCHITECTURE comments (A-3) | ✅ Released | Large | [Full details](roadmap/v0.80.0.md-full.md) |
 
-### Assessment-16-Driven Scaling Arc (v0.81.x – v0.87.x)
+### Assessment-16 Scaling Arc and Pre-Scaling Hardening Gate (v0.81.x - v0.87.x)
 
 Driven by the findings in the v0.80.0 vision audit
 ([plans/PLAN_OVERALL_ASSESSMENT_16.md](plans/PLAN_OVERALL_ASSESSMENT_16.md)).
@@ -400,14 +400,25 @@ architecture (single-process compute ceiling, change buffer I/O amplification,
 no state externalization), performance (no vectorized batch processing, SPI
 overhead per refresh, no incremental MERGE), ergonomics (no declarative DDL,
 no auto-schema-evolution, no configuration advisor), and observability (no
-OpenTelemetry traces, no commit-to-visible latency metric). This seven-release
+OpenTelemetry traces, no commit-to-visible latency metric). This seven-minor-release
 arc implements the "Blueprint for Infinite Scaling" — transitioning pg_trickle
 from a world-class single-node extension to a distributed, auto-scaling IVM
 system capable of running on a developer laptop or a Kubernetes cluster.
 
+An August 2026 implementation audit after v0.81.0 found unresolved single-node
+correctness and resilience risks that must not be carried into a multi-process
+architecture. Four patch releases now form a mandatory pre-scaling gate. They
+add no major features: they make the existing frontier, CDC, DVM, SQL API,
+catalog, upgrade, scheduler, and resource contracts fail closed and prove them
+under adversarial concurrency. v0.82.0 is blocked until all four gates pass.
+
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|--------------|
 | [v0.81.0](roadmap/v0.81.0.md) | Observability, Self-Tuning & Quick Wins: commit-to-visible latency metric using pg_xact_commit_timestamp (QW-1), configuration advisor function pgtrickle.tune_recommendations() (QW-2), preview/dry-run mode pgtrickle.preview_stream_table() (QW-3), OpenTelemetry trace spans on scheduler_tick/refresh_cycle/delta_execute/merge_apply with OTLP export (QW-4), bounded LRU eviction on thread-local L0/L1 template caches (QW-5), DeltaOperator trait for extensible operator dispatch (QW-6), split config.rs into config/scheduler.rs + config/cdc.rs + config/dvm.rs + config/monitoring.rs (QW-7), self-healing circuit breaker with auto-remediation for OOM/lock-timeout/sustained-lag (QW-8), chunked MERGE for large deltas with configurable merge_batch_size GUC (QW-9), stream table presets ('real-time'/'batch'/'cost-optimized') (QW-10) | ✅ Released | Large | [Full details](roadmap/v0.81.0.md) |
+| [v0.81.1](roadmap/v0.81.1.md) | Frontier & CDC Durability Gate: one safe frontier contract for manual/scheduled refresh, backend_xid/xmin/2PC holdback, database/tick-scoped immutable worker bounds, snapshot-aligned FULL refresh, no blind WAL slot fast-forward, atomic WAL-to-trigger cutover, missing-buffer fail-closed repair, common TopK/fused/fallback finalization, honest sync/UNLOGGED crash semantics | Planned | Large | [Full details](roadmap/v0.81.1.md) |
+| [v0.81.2](roadmap/v0.81.2.md) | DVM Semantic Fidelity Gate: private set-operation state and exact ALL multiplicity, positional/NULL-safe branches, nullable SUM and statistical accumulator correctness, scalar cardinality errors, LATERAL identity/IMMEDIATE safety, fail-closed volatility and AST rewrites, sound circular monotonicity admission, collision-free composite row identity | Planned | Large | [Full details](roadmap/v0.81.2.md) |
+| [v0.81.3](roadmap/v0.81.3.md) | Catalog, Privilege & Upgrade Integrity: fresh/upgrade catalog parity, explicit SQL ACL/ownership matrix, typed identifier and snapshot provenance safety, typed bulk lifecycle APIs and complete CDC cleanup, truthful logical restore, real old-binary upgrades, tag/runtime version equality, checked numeric contracts, generated SQL reference contracts | Planned | Large | [Full details](roadmap/v0.81.3.md) |
+| [v0.81.4](roadmap/v0.81.4.md) | Scheduler & Resource Resilience Gate: authoritative worker limits and race-free tokens, database-scoped pause/health state, persistent drain, enforceable refresh deadlines, complete self-healing/error accounting, bounded queue/catalog maintenance, scheduler-safe metrics/alerts, API resource ceilings and real fuzz/property assurance | Planned | Large | [Full details](roadmap/v0.81.4.md) |
 | [v0.82.0](roadmap/v0.82.0.md) | External Worker Foundation: extract DVM + MERGE into standalone pg_trickle_worker binary connecting via tokio-postgres (MT-1), advisory-lock-based work claiming with heartbeat monitoring and automatic failover (MT-2), DiffContext decomposition into CdcContext/CacheContext/OptimizationContext (MT-7), pg_stat_pgtrickle virtual system view for per-ST cumulative statistics (MT-9), adaptive worker pool sizing based on CPU utilization and refresh queue depth (MT-10), worker registration table pgt_worker_registry with health monitoring | Planned | Large | [Full details](roadmap/v0.82.0.md) |
 | [v0.83.0](roadmap/v0.83.0.md) | Performance Pipeline & CDC Extraction: pipelined refresh execution with portal-based streaming overlapping delta SQL and MERGE application (MT-3), external CDC consumer binary pg_trickle_cdc subscribing to logical replication with zero trigger overhead (MT-4), shared-memory change buffer ring for hot sources >10K writes/s with table-based overflow (MT-5), auto-schema-evolution via DDL event trigger for additive source changes (MT-6), pg_trickle.cdc_mode='external' GUC for zero-write-path-impact mode | Planned | Large | [Full details](roadmap/v0.83.0.md) |
 | [v0.84.0](roadmap/v0.84.0.md) | Vectorized Compute & Adaptive Engine: vectorized aggregate path using Arrow-compatible columnar batches with SIMD operations for pure-aggregate STs (MT-8), incremental window function computation replacing partition-based recomputation with proper incremental algorithms for ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD (LT-7), cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9), parallel delta computation fan-out for multi-source joins (PERF-O4) | Planned | Large | [Full details](roadmap/v0.84.0.md) |
@@ -547,6 +558,14 @@ v0.79    ─── Code quality, API ergonomics & security: remove lint suppress
 v0.80    ─── Operational excellence & final v1.0 gate: DVM reason codes, ring overflow alert, backlog trends, pg_extern docs lint, DVM_SUPPORT_MATRIX, rollback runbook, upgrade cutoff docs, CI gate docs
     │
 v0.81    ─── Observability, self-tuning & quick wins: OTel traces, commit-to-visible metric, config advisor, chunked MERGE, self-healing, presets, DeltaOperator trait
+    │
+v0.81.1  ─── Frontier & CDC durability gate: safe bounds, snapshot-aligned FULL, WAL cutover, fail-closed buffers, common finalization, crash semantics
+    │
+v0.81.2  ─── DVM semantic fidelity gate: exact set operations, NULL aggregates, scalar/LATERAL correctness, volatility, monotonicity, row identity
+    │
+v0.81.3  ─── Catalog, privilege & upgrade integrity: schema parity, ACL matrix, identifier safety, restore, real upgrades, version and API contracts
+    │
+v0.81.4  ─── Scheduler & resource resilience gate: worker caps, database scoping, drain/deadlines, self-healing, bounded maintenance, adversarial assurance
     │
 v0.82    ─── External worker foundation: pg_trickle_worker binary, advisory lock coordination, adaptive pool sizing, pg_stat_pgtrickle view, DiffContext split
     │
@@ -859,19 +878,34 @@ dates complete the pre-v1.0 checklist.
 
 **v0.81.0 through v0.87.0 form the Assessment-16-Driven Scaling Arc**, driven
 by the findings in the v0.80.0 vision audit
-(plans/PLAN_OVERALL_ASSESSMENT_16.md). With correctness, documentation, and
-operational readiness proven across 15 prior assessment arcs, the project is
-architecturally sound for single-node deployment but structurally limited to
-one PostgreSQL backend process. This arc implements the "Blueprint for Infinite
-Scaling" — a backward-compatible transition from a world-class single-node
-extension to a distributed, auto-scaling IVM system.
+(plans/PLAN_OVERALL_ASSESSMENT_16.md). Prior assessments established a strong
+single-node architecture, but the post-v0.81.0 implementation audit found
+correctness and resilience gaps that require explicit closure before that
+architecture is distributed. The broader arc implements the "Blueprint for
+Infinite Scaling" — a backward-compatible transition from a world-class
+single-node extension to a distributed, auto-scaling IVM system.
 
 v0.81.0 delivers immediate observability and ergonomic wins: OpenTelemetry
 trace spans across the refresh hot path, a commit-to-visible latency metric
 for SLA compliance, a configuration advisor function that analyzes workloads
 and suggests optimal GUC values, chunked MERGE to reduce peak memory on large
 deltas, self-healing circuit breakers, and stream table presets for progressive
-disclosure. v0.82.0 introduces the external worker foundation: a standalone
+disclosure.
+
+The post-v0.81.0 implementation audit adds a mandatory four-release hardening
+gate before scaling work begins. v0.81.1 closes frontier, CDC durability, WAL
+cutover, crash-recovery, and refresh-finalization paths that could skip or hide
+committed changes. v0.81.2 enforces PostgreSQL semantics in the existing DVM
+surface, including set operations, NULL aggregates, scalar and LATERAL
+subqueries, volatility, circular monotonicity, and row identity. v0.81.3 makes
+fresh and upgraded catalogs identical, defines the privilege boundary, repairs
+lifecycle and restore contracts, and verifies real binary upgrades and release
+versions. v0.81.4 makes scheduler concurrency, database scoping, drain,
+deadlines, remediation, maintenance, metrics, and resource bounds reliable
+under stress. These releases add no major user-facing capability; they are the
+proof boundary that v0.82 must preserve.
+
+v0.82.0 introduces the external worker foundation: a standalone
 `pg_trickle_worker` binary that connects via tokio-postgres, claims work via
 advisory locks, and computes deltas outside the PostgreSQL process. The
 in-process scheduler becomes a coordinator that dispatches to external workers
@@ -892,4 +926,3 @@ Each phase is backward-compatible: a developer laptop continues running
 pg_trickle as a single in-process extension with zero additional infrastructure.
 A production Kubernetes cluster deploys the full distributed topology with
 auto-scaling workers.
-
