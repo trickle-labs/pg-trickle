@@ -59,14 +59,7 @@ pub(super) fn transfer_output_table_ownership(
     schema: &str,
     table_name: &str,
 ) -> Result<(), PgTrickleError> {
-    let invoker = outer_user_id();
-
-    let invoker_name = Spi::get_one_with_args::<String>(
-        "SELECT rolname::text FROM pg_roles WHERE oid = $1",
-        &[invoker.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-    .ok_or_else(|| PgTrickleError::NotFound(format!("Role with OID {} not found", invoker)))?;
+    let invoker_name = outer_user_name()?;
     let sql = format!(
         "ALTER TABLE {}.{} OWNER TO {}",
         quote_identifier(schema),
@@ -78,12 +71,113 @@ pub(super) fn transfer_output_table_ownership(
     })
 }
 
+fn outer_user_name() -> Result<String, PgTrickleError> {
+    let invoker = outer_user_id();
+    Spi::get_one_with_args::<String>(
+        "SELECT rolname::text FROM pg_roles WHERE oid = $1",
+        &[invoker.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("Role with OID {invoker} not found")))
+}
+
 fn outer_user_id() -> pg_sys::Oid {
     unsafe {
         // SAFETY: PostgreSQL invokes SQL functions on its main backend thread;
         // the outer user remains the stream-table author throughout the call.
         pg_sys::GetOuterUserId()
     }
+}
+
+/// Run caller-controlled SQL with the search path that invoked a SECURITY
+/// DEFINER creation API, restoring the locked path afterwards.
+pub(super) fn with_invoker_search_path<T>(
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    use std::ffi::{CStr, CString};
+    use std::panic::AssertUnwindSafe;
+
+    unsafe {
+        // SAFETY: This reads the backend-local GUC stack for the active
+        // SECURITY DEFINER frame. PgTryBuilder restores the locked value on
+        // both success and PostgreSQL ERROR paths.
+        let search_path_handle = pg_sys::get_config_handle(c"search_path".as_ptr());
+        if search_path_handle.is_null() || (*search_path_handle).stack.is_null() {
+            return f();
+        }
+        let prior_path = (*(*search_path_handle).stack).prior.val.stringval;
+        if prior_path.is_null() {
+            return Err(PgTrickleError::InternalError(
+                "invoker search_path is null".to_string(),
+            ));
+        }
+        let prior_path = CStr::from_ptr(prior_path)
+            .to_str()
+            .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
+        let invoker_search_path =
+            CString::new(expand_search_path_user(prior_path, &outer_user_name()?))
+                .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
+
+        pg_sys::set_config_option(
+            c"search_path".as_ptr(),
+            invoker_search_path.as_ptr(),
+            pg_sys::GucContext::PGC_USERSET,
+            pg_sys::GucSource::PGC_S_SESSION,
+            pg_sys::GucAction::GUC_ACTION_LOCAL,
+            true,
+            pgrx::PgLogLevel::ERROR as i32,
+            false,
+        );
+
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
+            .finally(|| {
+                pg_sys::set_config_option(
+                    c"search_path".as_ptr(),
+                    c"pgtrickle, pg_catalog, pg_temp".as_ptr(),
+                    pg_sys::GucContext::PGC_USERSET,
+                    pg_sys::GucSource::PGC_S_SESSION,
+                    pg_sys::GucAction::GUC_ACTION_LOCAL,
+                    true,
+                    pgrx::PgLogLevel::ERROR as i32,
+                    false,
+                );
+            })
+            .execute()
+    }
+}
+
+fn expand_search_path_user(path: &str, role: &str) -> String {
+    let mut components = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let bytes = path.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if quoted && bytes.get(i + 1) == Some(&b'"') => i += 2,
+            b'"' => {
+                quoted = !quoted;
+                i += 1;
+            }
+            b',' if !quoted => {
+                components.push(&path[start..i]);
+                start = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    components.push(&path[start..]);
+
+    components
+        .into_iter()
+        .map(|component| match component.trim() {
+            "$user" | "\"$user\"" => quote_identifier(role),
+            _ => component.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // ── Helper functions ───────────────────────────────────────────────────────
@@ -1976,8 +2070,10 @@ pub(super) fn initialize_st(
         table = quote_identifier(name),
     );
 
-    Spi::run(&insert_sql)
-        .map_err(|e| PgTrickleError::SpiError(format!("Failed to initialize ST: {}", e)))?;
+    with_invoker_search_path(|| {
+        Spi::run(&insert_sql)
+            .map_err(|e| PgTrickleError::SpiError(format!("Failed to initialize ST: {}", e)))
+    })?;
 
     // Seed the initial frontier at creation time so every initialized stream
     // table participates in shared change-buffer bookkeeping immediately.
@@ -2805,6 +2901,18 @@ mod tests {
     #[test]
     fn test_quote_identifier_with_double_quote() {
         assert_eq!(quote_identifier("my\"col"), "\"my\"\"col\"");
+    }
+
+    #[test]
+    fn test_expand_search_path_user() {
+        assert_eq!(
+            expand_search_path_user("\"$user\", public", "app_user"),
+            "\"app_user\", public"
+        );
+        assert_eq!(
+            expand_search_path_user("\"tenant, $user\", public", "app_user"),
+            "\"tenant, $user\", public"
+        );
     }
 
     // ── quote_ident ────────────────────────────────────────────────────

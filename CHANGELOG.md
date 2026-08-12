@@ -132,8 +132,8 @@ The cutoff exists because:
 
 - Fix `create_stream_table()` for documented non-superuser roles without
   granting access to internal catalog or change-buffer objects (#903).
-- Keep storage-table DDL and the defining query under the caller's PostgreSQL
-  privileges and ownership.
+- Enforce the caller's source `SELECT` and target-schema `CREATE` privileges,
+  and transfer the completed stream table to the caller.
 
 ## [0.81.0] — Observability, Self-Tuning & Quick Wins
 

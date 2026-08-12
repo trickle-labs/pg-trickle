@@ -86,6 +86,16 @@ void  errfinish(const char *filename, int lineno, const char *funcname) {
 
 /* ── Transaction / type helpers ───────────────────────────────────────── */
 int      GetDatabaseEncoding(void)             { return 0; }
+uint32_t GetOuterUserId(void)                  { return 0; }
+void    *get_config_handle(const char *name)   { (void)name; return NULL; }
+int      set_config_option(const char *name, const char *value,
+                           unsigned int context, unsigned int source,
+                           unsigned int action, _Bool change_val,
+                           int elevel, _Bool is_reload) {
+    (void)name; (void)value; (void)context; (void)source; (void)action;
+    (void)change_val; (void)elevel; (void)is_reload;
+    return 0;
+}
 uint32_t GetCurrentTransactionId(void)          { return 0; }
 uint32_t GetCurrentTransactionIdIfAny(void)     { return 0; }
 int16_t  get_typlen(uint32_t typid)            { (void)typid; return -1; }

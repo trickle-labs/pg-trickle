@@ -2,9 +2,9 @@
 -- #903: permit documented non-superuser stream-table creation while keeping
 -- catalog and change-buffer objects private.
 
--- These functions use extension-owner privileges only for private metadata and
--- CDC setup. Rust switches back to the invoking role for output-table DDL and
--- the defining query, so normal source SELECT and target CREATE checks remain.
+-- These functions use extension-owner privileges for private metadata, CDC,
+-- and storage setup. Rust explicitly checks the invoking role's source SELECT
+-- and target CREATE privileges and transfers the completed stream table to it.
 
 ALTER FUNCTION pgtrickle.create_stream_table(
     TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT,

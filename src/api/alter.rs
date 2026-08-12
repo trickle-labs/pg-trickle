@@ -1209,18 +1209,19 @@ pub(crate) fn create_stream_table_impl(
         validate_requested_cdc_mode_requirements(&effective_requested_cdc_mode)?;
     }
 
-    // ── Query rewrite pipeline ─────────────────────────────────────
+    // ── Query rewrite, validation, and parse ───────────────────────
     let original_query = query.to_string();
-    let rw = run_query_rewrite_pipeline(query)?;
+    let (rw, vq) = with_invoker_search_path(|| {
+        let rw = run_query_rewrite_pipeline(query)?;
+        let vq = validate_and_parse_query(
+            &rw.query,
+            &mut refresh_mode,
+            is_auto,
+            rw.had_nested_window_rewrite,
+        )?;
+        Ok((rw, vq))
+    })?;
     let query = &rw.query;
-
-    // ── Validate & parse ───────────────────────────────────────────
-    let vq = validate_and_parse_query(
-        query,
-        &mut refresh_mode,
-        is_auto,
-        rw.had_nested_window_rewrite,
-    )?;
     validate_source_access(&vq.source_relids)?;
     // Warnings
     warn_source_table_properties(&vq.source_relids);

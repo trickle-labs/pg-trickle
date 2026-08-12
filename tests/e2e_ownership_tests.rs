@@ -155,15 +155,15 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
          EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
     )
     .await;
-    db.execute("CREATE SCHEMA sec903 AUTHORIZATION sec903_author")
+    db.execute("CREATE SCHEMA sec903_author AUTHORIZATION sec903_author")
         .await;
-    db.execute("CREATE TABLE sec903.source (id INT PRIMARY KEY, val TEXT)")
+    db.execute("CREATE TABLE sec903_author.source (id INT PRIMARY KEY, val TEXT)")
         .await;
-    db.execute("INSERT INTO sec903.source VALUES (1, 'one'), (2, 'two')")
+    db.execute("INSERT INTO sec903_author.source VALUES (1, 'one'), (2, 'two')")
         .await;
-    db.execute("ALTER TABLE sec903.source OWNER TO sec903_author")
+    db.execute("ALTER TABLE sec903_author.source OWNER TO sec903_author")
         .await;
-    db.execute("GRANT USAGE ON SCHEMA pgtrickle, sec903 TO sec903_author")
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, sec903_author TO sec903_author")
         .await;
     db.execute("GRANT USAGE, CREATE ON SCHEMA public TO sec903_author")
         .await;
@@ -175,7 +175,7 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
             "SET ROLE sec903_author",
             "SELECT pgtrickle.create_stream_table(\
                  'sec903_stream', \
-                 'SELECT id, val FROM sec903.source', \
+                 'SELECT id, val FROM source', \
                  '1m'\
              )",
             "RESET ROLE",

@@ -77,8 +77,8 @@ you do not have full superuser access:
    to install the extension: `CREATE EXTENSION pg_trickle;`
 4. After installation, non-superuser roles can use the explicitly granted
    `pgtrickle.*` functions. Creation APIs use `SECURITY DEFINER` only for
-   private infrastructure; defining queries and output-table DDL keep the
-   caller's privileges.
+   private infrastructure; creation explicitly checks the caller's source
+   `SELECT` and target-schema `CREATE` privileges.
 
 See [INSTALL.md](../INSTALL.md) for distribution-specific instructions.
 
