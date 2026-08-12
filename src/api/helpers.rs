@@ -89,29 +89,9 @@ fn outer_user_id() -> pg_sys::Oid {
     }
 }
 
-/// Capture the search path that invoked a SECURITY DEFINER creation API.
+/// Construct PostgreSQL's standard caller search path for a SECURITY DEFINER API.
 pub(super) fn invoker_search_path() -> Result<String, PgTrickleError> {
-    use std::ffi::CStr;
-
-    unsafe {
-        // SAFETY: This reads the backend-local GUC stack installed by the
-        // active SECURITY DEFINER frame; PostgreSQL owns the pointed-to data
-        // for the duration of the call.
-        let search_path_handle = pg_sys::get_config_handle(c"search_path".as_ptr());
-        if search_path_handle.is_null() || (*search_path_handle).stack.is_null() {
-            return Ok(format!("{}, public", quote_identifier(&outer_user_name()?)));
-        }
-        let prior_path = (*(*search_path_handle).stack).prior.val.stringval;
-        if prior_path.is_null() {
-            return Err(PgTrickleError::InternalError(
-                "invoker search_path is null".to_string(),
-            ));
-        }
-        let prior_path = CStr::from_ptr(prior_path)
-            .to_str()
-            .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
-        Ok(expand_search_path_user(prior_path, &outer_user_name()?))
-    }
+    Ok(format!("{}, public", quote_identifier(&outer_user_name()?)))
 }
 
 /// Run caller-controlled SQL with a captured invoker search path, restoring
@@ -156,40 +136,6 @@ pub(super) fn with_invoker_search_path<T>(
             })
             .execute()
     }
-}
-
-fn expand_search_path_user(path: &str, role: &str) -> String {
-    let mut components = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
-    let bytes = path.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' if quoted && bytes.get(i + 1) == Some(&b'"') => i += 2,
-            b'"' => {
-                quoted = !quoted;
-                i += 1;
-            }
-            b',' if !quoted => {
-                components.push(&path[start..i]);
-                start = i + 1;
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    components.push(&path[start..]);
-
-    components
-        .into_iter()
-        .map(|component| match component.trim() {
-            "$user" | "\"$user\"" => quote_identifier(role),
-            _ => component.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 // ── Helper functions ───────────────────────────────────────────────────────
@@ -2914,18 +2860,6 @@ mod tests {
     #[test]
     fn test_quote_identifier_with_double_quote() {
         assert_eq!(quote_identifier("my\"col"), "\"my\"\"col\"");
-    }
-
-    #[test]
-    fn test_expand_search_path_user() {
-        assert_eq!(
-            expand_search_path_user("\"$user\", public", "app_user"),
-            "\"app_user\", public"
-        );
-        assert_eq!(
-            expand_search_path_user("\"tenant, $user\", public", "app_user"),
-            "\"tenant, $user\", public"
-        );
     }
 
     // ── quote_ident ────────────────────────────────────────────────────
