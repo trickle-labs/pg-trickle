@@ -4647,19 +4647,34 @@ pub fn rewrite_nested_window_exprs(query: &str) -> Result<String, PgTrickleError
 }
 
 /// Extract FROM clause as SQL text from a SelectStmt.
-fn extract_from_clause_sql(select: &pg_sys::SelectStmt) -> Result<String, PgTrickleError> {
+pub(crate) fn extract_from_clause_sql(
+    select: &pg_sys::SelectStmt,
+) -> Result<String, PgTrickleError> {
     if select.fromClause.is_null() {
         return Err(PgTrickleError::QueryParseError(
             "DISTINCT ON query must have a FROM clause".into(),
         ));
     }
     let from_list = pg_list::<pg_sys::Node>(select.fromClause);
+    let cte_names = if select.withClause.is_null() {
+        Vec::new()
+    } else {
+        let with_clause = pg_deref!(select.withClause);
+        pg_list::<pg_sys::CommonTableExpr>(with_clause.ctes)
+            .iter_ptr()
+            .filter_map(|cte| {
+                // SAFETY: CTE pointers originate from the valid parser list.
+                unsafe { cte.as_ref() }
+            })
+            .filter_map(|cte| pg_cstr_to_str(cte.ctename).ok())
+            .collect::<Vec<_>>()
+    };
     let mut parts = Vec::new();
     for node_ptr in from_list.iter_ptr() {
         if node_ptr.is_null() {
             continue;
         }
-        parts.push(from_item_to_sql(node_ptr)?);
+        parts.push(from_item_to_sql(node_ptr, &cte_names)?);
     }
     if parts.is_empty() {
         return Err(PgTrickleError::QueryParseError(
@@ -4673,15 +4688,29 @@ fn extract_from_clause_sql(select: &pg_sys::SelectStmt) -> Result<String, PgTric
 ///
 /// # Safety
 /// Caller must ensure `node` points to a valid parse tree Node.
-fn from_item_to_sql(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
+fn from_item_to_sql(node: *mut pg_sys::Node, cte_names: &[&str]) -> Result<String, PgTrickleError> {
     if let Some(rv) = cast_node!(node, T_RangeVar, pg_sys::RangeVar) {
         let mut name = String::new();
-        if !rv.schemaname.is_null() {
-            let schema = pg_cstr_to_str(rv.schemaname).unwrap_or("public");
+        let relname = if rv.relname.is_null() {
+            None
+        } else {
+            Some(pg_cstr_to_str(rv.relname).unwrap_or("?"))
+        };
+        let schema = if !rv.schemaname.is_null() {
+            Some(
+                pg_cstr_to_str(rv.schemaname)
+                    .unwrap_or("public")
+                    .to_string(),
+            )
+        } else if relname.is_some_and(|relname| cte_names.contains(&relname)) {
+            None
+        } else {
+            resolve_rangevar_schema(rv)?
+        };
+        if let Some(schema) = schema {
             name.push_str(&format!("\"{}\".", schema.replace('"', "\"\"")));
         }
-        if !rv.relname.is_null() {
-            let rel = pg_cstr_to_str(rv.relname).unwrap_or("?");
+        if let Some(rel) = relname {
             name.push_str(&format!("\"{}\"", rel.replace('"', "\"\"")));
         }
         if !rv.alias.is_null() {
@@ -4697,12 +4726,12 @@ fn from_item_to_sql(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
         let left = if join.larg.is_null() {
             "?".to_string()
         } else {
-            from_item_to_sql(join.larg)?
+            from_item_to_sql(join.larg, cte_names)?
         };
         let right = if join.rarg.is_null() {
             "?".to_string()
         } else {
-            from_item_to_sql(join.rarg)?
+            from_item_to_sql(join.rarg, cte_names)?
         };
         let join_type = match join.jointype {
             pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",

@@ -1498,7 +1498,9 @@ pub(crate) fn create_stream_table_impl(
 
     // ── Phase 2b: Register view soft-dependencies for DDL tracking ──
     if original_query_opt.is_some()
-        && let Ok(original_sources) = extract_source_relations(&original_query)
+        && let Ok(original_sources) = with_invoker_search_path(&invoker_search_path, || {
+            extract_source_relations(&original_query)
+        })
     {
         for (src_oid, src_type) in &original_sources {
             if src_type == "VIEW" {
