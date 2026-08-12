@@ -12,6 +12,80 @@ pub(super) fn resolve_source_oid(source: &str) -> Result<pg_sys::Oid, PgTrickleE
     Ok(oid)
 }
 
+/// Verify that the invoker may create the requested stream table in `schema`.
+pub(super) fn validate_output_schema_create(schema: &str) -> Result<(), PgTrickleError> {
+    let invoker = outer_user_id();
+    let allowed = Spi::get_one_with_args::<bool>(
+        "SELECT has_schema_privilege($1, $2, 'CREATE')",
+        &[invoker.into(), schema.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(PgTrickleError::PermissionDenied(format!(
+            "permission denied for schema {schema}: CREATE privilege is required to create a stream table"
+        )))
+    }
+}
+
+/// Verify the invoker can read every relation in the defining query.
+pub(super) fn validate_source_access(
+    source_relids: &[(pg_sys::Oid, String)],
+) -> Result<(), PgTrickleError> {
+    let invoker = outer_user_id();
+    for (relid, _) in source_relids {
+        let allowed = Spi::get_one_with_args::<bool>(
+            "SELECT has_table_privilege($1, $2, 'SELECT') \
+             AND has_schema_privilege($1, c.relnamespace, 'USAGE') \
+             FROM pg_class c WHERE c.oid = $2",
+            &[invoker.into(), (*relid).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !allowed {
+            return Err(PgTrickleError::PermissionDenied(format!(
+                "permission denied for source relation with OID {relid}: SELECT and schema USAGE are required"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Make a successfully created stream table belong to its invoker.
+pub(super) fn transfer_output_table_ownership(
+    schema: &str,
+    table_name: &str,
+) -> Result<(), PgTrickleError> {
+    let invoker = outer_user_id();
+
+    let invoker_name = Spi::get_one_with_args::<String>(
+        "SELECT rolname::text FROM pg_roles WHERE oid = $1",
+        &[invoker.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("Role with OID {} not found", invoker)))?;
+    let sql = format!(
+        "ALTER TABLE {}.{} OWNER TO {}",
+        quote_identifier(schema),
+        quote_identifier(table_name),
+        quote_identifier(&invoker_name),
+    );
+    Spi::run(&sql).map_err(|e| {
+        PgTrickleError::SpiError(format!("Failed to transfer stream table ownership: {e}"))
+    })
+}
+
+fn outer_user_id() -> pg_sys::Oid {
+    unsafe {
+        // SAFETY: PostgreSQL invokes SQL functions on its main backend thread;
+        // the outer user remains the stream-table author throughout the call.
+        pg_sys::GetOuterUserId()
+    }
+}
+
 // ── Helper functions ───────────────────────────────────────────────────────
 
 /// EC-25/EC-26: Install a guard trigger that blocks direct DML on a stream
@@ -390,12 +464,10 @@ pub fn detect_volatile_functions_pub(s: &str) -> Option<&'static str> {
 pub(super) fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> {
     let parts: Vec<&str> = name.splitn(2, '.').collect();
     match parts.len() {
-        1 => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or_else(|| "public".to_string());
-            Ok((schema, parts[0].to_string()))
-        }
+        // Public creation APIs use a locked SECURITY DEFINER search_path, so
+        // `current_schema()` would resolve to the extension schema. Preserve
+        // the documented default target for an unqualified stream table name.
+        1 => Ok(("public".to_string(), parts[0].to_string())),
         2 => Ok((parts[0].to_string(), parts[1].to_string())),
         _ => Err(PgTrickleError::InvalidArgument(format!(
             "invalid table name: {name}"

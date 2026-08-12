@@ -54,7 +54,8 @@ check_rust_file() {
     fi
 
     # Check 2: search_path must not include 'public' unless nosemgrep-annotated
-    if echo "$context" | grep -qi "SET search_path" && echo "$context" | grep -qi "public"; then
+    if echo "$context" | grep -qi "SET search_path" \
+      && echo "$context" | grep -i "SET search_path" | grep -qi "public"; then
       if echo "$context" | grep -q "nosemgrep.*public\|public.*nosemgrep"; then
         log "  SKIP: $file:$linenum — nosemgrep annotation found for public"
       else
@@ -88,7 +89,8 @@ check_sql_file() {
       ERRORS=$((ERRORS + 1))
     fi
 
-    if echo "$context" | grep -qi "SET search_path" && echo "$context" | grep -qi "public"; then
+    if echo "$context" | grep -qi "SET search_path" \
+      && echo "$context" | grep -i "SET search_path" | grep -qi "public"; then
       if echo "$context" | grep -q "nosemgrep.*public\|public.*nosemgrep"; then
         log "  SKIP: $file:$linenum — nosemgrep annotation found for public"
       else

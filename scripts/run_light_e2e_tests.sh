@@ -122,6 +122,7 @@ LIGHT_E2E_TESTS=(
     e2e_immediate_concurrency_tests
     e2e_merge_template_tests
     e2e_rls_tests
+    e2e_ownership_tests
     e2e_ec01_property_tests
 )
 

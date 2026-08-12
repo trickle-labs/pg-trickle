@@ -1167,6 +1167,7 @@ pub(crate) fn create_stream_table_impl(
     // Parse schema.name
     let (schema, table_name) = parse_qualified_name(name)?;
     let qualified_name = format!("{schema}.{table_name}");
+    validate_output_schema_create(&schema)?;
 
     // HOT-1: validate fillfactor range.
     if let Some(ff) = storage_fillfactor
@@ -1220,6 +1221,7 @@ pub(crate) fn create_stream_table_impl(
         is_auto,
         rw.had_nested_window_rewrite,
     )?;
+    validate_source_access(&vq.source_relids)?;
     // Warnings
     warn_source_table_properties(&vq.source_relids);
     warn_select_star(query);
@@ -1435,6 +1437,7 @@ pub(crate) fn create_stream_table_impl(
 
     // ── Phase 2: CDC / IVM trigger setup ──
     setup_trigger_infrastructure(&vq.source_relids, refresh_mode, pgt_id, pgt_relid, query)?;
+    transfer_output_table_ownership(&schema, &table_name)?;
 
     // ── NS-5: Diamond consistency NOTICE ──
     // When the user explicitly opted out of atomic reads (diamond_consistency='none'),

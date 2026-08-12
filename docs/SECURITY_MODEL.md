@@ -75,9 +75,10 @@ you do not have full superuser access:
 2. Request or verify that `pg_trickle` is on the allowlist.
 3. Use the provider's superuser-equivalent role (e.g., `rds_superuser` on RDS)
    to install the extension: `CREATE EXTENSION pg_trickle;`
-4. After installation, non-superuser roles can **use** `pgtrickle.*` functions
-   if granted `EXECUTE` permission (the functions are `SECURITY DEFINER`,
-   so they run as the owner regardless of the caller's privileges).
+4. After installation, non-superuser roles can use the explicitly granted
+   `pgtrickle.*` functions. Creation APIs use `SECURITY DEFINER` only for
+   private infrastructure; defining queries and output-table DDL keep the
+   caller's privileges.
 
 See [INSTALL.md](../INSTALL.md) for distribution-specific instructions.
 

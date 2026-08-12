@@ -648,13 +648,19 @@ extension_sql!(
 -- event triggers. We create them manually here with the correct return type.
 CREATE FUNCTION pgtrickle."_on_ddl_end"()
     RETURNS event_trigger
+    SECURITY DEFINER
+    SET search_path TO pgtrickle, pg_catalog, pg_temp
     LANGUAGE c
     AS 'MODULE_PATHNAME', 'pg_trickle_on_ddl_end_wrapper';
+REVOKE EXECUTE ON FUNCTION pgtrickle."_on_ddl_end"() FROM PUBLIC;
 
 CREATE FUNCTION pgtrickle."_on_sql_drop"()
     RETURNS event_trigger
+    SECURITY DEFINER
+    SET search_path TO pgtrickle, pg_catalog, pg_temp
     LANGUAGE c
     AS 'MODULE_PATHNAME', 'pg_trickle_on_sql_drop_wrapper';
+REVOKE EXECUTE ON FUNCTION pgtrickle."_on_sql_drop"() FROM PUBLIC;
 
 -- Event trigger: track ALTER TABLE on upstream sources
 CREATE EVENT TRIGGER pg_trickle_ddl_tracker
