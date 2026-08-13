@@ -1324,7 +1324,9 @@ pub(crate) fn create_stream_table_impl(
     if crate::config::pg_trickle_enable_vector_agg()
         && let Some(ref pr) = vq.parsed_tree
     {
-        fix_vector_aggregate_column_types(&schema, &table_name, &pr.tree)?;
+        with_invoker_search_path(&invoker_search_path, || {
+            fix_vector_aggregate_column_types(&schema, &table_name, &pr.tree)
+        })?;
     }
 
     // CITUS-7: Distribute the output storage table when requested and Citus is available.
