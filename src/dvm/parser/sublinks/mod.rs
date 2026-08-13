@@ -375,15 +375,8 @@ pub(crate) fn deparse_select_to_sql(
 
     // Deparse FROM clause
     if !select.fromClause.is_null() {
-        let from_list = pg_list::<pg_sys::Node>(select.fromClause);
-        if !from_list.is_empty() {
-            sql.push_str(" FROM ");
-            let mut from_items = Vec::new();
-            for node_ptr in from_list.iter_ptr() {
-                from_items.push(deparse_from_item(node_ptr)?);
-            }
-            sql.push_str(&from_items.join(", "));
-        }
+        sql.push_str(" FROM ");
+        sql.push_str(&extract_from_clause_sql(select)?);
     }
 
     // Deparse WHERE clause
@@ -435,81 +428,6 @@ pub(crate) fn deparse_select_to_sql(
     }
 
     Ok(sql)
-}
-
-/// Deparse a FROM clause item back to SQL text.
-///
-/// # Safety
-/// Caller must ensure `node` points to a valid `pg_sys::Node`.
-fn deparse_from_item(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
-    if node.is_null() {
-        return Err(PgTrickleError::QueryParseError(
-            "NULL node in deparse_from_item".into(),
-        ));
-    }
-
-    if let Some(rv) = cast_node!(node, T_RangeVar, pg_sys::RangeVar) {
-        let mut sql = String::new();
-        if !rv.schemaname.is_null() {
-            let schema = pg_cstr_to_str(rv.schemaname).unwrap_or("public");
-            sql.push_str(&format!("\"{schema}\"."));
-        }
-        if !rv.relname.is_null() {
-            let table = pg_cstr_to_str(rv.relname).unwrap_or("?");
-            sql.push_str(&format!("\"{table}\""));
-        }
-        if !rv.alias.is_null() {
-            // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let alias_node = pg_deref!(rv.alias);
-            if !alias_node.aliasname.is_null() {
-                let alias = pg_cstr_to_str(alias_node.aliasname).unwrap_or("?");
-                sql.push_str(&format!(" \"{alias}\""));
-            }
-        }
-        Ok(sql)
-    } else if let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) {
-        let left = deparse_from_item(join.larg)?;
-        let right = deparse_from_item(join.rarg)?;
-        let join_type = match join.jointype {
-            pg_sys::JoinType::JOIN_INNER => "JOIN",
-            pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
-            pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
-            pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
-            _ => "JOIN",
-        };
-        let mut sql = format!("{left} {join_type} {right}");
-        if !join.quals.is_null() {
-            // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let quals = safe_node_to_expr(join.quals)?;
-            sql.push_str(&format!(" ON {}", quals.to_sql()));
-        }
-        Ok(sql)
-    } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
-        if sub.subquery.is_null()
-            // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-            || !is_node_type!(sub.subquery, T_SelectStmt)
-        {
-            return Err(PgTrickleError::UnsupportedOperator(
-                "RangeSubselect with non-SelectStmt subquery is not supported".into(),
-            ));
-        }
-        let inner_sql = deparse_select_to_sql(sub.subquery)?;
-        let lateral_kw = if sub.lateral { "LATERAL " } else { "" };
-        let mut result = format!("{lateral_kw}({inner_sql})");
-        if !sub.alias.is_null() {
-            // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = pg_deref!(sub.alias);
-            if !a.aliasname.is_null() {
-                let alias = pg_cstr_to_str(a.aliasname).unwrap_or("?");
-                result.push_str(&format!(" \"{}\"", alias.replace('"', "\"\"")));
-            }
-        }
-        Ok(result)
-    } else {
-        Err(PgTrickleError::UnsupportedOperator(
-            "Unsupported FROM item (VALUES clause, tablefunc, or other non-standard source)".into(),
-        ))
-    }
 }
 
 /// Parse a SubLink node into a SublinkWrapper for SemiJoin/AntiJoin construction.

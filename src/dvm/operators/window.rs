@@ -317,13 +317,9 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
         // GROUP BY columns, not necessarily as full-row DELETE+INSERT pairs.
         // When key columns are available, ANY child delta row for the same key
         // should replace the previous input row.
-        let child_key_cols = child.row_id_key_columns().and_then(|keys| {
-            if !keys.is_empty() && keys.iter().all(|key| pt_aliases.contains(key)) {
-                Some(keys)
-            } else {
-                None
-            }
-        });
+        let child_key_cols = child
+            .row_id_key_columns()
+            .filter(|keys| !keys.is_empty() && keys.iter().all(|key| pt_aliases.contains(key)));
         let key_match_cond = child_key_cols.as_ref().map(|keys| {
             keys.iter()
                 .map(|c| {

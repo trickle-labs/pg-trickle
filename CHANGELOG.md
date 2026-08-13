@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.81.1 — Non-superuser stream-table creation](#0811--non-superuser-stream-table-creation)
 - [0.81.0 — Observability, Self-Tuning & Quick Wins](#0810--observability-self-tuning--quick-wins)
 - [0.80.0 — Operational Excellence, Documentation Completeness & Final v1.0 Gate](#0800--operational-excellence-documentation-completeness--final-v10-gate)
 - [0.79.0 — Code Quality, API Ergonomics & Security](#0790--code-quality-api-ergonomics--security)
@@ -126,6 +127,13 @@ The cutoff exists because:
 <!-- TOC end -->
 
 ---
+
+## [0.81.1] — Non-superuser stream-table creation
+
+- Fix `create_stream_table()` for documented non-superuser roles without
+  granting access to internal catalog or change-buffer objects (#903).
+- Enforce the caller's source `SELECT` and target-schema `CREATE` privileges,
+  and transfer the completed stream table to the caller.
 
 ## [0.81.0] — Observability, Self-Tuning & Quick Wins
 

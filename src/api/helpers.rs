@@ -12,6 +12,122 @@ pub(super) fn resolve_source_oid(source: &str) -> Result<pg_sys::Oid, PgTrickleE
     Ok(oid)
 }
 
+/// Verify that the invoker may create the requested stream table in `schema`.
+pub(super) fn validate_output_schema_create(schema: &str) -> Result<(), PgTrickleError> {
+    let invoker = outer_user_id();
+    let allowed = Spi::get_one_with_args::<bool>(
+        "SELECT has_schema_privilege($1, $2, 'CREATE')",
+        &[invoker.into(), schema.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(PgTrickleError::PermissionDenied(format!(
+            "permission denied for schema {schema}: CREATE privilege is required to create a stream table"
+        )))
+    }
+}
+
+/// Verify the invoker can read every relation in the defining query.
+pub(super) fn validate_source_access(
+    source_relids: &[(pg_sys::Oid, String)],
+) -> Result<(), PgTrickleError> {
+    let invoker = outer_user_id();
+    for (relid, _) in source_relids {
+        let allowed = Spi::get_one_with_args::<bool>(
+            "SELECT has_table_privilege($1, $2, 'SELECT') \
+             AND has_schema_privilege($1, c.relnamespace, 'USAGE') \
+             FROM pg_class c WHERE c.oid = $2",
+            &[invoker.into(), (*relid).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !allowed {
+            return Err(PgTrickleError::PermissionDenied(format!(
+                "permission denied for source relation with OID {relid}: SELECT and schema USAGE are required"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Make a successfully created stream table belong to its invoker.
+pub(super) fn transfer_output_table_ownership(
+    schema: &str,
+    table_name: &str,
+) -> Result<(), PgTrickleError> {
+    let invoker_name = outer_user_name()?;
+    let sql = format!(
+        "ALTER TABLE {}.{} OWNER TO {}",
+        quote_identifier(schema),
+        quote_identifier(table_name),
+        quote_identifier(&invoker_name),
+    );
+    Spi::run(&sql).map_err(|e| {
+        PgTrickleError::SpiError(format!("Failed to transfer stream table ownership: {e}"))
+    })
+}
+
+fn outer_user_name() -> Result<String, PgTrickleError> {
+    let invoker = outer_user_id();
+    Spi::get_one_with_args::<String>(
+        "SELECT rolname::text FROM pg_roles WHERE oid = $1",
+        &[invoker.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("Role with OID {invoker} not found")))
+}
+
+fn outer_user_id() -> pg_sys::Oid {
+    unsafe {
+        // SAFETY: PostgreSQL invokes SQL functions on its main backend thread;
+        // the outer user remains the stream-table author throughout the call.
+        pg_sys::GetOuterUserId()
+    }
+}
+
+/// Construct PostgreSQL's standard caller search path for a SECURITY DEFINER API.
+pub(super) fn invoker_search_path() -> Result<String, PgTrickleError> {
+    Ok(format!("{}, public", quote_identifier(&outer_user_name()?)))
+}
+
+/// Run caller-controlled SQL with a captured invoker search path, restoring
+/// the locked SECURITY DEFINER path afterwards.
+pub(super) fn with_invoker_search_path<T>(
+    invoker_search_path: &str,
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    use std::panic::AssertUnwindSafe;
+
+    Spi::run_with_args(
+        "SELECT pg_catalog.set_config('search_path', $1, true)",
+        &[invoker_search_path.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    unsafe {
+        // SAFETY: PgTryBuilder runs the cleanup hook on both success and
+        // PostgreSQL ERROR paths while the backend is in a valid state.
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
+            .finally(|| {
+                pg_sys::set_config_option(
+                    c"search_path".as_ptr(),
+                    c"pgtrickle, pg_catalog, pg_temp".as_ptr(),
+                    pg_sys::GucContext::PGC_USERSET,
+                    pg_sys::GucSource::PGC_S_SESSION,
+                    pg_sys::GucAction::GUC_ACTION_LOCAL,
+                    true,
+                    pgrx::PgLogLevel::ERROR as i32,
+                    false,
+                );
+            })
+            .execute()
+    }
+}
+
 // ── Helper functions ───────────────────────────────────────────────────────
 
 /// EC-25/EC-26: Install a guard trigger that blocks direct DML on a stream
@@ -390,12 +506,10 @@ pub fn detect_volatile_functions_pub(s: &str) -> Option<&'static str> {
 pub(super) fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> {
     let parts: Vec<&str> = name.splitn(2, '.').collect();
     match parts.len() {
-        1 => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or_else(|| "public".to_string());
-            Ok((schema, parts[0].to_string()))
-        }
+        // Public creation APIs use a locked SECURITY DEFINER search_path, so
+        // `current_schema()` would resolve to the extension schema. Preserve
+        // the documented default target for an unqualified stream table name.
+        1 => Ok(("public".to_string(), parts[0].to_string())),
         2 => Ok((parts[0].to_string(), parts[1].to_string())),
         _ => Err(PgTrickleError::InvalidArgument(format!(
             "invalid table name: {name}"
@@ -1811,6 +1925,7 @@ pub(super) fn initialize_st(
     sum2_aux_columns: &[(String, String)],
     covar_aux_columns: &[(String, String)],
     nonnull_aux_columns: &[(String, String)],
+    invoker_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the initialization INSERT into the storage table.
@@ -1904,8 +2019,10 @@ pub(super) fn initialize_st(
         table = quote_identifier(name),
     );
 
-    Spi::run(&insert_sql)
-        .map_err(|e| PgTrickleError::SpiError(format!("Failed to initialize ST: {}", e)))?;
+    with_invoker_search_path(invoker_search_path, || {
+        Spi::run(&insert_sql)
+            .map_err(|e| PgTrickleError::SpiError(format!("Failed to initialize ST: {}", e)))
+    })?;
 
     // Seed the initial frontier at creation time so every initialized stream
     // table participates in shared change-buffer bookkeeping immediately.

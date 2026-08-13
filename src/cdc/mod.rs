@@ -2105,9 +2105,7 @@ fn build_changed_cols_bitmask_stmt_expr(
             // pgvector types (vector, halfvec, sparsevec) do not define an '='
             // operator, so IS DISTINCT FROM (which uses '=') would fail.
             // Cast to text for comparison — text always supports equality.
-            let base_type = type_name.split('(').next().unwrap_or("").trim();
-            let is_pgvector = matches!(base_type, "vector" | "halfvec" | "sparsevec");
-            if is_pgvector {
+            if triggers::is_pgvector_type(type_name) {
                 format!(
                     "(CASE WHEN n.\"{qcol}\"::text IS DISTINCT FROM o.\"{qcol}\"::text \
                      THEN B'1' ELSE B'0' END)::varbit"

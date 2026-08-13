@@ -42,6 +42,11 @@ The role that **creates a stream table** needs:
 - `CREATE` on the schema where the stream table will live.
 - `EXECUTE` on the relevant `pgtrickle.*` functions.
 
+The stream-table creation APIs use `SECURITY DEFINER` for private catalog,
+CDC, and storage setup. They explicitly check the caller's source `SELECT` and
+target-schema `CREATE` privileges, then transfer the completed stream table to
+the caller. Authors do not need access to `pgtrickle_changes`.
+
 ### Recommended split
 
 ```sql
@@ -105,17 +110,17 @@ for a complete worked example.
 ## CDC triggers — SECURITY DEFINER vs INVOKER
 
 In trigger CDC mode, pg_trickle installs `AFTER` triggers on every source table
-(statement-level by default, row-level if configured). These triggers run as **SECURITY DEFINER**
-under the role that owns the stream table — so they can write to
-`pgtrickle_changes.*` regardless of who issued the source-table
+(statement-level by default, row-level if configured). Their functions run as
+**SECURITY DEFINER** under the extension owner with a locked search path, so
+they can write to `pgtrickle_changes.*` regardless of who issued the source-table
 write.
 
 **What this means for you:**
 
 - Any role that can write to a source table will indirectly write to
   the corresponding change buffer. That is by design.
-- The change buffer table is owned by the stream-table owner. Other
-  roles get no implicit access.
+- The change buffer table is owned by the extension owner. Other roles get no
+  implicit access.
 - If you revoke `INSERT` on the change buffer, the trigger keeps
   working (it runs as the owner).
 
@@ -194,7 +199,6 @@ CREATE ROLE pgtrickle_admin NOLOGIN NOINHERIT;
 
 -- Extension function access
 GRANT USAGE   ON SCHEMA pgtrickle          TO pgtrickle_admin;
-GRANT USAGE   ON SCHEMA pgtrickle_changes  TO pgtrickle_admin;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO pgtrickle_admin;
 
 -- Create stream tables in the public schema

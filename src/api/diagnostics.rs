@@ -917,7 +917,7 @@ pub(super) fn gate_source(source: &str) -> Result<(), PgTrickleError> {
     // Signal the scheduler that the gate set has changed.
     let payload = format!("{}", source_relid.to_u32());
     // pg_notify does not support parameterized payloads; payload is source_relid.to_u32() (a plain integer).
-    let gate_sql = format!("SELECT pg_notify('pgtrickle_source_gate', '{}')", &payload);
+    let gate_sql = format!("SELECT pg_notify('pgtrickle_source_gate', '{}')", payload);
     Spi::run(&gate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::info!(
@@ -940,7 +940,7 @@ pub(super) fn ungate_source(source: &str) -> Result<(), PgTrickleError> {
     // Signal the scheduler that the gate set has changed.
     let payload = format!("{}", source_relid.to_u32());
     // pg_notify does not support parameterized payloads; payload is source_relid.to_u32() (a plain integer).
-    let gate_sql = format!("SELECT pg_notify('pgtrickle_source_gate', '{}')", &payload);
+    let gate_sql = format!("SELECT pg_notify('pgtrickle_source_gate', '{}')", payload);
     Spi::run(&gate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::info!(
@@ -1102,7 +1102,7 @@ pub(super) fn advance_watermark(
     // Notify the scheduler that watermark state changed.
     let payload = format!("wm:{}", source_relid.to_u32());
     // pg_notify does not support parameterized payloads; payload is "wm:" + source_relid.to_u32() (plain integer).
-    let wm_sql = format!("SELECT pg_notify('pgtrickle_watermark', '{}')", &payload);
+    let wm_sql = format!("SELECT pg_notify('pgtrickle_watermark', '{}')", payload);
     Spi::run(&wm_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::info!(

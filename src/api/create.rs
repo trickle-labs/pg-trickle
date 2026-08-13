@@ -25,7 +25,8 @@ use super::*;
 ///   a view over pg_ripple VP tables and you want co-location with VP shards.
 ///   Has no effect when Citus is not installed.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_stream_table(
     name: &str,
     query: &str,
@@ -80,7 +81,8 @@ fn create_stream_table(
 ///
 /// This is useful for migration scripts that should be safe to re-run.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_stream_table_if_not_exists(
     name: &str,
     query: &str,
@@ -164,7 +166,8 @@ fn create_stream_table_if_not_exists_impl(
 ///
 /// On any error, the entire transaction is rolled back (standard PostgreSQL
 /// transactional semantics).
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn bulk_create(definitions: pgrx::JsonB) -> pgrx::JsonB {
     let result = bulk_create_impl(definitions.0);
     match result {
@@ -616,7 +619,8 @@ fn create_or_replace_stream_table_impl(
 ///     'SELECT user_id, count(*) AS n FROM events GROUP BY user_id'
 /// );
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_stream_table_fast_append_only(
     name: &str,
     query: &str,
@@ -657,7 +661,8 @@ fn create_stream_table_fast_append_only(
 /// freshness is required and the defining query is fully supported by the
 /// DVM engine.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_stream_table_realtime(
     name: &str,
     query: &str,
@@ -695,7 +700,8 @@ fn create_stream_table_realtime(
 /// Use this preset for analytical workloads where moderate latency is
 /// acceptable and cost efficiency matters more than freshness.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_stream_table_batch(
     name: &str,
     query: &str,
@@ -733,7 +739,8 @@ fn create_stream_table_batch(
 /// Use this preset for reporting and BI queries where freshness can be
 /// traded for lower CPU and I/O overhead.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_stream_table_cost_optimized(
     name: &str,
     query: &str,

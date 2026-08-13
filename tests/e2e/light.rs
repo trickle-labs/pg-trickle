@@ -544,6 +544,33 @@ impl E2eDb {
             .map(|_| ())
     }
 
+    /// Execute setup, target, and teardown SQL on one connection so role state
+    /// is preserved and always reset, including when the target fails.
+    pub async fn try_execute_with_role(
+        &self,
+        setup_sql: &str,
+        target_sql: &str,
+        teardown_sql: &str,
+    ) -> Result<(), sqlx::Error> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .expect("Failed to acquire DB connection for try_execute_with_role");
+        sqlx::query(sqlx::AssertSqlSafe(setup_sql))
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|e| panic!("setup SQL failed: {}\nSQL: {}", e, setup_sql));
+        let result = sqlx::query(sqlx::AssertSqlSafe(target_sql))
+            .execute(&mut *conn)
+            .await
+            .map(|_| ());
+        let _ = sqlx::query(sqlx::AssertSqlSafe(teardown_sql))
+            .execute(&mut *conn)
+            .await;
+        result
+    }
+
     /// Reload PostgreSQL configuration and wait briefly for SIGHUP settings to apply.
     pub async fn reload_config_and_wait(&self) {
         self.execute("SELECT pg_reload_conf()").await;

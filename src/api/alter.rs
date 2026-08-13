@@ -1119,6 +1119,7 @@ pub(crate) fn create_stream_table_impl(
     } = opts;
     let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
     let mut refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
+    let invoker_search_path = invoker_search_path()?;
 
     // Parse diamond consistency — default to 'atomic' when not specified
     let dc = match diamond_consistency {
@@ -1167,6 +1168,7 @@ pub(crate) fn create_stream_table_impl(
     // Parse schema.name
     let (schema, table_name) = parse_qualified_name(name)?;
     let qualified_name = format!("{schema}.{table_name}");
+    validate_output_schema_create(&schema)?;
 
     // HOT-1: validate fillfactor range.
     if let Some(ff) = storage_fillfactor
@@ -1208,18 +1210,20 @@ pub(crate) fn create_stream_table_impl(
         validate_requested_cdc_mode_requirements(&effective_requested_cdc_mode)?;
     }
 
-    // ── Query rewrite pipeline ─────────────────────────────────────
+    // ── Query rewrite, validation, and parse ───────────────────────
     let original_query = query.to_string();
-    let rw = run_query_rewrite_pipeline(query)?;
+    let (rw, vq) = with_invoker_search_path(&invoker_search_path, || {
+        let rw = run_query_rewrite_pipeline(query)?;
+        let vq = validate_and_parse_query(
+            &rw.query,
+            &mut refresh_mode,
+            is_auto,
+            rw.had_nested_window_rewrite,
+        )?;
+        Ok((rw, vq))
+    })?;
     let query = &rw.query;
-
-    // ── Validate & parse ───────────────────────────────────────────
-    let vq = validate_and_parse_query(
-        query,
-        &mut refresh_mode,
-        is_auto,
-        rw.had_nested_window_rewrite,
-    )?;
+    validate_source_access(&vq.source_relids)?;
     // Warnings
     warn_source_table_properties(&vq.source_relids);
     warn_select_star(query);
@@ -1320,7 +1324,9 @@ pub(crate) fn create_stream_table_impl(
     if crate::config::pg_trickle_enable_vector_agg()
         && let Some(ref pr) = vq.parsed_tree
     {
-        fix_vector_aggregate_column_types(&schema, &table_name, &pr.tree)?;
+        with_invoker_search_path(&invoker_search_path, || {
+            fix_vector_aggregate_column_types(&schema, &table_name, &pr.tree)
+        })?;
     }
 
     // CITUS-7: Distribute the output storage table when requested and Citus is available.
@@ -1435,6 +1441,7 @@ pub(crate) fn create_stream_table_impl(
 
     // ── Phase 2: CDC / IVM trigger setup ──
     setup_trigger_infrastructure(&vq.source_relids, refresh_mode, pgt_id, pgt_relid, query)?;
+    transfer_output_table_ownership(&schema, &table_name)?;
 
     // ── NS-5: Diamond consistency NOTICE ──
     // When the user explicitly opted out of atomic reads (diamond_consistency='none'),
@@ -1493,7 +1500,9 @@ pub(crate) fn create_stream_table_impl(
 
     // ── Phase 2b: Register view soft-dependencies for DDL tracking ──
     if original_query_opt.is_some()
-        && let Ok(original_sources) = extract_source_relations(&original_query)
+        && let Ok(original_sources) = with_invoker_search_path(&invoker_search_path, || {
+            extract_source_relations(&original_query)
+        })
     {
         for (src_oid, src_type) in &original_sources {
             if src_type == "VIEW" {
@@ -1524,6 +1533,7 @@ pub(crate) fn create_stream_table_impl(
             &vq.sum2_aux_columns,
             &vq.covar_aux_columns,
             &vq.nonnull_aux_columns,
+            &invoker_search_path,
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
 

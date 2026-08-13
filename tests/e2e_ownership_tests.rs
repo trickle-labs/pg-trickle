@@ -8,7 +8,7 @@
 //! - `sec1_other`: a regular role that should be denied access
 //! - postgres (superuser): should bypass ownership checks
 //!
-//! Prerequisites: `./tests/build_e2e_image.sh`
+//! Runs in both the light and full E2E harnesses.
 
 mod e2e;
 
@@ -142,4 +142,168 @@ async fn test_ownership_superuser_override() {
         )
         .await;
     assert!(!exists, "Stream table should be dropped");
+}
+
+/// #903: A role with documented source/output privileges can create a stream
+/// table without access to pg_trickle's private catalog or change-buffer schema.
+#[tokio::test]
+async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec903_author LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("CREATE SCHEMA sec903_author AUTHORIZATION sec903_author")
+        .await;
+    db.execute("CREATE TABLE sec903_author.source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO sec903_author.source VALUES (1, 'one'), (2, 'two')")
+        .await;
+    db.execute("ALTER TABLE sec903_author.source OWNER TO sec903_author")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, sec903_author TO sec903_author")
+        .await;
+    db.execute("GRANT USAGE, CREATE ON SCHEMA public TO sec903_author")
+        .await;
+    db.execute("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO sec903_author")
+        .await;
+
+    let result = db
+        .try_execute_with_role(
+            "SET ROLE sec903_author",
+            "SELECT pgtrickle.create_stream_table(\
+                 'sec903_stream', \
+                 'SELECT id, val FROM source', \
+                 '1m'\
+             )",
+            "RESET ROLE",
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "Documented non-superuser creation should succeed: {:?}",
+        result.err()
+    );
+
+    let secured_api: bool = db
+        .query_scalar(
+            "SELECT prosecdef \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname = 'create_stream_table' \
+               AND p.pronargs = 17",
+        )
+        .await;
+    assert!(secured_api, "creation API must be SECURITY DEFINER");
+
+    let locked_search_path: bool = db
+        .query_scalar(
+            "SELECT EXISTS ( \
+             SELECT 1 FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace, \
+             unnest(p.proconfig) AS setting \
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname = 'create_stream_table' \
+               AND p.pronargs = 17 \
+               AND setting = 'search_path=pgtrickle, pg_catalog, pg_temp' \
+             )",
+        )
+        .await;
+    assert!(
+        locked_search_path,
+        "SECURITY DEFINER creation API must use a locked search_path"
+    );
+
+    let secured_hook: bool = db
+        .query_scalar(
+            "SELECT prosecdef \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname = '_on_ddl_end' \
+               AND p.pronargs = 0",
+        )
+        .await;
+    assert!(
+        secured_hook,
+        "DDL hook must retain private catalog privileges during caller-owned DDL"
+    );
+
+    let owner: String = db
+        .query_scalar(
+            "SELECT pg_get_userbyid(relowner) \
+             FROM pg_class WHERE oid = 'public.sec903_stream'::regclass",
+        )
+        .await;
+    assert_eq!(owner, "sec903_author");
+
+    let catalog_access: bool = db
+        .query_scalar(
+            "SELECT has_table_privilege('sec903_author', \
+             'pgtrickle.pgt_stream_tables', 'SELECT')",
+        )
+        .await;
+    assert!(!catalog_access, "catalog tables must remain private");
+
+    let change_schema_usage: bool = db
+        .query_scalar(
+            "SELECT has_schema_privilege('sec903_author', \
+             'pgtrickle_changes', 'USAGE')",
+        )
+        .await;
+    assert!(
+        !change_schema_usage,
+        "authors must not receive change-buffer schema access"
+    );
+}
+
+/// #903: The elevated creation API must not grant its owner privileges to the
+/// defining query; PostgreSQL should return a normal permission error instead.
+#[tokio::test]
+async fn test_ownership_nonsuperuser_create_requires_source_select() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec903_no_select LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("CREATE SCHEMA sec903_denied").await;
+    db.execute("CREATE TABLE sec903_denied.source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO sec903_denied.source VALUES (1, 'secret')")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, sec903_denied TO sec903_no_select")
+        .await;
+    db.execute("GRANT USAGE, CREATE ON SCHEMA public TO sec903_no_select")
+        .await;
+    db.execute("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO sec903_no_select")
+        .await;
+
+    let result = db
+        .try_execute_with_role(
+            "SET ROLE sec903_no_select",
+            "SELECT pgtrickle.create_stream_table(\
+                 'sec903_denied_stream', \
+                 'SELECT id, val FROM sec903_denied.source', \
+                 '1m', \
+                 initialize => false\
+             )",
+            "RESET ROLE",
+        )
+        .await;
+    let err = result
+        .expect_err("source SELECT must not be bypassed")
+        .to_string();
+    assert!(
+        err.contains("permission denied"),
+        "Expected a PostgreSQL permission error, got: {err}"
+    );
+
+    let backend_still_usable: i32 = db.query_scalar("SELECT 1").await;
+    assert_eq!(
+        backend_still_usable, 1,
+        "permission errors must not crash PostgreSQL"
+    );
 }

@@ -33,7 +33,6 @@ Run these statements as a superuser (e.g., `postgres`).
 CREATE ROLE pgtrickle_admin NOLOGIN NOINHERIT;
 
 GRANT USAGE  ON SCHEMA pgtrickle         TO pgtrickle_admin;
-GRANT USAGE  ON SCHEMA pgtrickle_changes TO pgtrickle_admin;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO pgtrickle_admin;
 
 -- Allow creating stream tables in the public schema
@@ -159,13 +158,14 @@ WHERE table_schema = 'pgtrickle_changes'
 
 ---
 
-## Step 6 — Secure CDC Trigger Ownership
+## Step 6 — Secure CDC Trigger Functions
 
-CDC triggers on source tables are owned by the stream table owner
-(`pgtrickle_admin`). Verify this:
+CDC trigger functions are owned by the extension installation role. This lets
+them write to private change buffers while stream-table authors keep only their
+source `SELECT` and target-schema `CREATE` privileges. Verify this:
 
 ```sql
--- CDC triggers should be owned by pgtrickle_admin, not a superuser
+-- CDC trigger functions should be owned by the extension installation role.
 SELECT trigger_name, event_object_table, action_statement
 FROM information_schema.triggers
 WHERE trigger_name LIKE 'pgt_cdc_%'
@@ -178,8 +178,9 @@ JOIN pg_roles ON pg_roles.oid = pg_proc.proowner
 WHERE proname LIKE 'pgt_cdc_%';
 ```
 
-If triggers are owned by `postgres` (the superuser), recreate the stream
-tables under `pgtrickle_admin` (drop and recreate via `SET ROLE pgtrickle_admin`).
+The generated functions must retain `SECURITY DEFINER` and their locked
+`search_path`; do not change their ownership or grant application roles access
+to `pgtrickle_changes`.
 
 ---
 

@@ -1039,7 +1039,8 @@ fn build_rescan_cte(
                 group_by = group_by_sql,
             )
         }
-    } else if let Some(ref defining_query) = ctx.defining_query {
+    } else {
+        let defining_query = ctx.defining_query.as_ref()?;
         // Fallback: wrap the defining query as a subquery and filter to
         // affected groups. Less efficient (re-aggregates all groups then
         // filters) but correct for any child OpTree shape.
@@ -1120,11 +1121,6 @@ fn build_rescan_cte(
             "SELECT {selects}\nFROM ({defining_query}) __pgt_dq{where_clause}",
             selects = dq_selects.join(", "),
         )
-    } else {
-        // No defining query available — cannot build rescan CTE.
-        // This shouldn't happen in practice since defining_query is
-        // always set during refresh. Fall back to no rescan.
-        return None;
     };
 
     ctx.add_cte(rescan_cte.clone(), rescan_sql);
@@ -1326,12 +1322,7 @@ fn generate_direct_agg_delta(
     group_by: &[Expr],
     aggregates: &[AggExpr],
 ) -> Result<(String, Vec<String>), PgTrickleError> {
-    let OpTree::Scan {
-        table_oid,
-        columns: _,
-        ..
-    } = scan
-    else {
+    let OpTree::Scan { table_oid, .. } = scan else {
         return Err(PgTrickleError::InternalError(
             "generate_direct_agg_delta called on non-Scan".into(),
         ));
