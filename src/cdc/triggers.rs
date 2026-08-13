@@ -26,6 +26,21 @@ pub fn cb_col_name(name: &str) -> String {
     }
 }
 
+pub(super) fn is_pgvector_type(type_name: &str) -> bool {
+    matches!(
+        type_name
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .trim_matches('"'),
+        "vector" | "halfvec" | "sparsevec"
+    )
+}
+
 /// Build the VARBIT bitmask expression for `changed_cols` in UPDATE triggers.
 ///
 /// Each non-PK column gets a `CASE WHEN NEW.col IS DISTINCT FROM OLD.col THEN
@@ -50,9 +65,7 @@ pub fn build_changed_cols_bitmask_expr(
             // pgvector types (vector, halfvec, sparsevec) do not define an '='
             // operator, so IS DISTINCT FROM (which uses '=') would fail.
             // Cast to text for comparison — text always supports equality.
-            let base_type = type_name.split('(').next().unwrap_or("").trim();
-            let is_pgvector = matches!(base_type, "vector" | "halfvec" | "sparsevec");
-            if is_pgvector {
+            if is_pgvector_type(type_name) {
                 format!(
                     "(CASE WHEN NEW.\"{qcol}\"::text IS DISTINCT FROM OLD.\"{qcol}\"::text \
                      THEN B'1' ELSE B'0' END)::varbit"
@@ -127,6 +140,19 @@ mod tests {
         assert!(
             expr.contains("::text"),
             "pgvector col should cast to text: {expr}"
+        );
+
+        let qualified_expr = build_changed_cols_bitmask_expr(
+            &pk,
+            &[
+                ("id".to_string(), "integer".to_string()),
+                ("embedding".to_string(), "public.vector(3)".to_string()),
+            ],
+        )
+        .unwrap();
+        assert!(
+            qualified_expr.contains("NEW.\"embedding\"::text"),
+            "schema-qualified pgvector col should cast to text: {qualified_expr}"
         );
     }
 }
