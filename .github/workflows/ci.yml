@@ -72,7 +72,7 @@ jobs:
       # M-9 (v0.55.0): Upload unit-test coverage to Codecov for PR gate.
       # fail_ci_if_error: false so that a Codecov outage never blocks merges.
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         if: always()
         with:
           fail_ci_if_error: false

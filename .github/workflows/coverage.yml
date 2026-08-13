@@ -67,7 +67,7 @@ jobs:
             --output-path coverage/lcov.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/lcov.info
@@ -178,7 +178,7 @@ jobs:
           fi
 
       - name: Upload E2E coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         if: hashFiles('coverage/combined/lcov.info') != ''
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
