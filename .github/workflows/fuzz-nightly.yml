@@ -38,7 +38,7 @@ jobs:
           pg-install-mode: system
 
       - name: Cache cargo registry and fuzz build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
