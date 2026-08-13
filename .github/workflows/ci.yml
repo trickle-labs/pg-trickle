@@ -146,7 +146,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3-alpine)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-alpine
         with:
           path: /tmp/docker-images/postgres-18.3-alpine.tar
@@ -252,7 +252,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-smoke
         with:
           path: /tmp/docker-images/postgres-18.3.tar
@@ -323,7 +323,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-e2e
         with:
           path: /tmp/docker-images/postgres-18.3.tar
@@ -409,7 +409,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-e2e-seq
         with:
           path: /tmp/docker-images/postgres-18.3.tar
@@ -740,7 +740,7 @@ jobs:
       # full 15-20 min release compile on every run.  A restore-key prefix
       # allows a partial hit on Cargo.lock changes (recompiles new deps only).
       - name: Cache bench release build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: target/release
           key: v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-${{ hashFiles('**/Cargo.lock') }}
@@ -749,7 +749,7 @@ jobs:
 
       - name: Restore Criterion baseline
         id: restore-baseline
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: target/criterion
           key: criterion-baseline-main
@@ -789,7 +789,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Cache bench release build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: target/release
           key: v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-${{ hashFiles('**/Cargo.lock') }}
@@ -797,7 +797,7 @@ jobs:
             v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
       - name: Restore existing baseline (for comparison output)
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: target/criterion
           key: criterion-baseline-main
@@ -810,7 +810,7 @@ jobs:
 
       - name: Save Criterion baseline to cache
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: target/criterion
           key: criterion-baseline-main
@@ -846,7 +846,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-dag-calc
         with:
           path: /tmp/docker-images/postgres-18.3.tar
@@ -894,7 +894,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-dag-par
         with:
           path: /tmp/docker-images/postgres-18.3.tar
@@ -1354,7 +1354,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-dvm
         with:
           path: /tmp/docker-images/postgres-18.3.tar
@@ -1444,7 +1444,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Restore Docker image cache (postgres:18.3)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-docker-postgres-sec
         with:
           path: /tmp/docker-images/postgres-18.3.tar
