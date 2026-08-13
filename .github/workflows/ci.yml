@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -87,7 +87,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -109,7 +109,7 @@ jobs:
     # A46-13: Windows compile failures are now BLOCKING on scheduled/manual runs.
     # continue-on-error removed intentionally.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -126,7 +126,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -214,7 +214,7 @@ jobs:
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           df -h
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -246,7 +246,7 @@ jobs:
                "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           docker system prune -af
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -317,7 +317,7 @@ jobs:
           docker system prune -af
           df -h
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -403,7 +403,7 @@ jobs:
           docker system prune -af
           df -h
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -476,7 +476,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Check version references are in sync
         run: ./scripts/check_version_sync.sh
@@ -537,7 +537,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -641,7 +641,7 @@ jobs:
     outputs:
       matrix: ${{ steps.pairs.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - id: pairs
         run: |
           # v0.47.0 upgrade support policy: only test upgrades from v0.40.0+.
@@ -680,7 +680,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.upgrade-e2e-prepare.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -729,7 +729,7 @@ jobs:
     timeout-minutes: 90
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -783,7 +783,7 @@ jobs:
     timeout-minutes: 45
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -840,7 +840,7 @@ jobs:
                "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           docker system prune -af
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -888,7 +888,7 @@ jobs:
                "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           docker system prune -af
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -932,7 +932,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
@@ -1059,7 +1059,7 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
@@ -1135,7 +1135,7 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
@@ -1321,7 +1321,7 @@ jobs:
     outputs:
       dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -1348,7 +1348,7 @@ jobs:
             "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           docker system prune -af
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -1410,7 +1410,7 @@ jobs:
     outputs:
       security_changed: ${{ steps.filter.outputs.security_changed }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -1438,7 +1438,7 @@ jobs:
             "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           docker system prune -af
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
