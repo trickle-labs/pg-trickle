@@ -637,6 +637,7 @@ fn refresh_timeline(
         name!(action, String),
         name!(status, String),
         name!(rows_inserted, i64),
+        name!(rows_updated, i64),
         name!(rows_deleted, i64),
         name!(duration_ms, Option<f64>),
         name!(error_message, Option<String>),
@@ -660,6 +661,7 @@ fn refresh_timeline(
                     h.action,
                     h.status,
                     COALESCE(h.rows_inserted, 0)::bigint,
+                    COALESCE(h.rows_updated, 0)::bigint,
                     COALESCE(h.rows_deleted, 0)::bigint,
                     CASE WHEN h.end_time IS NOT NULL
                          THEN EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000
@@ -692,10 +694,11 @@ fn refresh_timeline(
             let action = row.get::<String>(3).unwrap_or(None).unwrap_or_default();
             let status = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
             let ins = row.get::<i64>(5).unwrap_or(None).unwrap_or(0);
-            let del = row.get::<i64>(6).unwrap_or(None).unwrap_or(0);
-            let dur = row.get::<f64>(7).unwrap_or(None);
-            let err = row.get::<String>(8).unwrap_or(None);
-            out.push((start, table, action, status, ins, del, dur, err));
+            let updated = row.get::<i64>(6).unwrap_or(None).unwrap_or(0);
+            let del = row.get::<i64>(7).unwrap_or(None).unwrap_or(0);
+            let dur = row.get::<f64>(8).unwrap_or(None);
+            let err = row.get::<String>(9).unwrap_or(None);
+            out.push((start, table, action, status, ins, updated, del, dur, err));
         }
         out
     });

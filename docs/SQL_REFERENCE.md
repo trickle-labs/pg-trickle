@@ -1604,6 +1604,7 @@ pgtrickle.refresh_timeline(
     action          text,
     status          text,
     rows_inserted   bigint,
+    rows_updated    bigint,
     rows_deleted    bigint,
     duration_ms     float8,
     error_message   text
@@ -1638,6 +1639,7 @@ pgtrickle.st_refresh_stats() → SETOF record(
     successful_refreshes   bigint,
     failed_refreshes       bigint,
     total_rows_inserted    bigint,
+    total_rows_updated     bigint,
     total_rows_deleted     bigint,
     avg_duration_ms        float8,
     last_refresh_action    text,
@@ -1673,6 +1675,7 @@ pgtrickle.get_refresh_history(
     action           text,
     status           text,
     rows_inserted    bigint,
+    rows_updated     bigint,
     rows_deleted     bigint,
     duration_ms      float8,
     error_message    text
@@ -3636,6 +3639,7 @@ Audit log of all refresh operations.
 | `end_time` | `timestamptz` | When it completed |
 | `action` | `text` | NO_DATA, FULL, DIFFERENTIAL, REINITIALIZE, SKIP |
 | `rows_inserted` | `bigint` | Rows inserted |
+| `rows_updated` | `bigint` | Rows updated; TopK and fused MERGE paths use `merge_action()` accounting |
 | `rows_deleted` | `bigint` | Rows deleted |
 | `delta_row_count` | `bigint` | Number of delta rows processed from change buffers |
 | `merge_strategy_used` | `text` | Which merge strategy was used (e.g. MERGE, DELETE+INSERT) |
@@ -5013,6 +5017,7 @@ Payloads have the current pg_trickle envelope:
   "v": 1,
   "refresh_id": "...",
   "inserted": 12,
+  "updated": 4,
   "deleted": 3,
   "source": "public.orders_agg"
 }
@@ -5341,4 +5346,3 @@ FROM pgtrickle.ducklake_sink_status();
 Requires the `pgtrickle.pgt_ducklake_sink_delivery` catalog table introduced
 in v0.69.0. Returns an empty result set if no stream tables have a DuckLake
 sink configured.
-

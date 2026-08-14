@@ -188,6 +188,18 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         }
     };
 
+    if job.dispatch_tick_id.is_none() || job.tick_watermark_lsn.is_none() {
+        warning!(
+            "pg_trickle refresh worker: cancelling legacy job {} without immutable tick bound",
+            job_id
+        );
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            let _ = SchedulerJob::cancel(job_id, "Missing immutable dispatch tick bound");
+        }));
+        shmem::release_worker_token();
+        return;
+    }
+
     // Validate: DAG version hasn't become obsolete
     let current_dag_version = shmem::current_dag_version();
     if (current_dag_version as i64) > job.dag_version + 1 {
@@ -563,6 +575,7 @@ fn compute_unit_tier_priority(member_pgt_ids: &[i64]) -> u8 {
 /// Called from the main scheduler loop when `parallel_refresh_mode == On`.
 /// Polls completed jobs, updates readiness, and enqueues new jobs.
 /// Workers to spawn are appended to `pending_spawns`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn parallel_dispatch_tick(
     state: &mut ParallelDispatchState,
     dag: &StDag,
@@ -571,6 +584,8 @@ pub(super) fn parallel_dispatch_tick(
     retry_policy: &RetryPolicy,
     db_name: &str,
     pending_spawns: &mut Vec<(String, i64)>,
+    dispatch_tick_id: i64,
+    tick_watermark_lsn: Option<&str>,
 ) {
     let eu_dag = match &state.eu_dag {
         Some(d) => d,
@@ -891,6 +906,13 @@ pub(super) fn parallel_dispatch_tick(
             }
         };
 
+        let tick_watermark_lsn = match tick_watermark_lsn {
+            Some(lsn) => lsn,
+            None => {
+                shmem::release_worker_token();
+                continue;
+            }
+        };
         let job_id = match SchedulerJob::enqueue(
             dag_version_i64,
             &unit.stable_key(),
@@ -899,6 +921,8 @@ pub(super) fn parallel_dispatch_tick(
             unit.root_pgt_id,
             scheduler_pid,
             1,
+            dispatch_tick_id,
+            tick_watermark_lsn,
         ) {
             Ok(id) => {
                 // OBS-2: A new job has been added to the parallel queue.

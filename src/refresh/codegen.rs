@@ -389,7 +389,8 @@ pub(crate) fn drain_pending_cleanups() {
             Spi::get_one::<bool>(&format!(
                 "SELECT NOT EXISTS(\
                    SELECT 1 FROM \"{schema}\".{buf_name} \
-                   WHERE lsn > '{safe_lsn}'::pg_lsn \
+               WHERE action IN ('I', 'D') \
+                 AND lsn > '{safe_lsn}'::pg_lsn \
                    LIMIT 1\
                  )",
                 schema = change_schema,
@@ -486,7 +487,8 @@ pub(crate) fn drain_pending_cleanups() {
         } else {
             let delete_sql = format!(
                 "DELETE FROM \"{schema}\".{buf_name} \
-                 WHERE lsn <= '{safe_lsn}'::pg_lsn",
+                 WHERE action IN ('I', 'D') \
+                   AND lsn <= '{safe_lsn}'::pg_lsn",
                 schema = change_schema,
             );
             match Spi::run(&delete_sql) {
@@ -664,6 +666,17 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
                 .unwrap_or(0);
                 upsert_cleanup_status(oid, &buf_name, "TRUNCATE", &e.to_string(), backlog_rows);
             } else {
+                if let Err(e) = crate::cdc::restore_registered_sentinel(
+                    change_schema,
+                    &buf_name,
+                    "BASE",
+                    oid as i64,
+                ) {
+                    pgrx::debug1!(
+                        "[pg_trickle] Frontier-based cleanup sentinel restore failed: {}",
+                        e
+                    );
+                }
                 clear_cleanup_status(oid);
             }
         } else {
@@ -704,7 +717,12 @@ pub(crate) fn cleanup_st_change_buffers_by_frontier(
         let key = format!("pgt_{upstream_pgt_id}");
 
         // Check that the ST change buffer table exists.
-        if !crate::cdc::has_st_change_buffer(upstream_pgt_id, change_schema) {
+        if let Err(e) = crate::cdc::validate_st_change_buffer(upstream_pgt_id, change_schema) {
+            pgrx::warning!(
+                "[pg_trickle] ST buffer validation failed for {}: {}",
+                upstream_pgt_id,
+                e
+            );
             continue;
         }
 
@@ -753,7 +771,8 @@ pub(crate) fn cleanup_st_change_buffers_by_frontier(
 
         let delete_sql = format!(
             "DELETE FROM \"{schema}\".changes_pgt_{id} \
-             WHERE lsn <= '{safe_lsn}'::pg_lsn",
+             WHERE action IN ('I', 'D') \
+               AND lsn <= '{safe_lsn}'::pg_lsn",
             schema = change_schema,
             id = upstream_pgt_id,
         );
@@ -1052,9 +1071,9 @@ pub(crate) fn capture_delta_to_st_buffer(
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let pgt_id = st.pgt_id;
 
-    if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
-        return Ok(0);
-    }
+    crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
+
+    crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
 
     // A44-10: ST change buffers use flat D+I schema (no new_/old_ prefix).
     let flat_col_list: String = user_cols
@@ -1462,9 +1481,8 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let pgt_id = st.pgt_id;
 
-    if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
-        return Ok(0);
-    }
+    crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
+    crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
 
     let target_table = format!("\"{change_schema}\".changes_pgt_{pgt_id}");
     let total = capture_diff_to_table(st, user_cols, &target_table, pgt_id, None)?;
@@ -1493,9 +1511,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let pgt_id = st.pgt_id;
 
-    if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
-        return Ok(0);
-    }
+    crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
+    crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
 
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;

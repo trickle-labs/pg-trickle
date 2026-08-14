@@ -3,6 +3,7 @@
 // All shared helpers, types, and utilities are in api/mod.rs (use super::*).
 
 use super::*;
+use crate::refresh::RefreshAction;
 
 /// Manually trigger a synchronous refresh of a stream table.
 #[pg_extern(schema = "pgtrickle")]
@@ -193,6 +194,7 @@ fn execute_manual_refresh(
     let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
+    let manual_tick_watermark = cdc::compute_safe_upper_bound(None, 0)?.0;
 
     let refresh_id = RefreshRecord::insert(
         st.pgt_id,
@@ -207,7 +209,7 @@ fn execute_manual_refresh(
         0,
         None,
         false,
-        None, // no tick_watermark_lsn for manual refreshes
+        Some(&manual_tick_watermark),
     )?;
 
     // TopK tables use the scoped-recomputation refresh path regardless of
@@ -280,65 +282,48 @@ fn execute_manual_refresh(
     // ERG-D: Complete the refresh history record.
     match &result {
         Ok((rows_inserted, rows_deleted)) => {
-            let _ = RefreshRecord::complete(
-                refresh_id,
-                "COMPLETED",
-                *rows_inserted,
-                *rows_deleted,
-                None,
-                0,
-                None,
-                false,
-            );
-            // G12-ERM-1: Persist the effective refresh mode for manual
-            // refreshes, mirroring the scheduler path.  Without this,
-            // effective_refresh_mode stays NULL after every manual refresh,
-            // which breaks diagnostics and test assertions.
-            let eff_mode = crate::refresh::take_effective_mode();
-            if !eff_mode.is_empty() {
-                let _ = StreamTableMeta::update_effective_refresh_mode(st.pgt_id, eff_mode);
-            }
-            // Gap-1 fix: write outbox notification for ALL manual refresh modes.
-            // Centralized here so FULL, Immediate, needs_reinit, TopK, and
-            // Differential (including its fallback-to-full paths) all trigger
-            // the outbox write with the actual row counts.
-            if (*rows_inserted > 0 || *rows_deleted > 0)
-                && crate::api::outbox::is_outbox_enabled(st.pgt_id)
-                && let Err(e) = crate::api::outbox::write_outbox_row(
-                    st.pgt_id,
-                    None, // manual refresh has no UUID refresh_id
-                    *rows_inserted,
-                    *rows_deleted,
-                    0_i32,
-                    schema,
-                    table_name,
-                )
-            {
-                pgrx::warning!(
-                    "[pg_trickle] OUTBOX: failed to write outbox row for {}.{}: {}",
-                    schema,
-                    table_name,
-                    e
-                );
-            }
-            // VP-1/VP-2 (v0.47.0): Execute post-refresh action for manual refreshes too,
-            // mirroring the scheduler path so vector_status() drift tracking works correctly.
-            let rows_changed = rows_inserted + rows_deleted;
-            if rows_changed > 0 {
-                crate::scheduler::execute_post_refresh_action(st, rows_changed);
-            }
+            let rows_updated = refresh::take_last_rows_updated();
+            let frontier = match StreamTableMeta::get_frontier(st.pgt_id)? {
+                Some(frontier) => frontier,
+                None => {
+                    let positions =
+                        cdc::get_slot_positions_at_bound(source_oids, &manual_tick_watermark)?;
+                    version::compute_initial_frontier(&positions, &get_data_timestamp_str())
+                }
+            };
+            let execution = refresh::RefreshExecution {
+                requested_action: match action {
+                    "FULL" => RefreshAction::Full,
+                    "DIFFERENTIAL" => RefreshAction::Differential,
+                    _ => RefreshAction::Reinitialize,
+                },
+                effective_action: match action {
+                    "FULL" => RefreshAction::Full,
+                    "DIFFERENTIAL" => RefreshAction::Differential,
+                    _ => RefreshAction::Reinitialize,
+                },
+                frontier,
+                rows_inserted: *rows_inserted,
+                rows_updated,
+                rows_deleted: *rows_deleted,
+                data_changed: *rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0,
+                was_full_fallback: false,
+                downstream_capture_complete: true,
+            };
+            refresh::finalize_success(st, &execution, refresh_id, now, schema, table_name)?;
         }
         Err(e) => {
-            let _ = RefreshRecord::complete(
+            RefreshRecord::complete_with_rows_updated(
                 refresh_id,
                 "FAILED",
+                0,
                 0,
                 0,
                 Some(&e.to_string()),
                 0,
                 None,
                 false,
-            );
+            )?;
         }
     }
 
@@ -394,6 +379,12 @@ pub(crate) fn execute_manual_full_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
+    let dependencies = StDependency::get_for_st(st.pgt_id)?;
+    let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+    crate::cdc::lock_source_relations(source_oids)?;
+    crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
+    let (safe_bound, _, _, _) = crate::cdc::compute_safe_upper_bound(None, 0)?;
+
     // EC-25/EC-26: Ensure the internal_refresh flag is set so DML guard
     // triggers allow the refresh executor to modify the storage table.
     // This is needed when called directly (e.g., from alter_stream_table)
@@ -435,27 +426,51 @@ pub(crate) fn execute_manual_full_refresh(
     // at most the data that was visible to the INSERT.
     let change_schema_for_snapshot =
         crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
-    let st_source_lsn_snapshot: Vec<(i64, String)> =
-        crate::catalog::StDependency::get_for_st(st.pgt_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|dep| dep.source_type == "STREAM_TABLE")
-            .filter_map(|dep| {
-                let upstream_pgt_id = StreamTableMeta::pgt_id_for_relid(dep.source_relid)?;
-                if !crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema_for_snapshot) {
-                    return None;
+    let mut st_source_lsn_snapshot = Vec::new();
+    for dep in dependencies
+        .iter()
+        .filter(|dep| dep.source_type == "STREAM_TABLE")
+    {
+        let upstream_pgt_id =
+            StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
+                PgTrickleError::CdcStateInvalid {
+                    pgt_id: st.pgt_id,
+                    source_name: format!("OID {}", dep.source_relid.to_u32()),
+                    buffer: "stream-table dependency".to_string(),
+                    reason: "upstream stream table metadata is missing".to_string(),
                 }
-                let lsn = Spi::get_one::<String>(&format!(
-                    "SELECT COALESCE(MAX(lsn)::text, pg_current_wal_lsn()::text) \
-             FROM \"{schema}\".changes_pgt_{id}",
-                    schema = change_schema_for_snapshot,
-                    id = upstream_pgt_id,
-                ))
-                .unwrap_or(None)
-                .unwrap_or_else(|| "0/0".to_string());
-                Some((upstream_pgt_id, lsn))
-            })
-            .collect();
+            })?;
+        if !crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema_for_snapshot) {
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id: st.pgt_id,
+                source_name: format!("pgt_id {upstream_pgt_id}"),
+                buffer: format!("{change_schema_for_snapshot}.changes_pgt_{upstream_pgt_id}"),
+                reason: "required stream-table change buffer is missing".to_string(),
+            });
+        }
+        let lsn = Spi::get_one_with_args::<String>(
+            &format!(
+                "SELECT LEAST(COALESCE(MAX(lsn), '0/0'::pg_lsn), $1::pg_lsn)::text \
+                 FROM \"{schema}\".changes_pgt_{id}",
+                schema = change_schema_for_snapshot,
+                id = upstream_pgt_id,
+            ),
+            &[safe_bound.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::CdcStateInvalid {
+            pgt_id: st.pgt_id,
+            source_name: format!("pgt_id {upstream_pgt_id}"),
+            buffer: format!("{change_schema_for_snapshot}.changes_pgt_{upstream_pgt_id}"),
+            reason: format!("could not read bounded upstream position: {e}"),
+        })?
+        .ok_or_else(|| PgTrickleError::CdcStateInvalid {
+            pgt_id: st.pgt_id,
+            source_name: format!("pgt_id {upstream_pgt_id}"),
+            buffer: format!("{change_schema_for_snapshot}.changes_pgt_{upstream_pgt_id}"),
+            reason: "bounded upstream position was NULL".to_string(),
+        })?;
+        st_source_lsn_snapshot.push((upstream_pgt_id, lsn));
+    }
 
     let truncate_sql = format!("TRUNCATE {quoted_table}");
     Spi::run(&truncate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -560,7 +575,7 @@ pub(crate) fn execute_manual_full_refresh(
     // Compute and store frontier so differential can start from here.
     // S3 optimization: single SPI call combines frontier storage,
     // timestamp update, and marking the ST as populated.
-    let slot_positions = cdc::get_slot_positions(source_oids)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let mut frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
 
@@ -678,7 +693,8 @@ fn execute_manual_differential_refresh(
     }
 
     // Get current WAL positions for non-ST sources (reuses source_oids — G-N3)
-    let slot_positions = cdc::get_slot_positions(source_oids)?;
+    let (safe_bound, _, _, _) = cdc::compute_safe_upper_bound(None, 0)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
 
@@ -745,7 +761,12 @@ fn get_source_oids_for_manual_refresh(pgt_id: i64) -> Result<Vec<pg_sys::Oid>, P
     let deps = StDependency::get_for_st(pgt_id)?;
     Ok(deps
         .into_iter()
-        .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
+        .filter(|dep| {
+            matches!(
+                dep.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            )
+        })
         .map(|dep| dep.source_relid)
         .collect())
 }

@@ -44,9 +44,10 @@
 //! - Buffer tables are append-only; consumed changes are deleted after refresh
 
 use pgrx::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config;
+use crate::config::normalize_change_buffer_durability;
 use crate::error::PgTrickleError;
 
 // ── A45-7: Submodules extracted from this file ────────────────────────────
@@ -140,6 +141,95 @@ fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTr
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
 }
 
+/// Lock all managed source relations, including partition descendants, in OID
+/// order before a FULL baseline reads them.
+pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickleError> {
+    let mut relation_oids = HashSet::new();
+    for source_oid in source_oids {
+        let descendants = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "WITH RECURSIVE rels(oid) AS (\
+                         SELECT $1::oid\
+                         UNION ALL\
+                         SELECT i.inhrelid FROM pg_inherits i JOIN rels r ON r.oid = i.inhparent\
+                     ) SELECT oid::text FROM rels ORDER BY oid",
+                    None,
+                    &[(*source_oid).into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let mut oids = Vec::new();
+            for row in rows {
+                oids.push(
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .ok_or_else(|| {
+                            PgTrickleError::NotFound("source relation OID is NULL".into())
+                        })?
+                        .parse::<u32>()
+                        .map_err(|e| {
+                            PgTrickleError::SpiError(format!("invalid source relation OID: {e}"))
+                        })?,
+                );
+            }
+            Ok::<_, PgTrickleError>(oids)
+        })?;
+        relation_oids.extend(descendants);
+    }
+
+    let mut relation_oids: Vec<u32> = relation_oids.into_iter().collect();
+    relation_oids.sort_unstable();
+    for oid in relation_oids {
+        let table = resolve_relation_name(pg_sys::Oid::from(oid))?.ok_or_else(|| {
+            PgTrickleError::NotFound(format!("source relation OID {oid} not found"))
+        })?;
+        Spi::run(&format!("LOCK TABLE {table} IN SHARE MODE")).map_err(|e| {
+            PgTrickleError::LockTimeout(format!("could not lock source {table}: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Lock upstream stream-table storage and catalog rows for a protected FULL
+/// baseline.  The storage lock closes the data-read window; the catalog lock
+/// prevents the upstream frontier and buffer high-water mark from changing
+/// while the downstream baseline is established.
+pub fn lock_stream_table_sources(
+    pgt_id: i64,
+    dependencies: &[crate::catalog::StDependency],
+) -> Result<(), PgTrickleError> {
+    let mut relation_oids: Vec<pg_sys::Oid> = dependencies
+        .iter()
+        .filter(|dep| dep.source_type == "STREAM_TABLE")
+        .map(|dep| dep.source_relid)
+        .collect();
+    relation_oids.sort_unstable_by_key(|oid| oid.to_u32());
+    relation_oids.dedup();
+    lock_source_relations(&relation_oids)?;
+
+    for source_oid in relation_oids {
+        let upstream_id = Spi::get_one_with_args::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_relid = $1 FOR UPDATE",
+            &[source_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::CdcStateInvalid {
+            pgt_id,
+            source_name: format!("OID {}", source_oid.to_u32()),
+            buffer: "stream-table catalog row".to_string(),
+            reason: format!("could not lock upstream catalog row: {e}"),
+        })?
+        .ok_or_else(|| PgTrickleError::CdcStateInvalid {
+            pgt_id,
+            source_name: format!("OID {}", source_oid.to_u32()),
+            buffer: "stream-table catalog row".to_string(),
+            reason: "upstream stream-table metadata is missing".to_string(),
+        })?;
+        let _ = upstream_id;
+    }
+    Ok(())
+}
+
 /// Returns true when the source table is INSERT-only by design and therefore
 /// requires only an INSERT CDC trigger (no UPDATE / DELETE triggers).
 ///
@@ -156,6 +246,319 @@ fn is_insert_only_table(source_oid: pg_sys::Oid) -> bool {
     )
     .unwrap_or(Some(false))
     .unwrap_or(false)
+}
+
+fn sync_guard_sql(buffer_key: &str) -> String {
+    let key = buffer_key.replace('\'', "''");
+    format!(
+        "IF EXISTS (SELECT 1 FROM pgtrickle.pgt_change_buffers \
+                   WHERE buffer_key = '{key}' AND durability = 'sync') THEN \
+             PERFORM set_config('synchronous_commit', 'on', true); \
+         END IF;"
+    )
+}
+
+fn with_sync_guard(sql: &str, buffer_key: &str) -> String {
+    sql.replacen(
+        "BEGIN",
+        &format!("BEGIN\n             {}", sync_guard_sql(buffer_key)),
+        1,
+    )
+}
+
+/// Apply the registry's synchronous-commit policy to the current transaction.
+pub(crate) fn set_sync_commit_for_buffer(buffer_key: &str) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM pgtrickle.pgt_change_buffers \
+                                  WHERE buffer_key = $1 AND durability = 'sync') \
+                    THEN set_config('synchronous_commit', 'on', true) \
+                    ELSE current_setting('synchronous_commit') END",
+        &[buffer_key.into()],
+    )
+    .map_err(|e| PgTrickleError::CdcStateInvalid {
+        pgt_id: 0,
+        source_name: "buffer registry".to_string(),
+        buffer: buffer_key.to_string(),
+        reason: format!("synchronous_commit setup failed: {e}"),
+    })
+}
+
+fn register_change_buffer(
+    change_schema: &str,
+    buffer_name: &str,
+    source_kind: &str,
+    source_id: i64,
+    durability: config::ChangeBufferDurability,
+) -> Result<(), PgTrickleError> {
+    let token = source_id;
+    Spi::run_with_args(
+        "INSERT INTO pgtrickle.pgt_change_buffers \
+             (buffer_key, source_kind, source_id, durability, sentinel_token) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (source_kind, source_id) DO NOTHING",
+        &[
+            buffer_name.into(),
+            source_kind.into(),
+            source_id.into(),
+            durability.as_str().into(),
+            token.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::CdcStateInvalid {
+        pgt_id: if source_kind == "STREAM_TABLE" {
+            source_id
+        } else {
+            0
+        },
+        source_name: source_kind.to_string(),
+        buffer: buffer_name.to_string(),
+        reason: format!("registry insert failed: {e}"),
+    })?;
+
+    let sql = format!(
+        "INSERT INTO {change_schema}.{buffer_name} (lsn, action, pk_hash) \
+         SELECT '0/0'::pg_lsn, 'S', $1 \
+         WHERE NOT EXISTS (SELECT 1 FROM {change_schema}.{buffer_name} \
+                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND pk_hash = $1)",
+    );
+    Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
+        pgt_id: if source_kind == "STREAM_TABLE" {
+            source_id
+        } else {
+            0
+        },
+        source_name: source_kind.to_string(),
+        buffer: buffer_name.to_string(),
+        reason: format!("sentinel insert failed: {e}"),
+    })
+}
+
+pub(crate) fn restore_registered_sentinel(
+    change_schema: &str,
+    buffer_name: &str,
+    source_kind: &str,
+    source_id: i64,
+) -> Result<(), PgTrickleError> {
+    let token = Spi::get_one_with_args::<i64>(
+        "SELECT sentinel_token FROM pgtrickle.pgt_change_buffers \
+         WHERE source_kind = $1 AND source_id = $2",
+        &[source_kind.into(), source_id.into()],
+    )
+    .map_err(|e| PgTrickleError::CdcStateInvalid {
+        pgt_id: source_id,
+        source_name: source_kind.to_string(),
+        buffer: buffer_name.to_string(),
+        reason: format!("registry lookup failed after cleanup: {e}"),
+    })?
+    .ok_or_else(|| PgTrickleError::CdcStateInvalid {
+        pgt_id: source_id,
+        source_name: source_kind.to_string(),
+        buffer: buffer_name.to_string(),
+        reason: "registry row missing after cleanup".to_string(),
+    })?;
+    let sql = format!(
+        "INSERT INTO {change_schema}.{buffer_name} (lsn, action, pk_hash) \
+         VALUES ('0/0'::pg_lsn, 'S', $1)"
+    );
+    Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
+        pgt_id: source_id,
+        source_name: source_kind.to_string(),
+        buffer: buffer_name.to_string(),
+        reason: format!("sentinel restore failed: {e}"),
+    })
+}
+
+/// A validated buffer descriptor reused by correctness paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedChangeBuffer {
+    pub source_kind: String,
+    pub source_id: i64,
+    pub buffer_name: String,
+    pub durability: config::ChangeBufferDurability,
+    pub sentinel_token: i64,
+}
+
+pub(crate) fn validate_st_change_buffer(
+    pgt_id: i64,
+    change_schema: &str,
+) -> Result<ResolvedChangeBuffer, PgTrickleError> {
+    validate_one_change_buffer(
+        pgt_id,
+        &format!("stream table {pgt_id}"),
+        "STREAM_TABLE",
+        pgt_id,
+        &format!("changes_pgt_{pgt_id}"),
+        change_schema.trim_matches('"'),
+    )
+}
+
+fn validate_one_change_buffer(
+    pgt_id: i64,
+    source: &str,
+    source_kind: &str,
+    source_id: i64,
+    buffer_name: &str,
+    change_schema: &str,
+) -> Result<ResolvedChangeBuffer, PgTrickleError> {
+    let invalid = |reason: String| PgTrickleError::CdcStateInvalid {
+        pgt_id,
+        source_name: source.to_string(),
+        buffer: format!("{change_schema}.{buffer_name}"),
+        reason,
+    };
+    let registry = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT buffer_key::text, durability::text, sentinel_token::text \
+                 FROM pgtrickle.pgt_change_buffers \
+                 WHERE source_kind = $1 AND source_id = $2",
+                None,
+                &[source_kind.into(), source_id.into()],
+            )
+            .map_err(|e| invalid(format!("registry lookup failed: {e}")))?;
+        if rows.is_empty() {
+            return Err(invalid("registry row missing".into()));
+        }
+        let row = rows.first();
+        let key = row
+            .get::<String>(1)
+            .map_err(|e| invalid(format!("registry buffer key unreadable: {e}")))?
+            .ok_or_else(|| invalid("registry buffer key is NULL".into()))?;
+        let durability = row
+            .get::<String>(2)
+            .map_err(|e| invalid(format!("registry durability unreadable: {e}")))?
+            .ok_or_else(|| invalid("registry durability is NULL".into()))?;
+        let token = row
+            .get::<String>(3)
+            .map_err(|e| invalid(format!("registry sentinel token unreadable: {e}")))?
+            .ok_or_else(|| invalid("registry sentinel token is NULL".into()))?
+            .parse::<i64>()
+            .map_err(|e| invalid(format!("registry sentinel token malformed: {e}")))?;
+        Ok::<_, PgTrickleError>((key, durability, token))
+    })?;
+    if registry.0 != buffer_name {
+        return Err(invalid(format!(
+            "registered buffer name '{}' does not match expected '{buffer_name}'",
+            registry.0
+        )));
+    }
+    let durability = normalize_change_buffer_durability(Some(registry.1.clone()));
+    if !matches!(registry.1.as_str(), "logged" | "unlogged" | "sync") {
+        return Err(invalid(format!(
+            "unsupported registered durability '{}'",
+            registry.1
+        )));
+    }
+    let relpersistence = Spi::get_one_with_args::<String>(
+        "SELECT c.relpersistence::text FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
+        &[change_schema.into(), buffer_name.into()],
+    )
+    .map_err(|e| invalid(format!("relation lookup failed: {e}")))?
+    .ok_or_else(|| invalid("buffer relation missing or has invalid relkind".into()))?;
+    let expected_persistence = if durability == config::ChangeBufferDurability::Unlogged {
+        "u"
+    } else {
+        "p"
+    };
+    if relpersistence != expected_persistence {
+        return Err(invalid(format!(
+            "relation persistence '{relpersistence}' does not match durability '{}'",
+            durability.as_str()
+        )));
+    }
+    let columns_ok = Spi::get_one_with_args::<bool>(
+        "SELECT COUNT(*) FILTER (WHERE (a.attname::text, a.atttypid) IN (\
+                    ('change_id', 'int8'::regtype),\
+                    ('lsn', 'pg_lsn'::regtype),\
+                    ('action', 'bpchar'::regtype),\
+                    ('pk_hash', 'int8'::regtype))) = 4 FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 \
+           AND NOT a.attisdropped AND a.attname::text IN ('change_id', 'lsn', 'action', 'pk_hash')",
+        &[change_schema.into(), buffer_name.into()],
+    )
+    .map_err(|e| invalid(format!("buffer schema lookup failed: {e}")))?
+    .unwrap_or(false);
+    if !columns_ok {
+        return Err(invalid("required control columns are missing".into()));
+    }
+    let sentinel_ok = Spi::get_one_with_args::<bool>(
+        &format!(
+            "SELECT COUNT(*) = 1 AND MIN(pk_hash) = $1 FROM {change_schema}.{buffer_name} \
+             WHERE lsn = '0/0'::pg_lsn AND action = 'S'"
+        ),
+        &[registry.2.into()],
+    )
+    .map_err(|e| invalid(format!("sentinel lookup failed: {e}")))?
+    .unwrap_or(false);
+    if !sentinel_ok {
+        return Err(invalid("sentinel is missing or malformed".into()));
+    }
+    Ok(ResolvedChangeBuffer {
+        source_kind: source_kind.to_string(),
+        source_id,
+        buffer_name: buffer_name.to_string(),
+        durability,
+        sentinel_token: registry.2,
+    })
+}
+
+/// Validate every CDC buffer needed by one stream table before differential work.
+pub fn validate_required_change_buffers(
+    st: &crate::catalog::StreamTableMeta,
+    dependencies: &[crate::catalog::StDependency],
+) -> Result<Vec<ResolvedChangeBuffer>, PgTrickleError> {
+    let change_schema_setting = config::pg_trickle_change_buffer_schema();
+    let change_schema = change_schema_setting.trim_matches('"');
+    dependencies
+        .iter()
+        .filter(|dependency| {
+            matches!(
+                dependency.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW" | "STREAM_TABLE"
+            )
+        })
+        .map(|dependency| {
+            if matches!(
+                dependency.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            ) {
+                let suffix = dependency.source_stable_name.as_deref().unwrap_or("");
+                let suffix = if suffix.is_empty() {
+                    dependency.source_relid.to_u32().to_string()
+                } else {
+                    suffix.to_string()
+                };
+                Ok((
+                    dependency.source_type.clone(),
+                    "BASE",
+                    dependency.source_relid.to_u32() as i64,
+                    format!("changes_{suffix}"),
+                ))
+            } else {
+                let id = crate::catalog::StreamTableMeta::pgt_id_for_relid(dependency.source_relid)
+                    .ok_or_else(|| PgTrickleError::CdcStateInvalid {
+                        pgt_id: st.pgt_id,
+                        source_name: format!("OID {}", dependency.source_relid.to_u32()),
+                        buffer: "stream-table dependency".to_string(),
+                        reason: "upstream stream table metadata is missing".to_string(),
+                    })?;
+                Ok((
+                    dependency.source_type.clone(),
+                    "STREAM_TABLE",
+                    id,
+                    format!("changes_pgt_{id}"),
+                ))
+            }
+        })
+        .map(|descriptor| {
+            let (source, kind, id, name) = descriptor?;
+            validate_one_change_buffer(st.pgt_id, &source, kind, id, &name, change_schema)
+        })
+        .collect()
 }
 
 /// Create a CDC trigger on a source table.
@@ -207,20 +610,21 @@ pub fn create_change_trigger(
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) =
                 build_stmt_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
-            Spi::run(&ins_fn).map_err(|e| {
+            let buffer_key = format!("changes_{stable_name}");
+            Spi::run(&with_sync_guard(&ins_fn, &buffer_key)).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to create CDC INSERT trigger function: {}",
                     e
                 ))
             })?;
             if !insert_only {
-                Spi::run(&upd_fn).map_err(|e| {
+                Spi::run(&with_sync_guard(&upd_fn, &buffer_key)).map_err(|e| {
                     PgTrickleError::SpiError(format!(
                         "Failed to create CDC UPDATE trigger function: {}",
                         e
                     ))
                 })?;
-                Spi::run(&del_fn).map_err(|e| {
+                Spi::run(&with_sync_guard(&del_fn, &buffer_key)).map_err(|e| {
                     PgTrickleError::SpiError(format!(
                         "Failed to create CDC DELETE trigger function: {}",
                         e
@@ -277,7 +681,8 @@ pub fn create_change_trigger(
         }
         config::CdcTriggerMode::Row => {
             let fn_sql = build_row_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
-            Spi::run(&fn_sql).map_err(|e| {
+            let buffer_key = format!("changes_{stable_name}");
+            Spi::run(&with_sync_guard(&fn_sql, &buffer_key)).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to create CDC trigger function: {}", e))
             })?;
             let dml_events = if insert_only {
@@ -305,12 +710,15 @@ pub fn create_change_trigger(
     }
 
     // ── TRUNCATE capture (statement-level trigger) ──────────────────
+    let buffer_key = format!("changes_{stable_name}");
+    let sync_guard = sync_guard_sql(&buffer_key);
     let truncate_fn_sql = format!(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
+             {sync_guard}
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
                  RETURN NULL;
@@ -728,6 +1136,14 @@ pub fn create_change_buffer_table(
         })?;
     }
 
+    register_change_buffer(
+        change_schema,
+        &format!("changes_{stable_name}"),
+        "BASE",
+        source_oid.to_u32() as i64,
+        durability,
+    )?;
+
     // AA1: Single covering index (lsn, pk_hash, change_id) INCLUDE (action).
     // CITUS-4: Index name uses stable_name.
     let idx_sql = format!(
@@ -799,6 +1215,14 @@ pub fn create_st_change_buffer_table(
     Spi::run(&disable_rls_sql).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to disable RLS on ST change buffer: {}", e))
     })?;
+
+    register_change_buffer(
+        change_schema,
+        &format!("changes_pgt_{pgt_id}"),
+        "STREAM_TABLE",
+        pgt_id,
+        durability,
+    )?;
 
     // Covering index matching base-table buffer pattern
     let idx_sql = format!(
@@ -945,7 +1369,8 @@ pub fn compact_change_buffer(
     let pending_count: i64 = Spi::get_one::<i64>(&format!(
         "SELECT count(*)::bigint FROM (\
            SELECT 1 FROM \"{schema}\".{buf} \
-           WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn \
+           WHERE action IN ('I', 'D') \
+             AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn \
            LIMIT {limit}\
          ) __pgt_cnt",
         schema = change_schema,
@@ -1003,7 +1428,8 @@ pub fn compact_change_buffer(
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
                     ) AS last_act \
              FROM \"{schema}\".{buf} \
-             WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
+             WHERE action IN ('I', 'D') \
+               AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
            ) __pgt_ranked \
            WHERE (first_act = 'I' AND last_act = 'D') \
               OR (rn_asc > 1 AND rn_desc > 1)\
@@ -1060,7 +1486,8 @@ pub fn compact_st_change_buffer(
     let pending_count: i64 = Spi::get_one::<i64>(&format!(
         "SELECT count(*)::bigint FROM (\
            SELECT 1 FROM \"{schema}\".changes_pgt_{id} \
-           WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn \
+           WHERE action IN ('I', 'D') \
+             AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn \
            LIMIT {limit}\
          ) __pgt_cnt",
         schema = change_schema,
@@ -1135,7 +1562,8 @@ fn build_st_compact_sql(change_schema: &str, pgt_id: i64, prev_lsn: &str, new_ls
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
                     ) AS last_act \
              FROM \"{schema}\".changes_pgt_{id} \
-             WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
+             WHERE action IN ('I', 'D') \
+               AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
            ) __pgt_ranked \
            WHERE (first_act = 'I' AND last_act = 'D') \
               OR (rn_asc > 1 AND rn_desc > 1)\
@@ -2178,23 +2606,65 @@ pub fn get_current_wal_lsn() -> Result<String, PgTrickleError> {
     Ok(lsn.unwrap_or_else(|| "0/0".to_string()))
 }
 
-/// Get the current LSN positions for all source tables of a ST.
-///
-/// `source_oids` — the OIDs of base tables this ST depends on.
-///
-/// Returns a map from source OID to the latest WAL LSN.
+/// Legacy raw-position API. Correctness paths must provide a proven bound via
+/// [`get_slot_positions_at_bound`].
+#[deprecated(
+    since = "0.82.0",
+    note = "Use get_slot_positions_at_bound() with a proven safe frontier"
+)]
 pub fn get_slot_positions(
-    source_oids: &[pg_sys::Oid],
+    _source_oids: &[pg_sys::Oid],
 ) -> Result<HashMap<u32, String>, PgTrickleError> {
-    let mut positions = HashMap::new();
+    Err(PgTrickleError::SafeFrontierUnavailable {
+        context: "legacy source frontier API".to_string(),
+        reason: "a proven safe bound is required; call get_slot_positions_at_bound".to_string(),
+    })
+}
 
-    // Get the current WAL position — this is the "now" upper bound
-    let current_lsn = get_current_wal_lsn()?;
-
-    for oid in source_oids {
-        positions.insert(oid.to_u32(), current_lsn.clone());
+/// Build per-source frontier positions from one already-proven safe bound.
+/// WAL sources use only the decoder position that was committed with buffer
+/// writes; trigger sources use the immutable visibility bound.
+pub fn get_slot_positions_at_bound(
+    source_oids: &[pg_sys::Oid],
+    safe_bound: &str,
+) -> Result<HashMap<u32, String>, PgTrickleError> {
+    if !is_valid_lsn(safe_bound) {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: "source frontier construction".to_string(),
+            reason: format!("malformed safe bound '{safe_bound}'"),
+        });
     }
-
+    let mut positions = HashMap::new();
+    for oid in source_oids {
+        let wal_position = Spi::get_one_with_args::<String>(
+            "SELECT CASE WHEN cdc_mode = 'WAL' THEN decoder_confirmed_lsn::text \
+                    WHEN cdc_mode = 'TRANSITIONING' \
+                      THEN LEAST(COALESCE(decoder_confirmed_lsn, '0/0'::pg_lsn), \
+                                COALESCE(cutover_lsn, $1::pg_lsn))::text \
+                    ELSE NULL END \
+             FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = $2::oid \
+             ORDER BY pgt_id LIMIT 1",
+            &[safe_bound.into(), (*oid).into()],
+        )
+        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+            context: format!("source OID {}", oid.to_u32()),
+            reason: e.to_string(),
+        })?;
+        let position = match wal_position {
+            Some(lsn) if is_valid_lsn(&lsn) && lsn != "0/0" => lsn,
+            Some(_) => {
+                return Err(PgTrickleError::CdcStateInvalid {
+                    pgt_id: 0,
+                    source_name: format!("OID {}", oid.to_u32()),
+                    buffer: "WAL decoder position".to_string(),
+                    reason: "required committed decoder position is unavailable".to_string(),
+                });
+            }
+            None => safe_bound.to_string(),
+        };
+        positions.insert(oid.to_u32(), position);
+    }
     Ok(positions)
 }
 
@@ -2223,7 +2693,7 @@ pub fn consume_slot_changes(
     // With triggers, changes are already in the buffer table.
     // Just return how many uncommitted changes exist (informational).
     let count = Spi::get_one::<i64>(&format!(
-        "SELECT count(*)::bigint FROM {schema}.changes_{oid}",
+        "SELECT count(*)::bigint FROM {schema}.changes_{oid} WHERE action IN ('I', 'D')",
         schema = change_schema,
         oid = source_oid.to_u32(),
     ))
@@ -2244,7 +2714,7 @@ pub fn delete_consumed_changes(
         &format!(
             "WITH deleted AS (\
                 DELETE FROM {schema}.changes_{oid} \
-                WHERE lsn <= $1::pg_lsn \
+                WHERE action IN ('I', 'D') AND lsn <= $1::pg_lsn \
                 RETURNING 1\
             ) SELECT count(*)::bigint FROM deleted",
             schema = change_schema,
@@ -2484,7 +2954,8 @@ pub fn count_pending_changes(
     let buf_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid));
     Spi::get_one::<i64>(&format!(
         "SELECT count(*)::bigint FROM \"{schema}\".{buf} \
-         WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn",
+         WHERE action IN ('I', 'D') \
+           AND lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn",
         schema = change_schema,
         buf = buf_name,
     ))
@@ -2524,7 +2995,84 @@ pub fn estimate_pending_changes(pgt_id: i64) -> Option<i64> {
     })
 }
 
-// ── #536: Frontier visibility holdback ────────────────────────────────────
+// ── v0.82.0: Frontier visibility proof ───────────────────────────────────
+
+/// One scheduler probe: the WAL candidate is captured before blocker rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontierProbe {
+    pub candidate_lsn: String,
+    pub active_xids: HashSet<u64>,
+}
+
+/// State carried between successful probes in one scheduler backend.
+#[derive(Debug, Default)]
+pub struct FrontierProbeState {
+    pub previous_candidate_lsn: Option<String>,
+    pub writer_fences: HashMap<u64, Option<String>>,
+    pub last_safe_lsn: Option<String>,
+}
+
+/// Result of applying one probe to the writer-fence state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SafeFrontierDecision {
+    AdvanceTo(String),
+    HoldAt(String),
+    HoldExisting,
+}
+
+/// Apply the writer-fence rule without touching PostgreSQL.
+pub fn transition_writer_fences(
+    state: &mut FrontierProbeState,
+    probe: &FrontierProbe,
+) -> SafeFrontierDecision {
+    let previous_candidate = state.previous_candidate_lsn.clone();
+    let previous_fences = std::mem::take(&mut state.writer_fences);
+    state.writer_fences = probe
+        .active_xids
+        .iter()
+        .map(|xid| {
+            let fence = match previous_fences.get(xid) {
+                Some(fence) => fence.clone(),
+                None => previous_candidate.clone(),
+            };
+            (*xid, fence)
+        })
+        .collect();
+    state.previous_candidate_lsn = Some(probe.candidate_lsn.clone());
+
+    if state.writer_fences.values().any(Option::is_none) {
+        return match state.last_safe_lsn.clone() {
+            Some(lsn) => SafeFrontierDecision::HoldAt(lsn),
+            None => SafeFrontierDecision::HoldExisting,
+        };
+    }
+
+    let bound = state
+        .writer_fences
+        .values()
+        .filter_map(|fence| fence.as_deref())
+        .min_by(|a, b| crate::version::lsn_to_u64(a).cmp(&crate::version::lsn_to_u64(b)))
+        .map_or_else(
+            || probe.candidate_lsn.clone(),
+            |fence| crate::version::lsn_min(&probe.candidate_lsn, fence).to_string(),
+        );
+
+    let safe = match state.last_safe_lsn.as_deref() {
+        Some(last) if crate::version::lsn_gt(last, &bound) => last.to_string(),
+        _ => bound,
+    };
+    let decision = if state
+        .last_safe_lsn
+        .as_deref()
+        .is_some_and(|last| last == safe)
+    {
+        SafeFrontierDecision::HoldAt(safe.clone())
+    } else {
+        SafeFrontierDecision::AdvanceTo(safe.clone())
+    };
+    state.last_safe_lsn = Some(safe);
+    decision
+}
 
 /// Pure-logic holdback classifier — no SPI calls, fully unit-testable.
 ///
@@ -2565,21 +3113,9 @@ pub fn classify_holdback(prev_oldest_xmin: u64, current_oldest_xmin: u64) -> boo
     current_oldest_xmin <= prev_oldest_xmin
 }
 
-/// Set to `true` after the first time we emit a warning about restricted
-/// `pg_stat_activity` access (e.g. RDS / Cloud SQL without `pg_monitor`).
-/// Prevents log spam -- warn once per server process lifetime.
-static WARNED_PG_MONITOR_ACCESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-type HoldbackProbeTuple = (String, i64, i64, i64);
-type HoldbackProbeCacheEntry = (u64, HoldbackProbeTuple);
-
 thread_local! {
-    /// PERF-003 (v0.73.0): Short-lived cache for the raw holdback probe tuple.
-    ///
-    /// Stores `(captured_at_ms, (write_lsn, min_xmin, max_age, visible_backends))`.
-    static HOLD_PROBE_CACHE: std::cell::RefCell<Option<HoldbackProbeCacheEntry>> =
-        const { std::cell::RefCell::new(None) };
+    static FRONTIER_PROBE_STATE: std::cell::RefCell<FrontierProbeState> =
+        std::cell::RefCell::new(FrontierProbeState::default());
 }
 
 /// Probe the cluster for the current write LSN and the oldest in-progress
@@ -2602,162 +3138,190 @@ thread_local! {
 ///   (0 when no holdback is active, for the warning threshold check).
 pub fn compute_safe_upper_bound(
     prev_watermark_lsn: Option<&str>,
-    prev_oldest_xmin: u64,
+    _prev_oldest_xmin: u64,
 ) -> Result<(String, String, u64, u64), PgTrickleError> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let cache_ms = crate::config::pg_trickle_frontier_holdback_probe_cache_ms().max(0) as u64;
+    let probe_start = std::time::Instant::now();
+    let (probe, oldest_age_secs) = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH candidate AS MATERIALIZED (
+                    SELECT pg_current_wal_lsn()::text AS lsn
+                 ), active AS (
+                    SELECT backend_xid::text::bigint AS xid,
+                           EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
+                    FROM pg_stat_activity
+                    WHERE pid <> pg_backend_pid() AND backend_xid IS NOT NULL
+                    UNION ALL
+                    SELECT backend_xmin::text::bigint AS xid,
+                           EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
+                    FROM pg_stat_activity
+                    WHERE pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
+                    UNION ALL
+                    SELECT transaction::text::bigint AS xid,
+                           EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
+                    FROM pg_prepared_xacts
+                 )
+                 SELECT candidate.lsn, active.xid::text, active.age_secs::text
+                 FROM candidate LEFT JOIN active ON TRUE",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                context: "frontier probe".to_string(),
+                reason: e.to_string(),
+            })?;
 
-    let cached = if cache_ms > 0 {
-        HOLD_PROBE_CACHE.with(|c| {
-            c.borrow().as_ref().and_then(|(ts, tuple)| {
-                if now_ms.saturating_sub(*ts) <= cache_ms {
-                    Some(tuple.clone())
-                } else {
-                    None
-                }
-            })
-        })
-    } else {
-        None
-    };
-
-    // PERF-10-03: Single compound SELECT fetches write LSN, xmin probes, and
-    // 2PC prepared transaction state in one round-trip (~2ms saved per tick
-    // at the 100ms minimum scheduler interval).  Formerly three separate
-    // queries: pg_current_wal_lsn(), pg_stat_activity, pg_prepared_xacts.
-    let result = if let Some(tuple) = cached {
-        crate::shmem::record_holdback_probe(0, true);
-        tuple
-    } else {
-        let probe_start = std::time::Instant::now();
-        let tuple = Spi::connect(|client| {
-            let rows = client
-                .select(
-                    // xid (type oid 28) is 32-bit in PostgreSQL up to and including
-                    // PG18.  Casting via ::text::bigint is safe because 2^32 fits
-                    // comfortably in a signed bigint.  If a future PG version exposes
-                    // xid8 (64-bit) here, this cast will still work but the 32-bit
-                    // wraparound assumption in classify_holdback() should be revisited.
-                    "WITH active_xmins AS (
-                        SELECT
-                            backend_xmin::text::bigint AS xmin,
-                            EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
-                        FROM pg_stat_activity
-                        WHERE backend_xmin IS NOT NULL
-                          AND state <> 'idle'
-                          AND pid <> pg_backend_pid()
-                        UNION ALL
-                        SELECT
-                            transaction::text::bigint AS xmin,
-                            EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
-                        FROM pg_prepared_xacts
-                    )
-                    SELECT
-                        pg_current_wal_lsn()::text,
-                        COALESCE(MIN(xmin), 0)::bigint,
-                        COALESCE(MAX(age_secs), 0)::bigint,
-                        (SELECT COUNT(*) FROM pg_stat_activity
-                         WHERE pid <> pg_backend_pid())::bigint AS visible_other_backends
-                    FROM active_xmins",
-                    None,
-                    &[],
-                )
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-            let mut write_lsn = String::from("0/0");
-            let mut min_xmin: i64 = 0;
-            let mut max_age: i64 = 0;
-            let mut visible_other_backends: i64 = 0;
-
-            for row in rows {
-                write_lsn = row
-                    .get::<String>(1)
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| "0/0".to_string());
-                min_xmin = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
-                max_age = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
-                visible_other_backends = row.get::<i64>(4).unwrap_or(None).unwrap_or(0);
+        let mut candidate_lsn = None;
+        let mut active_xids = HashSet::new();
+        let mut oldest_age_secs = 0_u64;
+        for row in rows {
+            let candidate = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    context: "frontier probe candidate".to_string(),
+                    reason: e.to_string(),
+                })?
+                .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                    context: "frontier probe candidate".to_string(),
+                    reason: "candidate LSN was NULL".to_string(),
+                })?;
+            if !is_valid_lsn(&candidate) {
+                return Err(PgTrickleError::SafeFrontierUnavailable {
+                    context: "frontier probe candidate".to_string(),
+                    reason: format!("malformed candidate LSN '{candidate}'"),
+                });
             }
+            candidate_lsn = Some(candidate);
 
-            Ok::<_, PgTrickleError>((write_lsn, min_xmin, max_age, visible_other_backends))
-        })?;
+            let xid =
+                row.get::<String>(2)
+                    .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                        context: "frontier probe xid".to_string(),
+                        reason: e.to_string(),
+                    })?;
+            if let Some(xid) = xid {
+                let xid =
+                    xid.parse::<u64>()
+                        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                            context: "frontier probe xid".to_string(),
+                            reason: format!("malformed transaction ID '{xid}': {e}"),
+                        })?;
+                active_xids.insert(xid);
+                let age = row
+                    .get::<String>(3)
+                    .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                        context: "frontier probe transaction age".to_string(),
+                        reason: e.to_string(),
+                    })?
+                    .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                        context: "frontier probe transaction age".to_string(),
+                        reason: "transaction age was NULL".to_string(),
+                    })?
+                    .parse::<u64>()
+                    .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                        context: "frontier probe transaction age".to_string(),
+                        reason: e.to_string(),
+                    })?;
+                oldest_age_secs = oldest_age_secs.max(age);
+            }
+        }
 
-        let elapsed_ms = probe_start.elapsed().as_millis() as u64;
-        crate::shmem::record_holdback_probe(elapsed_ms, false);
-
-        if cache_ms > 0 {
-            HOLD_PROBE_CACHE.with(|c| {
-                *c.borrow_mut() = Some((now_ms, tuple.clone()));
+        Ok::<_, PgTrickleError>((
+            FrontierProbe {
+                candidate_lsn: candidate_lsn.ok_or_else(|| {
+                    PgTrickleError::SafeFrontierUnavailable {
+                        context: "frontier probe".to_string(),
+                        reason: "probe returned no rows".to_string(),
+                    }
+                })?,
+                active_xids,
+            },
+            oldest_age_secs,
+        ))
+    })?;
+    crate::shmem::record_holdback_probe(probe_start.elapsed().as_millis() as u64, false);
+    let write_lsn = probe.candidate_lsn.clone();
+    let current_oldest_xmin = probe.active_xids.iter().copied().min().unwrap_or(0);
+    let decision = FRONTIER_PROBE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.last_safe_lsn.is_none()
+            && let Some(previous) = prev_watermark_lsn.filter(|lsn| is_valid_lsn(lsn))
+        {
+            state.last_safe_lsn = Some(previous.to_string());
+        }
+        transition_writer_fences(&mut state, &probe)
+    });
+    let safe_lsn = match decision {
+        SafeFrontierDecision::AdvanceTo(lsn) | SafeFrontierDecision::HoldAt(lsn) => lsn,
+        SafeFrontierDecision::HoldExisting => {
+            return Err(PgTrickleError::SafeFrontierUnavailable {
+                context: "frontier probe".to_string(),
+                reason: "active transaction has no proven prior fence".to_string(),
             });
         }
-
-        tuple
     };
 
-    let (write_lsn, min_xmin_i64, age_secs_i64, visible_other_backends) = result;
+    Ok((safe_lsn, write_lsn, current_oldest_xmin, oldest_age_secs))
+}
 
-    // Detect restricted pg_stat_activity access. A healthy PostgreSQL server
-    // always has background processes (checkpointer, autovacuum launcher, etc.)
-    // visible to superusers / pg_monitor members. If we see 0 other backends,
-    // the role likely cannot read other sessions -- warn once so operators can
-    // grant pg_monitor to the pg_trickle service account.
-    if visible_other_backends == 0
-        && WARNED_PG_MONITOR_ACCESS
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_ok()
-    {
-        pgrx::warning!(
-            "pg_trickle: frontier holdback probe cannot see other PostgreSQL backends \
-             in pg_stat_activity. On managed services (RDS, Cloud SQL) this means \
-             long-running transactions from other sessions will NOT trigger a holdback, \
-             risking silent data loss. \
-             Fix: GRANT pg_monitor TO <pg_trickle_service_role>;"
-        );
-    }
-    let current_oldest_xmin = if min_xmin_i64 > 0 {
-        min_xmin_i64 as u64
-    } else {
-        0
+fn is_valid_lsn(lsn: &str) -> bool {
+    let Some((hi, lo)) = lsn.split_once('/') else {
+        return false;
     };
-    let oldest_txn_age_secs = if age_secs_i64 > 0 {
-        age_secs_i64 as u64
-    } else {
-        0
-    };
-
-    let should_hold = classify_holdback(prev_oldest_xmin, current_oldest_xmin);
-
-    let safe_lsn = if should_hold {
-        // Hold back to the previous watermark when one exists.
-        match prev_watermark_lsn {
-            Some(prev) if !prev.is_empty() && prev != "0/0" => prev.to_string(),
-            // First tick or no previous watermark: advance anyway to avoid
-            // stalling indefinitely.
-            _ => write_lsn.clone(),
-        }
-    } else {
-        write_lsn.clone()
-    };
-
-    Ok((
-        safe_lsn,
-        write_lsn,
-        current_oldest_xmin,
-        oldest_txn_age_secs,
-    ))
+    !hi.is_empty()
+        && !lo.is_empty()
+        && u64::from_str_radix(hi, 16).is_ok_and(|value| value <= u32::MAX as u64)
+        && u64::from_str_radix(lo, 16).is_ok_and(|value| value <= u32::MAX as u64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe(candidate_lsn: &str, xids: &[u64]) -> FrontierProbe {
+        FrontierProbe {
+            candidate_lsn: candidate_lsn.to_string(),
+            active_xids: xids.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn writer_fences_hold_first_unknown_writer() {
+        let mut state = FrontierProbeState::default();
+        assert_eq!(
+            transition_writer_fences(&mut state, &probe("0/10", &[42])),
+            SafeFrontierDecision::HoldExisting
+        );
+        assert_eq!(state.last_safe_lsn, None);
+    }
+
+    #[test]
+    fn writer_fences_allow_progress_after_writer_disappears() {
+        let mut state = FrontierProbeState::default();
+        assert_eq!(
+            transition_writer_fences(&mut state, &probe("0/10", &[])),
+            SafeFrontierDecision::AdvanceTo("0/10".into())
+        );
+        assert_eq!(
+            transition_writer_fences(&mut state, &probe("0/20", &[42])),
+            SafeFrontierDecision::HoldAt("0/10".into())
+        );
+        assert_eq!(
+            transition_writer_fences(&mut state, &probe("0/30", &[])),
+            SafeFrontierDecision::AdvanceTo("0/30".into())
+        );
+    }
+
+    #[test]
+    fn writer_fences_fence_replacement_at_previous_candidate() {
+        let mut state = FrontierProbeState::default();
+        transition_writer_fences(&mut state, &probe("0/10", &[]));
+        transition_writer_fences(&mut state, &probe("0/20", &[1]));
+        assert_eq!(
+            transition_writer_fences(&mut state, &probe("0/30", &[2])),
+            SafeFrontierDecision::AdvanceTo("0/20".into())
+        );
+    }
 
     // ── trigger_name_for_source tests ───────────────────────────────
 

@@ -57,6 +57,7 @@ fn st_refresh_stats() -> TableIterator<
         name!(successful_refreshes, i64),
         name!(failed_refreshes, i64),
         name!(total_rows_inserted, i64),
+        name!(total_rows_updated, i64),
         name!(total_rows_deleted, i64),
         name!(avg_duration_ms, f64),
         name!(last_refresh_action, Option<String>),
@@ -84,6 +85,7 @@ fn st_refresh_stats() -> TableIterator<
                     COALESCE(stats.successful_refreshes, 0)::bigint,
                     COALESCE(stats.failed_refreshes, 0)::bigint,
                     COALESCE(stats.total_rows_inserted, 0)::bigint,
+                    COALESCE(stats.total_rows_updated, 0)::bigint,
                     COALESCE(stats.total_rows_deleted, 0)::bigint,
                     CASE
                         WHEN COALESCE(stats.total_refreshes, 0) > 0
@@ -141,21 +143,22 @@ fn st_refresh_stats() -> TableIterator<
             let successful = row.get::<i64>(7).unwrap_or(None).unwrap_or(0);
             let failed = row.get::<i64>(8).unwrap_or(None).unwrap_or(0);
             let rows_inserted = row.get::<i64>(9).unwrap_or(None).unwrap_or(0);
-            let rows_deleted = row.get::<i64>(10).unwrap_or(None).unwrap_or(0);
-            let avg_duration = row.get::<f64>(11).unwrap_or(None).unwrap_or(0.0);
-            let last_action = row.get::<String>(12).unwrap_or(None);
-            let last_status = row.get::<String>(13).unwrap_or(None);
-            let last_refresh_at = row.get::<TimestampWithTimeZone>(14).unwrap_or(None);
-            let staleness = row.get::<f64>(15).unwrap_or(None);
-            let stale = row.get::<bool>(16).unwrap_or(None).unwrap_or(false);
-            let consecutive_errors = row.get::<i32>(17).unwrap_or(None).unwrap_or(0);
-            let schedule = row.get::<String>(18).unwrap_or(None);
+            let rows_updated = row.get::<i64>(10).unwrap_or(None).unwrap_or(0);
+            let rows_deleted = row.get::<i64>(11).unwrap_or(None).unwrap_or(0);
+            let avg_duration = row.get::<f64>(12).unwrap_or(None).unwrap_or(0.0);
+            let last_action = row.get::<String>(13).unwrap_or(None);
+            let last_status = row.get::<String>(14).unwrap_or(None);
+            let last_refresh_at = row.get::<TimestampWithTimeZone>(15).unwrap_or(None);
+            let staleness = row.get::<f64>(16).unwrap_or(None);
+            let stale = row.get::<bool>(17).unwrap_or(None).unwrap_or(false);
+            let consecutive_errors = row.get::<i32>(18).unwrap_or(None).unwrap_or(0);
+            let schedule = row.get::<String>(19).unwrap_or(None);
             let refresh_tier = row
-                .get::<String>(19)
+                .get::<String>(20)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "hot".to_string());
-            let last_error_message = row.get::<String>(20).unwrap_or(None);
-            let downstream_publication = row.get::<String>(21).unwrap_or(None);
+            let last_error_message = row.get::<String>(21).unwrap_or(None);
+            let downstream_publication = row.get::<String>(22).unwrap_or(None);
 
             out.push((
                 pgt_name,
@@ -167,6 +170,7 @@ fn st_refresh_stats() -> TableIterator<
                 successful,
                 failed,
                 rows_inserted,
+                rows_updated,
                 rows_deleted,
                 avg_duration,
                 last_action,
@@ -537,6 +541,7 @@ fn get_refresh_history(
         name!(action, String),
         name!(status, String),
         name!(rows_inserted, i64),
+        name!(rows_updated, i64),
         name!(rows_deleted, i64),
         name!(duration_ms, Option<f64>),
         name!(error_message, Option<String>),
@@ -560,6 +565,7 @@ fn get_refresh_history(
                     h.action,
                     h.status,
                     COALESCE(h.rows_inserted, 0)::bigint,
+                    COALESCE(h.rows_updated, 0)::bigint,
                     COALESCE(h.rows_deleted, 0)::bigint,
                     CASE WHEN h.end_time IS NOT NULL
                          THEN EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000
@@ -607,12 +613,13 @@ fn get_refresh_history(
             let action = row.get::<String>(5).unwrap_or(None).unwrap_or_default();
             let status = row.get::<String>(6).unwrap_or(None).unwrap_or_default();
             let ins = row.get::<i64>(7).unwrap_or(None).unwrap_or(0);
-            let del = row.get::<i64>(8).unwrap_or(None).unwrap_or(0);
-            let dur = row.get::<f64>(9).unwrap_or(None);
-            let err = row.get::<String>(10).unwrap_or(None);
+            let updated = row.get::<i64>(8).unwrap_or(None).unwrap_or(0);
+            let del = row.get::<i64>(9).unwrap_or(None).unwrap_or(0);
+            let dur = row.get::<f64>(10).unwrap_or(None);
+            let err = row.get::<String>(11).unwrap_or(None);
 
             out.push((
-                refresh_id, data_ts, start, end, action, status, ins, del, dur, err,
+                refresh_id, data_ts, start, end, action, status, ins, updated, del, dur, err,
             ));
         }
         out

@@ -293,34 +293,6 @@ pub fn get_existing_slot_lsn(slot_name: &str) -> Result<Option<String>, PgTrickl
     Ok(Some(lsn))
 }
 
-/// Advance a logical replication slot's `confirmed_flush_lsn` to the current
-/// WAL LSN (`pg_current_wal_lsn()`).
-///
-/// Called after a FULL refresh to allow PostgreSQL to reclaim WAL segments
-/// that the full refresh has already materialized (G3). Returns `Ok(())`
-/// immediately if the slot does not exist (e.g., trigger-based sources).
-pub fn advance_slot_to_current(slot_name: &str) -> Result<(), PgTrickleError> {
-    // Guard against missing slot (or a slot owned by a different database)
-    // before issuing the advance, which would otherwise raise a PostgreSQL ERROR.
-    let exists = Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots \
-         WHERE slot_name = $1 AND database = current_database())",
-        &[slot_name.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-    .unwrap_or(false);
-
-    if !exists {
-        return Ok(());
-    }
-
-    Spi::run_with_args(
-        "SELECT pg_replication_slot_advance($1, pg_current_wal_lsn())",
-        &[slot_name.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(format!("advance slot '{}': {}", slot_name, e)))
-}
-
 /// Create a logical replication slot via the PostgreSQL C API.
 ///
 /// Replicates the logic of `pg_create_logical_replication_slot()` from
@@ -583,6 +555,8 @@ pub fn poll_wal_changes(
 
     let mut count: i64 = 0;
     let mut last_lsn: Option<String> = None;
+
+    cdc::set_sync_commit_for_buffer(&cdc::buffer_base_name_for_oid(source_oid))?;
 
     // COR-5: Resolve canonical qualified names for WAL filter matching once per
     // poll cycle. This handles case-sensitive quoted identifiers, search-path-
@@ -1218,14 +1192,26 @@ pub fn check_and_complete_transition(
     let default_slot = slot_name_for_source(source_oid);
     let slot_name = dep.slot_name.as_deref().unwrap_or(&default_slot);
 
-    // Check if the decoder has caught up
+    let required_lsn =
+        dep.cutover_lsn
+            .as_deref()
+            .ok_or_else(|| PgTrickleError::CdcCutoverUnproven {
+                source_oid: source_oid.to_u32(),
+                target: "WAL".to_string(),
+                required_lsn: "unknown".to_string(),
+                confirmed_lsn: None,
+            })?;
+    let confirmed_lsn =
+        get_existing_slot_lsn(slot_name)?.ok_or_else(|| PgTrickleError::CdcCutoverUnproven {
+            source_oid: source_oid.to_u32(),
+            target: "WAL".to_string(),
+            required_lsn: required_lsn.to_string(),
+            confirmed_lsn: None,
+        })?;
     let lag_bytes = get_slot_lag_bytes(slot_name)?;
 
-    // Consider "caught up" when lag is under 64KB (a few WAL pages)
-    const MAX_LAG_BYTES: i64 = 65_536;
-
-    if lag_bytes <= MAX_LAG_BYTES {
-        // Decoder has caught up — complete the transition
+    if crate::version::lsn_gte(&confirmed_lsn, required_lsn) {
+        // Decoder has committed the exact handoff LSN — complete the transition.
         complete_wal_transition(source_oid, pgt_id, change_schema)?;
         return Ok(());
     }
@@ -1336,25 +1322,35 @@ fn complete_wal_transition(
     // lock spans the two SPI calls below even if they run in sub-transactions.
     Spi::run_with_args("SELECT pg_advisory_lock($1)", &[lock_key.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("advisory lock for COR-003: {}", e)))?;
+    let source_table = cdc::get_qualified_table_name(source_oid)?;
+    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")).map_err(|e| {
+        PgTrickleError::CdcCutoverUnproven {
+            source_oid: oid_u32,
+            target: "WAL".to_string(),
+            required_lsn: "source lock".to_string(),
+            confirmed_lsn: Some(e.to_string()),
+        }
+    })?;
 
     // Step 1: Update catalog to WAL mode FIRST.
     // After this point the scheduler knows the source is in WAL mode.  Any
     // concurrent DML that fires before DROP TRIGGER takes effect will write
     // through both trigger and WAL (dedup at refresh) — this is the safe side.
-    let mode_result =
-        StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Wal, None, None);
+    if let Err(e) = StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Wal, None, None) {
+        let _ = Spi::run_with_args("SELECT pg_advisory_unlock($1)", &[lock_key.into()]);
+        return Err(e);
+    }
 
     // Step 2: Drop the CDC trigger (WAL decoder now covers all changes).
     // DROP TRIGGER takes ACCESS EXCLUSIVE — it waits for all in-flight DML
     // that might be executing the trigger body before proceeding.
     let trigger_result = cdc::drop_change_trigger(source_oid, change_schema);
 
-    // Release the advisory lock regardless of outcome.
+    // Release the advisory lock regardless of trigger-drop outcome.
     let _ = Spi::run_with_args("SELECT pg_advisory_unlock($1)", &[lock_key.into()]);
 
-    // Propagate any errors after the lock is released.
-    mode_result?;
     trigger_result?;
+    StDependency::set_cutover_for_source(source_oid, None, None)?;
 
     info!(
         "pg_trickle: completed WAL transition for source OID {} — catalog set to WAL, trigger dropped",
@@ -1385,6 +1381,29 @@ pub fn abort_wal_transition(
     let oid_u32 = source_oid.to_u32();
     let slot_name = slot_name_for_source(source_oid);
 
+    let lock_key = -(oid_u32 as i64);
+    Spi::run_with_args("SELECT pg_advisory_xact_lock($1)", &[lock_key.into()]).map_err(|e| {
+        PgTrickleError::CdcCutoverUnproven {
+            source_oid: oid_u32,
+            target: "TRIGGER".to_string(),
+            required_lsn: "advisory lock".to_string(),
+            confirmed_lsn: Some(e.to_string()),
+        }
+    })?;
+
+    let source_table = cdc::get_qualified_table_name(source_oid)?;
+    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")).map_err(|e| {
+        PgTrickleError::CdcCutoverUnproven {
+            source_oid: oid_u32,
+            target: "TRIGGER".to_string(),
+            required_lsn: "source lock".to_string(),
+            confirmed_lsn: Some(e.to_string()),
+        }
+    })?;
+
+    // Future writes must be captured before WAL resources are released.
+    ensure_trigger_for_source(source_oid, change_schema)?;
+
     // Step 1: Drop the replication slot (stops WAL retention)
     if let Err(e) = drop_replication_slot(&slot_name) {
         warning!(
@@ -1406,6 +1425,7 @@ pub fn abort_wal_transition(
     // Step 3: Revert catalog to trigger mode
     // Step 3: Revert catalog to trigger mode for all dependents of this source.
     StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Trigger, None, None)?;
+    StDependency::set_cutover_for_source(source_oid, None, None)?;
 
     // Step 4: Verify the trigger still exists — recreate if lost.
     // This step is best-effort: if the source table lost its primary key (the
@@ -1486,6 +1506,39 @@ pub fn abort_wal_transition(
     Ok(())
 }
 
+fn ensure_trigger_for_source(
+    source_oid: pg_sys::Oid,
+    change_schema: &str,
+) -> Result<(), PgTrickleError> {
+    if cdc::trigger_exists(source_oid)? {
+        return Ok(());
+    }
+    let pk_columns = cdc::resolve_pk_columns(source_oid)?;
+    if pk_columns.is_empty() {
+        return Err(PgTrickleError::CdcStateInvalid {
+            pgt_id: 0,
+            source_name: format!("OID {}", source_oid.to_u32()),
+            buffer: "CDC trigger".to_string(),
+            reason: "cannot restore trigger without a primary key".to_string(),
+        });
+    }
+    let columns = cdc::resolve_source_column_defs(source_oid)?;
+    let source_id = crate::citus::SourceIdentifier::from_oid(source_oid).unwrap_or_else(|_| {
+        crate::citus::SourceIdentifier::from_oid_and_stable_name(
+            source_oid,
+            source_oid.to_u32().to_string(),
+        )
+    });
+    cdc::create_change_trigger(
+        source_oid,
+        change_schema,
+        &pk_columns,
+        &columns,
+        &source_id.stable_name,
+    )?;
+    Ok(())
+}
+
 /// Force a source back to trigger-based CDC to satisfy a conservative request.
 pub fn force_source_to_trigger(
     source_oid: pg_sys::Oid,
@@ -1508,6 +1561,17 @@ pub fn force_source_to_trigger(
         None
     };
 
+    let source_table = cdc::get_qualified_table_name(source_oid)?;
+    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")).map_err(|e| {
+        PgTrickleError::CdcCutoverUnproven {
+            source_oid: source_oid.to_u32(),
+            target: "TRIGGER".to_string(),
+            required_lsn: "source lock".to_string(),
+            confirmed_lsn: Some(e.to_string()),
+        }
+    })?;
+    ensure_trigger_for_source(source_oid, change_schema)?;
+
     let slot_name = slot_name_for_source(source_oid);
     if let Err(e) = drop_replication_slot(&slot_name) {
         warning!(
@@ -1525,6 +1589,7 @@ pub fn force_source_to_trigger(
     }
 
     StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Trigger, None, None)?;
+    StDependency::set_cutover_for_source(source_oid, None, None)?;
 
     if !cdc::trigger_exists(source_oid)? {
         let pk_columns = cdc::resolve_pk_columns(source_oid)?;
@@ -1922,6 +1987,8 @@ pub fn finish_wal_transition(
     // Create publication for this source table
     create_publication(source_oid)?;
 
+    StDependency::set_cutover_for_source(source_oid, Some("WAL"), Some(slot_lsn))?;
+
     // Update catalog — mark as TRANSITIONING
     StDependency::update_cdc_mode_for_source(
         source_oid,
@@ -1929,19 +1996,6 @@ pub fn finish_wal_transition(
         Some(slot_name),
         Some(slot_lsn),
     )?;
-
-    // Pre-advance the slot to the current WAL position so the lag check
-    // on the next scheduler tick sees near-zero lag and completes the
-    // transition promptly.  During TRANSITIONING both triggers and the
-    // WAL decoder are active, so any changes between the slot's creation
-    // LSN and now are already captured by triggers — no data is lost.
-    if let Err(e) = advance_slot_to_current(slot_name) {
-        log!(
-            "pg_trickle: could not pre-advance slot '{}' (non-fatal): {}",
-            slot_name,
-            e
-        );
-    }
 
     info!(
         "pg_trickle: started WAL transition for source OID {} \

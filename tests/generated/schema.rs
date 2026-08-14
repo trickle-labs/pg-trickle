@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     slot_name    TEXT,
     decoder_confirmed_lsn PG_LSN,
     transition_started_at TIMESTAMPTZ,
+    cutover_target TEXT CHECK (cutover_target IN ('TRIGGER', 'WAL')),
+    cutover_lsn PG_LSN,
     
     source_stable_name   TEXT,
     
@@ -117,6 +119,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     action          TEXT NOT NULL
                      CHECK (action IN ('NO_DATA', 'FULL', 'DIFFERENTIAL', 'REINITIALIZE', 'SKIP')),
     rows_inserted   BIGINT DEFAULT 0,
+    rows_updated    BIGINT NOT NULL DEFAULT 0,
     rows_deleted    BIGINT DEFAULT 0,
     delta_row_count BIGINT DEFAULT 0,
     merge_strategy_used TEXT,
@@ -166,7 +169,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
     started_at      TIMESTAMPTZ,
     finished_at     TIMESTAMPTZ,
     outcome_detail  TEXT,
-    retryable       BOOLEAN
+    retryable       BOOLEAN,
+    dispatch_tick_id BIGINT,
+    tick_watermark_lsn PG_LSN
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_status_enqueued
@@ -240,6 +245,7 @@ SELECT
     COALESCE(stats.successful_refreshes, 0) AS successful_refreshes,
     COALESCE(stats.failed_refreshes, 0) AS failed_refreshes,
     COALESCE(stats.total_rows_inserted, 0) AS total_rows_inserted,
+    COALESCE(stats.total_rows_updated, 0) AS total_rows_updated,
     COALESCE(stats.total_rows_deleted, 0) AS total_rows_deleted,
     stats.avg_duration_ms,
     stats.last_action,
@@ -257,6 +263,7 @@ LEFT JOIN LATERAL (
         count(*) FILTER (WHERE h.status = 'COMPLETED')::bigint AS successful_refreshes,
         count(*) FILTER (WHERE h.status = 'FAILED')::bigint AS failed_refreshes,
         COALESCE(sum(h.rows_inserted), 0)::bigint AS total_rows_inserted,
+        COALESCE(sum(h.rows_updated), 0)::bigint AS total_rows_updated,
         COALESCE(sum(h.rows_deleted), 0)::bigint AS total_rows_deleted,
         CASE WHEN count(*) FILTER (WHERE h.end_time IS NOT NULL) > 0
              THEN avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)

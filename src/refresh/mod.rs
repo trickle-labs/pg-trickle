@@ -24,6 +24,10 @@
 //! - [`phd1`]         — PH-D1 phantom-cleanup DELETE+INSERT strategy,
 //!   cross-cycle phantom cleanup (EC01-2)
 
+use crate::catalog::{RefreshRecord, StreamTableMeta};
+use crate::error::PgTrickleError;
+use pgrx::prelude::TimestampWithTimeZone;
+
 pub(crate) mod codegen;
 pub(crate) mod fused;
 pub(crate) mod merge;
@@ -64,6 +68,136 @@ pub use orchestrator::{
     RefreshAction, determine_refresh_action, execute_reinitialize_refresh, validate_topk_metadata,
 };
 // phd1: cross-cycle phantom cleanup (CORR-1, deferred — see merge.rs).
+
+/// The durable result of a refresh executor before catalog finalization.
+///
+/// Executors are allowed to mutate only the target and CDC buffers.  Callers
+/// pass this record to [`finalize_success`] so frontier, metadata, history,
+/// and notifications are committed as one unit.
+#[derive(Debug, Clone)]
+pub struct RefreshExecution {
+    pub requested_action: RefreshAction,
+    pub effective_action: RefreshAction,
+    pub frontier: crate::version::Frontier,
+    pub rows_inserted: i64,
+    pub rows_updated: i64,
+    pub rows_deleted: i64,
+    pub data_changed: bool,
+    pub was_full_fallback: bool,
+    pub downstream_capture_complete: bool,
+}
+
+/// Finalize a successful refresh in the caller's existing transaction.
+///
+/// Required durable operations deliberately propagate errors.  A failed
+/// history, frontier, or outbox write therefore aborts the transaction rather
+/// than reporting a partially finalized refresh.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_success(
+    st: &StreamTableMeta,
+    execution: &RefreshExecution,
+    refresh_id: i64,
+    data_timestamp: TimestampWithTimeZone,
+    schema: &str,
+    table_name: &str,
+) -> Result<(), PgTrickleError> {
+    if !execution.downstream_capture_complete {
+        return Err(PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: st.pgt_id,
+            stage: "downstream CDC capture".to_string(),
+            reason: "executor did not prove downstream capture completion".to_string(),
+        });
+    }
+
+    StreamTableMeta::store_frontier(st.pgt_id, &execution.frontier)?;
+    if execution.data_changed {
+        StreamTableMeta::update_after_refresh(
+            st.pgt_id,
+            data_timestamp,
+            execution.rows_inserted + execution.rows_updated,
+        )?;
+    } else {
+        StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+    }
+
+    let effective_mode = take_effective_mode();
+    let history_action = match effective_mode {
+        "FULL" => RefreshAction::Full,
+        "NO_DATA" => RefreshAction::NoData,
+        _ => execution.effective_action,
+    };
+    RefreshRecord::complete_with_rows_updated(
+        refresh_id,
+        "COMPLETED",
+        execution.rows_inserted,
+        execution.rows_updated,
+        execution.rows_deleted,
+        None,
+        execution.rows_inserted + execution.rows_updated + execution.rows_deleted,
+        Some(history_action.as_str()),
+        execution.was_full_fallback,
+    )?;
+
+    if !effective_mode.is_empty() {
+        StreamTableMeta::update_effective_refresh_mode(st.pgt_id, effective_mode)?;
+    }
+
+    let rows_changed = execution.rows_inserted + execution.rows_updated + execution.rows_deleted;
+    if rows_changed > 0 && crate::api::outbox::is_outbox_enabled(st.pgt_id) {
+        if let Some(vector_column) = crate::api::outbox::get_embedding_vector_column(st.pgt_id) {
+            crate::api::outbox::write_embedding_outbox_row(
+                st.pgt_id,
+                None,
+                execution.rows_inserted,
+                execution.rows_updated,
+                execution.rows_deleted,
+                schema,
+                table_name,
+                &vector_column,
+            )
+            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "embedding outbox".to_string(),
+                reason: e.to_string(),
+            })?;
+        } else {
+            crate::api::outbox::write_outbox_row(
+                st.pgt_id,
+                None,
+                execution.rows_inserted,
+                execution.rows_updated,
+                execution.rows_deleted,
+                0,
+                schema,
+                table_name,
+            )
+            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "outbox".to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+    }
+
+    if rows_changed > 0 && execution.effective_action != RefreshAction::NoData {
+        crate::api::fire_distance_subscriptions(
+            schema,
+            table_name,
+            table_name,
+            st.pooler_compatibility_mode,
+        );
+        crate::scheduler::execute_post_refresh_action(st, rows_changed);
+    }
+
+    if matches!(
+        execution.effective_action,
+        RefreshAction::Full | RefreshAction::Reinitialize
+    ) {
+        post_full_refresh_cleanup(st);
+    }
+
+    Ok(())
+}
 
 use std::cell::{Cell, RefCell};
 
@@ -279,6 +413,18 @@ pub(crate) fn set_effective_mode(mode: &'static str) {
 /// in this thread.
 pub fn take_effective_mode() -> &'static str {
     LAST_EFFECTIVE_MODE.with(|m| m.get())
+}
+
+thread_local! {
+    static LAST_ROWS_UPDATED: Cell<i64> = const { Cell::new(0) };
+}
+
+pub(crate) fn set_last_rows_updated(rows: i64) {
+    LAST_ROWS_UPDATED.with(|value| value.set(rows));
+}
+
+pub fn take_last_rows_updated() -> i64 {
+    LAST_ROWS_UPDATED.with(|value| value.replace(0))
 }
 
 // ── PH-E2: Last-refresh spill tracking ──────────────────────────────────

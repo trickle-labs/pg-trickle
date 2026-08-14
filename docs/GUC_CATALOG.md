@@ -49,14 +49,14 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
-| `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
+| `pg_trickle.enable_fused_refresh` | `bool` | `false` | Opt in to fused refresh after validating exact per-node accounting. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | When `true`, trace context is propagated through refresh cycles for distributed tracing with OpenTelemetry. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
 | `pg_trickle.enforce_backpressure` | `bool` | `false` | Default: `false` (alerts only, no throttling). |
 | `pg_trickle.force_full_refresh` | `bool` | `false` | Useful for SRE diagnosis when a cluster-wide `refresh_strategy = 'full'` still has DIFFERENTIAL STs due to explicit per-ST row values. |
 | `pg_trickle.foreign_table_polling` | `bool` | `false` | When enabled, foreign tables used in DIFFERENTIAL / IMMEDIATE mode defining queries will be supported via a snapshot-comparison approach: before each refresh cycle the scheduler materializes a snapshot of the foreign table into a local shadow table, then computes EXCEPT ALL deltas against the previous snapshot. |
-| `pg_trickle.frontier_holdback_mode` | `text` | `"xmin"` | \| Value \| Meaning \| \|-------\|---------\| \| `"xmin"` (default) \| Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
+| `pg_trickle.frontier_holdback_mode` | `text` | `"xmin"` | Mandatory writer-visibility probe applies for every mode; `xmin` adds no margin, `none` removes only the extra margin, and `lsn:<N>` adds an LSN cap. |
 | `pg_trickle.frontier_holdback_probe_cache_ms` | `int4` | `250` | Set to 0 to disable caching and probe on every scheduler tick. |
 | `pg_trickle.frontier_holdback_warn_seconds` | `int4` | `60` | #536: Emit a WARNING when the frontier holdback has been active for longer than this many seconds. |
 | `pg_trickle.fuse_default_ceiling` | `int4` | `0` | Set to 0 to disable the global default ceiling (per-ST ceiling only). |

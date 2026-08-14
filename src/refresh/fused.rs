@@ -357,9 +357,8 @@ fn build_fused_merge(node: &NodeSpec, using_cte: &str) -> String {
 /// 3. Deduplicates CTEs whose bodies are byte-identical (shared source-delta
 ///    CTEs with the same LSN bounds).
 /// 4. Lifts all CTEs into a shared top-level `WITH` block.
-/// 5. For all but the last node, wraps the MERGE in a
-///    `_apply_{pgt_id} AS (MERGE … RETURNING 1)` CTE.
-/// 6. Emits the last node's MERGE as the final statement.
+/// 5. Wraps every MERGE in an apply CTE with `RETURNING merge_action()`.
+/// 6. Returns one aggregated `(pgt_id, merge_action, count)` row per action.
 ///
 /// Returns `Err` only if `nodes` is empty.
 pub fn fuse_diff_batch(nodes: &[NodeSpec]) -> Result<FusedOutput, PgTrickleError> {
@@ -477,26 +476,37 @@ pub fn fuse_diff_batch(nodes: &[NodeSpec]) -> Result<FusedOutput, PgTrickleError
         cte_defs.push(def);
     }
 
-    // Emit wrapping apply CTEs for all but the last node.
-    for (i, (pnode, node)) in parsed.iter().zip(nodes.iter()).enumerate() {
-        if i + 1 == node_count {
-            break; // last node — emit as final statement below
-        }
+    // Emit one data-modifying apply CTE and one action-count CTE per node.
+    for (pnode, node) in parsed.iter().zip(nodes.iter()) {
         let merge_sql = build_fused_merge(node, &pnode.final_cte_name);
         let apply_cte_name = format!("_apply_{}", pnode.pgt_id);
         cte_defs.push(format!(
-            "{apply_cte_name} AS (\n{merge_sql}\nRETURNING 1\n)"
+            "{apply_cte_name} AS (\n{merge_sql}\nRETURNING merge_action() AS __pgt_merge_action\n)"
+        ));
+        cte_defs.push(format!(
+            "__pgt_fused_counts_{} AS (\n  SELECT {}::bigint AS pgt_id, \
+                    __pgt_merge_action AS merge_action, \
+                    count(*)::bigint AS action_count \
+             FROM {} GROUP BY __pgt_merge_action\n)",
+            pnode.pgt_id, pnode.pgt_id, apply_cte_name,
         ));
     }
 
-    // Build the final statement.
-    let last_idx = node_count - 1;
-    let final_merge = build_fused_merge(&nodes[last_idx], &parsed[last_idx].final_cte_name);
+    let count_selects = parsed
+        .iter()
+        .map(|node| {
+            format!(
+                "SELECT pgt_id, merge_action, action_count FROM __pgt_fused_counts_{}",
+                node.pgt_id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\nUNION ALL\n");
 
     let sql = if cte_defs.is_empty() {
-        final_merge
+        count_selects
     } else {
-        format!("{with_kw} {}\n{final_merge}", cte_defs.join(",\n"))
+        format!("{with_kw} {}\n{count_selects}", cte_defs.join(",\n"))
     };
 
     Ok(FusedOutput { sql, node_count })
@@ -611,10 +621,10 @@ SELECT * FROM __pgt_cte_scan_{c2}",
             out.sql.contains(r#""public"."view_b""#),
             "missing view_b in output"
         );
-        // The last node must NOT be wrapped in a _apply_ CTE.
+        // Every MERGE is wrapped so its exact action counts can be returned.
         assert!(
-            !out.sql.contains("_apply_102"),
-            "last node must not be wrapped in an apply CTE"
+            out.sql.contains("_apply_102"),
+            "last node must be wrapped in an apply CTE"
         );
         // The first node must be wrapped in a _apply_ CTE.
         assert!(
@@ -677,7 +687,7 @@ SELECT * FROM __pgt_cte_scan_{c2}",
         assert!(sql.contains(r#""public"."node_b""#));
     }
 
-    /// Single-node fuse: no wrapping apply CTE, SQL is just the MERGE.
+    /// Single-node fuse: the MERGE is wrapped so exact action counts are returned.
     #[test]
     fn fuse_diff_batch_single_node() {
         let delta = make_delta_sql(99999, "0/0", "0/100", 1);
@@ -685,10 +695,8 @@ SELECT * FROM __pgt_cte_scan_{c2}",
         let out = fuse_diff_batch(&nodes).expect("fuse_diff_batch single-node failed");
         assert_eq!(out.node_count, 1);
         assert!(out.sql.contains(r#""public"."solo""#));
-        assert!(
-            !out.sql.contains("_apply_"),
-            "single node must not have apply CTE"
-        );
+        assert!(out.sql.contains("_apply_301"));
+        assert!(out.sql.contains("__pgt_fused_counts_301"));
     }
 
     /// parse_delta_ctes handles a bare SELECT (no WITH).
@@ -827,8 +835,8 @@ SELECT * FROM __pgt_cte_scan_{c2}",
                 out.sql.contains(r#"MERGE INTO "s"."t""#),
                 "single-node fused SQL must contain MERGE INTO:\n{}", out.sql
             );
-            // Single node — no _apply_ wrapper CTE needed in the final MERGE.
-            // The final statement must be a MERGE (not a SELECT).
+            // The single node still has an apply wrapper so action counts are
+            // returned alongside the data-modifying CTE.
             let trimmed = out.sql.trim().to_ascii_uppercase();
             let is_with = trimmed.starts_with("WITH");
             prop_assert!(is_with, "fused SQL must start with WITH:\n{}", out.sql);

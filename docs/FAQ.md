@@ -2278,7 +2278,7 @@ During a restart:
 1. **The scheduler stops.** No refreshes occur while PostgreSQL is down.
 2. **CDC triggers are inactive.** Source table writes during the restart window are captured when PostgreSQL comes back up (triggers are persistent DDL objects).
 3. **On startup**, the scheduler background worker starts, reads the catalog, rebuilds the DAG, and resumes refresh cycles from where it left off.
-4. **Frontier reconciliation.** The scheduler detects any gap between the stored frontier LSN and the current WAL position. Source changes that occurred between the last successful refresh and the restart are in the change buffers (for trigger-mode CDC) and will be processed in the first refresh cycle.
+4. **Frontier reconciliation.** The scheduler re-establishes a visibility-safe bound before dispatching work. Required CDC buffers must still validate their registered sentinel; missing or crash-cleared state holds the old frontier and requires repair plus a protected FULL refresh.
 
 **Net effect:** Stream tables may be stale for the duration of the downtime, but no data is lost. The first refresh cycle after restart catches up automatically.
 

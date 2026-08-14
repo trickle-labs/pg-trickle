@@ -234,10 +234,12 @@ fn detach_outbox_impl(name: &str, if_exists: bool) -> Result<(), PgTrickleError>
 /// `SELECT tide.outbox_publish($outbox_name, $payload, $headers)` via SPI.
 /// The SPI call runs in the current transaction -- ADR-001/ADR-002 atomicity
 /// is preserved.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_outbox_row(
     pgt_id: i64,
     refresh_id: Option<&str>,
     inserted_count: i64,
+    updated_count: i64,
     deleted_count: i64,
     _inline_threshold_rows: i32,
     st_schema: &str,
@@ -253,6 +255,7 @@ pub(crate) fn write_outbox_row(
         "v": 1,
         "refresh_id": refresh_id,
         "inserted": inserted_count,
+        "updated": updated_count,
         "deleted": deleted_count,
         "source": format!("{}.{}", st_schema, st_table),
     });
@@ -354,10 +357,12 @@ fn attach_embedding_outbox_impl(
 /// The payload extends the standard delta-summary envelope with an
 /// `event_type = "embedding_change"` marker and the `vector_column` name so
 /// consumers can route embedding updates without inspecting the payload.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_embedding_outbox_row(
     pgt_id: i64,
     refresh_id: Option<&str>,
     inserted_count: i64,
+    updated_count: i64,
     deleted_count: i64,
     st_schema: &str,
     st_table: &str,
@@ -373,6 +378,7 @@ pub(crate) fn write_embedding_outbox_row(
         "event_type": "embedding_change",
         "refresh_id": refresh_id,
         "inserted": inserted_count,
+        "updated": updated_count,
         "deleted": deleted_count,
         "source": format!("{}.{}", st_schema, st_table),
         "vector_column": vector_column,

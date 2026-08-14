@@ -5,6 +5,7 @@ use super::*;
 pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("TOP_K");
+    crate::refresh::set_last_rows_updated(0);
 
     // EC-25/EC-26: Ensure the internal_refresh flag is set so DML guard
     // triggers allow the refresh executor to modify the storage table.
@@ -46,6 +47,36 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         schema.replace('"', "\"\""),
         name.replace('"', "\"\""),
     );
+
+    let downstream_cols = if has_downstream_st_consumers(st.pgt_id) {
+        let cols = get_st_user_columns(st);
+        if cols.is_empty() {
+            return Err(PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "topk downstream capture".to_string(),
+                reason: "downstream consumers require at least one user column".to_string(),
+            });
+        }
+        let col_list = cols
+            .iter()
+            .map(|col| format!("\"{}\"", col.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Spi::run(&format!(
+            "DROP TABLE IF EXISTS __pgt_pre_{pgt_id}; \
+             CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
+             SELECT __pgt_row_id, {col_list} FROM {quoted_table}",
+            pgt_id = st.pgt_id,
+        ))
+        .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: st.pgt_id,
+            stage: "topk downstream snapshot".to_string(),
+            reason: e.to_string(),
+        })?;
+        Some(cols)
+    } else {
+        None
+    };
 
     // Reconstruct the full TopK query from base query + ORDER BY + LIMIT [+ OFFSET].
     let topk_query = if let Some(offset) = st.topk_offset {
@@ -111,19 +142,51 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
          WHEN NOT MATCHED THEN \
            INSERT ({insert_cols}) VALUES ({insert_vals}) \
          WHEN NOT MATCHED BY SOURCE THEN \
-           DELETE",
+           DELETE \
+         RETURNING merge_action() AS __pgt_merge_action",
         update_set = update_set.join(", "),
     );
 
-    let (rows_inserted, rows_deleted) = Spi::connect_mut(|client| {
+    let (rows_inserted, rows_updated, rows_deleted) = Spi::connect_mut(|client| {
         let result = client
             .update(&merge_sql, None, &[])
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        // MERGE returns total rows processed. We don't get separate insert/delete
-        // counts from SPI, so return the total as "inserted" and 0 as "deleted".
-        // The actual bookkeeping is approximate here.
-        Ok::<(i64, i64), PgTrickleError>((result.len() as i64, 0))
+        let mut counts = (0_i64, 0_i64, 0_i64);
+        for row in result {
+            let action = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
+                    pgt_id: st.pgt_id,
+                    stage: "topk merge accounting".to_string(),
+                    reason: "MERGE RETURNING merge_action() was NULL".to_string(),
+                })?;
+            match action.as_str() {
+                "INSERT" => counts.0 += 1,
+                "UPDATE" => counts.1 += 1,
+                "DELETE" => counts.2 += 1,
+                other => {
+                    return Err(PgTrickleError::RefreshFinalizationFailed {
+                        pgt_id: st.pgt_id,
+                        stage: "topk merge accounting".to_string(),
+                        reason: format!("unknown MERGE action '{other}'"),
+                    });
+                }
+            }
+        }
+        Ok::<(i64, i64, i64), PgTrickleError>(counts)
     })?;
+    crate::refresh::set_last_rows_updated(rows_updated);
+
+    if let Some(cols) = downstream_cols {
+        crate::refresh::capture_full_refresh_diff_to_st_buffer(st, &cols).map_err(|e| {
+            PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "topk downstream capture".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+    }
 
     pgrx::debug1!(
         "[pg_trickle] TopK refresh of {}.{}: MERGE processed {} rows",

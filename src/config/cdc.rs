@@ -190,17 +190,20 @@ pub static PGS_UNLOGGED_BUFFERS: GucSetting<bool> = GucSetting::<bool>::new(fals
 ///
 /// This GUC supersedes `pg_trickle.unlogged_buffers` (which is now a
 /// compatibility alias: `true` maps to `"unlogged"`, `false` to `"logged"`).
-pub static PGS_CHANGE_BUFFER_DURABILITY: GucSetting<Option<std::ffi::CString>> =
-    GucSetting::<Option<std::ffi::CString>>::new(Some(c"logged"));
+pub static PGS_CHANGE_BUFFER_DURABILITY: GucSetting<ChangeBufferDurability> =
+    GucSetting::<ChangeBufferDurability>::new(ChangeBufferDurability::Logged);
 
 /// DUR-2: Change buffer durability mode enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PostgresGucEnum)]
 pub enum ChangeBufferDurability {
-    /// UNLOGGED tables — maximum performance, lost on crash.
-    Unlogged,
     /// WAL-logged tables — survives crash, replicated.
+    #[name = c"logged"]
     Logged,
+    /// UNLOGGED tables — maximum performance, lost on crash.
+    #[name = c"unlogged"]
+    Unlogged,
     /// WAL-logged + synchronous_commit — maximum durability.
+    #[name = c"sync"]
     Sync,
 }
 
@@ -224,8 +227,9 @@ impl ChangeBufferDurability {
 pub(crate) fn normalize_change_buffer_durability(value: Option<String>) -> ChangeBufferDurability {
     match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("logged") => ChangeBufferDurability::Logged,
+        Some("unlogged") => ChangeBufferDurability::Unlogged,
         Some("sync") => ChangeBufferDurability::Sync,
-        _ => ChangeBufferDurability::Unlogged,
+        _ => ChangeBufferDurability::Logged,
     }
 }
 
@@ -589,12 +593,12 @@ pub fn register_cdc_gucs() {
     );
 
     // DUR-2: Change buffer durability mode.
-    GucRegistry::define_string_guc(
+    GucRegistry::define_enum_guc(
         c"pg_trickle.change_buffer_durability",
-        c"Change buffer durability: unlogged (default), logged, or sync.",
-        c"'unlogged' (default) creates UNLOGGED change buffers for max throughput; \
+        c"Change buffer durability: logged (default), unlogged, or sync.",
+        c"'logged' (default) creates WAL-logged change buffers; survives crash, replicated. \
+           'unlogged' creates UNLOGGED change buffers for max throughput; \
            lost on crash (auto FULL refresh on recovery). \
-           'logged' creates WAL-logged change buffers; survives crash, replicated. \
            'sync' adds synchronous_commit for maximum durability. \
            Supersedes pg_trickle.unlogged_buffers (compatibility alias).",
         &PGS_CHANGE_BUFFER_DURABILITY,
@@ -835,10 +839,7 @@ pub fn pg_trickle_change_buffer_durability() -> ChangeBufferDurability {
         );
         return ChangeBufferDurability::Unlogged;
     }
-    let raw = PGS_CHANGE_BUFFER_DURABILITY
-        .get()
-        .map(|c| c.to_string_lossy().into_owned());
-    normalize_change_buffer_durability(raw)
+    PGS_CHANGE_BUFFER_DURABILITY.get()
 }
 
 /// SCAL-2: Returns the change buffer overflow alert threshold (0 = disabled).

@@ -617,6 +617,7 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        _ => pgrx::error!("{}", e),
     }
 }
 

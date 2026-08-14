@@ -5,6 +5,15 @@ the bits a human reader actually wants to see. For the full
 exhaustive list of changes per release, see the
 [Changelog](changelog.md).
 
+## v0.82.0 — Frontier and CDC durability gate
+
+- Safe frontiers now account for active XID/XMIN and prepared-transaction
+  writers, with fail-closed probe errors and immutable scheduler tick bounds.
+- CDC buffers have a logged registry/sentinel, strict durability modes, and
+  missing or crash-cleared state forces reinitialization.
+- FULL refreshes protect source relations, and WAL cutover uses exact LSN
+  proofs without blind slot advancement. Fused refresh is opt-in.
+
 ---
 
 ## v0.76 — Complete DuckLake Integration Removal (May 2026)

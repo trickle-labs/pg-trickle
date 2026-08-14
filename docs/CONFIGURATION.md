@@ -2952,7 +2952,7 @@ SELECT pg_reload_conf();
 |---|---|
 | **Type** | `text` |
 | **Default** | `"logged"` |
-| **Valid values** | `"logged"`, `"unlogged"` |
+| **Valid values** | `"logged"`, `"sync"`, `"unlogged"` |
 
 Controls whether the change buffer tables used by trigger-based CDC are created
 as regular `LOGGED` tables or as PostgreSQL `UNLOGGED` tables.
@@ -2961,12 +2961,15 @@ as regular `LOGGED` tables or as PostgreSQL `UNLOGGED` tables.
   PostgreSQL crash, buffered CDC rows are preserved and will be processed on the
   next scheduler cycle. **Recommended for production.**
 - **`"unlogged"`** — Change buffers are faster to write (no WAL overhead) but
-  are emptied on crash. If PostgreSQL crashes between a source INSERT and the
-  next refresh cycle, those changes are lost and the affected stream tables are
-  forced to reinitialize. Suitable only for non-critical derived tables where
-  occasional stale data after a crash is acceptable.
+  are emptied on crash. The registered sentinel is removed with the buffer, so
+  differential refresh is blocked and affected stream tables are forced to
+  reinitialize rather than acknowledging a possibly lost change.
+- **`"sync"`** — Logged buffers with `synchronous_commit = on` for buffer
+  writes. Invalid values are rejected by PostgreSQL; the default is crash-safe
+  `"logged"`.
 
-> **Note:** `pg_trickle.unlogged_buffers` is a compatibility alias retained for
+> **Note:** Invalid durability values are rejected by PostgreSQL. The
+> `pg_trickle.unlogged_buffers` setting is a compatibility alias retained for
 > backward compatibility. `true` maps to `"unlogged"`, `false` to `"logged"`.
 > Prefer the new `change_buffer_durability` GUC.
 
@@ -3076,7 +3079,7 @@ SET pg_trickle.wal_max_lag_bytes = 131072;        -- 128 KiB lag warning thresho
 | | |
 |---|---|
 | **Type** | `bool` |
-| **Default** | `true` |
+| **Default** | `false` |
 
 Controls whether pg_trickle uses the "fused refresh" optimisation: when multiple
 stream tables in the same DAG are ready to refresh, their delta pipelines are

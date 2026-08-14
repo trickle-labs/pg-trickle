@@ -2037,10 +2037,17 @@ pub(super) fn initialize_st(
     // a valid lower bound from which to compare polled change-buffer rows.
     let source_oids: Vec<pg_sys::Oid> = StDependency::get_for_st(pgt_id)?
         .into_iter()
-        .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
+        .filter(|dep| {
+            matches!(
+                dep.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            )
+        })
         .map(|dep| dep.source_relid)
         .collect();
-    let slot_positions = cdc::get_slot_positions(&source_oids)?;
+    cdc::lock_source_relations(&source_oids)?;
+    let (safe_bound, _, _, _) = cdc::compute_safe_upper_bound(None, 0)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(&source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
     StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0)?;

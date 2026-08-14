@@ -26,9 +26,9 @@ generated for table data. Tables are truncated on crash recovery.
   acceptable and fast refresh is critical
 - **Refresh mode support:** FULL, DIFFERENTIAL (AUTO)
 - **Partitioning support:** Yes
-- **Note:** Change buffers (`pgtrickle_changes.*`) are always UNLOGGED for
-  performance. Stream table outputs can optionally be UNLOGGED via the
-  `pg_trickle.change_buffer_durability` GUC.
+- **Note:** Stream-table outputs and CDC buffers are separate. CDC buffers use
+  `pg_trickle.change_buffer_durability`; choose `unlogged` only when the
+  sentinel-based FULL-reinitialization trade-off is acceptable.
 
 ### Citus Columnar (`citus`)
 
@@ -85,8 +85,9 @@ the derived stream table output is rebuilt.
 | Citus columnar | Citus extension not loaded        | Error at CREATE STREAM TABLE time              |
 | Citus columnar | Full disk                         | Transaction rollback; partial segments may remain |
 
-For UNLOGGED stream tables, pg_trickle detects the truncation during the next
-refresh cycle and performs a full rebuild automatically.
+For UNLOGGED CDC buffers, loss of the registered sentinel blocks differential
+refresh and marks consumers for protected FULL reinitialization. A clean
+restart that preserves the sentinel does not trigger a rebuild.
 
 ---
 
@@ -95,7 +96,7 @@ refresh cycle and performs a full rebuild automatically.
 | GUC | Default | Description |
 |-----|---------|-------------|
 | `pg_trickle.columnar_backend` | `none` | Columnar backend: `none` or `citus` |
-| `pg_trickle.change_buffer_durability` | `unlogged` | Durability of CDC change buffers: `logged` or `unlogged` |
+| `pg_trickle.change_buffer_durability` | `logged` | Durability of CDC change buffers: `logged`, `sync`, or `unlogged` |
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for the full GUC reference.
 
