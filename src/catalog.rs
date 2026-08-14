@@ -3217,7 +3217,7 @@ impl SchedulerJob {
                     "SELECT job_id, dag_version, unit_key, unit_kind, member_pgt_ids, \
                      root_pgt_id, status, scheduler_pid, worker_pid, attempt_no, \
                      enqueued_at, started_at, finished_at, outcome_detail, retryable, \
-                     dispatch_tick_id, tick_watermark_lsn \
+                     dispatch_tick_id, tick_watermark_lsn::text \
                      FROM pgtrickle.pgt_scheduler_jobs \
                      WHERE job_id = $1",
                     None,
