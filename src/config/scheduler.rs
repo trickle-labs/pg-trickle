@@ -342,7 +342,7 @@ pub static PGS_REINDEX_DRIFT_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new
 
 /// PERF-2 (v0.63.0): Enable CTE-fused multi-node refresh.
 ///
-/// When `true` (default), the scheduler composes the delta SQL for multiple
+/// When `true`, the scheduler composes the delta SQL for multiple
 /// DIFFERENTIAL-mode stream tables in the same tick into a single
 /// `WITH … MERGE; MERGE; …` CTE chain.  This reduces the number of
 /// planner invocations, executor setups, and round-trips for multi-node DAGs.
@@ -351,7 +351,7 @@ pub static PGS_REINDEX_DRIFT_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new
 /// Please file an issue with the problematic query if you need to disable
 /// fusion — we want to fix planner interaction problems rather than leave
 /// them as permanent opt-outs.
-pub static PGS_ENABLE_FUSED_REFRESH: GucSetting<bool> = GucSetting::<bool>::new(true);
+pub static PGS_ENABLE_FUSED_REFRESH: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// PERF-2 (v0.63.0): Maximum estimated delta rows for a node to be
 /// fusion-eligible.
@@ -1069,7 +1069,7 @@ pub fn register_scheduler_gucs() {
     GucRegistry::define_bool_guc(
         c"pg_trickle.enable_fused_refresh",
         c"PERF-2: Enable CTE-fused multi-node refresh (v0.63.0).",
-        c"When true (default), the scheduler composes the delta SQL for multiple \
+        c"When true, the scheduler composes the delta SQL for multiple \
           DIFFERENTIAL-mode stream tables in the same tick into a single \
           WITH … MERGE CTE chain, reducing planner invocations and round-trips. \
           Disable if a specific DAG shape causes unexpected planner behaviour.",

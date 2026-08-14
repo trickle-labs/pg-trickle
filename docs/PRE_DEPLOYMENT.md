@@ -143,7 +143,7 @@ pg_trickle.tiered_scheduling = true          # Tier-aware scheduling
 pg_trickle.cdc_mode = 'auto'                # auto | trigger | wal
 
 # Safety
-pg_trickle.unlogged_buffers = false          # true = faster but not crash-safe
+pg_trickle.change_buffer_durability = logged # sync for strongest commit durability
 pg_trickle.fuse_default_ceiling = 10000      # Auto-fuse change threshold
 ```
 

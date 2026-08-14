@@ -82,6 +82,44 @@ pub enum PgTrickleError {
     #[error("WAL transition error: {0}")]
     WalTransitionError(String),
 
+    /// A safe CDC frontier could not be established.
+    #[error("safe frontier unavailable: {context}: {reason}")]
+    SafeFrontierUnavailable { context: String, reason: String },
+
+    /// A source snapshot could not be aligned with the CDC protocol.
+    #[error("snapshot alignment unavailable for {source_name}: {reason}")]
+    SnapshotAlignmentUnavailable { source_name: String, reason: String },
+
+    /// CDC state is missing, malformed, or inaccessible and requires repair.
+    #[error(
+        "CDC state invalid for pgt_id={pgt_id}, source={source_name}, buffer={buffer}: {reason}"
+    )]
+    CdcStateInvalid {
+        pgt_id: i64,
+        source_name: String,
+        buffer: String,
+        reason: String,
+    },
+
+    /// A CDC cutover could not be proven safe.
+    #[error(
+        "CDC cutover to {target} unproven for source OID {source_oid}: required LSN {required_lsn}, confirmed LSN {confirmed_lsn:?}"
+    )]
+    CdcCutoverUnproven {
+        source_oid: u32,
+        target: String,
+        required_lsn: String,
+        confirmed_lsn: Option<String>,
+    },
+
+    /// Refresh finalization failed after execution.
+    #[error("refresh finalization failed for pgt_id={pgt_id} at {stage}: {reason}")]
+    RefreshFinalizationFailed {
+        pgt_id: i64,
+        stage: String,
+        reason: String,
+    },
+
     /// An SPI (Server Programming Interface) error occurred.
     #[error("SPI error: {0}")]
     SpiError(String),
@@ -259,6 +297,8 @@ impl PgTrickleError {
             PgTrickleError::LockTimeout(_)
             | PgTrickleError::ReplicationSlotError(_)
             | PgTrickleError::WalTransitionError(_)
+            | PgTrickleError::SafeFrontierUnavailable { .. }
+            | PgTrickleError::CdcCutoverUnproven { .. }
             | PgTrickleError::RefreshSkipped(_) => true,
             // F29 (G8.6): Classify SPI errors by SQLSTATE for retry decisions.
             // Only truly transient errors (serialization, lock, connection) are
@@ -281,6 +321,7 @@ impl PgTrickleError {
             PgTrickleError::UpstreamSchemaChanged(_)
                 | PgTrickleError::UpstreamTableDropped(_)
                 | PgTrickleError::StSourceFrontierMissing(_)
+                | PgTrickleError::CdcStateInvalid { .. }
         )
     }
 
@@ -294,6 +335,9 @@ impl PgTrickleError {
             PgTrickleError::RefreshSkipped(_)
                 | PgTrickleError::SpiPermissionError(_)
                 | PgTrickleError::PermissionDenied(_)
+                | PgTrickleError::SafeFrontierUnavailable { .. }
+                | PgTrickleError::CdcStateInvalid { .. }
+                | PgTrickleError::CdcCutoverUnproven { .. }
         )
     }
 }
@@ -570,6 +614,8 @@ impl PgTrickleError {
             PgTrickleError::LockTimeout(_)
             | PgTrickleError::ReplicationSlotError(_)
             | PgTrickleError::WalTransitionError(_)
+            | PgTrickleError::SafeFrontierUnavailable { .. }
+            | PgTrickleError::CdcCutoverUnproven { .. }
             | PgTrickleError::SpiError(_)
             | PgTrickleError::SpiErrorCode(_, _)
             | PgTrickleError::RefreshSkipped(_) => PgTrickleErrorKind::System,
@@ -604,6 +650,11 @@ impl PgTrickleError {
 
             // C-4: Dropped ST source is a schema-level error (requires reinitialize).
             PgTrickleError::StSourceFrontierMissing(_) => PgTrickleErrorKind::Schema,
+
+            PgTrickleError::SnapshotAlignmentUnavailable { .. }
+            | PgTrickleError::RefreshFinalizationFailed { .. } => PgTrickleErrorKind::System,
+
+            PgTrickleError::CdcStateInvalid { .. } => PgTrickleErrorKind::Schema,
         }
     }
 }
@@ -783,6 +834,15 @@ mod tests {
     fn test_requires_reinitialize() {
         assert!(PgTrickleError::UpstreamSchemaChanged(1).requires_reinitialize());
         assert!(PgTrickleError::UpstreamTableDropped(1).requires_reinitialize());
+        assert!(
+            PgTrickleError::CdcStateInvalid {
+                pgt_id: 1,
+                source_name: "source".into(),
+                buffer: "buffer".into(),
+                reason: "missing".into(),
+            }
+            .requires_reinitialize()
+        );
         assert!(!PgTrickleError::SpiError("x".into()).requires_reinitialize());
     }
 
@@ -793,6 +853,56 @@ mod tests {
         assert!(!PgTrickleError::RefreshSkipped("x".into()).counts_toward_suspension());
         // F34: SpiPermissionError does not count toward suspension
         assert!(!PgTrickleError::SpiPermissionError("x".into()).counts_toward_suspension());
+        assert!(
+            !PgTrickleError::SafeFrontierUnavailable {
+                context: "tick".into(),
+                reason: "probe failed".into(),
+            }
+            .counts_toward_suspension()
+        );
+        assert!(
+            !PgTrickleError::CdcStateInvalid {
+                pgt_id: 1,
+                source_name: "source".into(),
+                buffer: "buffer".into(),
+                reason: "missing".into(),
+            }
+            .counts_toward_suspension()
+        );
+    }
+
+    #[test]
+    fn test_v082_error_classification() {
+        let frontier = PgTrickleError::SafeFrontierUnavailable {
+            context: "tick".into(),
+            reason: "probe failed".into(),
+        };
+        assert!(frontier.is_retryable());
+        assert_eq!(frontier.kind(), PgTrickleErrorKind::System);
+
+        let alignment = PgTrickleError::SnapshotAlignmentUnavailable {
+            source_name: "orders".into(),
+            reason: "snapshot unavailable".into(),
+        };
+        assert!(!alignment.is_retryable());
+        assert_eq!(alignment.kind(), PgTrickleErrorKind::System);
+
+        let cutover = PgTrickleError::CdcCutoverUnproven {
+            source_oid: 42,
+            target: "WAL".into(),
+            required_lsn: "0/10".into(),
+            confirmed_lsn: Some("0/9".into()),
+        };
+        assert!(cutover.is_retryable());
+        assert!(!cutover.requires_reinitialize());
+
+        let finalization = PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: 1,
+            stage: "frontier".into(),
+            reason: "rollback".into(),
+        };
+        assert!(!finalization.is_retryable());
+        assert_eq!(finalization.kind(), PgTrickleErrorKind::System);
     }
 
     #[test]

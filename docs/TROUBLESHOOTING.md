@@ -573,11 +573,9 @@ details on fuse thresholds and configuration.
 - Server log contains: `pg_trickle: frontier holdback active — the oldest in-progress transaction is Ns old`.
 
 **Cause:**
-`frontier_holdback_mode = 'xmin'` (the default) prevents the scheduler from
-advancing the frontier while any in-progress transaction exists that is older
-than the previous tick's xmin baseline.  A long-running or forgotten session
-holding an open transaction will pause frontier advancement for all stream
-tables on that PostgreSQL server.
+`frontier_holdback_mode = 'xmin'` (the default) applies the mandatory visibility
+probe. A long-running or forgotten session holding an open transaction can pause
+frontier advancement until its writer fence is proven safe.
 
 This is intentional: without the holdback, a transaction that inserts into a
 tracked source table and commits *after* the scheduler ticks would have its
@@ -623,8 +621,9 @@ ORDER BY prepared;
    ROLLBACK PREPARED 'gid_from_pg_prepared_xacts';
    ```
 
-3. **For benchmark or known-safe workloads only**, disable holdback to restore
-   the pre-fix fast path (risks silent data loss):
+3. **For benchmark or known-safe workloads**, remove only the additional
+   holdback margin. The mandatory visibility probe still runs; `none` is not a
+   correctness bypass:
 
    ```sql
    ALTER SYSTEM SET pg_trickle.frontier_holdback_mode = 'none';
@@ -639,13 +638,10 @@ ORDER BY prepared;
    SELECT pg_reload_conf();
    ```
 
-5. **On managed PostgreSQL (RDS, Cloud SQL, Aiven, etc.)** where
-   `pg_stat_activity` is restricted to the current user's own sessions,
-   the probe will silently see no other backends and never trigger a
-   holdback. The server log will contain:
-   `pg_trickle: frontier holdback probe cannot see other PostgreSQL backends`.
-
-   Fix by granting the monitoring role to the pg_trickle service account:
+5. **On managed PostgreSQL (RDS, Cloud SQL, Aiven, etc.)**, ensure the
+   scheduler role can read `pg_stat_activity` and `pg_prepared_xacts`.
+   Permission or malformed-probe failures hold the previous bound and prevent
+   differential dispatch; they do not fall back to current WAL.
 
    ```sql
    GRANT pg_monitor TO <pg_trickle_service_role>;
@@ -757,7 +753,7 @@ When investigating any issue, follow this sequence:
 | `pg_trickle.fixed_point_max_iterations` | `10` | Circular pipeline iteration limit |
 | `pg_trickle.differential_change_ratio_threshold` | `0.5` | Falls back to FULL above this ratio |
 | `pg_trickle.auto_backoff` | `on` | Stretches intervals up to 8x under load |
-| `pg_trickle.frontier_holdback_mode` | `xmin` | `none` disables holdback (unsafe); `xmin` = safe default |
+| `pg_trickle.frontier_holdback_mode` | `xmin` | `none` removes only the extra LSN margin; the mandatory visibility probe remains active |
 | `pg_trickle.frontier_holdback_warn_seconds` | `60` | Warn after holding back for this many seconds |
 
 ---

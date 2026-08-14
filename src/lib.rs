@@ -358,6 +358,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     slot_name    TEXT,
     decoder_confirmed_lsn PG_LSN,
     transition_started_at TIMESTAMPTZ,
+    cutover_target TEXT CHECK (cutover_target IN ('TRIGGER', 'WAL')),
+    cutover_lsn PG_LSN,
     -- CITUS-3: Stable name for the source table (v0.32.0+). NULL = pre-upgrade row.
     source_stable_name   TEXT,
     -- CITUS-3: Source placement in a Citus cluster: 'local', 'reference', 'distributed'.
@@ -380,6 +382,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     action          TEXT NOT NULL
                      CHECK (action IN ('NO_DATA', 'FULL', 'DIFFERENTIAL', 'REINITIALIZE', 'SKIP')),
     rows_inserted   BIGINT DEFAULT 0,
+    rows_updated    BIGINT NOT NULL DEFAULT 0,
     rows_deleted    BIGINT DEFAULT 0,
     delta_row_count BIGINT DEFAULT 0,
     merge_strategy_used TEXT,
@@ -406,6 +409,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_summary (
     successful_refreshes BIGINT NOT NULL DEFAULT 0,
     failed_refreshes BIGINT NOT NULL DEFAULT 0,
     total_rows_inserted BIGINT NOT NULL DEFAULT 0,
+    total_rows_updated BIGINT NOT NULL DEFAULT 0,
     total_rows_deleted BIGINT NOT NULL DEFAULT 0,
     total_duration_ms BIGINT NOT NULL DEFAULT 0,
     last_refresh_action TEXT,
@@ -459,6 +463,17 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     frontier_per_node   JSONB
 );
 
+-- v0.82.0: Registry for validated base-table and stream-table change buffers.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_buffers (
+    buffer_key       TEXT PRIMARY KEY,
+    source_kind      TEXT NOT NULL CHECK (source_kind IN ('BASE', 'STREAM_TABLE')),
+    source_id        BIGINT NOT NULL,
+    durability       TEXT NOT NULL CHECK (durability IN ('logged', 'unlogged', 'sync')),
+    sentinel_token   BIGINT NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_kind, source_id)
+);
+
 -- Scheduler job table for parallel refresh dispatch
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
     job_id          BIGSERIAL PRIMARY KEY,
@@ -478,7 +493,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
     started_at      TIMESTAMPTZ,
     finished_at     TIMESTAMPTZ,
     outcome_detail  TEXT,
-    retryable       BOOLEAN
+    retryable       BOOLEAN,
+    dispatch_tick_id BIGINT,
+    tick_watermark_lsn PG_LSN
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_status_enqueued
@@ -532,6 +549,7 @@ ON CONFLICT (version) DO NOTHING;
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_stream_tables', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_dependencies', '');
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_change_buffers', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_source_gates', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_watermarks', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_watermark_groups', '');
@@ -705,6 +723,7 @@ SELECT
     COALESCE(stats.successful_refreshes, 0) AS successful_refreshes,
     COALESCE(stats.failed_refreshes, 0) AS failed_refreshes,
     COALESCE(stats.total_rows_inserted, 0) AS total_rows_inserted,
+    COALESCE(stats.total_rows_updated, 0) AS total_rows_updated,
     COALESCE(stats.total_rows_deleted, 0) AS total_rows_deleted,
     stats.avg_duration_ms,
     stats.last_action,
@@ -722,6 +741,7 @@ LEFT JOIN LATERAL (
         count(*) FILTER (WHERE h.status = 'COMPLETED')::bigint AS successful_refreshes,
         count(*) FILTER (WHERE h.status = 'FAILED')::bigint AS failed_refreshes,
         COALESCE(sum(h.rows_inserted), 0)::bigint AS total_rows_inserted,
+        COALESCE(sum(h.rows_updated), 0)::bigint AS total_rows_updated,
         COALESCE(sum(h.rows_deleted), 0)::bigint AS total_rows_deleted,
         CASE WHEN count(*) FILTER (WHERE h.end_time IS NOT NULL) > 0
              THEN avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)

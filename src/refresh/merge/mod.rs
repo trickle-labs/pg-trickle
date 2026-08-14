@@ -35,6 +35,23 @@ pub use insert::execute_topk_refresh;
 pub(crate) use update::*;
 
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
+    let dependencies = StDependency::get_for_st(st.pgt_id)?;
+    if !st.refresh_mode.is_immediate() {
+        crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+    }
+    let source_oids: Vec<pg_sys::Oid> = dependencies
+        .iter()
+        .filter(|dependency| {
+            matches!(
+                dependency.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            )
+        })
+        .map(|dependency| dependency.source_relid)
+        .collect();
+    crate::cdc::lock_source_relations(&source_oids)?;
+    crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
+
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("FULL");
     // OBS-4: Increment the FULL refresh mode counter.
@@ -118,18 +135,12 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
              SELECT __pgt_row_id, {col_list} FROM {quoted_table}",
             pgt_id = st.pgt_id,
         );
-        if let Err(e) = Spi::run(&snapshot_sql) {
-            pgrx::warning!(
-                "[pg_trickle] ST-ST: pre-snapshot failed for {}.{}: {} — \
-                 downstream STs will not receive differential delta",
-                schema,
-                name,
-                e,
-            );
-            Vec::new()
-        } else {
-            cols
-        }
+        Spi::run(&snapshot_sql).map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: st.pgt_id,
+            stage: "full-refresh downstream snapshot".to_string(),
+            reason: format!("{schema}.{name}: {e}"),
+        })?;
+        cols
     } else {
         Vec::new()
     };
@@ -181,31 +192,14 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     // diverge because they expect delta rows in changes_pgt_{id}. To
     // prevent that, mark all downstream STs for reinit so they do a FULL
     // refresh next cycle and resync.
-    if needs_diff_capture
-        && !user_cols.is_empty()
-        && let Err(e) = capture_full_refresh_diff_to_st_buffer(st, &user_cols)
-    {
-        pgrx::warning!(
-            "[pg_trickle] ST-ST: full-refresh diff capture failed for {}.{}: {} \
-             — marking downstream STs for reinit to prevent silent divergence",
-            schema,
-            name,
-            e,
-        );
-        // Mark downstream STs for reinit so they resync via FULL refresh.
-        if let Ok(downstream_ids) =
-            crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-        {
-            for ds_id in &downstream_ids {
-                if let Err(e2) = StreamTableMeta::mark_for_reinitialize(*ds_id) {
-                    pgrx::warning!(
-                        "[pg_trickle] ST-ST: failed to mark downstream ST {} for reinit: {}",
-                        ds_id,
-                        e2,
-                    );
-                }
+    if needs_diff_capture && !user_cols.is_empty() {
+        capture_full_refresh_diff_to_st_buffer(st, &user_cols).map_err(|e| {
+            PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "full-refresh downstream CDC capture".to_string(),
+                reason: e.to_string(),
             }
-        }
+        })?;
     }
 
     // Re-enable user triggers and emit NOTIFY so listeners know a FULL
@@ -251,13 +245,7 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
 /// completes successfully, from both the scheduled refresh path and from the
 /// adaptive fallback path inside `execute_differential_refresh`.
 ///
-/// 1. **G3 — WAL slot advancement**: For each WAL-mode source dependency,
-///    advances the replication slot's `confirmed_flush_lsn` to the current WAL
-///    LSN. This lets PostgreSQL reclaim WAL segments that the full refresh
-///    already materialized, preventing unbounded `pg_wal/` growth on servers
-///    that do repeated FULL refreshes.
-///
-/// 2. **G4 — Change buffer flush**: Deletes stale change buffer rows up to the
+/// 1. **G4 — Change buffer flush**: Deletes stale change buffer rows up to the
 ///    minimum stored frontier across all stream tables sharing each source.
 ///    This prevents the next differential tick from re-examining rows that are
 ///    already materialized, breaking the "adaptive fallback ping-pong" pattern.
@@ -278,36 +266,7 @@ pub fn post_full_refresh_cleanup(st: &StreamTableMeta) {
         .map(|d| d.source_relid.to_u32())
         .collect();
 
-    // G3: Advance WAL slots past the current LSN so WAL segments produced
-    // before and during the full refresh can be reclaimed by PostgreSQL.
-    for slot in deps
-        .iter()
-        .filter(|d| {
-            matches!(
-                d.cdc_mode,
-                crate::catalog::CdcMode::Wal | crate::catalog::CdcMode::Transitioning
-            )
-        })
-        .filter_map(|d| d.slot_name.as_deref())
-    {
-        match crate::wal_decoder::advance_slot_to_current(slot) {
-            Ok(()) => {
-                pgrx::debug1!(
-                    "[pg_trickle] post_full_refresh_cleanup: advanced WAL slot '{}' to current LSN",
-                    slot,
-                );
-            }
-            Err(e) => {
-                pgrx::debug1!(
-                    "[pg_trickle] post_full_refresh_cleanup: failed to advance slot '{}': {}",
-                    slot,
-                    e,
-                );
-            }
-        }
-    }
-
-    // G4: Flush change buffer rows that are now irrelevant because the full
+    // Flush change buffer rows that are now irrelevant because the full
     // refresh already captured them.  Prevents the next differential cycle
     // from re-examining them and re-triggering another adaptive fallback.
     cleanup_change_buffers_by_frontier(&change_schema, &source_oids);
@@ -345,17 +304,12 @@ pub fn poll_foreign_table_sources_for_st(st: &StreamTableMeta) -> Result<(), PgT
 }
 
 /// Execute a NO_DATA refresh: just advance the data timestamp.
-pub fn execute_no_data_refresh(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+pub fn execute_no_data_refresh(_st: &StreamTableMeta) -> Result<(), PgTrickleError> {
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("NO_DATA");
 
-    // Record that we checked — but do NOT update data_timestamp.
-    // data_timestamp is reserved for refreshes that actually write rows.
-    // Downstream stream tables compare upstream.data_timestamp against their
-    // own data_timestamp to decide whether a full refresh is needed; bumping
-    // data_timestamp on a no-data pass would trigger spurious full refreshes
-    // of every downstream ST every time this table is polled.
-    StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+    // Catalog state is finalized by `refresh::finalize_success` after the
+    // immutable frontier has been assembled by the caller.
     Ok(())
 }
 
@@ -412,6 +366,9 @@ pub fn execute_differential_refresh(
             schema, name
         )));
     }
+
+    let dependencies = StDependency::get_for_st(st.pgt_id)?;
+    let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
 
     // ── EC-16: Function-body change detection ────────────────────────
     // Check whether any user-defined function referenced in this ST's
@@ -552,9 +509,8 @@ pub fn execute_differential_refresh(
 
     // ── Short-circuit: skip the entire pipeline if no changes exist ──────
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
-    let catalog_source_oids: Vec<u32> = StDependency::get_for_st(st.pgt_id)
-        .unwrap_or_default()
-        .into_iter()
+    let catalog_source_oids: Vec<u32> = dependencies
+        .iter()
         .filter(|dep| {
             dep.source_type == "TABLE"
                 || dep.source_type == "FOREIGN_TABLE"
@@ -607,15 +563,12 @@ pub fn execute_differential_refresh(
         })?;
         if let Some(missing) = missing_oid {
             let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(missing));
-            pgrx::warning!(
-                "[pg_trickle] PREFLIGHT FAIL: change buffer table \
-                 \"{change_schema}\".{buf_name} not found via to_regclass \
-                 for ST {schema}.{name} (pgt_id={}, catalog_source_oids={:?}). \
-                 Skipping differential refresh.",
-                st.pgt_id,
-                catalog_source_oids,
-            );
-            return Ok((0, 0));
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id: st.pgt_id,
+                source_name: format!("OID {missing}"),
+                buffer: format!("{change_schema}.{buf_name}"),
+                reason: "required change buffer relation is missing".to_string(),
+            });
         }
     }
     pgrx::debug1!(

@@ -28,7 +28,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.cdc_mode` | `text` | `"auto"` | - `"auto"` (default): Use triggers for creation, transition to WAL if   `wal_level = logical` is available. |
 | `pg_trickle.cdc_paused` | `bool` | `false` | Default: `false` (CDC writes are enabled). |
 | `pg_trickle.cdc_trigger_mode` | `text` | `"statement"` | Changing this GUC takes effect for newly created stream tables. |
-| `pg_trickle.change_buffer_durability` | `text` | `"logged"` | This GUC supersedes `pg_trickle.unlogged_buffers` (which is now a compatibility alias: `true` maps to `"unlogged"`, `false` to `"logged"`). |
+| `pg_trickle.change_buffer_durability` | `ChangeBufferDurability` | `—` | This GUC supersedes `pg_trickle.unlogged_buffers` (which is now a compatibility alias: `true` maps to `"unlogged"`, `false` to `"logged"`). |
 | `pg_trickle.change_buffer_schema` | `text` | `"pgtrickle_changes"` | Schema name for change buffer tables. |
 | `pg_trickle.citus_st_lock_lease_ms` | `int4` | `60000` | Default: 60 000 ms (60 seconds). |
 | `pg_trickle.citus_worker_retry_ticks` | `int4` | `5` | Default: 5 ticks. |
@@ -49,7 +49,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
-| `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
+| `pg_trickle.enable_fused_refresh` | `bool` | `false` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | When `true`, trace context is propagated through refresh cycles for distributed tracing with OpenTelemetry. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |

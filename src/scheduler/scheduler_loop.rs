@@ -447,6 +447,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             None
         }
     };
+    let mut dispatch_tick_id: i64 = 0;
 
     // Per-ST retry state (in-memory only, reset on scheduler restart)
     let mut retry_states: HashMap<i64, RetryState> = HashMap::new();
@@ -982,6 +983,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // transactions that span a tick boundary.
             let (tick_watermark, _current_oldest_xmin, _holdback_age_secs) =
                 compute_coordinator_tick_watermark(prev_tick_watermark.as_deref());
+            dispatch_tick_id = dispatch_tick_id.saturating_add(1);
             // Persist this tick's safe watermark for the next tick's holdback comparison.
             prev_tick_watermark.clone_from(&tick_watermark);
 
@@ -1146,6 +1148,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         &retry_policy,
                         &db_name,
                         &mut pending_spawns,
+                        dispatch_tick_id,
+                        tick_watermark.as_deref(),
                     );
 
                     // Prune retry states for STs that no longer exist.

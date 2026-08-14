@@ -800,6 +800,11 @@ fn alter_stream_table_query(
             cdc::setup_foreign_table_polling(*source_oid, st.pgt_id, &change_schema)?;
         } else if source_type == "MATVIEW" && !refresh_mode.is_immediate() {
             cdc::setup_matview_polling(*source_oid, st.pgt_id, &change_schema)?;
+        } else if source_type == "STREAM_TABLE"
+            && !refresh_mode.is_immediate()
+            && let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(*source_oid)
+        {
+            cdc::ensure_st_change_buffer(upstream_pgt_id, *source_oid, &change_schema)?;
         }
     }
 

@@ -318,6 +318,9 @@ pub struct StDependency {
     pub decoder_confirmed_lsn: Option<String>,
     /// When the transition from triggers to WAL started (for timeout detection).
     pub transition_started_at: Option<String>,
+    /// v0.82.0: Exact CDC cutover target and handoff LSN.
+    pub cutover_target: Option<String>,
+    pub cutover_lsn: Option<String>,
     /// CITUS-4: Stable name (hash of schema+table) for this source.
     pub source_stable_name: Option<String>,
     /// CITUS-4: Citus placement type: 'local', 'distributed', or 'reference'.
@@ -334,6 +337,7 @@ pub struct RefreshRecord {
     pub end_time: Option<TimestampWithTimeZone>,
     pub action: String,
     pub rows_inserted: i64,
+    pub rows_updated: i64,
     pub rows_deleted: i64,
     pub error_message: Option<String>,
     pub status: String,
@@ -1722,6 +1726,21 @@ impl StDependency {
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
 
+    /// Store or clear the exact WAL handoff proof for a source.
+    pub fn set_cutover_for_source(
+        source_relid: pg_sys::Oid,
+        target: Option<&str>,
+        lsn: Option<&str>,
+    ) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_dependencies \
+             SET cutover_target = $1, cutover_lsn = $2::pg_lsn \
+             WHERE source_relid = $3",
+            &[target.into(), lsn.into(), source_relid.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
     /// Resolve the effective CDC request for a source across all deferred STs.
     ///
     /// Precedence is conservative: if any dependent ST requests `trigger`, the
@@ -1754,8 +1773,8 @@ impl StDependency {
                 .select(
                     "SELECT pgt_id, source_relid, source_type, columns_used, \
                             cdc_mode, slot_name, decoder_confirmed_lsn::text, \
-                            transition_started_at::text, column_snapshot, \
-                            schema_fingerprint, source_stable_name, \
+                            transition_started_at::text, cutover_target, cutover_lsn::text, \
+                            column_snapshot, schema_fingerprint, source_stable_name, \
                             COALESCE(source_placement, 'local') AS source_placement \
                      FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1",
                     None,
@@ -1777,11 +1796,13 @@ impl StDependency {
                 let slot_name = row.get::<String>(6).map_err(map_spi)?;
                 let decoder_confirmed_lsn = row.get::<String>(7).map_err(map_spi)?;
                 let transition_started_at = row.get::<String>(8).map_err(map_spi)?;
-                let column_snapshot = row.get::<pgrx::JsonB>(9).map_err(map_spi)?.map(|jb| jb.0);
-                let schema_fingerprint = row.get::<String>(10).map_err(map_spi)?;
-                let source_stable_name = row.get::<String>(11).map_err(map_spi)?;
+                let cutover_target = row.get::<String>(9).map_err(map_spi)?;
+                let cutover_lsn = row.get::<String>(10).map_err(map_spi)?;
+                let column_snapshot = row.get::<pgrx::JsonB>(11).map_err(map_spi)?.map(|jb| jb.0);
+                let schema_fingerprint = row.get::<String>(12).map_err(map_spi)?;
+                let source_stable_name = row.get::<String>(13).map_err(map_spi)?;
                 let source_placement = row
-                    .get::<String>(12)
+                    .get::<String>(14)
                     .map_err(map_spi)?
                     .unwrap_or_else(|| "local".to_string());
                 result.push(StDependency {
@@ -1795,6 +1816,8 @@ impl StDependency {
                     slot_name,
                     decoder_confirmed_lsn,
                     transition_started_at,
+                    cutover_target,
+                    cutover_lsn,
                     source_stable_name,
                     source_placement,
                 });
@@ -1824,8 +1847,8 @@ impl StDependency {
         let sql = format!(
             "SELECT pgt_id, source_relid, source_type, columns_used, \
                     cdc_mode, slot_name, decoder_confirmed_lsn::text, \
-                    transition_started_at::text, column_snapshot, \
-                    schema_fingerprint, source_stable_name, \
+                    transition_started_at::text, cutover_target, cutover_lsn::text, \
+                    column_snapshot, schema_fingerprint, source_stable_name, \
                     COALESCE(source_placement, 'local') AS source_placement \
              FROM pgtrickle.pgt_dependencies WHERE pgt_id IN ({id_list})"
         );
@@ -1849,11 +1872,13 @@ impl StDependency {
                 let slot_name = row.get::<String>(6).map_err(map_spi)?;
                 let decoder_confirmed_lsn = row.get::<String>(7).map_err(map_spi)?;
                 let transition_started_at = row.get::<String>(8).map_err(map_spi)?;
-                let column_snapshot = row.get::<pgrx::JsonB>(9).map_err(map_spi)?.map(|jb| jb.0);
-                let schema_fingerprint = row.get::<String>(10).map_err(map_spi)?;
-                let source_stable_name = row.get::<String>(11).map_err(map_spi)?;
+                let cutover_target = row.get::<String>(9).map_err(map_spi)?;
+                let cutover_lsn = row.get::<String>(10).map_err(map_spi)?;
+                let column_snapshot = row.get::<pgrx::JsonB>(11).map_err(map_spi)?.map(|jb| jb.0);
+                let schema_fingerprint = row.get::<String>(12).map_err(map_spi)?;
+                let source_stable_name = row.get::<String>(13).map_err(map_spi)?;
                 let source_placement = row
-                    .get::<String>(12)
+                    .get::<String>(14)
                     .map_err(map_spi)?
                     .unwrap_or_else(|| "local".to_string());
                 map.entry(pgt_id).or_default().push(StDependency {
@@ -1867,6 +1892,8 @@ impl StDependency {
                     slot_name,
                     decoder_confirmed_lsn,
                     transition_started_at,
+                    cutover_target,
+                    cutover_lsn,
                     source_stable_name,
                     source_placement,
                 });
@@ -1882,8 +1909,8 @@ impl StDependency {
                 .select(
                     "SELECT pgt_id, source_relid, source_type, columns_used, \
                             cdc_mode, slot_name, decoder_confirmed_lsn::text, \
-                            transition_started_at::text, column_snapshot, \
-                            schema_fingerprint, source_stable_name, \
+                            transition_started_at::text, cutover_target, cutover_lsn::text, \
+                            column_snapshot, schema_fingerprint, source_stable_name, \
                             COALESCE(source_placement, 'local') AS source_placement \
                      FROM pgtrickle.pgt_dependencies",
                     None,
@@ -1905,11 +1932,13 @@ impl StDependency {
                 let slot_name = row.get::<String>(6).map_err(map_spi)?;
                 let decoder_confirmed_lsn = row.get::<String>(7).map_err(map_spi)?;
                 let transition_started_at = row.get::<String>(8).map_err(map_spi)?;
-                let column_snapshot = row.get::<pgrx::JsonB>(9).map_err(map_spi)?.map(|jb| jb.0);
-                let schema_fingerprint = row.get::<String>(10).map_err(map_spi)?;
-                let source_stable_name = row.get::<String>(11).map_err(map_spi)?;
+                let cutover_target = row.get::<String>(9).map_err(map_spi)?;
+                let cutover_lsn = row.get::<String>(10).map_err(map_spi)?;
+                let column_snapshot = row.get::<pgrx::JsonB>(11).map_err(map_spi)?.map(|jb| jb.0);
+                let schema_fingerprint = row.get::<String>(12).map_err(map_spi)?;
+                let source_stable_name = row.get::<String>(13).map_err(map_spi)?;
                 let source_placement = row
-                    .get::<String>(12)
+                    .get::<String>(14)
                     .map_err(map_spi)?
                     .unwrap_or_else(|| "local".to_string());
                 result.push(StDependency {
@@ -1923,6 +1952,8 @@ impl StDependency {
                     slot_name,
                     decoder_confirmed_lsn,
                     transition_started_at,
+                    cutover_target,
+                    cutover_lsn,
                     source_stable_name,
                     source_placement,
                 });
@@ -2244,6 +2275,7 @@ impl RefreshRecord {
                  successful_refreshes,
                  failed_refreshes,
                  total_rows_inserted,
+                 total_rows_updated,
                  total_rows_deleted,
                  total_duration_ms,
                  last_refresh_action,
@@ -2256,6 +2288,7 @@ impl RefreshRecord {
                  CASE WHEN h.status = 'COMPLETED' THEN 1 ELSE 0 END,
                  CASE WHEN h.status = 'FAILED' THEN 1 ELSE 0 END,
                  COALESCE(h.rows_inserted, 0),
+                 COALESCE(h.rows_updated, 0),
                  COALESCE(h.rows_deleted, 0),
                  CASE
                      WHEN h.end_time IS NOT NULL THEN
@@ -2273,6 +2306,7 @@ impl RefreshRecord {
                  successful_refreshes = pgtrickle.pgt_refresh_summary.successful_refreshes + EXCLUDED.successful_refreshes,
                  failed_refreshes = pgtrickle.pgt_refresh_summary.failed_refreshes + EXCLUDED.failed_refreshes,
                  total_rows_inserted = pgtrickle.pgt_refresh_summary.total_rows_inserted + EXCLUDED.total_rows_inserted,
+                 total_rows_updated = pgtrickle.pgt_refresh_summary.total_rows_updated + EXCLUDED.total_rows_updated,
                  total_rows_deleted = pgtrickle.pgt_refresh_summary.total_rows_deleted + EXCLUDED.total_rows_deleted,
                  total_duration_ms = pgtrickle.pgt_refresh_summary.total_duration_ms + EXCLUDED.total_duration_ms,
                  last_refresh_action = EXCLUDED.last_refresh_action,
@@ -2357,16 +2391,43 @@ impl RefreshRecord {
         merge_strategy_used: Option<&str>,
         was_full_fallback: bool,
     ) -> Result<(), PgTrickleError> {
+        Self::complete_with_rows_updated(
+            refresh_id,
+            status,
+            rows_inserted,
+            rows_inserted.min(rows_deleted),
+            rows_deleted,
+            error_message,
+            delta_row_count,
+            merge_strategy_used,
+            was_full_fallback,
+        )
+    }
+
+    /// Complete a refresh record with exact INSERT/UPDATE/DELETE counts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_with_rows_updated(
+        refresh_id: i64,
+        status: &str,
+        rows_inserted: i64,
+        rows_updated: i64,
+        rows_deleted: i64,
+        error_message: Option<&str>,
+        delta_row_count: i64,
+        merge_strategy_used: Option<&str>,
+        was_full_fallback: bool,
+    ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_refresh_history \
              SET end_time = now(), status = $1, rows_inserted = $2, \
-             rows_deleted = $3, error_message = $4, \
-             delta_row_count = $5, merge_strategy_used = $6, \
-             was_full_fallback = $7 \
-             WHERE refresh_id = $8",
+             rows_updated = $3, rows_deleted = $4, error_message = $5, \
+             delta_row_count = $6, merge_strategy_used = $7, \
+             was_full_fallback = $8 \
+             WHERE refresh_id = $9",
             &[
                 status.into(),
                 rows_inserted.into(),
+                rows_updated.into(),
                 rows_deleted.into(),
                 error_message.into(),
                 delta_row_count.into(),
@@ -3047,10 +3108,13 @@ pub struct SchedulerJob {
     pub finished_at: Option<TimestampWithTimeZone>,
     pub outcome_detail: Option<String>,
     pub retryable: Option<bool>,
+    pub dispatch_tick_id: Option<i64>,
+    pub tick_watermark_lsn: Option<String>,
 }
 
 impl SchedulerJob {
     /// Enqueue a new job in QUEUED status. Returns the assigned `job_id`.
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue(
         dag_version: i64,
         unit_key: &str,
@@ -3059,14 +3123,16 @@ impl SchedulerJob {
         root_pgt_id: i64,
         scheduler_pid: i32,
         attempt_no: i32,
+        dispatch_tick_id: i64,
+        tick_watermark_lsn: &str,
     ) -> Result<i64, PgTrickleError> {
         Spi::connect_mut(|client| {
             let row = client
                 .update(
                     "INSERT INTO pgtrickle.pgt_scheduler_jobs \
                      (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id, \
-                      scheduler_pid, attempt_no) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                      scheduler_pid, attempt_no, dispatch_tick_id, tick_watermark_lsn) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::pg_lsn) \
                      RETURNING job_id",
                     None,
                     &[
@@ -3077,6 +3143,8 @@ impl SchedulerJob {
                         root_pgt_id.into(),
                         scheduler_pid.into(),
                         attempt_no.into(),
+                        dispatch_tick_id.into(),
+                        tick_watermark_lsn.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -3148,7 +3216,8 @@ impl SchedulerJob {
                 .select(
                     "SELECT job_id, dag_version, unit_key, unit_kind, member_pgt_ids, \
                      root_pgt_id, status, scheduler_pid, worker_pid, attempt_no, \
-                     enqueued_at, started_at, finished_at, outcome_detail, retryable \
+                     enqueued_at, started_at, finished_at, outcome_detail, retryable, \
+                     dispatch_tick_id, tick_watermark_lsn::text \
                      FROM pgtrickle.pgt_scheduler_jobs \
                      WHERE job_id = $1",
                     None,
@@ -3177,14 +3246,15 @@ impl SchedulerJob {
                          finished_at = now(), \
                          outcome_detail = 'Cancelled: orphaned after crash recovery' \
                      WHERE status IN ('QUEUED', 'RUNNING') \
-                       AND NOT EXISTS ( \
+                       AND (dispatch_tick_id IS NULL OR tick_watermark_lsn IS NULL \
+                            OR NOT EXISTS ( \
                            SELECT 1 FROM pg_stat_activity \
                            WHERE pid = pgt_scheduler_jobs.worker_pid \
                        ) \
-                       AND NOT EXISTS ( \
+                            OR NOT EXISTS ( \
                            SELECT 1 FROM pg_stat_activity \
                            WHERE pid = pgt_scheduler_jobs.scheduler_pid \
-                       )",
+                       ))",
                     None,
                     &[],
                 )
@@ -3233,7 +3303,8 @@ impl SchedulerJob {
     /// Column order must match the SELECT in `get_by_id`:
     /// 1=job_id, 2=dag_version, 3=unit_key, 4=unit_kind, 5=member_pgt_ids,
     /// 6=root_pgt_id, 7=status, 8=scheduler_pid, 9=worker_pid, 10=attempt_no,
-    /// 11=enqueued_at, 12=started_at, 13=finished_at, 14=outcome_detail, 15=retryable
+    /// 11=enqueued_at, 12=started_at, 13=finished_at, 14=outcome_detail, 15=retryable,
+    /// 16=dispatch_tick_id, 17=tick_watermark_lsn.
     fn from_spi_table_row(table: &SpiTupleTable<'_>) -> Result<Self, PgTrickleError> {
         let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
 
@@ -3261,6 +3332,8 @@ impl SchedulerJob {
             finished_at: table.get::<TimestampWithTimeZone>(13).map_err(map_spi)?,
             outcome_detail: table.get::<String>(14).map_err(map_spi)?,
             retryable: table.get::<bool>(15).map_err(map_spi)?,
+            dispatch_tick_id: table.get::<i64>(16).map_err(map_spi)?,
+            tick_watermark_lsn: table.get::<String>(17).map_err(map_spi)?,
         })
     }
 }

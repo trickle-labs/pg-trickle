@@ -174,14 +174,20 @@ async fn test_stmt_cdc_bulk_insert_all_rows_captured() {
     )
     .await;
 
-    let change_count: i64 = db.count(&buf).await;
+    let change_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM {buf} WHERE action IN ('I', 'D')"
+        ))
+        .await;
     assert_eq!(
         change_count, 100,
         "All 100 rows should appear in the change buffer"
     );
 
     let action: String = db
-        .query_scalar(&format!("SELECT DISTINCT action FROM {buf}"))
+        .query_scalar(&format!(
+            "SELECT DISTINCT action FROM {buf} WHERE action IN ('I', 'D')"
+        ))
         .await;
     assert_eq!(action, "I", "All change rows should have action='I'");
 
@@ -220,13 +226,18 @@ async fn test_stmt_cdc_bulk_update_keyed_table() {
     let source_oid = db.table_oid("bulk_upd").await;
     let buf = db.change_buffer_table(source_oid as i64).await;
     // Clear post-create changes from the buffer.
-    db.execute(&format!("TRUNCATE {buf}")).await;
+    db.execute(&format!("DELETE FROM {buf} WHERE action <> 'S'"))
+        .await;
 
     // Bulk-update all 50 rows in one statement.
     db.execute("UPDATE bulk_upd SET val = 'updated_' || id::text")
         .await;
 
-    let change_count: i64 = db.count(&buf).await;
+    let change_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM {buf} WHERE action IN ('I', 'D')"
+        ))
+        .await;
     // A44-10 D+I: keyed UPDATE of 50 rows → 50 D-rows + 50 I-rows = 100 total.
     assert_eq!(
         change_count, 100,
@@ -293,19 +304,26 @@ async fn test_stmt_cdc_bulk_delete_keyed_table() {
 
     let source_oid = db.table_oid("bulk_del").await;
     let buf = db.change_buffer_table(source_oid as i64).await;
-    db.execute(&format!("TRUNCATE {buf}")).await;
+    db.execute(&format!("DELETE FROM {buf} WHERE action <> 'S'"))
+        .await;
 
     // Delete all rows where id is odd (15 rows).
     db.execute("DELETE FROM bulk_del WHERE id % 2 = 1").await;
 
-    let change_count: i64 = db.count(&buf).await;
+    let change_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM {buf} WHERE action IN ('I', 'D')"
+        ))
+        .await;
     assert_eq!(
         change_count, 15,
         "All 15 deleted rows should appear in the change buffer"
     );
 
     let action: String = db
-        .query_scalar(&format!("SELECT DISTINCT action FROM {buf}"))
+        .query_scalar(&format!(
+            "SELECT DISTINCT action FROM {buf} WHERE action IN ('I', 'D')"
+        ))
         .await;
     assert_eq!(action, "D", "All change rows should have action='D'");
 
@@ -341,13 +359,18 @@ async fn test_stmt_cdc_keyless_update_captured_as_delete_plus_insert() {
 
     let source_oid = db.table_oid("keyless_upd").await;
     let buf = db.change_buffer_table(source_oid as i64).await;
-    db.execute(&format!("TRUNCATE {buf}")).await;
+    db.execute(&format!("DELETE FROM {buf} WHERE action <> 'S'"))
+        .await;
 
     // Update all 3 rows in a single statement.
     db.execute("UPDATE keyless_upd SET val = val || '_upd'")
         .await;
 
-    let total: i64 = db.count(&buf).await;
+    let total: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM {buf} WHERE action IN ('I', 'D')"
+        ))
+        .await;
     assert_eq!(
         total, 6,
         "Keyless UPDATE of 3 rows should produce 3 D + 3 I = 6 change rows"
@@ -533,7 +556,8 @@ async fn test_stmt_cdc_mixed_dml_in_transaction() {
 
     let source_oid = db.table_oid("mixed_dml").await;
     let buf = db.change_buffer_table(source_oid as i64).await;
-    db.execute(&format!("TRUNCATE {buf}")).await;
+    db.execute(&format!("DELETE FROM {buf} WHERE action <> 'S'"))
+        .await;
 
     // Mix of DML in a single transaction.
     // Use a dedicated connection so BEGIN/DML/COMMIT all run on the same
@@ -558,7 +582,11 @@ async fn test_stmt_cdc_mixed_dml_in_transaction() {
     }
 
     // A44-10 D+I: 3 DEL + 2 UPD (→ 2 D + 2 I) + 2 INS = 9 change rows.
-    let total: i64 = db.count(&buf).await;
+    let total: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM {buf} WHERE action IN ('I', 'D')"
+        ))
+        .await;
     assert_eq!(
         total, 9,
         "9 change rows expected: 5 D + 4 I (UPDs decomposed)"

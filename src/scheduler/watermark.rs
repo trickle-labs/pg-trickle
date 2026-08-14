@@ -19,11 +19,8 @@ static LAST_HOLDBACK_WARN_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic
 
 /// Compute the tick watermark for the **coordinator** (main scheduler loop).
 ///
-/// Applies the `frontier_holdback_mode` GUC logic:
-/// - `"none"` / watermark disabled: use raw `pg_current_wal_lsn()`.
-/// - `"xmin"`: probe `pg_stat_activity` + `pg_prepared_xacts` and hold back
-///   if a long-running transaction would cause data loss.
-/// - `"lsn:<N>"`: hold back by exactly N bytes.
+/// Applies the `frontier_holdback_mode` GUC logic. Every mode first uses the
+/// mandatory visibility probe; `lsn:<N>` may then apply an additional cap.
 ///
 /// Side effects (when holdback fires):
 /// - Updates `shmem::last_tick_oldest_xmin` for the next tick.
@@ -39,53 +36,12 @@ static LAST_HOLDBACK_WARN_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic
 pub(super) fn compute_coordinator_tick_watermark(
     prev_watermark_lsn: Option<&str>,
 ) -> (Option<String>, u64, u64) {
-    if !config::pg_trickle_tick_watermark_enabled() {
-        return (None, 0, 0);
-    }
-
     let mode = config::pg_trickle_frontier_holdback_mode();
 
     match mode {
-        config::FrontierHoldbackMode::None => {
-            let lsn = match Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text") {
-                Ok(v) => v,
-                Err(e) => {
-                    pgrx::warning!(
-                        "pg_trickle scheduler: failed to fetch pg_current_wal_lsn (mode=None): {}",
-                        e
-                    );
-                    None
-                }
-            };
-            // Store raw write LSN for workers.
-            if let Some(ref l) = lsn {
-                shmem::set_last_tick_safe_lsn(version::lsn_to_u64(l));
-            }
-            shmem::update_holdback_metrics(0, 0);
-            (lsn, 0, 0)
-        }
-
-        config::FrontierHoldbackMode::Xmin | config::FrontierHoldbackMode::InvalidLsn => {
-            // Skip the probe when CDC mode is WAL -- commit-LSN ordering
-            // is already safe in logical-replication mode.
-            if config::pg_trickle_cdc_mode() == "wal" {
-                let lsn = match Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text") {
-                    Ok(v) => v,
-                    Err(e) => {
-                        pgrx::warning!(
-                            "pg_trickle scheduler: failed to fetch pg_current_wal_lsn (mode=wal): {}",
-                            e
-                        );
-                        None
-                    }
-                };
-                if let Some(ref l) = lsn {
-                    shmem::set_last_tick_safe_lsn(version::lsn_to_u64(l));
-                }
-                shmem::update_holdback_metrics(0, 0);
-                return (lsn, 0, 0);
-            }
-
+        config::FrontierHoldbackMode::None
+        | config::FrontierHoldbackMode::Xmin
+        | config::FrontierHoldbackMode::InvalidLsn => {
             let prev_oldest_xmin = shmem::last_tick_oldest_xmin();
 
             match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
@@ -124,16 +80,7 @@ pub(super) fn compute_coordinator_tick_watermark(
                             shmem::set_last_tick_safe_lsn(u);
                             Some(prev.to_string())
                         }
-                        None => {
-                            // First tick — no previous watermark; fall back to
-                            // write LSN to avoid stalling forever on startup.
-                            let lsn = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text")
-                                .unwrap_or(None);
-                            if let Some(ref l) = lsn {
-                                shmem::set_last_tick_safe_lsn(version::lsn_to_u64(l));
-                            }
-                            lsn
-                        }
+                        None => None,
                     };
                     shmem::update_holdback_metrics(0, 0);
                     (safe_lsn, 0, 0)
@@ -142,84 +89,24 @@ pub(super) fn compute_coordinator_tick_watermark(
         }
 
         config::FrontierHoldbackMode::LsnBytes(offset_bytes) => {
-            let write_lsn_str = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text")
-                .unwrap_or(None)
-                .unwrap_or_else(|| "0/0".to_string());
-            let write_u64 = version::lsn_to_u64(&write_lsn_str);
-            let safe_u64 = write_u64.saturating_sub(offset_bytes);
-            let safe_lsn = version::u64_to_lsn(safe_u64);
-            shmem::set_last_tick_safe_lsn(safe_u64);
-            shmem::update_holdback_metrics(offset_bytes.min(write_u64), 0);
-            (Some(safe_lsn), 0, 0)
-        }
-    }
-}
-
-/// Compute the tick watermark for a **dynamic refresh worker**.
-///
-/// Dynamic workers run after the coordinator and do not have access to
-/// the previous tick's `prev_watermark_lsn`. They read the coordinator-
-/// computed safe watermark from shared memory and cap it with the current
-/// write LSN (in case the worker starts significantly after the tick).
-///
-/// When holdback is disabled or shmem is unavailable, falls back to
-/// `pg_current_wal_lsn()`.
-pub(super) fn compute_worker_tick_watermark() -> Option<String> {
-    if !config::pg_trickle_tick_watermark_enabled() {
-        return None;
-    }
-
-    let mode = config::pg_trickle_frontier_holdback_mode();
-
-    match mode {
-        config::FrontierHoldbackMode::None => {
-            match Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text") {
-                Ok(v) => v,
-                Err(e) => {
-                    pgrx::warning!(
-                        "pg_trickle scheduler: failed to fetch pg_current_wal_lsn (worker/None): {}",
-                        e
+            let prev_oldest_xmin = shmem::last_tick_oldest_xmin();
+            match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
+                Ok((mandatory_lsn, candidate_lsn, current_oldest_xmin, age_secs)) => {
+                    let mandatory = version::lsn_to_u64(&mandatory_lsn);
+                    let capped = version::lsn_to_u64(&candidate_lsn).saturating_sub(offset_bytes);
+                    let safe_lsn = version::u64_to_lsn(mandatory.min(capped));
+                    shmem::set_last_tick_holdback_state(current_oldest_xmin, mandatory.min(capped));
+                    shmem::update_holdback_metrics(
+                        version::lsn_to_u64(&candidate_lsn).saturating_sub(mandatory.min(capped)),
+                        age_secs,
                     );
-                    None
+                    (Some(safe_lsn), current_oldest_xmin, age_secs)
+                }
+                Err(e) => {
+                    warning!("pg_trickle: safe frontier probe failed: {}", e);
+                    (None, 0, 0)
                 }
             }
-        }
-
-        config::FrontierHoldbackMode::Xmin
-        | config::FrontierHoldbackMode::LsnBytes(_)
-        | config::FrontierHoldbackMode::InvalidLsn => {
-            // Read the safe watermark the coordinator stored in shmem.
-            let safe_lsn_u64 = shmem::last_tick_safe_lsn_u64();
-
-            if safe_lsn_u64 == 0 {
-                // No coordinator value yet — fall back to raw write LSN.
-                return match Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text") {
-                    Ok(v) => v,
-                    Err(e) => {
-                        pgrx::warning!(
-                            "pg_trickle scheduler: failed to fetch pg_current_wal_lsn (worker/fallback): {}",
-                            e
-                        );
-                        None
-                    }
-                };
-            }
-
-            // Cap with current write LSN: don't advance past what's available now.
-            let write_lsn_str = match Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text") {
-                Ok(Some(v)) => v,
-                Ok(None) => "0/0".to_string(),
-                Err(e) => {
-                    pgrx::warning!(
-                        "pg_trickle scheduler: failed to fetch pg_current_wal_lsn (worker/cap): {}",
-                        e
-                    );
-                    "0/0".to_string()
-                }
-            };
-            let write_u64 = version::lsn_to_u64(&write_lsn_str);
-            let effective_u64 = safe_lsn_u64.min(write_u64);
-            Some(version::u64_to_lsn(effective_u64))
         }
     }
 }

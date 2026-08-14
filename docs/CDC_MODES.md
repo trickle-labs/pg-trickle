@@ -116,10 +116,12 @@ TRIGGER ──► TRANSITIONING ──► WAL
    - Both the trigger and WAL decoder write to the buffer (deduplication happens at refresh)
 3. **WAL** — once the WAL decoder confirms it has caught up, the trigger is dropped.
 4. **Fallback** — if the transition times out or errors (e.g. `wal_level` reverts to
-   `replica`), the slot and publication are dropped and CDC reverts to triggers.
+   `replica`), trigger capture is installed and verified under the source lock before
+   WAL resources are removed. If an exact drain proof is unavailable, dependents are
+   marked for FULL reinitialization instead of reporting a normal cutover.
 
-The transition is transparent — stream tables remain current throughout and
-there is no window of data loss.
+The transition remains transactional: source locks and exact decoder positions are
+required before capture mode changes are committed.
 
 ---
 

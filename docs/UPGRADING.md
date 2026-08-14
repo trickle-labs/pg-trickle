@@ -623,7 +623,7 @@ delta SQL storage.
 | `pg_trickle.publication_lag_warn_bytes` | `104857600` | WAL lag warning threshold |
 | `pg_trickle.schedule_recommendation_min_samples` | `20` | Min samples for schedule recommendation |
 | `pg_trickle.schedule_alert_cooldown_seconds` | `300` | Min interval between schedule alerts |
-| `pg_trickle.change_buffer_durability` | `unlogged` | Change buffer WAL level |
+| `pg_trickle.change_buffer_durability` | `logged` | Change buffer WAL level (`logged`, `sync`, or `unlogged`) |
 
 No breaking changes.
 

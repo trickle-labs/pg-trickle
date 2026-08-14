@@ -265,7 +265,12 @@ async fn test_trigger_captures_bulk_insert() {
     db.execute("INSERT INTO cdc_bulk SELECT g, g FROM generate_series(2, 51) g")
         .await;
 
-    let change_count: i64 = db.count(&buffer_table).await;
+    let change_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {} WHERE action IN ('I', 'D')",
+            buffer_table
+        ))
+        .await;
     assert_eq!(
         change_count, 50,
         "All 50 bulk-inserted rows should be captured"

@@ -84,6 +84,7 @@ The standard stream-table outbox payload is a compact refresh summary:
   "v": 1,
   "refresh_id": "...",
   "inserted": 12,
+  "updated": 4,
   "deleted": 3,
   "source": "public.order_totals"
 }

@@ -153,6 +153,8 @@ pub fn poll_foreign_table_changes(
     let cb_col_list = cb_col_names.join(", ");
     let src_col_list = src_col_names.join(", ");
 
+    super::set_sync_commit_for_buffer(&format!("changes_{stable_name}"))?;
+
     // ── Deleted rows: in snapshot but not in current foreign table ──
     // These appear as 'D' (delete) rows in the change buffer.
     // INSERT target uses cb_col_list (change-buffer names); SELECT uses src_col_list

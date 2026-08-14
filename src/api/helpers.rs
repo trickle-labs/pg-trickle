@@ -416,12 +416,19 @@ pub(super) fn cleanup_cdc_for_source(
         }
 
         // Drop the change buffer table
+        let buffer_name = cdc::buffer_base_name_for_oid(source_oid);
         let drop_buf_sql = format!(
-            "DROP TABLE IF EXISTS {}.changes_{} CASCADE",
+            "DROP TABLE IF EXISTS {}.{} CASCADE",
             quote_identifier(&change_schema),
-            source_oid.to_u32(),
+            quote_identifier(&buffer_name),
         );
         let _ = Spi::run(&drop_buf_sql);
+
+        let _ = Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_change_buffers \
+             WHERE source_kind = 'BASE' AND source_id = $1",
+            &[i64::from(source_oid.to_u32()).into()],
+        );
 
         // EC-05: Drop the snapshot table (only exists for foreign table sources).
         let drop_snap_sql = format!(
@@ -1932,6 +1939,19 @@ pub(super) fn initialize_st(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+    let source_oids: Vec<pg_sys::Oid> = StDependency::get_for_st(pgt_id)?
+        .into_iter()
+        .filter(|dep| {
+            matches!(
+                dep.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            )
+        })
+        .map(|dep| dep.source_relid)
+        .collect();
+    cdc::lock_source_relations(&source_oids)?;
+    let safe_bound = cdc::get_current_wal_lsn()?;
+
     // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
     // defining query so the auxiliary column is populated correctly.
     let mut effective_query = if needs_pgt_count {
@@ -2035,12 +2055,7 @@ pub(super) fn initialize_st(
     // no-op (it assumes empty frontiers belong to ST-on-ST dependencies).
     // Including the FT OID with the current WAL LSN gives differential refresh
     // a valid lower bound from which to compare polled change-buffer rows.
-    let source_oids: Vec<pg_sys::Oid> = StDependency::get_for_st(pgt_id)?
-        .into_iter()
-        .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
-        .map(|dep| dep.source_relid)
-        .collect();
-    let slot_positions = cdc::get_slot_positions(&source_oids)?;
+    let slot_positions = cdc::get_slot_positions_at_bound(&source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
     StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0)?;

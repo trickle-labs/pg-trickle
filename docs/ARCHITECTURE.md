@@ -221,16 +221,21 @@ The CDC frontier (`pgt_stream_tables.frontier`) is advanced based on **LSN order
 **Failure scenario (trigger-based CDC only):**
 Without holdback, a transaction that inserts into a tracked table and commits *after* the scheduler has captured the tick watermark (`pg_current_wal_lsn()`) will have its change-buffer row permanently skipped on the next tick, because the frontier advanced past the row's LSN while the row was still uncommitted.
 
-**Fix — `frontier_holdback_mode = 'xmin'` (default):**
-Before computing the tick watermark, the scheduler probes `pg_stat_activity` and `pg_prepared_xacts` for the oldest in-progress transaction xmin. If any transaction from before the previous tick is still running, the frontier is held back to the previous tick's safe watermark rather than advancing to `pg_current_wal_lsn()`. This is a single cheap SPI round-trip per scheduler tick (~µs).
+**Fix — one mandatory safe-frontier probe:**
+Before computing the tick watermark, the scheduler captures a materialized WAL
+candidate and probes `backend_xid`, `backend_xmin`, and prepared transactions.
+Writer fences hold the frontier until every potentially invisible buffer write
+has a proven bound. Permission or malformed-result failures hold dispatch
+closed; no holdback mode can bypass this proof.
 
 The holdback algorithm (`cdc::classify_holdback`) is purely functional and unit-tested independently of the backend.
 
 **Configuration:**
-- `pg_trickle.frontier_holdback_mode` — `'xmin'` (default, safe), `'none'` (fast but can lose rows), `'lsn:<N>'` (hold back by N bytes, for debugging).
+- `pg_trickle.frontier_holdback_mode` — `'xmin'` (default), `'none'` (no additional margin), `'lsn:<N>'` (an additional cap). All modes retain the mandatory probe.
 - `pg_trickle.frontier_holdback_warn_seconds` — emit a `WARNING` (at most once per minute) when holdback has been active longer than this many seconds (default: 60).
 
-**Note:** WAL/logical-replication CDC mode is immune to this issue (commit-LSN ordering is inherently safe). The holdback is skipped when `cdc_mode = 'wal'`.
+WAL/logical-replication sources additionally use their durably decoded buffer
+position; raw current WAL is never recorded as a source frontier.
 
 **Observability:** Two Prometheus gauges are exposed:
 - `pg_trickle_frontier_holdback_lsn_bytes` — how many WAL bytes behind write_lsn the safe frontier currently is.
