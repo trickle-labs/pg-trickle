@@ -26,6 +26,8 @@ Future optimizations may replace the final step for narrowly defined cases, but 
 
 Four scope boundaries are stated explicitly because they are easy to leave implicit and expensive to get wrong: the supported type set is enumerated rather than open-ended (§6), the 64-bit hash is acknowledged as probabilistically rather than absolutely injective (§8), synthetic and sentinel identities are governed by the same module and versioning as user identities (§9), and the migration covers CDC change buffers and concurrent writers, not just stream-table rows (§15, §16).
 
+One prerequisite is called out separately because it changes the shape of the work: row identity is currently computed inside generated SQL through functions that take `TEXT[]`, so a typed encoder cannot be introduced by replacing the hash behind those functions. A new typed entry point is required first (§10.1).
+
 ---
 
 ## 2. Problem
@@ -228,6 +230,8 @@ The position taken by this proposal is:
 4. Two follow-ups are recorded but **not** implemented here: (a) verifying matches by additionally comparing identity columns in the MERGE predicate where those columns are physically present in the stream table, treating `__pgt_row_id` as an index-friendly probe rather than proof of equality; and (b) a wider 128-bit `BYTEA` identity. Option (a) is far cheaper and should be evaluated first.
 5. The documentation should publish the scale guidance above, so the residual risk is a stated engineering property rather than an unstated assumption.
 
+One interaction deserves separate mention. pg_trickle already supports stream tables whose `__pgt_row_id` index is **non-unique**, because uniqueness of the identity cannot always be proven from the query. In those tables a collision is indistinguishable from a legitimate duplicate: there is no constraint that would ever surface it, and no diagnostic that could distinguish the two. Conversely, where the index *is* unique, a collision surfaces as a unique-violation error — an outage rather than silent corruption, which is the better failure. This asymmetry should be stated in the documentation, because it means the practical risk from §8 is concentrated in exactly the stream tables that have the weakest guarantees to begin with.
+
 ---
 
 ## 9. Sentinel and Synthetic Identities
@@ -266,13 +270,47 @@ The exact Rust API can differ, but the ownership boundary should be clear: opera
 
 This gives pg_trickle one place to test and audit its row-ID invariant.
 
+### 10.1 Delivery mechanism: typed arguments, not `TEXT[]`
+
+There is a structural obstacle that the rest of this proposal assumes away and that must be resolved before Stage 2 can begin.
+
+Row identity today is not computed in Rust over tuple datums. It is computed in **generated SQL**. `build_hash_expr` emits either
+
+```text
+pgtrickle.pg_trickle_hash(<expr>)
+```
+
+or, for composite identities,
+
+```text
+pgtrickle.pg_trickle_hash_multi(ARRAY[(<expr1>)::TEXT, (<expr2>)::TEXT, ...])
+```
+
+and that string is embedded in scan CTEs, delta queries, MERGE sources, and full-refresh statements. The SQL function's Rust signature is `Vec<Option<String>>`. Every value therefore passes through `::TEXT` at the SQL level before Rust ever sees it, and by that point the type information and any session-formatting exposure are already baked in.
+
+This means a typed V2 encoder cannot simply be dropped in behind the existing functions. "Centralize call sites" (Stage 3) is not sufficient on its own — a centralized implementation that still receives `TEXT[]` would be tidier code with exactly the same defect. The proposal must therefore commit to a delivery mechanism:
+
+**Use a `VARIADIC "any"` entry point.** A function such as
+
+```text
+pgtrickle.row_id_v2(domain text, VARIADIC "any") RETURNS bigint
+```
+
+receives the real datums along with their declared types, which the implementation recovers with `get_fn_expr_argtype` per argument position. This is the only way to get typed values into the encoder while keeping the generated-SQL architecture. The generated expression then loses its `::TEXT` casts entirely.
+
+**Cache the resolved types in `fn_extra`.** Argument types are fixed for the lifetime of a given call site, so type resolution and encoder dispatch belong in `fn_extra` on the `FmgrInfo`, computed once per query execution rather than once per row. This is the concrete mechanism behind the general requirement in §11, and without it V2 will be measurably slower than V1 rather than comparable.
+
+**Add new functions; do not redefine the old ones.** `pg_trickle_hash` and `pg_trickle_hash_multi` are `#[pg_extern]`, live in the `pgtrickle` schema, and are marked `IMMUTABLE, PARALLEL SAFE`. Redefining them in place would change the meaning of an `IMMUTABLE` function whose outputs are already persisted, which is exactly the situation `IMMUTABLE` exists to forbid. V2 should ship as new functions in the extension upgrade script, with the V1 functions retained through the transition and removed in a later release once no persisted state or generated SQL can reference them.
+
+**`IMMUTABLE` must remain truthful.** Any encoding that consulted `DateStyle`, `TimeZone`, `bytea_output`, `lc_monetary`, or a collation would make the V2 function non-immutable in fact even if labelled immutable, with the planner free to fold and cache results across sessions. The tier-1 canonical forms in §6 were chosen so that the label stays honest; this is a correctness constraint on the type policy, not merely a preference.
+
 ---
 
 ## 11. Performance Requirements
 
 Correctness is the reason for the change, but row-ID generation is a hot path and the new implementation should avoid unnecessary overhead. The encoder should preferably stream its output directly into the hash state rather than constructing a complete intermediate buffer for every row.
 
-Tuple metadata and type dispatch should be resolved outside the per-row path wherever possible. If a record type is known for a generated plan, the encoder should cache the necessary type information rather than repeatedly performing catalog or function lookups for every row.
+Tuple metadata and type dispatch should be resolved outside the per-row path wherever possible. If a record type is known for a generated plan, the encoder should cache the necessary type information rather than repeatedly performing catalog or function lookups for every row. For the `VARIADIC "any"` entry point described in §10.1, the concrete mechanism is `fn_extra` on the `FmgrInfo`, resolved on first call and reused for every subsequent row in the same execution.
 
 The implementation should also avoid creating `Vec<String>` structures or repeatedly formatting values into SQL text when typed access is available. These changes are useful independently of future integer fast paths and may offset some of the additional framing work introduced by V2.
 
@@ -320,6 +358,10 @@ may be sufficient for the initial implementation.
 
 Crucially, the version must be recorded for **both** kinds of persisted identity state: stream-table storage and the CDC change buffers in `pgtrickle_changes`. Buffered change rows carry V1 identities exactly as stream-table rows do, and a marker that covers only the stream table cannot detect a mixed-version buffer. Every consumer of identity state must refuse to proceed when the recorded version does not match the running code, and must fail loudly rather than fall back to a full refresh that quietly reuses stale identities.
 
+The version check must be enforced at **runtime against catalog state**, not only inside the extension upgrade script. A PostgreSQL extension's shared library and its catalog contents version independently: an operator can install a new `.so` and restart the server without ever running `ALTER EXTENSION pg_trickle UPDATE`, and in a rolling or container-image upgrade this is the *normal* sequence rather than an exotic mistake. If the only guard lives in the upgrade SQL, a new binary will happily write V2 identities into a V1 catalog. The guard therefore belongs on the read/write paths themselves.
+
+Downgrade is not supported. Once state has been migrated to V2, running an older binary against it must fail with a clear error rather than silently reinterpret V2 identities as V1. This should be stated in the release notes, since it constrains rollback plans.
+
 Strategy metadata should only be added where it is actually needed. A single stream table may eventually contain scan identities, group identities, and derived join identities, so the proposal should not assume that one future `row_id_strategy` string on the stream table can describe an entire DVM plan.
 
 Encoding version belongs to persisted compatibility state. Strategy selection belongs to the relevant plan nodes or generated code.
@@ -352,7 +394,8 @@ The migration must perform an explicit transition, and its scope is **all persis
 2. **CDC change buffers** — pending rows in `pgtrickle_changes.changes_<oid>` that carry V1 identities. This is the most dangerous case: a buffer drained after the encoder is swapped would apply V1-keyed deltas against a V2-keyed table, producing missed deletes and duplicated inserts with no error raised.
 3. **WAL-decoder state** — any decoded-but-unapplied position or identity state held by the WAL CDC path, which must not be replayed across the encoding boundary.
 4. **Derived and cached identity state** — L0 caches, pre/post snapshot temp state, and any materialized helper structure keyed by row ID.
-5. **Downstream stream tables** — any stream table whose identity derives from an upstream stream table's identities, rebuilt in dependency order.
+5. **Indexes and generated columns** — the `__pgt_row_id` index on each storage table, plus any expression index or generated column that references the row-ID function. A rebuilt table implies rebuilt indexes; an expression index over the *old* function would silently retain V1 semantics and must be dropped or redefined rather than reindexed in place.
+6. **Downstream stream tables** — any stream table whose identity derives from an upstream stream table's identities, rebuilt in dependency order.
 
 For existing installations, pg_trickle should mark affected stream tables as requiring reinitialization. Existing CDC identity state generated using V1 must not be consumed as V2 state — it must be discarded as part of a cutover that simultaneously re-establishes the source position (§16), never simply drained. Stream tables are then rebuilt from an authoritative source snapshot using the new encoding.
 
@@ -437,11 +480,11 @@ The work should be implemented in small stages.
 
 **Stage 1: Define the invariant.** Add the V2 encoding specification, version/domain constants, the explicit tier-1/tier-2/tier-3 type policy from §6, and tests for canonical field encoding.
 
-**Stage 2: Build the shared encoder.** Implement typed field encoding and streaming hash generation in a dedicated row-identity module, including the equality-agreement canonicalizations (numeric scale, float zero/NaN, `bpchar` padding).
+**Stage 2: Build the shared encoder.** Implement typed field encoding and streaming hash generation in a dedicated row-identity module, including the equality-agreement canonicalizations (numeric scale, float zero/NaN, `bpchar` padding). Add the `VARIADIC "any"` entry point and `fn_extra` type caching from §10.1 as new SQL functions, leaving the V1 functions untouched.
 
-**Stage 3: Centralize call sites.** Replace independent composite-hash construction in CDC, WAL decoding, IMMEDIATE processing, DVM scan generation, joins, aggregates, and other derived identities with calls through the shared abstraction. Enumerate and migrate every synthetic/sentinel identity producer per §9, and add tier-3 rejection at DDL time.
+**Stage 3: Centralize call sites.** Replace independent composite-hash construction in CDC, WAL decoding, IMMEDIATE processing, DVM scan generation, joins, aggregates, and other derived identities with calls through the shared abstraction. Remove the `::TEXT` casts from generated row-ID expressions. Enumerate and migrate every synthetic/sentinel identity producer per §9, and add tier-3 rejection at DDL time.
 
-**Stage 4: Add version tracking.** Persist enough internal metadata to distinguish V1 and V2 state — for stream tables *and* change buffers — and hard-fail rather than proceed on mixed-version incremental processing.
+**Stage 4: Add version tracking.** Persist enough internal metadata to distinguish V1 and V2 state — for stream tables *and* change buffers — and hard-fail rather than proceed on mixed-version incremental processing, enforced at runtime against catalog state rather than only in the upgrade script.
 
 **Stage 5: Implement migration/reinitialization.** Add the safe V1-to-V2 cutover path per §15 and §16: continuously armed capture, a single transaction fixing the snapshot position and discarding V1 buffer state, dependency-aware rebuilding, resumability after interruption, and the documented quiesce fallback. Concurrent-write tests gate this stage.
 
@@ -478,3 +521,29 @@ The proposal claims injectivity for the **encoding** only. The 64-bit hash remai
 The internal API should be designed around a row-ID strategy abstraction, but V2 hashing should be the only implemented strategy in this proposal.
 
 After this foundation ships and the migration is proven safe, pg_trickle can separately evaluate a direct `INT4`/`INT8` primary-key fast path. At that point the decision can be based on benchmarks rather than architecture pressure, and the existing CDC/DVM code will already be structured to support it cleanly.
+
+---
+
+## 23. Review Record and Open Questions
+
+This section records the review outcome and the questions that remain genuinely open. It should be resolved and removed before the proposal moves from Proposed to Accepted.
+
+### 23.1 Review outcome
+
+The direction is endorsed: versioned unambiguous encoding, hashed to the existing `BIGINT`, centralized generation, rebuild during migration, and integer identities deferred. Review raised five clarifications, all of which have been folded into the body of the proposal — migration scope beyond stream tables (§15), an explicit supported-type set (§6), concurrency safety during cutover (§16), rules for sentinel and synthetic identities (§9), and honest treatment of 64-bit collision probability (§8).
+
+A sixth issue was identified during review of the existing code and is the largest change to the plan: the current row-ID pipeline runs through generated SQL with `::TEXT` casts, so a typed encoder requires a new `VARIADIC "any"` entry point rather than a drop-in replacement behind the existing functions (§10.1). Without that, Stage 3 could be completed in full while leaving the original defect intact.
+
+### 23.2 Open questions
+
+**Q1 — Non-deterministic collations.** §6.4 offers two options: reject such columns from identity roles, or accept them with documented byte-level identity. Rejection is safer but may break existing installations on upgrade, turning a correctness fix into a functional regression for those users. A decision is needed, along with a survey of how likely such columns are in practice.
+
+**Q2 — Scope of the tier-3 rejection on upgrade.** An existing stream table whose identity includes, say, a `json` column is currently working, however unsoundly. V2 would reject it. Does the migration refuse to complete, or does it complete while marking that stream table permanently degraded and unmaintainable? The former is defensible pre-1.0; the latter needs its own design. Either way, the upgrade must detect and report affected stream tables *before* it starts making changes.
+
+**Q3 — Cost of the quiesce fallback.** §16 permits taking a lock strong enough to exclude writers on source relations for the position-fixing transaction. On a large installation with many sources this could mean a meaningful write stall during upgrade. The expected duration should be measured on a realistic dataset before this is presented as the recommended path, and the documentation should give operators a way to estimate it.
+
+**Q4 — Does V2 actually pay for itself on performance?** §19 sets no performance bar, which is correct for a correctness fix, but the honest expectation should be stated up front. Removing per-row `::TEXT` formatting and array construction is a real saving; adding per-field framing and type dispatch is a real cost. If the net turns out significantly negative on composite keys, that changes the release calculus and should be surfaced early rather than at Stage 7.
+
+**Q5 — Priority of the collision follow-up.** §8 records identity-column verification in the MERGE predicate as the cheaper of two mitigations but does not schedule it. Given that the risk is concentrated in non-unique-index stream tables, it is worth deciding now whether that follow-up is a 1.0 blocker or genuinely post-1.0 work.
+
+**Q6 — Interaction with logical replication.** `__pgt_row_id` values can be published downstream. A subscriber holding V1 identities while the publisher migrates to V2 is a scenario the migration sections do not currently cover. It may be adequately handled by the opacity contract in §14, but that should be confirmed rather than assumed.
