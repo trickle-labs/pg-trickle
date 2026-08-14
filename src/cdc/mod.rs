@@ -131,14 +131,26 @@ pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
 }
 
 fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTrickleError> {
-    Spi::get_one_with_args::<String>(
-        "SELECT format('%I.%I', n.nspname, c.relname) \
-         FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE c.oid = $1",
-        &[source_oid.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT format('%I.%I', n.nspname, c.relname) \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = $1 AND c.relkind <> 'm'",
+                Some(1),
+                &[source_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        rows.into_iter()
+            .next()
+            .map(|row| {
+                row.get::<String>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+            })
+            .transpose()
+            .map(Option::flatten)
+    })
 }
 
 /// Lock all managed source relations, including partition descendants, in OID
@@ -149,10 +161,10 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
         let descendants = Spi::connect(|client| {
             let rows = client
                 .select(
-                    "WITH RECURSIVE rels(oid) AS (\
-                         SELECT $1::oid\
-                         UNION ALL\
-                         SELECT i.inhrelid FROM pg_inherits i JOIN rels r ON r.oid = i.inhparent\
+                    "WITH RECURSIVE rels(oid) AS (
+                         SELECT $1::oid
+                         UNION ALL
+                         SELECT i.inhrelid FROM pg_inherits i JOIN rels r ON r.oid = i.inhparent
                      ) SELECT oid::text FROM rels ORDER BY oid",
                     None,
                     &[(*source_oid).into()],
@@ -180,9 +192,9 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
     let mut relation_oids: Vec<u32> = relation_oids.into_iter().collect();
     relation_oids.sort_unstable();
     for oid in relation_oids {
-        let table = resolve_relation_name(pg_sys::Oid::from(oid))?.ok_or_else(|| {
-            PgTrickleError::NotFound(format!("source relation OID {oid} not found"))
-        })?;
+        let Some(table) = resolve_relation_name(pg_sys::Oid::from(oid))? else {
+            continue;
+        };
         Spi::run(&format!("LOCK TABLE {table} IN SHARE MODE")).map_err(|e| {
             PgTrickleError::LockTimeout(format!("could not lock source {table}: {e}"))
         })?;
@@ -526,17 +538,11 @@ pub fn validate_required_change_buffers(
                 dependency.source_type.as_str(),
                 "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
             ) {
-                let suffix = dependency.source_stable_name.as_deref().unwrap_or("");
-                let suffix = if suffix.is_empty() {
-                    dependency.source_relid.to_u32().to_string()
-                } else {
-                    suffix.to_string()
-                };
                 Ok((
                     dependency.source_type.clone(),
                     "BASE",
                     dependency.source_relid.to_u32() as i64,
-                    format!("changes_{suffix}"),
+                    buffer_base_name_for_oid(dependency.source_relid),
                 ))
             } else {
                 let id = crate::catalog::StreamTableMeta::pgt_id_for_relid(dependency.source_relid)
@@ -3157,7 +3163,7 @@ pub fn compute_safe_upper_bound(
                     FROM pg_stat_activity
                     WHERE pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
                     UNION ALL
-                    SELECT transaction::text::bigint AS xid,
+                    SELECT \"transaction\"::text::bigint AS xid,
                            EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
                     FROM pg_prepared_xacts
                  )

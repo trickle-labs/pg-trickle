@@ -194,7 +194,7 @@ fn execute_manual_refresh(
     let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
-    let manual_tick_watermark = cdc::compute_safe_upper_bound(None, 0)?.0;
+    let manual_tick_watermark = cdc::get_current_wal_lsn()?;
 
     let refresh_id = RefreshRecord::insert(
         st.pgt_id,
@@ -383,7 +383,7 @@ pub(crate) fn execute_manual_full_refresh(
     let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
     crate::cdc::lock_source_relations(source_oids)?;
     crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
-    let (safe_bound, _, _, _) = crate::cdc::compute_safe_upper_bound(None, 0)?;
+    let safe_bound = crate::cdc::get_current_wal_lsn()?;
 
     // EC-25/EC-26: Ensure the internal_refresh flag is set so DML guard
     // triggers allow the refresh executor to modify the storage table.

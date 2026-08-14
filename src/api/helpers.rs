@@ -1932,6 +1932,19 @@ pub(super) fn initialize_st(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+    let source_oids: Vec<pg_sys::Oid> = StDependency::get_for_st(pgt_id)?
+        .into_iter()
+        .filter(|dep| {
+            matches!(
+                dep.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            )
+        })
+        .map(|dep| dep.source_relid)
+        .collect();
+    cdc::lock_source_relations(&source_oids)?;
+    let safe_bound = cdc::get_current_wal_lsn()?;
+
     // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
     // defining query so the auxiliary column is populated correctly.
     let mut effective_query = if needs_pgt_count {
@@ -2035,18 +2048,6 @@ pub(super) fn initialize_st(
     // no-op (it assumes empty frontiers belong to ST-on-ST dependencies).
     // Including the FT OID with the current WAL LSN gives differential refresh
     // a valid lower bound from which to compare polled change-buffer rows.
-    let source_oids: Vec<pg_sys::Oid> = StDependency::get_for_st(pgt_id)?
-        .into_iter()
-        .filter(|dep| {
-            matches!(
-                dep.source_type.as_str(),
-                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
-            )
-        })
-        .map(|dep| dep.source_relid)
-        .collect();
-    cdc::lock_source_relations(&source_oids)?;
-    let (safe_bound, _, _, _) = cdc::compute_safe_upper_bound(None, 0)?;
     let slot_positions = cdc::get_slot_positions_at_bound(&source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
