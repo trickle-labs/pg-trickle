@@ -1259,6 +1259,35 @@ fn handle_dropped_table(obj: &DroppedObject) {
         return;
     }
 
+    // A source drop does not cascade to pg_trickle's separately-owned CDC
+    // buffer or its registry row. Remove both before a replacement relation
+    // can reuse the stable buffer name.
+    let buffer =
+        cdc::buffer_qualified_name_for_oid(&config::pg_trickle_change_buffer_schema(), obj.objid);
+    let drop_buffer_sql = format!("DROP TABLE IF EXISTS {buffer} CASCADE");
+    if let Err(e) = Spi::run(&drop_buffer_sql) {
+        pgrx::warning!(
+            "pg_trickle_ddl_tracker: failed to drop CDC buffer for {}: {}",
+            identity,
+            e,
+        );
+    }
+    if let Err(e) = Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_change_buffers \
+         WHERE source_kind = 'BASE' AND source_id = $1",
+        &[i64::from(obj.objid.to_u32()).into()],
+    ) {
+        pgrx::warning!(
+            "pg_trickle_ddl_tracker: failed to remove CDC registry row for {}: {}",
+            identity,
+            e,
+        );
+    }
+    let _ = Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1",
+        &[obj.objid.into()],
+    );
+
     // Case 2: Check if the dropped table is an upstream source of any ST.
     let affected_pgt_ids = match find_downstream_pgt_ids(obj.objid) {
         Ok(ids) => ids,

@@ -2606,7 +2606,7 @@ pub(crate) fn batched_has_source_changes(
             .iter()
             .map(|oid| {
                 let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
-                format!("SELECT 1 FROM {buf}")
+                format!("SELECT 1 FROM {buf} WHERE action <> 'S'")
             })
             .collect();
 
@@ -2671,7 +2671,7 @@ fn has_table_source_changes(st: &StreamTableMeta) -> bool {
         .iter()
         .map(|oid| {
             let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
-            format!("SELECT 1 FROM {buf}")
+            format!("SELECT 1 FROM {buf} WHERE action <> 'S'")
         })
         .collect();
     let batched_sql = format!("SELECT EXISTS({})", union_arms.join(" UNION ALL "));
@@ -3564,7 +3564,9 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::RetryableFailure;
         }
     };
-    if let Err(e) = crate::cdc::validate_required_change_buffers(st, &dependencies) {
+    if !st.refresh_mode.is_immediate()
+        && let Err(e) = crate::cdc::validate_required_change_buffers(st, &dependencies)
+    {
         log!(
             "pg_trickle: CDC validation failed for {}.{}: {}",
             st.pgt_schema,

@@ -1264,6 +1264,17 @@ pub fn drop_st_change_buffer_table(pgt_id: i64, change_schema: &str) -> Result<(
     Spi::run(&sql).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to drop ST change buffer table: {}", e))
     })?;
+    Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_change_buffers \
+         WHERE source_kind = 'STREAM_TABLE' AND source_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "Failed to remove ST change buffer registry row: {}",
+            e
+        ))
+    })?;
     Ok(())
 }
 
@@ -3166,16 +3177,19 @@ pub fn compute_safe_upper_bound(
                     SELECT backend_xid::text::bigint AS xid,
                            EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
                     FROM pg_stat_activity
-                    WHERE pid <> pg_backend_pid() AND backend_xid IS NOT NULL
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid() AND backend_xid IS NOT NULL
                     UNION ALL
                     SELECT backend_xmin::text::bigint AS xid,
                            EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
                     FROM pg_stat_activity
-                    WHERE pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL
                     UNION ALL
                     SELECT \"transaction\"::text::bigint AS xid,
                            EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
                     FROM pg_prepared_xacts
+                    WHERE database = current_database()
                  )
                  SELECT candidate.lsn, active.xid::text, active.age_secs::text
                  FROM candidate LEFT JOIN active ON TRUE",

@@ -424,6 +424,12 @@ pub(super) fn cleanup_cdc_for_source(
         );
         let _ = Spi::run(&drop_buf_sql);
 
+        let _ = Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_change_buffers \
+             WHERE source_kind = 'BASE' AND source_id = $1",
+            &[i64::from(source_oid.to_u32()).into()],
+        );
+
         // EC-05: Drop the snapshot table (only exists for foreign table sources).
         let drop_snap_sql = format!(
             "DROP TABLE IF EXISTS {}.snapshot_{} CASCADE",
