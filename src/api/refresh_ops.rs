@@ -306,7 +306,8 @@ fn execute_manual_refresh(
                 rows_inserted: *rows_inserted,
                 rows_updated,
                 rows_deleted: *rows_deleted,
-                data_changed: *rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0,
+                data_changed: !refresh::effective_mode_is_no_data()
+                    && (*rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0),
                 was_full_fallback: false,
                 downstream_capture_complete: true,
             };
@@ -380,7 +381,9 @@ pub(crate) fn execute_manual_full_refresh(
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
-    let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+    if !st.refresh_mode.is_immediate() {
+        crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+    }
     crate::cdc::lock_source_relations(source_oids)?;
     crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
     let safe_bound = crate::cdc::get_current_wal_lsn()?;
@@ -429,7 +432,7 @@ pub(crate) fn execute_manual_full_refresh(
     let mut st_source_lsn_snapshot = Vec::new();
     for dep in dependencies
         .iter()
-        .filter(|dep| dep.source_type == "STREAM_TABLE")
+        .filter(|dep| dep.source_type == "STREAM_TABLE" && !st.refresh_mode.is_immediate())
     {
         let upstream_pgt_id =
             StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
@@ -635,6 +638,7 @@ pub(crate) fn execute_manual_full_refresh(
         // No upstream changes — store frontier but preserve data_timestamp.
         StreamTableMeta::store_frontier(st.pgt_id, &frontier)?;
         StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
+        crate::refresh::set_effective_mode("NO_DATA");
         pgrx::info!(
             "Stream table {}.{} refreshed (FULL, no-op — data_timestamp preserved)",
             schema,
@@ -675,6 +679,7 @@ fn execute_manual_differential_refresh(
     }
 
     refresh::poll_foreign_table_sources_for_st(st)?;
+    crate::cdc::lock_source_relations(source_oids)?;
 
     // ST-source guard: if ANY upstream dependency is a STREAM_TABLE, always
     // fall back to a FULL refresh.  The manual FULL refresh path
@@ -693,7 +698,22 @@ fn execute_manual_differential_refresh(
     }
 
     // Get current WAL positions for non-ST sources (reuses source_oids — G-N3)
-    let (safe_bound, _, _, _) = cdc::compute_safe_upper_bound(None, 0)?;
+    // The source lock is the visibility proof for this manual refresh: no
+    // source transaction can add a change-buffer row after this bound.
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let mut safe_bound = cdc::get_current_wal_lsn()?;
+    for source_oid in source_oids {
+        let buffer_name = cdc::buffer_base_name_for_oid(*source_oid);
+        safe_bound = Spi::get_one_with_args::<String>(
+            &format!(
+                "SELECT GREATEST($1::pg_lsn, COALESCE(MAX(lsn), '0/0'::pg_lsn))::text \
+                 FROM \"{change_schema}\".{buffer_name}"
+            ),
+            &[safe_bound.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(safe_bound);
+    }
     let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);

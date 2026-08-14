@@ -415,6 +415,10 @@ pub fn take_effective_mode() -> &'static str {
     LAST_EFFECTIVE_MODE.with(|m| m.get())
 }
 
+pub(crate) fn effective_mode_is_no_data() -> bool {
+    LAST_EFFECTIVE_MODE.with(|m| m.get() == "NO_DATA")
+}
+
 thread_local! {
     static LAST_ROWS_UPDATED: Cell<i64> = const { Cell::new(0) };
 }

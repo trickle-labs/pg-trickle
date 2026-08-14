@@ -416,10 +416,11 @@ pub(super) fn cleanup_cdc_for_source(
         }
 
         // Drop the change buffer table
+        let buffer_name = cdc::buffer_base_name_for_oid(source_oid);
         let drop_buf_sql = format!(
-            "DROP TABLE IF EXISTS {}.changes_{} CASCADE",
+            "DROP TABLE IF EXISTS {}.{} CASCADE",
             quote_identifier(&change_schema),
-            source_oid.to_u32(),
+            quote_identifier(&buffer_name),
         );
         let _ = Spi::run(&drop_buf_sql);
 

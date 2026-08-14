@@ -47,6 +47,12 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         schema.replace('"', "\"\""),
         name.replace('"', "\"\""),
     );
+    let pre_table = format!("__pgt_topk_state_{}", st.pgt_id);
+    Spi::run(&format!(
+        "DROP TABLE IF EXISTS {pre_table}; \
+         CREATE TEMP TABLE {pre_table} ON COMMIT DROP AS SELECT * FROM {quoted_table}"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     let downstream_cols = if has_downstream_st_consumers(st.pgt_id) {
         let cols = get_st_user_columns(st);
@@ -142,39 +148,52 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
          WHEN NOT MATCHED THEN \
            INSERT ({insert_cols}) VALUES ({insert_vals}) \
          WHEN NOT MATCHED BY SOURCE THEN \
-           DELETE \
-         RETURNING merge_action() AS __pgt_merge_action",
+           DELETE",
         update_set = update_set.join(", "),
     );
 
-    let (rows_inserted, rows_updated, rows_deleted) = Spi::connect_mut(|client| {
-        let result = client
+    Spi::connect_mut(|client| {
+        client
             .update(&merge_sql, None, &[])
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let mut counts = (0_i64, 0_i64, 0_i64);
-        for row in result {
-            let action = row
-                .get::<String>(1)
+        Ok::<(), PgTrickleError>(())
+    })?;
+
+    let changed_columns = col_list
+        .iter()
+        .map(|col| format!("t.{col} IS DISTINCT FROM p.{col}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let counts_sql = format!(
+        "SELECT count(*) FILTER (WHERE p.__pgt_row_id IS NULL)::bigint, \
+                count(*) FILTER (WHERE t.__pgt_row_id IS NULL)::bigint, \
+                count(*) FILTER (WHERE t.__pgt_row_id IS NOT NULL \
+                                  AND p.__pgt_row_id IS NOT NULL \
+                                  AND ({changed_columns}))::bigint \
+         FROM {quoted_table} t FULL JOIN {pre_table} p USING (__pgt_row_id)"
+    );
+    let (rows_inserted, rows_deleted, rows_updated) = Spi::connect(|client| {
+        let mut rows = client
+            .select(&counts_sql, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let row = rows
+            .next()
+            .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "topk merge accounting".to_string(),
+                reason: "target change counts were not returned".to_string(),
+            })?;
+        Ok::<(i64, i64, i64), PgTrickleError>((
+            row.get::<i64>(1)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
-                    pgt_id: st.pgt_id,
-                    stage: "topk merge accounting".to_string(),
-                    reason: "MERGE RETURNING merge_action() was NULL".to_string(),
-                })?;
-            match action.as_str() {
-                "INSERT" => counts.0 += 1,
-                "UPDATE" => counts.1 += 1,
-                "DELETE" => counts.2 += 1,
-                other => {
-                    return Err(PgTrickleError::RefreshFinalizationFailed {
-                        pgt_id: st.pgt_id,
-                        stage: "topk merge accounting".to_string(),
-                        reason: format!("unknown MERGE action '{other}'"),
-                    });
-                }
-            }
-        }
-        Ok::<(i64, i64, i64), PgTrickleError>(counts)
+                .unwrap_or(0),
+            row.get::<i64>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(0),
+            row.get::<i64>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(0),
+        ))
     })?;
     crate::refresh::set_last_rows_updated(rows_updated);
 

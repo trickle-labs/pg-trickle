@@ -36,7 +36,9 @@ pub(crate) use update::*;
 
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
-    crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+    if !st.refresh_mode.is_immediate() {
+        crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+    }
     let source_oids: Vec<pg_sys::Oid> = dependencies
         .iter()
         .filter(|dependency| {

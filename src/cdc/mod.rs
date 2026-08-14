@@ -192,6 +192,14 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
     let mut relation_oids: Vec<u32> = relation_oids.into_iter().collect();
     relation_oids.sort_unstable();
     for oid in relation_oids {
+        let relkind = Spi::get_one_with_args::<String>(
+            "SELECT relkind::text FROM pg_class WHERE oid = $1",
+            &[pg_sys::Oid::from(oid).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if relkind.as_deref() == Some("f") {
+            continue;
+        }
         let Some(table) = resolve_relation_name(pg_sys::Oid::from(oid))? else {
             continue;
         };
@@ -370,7 +378,9 @@ pub(crate) fn restore_registered_sentinel(
     })?;
     let sql = format!(
         "INSERT INTO {change_schema}.{buffer_name} (lsn, action, pk_hash) \
-         VALUES ('0/0'::pg_lsn, 'S', $1)"
+         SELECT '0/0'::pg_lsn, 'S', $1 \
+         WHERE NOT EXISTS (SELECT 1 FROM {change_schema}.{buffer_name} \
+                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND pk_hash = $1)"
     );
     Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
         pgt_id: source_id,

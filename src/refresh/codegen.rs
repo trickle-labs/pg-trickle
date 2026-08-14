@@ -389,8 +389,7 @@ pub(crate) fn drain_pending_cleanups() {
             Spi::get_one::<bool>(&format!(
                 "SELECT NOT EXISTS(\
                    SELECT 1 FROM \"{schema}\".{buf_name} \
-               WHERE action IN ('I', 'D') \
-                 AND lsn > '{safe_lsn}'::pg_lsn \
+                   WHERE lsn > '{safe_lsn}'::pg_lsn \
                    LIMIT 1\
                  )",
                 schema = change_schema,
@@ -477,10 +476,20 @@ pub(crate) fn drain_pending_cleanups() {
                 schema = change_schema,
             )) {
                 Ok(()) => {
-                    CLEANUP_FAILURE_COUNTS.with(|m| {
-                        m.borrow_mut().remove(&oid);
-                    });
-                    clear_cleanup_status(oid);
+                    match crate::cdc::restore_registered_sentinel(
+                        &change_schema,
+                        &buf_name,
+                        "BASE",
+                        oid as i64,
+                    ) {
+                        Ok(()) => {
+                            CLEANUP_FAILURE_COUNTS.with(|m| {
+                                m.borrow_mut().remove(&oid);
+                            });
+                            clear_cleanup_status(oid);
+                        }
+                        Err(e) => record_cleanup_failure(oid, "SENTINEL_RESTORE", &e.to_string()),
+                    }
                 }
                 Err(e) => record_cleanup_failure(oid, "TRUNCATE", &e.to_string()),
             }
@@ -682,7 +691,8 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
         } else {
             let delete_sql = format!(
                 "DELETE FROM \"{schema}\".{buf_name} \
-                 WHERE lsn <= '{safe_lsn}'::pg_lsn",
+                 WHERE action IN ('I', 'D') \
+                   AND lsn <= '{safe_lsn}'::pg_lsn",
                 schema = change_schema,
             );
             if let Err(e) = Spi::run(&delete_sql) {
