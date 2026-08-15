@@ -81,8 +81,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.parse_duration_seconds()` | `pgtrickle` | `bigint (nullable)` | Used by SQL views to compare schedule. |
 | `pgtrickle.pause_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.pause_scheduler(ARRAY['public.my_view', 'analytics.summary']); ```. |
 | `pgtrickle.pause_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.pause_stream_table('my_schema.my_st'); SELECT pgtrickle.resume_stream_table('my_schema.my_st'); ```. |
-| `pgtrickle.pg_trickle_hash()` | `pgtrickle` | `bigint` | NULL input is mapped to a deterministic sentinel (`\x00NULL\x00`) — the same encoding used by [`pg_trickle_hash_multi`] — so that rows with NULL-valued group keys receive a non-NULL `__pgt_row_id`. |
-| `pgtrickle.pg_trickle_hash_multi()` | `pgtrickle` | `bigint` | The hash output is identical to the previous xxh64-based implementation **except** that it now uses xxh3 which produces different numeric values. |
+| `pgtrickle.pg_trickle_hash()` | `pgtrickle` | `bigint` | NULL input is mapped to a deterministic sentinel (`\x00NULL\x00`) so that rows with NULL-valued group keys receive a non-NULL `__pgt_row_id`. |
+| `pgtrickle.pg_trickle_hash_multi()` | `pgtrickle` | `bigint` | Hash multiple text values using the versioned composite framing. |
 | `pgtrickle.pgt_ivm_apply_delta()` | `pgtrickle` | `void` | Delta SQL templates are cached per (pgt_id, source_oid, has_new, has_old) to avoid re-parsing the defining query on every trigger invocation. |
 | `pgtrickle.pgt_ivm_apply_delta_enr()` | `pgtrickle` | `void` | Requires PostgreSQL 18+ which propagates ENRs to nested SPI calls within trigger execution contexts. |
 | `pgtrickle.pgt_ivm_handle_truncate()` | `pgtrickle` | `void` | Truncates the stream table (equivalent to a full refresh with empty base table for simple views). |
