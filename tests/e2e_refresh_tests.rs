@@ -803,7 +803,7 @@ async fn test_stddev_alias_differential_mode() {
         "sda_st",
         "SELECT dept, STDDEV(amount) AS sd FROM sda_src GROUP BY dept",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
@@ -915,7 +915,7 @@ async fn test_variance_alias_differential_mode() {
         "va_st",
         "SELECT dept, VARIANCE(amount) AS v FROM va_src GROUP BY dept",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 

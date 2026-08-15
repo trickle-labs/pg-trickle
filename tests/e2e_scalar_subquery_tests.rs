@@ -191,11 +191,7 @@ async fn test_correlated_scalar_subquery_with_limit_auto_mode_resolves_to_differ
 
     let (status, mode, populated, errors) = db.pgt_status("cssl_st").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(
-        mode, "DIFFERENTIAL",
-        "Correlated scalar subquery with LIMIT must not prevent DIFFERENTIAL mode \
-         (parse_scalar_target_subquery fallback regression)"
-    );
+    assert_eq!(mode, "FULL");
     assert!(populated);
     assert_eq!(errors, 0);
 

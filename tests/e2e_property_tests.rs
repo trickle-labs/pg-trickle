@@ -1130,7 +1130,7 @@ async fn test_property_except_differential() {
     db.create_st("prop_exc_st", query, "1m", "AUTO").await;
     db.assert_st_matches_query("prop_exc_st", query).await;
 
-    for cycle in 1..=CYCLES {
+    for _cycle in 1..=CYCLES {
         let id = a_ids.alloc();
         let val = rng.i32_range(1, 10);
         db.execute(&format!("INSERT INTO prop_exc_a VALUES ({id}, {val})"))
