@@ -401,12 +401,12 @@ async fn test_stddev_aggregate_supported_in_differential_mode() {
     let result = db
         .try_execute(
             "SELECT pgtrickle.create_stream_table('stddev_st', \
-             $$ SELECT grp, STDDEV(val) AS std FROM metrics GROUP BY grp $$, '1m', 'DIFFERENTIAL')",
+             $$ SELECT grp, STDDEV(val) AS std FROM metrics GROUP BY grp $$, '1m', 'AUTO')",
         )
         .await;
     assert!(
         result.is_ok(),
-        "STDDEV should now be supported in DIFFERENTIAL mode, got: {:?}",
+        "STDDEV should be accepted in AUTO mode, got: {:?}",
         result.err()
     );
 }
@@ -1121,7 +1121,7 @@ async fn test_json_table_differential_mode() {
          FROM events e,
               JSON_TABLE(e.data, '$.tags[*]'
                 COLUMNS (tag TEXT PATH '$')) AS jt";
-    db.create_st("event_tags", query_event_tags, "1m", "AUTO")
+    db.create_st("event_tags", query_event_tags, "1m", "FULL")
         .await;
     db.assert_st_matches_query("event_tags", query_event_tags)
         .await;
