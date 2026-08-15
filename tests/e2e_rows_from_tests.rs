@@ -144,8 +144,7 @@ async fn test_rows_from_dual_unnest_differential_insert() {
          FROM rf_diff d, \
          ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
 
-    db.create_st("rf_diff_view", query, "1m", "DIFFERENTIAL")
-        .await;
+    db.create_st("rf_diff_view", query, "1m", "AUTO").await;
 
     db.assert_st_matches_query("rf_diff_view", query).await;
 
@@ -175,8 +174,7 @@ async fn test_rows_from_dual_unnest_differential_delete() {
          FROM rf_del d, \
          ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
 
-    db.create_st("rf_del_view", query, "1m", "DIFFERENTIAL")
-        .await;
+    db.create_st("rf_del_view", query, "1m", "AUTO").await;
 
     // id=1: 2 rows, id=2: 1 row = 3
     db.assert_st_matches_query("rf_del_view", query).await;
@@ -205,8 +203,7 @@ async fn test_rows_from_dual_unnest_differential_update() {
          FROM rf_upd d, \
          ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
 
-    db.create_st("rf_upd_view", query, "1m", "DIFFERENTIAL")
-        .await;
+    db.create_st("rf_upd_view", query, "1m", "AUTO").await;
 
     db.assert_st_matches_query("rf_upd_view", query).await;
 

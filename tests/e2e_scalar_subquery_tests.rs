@@ -62,7 +62,7 @@ async fn test_scalar_subquery_where_differential() {
 
     let q = "SELECT name, price FROM ss_products \
              WHERE price >= (SELECT min_price FROM ss_thresholds LIMIT 1)";
-    db.create_st("ss_where_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("ss_where_st", q, "1m", "AUTO").await;
     db.assert_st_matches_query("ss_where_st", q).await;
 
     // Lower threshold → more rows
