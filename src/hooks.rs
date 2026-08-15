@@ -1272,11 +1272,17 @@ fn handle_dropped_table(obj: &DroppedObject) {
             e,
         );
     }
-    if let Err(e) = Spi::run_with_args(
-        "DELETE FROM pgtrickle.pgt_change_buffers \
-         WHERE source_kind = 'BASE' AND source_id = $1",
-        &[i64::from(obj.objid.to_u32()).into()],
-    ) {
+    let registry_exists =
+        Spi::get_one::<bool>("SELECT to_regclass('pgtrickle.pgt_change_buffers') IS NOT NULL")
+            .unwrap_or(Some(false))
+            .unwrap_or(false);
+    if registry_exists
+        && let Err(e) = Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_change_buffers \
+             WHERE source_kind = 'BASE' AND source_id = $1",
+            &[i64::from(obj.objid.to_u32()).into()],
+        )
+    {
         pgrx::warning!(
             "pg_trickle_ddl_tracker: failed to remove CDC registry row for {}: {}",
             identity,

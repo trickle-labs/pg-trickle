@@ -2651,7 +2651,6 @@ CREATE  FUNCTION pgtrickle."commit_latency_stats"() RETURNS TABLE (
         "min_ms" double precision,  /* f64 */
         "p50_ms" double precision,  /* f64 */
         "p95_ms" double precision,  /* f64 */
-        "p95_ms" double precision,  /* f64 */
         "max_ms" double precision,  /* f64 */
         "tracking_mode" TEXT  /* String */
 )
