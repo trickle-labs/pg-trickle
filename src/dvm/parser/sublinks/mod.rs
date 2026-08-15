@@ -1480,42 +1480,51 @@ fn collect_analyzed_aggregate_locations(
 ) -> Result<HashMap<i32, pg_sys::Oid>, PgTrickleError> {
     use pgrx::PgList;
     use std::ffi::CString;
+    use std::panic::AssertUnwindSafe;
 
     let c_sql = CString::new(query)
         .map_err(|e| PgTrickleError::QueryParseError(format!("Query contains null byte: {e}")))?;
 
-    // SAFETY: raw_parser + parse_analyze_fixedparams are called inside a valid
-    // PostgreSQL backend; returned nodes live for the duration of this function.
+    // PostgreSQL reports unresolved relations from parse_analyze_fixedparams
+    // with ERROR, not a null return. Metadata is optional, so contain that
+    // error and let AUTO use its normal FULL fallback.
     unsafe {
-        let raw_list = pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
-        let stmts = PgList::<pg_sys::RawStmt>::from_pg(raw_list);
-        let raw_stmt = stmts.get_ptr(0).ok_or_else(|| {
-            PgTrickleError::QueryParseError("Query produced no parse tree nodes".into())
-        })?;
-        let query_node = pg_sys::parse_analyze_fixedparams(
-            raw_stmt,
-            c_sql.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null_mut(),
-        );
-        if query_node.is_null() {
-            return Err(PgTrickleError::QueryParseError(
-                "Query analysis returned null".into(),
-            ));
-        }
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(|| {
+            // SAFETY: raw_parser + parse_analyze_fixedparams are called inside
+            // a valid PostgreSQL backend; returned nodes live for the duration
+            // of this closure.
+            let raw_list =
+                pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+            let stmts = PgList::<pg_sys::RawStmt>::from_pg(raw_list);
+            let raw_stmt = stmts.get_ptr(0).ok_or_else(|| {
+                PgTrickleError::QueryParseError("Query produced no parse tree nodes".into())
+            })?;
+            let query_node = pg_sys::parse_analyze_fixedparams(
+                raw_stmt,
+                c_sql.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            );
+            if query_node.is_null() {
+                return Err(PgTrickleError::QueryParseError(
+                    "Query analysis returned null".into(),
+                ));
+            }
 
-        let mut by_location = HashMap::new();
-        let mut ctx = AnalyzedAggCollectorCtx {
-            by_location: &mut by_location as *mut _,
-        };
-        pg_sys::query_tree_walker_impl(
-            query_node,
-            Some(analyzed_agg_walker),
-            &mut ctx as *mut AnalyzedAggCollectorCtx as *mut std::ffi::c_void,
-            0,
-        );
-        Ok(by_location)
+            let mut by_location = HashMap::new();
+            let mut ctx = AnalyzedAggCollectorCtx {
+                by_location: &mut by_location as *mut _,
+            };
+            pg_sys::query_tree_walker_impl(
+                query_node,
+                Some(analyzed_agg_walker),
+                &mut ctx as *mut AnalyzedAggCollectorCtx as *mut std::ffi::c_void,
+                0,
+            );
+            Ok(by_location)
+        }))
+        .execute()
     }
 }
 
