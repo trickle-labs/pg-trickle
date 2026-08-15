@@ -75,6 +75,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 
@@ -90,6 +91,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 

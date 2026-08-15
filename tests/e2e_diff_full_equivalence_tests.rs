@@ -492,7 +492,9 @@ async fn test_diff_full_equivalence_intersect() {
         .await;
 
     let q = "SELECT v FROM dfe_isect_l INTERSECT SELECT v FROM dfe_isect_r";
-    db.create_st("dfe_isect_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("dfe_isect_st", q, "1m", "AUTO").await;
+    let (_, mode, _, _) = db.pgt_status("dfe_isect_st").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("dfe_isect_st", q).await;
 
     // Cycle 1: add to both to expand intersection
@@ -538,7 +540,9 @@ async fn test_diff_full_equivalence_except() {
     db.execute("INSERT INTO dfe_exc_r (v) VALUES (2),(4)").await;
 
     let q = "SELECT v FROM dfe_exc_l EXCEPT SELECT v FROM dfe_exc_r";
-    db.create_st("dfe_exc_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("dfe_exc_st", q, "1m", "AUTO").await;
+    let (_, mode, _, _) = db.pgt_status("dfe_exc_st").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("dfe_exc_st", q).await;
 
     // Cycle 1: add to right causes exclusion
@@ -771,29 +775,27 @@ async fn test_diff_full_equivalence_lateral_subquery() {
                       FROM dfe_lat_emp e \
                       WHERE e.dept_id = d.id \
                       ORDER BY e.salary DESC LIMIT 2) top";
-    db.create_st("dfe_lat_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("dfe_lat_st", q, "1m", "AUTO").await;
+    let (_, mode, _, _) = db.pgt_status("dfe_lat_st").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("dfe_lat_st", q).await;
-    assert_differential_mode(&db, "dfe_lat_st").await;
 
     // Cycle 1: INSERT new high-salary employee → enters top-2
     db.execute("INSERT INTO dfe_lat_emp VALUES (15,1,200,'Frank')")
         .await;
     db.refresh_st("dfe_lat_st").await;
     db.assert_st_matches_query("dfe_lat_st", q).await;
-    assert_differential_mode(&db, "dfe_lat_st").await;
 
     // Cycle 2: UPDATE salary → reorder within department
     db.execute("UPDATE dfe_lat_emp SET salary = 300 WHERE id = 14")
         .await;
     db.refresh_st("dfe_lat_st").await;
     db.assert_st_matches_query("dfe_lat_st", q).await;
-    assert_differential_mode(&db, "dfe_lat_st").await;
 
     // Cycle 3: DELETE top employee from Eng → next one enters
     db.execute("DELETE FROM dfe_lat_emp WHERE id = 15").await;
     db.refresh_st("dfe_lat_st").await;
     db.assert_st_matches_query("dfe_lat_st", q).await;
-    assert_differential_mode(&db, "dfe_lat_st").await;
 
     // Cycle 4: INSERT + DELETE in same cycle
     db.execute("INSERT INTO dfe_lat_emp VALUES (16,3,150,'Grace')")
@@ -801,14 +803,12 @@ async fn test_diff_full_equivalence_lateral_subquery() {
     db.execute("DELETE FROM dfe_lat_emp WHERE id = 12").await;
     db.refresh_st("dfe_lat_st").await;
     db.assert_st_matches_query("dfe_lat_st", q).await;
-    assert_differential_mode(&db, "dfe_lat_st").await;
 
     // Cycle 5: UPDATE department → employee moves between departments
     db.execute("UPDATE dfe_lat_emp SET dept_id = 2 WHERE id = 10")
         .await;
     db.refresh_st("dfe_lat_st").await;
     db.assert_st_matches_query("dfe_lat_st", q).await;
-    assert_differential_mode(&db, "dfe_lat_st").await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

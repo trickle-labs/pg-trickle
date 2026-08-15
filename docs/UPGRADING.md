@@ -83,6 +83,20 @@ This executes the upgrade migration scripts in order (for example,
 PostgreSQL automatically determines the full upgrade chain from your current
 version to the new `default_version`.
 
+### 0.82.0 → 0.83.0 row-identity rebuild
+
+The migration adds `row_identity_version` to `pgt_stream_tables` and
+`pgt_change_buffers`, creates the durable private set-operation registry, and
+locks tracked source/storage relations in OID order. Pending CDC rows are
+discarded except for each buffer's sentinel, then the buffers are marked
+version `2`; the migration rolls back if a registered buffer is missing.
+Existing stream tables are marked `needs_reinit` with legacy version `1`.
+
+The next protected FULL refresh rebuilds each table from source data and marks
+its row identity version `2`. Incremental refresh remains blocked until that
+reinitialization succeeds. `INTERSECT` and `EXCEPT` continue to use FULL/AUTO
+until their private multiplicity state is admitted by the semantic gate.
+
 ### 5. Verify the Upgrade
 
 ```sql

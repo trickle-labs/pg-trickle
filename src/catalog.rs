@@ -258,6 +258,10 @@ pub struct StreamTableMeta {
     /// Used by the scheduler to log per-class cost estimates without
     /// re-running the OpTree analysis on every tick.
     pub query_complexity_class: Option<String>,
+    /// v0.83.0: Composite row-identity encoding used by this stream table.
+    /// NULL is treated as an unknown pre-upgrade value and fails closed on
+    /// incremental paths.
+    pub row_identity_version: Option<i16>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -399,9 +403,9 @@ impl StreamTableMeta {
                       requested_cdc_mode, is_append_only, pooler_compatibility_mode, \
                       st_partition_key, max_differential_joins, max_delta_fraction, \
                       temporal_mode, storage_backend, defining_query_hash, \
-                      storage_fillfactor) \
+                      storage_fillfactor, row_identity_version) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24) \
+                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -429,6 +433,7 @@ impl StreamTableMeta {
                         storage_backend.into(),
                         query_hash.into(),
                         storage_fillfactor.into(),
+                        crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -467,7 +472,7 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class \
+                     query_complexity_class, row_identity_version \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -510,7 +515,7 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class \
+                     query_complexity_class, row_identity_version \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -558,7 +563,7 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class \
+                     query_complexity_class, row_identity_version \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -601,7 +606,7 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class \
+                     query_complexity_class, row_identity_version \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -648,7 +653,7 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class \
+                     query_complexity_class, row_identity_version \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -928,6 +933,21 @@ impl StreamTableMeta {
              SET needs_reinit = true, updated_at = now() \
              WHERE pgt_id = $1",
             &[pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// Mark a successfully rebuilt stream table as using the current row
+    /// identity encoding.
+    pub fn mark_row_identity_reinitialized(pgt_id: i64) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET row_identity_version = $1, updated_at = now() \
+             WHERE pgt_id = $2",
+            &[
+                crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
+                pgt_id.into(),
+            ],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -1373,6 +1393,7 @@ impl StreamTableMeta {
         let defining_query_hash = table.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
         let storage_fillfactor = table.get::<i32>(52).map_err(map_spi)?;
         let query_complexity_class = table.get::<String>(53).map_err(map_spi)?;
+        let row_identity_version = table.get::<i16>(54).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1428,6 +1449,7 @@ impl StreamTableMeta {
             defining_query_hash,
             storage_fillfactor,
             query_complexity_class,
+            row_identity_version,
         })
     }
 
@@ -1556,6 +1578,7 @@ impl StreamTableMeta {
         let defining_query_hash = row.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
         let storage_fillfactor = row.get::<i32>(52).map_err(map_spi)?;
         let query_complexity_class = row.get::<String>(53).map_err(map_spi)?;
+        let row_identity_version = row.get::<i16>(54).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1611,6 +1634,7 @@ impl StreamTableMeta {
             defining_query_hash,
             storage_fillfactor,
             query_complexity_class,
+            row_identity_version,
         })
     }
 }

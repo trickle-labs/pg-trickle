@@ -316,14 +316,16 @@ when the subquery returns no rows.
 
 ## LATERAL Joins in DIFFERENTIAL Mode (FEAT-2)
 
-Most `LATERAL` patterns are supported in `DIFFERENTIAL` mode.  The following
-patterns have known limitations:
+Only forms with complete outer dependencies and an exact, NULL-safe outer
+identity are admitted to `DIFFERENTIAL` mode. AUTO falls back to FULL when
+those proofs are unavailable.
 
 | LATERAL pattern | Status | Notes |
 |----------------|--------|-------|
 | `LATERAL` volatile SRF | ❌ Falls back to FULL | `random()`, `clock_timestamp()`, etc. cannot be differentiated |
 | Nested `LATERAL` (LATERAL inside LATERAL) | ❌ Falls back to FULL | Not yet implemented in delta rules |
-| `LEFT JOIN LATERAL` with correlated aggregate | ⚠️ Supported (suboptimal) | Re-scans sub-table for each changed outer row; see note below |
+| `LEFT JOIN LATERAL` with correlated aggregate | ⚠️ Supported when identity is proven | Re-scans sub-table for each changed outer row; see note below |
+| Mutable inner source in `IMMEDIATE` | ❌ Rejected | Transition-table coverage is not implemented for this path |
 
 ### Correlated Aggregate Performance Note
 

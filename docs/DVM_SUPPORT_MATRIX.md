@@ -138,6 +138,14 @@ SELECT id, amount FROM foreign_orders
 
 - Supported. Each branch is differentiated independently.
 
+### INTERSECT / EXCEPT
+
+`INTERSECT`, `INTERSECT ALL`, `EXCEPT`, and `EXCEPT ALL` are materialized
+directly in FULL mode. Their branch multiplicity state is not exposed in the
+stream table. AUTO selects FULL; explicit DIFFERENTIAL and IMMEDIATE requests
+are rejected until durable private state and mutation-by-mutation parity are
+proven.
+
 ### Lateral joins
 
 ```sql
@@ -149,8 +157,10 @@ CROSS JOIN LATERAL (
 ) latest
 ```
 
-- Supported with snapshot-based delta.  The lateral subquery is
-  evaluated as a snapshot for the delta computation.
+- Supported for proven row-scoped forms with exact outer identity. AUTO falls
+  back to FULL when identity/dependency inspection is incomplete. IMMEDIATE
+  rejects mutable inner sources because transition-table coverage is not yet
+  proven.
 
 ### Scalar subqueries (non-correlated)
 
@@ -161,6 +171,12 @@ FROM orders
 ```
 
 - Supported if the scalar subquery is not correlated (no outer reference).
+
+### Volatility
+
+Only IMMUTABLE expressions are admitted to incremental maintenance by default.
+STABLE and VOLATILE expressions use FULL under AUTO and are rejected for
+explicit DIFFERENTIAL or IMMEDIATE mode.
 
 ---
 

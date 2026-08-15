@@ -272,6 +272,7 @@ fn migrate_aux_columns(
     new_sum2_aux: &[(String, String)],
     old_covar_aux: &[(String, String)],
     new_covar_aux: &[(String, String)],
+    new_statistical_aux_types: &[(String, String)],
     old_nonnull_aux: &[(String, String)],
     new_nonnull_aux: &[(String, String)],
 ) -> Result<(), PgTrickleError> {
@@ -391,10 +392,16 @@ fn migrate_aux_columns(
     // Add new sum2 aux columns
     for (col_name, _) in new_sum2_aux {
         if !old_sum2_names.contains(col_name.as_str()) {
+            let accumulator_type = new_statistical_aux_types
+                .iter()
+                .find(|(name, _)| name == col_name)
+                .map(|(_, ty)| ty.as_str())
+                .unwrap_or("numeric");
             let sql = format!(
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} NUMERIC NOT NULL DEFAULT 0",
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} NOT NULL DEFAULT 0",
                 quoted_table,
                 quote_identifier(col_name),
+                accumulator_type,
             );
             Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
@@ -420,10 +427,16 @@ fn migrate_aux_columns(
     // Add new covar aux columns
     for (col_name, _) in new_covar_aux {
         if !old_covar_names.contains(col_name.as_str()) {
+            let accumulator_type = new_statistical_aux_types
+                .iter()
+                .find(|(name, _)| name == col_name)
+                .map(|(_, ty)| ty.as_str())
+                .unwrap_or("numeric");
             let sql = format!(
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} NUMERIC NOT NULL DEFAULT 0",
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} NOT NULL DEFAULT 0",
                 quoted_table,
                 quote_identifier(col_name),
+                accumulator_type,
             );
             Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
@@ -579,15 +592,27 @@ fn alter_stream_table_query(
 
     let new_pgt_relid = match &schema_change {
         SchemaChange::Same => {
-            // No DDL required
+            // The output columns are unchanged, but set-operation FULL
+            // storage may have a non-unique row-id index. Rebuild it when
+            // the query's keyless requirement changes.
+            if st.has_keyless_source != vq.has_keyless_source {
+                rebuild_row_id_index(
+                    schema,
+                    table_name,
+                    &vq.columns,
+                    vq.has_keyless_source,
+                    st.st_partition_key.is_some(),
+                )?;
+            }
             st.pgt_relid
         }
         SchemaChange::Compatible { added, removed } => {
             migrate_storage_table_compatible(schema, table_name, added, removed)?;
             // Dropping columns may destroy the covering INCLUDE index on
-            // __pgt_row_id.  Rebuild it with the new column set so that
-            // ON CONFLICT (__pgt_row_id) in differential refresh still works.
-            if !removed.is_empty() {
+            // __pgt_row_id.  A query transition can also change whether
+            // duplicate row IDs are valid (notably set-operation FULL
+            // storage), so rebuild whenever the keyless flag changes.
+            if !removed.is_empty() || st.has_keyless_source != vq.has_keyless_source {
                 rebuild_row_id_index(
                     schema,
                     table_name,
@@ -640,6 +665,7 @@ fn alter_stream_table_query(
                 &vq.sum2_aux_columns,
                 &vq.covar_aux_columns,
                 &vq.nonnull_aux_columns,
+                &vq.statistical_aux_types,
                 st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
                 st.storage_fillfactor,          // HOT-1: preserve fillfactor
             )?
@@ -662,6 +688,7 @@ fn alter_stream_table_query(
             &vq.sum2_aux_columns,
             &old_covar_aux,
             &vq.covar_aux_columns,
+            &vq.statistical_aux_types,
             &old_nonnull_aux,
             &vq.nonnull_aux_columns,
         )?;
@@ -961,6 +988,7 @@ fn alter_stream_table_partition_key(
     let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
     let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
     let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
+    let statistical_aux_types = crate::dvm::query_statistical_aux_types(&st.defining_query);
 
     // Recreate the storage table with the new partition scheme.
     let new_pgt_relid = setup_storage_table(
@@ -976,6 +1004,7 @@ fn alter_stream_table_partition_key(
         &sum2_aux,
         &covar_aux,
         &nonnull_aux,
+        &statistical_aux_types,
         new_partition_key,
         st.storage_fillfactor, // HOT-1: preserve fillfactor
     )?;
@@ -1317,6 +1346,7 @@ pub(crate) fn create_stream_table_impl(
         &vq.sum2_aux_columns,
         &vq.covar_aux_columns,
         &vq.nonnull_aux_columns,
+        &vq.statistical_aux_types,
         partition_by,
         storage_fillfactor,
     )?;
@@ -1538,6 +1568,7 @@ pub(crate) fn create_stream_table_impl(
             &vq.sum2_aux_columns,
             &vq.covar_aux_columns,
             &vq.nonnull_aux_columns,
+            &vq.statistical_aux_types,
             &invoker_search_path,
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
@@ -1748,6 +1779,12 @@ pub(crate) fn alter_stream_table_impl(
         validate_requested_cdc_mode_requirements(&effective_requested_cdc_mode)?;
     }
 
+    // Validate the complete incremental admission before changing CDC mode,
+    // schedule, catalog state, or trigger infrastructure.
+    if target_refresh_mode != RefreshMode::Full {
+        super::validate_incremental_mode_for_query(&st.defining_query, target_refresh_mode)?;
+    }
+
     if requested_cdc_mode_override != st.requested_cdc_mode {
         StreamTableMeta::update_requested_cdc_mode(
             st.pgt_id,
@@ -1923,6 +1960,19 @@ pub(crate) fn alter_stream_table_impl(
                 &[mode_str.to_uppercase().into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+            // Normalize legacy set-operation storage even when the caller
+            // explicitly reasserts FULL without requesting a refresh.
+            if new_mode == RefreshMode::Full
+                && crate::dvm::query_needs_dual_count(&st.defining_query)
+            {
+                crate::api::helpers::normalize_full_set_operation_storage(
+                    &schema,
+                    &table_name,
+                    st.pgt_relid,
+                    st.pgt_id,
+                )?;
+            }
         }
     }
 

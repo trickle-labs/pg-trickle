@@ -336,6 +336,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
     -- v0.78.0 P-2: OpTree-derived complexity label, back-filled lazily on first refresh.
     query_complexity_class TEXT,
+    -- v0.83.0: Composite row-identity encoding version. NULL is an
+    -- unclassified pre-upgrade row; fresh objects are written explicitly.
+    row_identity_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -344,6 +347,21 @@ CREATE INDEX IF NOT EXISTS idx_pgt_status ON pgtrickle.pgt_stream_tables (status
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pgt_name ON pgtrickle.pgt_stream_tables (pgt_schema, pgt_name);
 -- PERF-4: Scheduler hot‐path lookup by relation OID.
 CREATE INDEX IF NOT EXISTS idx_pgt_relid ON pgtrickle.pgt_stream_tables (pgt_relid);
+
+-- v0.83.0: Durable private state registry for set-operation state.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_set_operation_states (
+    pgt_id         BIGINT NOT NULL
+                   REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                   ON DELETE CASCADE,
+    node_ordinal   INTEGER NOT NULL,
+    operation      TEXT NOT NULL CHECK (operation IN ('INTERSECT', 'EXCEPT')),
+    is_all         BOOLEAN NOT NULL,
+    state_relid    OID NOT NULL,
+    schema_version SMALLINT NOT NULL,
+    PRIMARY KEY (pgt_id, node_ordinal)
+);
+
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_set_operation_states', '');
 
 -- DAG edges
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
@@ -470,6 +488,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_buffers (
     source_id        BIGINT NOT NULL,
     durability       TEXT NOT NULL CHECK (durability IN ('logged', 'unlogged', 'sync')),
     sentinel_token   BIGINT NOT NULL,
+    -- v0.83.0: Composite row-identity encoding used by buffer writers.
+    row_identity_version SMALLINT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (source_kind, source_id)
 );
@@ -545,6 +565,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_schema_version (
 );
 INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES ('0.19.0', 'Initial schema version tracking')
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES ('0.83.0', 'Versioned composite identity with locked CDC buffer conversion and reinit')
 ON CONFLICT (version) DO NOTHING;
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_stream_tables', '');

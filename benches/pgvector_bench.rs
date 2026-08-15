@@ -33,6 +33,7 @@ fn build_vector_avg_tree() -> OpTree {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
         is_distinct: false,
         alias: "centroid".to_string(),
     };
@@ -63,6 +64,7 @@ fn build_vector_sum_tree() -> OpTree {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
         is_distinct: false,
         alias: "total_vec".to_string(),
     };

@@ -80,10 +80,7 @@ pub fn diff_anti_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             .iter()
             .map(|c| format!("l.{}::TEXT", quote_ident(c)))
             .collect();
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            key_exprs.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&key_exprs)
     };
 
     // Build R_old snapshot (same approach as semi_join)

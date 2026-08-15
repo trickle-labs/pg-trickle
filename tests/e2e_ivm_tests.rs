@@ -3,7 +3,7 @@
 //! Validates that IMMEDIATE stream tables:
 //! - Are maintained synchronously within the same transaction as DML.
 //! - Handle INSERT, UPDATE, DELETE, and TRUNCATE correctly.
-//! - Support window functions, LATERAL joins, and scalar subqueries.
+//! - Support window functions and scalar subqueries.
 //! - Reject unsupported features (TopK, recursive CTEs).
 //! - Cascade through dependent IMMEDIATE stream tables.
 //! - Handle concurrent inserts correctly.
@@ -552,7 +552,7 @@ async fn test_ivm_window_insert_propagates() {
 // ── LATERAL Subqueries in IMMEDIATE Mode ───────────────────────────────
 
 #[tokio::test]
-async fn test_ivm_lateral_join_create_succeeds() {
+async fn test_ivm_lateral_join_with_mutable_inner_source_is_rejected() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE lat_parent (id INT PRIMARY KEY, val INT)")
@@ -564,23 +564,22 @@ async fn test_ivm_lateral_join_create_succeeds() {
     db.execute("INSERT INTO lat_child VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30)")
         .await;
 
-    // LATERAL subqueries should now be accepted in IMMEDIATE mode.
-    create_immediate_st(
-        &db,
-        "lat_imm",
-        "SELECT p.id, t.score FROM lat_parent p, \
-         LATERAL (SELECT score FROM lat_child c WHERE c.parent_id = p.id ORDER BY score DESC LIMIT 1) t",
-    )
-    .await;
-
-    let (_, mode, populated, _) = db.pgt_status("lat_imm").await;
-    assert_eq!(mode, "IMMEDIATE");
-    assert!(populated);
-    assert_eq!(db.count("public.lat_imm").await, 2);
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('lat_imm', \
+             $$SELECT p.id, t.score FROM lat_parent p, \
+               LATERAL (SELECT score FROM lat_child c WHERE c.parent_id = p.id \
+                        ORDER BY score DESC LIMIT 1) t$$, NULL, 'IMMEDIATE')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "mutable LATERAL inner sources are not IMMEDIATE-safe"
+    );
 }
 
 #[tokio::test]
-async fn test_ivm_lateral_insert_propagates() {
+async fn test_ivm_lateral_insert_with_mutable_inner_source_is_rejected() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE lat_ins_p (id INT PRIMARY KEY, name TEXT)")
@@ -591,27 +590,17 @@ async fn test_ivm_lateral_insert_propagates() {
         .await;
     db.execute("INSERT INTO lat_ins_c VALUES (1, 1, 100)").await;
 
-    create_immediate_st(
-        &db,
-        "lat_ins_imm",
-        "SELECT p.id, p.name, t.amount FROM lat_ins_p p, \
-         LATERAL (SELECT amount FROM lat_ins_c c WHERE c.parent_id = p.id ORDER BY amount DESC LIMIT 1) t",
-    )
-    .await;
-    assert_eq!(db.count("public.lat_ins_imm").await, 1);
-
-    // Insert a new parent + child — should propagate.
-    db.execute("INSERT INTO lat_ins_p VALUES (2, 'Bob')").await;
-    db.execute("INSERT INTO lat_ins_c VALUES (2, 2, 200)").await;
-
-    // After both inserts, the LATERAL ST should reflect the new data.
-    // Note: the first INSERT (parent) may not produce a row since the child
-    // doesn't exist yet. After the second INSERT (child), refresh picks it up.
-    db.refresh_st("lat_ins_imm").await;
-    assert_eq!(
-        db.count("public.lat_ins_imm").await,
-        2,
-        "LATERAL ST should have 2 rows after parent+child INSERT + refresh"
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('lat_ins_imm', \
+             $$SELECT p.id, p.name, t.amount FROM lat_ins_p p, \
+               LATERAL (SELECT amount FROM lat_ins_c c WHERE c.parent_id = p.id \
+                        ORDER BY amount DESC LIMIT 1) t$$, NULL, 'IMMEDIATE')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "mutable LATERAL inner sources are not IMMEDIATE-safe"
     );
 }
 

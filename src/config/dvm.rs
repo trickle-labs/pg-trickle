@@ -164,12 +164,12 @@ pub static PGS_IVM_RECURSIVE_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new
 pub static PGS_CONNECTION_POOLER_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
 
-/// VOL-1: Volatile function policy for DIFFERENTIAL/IMMEDIATE mode.
+/// VOL-1: Legacy volatility policy setting.
 ///
 /// Controls how volatile functions in defining queries are handled:
-/// - `"reject"` (default): Error — volatile functions are rejected.
-/// - `"warn"`: Allow creation with a WARNING.
-/// - `"allow"`: Allow silently.
+/// - `"reject"` (default): report the unsafe expression.
+/// - `"warn"` / `"allow"`: retained for compatibility, but cannot override
+///   the v0.83 fail-closed incremental admission gate.
 pub static PGS_VOLATILE_FUNCTION_POLICY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"reject"));
 
@@ -790,14 +790,12 @@ pub fn register_dvm_gucs() {
         GucFlags::default(),
     );
 
-    // VOL-1: Volatile function policy.
+    // VOL-1: Legacy volatility policy (the admission gate remains fail-closed).
     GucRegistry::define_string_guc(
         c"pg_trickle.volatile_function_policy",
-        c"Volatile function policy: reject (default), warn, or allow.",
-        c"'reject' (default) errors on volatile functions in DIFFERENTIAL/IMMEDIATE queries. \
-           'warn' emits a WARNING but allows creation. \
-           'allow' permits volatile functions silently. Volatile functions produce different \
-           values on each evaluation, which may break delta computation.",
+        c"Legacy volatile function policy: reject, warn, or allow.",
+        c"Volatility is FULL-only for incremental admission in v0.83. This setting is retained \
+           for compatibility and cannot override that guardrail.",
         &PGS_VOLATILE_FUNCTION_POLICY,
         GucContext::Suset,
         GucFlags::default(),

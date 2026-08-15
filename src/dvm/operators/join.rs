@@ -235,18 +235,12 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // Part 1: delta_left ⋈ base_right → hash(left_pks_from_dl, right_pks_from_r)
     let mut hash1_args = left_key_exprs_dl.clone();
     hash1_args.extend(right_key_exprs_r.clone());
-    let hash_part1 = format!(
-        "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-        hash1_args.join(", ")
-    );
+    let hash_part1 = crate::hash::build_composite_hash_expr(&hash1_args);
 
     // Part 2: base_left ⋈ delta_right → hash(left_pks_from_l, right_pks_from_dr)
     let mut hash2_args = left_key_exprs_l.clone();
     hash2_args.extend(right_key_exprs_dr.clone());
-    let hash_part2 = format!(
-        "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-        hash2_args.join(", ")
-    );
+    let hash_part2 = crate::hash::build_composite_hash_expr(&hash2_args);
 
     // Rewrite join condition with aliases for each part.
     // The original condition uses the source table aliases (e.g. o.cust_id = c.id).
@@ -545,10 +539,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             // Part 1 and Part 2 to ensure consistent row_ids.
             let mut hash_corr_args = left_key_exprs_dl.clone();
             hash_corr_args.extend(right_key_exprs_dr.clone());
-            let hash_correction = format!(
-                "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                hash_corr_args.join(", ")
-            );
+            let hash_correction = crate::hash::build_composite_hash_expr(&hash_corr_args);
 
             format!(
                 "

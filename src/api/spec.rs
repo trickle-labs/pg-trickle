@@ -154,6 +154,7 @@ mod tests {
             defining_query_hash: 0,
             storage_fillfactor: None,
             query_complexity_class: None,
+            row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).

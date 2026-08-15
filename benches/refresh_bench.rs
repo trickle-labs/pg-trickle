@@ -161,6 +161,7 @@ fn bench_output_columns(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::CountStar,
@@ -170,6 +171,7 @@ fn bench_output_columns(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
         ],
         child: Box::new(make_scan("t", 1, 5)),
@@ -582,6 +584,7 @@ fn bench_a44_11_di_delta_scan(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan),
         };

@@ -175,7 +175,7 @@ async fn test_lateral_subquery_full_mode_refresh() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// DIFFERENTIAL Mode Tests
+// DIFFERENTIAL / AUTO Mode Tests
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -195,8 +195,10 @@ async fn test_lateral_subquery_differential_initial() {
          FROM lsq_di_orders o, \
          LATERAL (SELECT li.amount FROM lsq_di_items li \
                   WHERE li.order_id = o.id LIMIT 1) AS sub";
-    db.create_st("lsq_di_top", query_lsq_di_top, "1m", "DIFFERENTIAL")
+    db.create_st("lsq_di_top", query_lsq_di_top, "1m", "AUTO")
         .await;
+    let (_, mode, _, _) = db.pgt_status("lsq_di_top").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("lsq_di_top", query_lsq_di_top)
         .await;
 
@@ -221,8 +223,10 @@ async fn test_lateral_subquery_differential_outer_insert() {
          FROM lsq_oi_orders o, \
          LATERAL (SELECT li.amount FROM lsq_oi_items li \
                   WHERE li.order_id = o.id LIMIT 1) AS sub";
-    db.create_st("lsq_oi_top", query_lsq_oi_top, "1m", "DIFFERENTIAL")
+    db.create_st("lsq_oi_top", query_lsq_oi_top, "1m", "AUTO")
         .await;
+    let (_, mode, _, _) = db.pgt_status("lsq_oi_top").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("lsq_oi_top", query_lsq_oi_top)
         .await;
     assert_eq!(db.count("public.lsq_oi_top").await, 1);
@@ -259,8 +263,10 @@ async fn test_lateral_subquery_differential_outer_delete() {
          FROM lsq_od_orders o, \
          LATERAL (SELECT li.amount FROM lsq_od_items li \
                   WHERE li.order_id = o.id LIMIT 1) AS sub";
-    db.create_st("lsq_od_top", query_lsq_od_top, "1m", "DIFFERENTIAL")
+    db.create_st("lsq_od_top", query_lsq_od_top, "1m", "AUTO")
         .await;
+    let (_, mode, _, _) = db.pgt_status("lsq_od_top").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("lsq_od_top", query_lsq_od_top)
         .await;
     assert_eq!(db.count("public.lsq_od_top").await, 2);
@@ -343,8 +349,10 @@ async fn test_lateral_subquery_differential_mixed_dml() {
          FROM lsq_mx_orders o, \
          LATERAL (SELECT li.amount FROM lsq_mx_items li \
                   WHERE li.order_id = o.id LIMIT 1) AS sub";
-    db.create_st("lsq_mx_top", query_lsq_mx_top, "1m", "DIFFERENTIAL")
+    db.create_st("lsq_mx_top", query_lsq_mx_top, "1m", "AUTO")
         .await;
+    let (_, mode, _, _) = db.pgt_status("lsq_mx_top").await;
+    assert_eq!(mode, "FULL");
     db.assert_st_matches_query("lsq_mx_top", query_lsq_mx_top)
         .await;
     assert_eq!(db.count("public.lsq_mx_top").await, 3);
@@ -497,7 +505,9 @@ async fn test_lateral_with_nulls() {
 
     let q = "SELECT l.id, l.val, lat.x FROM lat_null_src l LEFT JOIN LATERAL (SELECT l.val * 2 as x) lat ON true";
 
-    db.create_st("lat_null_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("lat_null_st", q, "1m", "AUTO").await;
+    let (_, mode, _, _) = db.pgt_status("lat_null_st").await;
+    assert_eq!(mode, "FULL");
 
     db.assert_st_matches_query("lat_null_st", q).await;
 

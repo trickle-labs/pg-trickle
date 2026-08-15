@@ -906,10 +906,7 @@ pub fn build_hash_expr(exprs: &[String]) -> String {
         // parens, `a * (1 - b)::TEXT` would cast only `b` to TEXT due to
         // SQL precedence of :: over arithmetic operators.
         let array_items: Vec<String> = exprs.iter().map(|e| format!("({e})::TEXT")).collect();
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            array_items.join(", "),
-        )
+        crate::hash::build_composite_hash_expr(&array_items)
     }
 }
 

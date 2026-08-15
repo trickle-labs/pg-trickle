@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
     
     query_complexity_class TEXT,
+    row_identity_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

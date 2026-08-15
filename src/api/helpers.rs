@@ -1666,7 +1666,7 @@ pub(super) fn validate_cycle_allowed_inner(
 
         // All cycle members must have monotone queries
         match crate::dvm::parse_defining_query_full(query_to_check) {
-            Ok(pr) => crate::dvm::check_monotonicity(&pr.tree)?,
+            Ok(pr) => crate::dvm::check_monotonicity_with_registry(&pr)?,
             Err(e) => {
                 return Err(PgTrickleError::InvalidArgument(format!(
                     "cannot verify monotonicity of '{}': {}",
@@ -1782,6 +1782,7 @@ pub(super) fn build_create_table_sql(
     sum2_aux_columns: &[(String, String)],
     covar_aux_columns: &[(String, String)],
     nonnull_aux_columns: &[(String, String)],
+    statistical_aux_types: &[(String, String)],
     // A1-1: when Some, emit PARTITION BY RANGE (<key>) suffix.
     partition_key: Option<&str>,
     // HOT-1: when Some, emit WITH (fillfactor=N) storage option.
@@ -1833,9 +1834,15 @@ pub(super) fn build_create_table_sql(
     // algebraic STDDEV/VAR maintenance.
     let mut sum2_aux_sql = String::new();
     for (sum2_col, _arg_sql) in sum2_aux_columns {
+        let accumulator_type = statistical_aux_types
+            .iter()
+            .find(|(name, _)| name == sum2_col)
+            .map(|(_, ty)| ty.as_str())
+            .unwrap_or("numeric");
         sum2_aux_sql.push_str(&format!(
-            ",\n    {} NUMERIC NOT NULL DEFAULT 0",
+            ",\n    {} {} NOT NULL DEFAULT 0",
             quote_identifier(sum2_col),
+            accumulator_type,
         ));
     }
 
@@ -1843,9 +1850,15 @@ pub(super) fn build_create_table_sql(
     // sumx2, sumy2) for algebraic CORR/COVAR/REGR_* maintenance (P3-2).
     let mut covar_aux_sql = String::new();
     for (covar_col, _arg_sql) in covar_aux_columns {
+        let accumulator_type = statistical_aux_types
+            .iter()
+            .find(|(name, _)| name == covar_col)
+            .map(|(_, ty)| ty.as_str())
+            .unwrap_or("numeric");
         covar_aux_sql.push_str(&format!(
-            ",\n    {} NUMERIC NOT NULL DEFAULT 0",
+            ",\n    {} {} NOT NULL DEFAULT 0",
             quote_identifier(covar_col),
+            accumulator_type,
         ));
     }
 
@@ -1916,6 +1929,111 @@ pub(super) fn get_table_oid(schema: &str, name: &str) -> Result<pg_sys::Oid, PgT
     Ok(oid)
 }
 
+/// Convert legacy INTERSECT/EXCEPT storage to the guarded FULL-refresh shape.
+///
+/// Older tables may still contain visible dual-count columns and a unique
+/// row-id index.  Keep the migration idempotent so every FULL path can call
+/// it before materialization.
+pub(crate) fn normalize_full_set_operation_storage(
+    schema: &str,
+    name: &str,
+    pgt_relid: pg_sys::Oid,
+    pgt_id: i64,
+) -> Result<(), PgTrickleError> {
+    let quoted_table = format!("{}.{}", quote_identifier(schema), quote_identifier(name),);
+
+    for column in ["__pgt_count_l", "__pgt_count_r"] {
+        Spi::run(&format!(
+            "ALTER TABLE {quoted_table} DROP COLUMN IF EXISTS {}",
+            quote_identifier(column),
+        ))
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to remove legacy set-operation column {column}: {e}"
+            ))
+        })?;
+    }
+
+    let indexes = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT i.indexrelid::regclass::text, i.indisunique \
+                 FROM pg_index i \
+                 JOIN pg_attribute a \
+                   ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+                 WHERE i.indrelid = $1 \
+                   AND a.attname = '__pgt_row_id'",
+                None,
+                &[pgt_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut indexes = Vec::new();
+        for row in rows {
+            let index_name = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::SpiError(
+                        "row-id index catalog lookup returned NULL name".to_string(),
+                    )
+                })?;
+            let is_unique = row
+                .get::<bool>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(false);
+            indexes.push((index_name, is_unique));
+        }
+        Ok::<_, PgTrickleError>(indexes)
+    })?;
+
+    let has_nonunique = indexes.iter().any(|(_, is_unique)| !is_unique);
+    let rebuild_index = indexes.iter().any(|(_, is_unique)| *is_unique) || !has_nonunique;
+    if rebuild_index {
+        for (index_name, _) in &indexes {
+            Spi::run(&format!("DROP INDEX IF EXISTS {index_name}")) // nosemgrep: rust.spi.run.dynamic-format — index_name comes from pg_catalog::regclass.
+                .map_err(|e| {
+                    PgTrickleError::SpiError(format!(
+                        "Failed to remove legacy row-id index {index_name}: {e}"
+                    ))
+                })?;
+        }
+    }
+
+    if rebuild_index {
+        let user_columns = crate::cdc::resolve_st_output_columns(pgt_relid)?;
+        let include_clause = if crate::config::pg_trickle_auto_index()
+            && !user_columns.is_empty()
+            && user_columns.len() <= 8
+        {
+            let columns = user_columns
+                .iter()
+                .map(|(column, _)| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" INCLUDE ({columns})")
+        } else {
+            String::new()
+        };
+        Spi::run(&format!(
+            "CREATE INDEX ON {quoted_table} (__pgt_row_id){include_clause}"
+        ))
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!("Failed to create non-unique row-id index: {e}"))
+        })?;
+    }
+
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET has_keyless_source = TRUE, updated_at = now() \
+         WHERE pgt_id = $1 AND NOT has_keyless_source",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    Ok(())
+}
+
 /// Initialize a stream table by populating it from its defining query.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn initialize_st(
@@ -1932,6 +2050,7 @@ pub(super) fn initialize_st(
     sum2_aux_columns: &[(String, String)],
     covar_aux_columns: &[(String, String)],
     nonnull_aux_columns: &[(String, String)],
+    statistical_aux_types: &[(String, String)],
     invoker_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
@@ -1969,13 +2088,15 @@ pub(super) fn initialize_st(
     // For STDDEV/VAR algebraic maintenance, inject SUM(arg*arg) auxiliary
     // columns for sum-of-squares tracking.
     if !sum2_aux_columns.is_empty() {
-        effective_query = inject_sum2_aux(&effective_query, sum2_aux_columns);
+        let typed = typed_statistical_aux_columns(sum2_aux_columns, statistical_aux_types);
+        effective_query = inject_sum2_aux_typed(&effective_query, &typed);
     }
 
     // P3-2: For CORR/COVAR/REGR_* algebraic maintenance, inject cross-product
     // auxiliary columns (sumx, sumy, sumxy, sumx2, sumy2).
     if !covar_aux_columns.is_empty() {
-        effective_query = inject_covar_aux(&effective_query, covar_aux_columns);
+        let typed = typed_statistical_aux_columns(covar_aux_columns, statistical_aux_types);
+        effective_query = inject_covar_aux_typed(&effective_query, &typed);
     }
 
     // For SUM NULL-transition correction (P2-2), inject COUNT(IS NOT NULL)
@@ -1986,25 +2107,14 @@ pub(super) fn initialize_st(
 
     // Compute row_id using the same hash formula as the delta query so
     // the MERGE ON clause matches during subsequent differential refreshes.
-    // For INTERSECT/EXCEPT queries, compute per-branch multiplicities
-    // matching the dual-count storage schema.
+    // Guarded INTERSECT/EXCEPT queries are materialized directly; their
+    // legacy branch-count state is not part of the visible FULL relation.
     // For UNION (without ALL) queries, convert to UNION ALL and count
     // per-unique-row multiplicities for the __pgt_count column.
     // For UNION ALL queries, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
     let insert_body = if needs_dual_count {
-        let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-        if let Some(set_op_sql) = crate::dvm::try_set_op_refresh_sql(query, &col_names) {
-            set_op_sql
-        } else {
-            // Fallback: should not happen since needs_dual_count implies set-op
-            let row_id_expr = crate::dvm::row_id_expr_for_query(query);
-            format!(
-                "SELECT {row_id_expr} AS __pgt_row_id, sub.*, \
-                 1::bigint AS __pgt_count_l, 0::bigint AS __pgt_count_r \
-                 FROM ({effective_query}) sub",
-            )
-        }
+        crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
     } else if needs_union_dedup {
         let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
         if let Some(union_sql) = crate::dvm::try_union_dedup_refresh_sql(query, &col_names) {
@@ -2168,16 +2278,44 @@ pub fn inject_avg_aux(query: &str, avg_aux_columns: &[(String, String, String)])
 /// Populates `__pgt_aux_sum2_*` columns for STDDEV/VAR algebraic maintenance
 /// during initial population and full refresh. Call after `inject_avg_aux`.
 pub fn inject_sum2_aux(query: &str, sum2_aux_columns: &[(String, String)]) -> String {
+    let typed = sum2_aux_columns
+        .iter()
+        .map(|(name, arg)| (name.clone(), arg.clone(), "numeric".to_string()))
+        .collect::<Vec<_>>();
+    inject_sum2_aux_typed(query, &typed)
+}
+
+pub fn typed_statistical_aux_columns(
+    columns: &[(String, String)],
+    types: &[(String, String)],
+) -> Vec<(String, String, String)> {
+    columns
+        .iter()
+        .map(|(name, arg)| {
+            let ty = types
+                .iter()
+                .find(|(type_name, _)| type_name == name)
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or_else(|| "numeric".to_string());
+            (name.clone(), arg.clone(), ty)
+        })
+        .collect()
+}
+
+/// Inject sum-of-squares auxiliaries using PostgreSQL's analyzed accumulator
+/// type for the multiplication and stored state.
+pub fn inject_sum2_aux_typed(query: &str, sum2_aux_columns: &[(String, String, String)]) -> String {
     if sum2_aux_columns.is_empty() {
         return query.to_string();
     }
 
     if let Some(pos) = find_top_level_keyword(query, "FROM") {
         let mut extra = String::new();
-        for (sum2_col, arg_sql) in sum2_aux_columns {
+        for (sum2_col, arg_sql, accumulator_type) in sum2_aux_columns {
             // COALESCE guards against NULL (e.g. when arg_sql is NULL for all rows).
             extra.push_str(&format!(
-                ", COALESCE(SUM(({arg_sql}) * ({arg_sql})), 0) AS {}",
+                ", COALESCE(SUM(({arg_sql})::{accumulator_type} * \
+                 ({arg_sql})::{accumulator_type}), 0::{accumulator_type}) AS {}",
                 quote_identifier(sum2_col),
             ));
         }
@@ -2223,13 +2361,25 @@ pub fn inject_nonnull_aux(query: &str, nonnull_aux_columns: &[(String, String)])
 ///   `__pgt_aux_sumx2_*` → `SUM((x)*(x))`
 ///   `__pgt_aux_sumy2_*` → `SUM((y)*(y))`
 pub fn inject_covar_aux(query: &str, covar_aux_columns: &[(String, String)]) -> String {
+    let typed = covar_aux_columns
+        .iter()
+        .map(|(name, arg)| (name.clone(), arg.clone(), "numeric".to_string()))
+        .collect::<Vec<_>>();
+    inject_covar_aux_typed(query, &typed)
+}
+
+/// Inject CORR/COVAR/REGR auxiliaries using the analyzed accumulator type.
+pub fn inject_covar_aux_typed(
+    query: &str,
+    covar_aux_columns: &[(String, String, String)],
+) -> String {
     if covar_aux_columns.is_empty() {
         return query.to_string();
     }
 
     if let Some(pos) = find_top_level_keyword(query, "FROM") {
         let mut extra = String::new();
-        for (col_name, arg_sql) in covar_aux_columns {
+        for (col_name, arg_sql, accumulator_type) in covar_aux_columns {
             // COALESCE guards each SUM against NULL when all values in a group
             // are NULL (e.g. NULL arguments to CORR/COVAR/REGR_*).
             let expr = if col_name.starts_with("__pgt_aux_sumxy_") {
@@ -2240,14 +2390,23 @@ pub fn inject_covar_aux(query: &str, covar_aux_columns: &[(String, String)]) -> 
                 } else {
                     (arg_sql.as_str(), arg_sql.as_str())
                 };
-                format!("COALESCE(SUM(({x}) * ({y})), 0)")
+                format!(
+                    "COALESCE(SUM(({x})::{accumulator_type} * \
+                     ({y})::{accumulator_type}), 0::{accumulator_type})"
+                )
             } else if col_name.starts_with("__pgt_aux_sumx2_")
                 || col_name.starts_with("__pgt_aux_sumy2_")
             {
-                format!("COALESCE(SUM(({arg_sql}) * ({arg_sql})), 0)")
+                format!(
+                    "COALESCE(SUM(({arg_sql})::{accumulator_type} * \
+                     ({arg_sql})::{accumulator_type}), 0::{accumulator_type})"
+                )
             } else {
                 // sumx_ or sumy_ — simple SUM
-                format!("COALESCE(SUM({arg_sql}), 0)")
+                format!(
+                    "COALESCE(SUM(({arg_sql})::{accumulator_type}), \
+                     0::{accumulator_type})"
+                )
             };
             extra.push_str(&format!(", {} AS {}", expr, quote_identifier(col_name)));
         }
@@ -2827,6 +2986,50 @@ pub fn restore_stream_tables() -> Result<(), crate::error::PgTrickleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_statistical_auxiliary_products_cast_to_numeric() {
+        let sum2 = inject_sum2_aux(
+            "SELECT dept FROM src GROUP BY dept",
+            &[("__pgt_aux_sum2_sd".into(), "amount".into())],
+        );
+        assert!(sum2.contains("(amount)::numeric * (amount)::numeric"));
+
+        let covar = inject_covar_aux(
+            "SELECT dept FROM src GROUP BY dept",
+            &[("__pgt_aux_sumxy_corr".into(), "x|y".into())],
+        );
+        assert!(covar.contains("(x)::numeric * (y)::numeric"));
+
+        let typed = typed_statistical_aux_columns(
+            &[("__pgt_aux_sum2_sd".into(), "amount".into())],
+            &[("__pgt_aux_sum2_sd".into(), "double precision".into())],
+        );
+        let sum2 = inject_sum2_aux_typed("SELECT dept FROM src GROUP BY dept", &typed);
+        assert!(sum2.contains("(amount)::double precision * (amount)::double precision"));
+    }
+
+    #[test]
+    fn test_statistical_auxiliary_ddl_uses_analyzed_type() {
+        let ddl = build_create_table_sql(
+            "public",
+            "stats",
+            &[ColumnDef {
+                name: "dept".into(),
+                type_oid: PgOid::Invalid,
+            }],
+            false,
+            false,
+            &[],
+            &[("__pgt_aux_sum2_sd".into(), "amount".into())],
+            &[],
+            &[],
+            &[("__pgt_aux_sum2_sd".into(), "double precision".into())],
+            None,
+            None,
+        );
+        assert!(ddl.contains("\"__pgt_aux_sum2_sd\" double precision"));
+    }
 
     // ── parse_qualified_name ────────────────────────────────────────────
 

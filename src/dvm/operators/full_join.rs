@@ -348,6 +348,14 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     );
 
     let cte_name = ctx.next_cte_name("full_join");
+    let hash_dl_r = crate::hash::build_composite_hash_expr(&[
+        "dl.__pgt_row_id::TEXT".to_string(),
+        "pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT".to_string(),
+    ]);
+    let hash_l_dr = crate::hash::build_composite_hash_expr(&[
+        "pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT".to_string(),
+        "dr.__pgt_row_id::TEXT".to_string(),
+    ]);
 
     let sql = if use_l0 {
         // ── L₀ path: standard DBSP formula with comprehensive guards ─
@@ -360,7 +368,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         format!(
             "\
 -- Part 1: delta_left JOIN current_right R₁ (unsplit — standard DBSP L₀ formula)
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -371,7 +379,7 @@ UNION ALL
 -- Part 2: L₀ (pre-change left) JOIN delta_right
 -- Uses pre-change left state to avoid double-counting when L is updated
 -- and R is changed simultaneously for the same join key.
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
+SELECT {hash_l_dr} AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
 FROM {left_part2} l
@@ -529,7 +537,7 @@ WHERE dl.__pgt_action = 'D'
         format!(
             "\
 -- Part 1a: delta_left INSERTS JOIN current_right R₁ (matching insert rows)
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -539,7 +547,7 @@ WHERE dl.__pgt_action = 'I'
 UNION ALL
 
 -- Part 1b: delta_left DELETES JOIN pre-change_right R₀ (EC-01 fix)
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -549,7 +557,7 @@ WHERE dl.__pgt_action = 'D'
 UNION ALL
 
 -- Part 2: current_left JOIN delta_right
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
+SELECT {hash_l_dr} AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
 FROM {left_table} l
@@ -692,7 +700,7 @@ WHERE dl.__pgt_action = 'D'
         format!(
             "\
 -- Part 1: delta_left JOIN current_right (matching rows)
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -701,7 +709,7 @@ JOIN {right_table} r ON {join_cond_part1}
 UNION ALL
 
 -- Part 2: current_left JOIN delta_right
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
+SELECT {hash_l_dr} AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
 FROM {left_table} l

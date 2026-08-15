@@ -83,10 +83,7 @@ pub(crate) fn build_content_hash_column(prefix: &str, data_cols: &[&str]) -> Str
                     format!("{prefix}\"{escaped}\"::TEXT")
                 })
                 .collect();
-            format!(
-                "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                args.join(", ")
-            )
+            crate::hash::build_composite_hash_expr(&args)
         }
     }
 }

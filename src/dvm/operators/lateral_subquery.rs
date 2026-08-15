@@ -95,38 +95,56 @@ pub fn diff_lateral_subquery(
         }
     };
 
-    let st_col_names: Vec<String> = if let Some(ref st_cols) = ctx.st_user_columns {
-        if st_cols.len() >= all_output_cols.len() {
-            st_cols[..all_output_cols.len()]
-                .iter()
-                .map(|c| actual_st_col(c))
-                .collect()
-        } else {
-            all_output_cols.clone()
-        }
-    } else {
-        all_output_cols.clone()
-    };
-    let st_child_cols: Vec<String> = st_col_names[..child_cols.len()].to_vec();
+    let st_col_names: Vec<String> = all_output_cols.iter().map(|c| actual_st_col(c)).collect();
+    let st_child_cols: Vec<String> = child_cols.iter().map(|c| actual_st_col(c)).collect();
 
     // Determine which output columns actually exist in the stream table.
     // When a Project above narrows the defining query's output, some of
     // this operator's columns (e.g., source PK not in SELECT, scalar
     // subquery alias from WHERE rewrite) won't exist in the ST.
     let col_in_st: Vec<bool> = if let Some(ref st_cols) = ctx.st_user_columns {
-        if st_cols.len() >= all_output_cols.len() {
-            vec![true; all_output_cols.len()]
-        } else {
-            let st_set: std::collections::HashSet<&str> =
-                st_cols.iter().map(|s| s.as_str()).collect();
-            all_output_cols
-                .iter()
-                .map(|c| st_set.contains(c.as_str()))
-                .collect()
-        }
+        let st_set: std::collections::HashSet<String> =
+            st_cols.iter().map(|s| actual_st_col(s)).collect();
+        all_output_cols
+            .iter()
+            .map(|c| st_set.contains(&actual_st_col(c)))
+            .collect()
     } else {
         vec![true; all_output_cols.len()]
     };
+
+    // Old rows must be identified by the same stable outer identity used by
+    // the child operator. Matching on only the projected columns can delete
+    // multiple outer rows (or degrade to ON TRUE) when a Project removed the
+    // identity. Fail closed instead of generating a broad deletion join.
+    let outer_identity = child.row_id_key_columns().ok_or_else(|| {
+        PgTrickleError::UnsupportedOperator(
+            "LATERAL subquery requires an exact outer row identity for deletion; \
+             use FULL or retain a stable outer key in the query output."
+                .into(),
+        )
+    })?;
+    if outer_identity.is_empty() {
+        return Err(PgTrickleError::UnsupportedOperator(
+            "LATERAL subquery has no usable outer row identity for deletion; \
+             use FULL or retain a stable outer key in the query output."
+                .into(),
+        ));
+    }
+    for key in &outer_identity {
+        let child_index = child_cols.iter().position(|c| c == key).ok_or_else(|| {
+            PgTrickleError::UnsupportedOperator(format!(
+                "LATERAL subquery outer identity column \"{key}\" is not available \
+                 from the child delta; use FULL or retain the outer key."
+            ))
+        })?;
+        if !col_in_st[child_index] {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "LATERAL subquery outer identity column \"{key}\" is projected away \
+                 from the stream table; use FULL or retain the outer key."
+            )));
+        }
+    }
 
     // ── CTE 1: Find source rows that changed ───────────────────────────
     //
@@ -145,7 +163,7 @@ pub fn diff_lateral_subquery(
         child_cols,
         subquery_source_oids,
         correlation_predicates,
-    );
+    )?;
 
     let changed_sources_sql = if let Some(inner_branch) = &inner_change_branch {
         format!(
@@ -374,25 +392,21 @@ pub fn diff_lateral_subquery(
     // The ST may use aliased names, while the changed_sources CTE uses
     // the child's original column names.
     // Only join on columns that actually exist in the ST (col_in_st).
-    let join_parts: Vec<String> = child_cols
+    let join_parts: Vec<String> = outer_identity
         .iter()
-        .enumerate()
-        .zip(st_child_cols.iter())
-        .filter_map(|((i, child_c), st_c)| {
-            if col_in_st[i] {
-                let qc_child = quote_ident(child_c);
-                let qc_st = quote_ident(st_c);
-                Some(format!("st.{qc_st} IS NOT DISTINCT FROM cs.{qc_child}"))
-            } else {
-                None
-            }
+        .map(|key| {
+            let i = child_cols.iter().position(|c| c == key).ok_or_else(|| {
+                PgTrickleError::InternalError(format!(
+                    "LATERAL outer identity column \"{key}\" disappeared from child columns"
+                ))
+            })?;
+            let st_c = &st_child_cols[i];
+            let qc_child = quote_ident(key);
+            let qc_st = quote_ident(st_c);
+            Ok(format!("st.{qc_st} IS NOT DISTINCT FROM cs.{qc_child}"))
         })
-        .collect();
-    let join_on_child_cols = if join_parts.is_empty() {
-        "TRUE".to_string()
-    } else {
-        join_parts.join(" AND ")
-    };
+        .collect::<Result<Vec<_>, PgTrickleError>>()?;
+    let join_on_child_cols = join_parts.join(" AND ");
 
     // SELECT st columns with aliases back to the expected output names.
     // Columns that don't exist in the ST (projected away) are NULL-padded.
@@ -435,16 +449,9 @@ pub fn diff_lateral_subquery(
     // execute as a Hash Join: O(N + M).
     let old_rows_sql = if inner_change_branch_present {
         let keys_cte = ctx.next_cte_name("lat_sq_keys");
-        let key_col_refs: Vec<String> = child_cols
+        let key_col_refs: Vec<String> = outer_identity
             .iter()
-            .enumerate()
-            .filter_map(|(i, c)| {
-                if col_in_st[i] {
-                    Some(format!("cs.{}", quote_ident(c)))
-                } else {
-                    None
-                }
-            })
+            .map(|c| format!("cs.{}", quote_ident(c)))
             .collect();
         let key_col_refs_str = key_col_refs.join(", ");
         let keys_sql = format!(
@@ -458,25 +465,20 @@ pub fn diff_lateral_subquery(
         // use Hash Join with this operator, so it doesn't prevent good
         // plans. The keys CTE gives PostgreSQL a separate relation to
         // hash, enabling O(N+M) execution instead of O(N×M) EXISTS.
-        let key_join_parts: Vec<String> = child_cols
+        let key_join_parts: Vec<String> = outer_identity
             .iter()
-            .enumerate()
-            .zip(st_child_cols.iter())
-            .filter_map(|((i, child_c), st_c)| {
-                if col_in_st[i] {
-                    let qc_child = quote_ident(child_c);
-                    let qc_st = quote_ident(st_c);
-                    Some(format!("st.{qc_st} IS NOT DISTINCT FROM ck.{qc_child}"))
-                } else {
-                    None
-                }
+            .map(|key| {
+                let i = child_cols.iter().position(|c| c == key).ok_or_else(|| {
+                    PgTrickleError::InternalError(format!(
+                        "LATERAL outer identity column \"{key}\" disappeared from child columns"
+                    ))
+                })?;
+                let qc_child = quote_ident(key);
+                let qc_st = quote_ident(&st_child_cols[i]);
+                Ok(format!("st.{qc_st} IS NOT DISTINCT FROM ck.{qc_child}"))
             })
-            .collect();
-        let key_join_cond = if key_join_parts.is_empty() {
-            "TRUE".to_string()
-        } else {
-            key_join_parts.join(" AND ")
-        };
+            .collect::<Result<Vec<_>, PgTrickleError>>()?;
+        let key_join_cond = key_join_parts.join(" AND ");
 
         if has_absent_cols {
             format!(
@@ -561,17 +563,22 @@ fn build_inner_change_branch(
     child_cols: &[String],
     inner_oids: &[u32],
     correlation_predicates: &[crate::dvm::parser::CorrelationPredicate],
-) -> Option<String> {
+) -> Result<Option<String>, PgTrickleError> {
     use crate::dvm::diff::DeltaSource;
     use crate::dvm::operators::join_common::build_snapshot_sql;
 
     // Only change-buffer mode has persistent change tables to check.
     if !matches!(ctx.delta_source, DeltaSource::ChangeBuffer) {
-        return None;
+        return Ok(None);
     }
 
     if inner_oids.is_empty() {
-        return None;
+        return Ok(None);
+    }
+    if inner_oids.contains(&0) {
+        return Err(PgTrickleError::UnsupportedOperator(
+            "LATERAL subquery has an unresolved inner source dependency; use FULL or AUTO.".into(),
+        ));
     }
 
     // Deduplicate inner OIDs (a shared OID may appear in both the child
@@ -619,11 +626,11 @@ fn build_inner_change_branch(
 
             if corr_preds.is_empty() {
                 // No scoping possible — check if ANY changes exist (full scan).
-                format!(
+                Ok(format!(
                     "EXISTS (SELECT 1 FROM {change_table} c \
                      WHERE {lsn_filter} \
                      LIMIT 1)"
-                )
+                ))
             } else {
                 // Scoped: join change buffer on correlation column(s).
                 // D+I flat schema (A44-10): each row carries the relevant
@@ -632,24 +639,36 @@ fn build_inner_change_branch(
                 let corr_conditions: Vec<String> = corr_preds
                     .iter()
                     .map(|p| {
+                        if p.inner_oid == 0
+                            || !inner_oids.contains(&p.inner_oid)
+                            || !child_cols.iter().any(|c| c == &p.outer_col)
+                            || p.inner_alias.is_empty()
+                            || p.inner_col.is_empty()
+                        {
+                            return Err(PgTrickleError::UnsupportedOperator(
+                                "LATERAL subquery has an unresolved outer/inner dependency; \
+                                 use FULL or AUTO."
+                                    .into(),
+                            ));
+                        }
                         let outer_ref =
                             format!("{}.{}", quote_ident(outer_alias), quote_ident(&p.outer_col));
                         let col = quote_ident(&p.inner_col);
-                        format!("c.{col} = {outer_ref}")
+                        Ok(format!("c.{col} = {outer_ref}"))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()?;
                 let corr_filter = corr_conditions.join(" AND ");
 
-                format!(
+                Ok(format!(
                     "EXISTS (SELECT 1 FROM {change_table} c \
                      WHERE {lsn_filter} AND {corr_filter})"
-                )
+                ))
             }
         })
-        .collect();
+        .collect::<Result<Vec<_>, PgTrickleError>>()?;
     let any_inner_changed = exists_checks.join(" OR ");
 
-    Some(format!(
+    Ok(Some(format!(
         "-- Outer rows affected by inner subquery source changes\n\
          SELECT {LATERAL_INNER_DUMMY_ROW_ID}::BIGINT AS \"__pgt_row_id\",\n\
                 'I'::TEXT AS \"__pgt_action\",\n\
@@ -657,7 +676,7 @@ fn build_inner_change_branch(
          FROM {outer_snap} {outer_alias_q}\n\
          WHERE {any_inner_changed}",
         outer_alias_q = quote_ident(outer_alias),
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -1211,15 +1230,13 @@ mod tests {
         );
     }
 
-    /// Regression: When a Project above narrows the output (e.g.,
-    /// `SELECT name, price FROM products CROSS JOIN LATERAL (...)`),
-    /// the ST has only [name, price] but the child Scan includes PK
-    /// column "id". The old_rows CTE must NOT reference st."id".
+    /// A projected-away outer identity must fail closed instead of producing
+    /// an `ON TRUE` deletion join.
     #[test]
-    fn test_diff_lateral_subquery_narrowed_st_no_absent_col_ref() {
+    fn test_diff_lateral_subquery_projected_away_identity_is_rejected() {
         let mut ctx = test_ctx_with_st("public", "my_st");
-        // Simulate a Project above having set st_user_columns to only
-        // the projected columns (no "id" PK column).
+        // Simulate a Project above having set st_user_columns to only the
+        // projected columns (no "id" identity column).
         ctx.st_user_columns = Some(vec!["name".to_string(), "price".to_string()]);
 
         let child = scan(
@@ -1238,23 +1255,35 @@ mod tests {
             vec![2],
             child,
         );
+        let err = diff_lateral_subquery(&mut ctx, &tree).unwrap_err();
+        assert!(err.to_string().contains("projected away"));
+    }
+
+    #[test]
+    fn test_diff_lateral_subquery_composite_nullable_identity_is_null_safe() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        let child = scan_with_pk(
+            1,
+            "orders",
+            "public",
+            "o",
+            &["tenant_id", "order_id", "value"],
+            &["tenant_id", "order_id"],
+        );
+        let tree = lateral_subquery(
+            "SELECT x FROM items i WHERE i.tenant_id = o.tenant_id",
+            "sub",
+            vec!["x"],
+            vec!["x"],
+            false,
+            vec![2],
+            child,
+        );
         let result = diff_lateral_subquery(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-
-        // The old_rows CTE must NOT reference st."id" (absent from ST).
-        assert!(
-            !sql.contains("st.\"id\""),
-            "Should not reference st.\"id\" — column was projected away.\nSQL:\n{sql}"
-        );
-        // It SHOULD reference st."name" and st."price" (present in ST).
-        assert_sql_contains(&sql, "st.\"name\"");
-        assert_sql_contains(&sql, "st.\"price\"");
-        // Absent columns should be NULL-padded in the old_rows CTE.
-        assert_sql_contains(&sql, "NULL AS \"id\"");
-        assert_sql_contains(&sql, "NULL AS \"__pgt_scalar_1\"");
-        // When absent columns exist, old_rows should include a type-hint
-        // branch from expand to establish correct column types.
-        assert_sql_contains(&sql, "WHERE FALSE");
+        assert!(sql.matches("IS NOT DISTINCT FROM").count() >= 2);
+        assert!(!sql.contains("JOIN st ON TRUE"));
+        assert!(!sql.contains("WHERE TRUE"));
     }
 
     /// Regression: When the inner LATERAL subquery references the same

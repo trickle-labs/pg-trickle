@@ -1359,14 +1359,15 @@ SET pg_trickle.max_grouping_set_branches = 128;
 
 ### pg_trickle.volatile_function_policy
 
-Controls how volatile functions in defining queries are handled for
-DIFFERENTIAL and IMMEDIATE modes.
+Legacy control for volatile-function diagnostics. In v0.83, STABLE and
+VOLATILE expressions are FULL-only for incremental admission; this setting
+cannot override that guardrail.
 
 | Value | Behaviour |
 |-------|----------|
 | `reject` | **(Default)** Volatile functions cause an ERROR at stream table creation time. |
-| `warn` | Volatile functions emit a WARNING but creation proceeds. Delta correctness is not guaranteed. |
-| `allow` | Volatile functions are permitted silently. Use only when you understand that delta computation may produce incorrect results. |
+| `warn` | Retained for compatibility; incremental admission still falls back or rejects. |
+| `allow` | Retained for compatibility; incremental admission still falls back or rejects. |
 
 **Default:** `reject`
 **Context:** `SUSET` (superuser session-level)
@@ -1381,9 +1382,9 @@ SET pg_trickle.volatile_function_policy = 'allow';
 
 > **Note:** Volatile functions (e.g., `random()`, `clock_timestamp()`) produce
 > different values on each evaluation. In DIFFERENTIAL/IMMEDIATE modes, the
-> delta computation assumes deterministic functions — volatile functions may
-> cause stale or incorrect rows. FULL mode is unaffected since it recomputes
-> from scratch every time.
+> delta computation assumes deterministic functions. AUTO falls back to FULL
+> and explicit DIFFERENTIAL/IMMEDIATE requests are rejected. FULL mode is
+> unaffected since it recomputes from scratch every time.
 
 ---
 

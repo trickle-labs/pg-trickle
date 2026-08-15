@@ -737,6 +737,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["region", "amount"])),
         };
@@ -910,6 +911,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
                 AggExpr {
                     function: AggFunc::CountStar,
@@ -919,6 +921,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
             ],
             child: Box::new(scan_node("t", 1, &["region", "amount"])),
@@ -1110,6 +1113,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
                 AggExpr {
                     function: AggFunc::Count,
@@ -1119,6 +1123,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
                 AggExpr {
                     function: AggFunc::Avg,
@@ -1128,6 +1133,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
             ],
             child: Box::new(projected),
@@ -1183,6 +1189,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id", "val"])),
         };
@@ -1201,6 +1208,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id", "val"])),
         };
@@ -1379,6 +1387,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 }],
                 child: Box::new(scan_node("orders", 1, &["user_id", "amount"])),
             }),
@@ -2235,6 +2244,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 
@@ -2416,6 +2426,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id"])),
         };
@@ -2480,6 +2491,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 }],
                 child: Box::new(scan_node("t", 1, &["id", "name"])),
             }),
@@ -2520,6 +2532,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 }],
                 child: Box::new(scan_node(
                     "department_stats",
@@ -2695,6 +2708,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["region", "val"])),
         };
@@ -2713,6 +2727,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id"])),
         };
@@ -3125,6 +3140,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id", "val"])),
         };
@@ -3144,6 +3160,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id", "val"])),
         };
@@ -3178,6 +3195,7 @@ mod tests {
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 }],
                 child: Box::new(scan_node("t", 1, &["id", "val"])),
             },
@@ -3910,6 +3928,7 @@ mod tests {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(inner_scan),
         };
@@ -4680,6 +4699,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["id", "dept", "salary", "name"])),
         };
@@ -4889,6 +4909,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan_node("t", 1, &["dept", "salary"])),
         };
@@ -5490,6 +5511,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan),
         };
@@ -5577,6 +5599,7 @@ mod tests {
                 second_arg: None,
                 filter: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(filter),
         };

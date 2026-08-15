@@ -116,6 +116,31 @@ they abort the refresh transaction, preventing partial commits. PostgreSQL WAL
 atomicity guarantees that the frontier and the data change are committed
 together.
 
+### ADR-005: Private State for Set-Operation Multiplicity
+
+| Field | Value |
+|-------|-------|
+| **Status** | ✅ Accepted — see [ADR-005.md](ADR-005.md) |
+| **Category** | DVM correctness / storage |
+| **Implemented** | v0.83.0 |
+
+**Decision:** Keep positional set-operation branch multiplicities in permanent,
+LOGGED private relations rather than exposing implementation counters in the
+user-visible stream table. Apply private state and visible deltas
+transactionally with NULL-safe value equality.
+
+### ADR-006: Fail-Closed Semantic Admission
+
+| Field | Value |
+|-------|-------|
+| **Status** | ✅ Accepted — see [ADR-006.md](ADR-006.md) |
+| **Category** | DVM correctness / safety |
+| **Implemented** | v0.83.0 |
+
+**Decision:** Use one structured admission result for all planning surfaces.
+AUTO falls back to FULL for unsupported or uninspectable forms, while explicit
+incremental modes reject before mutation.
+
 ---
 
 ### ADR-002: Hybrid CDC — Trigger Bootstrap with WAL Steady-State

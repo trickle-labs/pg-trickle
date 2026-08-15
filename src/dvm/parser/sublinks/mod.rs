@@ -22,7 +22,7 @@ pub(crate) use having::{is_star_only, rewrite_having_expr};
 
 use super::*;
 use crate::error::PgTrickleError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── SubLink extraction for WHERE clauses ────────────────────────────────
 
@@ -1245,6 +1245,7 @@ fn extract_aggregates_from_expr_inner(expr: &Expr, start_idx: usize, out: &mut V
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 });
             } else {
                 // Non-aggregate FuncCall: recurse into arguments
@@ -1429,6 +1430,527 @@ pub fn parse_defining_query_full(query: &str) -> Result<ParseResult, PgTrickleEr
     unsafe { parse_defining_query_inner(query) }
 }
 
+#[cfg(any(not(test), feature = "pg_test"))]
+struct AnalyzedAggCollectorCtx {
+    by_location: *mut HashMap<i32, pg_sys::Oid>,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe extern "C-unwind" fn analyzed_agg_walker(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) } {
+        // SAFETY: node tag verified as T_Aggref.
+        let aggref = unsafe { &*(node as *const pg_sys::Aggref) };
+        if aggref.location >= 0 {
+            // SAFETY: context is our AnalyzedAggCollectorCtx for the walk.
+            let by_location =
+                unsafe { &mut *((*(context as *mut AnalyzedAggCollectorCtx)).by_location) };
+            by_location
+                .entry(aggref.location)
+                .or_insert(aggref.aggfnoid);
+        }
+        return false;
+    }
+
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
+        // SAFETY: node tag verified as T_Query.
+        return unsafe {
+            pg_sys::query_tree_walker_impl(
+                node as *mut pg_sys::Query,
+                Some(analyzed_agg_walker),
+                context,
+                0,
+            )
+        };
+    }
+
+    // SAFETY: expression_tree_walker handles all standard analyzed expression nodes.
+    unsafe { pg_sys::expression_tree_walker_impl(node, Some(analyzed_agg_walker), context) }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn collect_analyzed_aggregate_locations(
+    query: &str,
+) -> Result<HashMap<i32, pg_sys::Oid>, PgTrickleError> {
+    use pgrx::PgList;
+    use std::ffi::CString;
+
+    let c_sql = CString::new(query)
+        .map_err(|e| PgTrickleError::QueryParseError(format!("Query contains null byte: {e}")))?;
+
+    // SAFETY: raw_parser + parse_analyze_fixedparams are called inside a valid
+    // PostgreSQL backend; returned nodes live for the duration of this function.
+    unsafe {
+        let raw_list = pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+        let stmts = PgList::<pg_sys::RawStmt>::from_pg(raw_list);
+        let raw_stmt = stmts.get_ptr(0).ok_or_else(|| {
+            PgTrickleError::QueryParseError("Query produced no parse tree nodes".into())
+        })?;
+        let query_node = pg_sys::parse_analyze_fixedparams(
+            raw_stmt,
+            c_sql.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+        );
+        if query_node.is_null() {
+            return Err(PgTrickleError::QueryParseError(
+                "Query analysis returned null".into(),
+            ));
+        }
+
+        let mut by_location = HashMap::new();
+        let mut ctx = AnalyzedAggCollectorCtx {
+            by_location: &mut by_location as *mut _,
+        };
+        pg_sys::query_tree_walker_impl(
+            query_node,
+            Some(analyzed_agg_walker),
+            &mut ctx as *mut AnalyzedAggCollectorCtx as *mut std::ffi::c_void,
+            0,
+        );
+        Ok(by_location)
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn load_transition_arg_type_oids(
+    client: &pgrx::spi::SpiClient<'_>,
+    aggfnoid: pg_sys::Oid,
+) -> Result<Vec<u32>, PgTrickleError> {
+    let sql = "SELECT COALESCE(array_agg(arg.arg_type_oid ORDER BY arg.ordinality), ARRAY[]::int4[]) \
+               FROM pg_catalog.pg_aggregate a \
+               JOIN pg_catalog.pg_proc transfn ON transfn.oid = a.aggtransfn \
+               LEFT JOIN LATERAL ( \
+                   SELECT arg_type_txt::int4 AS arg_type_oid, ordinality \
+                   FROM unnest(string_to_array(transfn.proargtypes::text, ' ')) WITH ORDINALITY \
+                        AS args(arg_type_txt, ordinality) \
+               ) arg ON TRUE \
+               WHERE a.aggfnoid = $1::oid \
+               GROUP BY a.aggtransfn";
+    let result = client.select(sql, None, &[aggfnoid.into()]).map_err(|e| {
+        PgTrickleError::QueryParseError(format!("Failed to inspect aggregate signature: {e}"))
+    })?;
+    if result.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row = result.first();
+    let arg_type_oids = row
+        .get::<Vec<i32>>(1)
+        .map_err(|e| {
+            PgTrickleError::QueryParseError(format!("Failed to read aggregate signature: {e}"))
+        })?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|oid| oid as u32)
+        .collect();
+    Ok(arg_type_oids)
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn load_type_sql_name(
+    client: &pgrx::spi::SpiClient<'_>,
+    type_oid: u32,
+) -> Result<Option<String>, PgTrickleError> {
+    let result = client
+        .select(
+            "SELECT format_type($1::oid, NULL)",
+            None,
+            &[(type_oid as i32).into()],
+        )
+        .map_err(|e| {
+            PgTrickleError::QueryParseError(format!("Failed to inspect type name: {e}"))
+        })?;
+    if result.is_empty() {
+        return Ok(None);
+    }
+    result
+        .first()
+        .get::<String>(1)
+        .map_err(|e| PgTrickleError::QueryParseError(format!("Failed to read type name: {e}")))
+}
+
+fn annotate_tree_statistical_support(
+    tree: &mut OpTree,
+    aggfnoids_by_location: &HashMap<i32, pg_sys::Oid>,
+    transition_arg_types_by_aggfnoid: &HashMap<pg_sys::Oid, Vec<u32>>,
+    type_sql_by_oid: &HashMap<u32, String>,
+) {
+    match tree {
+        OpTree::Aggregate {
+            aggregates, child, ..
+        } => {
+            annotate_tree_statistical_support(
+                child,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+            for agg in aggregates {
+                let Some(support) = agg.statistical_support.as_mut() else {
+                    continue;
+                };
+                if support.accumulator_type.is_some() {
+                    continue;
+                }
+                let Some(location) = support.parse_location else {
+                    continue;
+                };
+                let Some(aggfnoid) = aggfnoids_by_location.get(&location) else {
+                    continue;
+                };
+                let Some(transition_arg_types) = transition_arg_types_by_aggfnoid.get(aggfnoid)
+                else {
+                    continue;
+                };
+                let Some(type_oid) =
+                    resolve_statistical_accumulator_type_oid(&agg.function, transition_arg_types)
+                else {
+                    continue;
+                };
+                let Some(type_sql) = type_sql_by_oid.get(&type_oid) else {
+                    continue;
+                };
+                support.accumulator_type = Some(ResolvedSqlType {
+                    oid: type_oid,
+                    sql: type_sql.clone(),
+                });
+            }
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. }
+        | OpTree::Window { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::LateralFunction { child, .. }
+        | OpTree::LateralSubquery { child, .. } => annotate_tree_statistical_support(
+            child,
+            aggfnoids_by_location,
+            transition_arg_types_by_aggfnoid,
+            type_sql_by_oid,
+        ),
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. }
+        | OpTree::SemiJoin { left, right, .. }
+        | OpTree::AntiJoin { left, right, .. }
+        | OpTree::Intersect { left, right, .. }
+        | OpTree::Except { left, right, .. } => {
+            annotate_tree_statistical_support(
+                left,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+            annotate_tree_statistical_support(
+                right,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+        }
+        OpTree::UnionAll { children } => {
+            for child in children {
+                annotate_tree_statistical_support(
+                    child,
+                    aggfnoids_by_location,
+                    transition_arg_types_by_aggfnoid,
+                    type_sql_by_oid,
+                );
+            }
+        }
+        OpTree::ScalarSubquery {
+            subquery, child, ..
+        } => {
+            annotate_tree_statistical_support(
+                subquery,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+            annotate_tree_statistical_support(
+                child,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+        }
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => {
+            annotate_tree_statistical_support(
+                base,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+            annotate_tree_statistical_support(
+                recursive,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                type_sql_by_oid,
+            );
+        }
+        OpTree::Scan { .. }
+        | OpTree::ConstantSelect { .. }
+        | OpTree::CteScan { .. }
+        | OpTree::RecursiveSelfRef { .. } => {}
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn annotate_statistical_aggregate_support(
+    query: &str,
+    tree: &mut OpTree,
+    cte_registry: &mut CteRegistry,
+) -> Result<(), PgTrickleError> {
+    if !tree_has_statistical_aggregate(tree)
+        && !cte_registry
+            .entries
+            .iter()
+            .any(|(_, cte_tree)| tree_has_statistical_aggregate(cte_tree))
+    {
+        return Ok(());
+    }
+
+    // Metadata is an admission aid, not a reason to reject an otherwise
+    // parseable query.  If PostgreSQL cannot analyze the query in this
+    // planning context, leave the support unresolved so AUTO falls back to
+    // FULL and explicit incremental modes fail closed.
+    let aggfnoids_by_location = match collect_analyzed_aggregate_locations(query) {
+        Ok(locations) => locations,
+        Err(_) => return Ok(()),
+    };
+    if aggfnoids_by_location.is_empty() {
+        return Ok(());
+    }
+
+    let mut transition_arg_types_by_aggfnoid = HashMap::new();
+    let mut type_sql_by_oid = HashMap::new();
+    let unique_aggfnoids: HashSet<pg_sys::Oid> = aggfnoids_by_location.values().copied().collect();
+
+    Spi::connect(|client| {
+        let mut needed_type_oids = HashSet::new();
+        for aggfnoid in &unique_aggfnoids {
+            let arg_type_oids = load_transition_arg_type_oids(client, *aggfnoid)?;
+            transition_arg_types_by_aggfnoid.insert(*aggfnoid, arg_type_oids);
+        }
+
+        for (_, cte_tree) in &cte_registry.entries {
+            collect_needed_statistical_type_oids(
+                cte_tree,
+                &aggfnoids_by_location,
+                &transition_arg_types_by_aggfnoid,
+                &mut needed_type_oids,
+            );
+        }
+        collect_needed_statistical_type_oids(
+            tree,
+            &aggfnoids_by_location,
+            &transition_arg_types_by_aggfnoid,
+            &mut needed_type_oids,
+        );
+
+        for type_oid in needed_type_oids {
+            if let Some(type_sql) = load_type_sql_name(client, type_oid)? {
+                type_sql_by_oid.insert(type_oid, type_sql);
+            }
+        }
+
+        Ok::<(), PgTrickleError>(())
+    })?;
+
+    annotate_tree_statistical_support(
+        tree,
+        &aggfnoids_by_location,
+        &transition_arg_types_by_aggfnoid,
+        &type_sql_by_oid,
+    );
+    for (_, cte_tree) in &mut cte_registry.entries {
+        annotate_tree_statistical_support(
+            cte_tree,
+            &aggfnoids_by_location,
+            &transition_arg_types_by_aggfnoid,
+            &type_sql_by_oid,
+        );
+    }
+
+    Ok(())
+}
+
+fn tree_has_statistical_aggregate(tree: &OpTree) -> bool {
+    match tree {
+        OpTree::Aggregate {
+            aggregates, child, ..
+        } => {
+            aggregates.iter().any(|agg| {
+                !agg.is_distinct
+                    && (agg.function.needs_sum_of_squares() || agg.function.needs_cross_products())
+            }) || tree_has_statistical_aggregate(child)
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. }
+        | OpTree::Window { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::LateralFunction { child, .. }
+        | OpTree::LateralSubquery { child, .. } => tree_has_statistical_aggregate(child),
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. }
+        | OpTree::SemiJoin { left, right, .. }
+        | OpTree::AntiJoin { left, right, .. }
+        | OpTree::Intersect { left, right, .. }
+        | OpTree::Except { left, right, .. } => {
+            tree_has_statistical_aggregate(left) || tree_has_statistical_aggregate(right)
+        }
+        OpTree::UnionAll { children } => children.iter().any(tree_has_statistical_aggregate),
+        OpTree::ScalarSubquery {
+            subquery, child, ..
+        } => tree_has_statistical_aggregate(subquery) || tree_has_statistical_aggregate(child),
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => tree_has_statistical_aggregate(base) || tree_has_statistical_aggregate(recursive),
+        OpTree::Scan { .. }
+        | OpTree::ConstantSelect { .. }
+        | OpTree::CteScan { .. }
+        | OpTree::RecursiveSelfRef { .. } => false,
+    }
+}
+
+fn collect_needed_statistical_type_oids(
+    tree: &OpTree,
+    aggfnoids_by_location: &HashMap<i32, pg_sys::Oid>,
+    transition_arg_types_by_aggfnoid: &HashMap<pg_sys::Oid, Vec<u32>>,
+    out: &mut HashSet<u32>,
+) {
+    match tree {
+        OpTree::Aggregate {
+            aggregates, child, ..
+        } => {
+            collect_needed_statistical_type_oids(
+                child,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+            for agg in aggregates {
+                let Some(support) = agg.statistical_support.as_ref() else {
+                    continue;
+                };
+                let Some(location) = support.parse_location else {
+                    continue;
+                };
+                let Some(aggfnoid) = aggfnoids_by_location.get(&location) else {
+                    continue;
+                };
+                let Some(transition_arg_types) = transition_arg_types_by_aggfnoid.get(aggfnoid)
+                else {
+                    continue;
+                };
+                if let Some(type_oid) =
+                    resolve_statistical_accumulator_type_oid(&agg.function, transition_arg_types)
+                {
+                    out.insert(type_oid);
+                }
+            }
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. }
+        | OpTree::Window { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::LateralFunction { child, .. }
+        | OpTree::LateralSubquery { child, .. } => collect_needed_statistical_type_oids(
+            child,
+            aggfnoids_by_location,
+            transition_arg_types_by_aggfnoid,
+            out,
+        ),
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. }
+        | OpTree::SemiJoin { left, right, .. }
+        | OpTree::AntiJoin { left, right, .. }
+        | OpTree::Intersect { left, right, .. }
+        | OpTree::Except { left, right, .. } => {
+            collect_needed_statistical_type_oids(
+                left,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+            collect_needed_statistical_type_oids(
+                right,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+        }
+        OpTree::UnionAll { children } => {
+            for child in children {
+                collect_needed_statistical_type_oids(
+                    child,
+                    aggfnoids_by_location,
+                    transition_arg_types_by_aggfnoid,
+                    out,
+                );
+            }
+        }
+        OpTree::ScalarSubquery {
+            subquery, child, ..
+        } => {
+            collect_needed_statistical_type_oids(
+                subquery,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+            collect_needed_statistical_type_oids(
+                child,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+        }
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => {
+            collect_needed_statistical_type_oids(
+                base,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+            collect_needed_statistical_type_oids(
+                recursive,
+                aggfnoids_by_location,
+                transition_arg_types_by_aggfnoid,
+                out,
+            );
+        }
+        OpTree::Scan { .. }
+        | OpTree::ConstantSelect { .. }
+        | OpTree::CteScan { .. }
+        | OpTree::RecursiveSelfRef { .. } => {}
+    }
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn annotate_statistical_aggregate_support(
+    _query: &str,
+    _tree: &mut OpTree,
+    _cte_registry: &mut CteRegistry,
+) -> Result<(), PgTrickleError> {
+    Ok(())
+}
+
 unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrickleError> {
     // Clear the per-parse warning accumulator so each invocation starts fresh.
     PARSE_ADVISORY_WARNINGS.with(|w| w.borrow_mut().clear());
@@ -1567,6 +2089,8 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         unsafe { parse_select_stmt(select, query, &mut cte_ctx)? }
     };
+
+    annotate_statistical_aggregate_support(query, &mut tree, &mut cte_ctx.registry)?;
 
     // Prune Scan columns to only those referenced by the defining query,
     // reducing the number of new_*/old_* columns read from change buffers.
@@ -1997,6 +2521,31 @@ unsafe fn parse_select_stmt_inner(
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         let (target_exprs, target_aliases) = unsafe { parse_target_list(&target_list)? };
 
+        let coalesced_sum_defaults: std::collections::HashMap<String, Expr> = target_exprs
+            .iter()
+            .zip(target_aliases.iter())
+            .filter_map(|(expr, alias)| {
+                let Expr::FuncCall { func_name, args } = expr else {
+                    return None;
+                };
+                if !func_name.eq_ignore_ascii_case("coalesce") || args.len() < 2 {
+                    return None;
+                }
+                let Expr::FuncCall {
+                    func_name: inner_name,
+                    ..
+                } = &args[0]
+                else {
+                    return None;
+                };
+                if inner_name.eq_ignore_ascii_case("sum") {
+                    Some((alias.clone(), args[1].clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Resolve ordinal GROUP BY references (e.g., GROUP BY 1 → first
         // target expression). PostgreSQL allows GROUP BY <n> to refer to
         // the Nth output column. Resolve these to the actual target
@@ -2029,14 +2578,31 @@ unsafe fn parse_select_stmt_inner(
             child: Box::new(tree),
         };
 
-        // Add a Project wrapper if any GROUP BY column needs renaming.
-        if !rename_map.is_empty() {
+        // Add a Project wrapper for GROUP BY renames and for
+        // COALESCE(SUM(...), default), so the aggregate node restores NULL
+        // and the outer projection applies PostgreSQL's COALESCE semantics.
+        let needs_projection = !rename_map.is_empty() || !coalesced_sum_defaults.is_empty();
+        if needs_projection {
             let agg_output = tree.output_columns();
             let proj_exprs: Vec<Expr> = agg_output
                 .iter()
-                .map(|name| Expr::ColumnRef {
-                    table_alias: None,
-                    column_name: name.clone(),
+                .map(|name| {
+                    coalesced_sum_defaults.get(name).map_or_else(
+                        || Expr::ColumnRef {
+                            table_alias: None,
+                            column_name: name.clone(),
+                        },
+                        |default| Expr::FuncCall {
+                            func_name: "COALESCE".to_string(),
+                            args: vec![
+                                Expr::ColumnRef {
+                                    table_alias: None,
+                                    column_name: name.clone(),
+                                },
+                                default.clone(),
+                            ],
+                        },
+                    )
                 })
                 .collect();
             let proj_aliases: Vec<String> = agg_output
@@ -2749,13 +3315,13 @@ unsafe fn parse_from_item_inner(
             // Extract source table OIDs from the subquery's FROM clause
             let subquery_source_oids =
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                unsafe { extract_from_oids(sub_stmt.fromClause).unwrap_or_default() };
+                unsafe { extract_select_source_oids(sub_stmt)? };
 
             // P2-6: Extract alias→OID mapping and correlation predicates
             // for scoped inner-change re-execution.
             let inner_alias_oids =
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                unsafe { extract_from_alias_oids(sub_stmt.fromClause).unwrap_or_default() };
+                unsafe { extract_from_alias_oids(sub_stmt.fromClause)? };
             let correlation_predicates =
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
                 unsafe { extract_correlation_predicates(sub_stmt.whereClause, &inner_alias_oids) };
@@ -4855,21 +5421,148 @@ unsafe fn extract_select_output_cols(
     Ok(cols)
 }
 
-/// Walk a FROM clause collecting all table OIDs.
+/// Walk a LATERAL body collecting every base table OID it can reference.
 ///
 /// Used to extract source OIDs from a LATERAL subquery body's FROM clause
-/// so that CDC triggers can be set up for those tables.
+/// and nested subqueries so that CDC triggers can be set up for every table
+/// whose changes can affect the body.
+///
+/// # Safety
+/// Caller must ensure `stmt` points to a valid raw `SelectStmt`.
+unsafe fn extract_select_source_oids(
+    stmt: &pg_sys::SelectStmt,
+) -> Result<Vec<u32>, PgTrickleError> {
+    let mut oids = Vec::new();
+    unsafe { collect_from_oids(stmt.fromClause, &mut oids)? };
+
+    // The FROM walker cannot see relations inside scalar/EXISTS/IN
+    // subqueries embedded in SELECT, WHERE, HAVING, ORDER BY, or LIMIT
+    // expressions.  Walk each expression tree as well.
+    let mut walk_expr = |node: *mut pg_sys::Node| {
+        if !node.is_null() {
+            // SAFETY: `node` points into the raw parse tree owned by `stmt`.
+            unsafe { collect_expression_source_oids(node, &mut oids) };
+        }
+    };
+    for target_ptr in pg_list::<pg_sys::ResTarget>(stmt.targetList).iter_ptr() {
+        if !target_ptr.is_null() {
+            // SAFETY: target_ptr is a ResTarget from stmt.targetList.
+            walk_expr(unsafe { (*target_ptr).val });
+        }
+    }
+    walk_expr(stmt.whereClause);
+    walk_expr(stmt.havingClause);
+    walk_expr(stmt.limitOffset);
+    walk_expr(stmt.limitCount);
+
+    for sort_ptr in pg_list::<pg_sys::SortBy>(stmt.sortClause).iter_ptr() {
+        if !sort_ptr.is_null() {
+            // SAFETY: sort_ptr is a SortBy from stmt.sortClause.
+            walk_expr(unsafe { (*sort_ptr).node });
+        }
+    }
+    for group_ptr in pg_list::<pg_sys::Node>(stmt.groupClause).iter_ptr() {
+        walk_expr(group_ptr);
+    }
+    for distinct_ptr in pg_list::<pg_sys::Node>(stmt.distinctClause).iter_ptr() {
+        walk_expr(distinct_ptr);
+    }
+
+    if !stmt.withClause.is_null() {
+        // SAFETY: withClause and its list are part of the same raw parse tree.
+        let with_clause = unsafe { &*stmt.withClause };
+        for cte_ptr in pg_list::<pg_sys::CommonTableExpr>(with_clause.ctes).iter_ptr() {
+            if !cte_ptr.is_null() {
+                // SAFETY: cte_ptr is a CommonTableExpr from with_clause.ctes.
+                let cte_query = unsafe { (*cte_ptr).ctequery };
+                if !cte_query.is_null()
+                    // SAFETY: raw parser node tag is valid for this pointer.
+                    && is_node_type!(cte_query, T_SelectStmt)
+                {
+                    // SAFETY: cte_query is a valid SelectStmt raw parse node.
+                    unsafe {
+                        oids.extend(extract_select_source_oids(
+                            &*(cte_query as *const pg_sys::SelectStmt),
+                        )?);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(oids)
+}
+
+/// Collect table OIDs from a FROM clause into an existing vector.
 ///
 /// # Safety
 /// Caller must ensure `from_list` points to a valid `pg_sys::List`.
-unsafe fn extract_from_oids(from_list: *mut pg_sys::List) -> Result<Vec<u32>, PgTrickleError> {
+unsafe fn collect_from_oids(
+    from_list: *mut pg_sys::List,
+    oids: &mut Vec<u32>,
+) -> Result<(), PgTrickleError> {
     let list = pg_list::<pg_sys::Node>(from_list);
-    let mut oids = Vec::new();
     for node_ptr in list.iter_ptr() {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        unsafe { collect_from_item_oids(node_ptr, &mut oids)? };
+        unsafe { collect_from_item_oids(node_ptr, oids)? };
     }
-    Ok(oids)
+    Ok(())
+}
+
+/// Walk a raw expression tree for relations referenced by nested subqueries.
+///
+/// # Safety
+/// Caller must ensure `node` points to a valid raw parse-tree expression.
+unsafe fn collect_expression_source_oids(node: *mut pg_sys::Node, oids: &mut Vec<u32>) {
+    let mut ctx = RawSourceOidContext {
+        oids: oids as *mut Vec<u32>,
+    };
+    // SAFETY: node is a valid raw parse-tree expression and the callback only
+    // reads relation/subquery fields from nodes supplied by PostgreSQL.
+    unsafe {
+        pg_sys::raw_expression_tree_walker_impl(
+            node,
+            Some(raw_source_oid_walker),
+            &mut ctx as *mut RawSourceOidContext as *mut std::ffi::c_void,
+        );
+    }
+}
+
+struct RawSourceOidContext {
+    oids: *mut Vec<u32>,
+}
+
+/// Callback for `raw_expression_tree_walker_impl`.
+///
+/// Nested `SubLink` SELECTs are collected explicitly because the raw walker
+/// does not recurse into `SelectStmt` nodes as ordinary expressions.
+unsafe extern "C-unwind" fn raw_source_oid_walker(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    let oids = unsafe { &mut *((*(context as *mut RawSourceOidContext)).oids) };
+    if is_node_type!(node, T_SubLink) {
+        // SAFETY: node tag verified as SubLink.
+        let sublink = unsafe { &*(node as *const pg_sys::SubLink) };
+        if !sublink.subselect.is_null()
+            // SAFETY: raw parser node tag is valid for this pointer.
+            && is_node_type!(sublink.subselect, T_SelectStmt)
+        {
+            // SAFETY: subselect is a valid raw SelectStmt node.
+            match unsafe {
+                extract_select_source_oids(&*(sublink.subselect as *const pg_sys::SelectStmt))
+            } {
+                Ok(inner) => oids.extend(inner),
+                Err(_) => oids.push(0),
+            }
+        }
+    }
+
+    false
 }
 
 /// Recursively collect table OIDs from a single FROM item.
@@ -4917,9 +5610,10 @@ unsafe fn collect_from_item_oids(
             }
             Ok(0u32)
         })?;
-        if oid > 0 {
-            oids.push(oid);
-        }
+        // Keep an explicit unresolved marker.  Treating an unresolvable
+        // relation as "no dependency" can make inner changes invisible to
+        // the LATERAL delta path; admission rejects the marker.
+        oids.push(oid);
     } else if let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         unsafe { collect_from_item_oids(join.larg, oids)? };
@@ -4933,7 +5627,7 @@ unsafe fn collect_from_item_oids(
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
         let sub_stmt = pg_deref!(sub.subquery as *const pg_sys::SelectStmt);
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        let inner_oids = unsafe { extract_from_oids(sub_stmt.fromClause)? };
+        let inner_oids = unsafe { extract_select_source_oids(sub_stmt)? };
         oids.extend(inner_oids);
     }
     // RangeFunction: no table OIDs to extract (SRFs don't reference tables directly)
@@ -5015,9 +5709,7 @@ unsafe fn collect_from_item_alias_oids(
             }
             Ok(0u32)
         })?;
-        if oid > 0 {
-            pairs.push((alias, oid));
-        }
+        pairs.push((alias, oid));
     } else if let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         unsafe { collect_from_item_alias_oids(join.larg, pairs)? };
@@ -6116,6 +6808,45 @@ unsafe fn extract_aggregates(
             continue;
         }
 
+        // Preserve a simple COALESCE(SUM(...), default) as an outer Project
+        // over a real SUM aggregate.  Treating the whole expression as a
+        // ComplexExpression loses SUM's auxiliary state and makes deletion
+        // of the last non-NULL input indistinguishable from a zero.
+        if let Some(coalesce) = cast_node!(rt.val, T_CoalesceExpr, pg_sys::CoalesceExpr) {
+            let coalesce_args = pg_list::<pg_sys::Node>(coalesce.args);
+            if coalesce_args.len() >= 2
+                && let Some(sum_node) = coalesce_args.head()
+                && let Some(sum_call) = cast_node!(sum_node, T_FuncCall, pg_sys::FuncCall)
+            {
+                let func_name = unsafe { extract_func_name(sum_call.funcname)? };
+                if func_name.eq_ignore_ascii_case("sum") && sum_call.over.is_null() {
+                    let alias = if !rt.name.is_null() {
+                        pg_cstr_to_str(rt.name).unwrap_or(&func_name).to_string()
+                    } else {
+                        func_name.clone()
+                    };
+                    let args_list = pg_list::<pg_sys::Node>(sum_call.args);
+                    let argument = args_list.head().and_then(|n| safe_node_to_expr(n).ok());
+                    let filter = if !sum_call.agg_filter.is_null() {
+                        Some(safe_node_to_expr(sum_call.agg_filter)?)
+                    } else {
+                        None
+                    };
+                    aggs.push(AggExpr {
+                        function: AggFunc::Sum,
+                        argument,
+                        alias,
+                        is_distinct: sum_call.agg_distinct,
+                        second_arg: None,
+                        filter,
+                        order_within_group: None,
+                        statistical_support: None,
+                    });
+                    continue;
+                }
+            }
+        }
+
         if let Some(fcall) = cast_node!(rt.val, T_FuncCall, pg_sys::FuncCall) {
             // Window functions (FuncCall with OVER clause) are NOT aggregates.
             // Treat them as plain expressions — they'll be handled by the
@@ -6235,6 +6966,12 @@ unsafe fn extract_aggregates(
                 } else {
                     None
                 };
+                let statistical_support =
+                    if agg_func.needs_sum_of_squares() || agg_func.needs_cross_products() {
+                        Some(StatisticalAggSupport::with_location(fcall.location))
+                    } else {
+                        None
+                    };
 
                 aggs.push(AggExpr {
                     function: agg_func,
@@ -6244,6 +6981,7 @@ unsafe fn extract_aggregates(
                     second_arg,
                     filter,
                     order_within_group,
+                    statistical_support,
                 });
             } else if is_known_aggregate(&name_lower) {
                 // Recognized as an aggregate but not supported for differential maintenance
@@ -6341,6 +7079,7 @@ unsafe fn extract_aggregates(
                     second_arg: None,
                     filter,
                     order_within_group: None,
+                    statistical_support: None,
                 });
             // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
             } else if unsafe { expr_contains_agg(rt.val) } {
@@ -6365,6 +7104,7 @@ unsafe fn extract_aggregates(
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 });
             } else {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
@@ -6413,6 +7153,7 @@ unsafe fn extract_aggregates(
                 second_arg: None,
                 filter,
                 order_within_group: None,
+                statistical_support: None,
             });
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
         } else if is_node_type!(rt.val, T_JsonArrayAgg) {
@@ -6452,6 +7193,7 @@ unsafe fn extract_aggregates(
                 second_arg: None,
                 filter,
                 order_within_group: None,
+                statistical_support: None,
             });
         } else {
             // Not a top-level aggregate function call.
@@ -6478,6 +7220,7 @@ unsafe fn extract_aggregates(
                     second_arg: None,
                     filter: None,
                     order_within_group: None,
+                    statistical_support: None,
                 });
             } else {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
@@ -6562,6 +7305,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 
@@ -6577,6 +7321,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 

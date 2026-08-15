@@ -57,14 +57,15 @@ pub mod row_id;
 
 pub use diff::DiffContext;
 pub use parser::{
-    CteRegistry, ParseResult, TopKInfo, check_ivm_support, check_ivm_support_with_registry,
-    check_monotonicity, classify_agg_strategy, detect_topk_pattern, has_order_by_without_limit,
+    CteRegistry, IncrementalAdmission, ParseResult, TopKInfo, ValidationIssue, check_ivm_support,
+    check_ivm_support_with_registry, check_monotonicity, check_monotonicity_with_registry,
+    classify_agg_strategy, detect_topk_pattern, has_order_by_without_limit, incremental_admission,
     parse_defining_query, parse_defining_query_full, query_has_cte, query_has_recursive_cte,
     reject_limit_offset, reject_materialized_views, reject_unsupported_constructs,
-    rewrite_correlated_scalar_in_select, rewrite_demorgan_sublinks, rewrite_distinct_on,
-    rewrite_grouping_sets, rewrite_nested_window_exprs, rewrite_rows_from,
+    resolve_incremental_mode, rewrite_correlated_scalar_in_select, rewrite_demorgan_sublinks,
+    rewrite_distinct_on, rewrite_grouping_sets, rewrite_nested_window_exprs, rewrite_rows_from,
     rewrite_scalar_subquery_in_where, rewrite_sublinks_in_or, rewrite_views_inline,
-    tree_worst_volatility_with_registry, validate_immediate_mode_support,
+    topk_query_volatility, tree_worst_volatility_with_registry, validate_immediate_mode_support,
     warn_limit_without_order_in_subqueries,
 };
 
@@ -1307,6 +1308,14 @@ pub fn query_covar_aux_columns(defining_query: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Return PostgreSQL's analyzed accumulator type for each statistical
+/// auxiliary column.
+pub fn query_statistical_aux_types(defining_query: &str) -> Vec<(String, String)> {
+    parse_defining_query(defining_query)
+        .map(|tree| tree.statistical_aux_types())
+        .unwrap_or_default()
+}
+
 /// Returns `(nonnull_col_name, arg_sql)` tuples for each non-DISTINCT SUM
 /// aggregate above a FULL JOIN child that needs an auxiliary nonnull-count
 /// column (`__pgt_aux_nonnull_*`) for P2-2 NULL-transition correction.
@@ -1317,8 +1326,8 @@ pub fn query_nonnull_aux_columns(defining_query: &str) -> Vec<(String, String)> 
         .unwrap_or_default()
 }
 
-/// Check whether a defining query is an INTERSECT or EXCEPT that needs
-/// dual-count columns (`__pgt_count_l`, `__pgt_count_r`).
+/// Check whether a defining query is an INTERSECT or EXCEPT that has the
+/// legacy/private dual-count state shape (`__pgt_count_l`, `__pgt_count_r`).
 pub fn query_needs_dual_count(defining_query: &str) -> bool {
     parse_defining_query(defining_query)
         .map(|tree| tree.needs_dual_count())
@@ -1381,10 +1390,7 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
                 .iter()
                 .map(|c| format!("sub.{}::TEXT", diff::quote_ident(c)))
                 .collect();
-            format!(
-                "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                array_items.join(", ")
-            )
+            crate::hash::build_composite_hash_expr(&array_items)
         }
         _ => {
             // Scalar aggregate (no GROUP BY): use singleton sentinel hash
@@ -1404,6 +1410,25 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
             }
         }
     }
+}
+
+/// Build the INSERT body used to materialize a defining query during a FULL
+/// refresh.  Set-operation tables use this direct shape so only the defining
+/// query's columns are written; branch multiplicity state is not part of the
+/// user-facing storage relation.
+pub fn direct_full_refresh_insert_body(
+    defining_query: &str,
+    materialization_query: &str,
+) -> String {
+    let row_id_expr = row_id_expr_for_query(defining_query);
+    direct_full_refresh_insert_body_with_row_id(&row_id_expr, materialization_query)
+}
+
+fn direct_full_refresh_insert_body_with_row_id(
+    row_id_expr: &str,
+    materialization_query: &str,
+) -> String {
+    format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({materialization_query}) sub")
 }
 
 /// Check whether the root of an OpTree is a scalar aggregate (GROUP BY
@@ -1457,15 +1482,14 @@ pub fn try_union_all_refresh_sql(defining_query: &str) -> Option<String> {
                 .iter()
                 .map(|c| format!("sub.{}::TEXT", diff::quote_ident(c)))
                 .collect();
-            format!(
-                "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                items.join(", ")
-            )
+            crate::hash::build_composite_hash_expr(&items)
         };
 
         // Wrap with branch prefix (matching diff_union_all's idx = i + 1).
-        let row_id_expr =
-            format!("pgtrickle.pg_trickle_hash_multi(ARRAY['{idx}'::TEXT, ({child_hash})::TEXT])",);
+        let row_id_expr = crate::hash::build_composite_hash_expr(&[
+            format!("'{idx}'::TEXT"),
+            format!("({child_hash})::TEXT"),
+        ]);
 
         parts.push(format!(
             "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({branch_sql}) sub",
@@ -1674,10 +1698,7 @@ pub fn try_union_dedup_refresh_sql(
     let hash_expr = if hash_items.len() == 1 {
         format!("pgtrickle.pg_trickle_hash({})", hash_items[0])
     } else {
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            hash_items.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&hash_items)
     };
 
     let outer_cols: Vec<String> = quoted_cols.iter().map(|c| format!("sub2.{c}")).collect();
@@ -1821,41 +1842,46 @@ fn split_top_level_set_op(query: &str) -> Option<SetOpParts> {
 
 /// For INTERSECT / EXCEPT queries, generate a full-refresh SELECT that
 /// computes per-branch multiplicity counts (`__pgt_count_l`, `__pgt_count_r`)
-/// matching the storage schema used by the differential operators.
+/// for the private state shape used by the differential operators.
 ///
 /// Returns `None` when the query is not a top-level set operation.
 pub fn try_set_op_refresh_sql(defining_query: &str, column_names: &[String]) -> Option<String> {
     let parts = split_top_level_set_op(defining_query)?;
 
-    let quoted_cols: Vec<String> = column_names.iter().map(|c| diff::quote_ident(c)).collect();
-    let col_list = quoted_cols.join(", ");
+    if column_names.is_empty() {
+        return None;
+    }
 
-    let (join_type, where_clause) = match parts.kind {
-        // INTERSECT/EXCEPT: use FULL OUTER JOIN to populate ALL unique
-        // values from both branches with their per-branch counts.
-        // Invisible rows are kept so that the differential engine can
-        // track multiplicity changes correctly across refreshes.
-        SetOpKind::Intersect
-        | SetOpKind::IntersectAll
-        | SetOpKind::Except
-        | SetOpKind::ExceptAll => ("FULL OUTER JOIN", String::new()),
-    };
+    let canonical_cols: Vec<String> = (1..=column_names.len())
+        .map(|n| format!("__pgt_set_c{n}"))
+        .collect();
+    let canonical_col_list = canonical_cols.join(", ");
+    let left_alias_list = canonical_col_list.clone();
+    let right_alias_list = canonical_col_list.clone();
+    let group_list = canonical_col_list.clone();
+    let join_condition = canonical_cols
+        .iter()
+        .map(|c| format!("l.{c} IS NOT DISTINCT FROM r.{c}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
 
     // For FULL OUTER JOIN, columns from one side may be NULL.
     // Use COALESCE to pick from whichever side matched.
     let (select_cols, hash_items_final) = {
-        let coalesced: Vec<String> = column_names
+        let coalesced: Vec<String> = canonical_cols
             .iter()
-            .map(|c| {
+            .zip(column_names)
+            .map(|(canonical, output)| {
                 format!(
-                    "COALESCE(l.{qc}, r.{qc}) AS {qc}",
-                    qc = diff::quote_ident(c)
+                    "COALESCE(l.{canonical}, r.{canonical}) AS {output}",
+                    canonical = canonical,
+                    output = diff::quote_ident(output),
                 )
             })
             .collect();
-        let hash_items_c: Vec<String> = column_names
+        let hash_items_c: Vec<String> = canonical_cols
             .iter()
-            .map(|c| format!("COALESCE(l.{qc}, r.{qc})::TEXT", qc = diff::quote_ident(c)))
+            .map(|c| format!("COALESCE(l.{c}, r.{c})::TEXT"))
             .collect();
         (coalesced.join(",\n       "), hash_items_c)
     };
@@ -1863,29 +1889,35 @@ pub fn try_set_op_refresh_sql(defining_query: &str, column_names: &[String]) -> 
     let hash_expr_final = if hash_items_final.len() == 1 {
         format!("pgtrickle.pg_trickle_hash({})", hash_items_final[0])
     } else {
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            hash_items_final.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&hash_items_final)
     };
 
     let sql = format!(
-        "WITH __pgt_left AS (\n\
-         \x20 SELECT {col_list}, COUNT(*) AS __cnt\n\
-         \x20 FROM ({left}) __sub\n\
-         \x20 GROUP BY {col_list}\n\
+        "WITH __pgt_set_branches AS (\n\
+         \x20 SELECT {canonical_col_list}, 0::smallint AS __pgt_branch\n\
+         \x20 FROM ({left}) AS __pgt_left_branch({left_alias_list})\n\
+         \x20 UNION ALL\n\
+         \x20 SELECT {canonical_col_list}, 1::smallint AS __pgt_branch\n\
+         \x20 FROM ({right}) AS __pgt_right_branch({right_alias_list})\n\
+         ),\n\
+         __pgt_left AS (\n\
+         \x20 SELECT {canonical_col_list}, COUNT(*) AS __cnt\n\
+         \x20 FROM __pgt_set_branches\n\
+         \x20 WHERE __pgt_branch = 0\n\
+         \x20 GROUP BY {group_list}\n\
          ),\n\
          __pgt_right AS (\n\
-         \x20 SELECT {col_list}, COUNT(*) AS __cnt\n\
-         \x20 FROM ({right}) __sub\n\
-         \x20 GROUP BY {col_list}\n\
+         \x20 SELECT {canonical_col_list}, COUNT(*) AS __cnt\n\
+         \x20 FROM __pgt_set_branches\n\
+         \x20 WHERE __pgt_branch = 1\n\
+         \x20 GROUP BY {group_list}\n\
          )\n\
          SELECT {hash_expr_final} AS __pgt_row_id,\n\
          \x20      {select_cols},\n\
          \x20      COALESCE(l.__cnt, 0) AS __pgt_count_l,\n\
          \x20      COALESCE(r.__cnt, 0) AS __pgt_count_r\n\
          FROM __pgt_left l\n\
-         {join_type} __pgt_right r USING ({col_list}){where_clause}",
+         FULL OUTER JOIN __pgt_right r ON {join_condition}",
         left = parts.left,
         right = parts.right,
     );
@@ -2457,6 +2489,44 @@ mod tests {
                 .unwrap();
         assert_eq!(parts.kind, SetOpKind::Intersect);
         assert_eq!(parts.left, "SELECT 'INTERSECT' FROM t1");
+    }
+
+    #[test]
+    fn test_set_op_refresh_sql_binds_branches_positionally_and_null_safely() {
+        let columns = vec!["left_name".to_string(), "value".to_string()];
+        let sql = try_set_op_refresh_sql(
+            "SELECT a AS left_name, b FROM left_t \
+             INTERSECT ALL \
+             SELECT x AS right_name, y FROM right_t",
+            &columns,
+        )
+        .unwrap();
+
+        assert!(sql.contains(
+            "FROM (SELECT a AS left_name, b FROM left_t) \
+             AS __pgt_left_branch(__pgt_set_c1, __pgt_set_c2)"
+        ));
+        assert!(sql.contains(
+            "FROM (SELECT x AS right_name, y FROM right_t) \
+             AS __pgt_right_branch(__pgt_set_c1, __pgt_set_c2)"
+        ));
+        assert!(sql.contains("l.__pgt_set_c1 IS NOT DISTINCT FROM r.__pgt_set_c1"));
+        assert!(sql.contains("l.__pgt_set_c2 IS NOT DISTINCT FROM r.__pgt_set_c2"));
+        assert!(sql.contains("UNION ALL"));
+        assert!(!sql.contains(" USING ("));
+    }
+
+    #[test]
+    fn test_direct_full_refresh_insert_body_has_no_set_state_columns() {
+        let sql = direct_full_refresh_insert_body_with_row_id(
+            "pgtrickle.pg_trickle_hash(sub.value::text)",
+            "SELECT value FROM left_t INTERSECT SELECT value FROM right_t",
+        );
+
+        assert!(sql.contains("AS __pgt_row_id"));
+        assert!(sql.contains("sub.*"));
+        assert!(!sql.contains("__pgt_count_l"));
+        assert!(!sql.contains("__pgt_count_r"));
     }
 
     // ── is_scalar_aggregate_root() ─────────────────────────────────

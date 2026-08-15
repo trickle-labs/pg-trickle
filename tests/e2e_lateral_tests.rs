@@ -1,8 +1,8 @@
 //! E2E tests for LATERAL set-returning functions (SRFs) in FROM clauses.
 //!
 //! Tests `jsonb_array_elements`, `jsonb_each`, `unnest`, and other SRFs
-//! with both FULL and DIFFERENTIAL refresh modes. DIFFERENTIAL uses
-//! row-scoped recomputation (Level 3 from PLAN_LATERAL_RANGE.md).
+//! with FULL refresh mode. AUTO falls back to FULL when an SRF body cannot be
+//! inspected for incremental maintenance.
 //!
 //! Prerequisites: `./tests/build_e2e_image.sh`
 
@@ -153,7 +153,7 @@ async fn test_lateral_full_refresh_picks_up_changes() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  DIFFERENTIAL Refresh Mode (Row-Scoped Recomputation)
+//  AUTO Refresh Mode (FULL fallback for unsupported SRF bodies)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -175,13 +175,13 @@ async fn test_lateral_jsonb_array_elements_differential() {
          FROM lat_diff d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
     let (status, mode, populated, errors) = db.pgt_status("lat_diff_st").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(mode, "DIFFERENTIAL");
+    assert_eq!(mode, "FULL");
     assert!(populated);
     assert_eq!(errors, 0);
 
@@ -204,7 +204,7 @@ async fn test_lateral_differential_insert() {
          FROM lat_dins d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_dins_st").await, 2);
@@ -244,7 +244,7 @@ async fn test_lateral_differential_delete() {
          FROM lat_ddel d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_ddel_st").await, 5);
@@ -277,7 +277,7 @@ async fn test_lateral_differential_update_array() {
          FROM lat_dupd d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_dupd_st").await, 3);
@@ -317,7 +317,7 @@ async fn test_lateral_differential_mixed_dml() {
          FROM lat_dmix d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_dmix_st").await, 6);
@@ -364,7 +364,7 @@ async fn test_lateral_differential_empty_array() {
          FROM lat_empty d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
@@ -404,7 +404,7 @@ async fn test_lateral_unnest_differential() {
          FROM lat_utags t, \
          unnest(t.tags) AS tag(tag)",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_utags_st").await, 3);
@@ -442,7 +442,7 @@ async fn test_lateral_jsonb_each_differential() {
          FROM lat_dkv d, \
          jsonb_each(d.props) AS kv",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_dkv_st").await, 3);
@@ -479,7 +479,7 @@ async fn test_lateral_with_where_clause_differential() {
          jsonb_array_elements(f.data) AS e \
          WHERE (e.value)::int > 12",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
@@ -553,7 +553,7 @@ async fn test_lateral_multiple_refreshes_converge() {
          FROM lat_conv d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     assert_eq!(db.count("public.lat_conv_st").await, 1);

@@ -3135,6 +3135,32 @@ fn refresh_single_st(
         None => return,
     };
 
+    // Revalidate persisted explicit incremental definitions before scheduling.
+    // This closes the upgrade path where a query was accepted by an older
+    // binary but is FULL-only under the current semantic admission matrix.
+    if !st.needs_reinit
+        && st.refresh_mode != RefreshMode::Full
+        && let Err(e) =
+            crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)
+    {
+        let message = format!("incremental refresh suspended after semantic revalidation: {e}");
+        pgrx::warning!(
+            "pg_trickle: suspending {}.{} — {}",
+            st.pgt_schema,
+            st.pgt_name,
+            message
+        );
+        if let Err(mark_error) = StreamTableMeta::set_error_state(st.pgt_id, &message) {
+            pgrx::warning!(
+                "pg_trickle: failed to persist semantic validation error for {}.{}: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                mark_error
+            );
+        }
+        return;
+    }
+
     let needs_refresh = check_schedule(&st, dag_ref);
     if !needs_refresh && !st.needs_reinit {
         return;
@@ -3564,7 +3590,11 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::RetryableFailure;
         }
     };
-    if !st.refresh_mode.is_immediate()
+    // A migrated or schema-invalid ST is deliberately reinitialized through
+    // the protected FULL path. Strict differential validation would reject
+    // the old identity version before that repair can run.
+    if !st.needs_reinit
+        && !st.refresh_mode.is_immediate()
         && let Err(e) = crate::cdc::validate_required_change_buffers(st, &dependencies)
     {
         log!(

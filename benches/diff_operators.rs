@@ -183,6 +183,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(make_scan("orders", 16384, &["id", "region", "amount"])),
     };
@@ -211,6 +212,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::CountStar,
@@ -220,6 +222,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::Avg,
@@ -232,6 +235,7 @@ fn bench_diff_aggregate(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
         ],
         child: Box::new(make_scan(
@@ -442,6 +446,7 @@ fn bench_diff_composite(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(join),
     };
@@ -562,6 +567,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::Sum,
@@ -574,6 +580,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::Sum,
@@ -597,6 +604,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::Avg,
@@ -609,6 +617,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::Avg,
@@ -621,6 +630,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::CountStar,
@@ -630,6 +640,7 @@ fn bench_diff_tpch_q01(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
         ],
         child: Box::new(filter),
@@ -763,6 +774,7 @@ fn bench_diff_tpch_q05(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(j5),
     };
@@ -924,6 +936,7 @@ fn bench_diff_tpch_q08(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::Sum,
@@ -936,6 +949,7 @@ fn bench_diff_tpch_q08(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
         ],
         child: Box::new(j7),
@@ -984,6 +998,7 @@ fn bench_diff_tpch_q18(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(lineitem_inner),
     };
@@ -1073,6 +1088,7 @@ fn bench_diff_tpch_q18(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(j_lineitem),
     };
@@ -1207,6 +1223,7 @@ fn bench_diff_tpch_q21(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(antijoin),
     };
@@ -1329,6 +1346,7 @@ fn bench_diff_topk(c: &mut Criterion) {
                     filter: None,
                     second_arg: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
                 AggExpr {
                     function: AggFunc::CountStar,
@@ -1338,6 +1356,7 @@ fn bench_diff_topk(c: &mut Criterion) {
                     filter: None,
                     second_arg: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
             ],
             child: Box::new(make_scan("orders", 16384, &col_refs)),
@@ -1394,6 +1413,7 @@ fn bench_diff_aggregate_scaled(c: &mut Criterion) {
                     filter: None,
                     second_arg: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
                 AggExpr {
                     function: AggFunc::Avg,
@@ -1406,6 +1426,7 @@ fn bench_diff_aggregate_scaled(c: &mut Criterion) {
                     filter: None,
                     second_arg: None,
                     order_within_group: None,
+                    statistical_support: None,
                 },
             ],
             child: Box::new(make_scan("facts", 16384, &col_refs)),
@@ -1503,6 +1524,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(make_scan(
             "user_embeddings",
@@ -1528,6 +1550,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }],
         child: Box::new(make_scan(
             "cluster_embeddings",
@@ -1554,6 +1577,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::CountStar,
@@ -1563,6 +1587,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
             AggExpr {
                 function: AggFunc::VectorSum,
@@ -1575,6 +1600,7 @@ fn bench_diff_vector_avg(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             },
         ],
         child: Box::new(make_scan(
@@ -1680,6 +1706,7 @@ fn bench_a44_7_scan_agg_delta_sql(c: &mut Criterion) {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(make_scan("orders", 16384, &cols)),
         };

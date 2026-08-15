@@ -477,10 +477,7 @@ fn build_pk_hash_expr(
     if hash_args.len() == 1 {
         format!("pgtrickle.pg_trickle_hash({})", hash_args[0])
     } else {
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            hash_args.join(", "),
-        )
+        crate::hash::build_composite_hash_expr(&hash_args)
     }
 }
 

@@ -276,9 +276,18 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // use_l0 is true.
     let correction_cols = [dl_cols.as_slice(), dr_cols.as_slice()].concat().join(", ");
     let join_cond_correction = rewrite_join_condition(condition, left, "dl", right, "dr");
-    let hash_correction =
-        "pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, dr.__pgt_row_id::TEXT])"
-            .to_string();
+    let hash_correction = crate::hash::build_composite_hash_expr(&[
+        "dl.__pgt_row_id::TEXT".to_string(),
+        "dr.__pgt_row_id::TEXT".to_string(),
+    ]);
+    let hash_dl_r = crate::hash::build_composite_hash_expr(&[
+        "dl.__pgt_row_id::TEXT".to_string(),
+        "pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT".to_string(),
+    ]);
+    let hash_l_dr = crate::hash::build_composite_hash_expr(&[
+        "pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT".to_string(),
+        "dr.__pgt_row_id::TEXT".to_string(),
+    ]);
 
     let correction_sql = if !use_l0 && is_join_child(left) && !is_simple_child(left) {
         // Part 2 uses L₁: correction for (L₁ − L₀) ⋈ ΔR error.
@@ -336,7 +345,7 @@ JOIN {delta_right} dr ON {join_cond_correction}",
         format!(
             "\
 -- Part 1a: delta_left INSERTS JOIN current_right R₁ (matching insert rows)
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -349,7 +358,7 @@ UNION ALL
 -- R₀ via NOT EXISTS anti-join + old rows (DI-2)
 -- Ensures deleted left rows find their old right partner even when
 -- the right partner was simultaneously deleted.
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -361,7 +370,7 @@ UNION ALL
 -- Part 2: pre-change left (L₀) JOIN delta_right
 -- Uses L₀ instead of L₁ so right-side changes are attributed to the
 -- correct (old) group key — fixes G17-STBASE overcounting.
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
+SELECT {hash_l_dr} AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
 FROM {left_part2} l
@@ -444,7 +453,7 @@ WHERE dr.__pgt_action = 'D'
         format!(
             "\
 -- Part 1: delta_left JOIN current_right (matching rows)
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
+SELECT {hash_dl_r} AS __pgt_row_id,
        dl.__pgt_action,
        {part1_cols}
 FROM {delta_left} dl
@@ -453,7 +462,7 @@ JOIN {right_table} r ON {join_cond_part1}
 UNION ALL
 
 -- Part 2: pre-change left (L₀) JOIN delta_right
-SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
+SELECT {hash_l_dr} AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
 FROM {left_part2} l
