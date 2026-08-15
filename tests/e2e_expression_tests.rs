@@ -393,15 +393,15 @@ async fn test_distinct_on_accepted_via_rewrite() {
 async fn test_stddev_aggregate_supported_in_differential_mode() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE metrics (id INT PRIMARY KEY, val NUMERIC, grp TEXT)")
+    db.execute("CREATE TABLE public.metrics (id INT PRIMARY KEY, val NUMERIC, grp TEXT)")
         .await;
-    db.execute("INSERT INTO metrics VALUES (1, 10, 'a'), (2, 20, 'a'), (3, 30, 'b')")
+    db.execute("INSERT INTO public.metrics VALUES (1, 10, 'a'), (2, 20, 'a'), (3, 30, 'b')")
         .await;
 
     let result = db
         .try_execute(
             "SELECT pgtrickle.create_stream_table('stddev_st', \
-             $$ SELECT grp, STDDEV(val) AS std FROM metrics GROUP BY grp $$, '1m', 'AUTO')",
+             $$ SELECT grp, STDDEV(val) AS std FROM public.metrics GROUP BY grp $$, '1m', 'AUTO')",
         )
         .await;
     assert!(
