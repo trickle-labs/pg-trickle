@@ -1121,7 +1121,7 @@ async fn test_json_table_differential_mode() {
          FROM events e,
               JSON_TABLE(e.data, '$.tags[*]'
                 COLUMNS (tag TEXT PATH '$')) AS jt";
-    db.create_st("event_tags", query_event_tags, "1m", "DIFFERENTIAL")
+    db.create_st("event_tags", query_event_tags, "1m", "AUTO")
         .await;
     db.assert_st_matches_query("event_tags", query_event_tags)
         .await;

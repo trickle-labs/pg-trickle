@@ -1166,7 +1166,7 @@ async fn test_property_lateral_join_differential() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Test 15: EXCEPT — DIFFERENTIAL
+// Test 15: EXCEPT — AUTO falls back to FULL
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -1197,8 +1197,7 @@ async fn test_property_except_differential() {
     }
 
     let query = "SELECT val FROM prop_exc_a EXCEPT SELECT val FROM prop_exc_b";
-    db.create_st("prop_exc_st", query, "1m", "DIFFERENTIAL")
-        .await;
+    db.create_st("prop_exc_st", query, "1m", "AUTO").await;
     assert_invariant_except(&db, "prop_exc_st", query, seed, 0).await;
 
     for cycle in 1..=CYCLES {
@@ -1347,7 +1346,7 @@ async fn test_property_three_table_join_differential() {
     }
 }
 
-// ── Test 18: INTERSECT (DIFFERENTIAL) ──────────────────────────────────
+// ── Test 18: INTERSECT (AUTO falls back to FULL) ────────────────────────
 
 /// A7 — INTERSECT set operation with differential maintenance.
 #[tokio::test]
@@ -1379,8 +1378,7 @@ async fn test_property_intersect_differential() {
     }
 
     let query = "SELECT val FROM prop_int_a INTERSECT SELECT val FROM prop_int_b";
-    db.create_st("prop_int_st", query, "1m", "DIFFERENTIAL")
-        .await;
+    db.create_st("prop_int_st", query, "1m", "AUTO").await;
     assert_invariant(&db, "prop_int_st", query, seed, 0).await;
 
     for cycle in 1..=CYCLES {
