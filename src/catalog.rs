@@ -508,9 +508,9 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
-                     COALESCE(self_heal_work_mem_percent, 100), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0), \
-                     COALESCE(self_heal_success_streak, 0), \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
@@ -555,9 +555,9 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
-                     COALESCE(self_heal_work_mem_percent, 100), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0), \
-                     COALESCE(self_heal_success_streak, 0), \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
@@ -607,9 +607,9 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
-                     COALESCE(self_heal_work_mem_percent, 100), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0), \
-                     COALESCE(self_heal_success_streak, 0), \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
@@ -654,9 +654,9 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
-                     COALESCE(self_heal_work_mem_percent, 100), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0), \
-                     COALESCE(self_heal_success_streak, 0), \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
@@ -705,9 +705,9 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
-                     COALESCE(self_heal_work_mem_percent, 100), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0), \
-                     COALESCE(self_heal_success_streak, 0), \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
