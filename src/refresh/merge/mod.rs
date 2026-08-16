@@ -360,7 +360,29 @@ pub fn execute_differential_refresh(
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
 ) -> Result<(i64, i64), PgTrickleError> {
+    validate_differential_refresh_inputs(st, prev_frontier)?;
     execute_differential_refresh_with_tuning(st, prev_frontier, new_frontier, &st.runtime_tuning())
+}
+
+fn validate_differential_refresh_inputs(
+    st: &StreamTableMeta,
+    prev_frontier: &Frontier,
+) -> Result<(), PgTrickleError> {
+    if !st.is_populated {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Cannot run DIFFERENTIAL refresh on unpopulated stream table {}.{}; a FULL refresh is required first.",
+            st.pgt_schema, st.pgt_name
+        )));
+    }
+
+    if prev_frontier.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Cannot run DIFFERENTIAL refresh on {}.{}; no previous frontier exists.",
+            st.pgt_schema, st.pgt_name
+        )));
+    }
+
+    Ok(())
 }
 
 pub fn execute_differential_refresh_with_tuning(
@@ -369,24 +391,12 @@ pub fn execute_differential_refresh_with_tuning(
     new_frontier: &Frontier,
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
+    validate_differential_refresh_inputs(st, prev_frontier)?;
+
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
     // F10: record start time for OTLP span (nanoseconds since Unix epoch).
     let start_ns = crate::otel::now_ns();
-
-    if !st.is_populated {
-        return Err(PgTrickleError::InvalidArgument(format!(
-            "Cannot run DIFFERENTIAL refresh on unpopulated stream table {}.{}; a FULL refresh is required first.",
-            schema, name
-        )));
-    }
-
-    if prev_frontier.is_empty() {
-        return Err(PgTrickleError::InvalidArgument(format!(
-            "Cannot run DIFFERENTIAL refresh on {}.{}; no previous frontier exists.",
-            schema, name
-        )));
-    }
 
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
