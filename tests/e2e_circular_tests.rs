@@ -592,16 +592,16 @@ async fn test_circular_drop_member_clears_scc_id() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_a', \
          query => $$SELECT id, val FROM cyc_drop_src \
-           UNION \
-           SELECT DISTINCT b.id, b.val FROM cyc_drop_b b$$)",
+         UNION ALL \
+         SELECT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
     // ALTER B to reference A (completes the cycle)
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
          query => $$SELECT id, val FROM cyc_drop_src \
-           UNION \
-           SELECT DISTINCT a.id, a.val FROM cyc_drop_a a$$)",
+         UNION ALL \
+         SELECT a.id, a.val FROM cyc_drop_a a$$)",
     )
     .await;
 
