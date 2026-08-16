@@ -4,6 +4,7 @@
 //! interface for creating, altering, dropping, and refreshing stream tables.
 
 use pgrx::prelude::*;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -24,6 +25,7 @@ pub(crate) mod outbox;
 pub(crate) mod publication;
 pub(crate) mod scheduler_control;
 pub(crate) mod spec;
+pub(crate) mod validation;
 
 // ── G13-EH: Enriched error reporting ────────────────────────────────────────
 
@@ -853,6 +855,20 @@ fn validate_and_parse_query(
 
     // TopK detection — must run BEFORE reject_limit_offset
     let topk_info = crate::dvm::detect_topk_pattern(query)?;
+    if let Some(info) = &topk_info {
+        let limit = validation::positive_i32("topk_limit", info.limit_value)?;
+        let offset = info
+            .offset_value
+            .map(|value| validation::nonnegative_i32("topk_offset", value))
+            .transpose()?;
+        if let Some(offset) = offset
+            && limit.checked_add(offset).is_none()
+        {
+            return Err(PgTrickleError::InvalidArgument(
+                "topk_limit + topk_offset exceeds the supported integer range".to_string(),
+            ));
+        }
+    }
 
     // TopK parsing removes ORDER BY/LIMIT from the DVM tree. Inspect the
     // original query first so volatile or uninspectable ordering expressions
@@ -1518,6 +1534,25 @@ fn insert_catalog_and_deps(
     // HOT-1 (v0.73.0): heap fillfactor
     storage_fillfactor: Option<i32>,
 ) -> Result<i64, PgTrickleError> {
+    let topk_limit = vq
+        .topk_info
+        .as_ref()
+        .map(|info| validation::positive_i32("topk_limit", info.limit_value))
+        .transpose()?;
+    let topk_offset = vq
+        .topk_info
+        .as_ref()
+        .and_then(|info| info.offset_value)
+        .map(|value| validation::nonnegative_i32("topk_offset", value))
+        .transpose()?;
+    if let (Some(limit), Some(offset)) = (topk_limit, topk_offset)
+        && limit.checked_add(offset).is_none()
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "topk_limit + topk_offset exceeds the supported integer range".to_string(),
+        ));
+    }
+
     let pgt_id = StreamTableMeta::insert(
         pgt_relid,
         table_name,
@@ -1527,11 +1562,9 @@ fn insert_catalog_and_deps(
         schedule,
         refresh_mode,
         vq.parsed_tree.as_ref().map(|pr| pr.functions_used()),
-        vq.topk_info.as_ref().map(|i| i.limit_value as i32),
+        topk_limit,
         vq.topk_info.as_ref().map(|i| i.order_by_sql.as_str()),
-        vq.topk_info
-            .as_ref()
-            .and_then(|i| i.offset_value.map(|v| v as i32)),
+        topk_offset,
         dc,
         dsp,
         vq.has_keyless_source,
@@ -2617,13 +2650,221 @@ fn cdc_pause_status() -> TableIterator<
 
 // ── v0.36.0: Bulk operations (A25) ────────────────────────────────────────
 
+const BULK_STREAM_TABLE_LIMIT: usize = 1000;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BulkAlterStreamTableParams {
+    query: Option<String>,
+    schedule: Option<String>,
+    refresh_mode: Option<String>,
+    status: Option<String>,
+    diamond_consistency: Option<String>,
+    diamond_schedule_policy: Option<String>,
+    cdc_mode: Option<String>,
+    append_only: Option<bool>,
+    pooler_compatibility_mode: Option<bool>,
+    tier: Option<String>,
+    #[serde(alias = "fuse_mode")]
+    fuse: Option<String>,
+    fuse_ceiling: Option<i64>,
+    fuse_sensitivity: Option<i32>,
+    partition_by: Option<String>,
+    max_differential_joins: Option<i32>,
+    max_delta_fraction: Option<f64>,
+    post_refresh_action: Option<String>,
+    reindex_drift_threshold: Option<f64>,
+}
+
+impl BulkAlterStreamTableParams {
+    fn is_empty(&self) -> bool {
+        self.query.is_none()
+            && self.schedule.is_none()
+            && self.refresh_mode.is_none()
+            && self.status.is_none()
+            && self.diamond_consistency.is_none()
+            && self.diamond_schedule_policy.is_none()
+            && self.cdc_mode.is_none()
+            && self.append_only.is_none()
+            && self.pooler_compatibility_mode.is_none()
+            && self.tier.is_none()
+            && self.fuse.is_none()
+            && self.fuse_ceiling.is_none()
+            && self.fuse_sensitivity.is_none()
+            && self.partition_by.is_none()
+            && self.max_differential_joins.is_none()
+            && self.max_delta_fraction.is_none()
+            && self.post_refresh_action.is_none()
+            && self.reindex_drift_threshold.is_none()
+    }
+}
+
+fn canonicalize_bulk_stream_table_names(
+    names: &[Option<String>],
+    function_name: &str,
+) -> Result<Vec<String>, PgTrickleError> {
+    if names.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "{function_name}() names array is empty"
+        )));
+    }
+    if names.len() > BULK_STREAM_TABLE_LIMIT {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "{function_name}() accepts at most {BULK_STREAM_TABLE_LIMIT} names per call"
+        )));
+    }
+
+    let mut seen = HashSet::with_capacity(names.len());
+    let mut canonical_names = Vec::with_capacity(names.len());
+
+    for (index, name_opt) in names.iter().enumerate() {
+        let name = name_opt.as_deref().ok_or_else(|| {
+            PgTrickleError::InvalidArgument(format!(
+                "{function_name}() names[{index}] must not be NULL"
+            ))
+        })?;
+        let (schema, table_name) = parse_qualified_name(name)?;
+        let canonical_name = format!("{schema}.{table_name}");
+        if !seen.insert(canonical_name.clone()) {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "{function_name}() contains duplicate target \"{canonical_name}\""
+            )));
+        }
+        canonical_names.push(canonical_name);
+    }
+
+    Ok(canonical_names)
+}
+
+fn parse_bulk_alter_stream_table_params(
+    params: serde_json::Value,
+) -> Result<BulkAlterStreamTableParams, PgTrickleError> {
+    let obj = params.as_object().ok_or_else(|| {
+        PgTrickleError::InvalidArgument(
+            "bulk_alter_stream_tables() expects params to be a JSON object".into(),
+        )
+    })?;
+
+    if obj.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(
+            "bulk_alter_stream_tables() params object is empty".into(),
+        ));
+    }
+
+    if let Some((key, _)) = obj.iter().find(|(_, value)| value.is_null()) {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "bulk_alter_stream_tables() params field \"{key}\" must not be null"
+        )));
+    }
+
+    let parsed: BulkAlterStreamTableParams = serde_json::from_value(params).map_err(|e| {
+        PgTrickleError::InvalidArgument(format!(
+            "bulk_alter_stream_tables() invalid params JSON: {e}"
+        ))
+    })?;
+
+    if parsed.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(
+            "bulk_alter_stream_tables() params object is empty".into(),
+        ));
+    }
+    if let Some(value) = parsed.max_differential_joins {
+        validation::nonnegative_i32("max_differential_joins", i64::from(value))?;
+    }
+    if let Some(value) = parsed.max_delta_fraction {
+        validation::finite_fraction("max_delta_fraction", value)?;
+    }
+    if let Some(value) = parsed.fuse_ceiling
+        && value <= 0
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "fuse_ceiling must be a positive integer".into(),
+        ));
+    }
+    if let Some(value) = parsed.fuse_sensitivity
+        && value <= 0
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "fuse_sensitivity must be a positive integer".into(),
+        ));
+    }
+    if let Some(value) = parsed.reindex_drift_threshold
+        && (!value.is_finite() || !(0.0..=1.0).contains(&value) || value == 0.0)
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "reindex_drift_threshold must be finite and between 0.0 and 1.0".into(),
+        ));
+    }
+
+    Ok(parsed)
+}
+
+fn build_bulk_alter_stream_table_options<'a>(
+    name: &'a str,
+    params: &'a BulkAlterStreamTableParams,
+) -> alter::AlterStreamTableOptions<'a> {
+    alter::AlterStreamTableOptions {
+        name,
+        query: params.query.as_deref(),
+        schedule: params.schedule.as_deref(),
+        refresh_mode: params.refresh_mode.as_deref(),
+        status: params.status.as_deref(),
+        diamond_consistency: params.diamond_consistency.as_deref(),
+        diamond_schedule_policy: params.diamond_schedule_policy.as_deref(),
+        cdc_mode: params.cdc_mode.as_deref(),
+        append_only: params.append_only,
+        pooler_compatibility_mode: params.pooler_compatibility_mode,
+        tier: params.tier.as_deref(),
+        fuse: params.fuse.as_deref(),
+        fuse_ceiling: params.fuse_ceiling,
+        fuse_sensitivity: params.fuse_sensitivity,
+        partition_by: params.partition_by.as_deref(),
+        max_differential_joins: params.max_differential_joins,
+        max_delta_fraction: params.max_delta_fraction,
+        post_refresh_action: params.post_refresh_action.as_deref(),
+        reindex_drift_threshold: params.reindex_drift_threshold,
+    }
+}
+
+fn bulk_alter_stream_tables_impl(
+    names: Vec<Option<String>>,
+    params: serde_json::Value,
+) -> Result<i32, PgTrickleError> {
+    let canonical_names = canonicalize_bulk_stream_table_names(&names, "bulk_alter_stream_tables")?;
+    let params = parse_bulk_alter_stream_table_params(params)?;
+
+    for name in &canonical_names {
+        alter::prevalidate_stream_table_target(name)?;
+    }
+
+    for name in &canonical_names {
+        alter::alter_stream_table_impl(build_bulk_alter_stream_table_options(name, &params))?;
+    }
+
+    Ok(canonical_names.len() as i32)
+}
+
+fn bulk_drop_stream_tables_impl(names: Vec<Option<String>>) -> Result<i32, PgTrickleError> {
+    let canonical_names = canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables")?;
+    let ordered_names = alter::plan_drop_stream_tables(&canonical_names)?;
+
+    for name in &ordered_names {
+        alter::drop_stream_table_impl(name, false)?;
+    }
+
+    Ok(ordered_names.len() as i32)
+}
+
 /// A25 (v0.36.0): Alter multiple stream tables in a single call.
 ///
 /// Applies the same parameter set to each stream table in `names`. The
 /// `params` JSONB object accepts the same keys as `alter_stream_table()`:
 /// `schedule`, `refresh_mode`, `tier`, `fuse_mode`, `fuse_ceiling`, etc.
 ///
-/// Returns the number of stream tables successfully altered.
+/// Validates the full batch before mutating any table and aborts atomically on
+/// the first error.
+///
+/// Returns the number of stream tables altered.
 ///
 /// # Example
 /// ```sql
@@ -2634,60 +2875,20 @@ fn cdc_pause_status() -> TableIterator<
 /// ```
 #[pg_extern(schema = "pgtrickle")]
 fn bulk_alter_stream_tables(names: Vec<Option<String>>, params: pgrx::Json) -> i32 {
-    let mut count = 0i32;
-    let param_map: serde_json::Map<String, serde_json::Value> =
-        match serde_json::from_value(params.0) {
-            Ok(m) => m,
-            Err(e) => {
-                pgrx::error!("bulk_alter_stream_tables: invalid params JSON: {}", e);
-            }
-        };
-
-    for name_opt in names.iter().flatten() {
-        let name = name_opt.as_str();
-        // Parse schema.name from the provided name
-        let (schema, tbl) = if let Some((s, t)) = name.split_once('.') {
-            (s.to_string(), t.to_string())
-        } else {
-            ("public".to_string(), name.to_string())
-        };
-
-        // Build ALTER STREAM TABLE command by calling the existing alter function
-        // for each key/value pair in params.
-        let mut altered = false;
-        for (key, value) in &param_map {
-            let val_str = match value {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                _ => value.to_string(),
-            };
-            let alter_sql = format!(
-                "ALTER STREAM TABLE {}.{} SET ({} = '{}')",
-                schema, tbl, key, val_str
-            );
-            match Spi::run(&alter_sql) {
-                Ok(_) => {
-                    altered = true;
-                }
-                Err(e) => {
-                    pgrx::warning!("bulk_alter_stream_tables: failed to alter {}: {}", name, e);
-                }
-            }
-        }
-        if altered {
-            count += 1;
-        }
+    match bulk_alter_stream_tables_impl(names, params.0) {
+        Ok(count) => count,
+        Err(e) => raise_error_with_context(e),
     }
-    count
 }
 
 /// A25 (v0.36.0): Drop multiple stream tables in a single call.
 ///
 /// Drops each stream table in `names`, stopping CDC and removing the storage
-/// table. On failure for any table, logs a WARNING and continues to the next.
+/// table. The batch is validated up front and then executed in dependency-aware
+/// order so a parent and its descendants can be dropped together with RESTRICT
+/// semantics.
 ///
-/// Returns the number of stream tables successfully dropped.
+/// Returns the number of stream tables dropped.
 ///
 /// # Example
 /// ```sql
@@ -2697,33 +2898,10 @@ fn bulk_alter_stream_tables(names: Vec<Option<String>>, params: pgrx::Json) -> i
 /// ```
 #[pg_extern(schema = "pgtrickle")]
 fn bulk_drop_stream_tables(names: Vec<Option<String>>) -> i32 {
-    let mut count = 0i32;
-    for name_opt in names.iter().flatten() {
-        let name = name_opt.as_str();
-        let (schema, tbl) = if let Some((s, t)) = name.split_once('.') {
-            (s.to_string(), t.to_string())
-        } else {
-            ("public".to_string(), name.to_string())
-        };
-        let drop_sql = format!(
-            "SELECT pgtrickle.drop_stream_table('{}', '{}')",
-            tbl, schema
-        );
-        match Spi::run(&drop_sql) {
-            Ok(_) => {
-                count += 1;
-            }
-            Err(e) => {
-                pgrx::warning!(
-                    "bulk_drop_stream_tables: failed to drop {}.{}: {}",
-                    schema,
-                    tbl,
-                    e
-                );
-            }
-        }
+    match bulk_drop_stream_tables_impl(names) {
+        Ok(count) => count,
+        Err(e) => raise_error_with_context(e),
     }
-    count
 }
 
 // ── v0.36.0: CREATE STREAM TABLE SQL syntax (F11) ─────────────────────────
@@ -4269,5 +4447,96 @@ mod tests {
         let input = serde_json::json!([{"name": "t1"}]);
         let err = bulk_create_impl(input).unwrap_err();
         assert!(err.to_string().contains("missing required \"query\""));
+    }
+
+    #[test]
+    fn test_canonicalize_bulk_stream_table_names_canonicalizes_public_schema() {
+        let names = vec![
+            Some("orders".to_string()),
+            Some("analytics.daily".to_string()),
+        ];
+        let canonical =
+            canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables").unwrap();
+        assert_eq!(canonical, vec!["public.orders", "analytics.daily"]);
+    }
+
+    #[test]
+    fn test_canonicalize_bulk_stream_table_names_rejects_empty() {
+        let err = canonicalize_bulk_stream_table_names(&[], "bulk_drop_stream_tables").unwrap_err();
+        assert!(err.to_string().contains("names array is empty"));
+    }
+
+    #[test]
+    fn test_canonicalize_bulk_stream_table_names_rejects_null_entry() {
+        let err = canonicalize_bulk_stream_table_names(
+            &[Some("orders".to_string()), None],
+            "bulk_drop_stream_tables",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must not be NULL"));
+    }
+
+    #[test]
+    fn test_canonicalize_bulk_stream_table_names_rejects_duplicates() {
+        let err = canonicalize_bulk_stream_table_names(
+            &[
+                Some("orders".to_string()),
+                Some("public.orders".to_string()),
+            ],
+            "bulk_drop_stream_tables",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate target"));
+    }
+
+    #[test]
+    fn test_canonicalize_bulk_stream_table_names_rejects_over_limit() {
+        let names = vec![Some("orders".to_string()); BULK_STREAM_TABLE_LIMIT + 1];
+        let err =
+            canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables").unwrap_err();
+        assert!(err.to_string().contains("at most"));
+    }
+
+    #[test]
+    fn test_parse_bulk_alter_stream_table_params_rejects_non_object() {
+        let err = parse_bulk_alter_stream_table_params(serde_json::json!(["bad"])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expects params to be a JSON object")
+        );
+    }
+
+    #[test]
+    fn test_parse_bulk_alter_stream_table_params_rejects_empty_object() {
+        let err = parse_bulk_alter_stream_table_params(serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("params object is empty"));
+    }
+
+    #[test]
+    fn test_parse_bulk_alter_stream_table_params_rejects_null_field() {
+        let err = parse_bulk_alter_stream_table_params(serde_json::json!({"schedule": null}))
+            .unwrap_err();
+        assert!(err.to_string().contains("must not be null"));
+    }
+
+    #[test]
+    fn test_parse_bulk_alter_stream_table_params_rejects_unknown_field() {
+        let err = parse_bulk_alter_stream_table_params(serde_json::json!({"unknown": "value"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_parse_bulk_alter_stream_table_params_rejects_wrong_type() {
+        let err = parse_bulk_alter_stream_table_params(serde_json::json!({"append_only": "yes"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn test_parse_bulk_alter_stream_table_params_accepts_alias() {
+        let params =
+            parse_bulk_alter_stream_table_params(serde_json::json!({"fuse_mode": "auto"})).unwrap();
+        assert_eq!(params.fuse.as_deref(), Some("auto"));
     }
 }

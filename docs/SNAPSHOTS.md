@@ -6,7 +6,9 @@ derived state, bootstrap a replica, build deterministic test
 fixtures, or compare two refresh runs without having to re-derive
 the data.
 
-> **Supported feature**
+> **Supported feature.** Snapshot mutation is accepted only for a relation
+> recorded in `pgtrickle.pgt_snapshots` with matching OID, provenance token,
+> relation kind, schema, and stream-table owner.
 
 ---
 
@@ -44,6 +46,10 @@ The function returns the fully-qualified name of the new snapshot
 table. By default snapshots live in the `pgtrickle` schema and are
 named `snapshot_<table>_<epoch_ms>`.
 
+Each new snapshot stores an independent provenance token, exact relation OID,
+creator role, source `pgt_id`, and compatibility metadata in the catalog.
+Names alone are not proof of snapshot identity.
+
 You can choose your own name with the optional second argument:
 
 ```sql
@@ -75,8 +81,11 @@ SELECT pgtrickle.restore_from_snapshot(
 ```
 
 After a restore, pg_trickle reinitialises the stream table's frontier
-so that the next refresh reads only changes that occurred after the
-snapshot was taken.
+and validates the cataloged snapshot identity before changing storage. A
+drop/recreate lookalike, unresolved legacy row, incompatible column layout, or
+ownership mismatch is rejected before locking or truncating the stream table.
+Logical cluster restore rebinding is separate: it resets restored frontiers and
+rebuilds CDC before a protected FULL baseline.
 
 ### Drop an old snapshot
 
@@ -155,6 +164,9 @@ table will catch up correctly when CDC resumes.
   table to *replay* changes between the snapshot time and now, the
   source CDC slots / change buffers must still hold those entries.
   Otherwise, expect a full refresh on the next cycle.
+- Legacy snapshots whose OID and provenance cannot be proven remain cataloged
+  but are read-only until explicitly repaired; an ordinary table with a
+  plausible name is never accepted.
 
 ---
 

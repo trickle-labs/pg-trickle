@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     is_populated    BOOLEAN NOT NULL DEFAULT FALSE,
     data_timestamp  TIMESTAMPTZ,
     frontier        JSONB,
+    tentative_frontier JSONB,
     last_refresh_at TIMESTAMPTZ,
     consecutive_errors INT NOT NULL DEFAULT 0,
     needs_reinit    BOOLEAN NOT NULL DEFAULT FALSE,
@@ -37,8 +38,11 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     is_append_only  BOOLEAN NOT NULL DEFAULT FALSE,
     scc_id          INT,
     last_fixpoint_iterations INT,
-    max_differential_joins   INT,
-    max_delta_fraction       DOUBLE PRECISION,
+    max_differential_joins   INT
+        CHECK (max_differential_joins IS NULL OR max_differential_joins >= 0),
+    max_delta_fraction       DOUBLE PRECISION
+        CHECK (max_delta_fraction IS NULL OR
+               (max_delta_fraction >= 0.0 AND max_delta_fraction <= 1.0)),
     pooler_compatibility_mode BOOLEAN NOT NULL DEFAULT FALSE,
     refresh_tier    TEXT NOT NULL DEFAULT 'hot'
                      CHECK (refresh_tier IN ('hot', 'warm', 'cold', 'frozen')),
@@ -56,6 +60,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     downstream_publication_name TEXT,
     freshness_deadline_ms BIGINT,
     st_partition_key TEXT,
+    in_shadow_build BOOLEAN NOT NULL DEFAULT FALSE,
+    shadow_table_name TEXT,
 
     st_placement    TEXT NOT NULL DEFAULT 'local',
 
@@ -77,6 +83,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
 
     query_complexity_class TEXT,
+
 
     row_identity_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

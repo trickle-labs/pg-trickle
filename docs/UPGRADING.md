@@ -97,6 +97,37 @@ its row identity version `2`. Incremental refresh remains blocked until that
 reinitialization succeeds. `INTERSECT` and `EXCEPT` continue to use FULL/AUTO
 until their private multiplicity state is admitted by the semantic gate.
 
+### 0.83.0 → 0.84.0 catalog and privilege integrity
+
+This hop repairs migration-era catalogs and installs a deny-first function ACL
+policy. Before upgrading, inspect roles that rely on PostgreSQL's default
+`PUBLIC EXECUTE` privilege and generate exact grants from
+`scripts/sql_api_policy.json`; do not replace them with
+`GRANT EXECUTE ON ALL FUNCTIONS`.
+
+Run the preflight checks in every database:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+SELECT pgtrickle.migrate(); -- read-only diagnostic
+SELECT snapshot_id, snapshot_schema, snapshot_table
+FROM pgtrickle.pgt_snapshots
+WHERE snapshot_relid IS NULL OR provenance_token IS NULL;
+```
+
+Unresolved legacy snapshots remain cataloged but cannot be restored or dropped
+until their relation identity and provenance are repaired. Invalid numeric
+configuration (including NaN/infinity) and ambiguous ownership are rejected;
+the migration never clamps or guesses values.
+
+Install the released 0.83.0 shared library and SQL together, restart
+PostgreSQL, then run `ALTER EXTENSION pg_trickle UPDATE` before switching to
+the 0.84.0 package. Verify that `pgtrickle.version()`,
+`pg_extension.extversion`, and the latest migration audit row all report
+`0.84.0`. After a logical restore, keep scheduling disabled until
+`pgtrickle.restore_stream_tables()` completes protected FULL baselines and
+post-restore DML converges with each defining query.
+
 ### 5. Verify the Upgrade
 
 ```sql

@@ -12,6 +12,8 @@ mod e2e;
 
 use e2e::E2eDb;
 
+const CURRENT_PG_TRICKLE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 // ── DT-1: explain_query_rewrite ───────────────────────────────────────────
 
 /// DT-1: simple SELECT — only the `FINAL` pass should report a rewritten SQL.
@@ -833,5 +835,92 @@ async fn test_st_on_st_manual_refresh_succeeds() {
     assert!(
         matches,
         "Downstream ST should match its defining query after manual refresh"
+    );
+}
+
+/// DB-9: migrate() should be a read-only diagnostic when versions already align.
+#[tokio::test]
+async fn test_diagnostics_migrate_reports_aligned_versions() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_schema_version (version, description) \
+         VALUES ('{CURRENT_PG_TRICKLE_VERSION}', 'test current row') \
+         ON CONFLICT (version) DO UPDATE \
+         SET applied_at = now(), description = EXCLUDED.description"
+    ))
+    .await;
+
+    let status: String = db
+        .query_scalar("SELECT pgtrickle.migrate()::jsonb ->> 'status'")
+        .await;
+    let runtime_version: String = db
+        .query_scalar("SELECT pgtrickle.migrate()::jsonb ->> 'runtime_version'")
+        .await;
+    let extension_version: String = db
+        .query_scalar("SELECT pgtrickle.migrate()::jsonb ->> 'extension_version'")
+        .await;
+    let schema_version: String = db
+        .query_scalar("SELECT pgtrickle.migrate()::jsonb ->> 'schema_version'")
+        .await;
+    let up_to_date: bool = db
+        .query_scalar("SELECT (pgtrickle.migrate()::jsonb ->> 'up_to_date')::boolean")
+        .await;
+
+    assert_eq!(status, "ok");
+    assert_eq!(runtime_version, CURRENT_PG_TRICKLE_VERSION);
+    assert_eq!(extension_version, CURRENT_PG_TRICKLE_VERSION);
+    assert_eq!(schema_version, CURRENT_PG_TRICKLE_VERSION);
+    assert!(
+        up_to_date,
+        "migrate() should report aligned versions as healthy"
+    );
+}
+
+/// DB-9: migrate() must not mutate pgtrickle.pgt_schema_version when drift exists.
+#[tokio::test]
+async fn test_diagnostics_migrate_is_read_only_on_schema_version_drift() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(&format!(
+        "DELETE FROM pgtrickle.pgt_schema_version \
+         WHERE version = '{CURRENT_PG_TRICKLE_VERSION}'"
+    ))
+    .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_schema_version \
+         SET applied_at = now(), description = 'stale row for migrate() diagnostic test' \
+         WHERE version = '0.19.0'",
+    )
+    .await;
+
+    let before_count: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM pgtrickle.pgt_schema_version")
+        .await;
+    let status: String = db
+        .query_scalar("SELECT pgtrickle.migrate()::jsonb ->> 'status'")
+        .await;
+    let remediation: String = db
+        .query_scalar("SELECT pgtrickle.migrate()::jsonb ->> 'remediation'")
+        .await;
+    let remediation_sql: Option<String> = db
+        .query_scalar_opt("SELECT pgtrickle.migrate()::jsonb ->> 'remediation_sql'")
+        .await;
+    let after_count: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM pgtrickle.pgt_schema_version")
+        .await;
+
+    assert_eq!(status, "schema_version_mismatch");
+    assert!(
+        remediation.contains("read-only"),
+        "migrate() remediation should explain that it will not mutate the schema ledger: {remediation}"
+    );
+    assert_eq!(
+        remediation_sql, None,
+        "schema-version drift with matching runtime/extension should not pretend ALTER EXTENSION can fix it"
+    );
+    assert_eq!(
+        before_count, after_count,
+        "migrate() must not insert or update pgtrickle.pgt_schema_version"
     );
 }

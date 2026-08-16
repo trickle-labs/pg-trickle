@@ -7,6 +7,7 @@ use super::alter::{
     create_stream_table_impl,
 };
 use super::*;
+use serde::Deserialize;
 
 /// Create a new stream table.
 ///
@@ -190,103 +191,103 @@ pub(crate) fn bulk_create_impl(
             "bulk_create() definitions array is empty".into(),
         ));
     }
+    if defs.len() > 1_000 {
+        return Err(PgTrickleError::InvalidArgument(
+            "bulk_create() accepts at most 1000 definitions".into(),
+        ));
+    }
 
-    let mut results = Vec::with_capacity(defs.len());
-
+    let mut parsed = Vec::with_capacity(defs.len());
+    let mut targets = std::collections::HashSet::with_capacity(defs.len());
     for (i, def) in defs.iter().enumerate() {
-        let obj = def.as_object().ok_or_else(|| {
+        let object = def.as_object().ok_or_else(|| {
             PgTrickleError::InvalidArgument(format!(
-                "bulk_create() element [{}] is not a JSON object",
-                i
+                "bulk_create() element [{i}] is not a JSON object"
             ))
         })?;
-
-        let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+        if !object.contains_key("name") {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "bulk_create() element [{i}] missing required \"name\" string"
+            )));
+        }
+        if !object.contains_key("query") {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "bulk_create() element [{i}] missing required \"query\" string"
+            )));
+        }
+        let definition: BulkCreateDefinition =
+            serde_json::from_value(def.clone()).map_err(|e| {
+                PgTrickleError::InvalidArgument(format!(
+                    "bulk_create() element [{i}] has an invalid schema: {e}"
+                ))
+            })?;
+        let (schema, table_name) = parse_qualified_name(&definition.name).map_err(|e| {
             PgTrickleError::InvalidArgument(format!(
-                "bulk_create() element [{}] missing required \"name\" string",
-                i
+                "bulk_create() element [{i}] has invalid name {:?}: {e}",
+                definition.name
             ))
         })?;
+        if !targets.insert((schema, table_name)) {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "bulk_create() element [{i}] duplicates a target"
+            )));
+        }
+        let max_differential_joins = definition
+            .max_differential_joins
+            .map(|value| validation::nonnegative_i32("max_differential_joins", value))
+            .transpose()?;
+        let storage_fillfactor = definition
+            .fillfactor
+            .map(|value| validation::checked_i32("fillfactor", value))
+            .transpose()?;
+        if let Some(fillfactor) = storage_fillfactor
+            && !(10..=100).contains(&fillfactor)
+        {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "fillfactor must be between 10 and 100 (got {fillfactor})"
+            )));
+        }
+        if let Some(value) = definition.max_delta_fraction {
+            validation::finite_fraction("max_delta_fraction", value)?;
+        }
+        parsed.push((definition, max_differential_joins, storage_fillfactor));
+    }
 
-        let query = obj.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
-            PgTrickleError::InvalidArgument(format!(
-                "bulk_create() element [{}] \"{}\" missing required \"query\" string",
-                i, name
-            ))
-        })?;
+    let mut results = Vec::with_capacity(parsed.len());
 
-        let schedule = obj.get("schedule").and_then(|v| v.as_str());
-        let refresh_mode = obj
-            .get("refresh_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("AUTO");
-        let initialize = obj
-            .get("initialize")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let diamond_consistency = obj.get("diamond_consistency").and_then(|v| v.as_str());
-        let diamond_schedule_policy = obj.get("diamond_schedule_policy").and_then(|v| v.as_str());
-        let cdc_mode = obj.get("cdc_mode").and_then(|v| v.as_str());
-        let append_only = obj
-            .get("append_only")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let pooler_compatibility_mode = obj
-            .get("pooler_compatibility_mode")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let partition_by = obj.get("partition_by").and_then(|v| v.as_str());
-        let max_differential_joins = obj
-            .get("max_differential_joins")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
-        let max_delta_fraction = obj.get("max_delta_fraction").and_then(|v| v.as_f64());
-        // CITUS-7: optional distribution column for the output table
-        let output_distribution_column = obj
-            .get("output_distribution_column")
-            .and_then(|v| v.as_str());
-        // CORR-1/UX-1 (v0.36.0): temporal IVM mode
-        let temporal = obj
-            .get("temporal")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        // CORR-2/UX-3 (v0.36.0): columnar storage backend
-        let storage_backend = obj.get("storage_backend").and_then(|v| v.as_str());
-        // HOT-1 (v0.73.0): heap fillfactor
-        let storage_fillfactor = obj
-            .get("fillfactor")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
-
+    for (i, (definition, max_differential_joins, storage_fillfactor)) in
+        parsed.into_iter().enumerate()
+    {
         match create_stream_table_impl(CreateStreamTableOptions {
-            name,
-            query,
-            schedule,
-            refresh_mode_str: refresh_mode,
-            initialize,
-            diamond_consistency,
-            diamond_schedule_policy,
-            requested_cdc_mode: cdc_mode,
-            append_only,
-            pooler_compatibility_mode,
-            partition_by,
+            name: &definition.name,
+            query: &definition.query,
+            schedule: definition.schedule.as_deref(),
+            refresh_mode_str: &definition.refresh_mode,
+            initialize: definition.initialize,
+            diamond_consistency: definition.diamond_consistency.as_deref(),
+            diamond_schedule_policy: definition.diamond_schedule_policy.as_deref(),
+            requested_cdc_mode: definition.cdc_mode.as_deref(),
+            append_only: definition.append_only,
+            pooler_compatibility_mode: definition.pooler_compatibility_mode,
+            partition_by: definition.partition_by.as_deref(),
             max_differential_joins,
-            max_delta_fraction,
-            output_distribution_column,
-            temporal_mode: temporal,
-            storage_backend,
+            max_delta_fraction: definition.max_delta_fraction,
+            output_distribution_column: definition.output_distribution_column.as_deref(),
+            temporal_mode: definition.temporal,
+            storage_backend: definition.storage_backend.as_deref(),
             storage_fillfactor,
         }) {
             Ok(()) => {
                 // Look up pgt_id for the result
-                let (schema, table_name) =
-                    parse_qualified_name(name).unwrap_or_else(|_| ("public".into(), name.into()));
-                let pgt_id = StreamTableMeta::get_by_name(&schema, &table_name)
-                    .map(|st| st.pgt_id)
-                    .unwrap_or(-1);
+                let (schema, table_name) = parse_qualified_name(&definition.name).map_err(|e| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "bulk_create() element [{i}] has invalid name: {e}"
+                    ))
+                })?;
+                let pgt_id = StreamTableMeta::get_by_name(&schema, &table_name)?.pgt_id;
 
                 results.push(serde_json::json!({
-                    "name": name,
+                    "name": definition.name,
                     "status": "created",
                     "pgt_id": pgt_id,
                 }));
@@ -296,8 +297,8 @@ pub(crate) fn bulk_create_impl(
                 // be rolled back by PostgreSQL. Return immediate error
                 // with context about which definition failed.
                 return Err(PgTrickleError::InvalidArgument(format!(
-                    "bulk_create() failed on element [{}] \"{}\": {}",
-                    i, name, e
+                    "bulk_create() failed on element [{i}] {:?}: {e}",
+                    definition.name
                 )));
             }
         }
@@ -309,6 +310,51 @@ pub(crate) fn bulk_create_impl(
     );
 
     Ok(serde_json::Value::Array(results))
+}
+
+fn default_bulk_refresh_mode() -> String {
+    "AUTO".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BulkCreateDefinition {
+    name: String,
+    query: String,
+    #[serde(default)]
+    schedule: Option<String>,
+    #[serde(default = "default_bulk_refresh_mode")]
+    refresh_mode: String,
+    #[serde(default = "default_true")]
+    initialize: bool,
+    #[serde(default)]
+    diamond_consistency: Option<String>,
+    #[serde(default)]
+    diamond_schedule_policy: Option<String>,
+    #[serde(default)]
+    cdc_mode: Option<String>,
+    #[serde(default)]
+    append_only: bool,
+    #[serde(default)]
+    pooler_compatibility_mode: bool,
+    #[serde(default)]
+    partition_by: Option<String>,
+    #[serde(default)]
+    max_differential_joins: Option<i64>,
+    #[serde(default)]
+    max_delta_fraction: Option<f64>,
+    #[serde(default)]
+    output_distribution_column: Option<String>,
+    #[serde(default)]
+    temporal: bool,
+    #[serde(default)]
+    storage_backend: Option<String>,
+    #[serde(default)]
+    fillfactor: Option<i64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Create or replace a stream table.

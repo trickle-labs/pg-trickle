@@ -711,13 +711,26 @@ fn alter_stream_table_query(
     };
 
     let functions_used = vq.parsed_tree.as_ref().map(|pr| pr.functions_used());
-    let topk_limit = vq.topk_info.as_ref().map(|i| i.limit_value as i32);
+    let topk_limit = vq
+        .topk_info
+        .as_ref()
+        .map(|info| validation::positive_i32("topk_limit", info.limit_value))
+        .transpose()?;
     let topk_order_by_owned = vq.topk_info.as_ref().map(|i| i.order_by_sql.clone());
     let topk_order_by = topk_order_by_owned.as_deref();
     let topk_offset = vq
         .topk_info
         .as_ref()
-        .and_then(|i| i.offset_value.map(|v| v as i32));
+        .and_then(|i| i.offset_value)
+        .map(|value| validation::nonnegative_i32("topk_offset", value))
+        .transpose()?;
+    if let (Some(limit), Some(offset)) = (topk_limit, topk_offset)
+        && limit.checked_add(offset).is_none()
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "topk_limit + topk_offset exceeds the supported integer range".to_string(),
+        ));
+    }
 
     // F5 (v0.36.0): Online schema evolution — when the GUC is enabled and the
     // schema change only adds columns (no removals, no incompatible changes),
@@ -1212,6 +1225,14 @@ pub(crate) fn create_stream_table_impl(
             "invalid fillfactor value: {} (expected 10–100)",
             ff
         )));
+    }
+    if max_differential_joins.is_some_and(|mdj| mdj < 0) {
+        return Err(PgTrickleError::InvalidArgument(
+            "max_differential_joins must be non-negative".to_string(),
+        ));
+    }
+    if let Some(mdf) = max_delta_fraction {
+        validation::finite_fraction("max_delta_fraction", mdf)?;
     }
 
     // Parse and validate schedule
@@ -1730,6 +1751,33 @@ pub(crate) fn alter_stream_table_impl(
         post_refresh_action,
         reindex_drift_threshold,
     } = opts;
+    if let Some(value) = max_differential_joins {
+        validation::nonnegative_i32("max_differential_joins", i64::from(value))?;
+    }
+    if let Some(value) = max_delta_fraction {
+        validation::finite_fraction("max_delta_fraction", value)?;
+    }
+    if let Some(value) = fuse_ceiling_arg
+        && value <= 0
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "fuse_ceiling must be a positive integer".to_string(),
+        ));
+    }
+    if let Some(value) = fuse_sensitivity_arg
+        && value <= 0
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "fuse_sensitivity must be a positive integer".to_string(),
+        ));
+    }
+    if let Some(value) = reindex_drift_threshold
+        && (!value.is_finite() || !(0.0..=1.0).contains(&value) || value == 0.0)
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "reindex_drift_threshold must be finite and between 0.0 and 1.0".to_string(),
+        ));
+    }
     let (schema, table_name) = parse_qualified_name(name)?;
     let mut st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     let qualified_name = format!("{schema}.{table_name}");
@@ -2191,11 +2239,7 @@ pub(crate) fn alter_stream_table_impl(
 
     // DI-7: Update max_delta_fraction if explicitly set.
     if let Some(mdf) = max_delta_fraction {
-        if mdf < 0.0 {
-            return Err(PgTrickleError::InvalidArgument(
-                "max_delta_fraction must be a non-negative number (0 disables the limit)".into(),
-            ));
-        }
+        validation::finite_fraction("max_delta_fraction", mdf)?;
         let val: Option<f64> = if mdf == 0.0 { None } else { Some(mdf) };
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
@@ -2270,7 +2314,120 @@ fn drop_stream_table(name: &str, cascade: default!(bool, false)) {
     }
 }
 
-fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), PgTrickleError> {
+pub(crate) fn prevalidate_stream_table_target(
+    name: &str,
+) -> Result<StreamTableMeta, PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+    Ok(st)
+}
+
+fn order_bulk_drop_target_ids(
+    target_ids: &[i64],
+    downstream_by_id: &std::collections::HashMap<i64, Vec<i64>>,
+) -> Result<Vec<i64>, PgTrickleError> {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum VisitState {
+        Visiting,
+        Visited,
+    }
+
+    fn visit(
+        pgt_id: i64,
+        downstream_by_id: &std::collections::HashMap<i64, Vec<i64>>,
+        states: &mut std::collections::HashMap<i64, VisitState>,
+        ordered: &mut Vec<i64>,
+    ) -> Result<(), PgTrickleError> {
+        match states.get(&pgt_id) {
+            Some(VisitState::Visited) => return Ok(()),
+            Some(VisitState::Visiting) => {
+                return Err(PgTrickleError::InternalError(format!(
+                    "cycle detected while ordering bulk drop targets for pgt_id={pgt_id}"
+                )));
+            }
+            None => {}
+        }
+
+        states.insert(pgt_id, VisitState::Visiting);
+        for downstream_id in downstream_by_id.get(&pgt_id).into_iter().flatten() {
+            visit(*downstream_id, downstream_by_id, states, ordered)?;
+        }
+        states.insert(pgt_id, VisitState::Visited);
+        ordered.push(pgt_id);
+        Ok(())
+    }
+
+    let mut states = std::collections::HashMap::with_capacity(target_ids.len());
+    let mut ordered = Vec::with_capacity(target_ids.len());
+    for pgt_id in target_ids {
+        visit(*pgt_id, downstream_by_id, &mut states, &mut ordered)?;
+    }
+    Ok(ordered)
+}
+
+pub(crate) fn plan_drop_stream_tables(names: &[String]) -> Result<Vec<String>, PgTrickleError> {
+    let mut targets = Vec::with_capacity(names.len());
+    let mut requested_ids = HashSet::with_capacity(names.len());
+    let mut names_by_id = std::collections::HashMap::with_capacity(names.len());
+
+    for name in names {
+        let st = prevalidate_stream_table_target(name)?;
+        let qualified_name = format!("{}.{}", st.pgt_schema, st.pgt_name);
+        requested_ids.insert(st.pgt_id);
+        names_by_id.insert(st.pgt_id, qualified_name.clone());
+        targets.push((st.pgt_id, st.pgt_relid, qualified_name));
+    }
+
+    let mut downstream_by_id = std::collections::HashMap::with_capacity(targets.len());
+    for (pgt_id, relid, qualified_name) in &targets {
+        let downstream_ids = StDependency::get_downstream_pgt_ids(*relid)?;
+        let mut requested_downstream = Vec::new();
+        let mut external_dependents = Vec::new();
+
+        for downstream_id in downstream_ids {
+            if requested_ids.contains(&downstream_id) {
+                requested_downstream.push(downstream_id);
+            } else if let Some(downstream_st) = StreamTableMeta::get_by_id(downstream_id)? {
+                external_dependents.push(format!(
+                    "{}.{}",
+                    downstream_st.pgt_schema, downstream_st.pgt_name
+                ));
+            }
+        }
+
+        if !external_dependents.is_empty() {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "stream table {qualified_name} has dependent stream tables not included in this bulk drop: {}. \
+                 Include them in the names array or call pgtrickle.drop_stream_table('{qualified_name}', cascade => true).",
+                external_dependents.join(", ")
+            )));
+        }
+
+        downstream_by_id.insert(*pgt_id, requested_downstream);
+    }
+
+    let ordered_ids = order_bulk_drop_target_ids(
+        &targets
+            .iter()
+            .map(|(pgt_id, _, _)| *pgt_id)
+            .collect::<Vec<_>>(),
+        &downstream_by_id,
+    )?;
+
+    ordered_ids
+        .into_iter()
+        .map(|pgt_id| {
+            names_by_id.get(&pgt_id).cloned().ok_or_else(|| {
+                PgTrickleError::InternalError(format!(
+                    "missing bulk drop target metadata for pgt_id={pgt_id}"
+                ))
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), PgTrickleError> {
     let mut visited_pgt_ids = HashSet::new();
     drop_stream_table_impl_inner(name, cascade, &mut visited_pgt_ids)
 }
@@ -2776,4 +2933,42 @@ fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         st.pgt_id
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_order_bulk_drop_target_ids_puts_dependents_first() {
+        let target_ids = vec![1, 2, 3];
+        let downstream_by_id =
+            std::collections::HashMap::from([(1, vec![2, 3]), (2, vec![3]), (3, Vec::new())]);
+
+        let ordered = order_bulk_drop_target_ids(&target_ids, &downstream_by_id).unwrap();
+        assert_eq!(ordered, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn test_order_bulk_drop_target_ids_handles_independent_targets() {
+        let target_ids = vec![10, 20, 30];
+        let downstream_by_id =
+            std::collections::HashMap::from([(10, vec![20]), (20, Vec::new()), (30, Vec::new())]);
+
+        let ordered = order_bulk_drop_target_ids(&target_ids, &downstream_by_id).unwrap();
+        let pos_10 = ordered.iter().position(|id| *id == 10).unwrap();
+        let pos_20 = ordered.iter().position(|id| *id == 20).unwrap();
+        let pos_30 = ordered.iter().position(|id| *id == 30).unwrap();
+        assert!(pos_20 < pos_10);
+        assert!(pos_30 < ordered.len());
+    }
+
+    #[test]
+    fn test_order_bulk_drop_target_ids_rejects_cycles() {
+        let target_ids = vec![1, 2];
+        let downstream_by_id = std::collections::HashMap::from([(1, vec![2]), (2, vec![1])]);
+
+        let err = order_bulk_drop_target_ids(&target_ids, &downstream_by_id).unwrap_err();
+        assert!(err.to_string().contains("cycle detected"));
+    }
 }

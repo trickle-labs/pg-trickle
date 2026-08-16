@@ -76,7 +76,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.list_sources()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.list_sources(name)`. |
 | `pgtrickle.list_subscriptions()` | `pgtrickle` | `SetOf row` | Returns a table with columns (stream_table TEXT, channel TEXT, created_at TIMESTAMPTZ). |
 | `pgtrickle.metrics_summary()` | `pgtrickle` | `SetOf row` | v0.80.0 (O-3): Added `cleanup_backlog_count` and `cleanup_blocked_count` — total and blocked entries in `pgt_cleanup_status` for backlog trend monitoring. |
-| `pgtrickle.migrate()` | `pgtrickle` | `text` | This is a convenience function for users who upgrade the extension without using `ALTER EXTENSION pg_trickle UPDATE` — it ensures the catalog schema matches the library expectations. |
+| `pgtrickle.migrate()` | `pgtrickle` | `text` | This function performs no INSERT, UPDATE, DELETE, or DDL. |
 | `pgtrickle.parallel_job_status()` | `pgtrickle` | `` | Exposed as `pgtrickle.parallel_job_status(max_age_seconds)`. |
 | `pgtrickle.parse_duration_seconds()` | `pgtrickle` | `bigint (nullable)` | Used by SQL views to compare schedule. |
 | `pgtrickle.pause_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.pause_scheduler(ARRAY['public.my_view', 'analytics.summary']); ```. |
@@ -102,7 +102,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.repair_stream_table()` | `pgtrickle` | `text` | Steps performed (actions taken are summarized in the return text): 1. |
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
-| `pgtrickle.restore_stream_tables()` | `pgtrickle` | `void` | During a `pg_restore`, `pg_dump` will restore the base storage tables and the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers and internal wiring will be missing. |
+| `pgtrickle.restore_stream_tables()` | `pgtrickle` | `void` | During a `pg_restore`, `pg_dump` will restore the base storage tables and the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers, dependency wiring, frontiers, and ownership state cannot be safely reconstructed here without a protected reconciliation flow. |
 | `pgtrickle.resume_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.resume_scheduler(ARRAY['public.my_view']); ```. |
 | `pgtrickle.resume_stream_table()` | `pgtrickle` | `` | Resume a suspended stream table, clearing its consecutive error count and re-enabling automated and manual refreshes. |
 | `pgtrickle.schedule_recommendations()` | `pgtrickle` | `SetOf row` | PLAN-2 (v0.27.0): Return one schedule recommendation row per registered stream table, sortable by `delta_pct DESC`. |

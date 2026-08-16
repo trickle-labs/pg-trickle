@@ -71,7 +71,7 @@ pub(super) fn transfer_output_table_ownership(
     })
 }
 
-fn outer_user_name() -> Result<String, PgTrickleError> {
+pub(crate) fn outer_user_name() -> Result<String, PgTrickleError> {
     let invoker = outer_user_id();
     Spi::get_one_with_args::<String>(
         "SELECT rolname::text FROM pg_roles WHERE oid = $1",
@@ -81,7 +81,7 @@ fn outer_user_name() -> Result<String, PgTrickleError> {
     .ok_or_else(|| PgTrickleError::NotFound(format!("Role with OID {invoker} not found")))
 }
 
-fn outer_user_id() -> pg_sys::Oid {
+pub(crate) fn outer_user_id() -> pg_sys::Oid {
     unsafe {
         // SAFETY: PostgreSQL invokes SQL functions on its main backend thread;
         // the outer user remains the stream-table author throughout the call.
@@ -368,7 +368,7 @@ pub(super) fn cleanup_cdc_for_source(
             )",
             &[source_oid.into(), pgt_id.into()],
         )
-        .unwrap_or(Some(false))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false)
     } else {
         Spi::get_one_with_args::<bool>(
@@ -377,7 +377,7 @@ pub(super) fn cleanup_cdc_for_source(
             )",
             &[source_oid.into()],
         )
-        .unwrap_or(Some(false))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false)
     };
 
@@ -388,32 +388,13 @@ pub(super) fn cleanup_cdc_for_source(
         // the replication slot and publication first.
         if matches!(cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
             let slot_name = wal_decoder::slot_name_for_source(source_oid);
-            if let Err(e) = wal_decoder::drop_replication_slot(&slot_name) {
-                pgrx::warning!(
-                    "Failed to drop replication slot {} for oid {}: {}",
-                    slot_name,
-                    source_oid.to_u32(),
-                    e
-                );
-            }
-            if let Err(e) = wal_decoder::drop_publication(source_oid) {
-                pgrx::warning!(
-                    "Failed to drop publication for oid {}: {}",
-                    source_oid.to_u32(),
-                    e
-                );
-            }
+            wal_decoder::drop_replication_slot(&slot_name)?;
+            wal_decoder::drop_publication(source_oid)?;
         }
 
         // Drop the CDC trigger and trigger function (may not exist if
         // already in WAL mode, but safe to attempt)
-        if let Err(e) = cdc::drop_change_trigger(source_oid, &change_schema) {
-            pgrx::warning!(
-                "Failed to drop CDC trigger for oid {}: {}",
-                source_oid.to_u32(),
-                e
-            );
-        }
+        cdc::drop_change_trigger(source_oid, &change_schema)?;
 
         // Drop the change buffer table
         let buffer_name = cdc::buffer_base_name_for_oid(source_oid);
@@ -422,13 +403,14 @@ pub(super) fn cleanup_cdc_for_source(
             quote_identifier(&change_schema),
             quote_identifier(&buffer_name),
         );
-        let _ = Spi::run(&drop_buf_sql);
+        Spi::run(&drop_buf_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        let _ = Spi::run_with_args(
+        Spi::run_with_args(
             "DELETE FROM pgtrickle.pgt_change_buffers \
              WHERE source_kind = 'BASE' AND source_id = $1",
             &[i64::from(source_oid.to_u32()).into()],
-        );
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
         // EC-05: Drop the snapshot table (only exists for foreign table sources).
         let drop_snap_sql = format!(
@@ -436,39 +418,294 @@ pub(super) fn cleanup_cdc_for_source(
             quote_identifier(&change_schema),
             source_oid.to_u32(),
         );
-        let _ = Spi::run(&drop_snap_sql);
+        Spi::run(&drop_snap_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
         // Delete tracking record
-        let _ = Spi::run_with_args(
+        Spi::run_with_args(
             "DELETE FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1",
             &[source_oid.into()],
-        );
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     }
 
     Ok(())
 }
 
-/// SEC-1: Check that the current role owns the stream table's storage table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypedIdentifier(String);
+
+impl TypedIdentifier {
+    pub(crate) fn parse(raw: &str) -> Result<Self, PgTrickleError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(PgTrickleError::InvalidArgument(
+                "identifier component must not be empty".to_string(),
+            ));
+        }
+        if trimmed.contains('\0') {
+            return Err(PgTrickleError::InvalidArgument(
+                "identifier component must not contain NUL".to_string(),
+            ));
+        }
+
+        if !trimmed.starts_with('"') {
+            if trimmed.contains('"') {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "invalid quoted identifier component: {raw}"
+                )));
+            }
+            return Ok(Self(trimmed.to_string()));
+        }
+
+        let bytes = trimmed.as_bytes();
+        let mut idx = 1usize;
+        let mut value = String::with_capacity(trimmed.len().saturating_sub(2));
+
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'"' => {
+                    if idx + 1 < bytes.len() && bytes[idx + 1] == b'"' {
+                        value.push('"');
+                        idx += 2;
+                        continue;
+                    }
+
+                    if !trimmed[idx + 1..].trim().is_empty() {
+                        return Err(PgTrickleError::InvalidArgument(format!(
+                            "invalid trailing text after quoted identifier component: {raw}"
+                        )));
+                    }
+
+                    if value.is_empty() {
+                        return Err(PgTrickleError::InvalidArgument(
+                            "identifier component must not be empty".to_string(),
+                        ));
+                    }
+
+                    return Ok(Self(value));
+                }
+                b'\0' => {
+                    return Err(PgTrickleError::InvalidArgument(
+                        "identifier component must not contain NUL".to_string(),
+                    ));
+                }
+                _ => {
+                    let ch = trimmed[idx..].chars().next().ok_or_else(|| {
+                        PgTrickleError::InvalidArgument(format!(
+                            "invalid quoted identifier component: {raw}"
+                        ))
+                    })?;
+                    value.push(ch);
+                    idx += ch.len_utf8();
+                }
+            }
+        }
+
+        Err(PgTrickleError::InvalidArgument(format!(
+            "unterminated quoted identifier component: {raw}"
+        )))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+
+    pub(crate) fn quoted(&self) -> String {
+        quote_identifier(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QualifiedIdentifier {
+    schema: TypedIdentifier,
+    name: TypedIdentifier,
+}
+
+impl QualifiedIdentifier {
+    pub(crate) fn parse_with_default(
+        raw: &str,
+        default_schema: &str,
+    ) -> Result<Self, PgTrickleError> {
+        let (schema, name) = split_qualified_identifier(raw)?;
+        let schema = match schema {
+            Some(component) => TypedIdentifier::parse(component)?,
+            None => TypedIdentifier::parse(default_schema)?,
+        };
+        let name = TypedIdentifier::parse(name)?;
+        Ok(Self { schema, name })
+    }
+
+    pub(crate) fn schema(&self) -> &str {
+        self.schema.as_str()
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub(crate) fn into_parts(self) -> (String, String) {
+        (self.schema.into_inner(), self.name.into_inner())
+    }
+
+    pub(crate) fn quoted(&self) -> String {
+        format!("{}.{}", self.schema.quoted(), self.name.quoted())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelationIdentity {
+    pub(crate) qualified: QualifiedIdentifier,
+    pub(crate) relid: pg_sys::Oid,
+    pub(crate) relkind: char,
+    pub(crate) relowner: pg_sys::Oid,
+}
+
+fn split_qualified_identifier(raw: &str) -> Result<(Option<&str>, &str), PgTrickleError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(
+            "qualified identifier must not be empty".to_string(),
+        ));
+    }
+    if trimmed.contains('\0') {
+        return Err(PgTrickleError::InvalidArgument(
+            "qualified identifier must not contain NUL".to_string(),
+        ));
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut idx = 0usize;
+    let mut in_quotes = false;
+    let mut separator_idx = None;
+
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'"' => {
+                if in_quotes && idx + 1 < bytes.len() && bytes[idx + 1] == b'"' {
+                    idx += 2;
+                    continue;
+                }
+                in_quotes = !in_quotes;
+            }
+            b'.' if !in_quotes => {
+                if separator_idx.is_some() {
+                    return Err(PgTrickleError::InvalidArgument(format!(
+                        "qualified identifier must contain at most one top-level dot: {raw}"
+                    )));
+                }
+                separator_idx = Some(idx);
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    if in_quotes {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "unterminated quoted identifier: {raw}"
+        )));
+    }
+
+    Ok(match separator_idx {
+        Some(idx) => (Some(&trimmed[..idx]), &trimmed[idx + 1..]),
+        None => (None, trimmed),
+    })
+}
+
+pub(crate) fn resolve_relation_identity(
+    qualified: QualifiedIdentifier,
+) -> Result<Option<RelationIdentity>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT c.oid, c.relkind::text, c.relowner \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2",
+                None,
+                &[qualified.schema().into(), qualified.name().into()],
+            )
+            .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let row = rows.first();
+        let relid = row
+            .get::<pg_sys::Oid>(1)
+            .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("missing relation oid".to_string()))?;
+        let relkind = row
+            .get::<String>(2)
+            .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+            .and_then(|value| value.chars().next())
+            .ok_or_else(|| PgTrickleError::InternalError("missing relation kind".to_string()))?;
+        let relowner = row
+            .get::<pg_sys::Oid>(3)
+            .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("missing relation owner".to_string()))?;
+
+        Ok(Some(RelationIdentity {
+            qualified,
+            relid,
+            relkind,
+            relowner,
+        }))
+    })
+}
+
+fn current_schema_name() -> Result<String, PgTrickleError> {
+    Ok(Spi::get_one::<String>("SELECT current_schema()::text")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or_else(|| "public".to_string()))
+}
+
+/// Check whether `caller_oid` owns `relid` or is a superuser.
 ///
-/// Uses `pg_catalog.pg_class.relowner` to verify ownership. Superusers bypass
-/// the check (PostgreSQL convention). Returns `Ok(())` if the caller is the
-/// owner or a superuser, `Err(PermissionDenied)` otherwise.
+/// The caller role is supplied explicitly so SECURITY DEFINER code can validate
+/// the outer invoker via [`outer_user_id`] while invoker-only code can preserve
+/// `current_user` semantics by passing its effective role OID.
+pub(crate) fn role_owns_relation_or_is_superuser(
+    caller_oid: pgrx::pg_sys::Oid,
+    relid: pgrx::pg_sys::Oid,
+) -> Result<bool, PgTrickleError> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+             FROM pg_catalog.pg_class c \
+             WHERE c.oid = $2 \
+               AND ( \
+                   pg_has_role($1, c.relowner, 'USAGE') \
+                   OR EXISTS ( \
+                       SELECT 1 \
+                       FROM pg_catalog.pg_roles caller \
+                       WHERE caller.oid = $1 \
+                         AND caller.rolsuper \
+                   ) \
+               ) \
+         )",
+        &[caller_oid.into(), relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    .map(|value| value.unwrap_or(false))
+}
+
+/// SEC-1: Check that the outer invoker owns the stream table's storage table.
+///
+/// Uses `pg_catalog.pg_class.relowner` to verify ownership against the outer
+/// caller role rather than `current_user`, so SECURITY DEFINER APIs enforce the
+/// documented invoker ownership model. Superusers bypass the check.
 pub(super) fn check_stream_table_ownership(
     pgt_relid: pgrx::pg_sys::Oid,
     schema: &str,
     table_name: &str,
 ) -> Result<(), PgTrickleError> {
-    let is_owner_or_superuser = Spi::get_one_with_args::<bool>(
-        "SELECT pg_catalog.pg_table_is_visible($1) IS NOT NULL \
-         AND (pg_has_role(current_user, \
-              (SELECT relowner FROM pg_catalog.pg_class WHERE oid = $1), \
-              'USAGE') \
-              OR (SELECT rolsuper FROM pg_catalog.pg_roles \
-                  WHERE rolname = current_user))",
-        &[pgt_relid.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-    .unwrap_or(false);
+    let is_owner_or_superuser = role_owns_relation_or_is_superuser(outer_user_id(), pgt_relid)?;
 
     if !is_owner_or_superuser {
         return Err(PgTrickleError::PermissionDenied(format!(
@@ -511,17 +748,14 @@ pub fn detect_volatile_functions_pub(s: &str) -> Option<&'static str> {
 
 /// Parse a possibly schema-qualified name into `(schema, table)`.
 pub(super) fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> {
-    let parts: Vec<&str> = name.splitn(2, '.').collect();
-    match parts.len() {
-        // Public creation APIs use a locked SECURITY DEFINER search_path, so
-        // `current_schema()` would resolve to the extension schema. Preserve
-        // the documented default target for an unqualified stream table name.
-        1 => Ok(("public".to_string(), parts[0].to_string())),
-        2 => Ok((parts[0].to_string(), parts[1].to_string())),
-        _ => Err(PgTrickleError::InvalidArgument(format!(
-            "invalid table name: {name}"
-        ))),
-    }
+    QualifiedIdentifier::parse_with_default(name, "public").map(QualifiedIdentifier::into_parts)
+}
+
+pub(crate) fn parse_qualified_identifier_with_current_schema(
+    name: &str,
+) -> Result<QualifiedIdentifier, PgTrickleError> {
+    let current_schema = current_schema_name()?;
+    QualifiedIdentifier::parse_with_default(name, &current_schema)
 }
 
 /// A1-1: Validate the `partition_by` column name against the stream table's
@@ -2969,12 +3203,18 @@ pub(super) fn quote_ident(name: &str) -> String {
 }
 
 /// During a `pg_restore`, `pg_dump` will restore the base storage tables and
-/// the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers
-/// and internal wiring will be missing. This function re-establishes them.
+/// the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers,
+/// dependency wiring, frontiers, and ownership state cannot be safely
+/// reconstructed here without a protected reconciliation flow.
 #[pg_extern(schema = "pgtrickle")]
 pub fn restore_stream_tables() -> Result<(), crate::error::PgTrickleError> {
-    pgrx::info!("restore_stream_tables() called. This is a stub for the 0.8.0 pg_dump support.");
-    Ok(())
+    Err(restore_stream_tables_blocked_error())
+}
+
+fn restore_stream_tables_blocked_error() -> PgTrickleError {
+    PgTrickleError::InvalidArgument(
+        "pgtrickle.restore_stream_tables() is disabled: logical restore requires protected reinitialization/reconciliation of stream-table storage, dependencies, CDC state, frontiers, and ownership before refreshes may resume".to_string(),
+    )
 }
 
 // ── TEST-1: Unit tests for api/helpers.rs ─────────────────────────────────
@@ -3035,8 +3275,6 @@ mod tests {
 
     #[test]
     fn test_pqn_schema_dot_table() {
-        // parse_qualified_name calls SPI for single-part names, so we only
-        // test the two-part variant here (no backend needed).
         let result = parse_qualified_name("myschema.orders");
         assert_eq!(
             result.unwrap(),
@@ -3051,6 +3289,77 @@ mod tests {
             result.unwrap(),
             ("Public".to_string(), "MyTable".to_string())
         );
+    }
+
+    #[test]
+    fn test_pqn_default_schema_for_single_part() {
+        let result = parse_qualified_name("orders");
+        assert_eq!(
+            result.unwrap(),
+            ("public".to_string(), "orders".to_string())
+        );
+    }
+
+    #[test]
+    fn test_qi_parses_quoted_dot_components() {
+        let result = QualifiedIdentifier::parse_with_default(
+            r#"  "weird.schema"  .  "table.with.dot"  "#,
+            "public",
+        )
+        .unwrap();
+        assert_eq!(result.schema(), "weird.schema");
+        assert_eq!(result.name(), "table.with.dot");
+    }
+
+    #[test]
+    fn test_qi_parses_doubled_quotes_and_unicode() {
+        let result =
+            QualifiedIdentifier::parse_with_default("\"sch\"\"ema\".\"naïve\"\"table\"", "public")
+                .unwrap();
+        assert_eq!(result.schema(), r#"sch"ema"#);
+        assert_eq!(result.name(), r#"naïve"table"#);
+    }
+
+    #[test]
+    fn test_qi_preserves_semicolons_and_comment_markers() {
+        let result =
+            QualifiedIdentifier::parse_with_default("\"semi;--/*\".\"name*/--;\"", "public")
+                .unwrap();
+        assert_eq!(result.schema(), "semi;--/*");
+        assert_eq!(result.name(), "name*/--;");
+    }
+
+    #[test]
+    fn test_qi_rejects_nul_bytes() {
+        let err = QualifiedIdentifier::parse_with_default("good.\0bad", "public").unwrap_err();
+        assert!(format!("{err}").contains("NUL"));
+    }
+
+    #[test]
+    fn test_qi_rejects_empty_components() {
+        assert!(QualifiedIdentifier::parse_with_default("schema.", "public").is_err());
+        assert!(QualifiedIdentifier::parse_with_default(".table", "public").is_err());
+        assert!(QualifiedIdentifier::parse_with_default("\"\".table", "public").is_err());
+    }
+
+    #[test]
+    fn test_qi_rejects_multiple_top_level_dots() {
+        let err = QualifiedIdentifier::parse_with_default("one.two.three", "public").unwrap_err();
+        assert!(format!("{err}").contains("top-level dot"));
+    }
+
+    #[test]
+    fn test_qi_rejects_unterminated_quotes() {
+        let err = QualifiedIdentifier::parse_with_default(r#""unterminated.table"#, "public")
+            .unwrap_err();
+        assert!(format!("{err}").contains("unterminated"));
+    }
+
+    #[test]
+    fn test_restore_stream_tables_fails_closed() {
+        let msg = restore_stream_tables_blocked_error().to_string();
+        assert!(msg.contains("restore_stream_tables() is disabled"));
+        assert!(msg.contains("protected reinitialization/reconciliation"));
     }
 
     // ── quote_identifier ───────────────────────────────────────────────

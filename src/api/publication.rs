@@ -696,9 +696,8 @@ mod tests {
 
     #[test]
     fn test_parse_qualified_dots_in_schema() {
-        // Only the first dot is treated as schema separator.
-        let result = crate::api::helpers::parse_qualified_name_pub("my.schema.table").ok();
-        assert_eq!(result, Some(("my".to_string(), "schema.table".to_string())));
+        // Typed identifiers reject ambiguous three-part names.
+        assert!(crate::api::helpers::parse_qualified_name_pub("my.schema.table").is_err());
     }
 
     #[test]

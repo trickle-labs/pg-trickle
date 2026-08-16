@@ -46,11 +46,22 @@ permissions:
   packages: write
 
 jobs:
+  preflight:
+    name: Version sync check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check version references are in sync
+        run: ./scripts/check_version_sync.sh
+
   # ════════════════════════════════════════════════════════════════════════════
   # Job 1: Build each platform natively and push by digest
   # ════════════════════════════════════════════════════════════════════════════
   build:
     name: Build (${{ matrix.platform }})
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -133,6 +144,8 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - uses: actions/checkout@v7
+
       - name: Download amd64 digest
         uses: actions/download-artifact@v8
         with:
@@ -169,13 +182,25 @@ jobs:
             sleep 2
           done
 
+      - name: Validate OCI version label
+        run: |
+          ./scripts/check_version_sync.sh \
+            --image "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.digest.outputs.sha }}"
+
       - name: Smoke test — extension loads and version is correct
         run: |
           docker exec pgtrickle-ghcr-smoke \
-            psql -U postgres -v ON_ERROR_STOP=1 -c "
-              CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;
-              SELECT pgtrickle.version() AS ext_version;
-            "
+            psql -U postgres -v ON_ERROR_STOP=1 -q -c \
+            "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;"
+
+          RUNTIME_VERSION=$(docker exec pgtrickle-ghcr-smoke \
+            psql -U postgres -Atqc "SELECT pgtrickle.version()")
+          EXTENSION_VERSION=$(docker exec pgtrickle-ghcr-smoke \
+            psql -U postgres -Atqc \
+            "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+
+          test "$RUNTIME_VERSION" = "${{ needs.build.outputs.version }}"
+          test "$EXTENSION_VERSION" = "${{ needs.build.outputs.version }}"
 
       - name: Smoke test — stream table lifecycle
         run: |
