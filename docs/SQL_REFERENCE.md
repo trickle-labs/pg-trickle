@@ -149,6 +149,32 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 > (`p_name`, `p_retention_hours`). When calling functions with named
 > arguments in SQL, prefer bare names: `pgtrickle.create_stream_table(name => 'x', query => 'SELECT 1')`.
 
+<!-- v0.84.0-contract:start -->
+## v0.84.0 API contract
+
+The packaged SQL and `scripts/sql_api_policy.json` are the source of truth for
+overloads. CI compares each schema/name/identity-argument signature with this
+contract; function names alone are not sufficient.
+
+| API class | Default execute policy | Runtime rule |
+|---|---|---|
+| `public_read` | Explicit grant to `PUBLIC` | Side-effect-free read-only operation |
+| `owner_lifecycle` | Revoked from `PUBLIC` | Original caller owns the resolved stream-table relation |
+| `admin_global` | Revoked from `PUBLIC` | Original caller is superuser or extension owner |
+| `arbitrary_sql` | Revoked from `PUBLIC` | Always invoker; normal SQL privileges apply |
+| `trigger_entry` | Revoked from `PUBLIC` | PostgreSQL trigger/event-trigger invocation only |
+| `internal` | Revoked from `PUBLIC` | Extension-owned callers only |
+
+Bulk create/alter/drop inputs are closed and bounded to 1,000 items. Unknown
+keys, wrong JSON types, NULL entries, duplicate canonical targets, invalid
+numeric ranges, and integer overflow fail before the first mutation. Bulk
+operations are atomic.
+
+`pgtrickle.migrate()` is a read-only diagnostic. Only
+`ALTER EXTENSION pg_trickle UPDATE` and packaged migration SQL may change the
+extension schema or schema-version audit.
+<!-- v0.84.0-contract:end -->
+
 ### Core Lifecycle
 
 Create, modify, and manage the lifecycle of stream tables.

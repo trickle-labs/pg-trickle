@@ -37,6 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check version references are in sync
+        run: ./scripts/check_version_sync.sh
+
       - name: Set image tag
         id: tag
         run: |
@@ -59,6 +62,9 @@ jobs:
             VERSION=${{ steps.tag.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Validate OCI version label
+        run: ./scripts/check_version_sync.sh --image "${{ steps.tag.outputs.tag }}"
 
       # ── Smoke test ─────────────────────────────────────────────────────────
       # Start the container and verify:
@@ -86,10 +92,17 @@ jobs:
       - name: Smoke test — extension + version
         run: |
           docker exec pgtrickle-hub-smoke \
-            psql -U postgres -v ON_ERROR_STOP=1 -c "
-              CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;
-              SELECT pgtrickle.version() AS ext_version;
-            "
+            psql -U postgres -v ON_ERROR_STOP=1 -q -c \
+            "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;"
+
+          RUNTIME_VERSION=$(docker exec pgtrickle-hub-smoke \
+            psql -U postgres -Atqc "SELECT pgtrickle.version()")
+          EXTENSION_VERSION=$(docker exec pgtrickle-hub-smoke \
+            psql -U postgres -Atqc \
+            "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+
+          test "$RUNTIME_VERSION" = "${{ steps.tag.outputs.version }}"
+          test "$EXTENSION_VERSION" = "${{ steps.tag.outputs.version }}"
 
       - name: Smoke test — stream table lifecycle
         run: |

@@ -4,6 +4,169 @@
 //! watermarks, refresh groups, and recommendation endpoints.
 
 use super::*;
+use std::cmp::Ordering;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SchemaVersionAuditRow {
+    version: String,
+    applied_at: Option<String>,
+    description: Option<String>,
+}
+
+fn parse_release_version(input: &str) -> Option<(u64, u64, u64)> {
+    let base = input.split('-').next()?;
+    let mut parts = base.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn compare_release_versions(lhs: &str, rhs: &str) -> Option<Ordering> {
+    Some(parse_release_version(lhs)?.cmp(&parse_release_version(rhs)?))
+}
+
+fn latest_schema_version_audit_row() -> Option<SchemaVersionAuditRow> {
+    let schema_table_exists =
+        Spi::get_one::<bool>("SELECT to_regclass('pgtrickle.pgt_schema_version') IS NOT NULL")
+            .unwrap_or(None)
+            .unwrap_or(false);
+
+    if !schema_table_exists {
+        return None;
+    }
+
+    Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT version, applied_at::text, description \
+                 FROM pgtrickle.pgt_schema_version \
+                 ORDER BY applied_at DESC, version DESC LIMIT 1",
+                None,
+                &[],
+            )
+            .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?;
+
+        for row in result {
+            let version = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            if version.is_empty() {
+                continue;
+            }
+            return Ok::<_, crate::error::PgTrickleError>(Some(SchemaVersionAuditRow {
+                version,
+                applied_at: row.get::<String>(2).unwrap_or(None),
+                description: row.get::<String>(3).unwrap_or(None),
+            }));
+        }
+
+        Ok::<_, crate::error::PgTrickleError>(None)
+    })
+    .unwrap_or(None)
+}
+
+fn build_migrate_report(
+    runtime_version: &str,
+    extension_version: Option<&str>,
+    schema_audit: Option<&SchemaVersionAuditRow>,
+) -> serde_json::Value {
+    let schema_version = schema_audit.map(|row| row.version.as_str());
+    let runtime_matches_extension = extension_version == Some(runtime_version);
+    let extension_matches_schema =
+        extension_version.is_some() && extension_version == schema_version;
+    let runtime_matches_schema = schema_version == Some(runtime_version);
+
+    let (status, remediation, remediation_sql) = match extension_version {
+        None => (
+            "extension_not_installed",
+            format!(
+                "Install the packaged pg_trickle extension at version {runtime_version} before relying on migration diagnostics."
+            ),
+            Some(format!(
+                "CREATE EXTENSION pg_trickle VERSION '{runtime_version}' CASCADE;"
+            )),
+        ),
+        Some(ext_version)
+            if ext_version == runtime_version && schema_version == Some(runtime_version) =>
+        {
+            ("ok", "No action required.".to_string(), None)
+        }
+        Some(ext_version) if ext_version == runtime_version => (
+            "schema_version_mismatch",
+            match schema_version {
+                Some(version) => format!(
+                    "The loaded library and SQL extension are both at {runtime_version}, but the latest pgtrickle.pgt_schema_version row is {version}. Reinstall or restore the packaged {runtime_version} SQL; pgtrickle.migrate() is read-only and will not advance the schema-version ledger."
+                ),
+                None => format!(
+                    "The loaded library and SQL extension are both at {runtime_version}, but pgtrickle.pgt_schema_version is missing or empty. Reinstall or restore the packaged {runtime_version} SQL; pgtrickle.migrate() is read-only and will not seed the schema-version ledger."
+                ),
+            },
+            None,
+        ),
+        Some(ext_version)
+            if compare_release_versions(ext_version, runtime_version) == Some(Ordering::Less) =>
+        {
+            (
+                "alter_extension_required",
+                format!(
+                    "The loaded library is {runtime_version}, but pg_extension is still at {ext_version}. Apply the packaged SQL upgrade before using the newer runtime."
+                ),
+                Some(format!(
+                    "ALTER EXTENSION pg_trickle UPDATE TO '{runtime_version}';"
+                )),
+            )
+        }
+        Some(ext_version)
+            if compare_release_versions(ext_version, runtime_version)
+                == Some(Ordering::Greater)
+                && schema_version == Some(ext_version) =>
+        {
+            (
+                "restart_required",
+                format!(
+                    "The SQL extension and schema-version ledger are already at {ext_version}, but PostgreSQL is still running the older {runtime_version} shared library. Restart PostgreSQL to load the updated pg_trickle library."
+                ),
+                None,
+            )
+        }
+        Some(ext_version) => (
+            "version_mismatch",
+            match schema_version {
+                Some(version) => format!(
+                    "Runtime/extension/schema versions disagree (runtime={runtime_version}, extension={ext_version}, schema={version}). If you already ran ALTER EXTENSION, restart PostgreSQL; otherwise apply the packaged upgrade ending at {runtime_version}."
+                ),
+                None => format!(
+                    "Runtime and extension versions disagree (runtime={runtime_version}, extension={ext_version}), and pgtrickle.pgt_schema_version is missing or empty. If you already ran ALTER EXTENSION, restart PostgreSQL; otherwise apply the packaged upgrade ending at {runtime_version}."
+                ),
+            },
+            Some(format!(
+                "ALTER EXTENSION pg_trickle UPDATE TO '{runtime_version}';"
+            )),
+        ),
+    };
+
+    serde_json::json!({
+        "runtime_version": runtime_version,
+        "extension_version": extension_version,
+        "schema_version": schema_version,
+        "latest_schema_migration": schema_audit.map(|row| {
+            serde_json::json!({
+                "version": row.version,
+                "applied_at": row.applied_at,
+                "description": row.description,
+            })
+        }),
+        "runtime_matches_extension": runtime_matches_extension,
+        "extension_matches_schema": extension_matches_schema,
+        "runtime_matches_schema": runtime_matches_schema,
+        "up_to_date": runtime_matches_extension && extension_matches_schema,
+        "status": status,
+        "remediation": remediation,
+        "remediation_sql": remediation_sql,
+    })
+}
 
 #[pg_extern(schema = "pgtrickle", immutable, parallel_safe)]
 pub(super) fn version() -> &'static str {
@@ -49,40 +212,32 @@ pub(super) fn version_check() -> String {
     )
 }
 
-/// DB-9: Check the current schema version and apply pending migrations.
+/// DB-9: Report runtime, extension, and schema-version state without mutating.
 ///
-/// Compares the installed schema version (from `pgtrickle.pgt_schema_version`)
-/// against the library version compiled into the `.so`. Returns a summary
-/// string indicating whether migration was needed.
+/// Returns a JSON string describing the loaded pg_trickle shared library
+/// version, `pg_extension.extversion`, and the latest
+/// `pgtrickle.pgt_schema_version` audit row, plus the correct remediation when
+/// they diverge.
 ///
-/// This is a convenience function for users who upgrade the extension without
-/// using `ALTER EXTENSION pg_trickle UPDATE` — it ensures the catalog schema
-/// matches the library expectations.
+/// This function performs no INSERT, UPDATE, DELETE, or DDL. Only packaged
+/// install/upgrade SQL may advance `pgtrickle.pgt_schema_version`.
 #[pg_extern(schema = "pgtrickle")]
 pub(super) fn migrate() -> String {
-    let lib_version = env!("CARGO_PKG_VERSION");
-    let current_version: Option<String> = Spi::get_one::<String>(
-        "SELECT version FROM pgtrickle.pgt_schema_version \
-         ORDER BY applied_at DESC LIMIT 1",
+    let runtime_version = env!("CARGO_PKG_VERSION");
+    let extension_version: Option<String> = Spi::get_one::<String>(
+        "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_trickle'",
     )
     .unwrap_or(None);
+    let schema_audit = latest_schema_version_audit_row();
 
-    let cur = current_version.as_deref().unwrap_or("unknown");
-    if cur == lib_version {
-        return format!("pg_trickle schema is up to date ({})", lib_version);
-    }
-
-    // Insert the new version — the library code is the source of truth.
-    let _ = Spi::run_with_args(
-        "INSERT INTO pgtrickle.pgt_schema_version (version, description) \
-         VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
-        &[
-            lib_version.into(),
-            format!("Migrated from {} via pgtrickle.migrate()", cur).into(),
-        ],
-    );
-
-    format!("pg_trickle schema migrated: {} → {}", cur, lib_version,)
+    serde_json::to_string(&build_migrate_report(
+        runtime_version,
+        extension_version.as_deref(),
+        schema_audit.as_ref(),
+    ))
+    .unwrap_or_else(|_| {
+        "{\"status\":\"serialization_error\",\"remediation\":\"Inspect pgtrickle version state manually.\"}".to_string()
+    })
 }
 
 /// Bump the shared-memory DAG rebuild signal.
@@ -685,6 +840,7 @@ pub(super) fn reset_fuse(name: &str, action: default!(&str, "'apply'")) {
 pub(super) fn reset_fuse_impl(name: &str, action: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
     if st.fuse_state != "blown" {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -2319,6 +2475,9 @@ fn preview_depth(tree: &crate::dvm::parser::OpTree) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::{SchemaVersionAuditRow, build_migrate_report, compare_release_versions};
+    use std::cmp::Ordering;
+
     #[test]
     fn test_version_returns_cargo_version() {
         let v = env!("CARGO_PKG_VERSION");
@@ -2331,6 +2490,97 @@ mod tests {
         let v = env!("CARGO_PKG_VERSION");
         assert_ne!(v, "0.0.0");
         assert_ne!(v, "@CARGO_VERSION@");
+    }
+
+    #[test]
+    fn test_compare_release_versions_orders_numeric_versions() {
+        assert_eq!(
+            compare_release_versions("0.83.0", "0.84.0"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_release_versions("0.84.0", "0.84.0"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_release_versions("0.85.0", "0.84.0"),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn test_migrate_report_marks_matching_versions_ok() {
+        let report = build_migrate_report(
+            "0.84.0",
+            Some("0.84.0"),
+            Some(&SchemaVersionAuditRow {
+                version: "0.84.0".into(),
+                applied_at: Some("2026-08-16 09:00:00+00".into()),
+                description: Some("current".into()),
+            }),
+        );
+
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["up_to_date"], true);
+        assert_eq!(report["remediation_sql"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_migrate_report_requires_alter_for_older_sql() {
+        let report = build_migrate_report(
+            "0.84.0",
+            Some("0.83.0"),
+            Some(&SchemaVersionAuditRow {
+                version: "0.83.0".into(),
+                applied_at: None,
+                description: None,
+            }),
+        );
+
+        assert_eq!(report["status"], "alter_extension_required");
+        assert_eq!(
+            report["remediation_sql"],
+            "ALTER EXTENSION pg_trickle UPDATE TO '0.84.0';"
+        );
+    }
+
+    #[test]
+    fn test_migrate_report_requires_restart_for_newer_sql() {
+        let report = build_migrate_report(
+            "0.83.0",
+            Some("0.84.0"),
+            Some(&SchemaVersionAuditRow {
+                version: "0.84.0".into(),
+                applied_at: None,
+                description: None,
+            }),
+        );
+
+        assert_eq!(report["status"], "restart_required");
+        assert_eq!(report["remediation_sql"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_migrate_report_is_read_only_diagnostic_for_schema_drift() {
+        let report = build_migrate_report(
+            "0.84.0",
+            Some("0.84.0"),
+            Some(&SchemaVersionAuditRow {
+                version: "0.83.0".into(),
+                applied_at: None,
+                description: Some("stale".into()),
+            }),
+        );
+
+        assert_eq!(report["status"], "schema_version_mismatch");
+        assert_eq!(report["up_to_date"], false);
+        assert_eq!(report["remediation_sql"], serde_json::Value::Null);
+        assert!(
+            report["remediation"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only")
+        );
     }
 
     #[test]

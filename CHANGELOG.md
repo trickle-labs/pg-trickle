@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.84.0 — Catalog, Privilege & Upgrade Integrity](#0840--catalog-privilege--upgrade-integrity)
 - [0.83.0 — DVM Semantic Fidelity Gate](#0830--dvm-semantic-fidelity-gate)
 - [0.81.1 — Non-superuser stream-table creation](#0811--non-superuser-stream-table-creation)
 - [0.81.0 — Observability, Self-Tuning & Quick Wins](#0810--observability-self-tuning--quick-wins)
@@ -126,6 +127,31 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.84.0] — Catalog, Privilege & Upgrade Integrity
+
+### Changed
+
+- Fresh-install and upgrade catalogs are repaired and compared with a
+  bidirectional normalized manifest.
+- SQL function privileges use an explicit deny-first policy; runtime lifecycle
+  authorization checks the original caller and canonical relation owner.
+- Bulk lifecycle APIs validate closed, bounded input and abort atomically.
+- Snapshot identity uses cataloged relation OIDs and provenance rather than
+  names alone.
+- Logical restore is fail-closed until durable identities, CDC resources, and
+  protected FULL baselines are rebuilt.
+- Version and upgrade checks cover package metadata, runtime state, migration
+  audit, and release artifacts.
+
+### Fixed
+
+- `pgtrickle.migrate()` is now a read-only diagnostic; only extension upgrade
+  SQL advances the schema-version audit.
+- Numeric API inputs reject non-finite, out-of-range, and narrowing values
+  before catalog or storage mutation.
 
 ---
 

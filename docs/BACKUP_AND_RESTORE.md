@@ -1,19 +1,19 @@
 # Backup and Restore
 
-pg_trickle plays nicely with every standard PostgreSQL backup
-mechanism — `pg_dump`, `pg_basebackup`, pgBackRest, WAL archiving,
-PITR, and pre-built tools like CloudNativePG and Crunchy Operator.
-The catalog, change buffers, and stream-table contents are all
-ordinary PostgreSQL relations, so they get backed up like anything
-else.
+pg_trickle supports physical PostgreSQL backups directly. Logical restore is
+also supported, but it is an explicit reconciliation operation: restored OIDs,
+frontiers, dependency rows, and CDC infrastructure are not trusted. The
+extension rebuilds derived state and requires a protected FULL baseline before
+differential refresh resumes.
 
 This page walks through the recommended workflows, the gotchas, and
 how the [Snapshots](SNAPSHOTS.md) API fits in.
 
-> **TL;DR.** Physical backups (pgBackRest, `pg_basebackup`) just
-> work. `pg_dump` works too, with one small ordering rule. Snapshots
-> are an *application-level* tool for derived state, not a backup
-> replacement.
+> **TL;DR.** Physical backups preserve all runtime state. For `pg_dump` /
+> `pg_restore`, disable `pg_trickle.enabled` during the restore, run the
+> reconciliation helper, and wait for every stream table to complete its
+> protected FULL baseline before re-enabling scheduled differential refresh.
+> Snapshots are provenance-checked derived data, not a backup replacement.
 
 ---
 
@@ -42,7 +42,9 @@ and (in WAL CDC mode) the replication slots' on-disk state.
 3. The pg_trickle launcher discovers each database on the next
    tick (~10 s) and resumes the per-database scheduler.
 
-There is nothing pg_trickle-specific to do.
+After a physical restore, verify the launcher and CDC resources before
+resuming application writes. Physical restore preserves OIDs and runtime
+state, but a promoted or rebuilt cluster may still require WAL-slot repair.
 
 **Point-in-time recovery (PITR).** PITR works as expected. If you
 recover to a point in the middle of a refresh, that refresh is
@@ -60,9 +62,10 @@ see one `WARNING` per source; the system continues to work.
 
 ## Logical backups (`pg_dump` / `pg_restore`)
 
-`pg_dump` produces a portable SQL script (or directory archive)
-that can be replayed into a fresh database. pg_trickle objects are
-included automatically because they are normal extension objects.
+`pg_dump` produces a portable SQL script (or directory archive). Durable
+pg_trickle configuration is included according to the extension's
+`pg_extension_config_dump` policy; derived CDC/runtime state is excluded or
+reset and rebuilt during reconciliation.
 
 **The one ordering rule:** restore must follow the standard
 PostgreSQL "schema, then data, then constraints/indexes" order.
@@ -81,15 +84,24 @@ createdb mydb_restored
 pg_restore --dbname=mydb_restored --jobs=4 mydb.dump
 ```
 
-Then, if you want to verify everything came back:
+Before restore, stop scheduling and avoid application writes. After restore,
+run the reconciliation helper and keep the scheduler fail-closed until all
+stream tables have a new FULL baseline:
 
 ```sql
--- Should list every stream table
+-- Inspect durable configuration and reconciliation state
 SELECT * FROM pgtrickle.pgt_status();
 
--- Force a refresh on each one to confirm CDC is wired
-SELECT pgtrickle.refresh_stream_table(pgt_name)
-FROM pgtrickle.stream_tables_info;
+SELECT pgtrickle.restore_stream_tables();
+```
+
+If reconciliation reports an unresolved relation or legacy snapshot, do not
+guess from a similarly named table. Repair or recreate the object, then retry:
+
+```sql
+SELECT pgtrickle.repair_stream_table(pgt_name)
+FROM pgtrickle.stream_tables_info
+WHERE status IN ('ERROR', 'SUSPENDED');
 ```
 
 ### What `pg_dump` does and does not capture
@@ -98,11 +110,12 @@ FROM pgtrickle.stream_tables_info;
 |---|---|
 | Source tables (your data) | ✅ |
 | Stream-table storage (your derived data) | ✅ |
-| `pgtrickle.*` catalog rows | ✅ |
-| CDC trigger definitions | ✅ (recreated when the extension reapplies them) |
-| `pgtrickle_changes.*` change buffers | ✅ — but typically empty after a clean dump |
+| Durable `pgtrickle.*` configuration | ✅ |
+| Dependency and CDC registries | ✕ — derived and rebuilt |
+| CDC trigger definitions | ✕ — recreated during reconciliation |
+| `pgtrickle_changes.*` change buffers | ✕ — derived and rebuilt |
 | WAL replication slots (WAL CDC mode) | ✕ (slots are not dumpable; the scheduler recreates them) |
-| Refresh history | ✅ |
+| Refresh history and runtime summaries | ✕ — operational history is excluded |
 
 If you do not need the audit history, you can shrink the dump with
 `pg_dump --exclude-table='pgtrickle.pgt_refresh_history'`.
@@ -156,8 +169,8 @@ See [CloudNativePG integration](integrations/cloudnativepg.md).
 - [ ] If using WAL CDC: alerting on
       `pg_trickle.slot_lag_critical_threshold_mb`.
 - [ ] Periodic snapshot of business-critical stream tables.
-- [ ] Documented restore procedure tested at least once
-      (snapshot → fresh database → `pg_trickle.health_check()`).
+- [ ] Documented logical-restore procedure tested with changed relation OIDs,
+      reconciliation, and post-restore DML.
 - [ ] Off-site copy of backups (managed service, S3 with
       cross-region replication, etc.).
 - [ ] Monitoring on `pg_trickle.pgt_refresh_history` for restore

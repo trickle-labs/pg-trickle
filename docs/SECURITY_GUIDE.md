@@ -199,7 +199,21 @@ CREATE ROLE pgtrickle_admin NOLOGIN NOINHERIT;
 
 -- Extension function access
 GRANT USAGE   ON SCHEMA pgtrickle          TO pgtrickle_admin;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO pgtrickle_admin;
+-- Use the exact grants emitted by scripts/check_sql_api_policy.py.
+-- Do not grant EXECUTE on every function: internal and trigger-entry
+-- functions are intentionally excluded.
+-- Example lifecycle grants:
+GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table(
+    text, text, text, text, boolean, text, text, text, boolean, boolean,
+    text, integer, double precision, text, boolean, text, integer
+) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(
+    text, text, text, text, text, text, text, text, boolean, boolean,
+    text, text, bigint, integer, text, integer, double precision, text,
+    double precision
+) TO pgtrickle_admin;
+GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean)
+    TO pgtrickle_admin;
 
 -- Create stream tables in the public schema
 GRANT CREATE  ON SCHEMA public TO pgtrickle_admin;

@@ -38,6 +38,18 @@ async fn setup_ownership_test(db: &E2eDb) {
         .await;
     db.execute("GRANT SELECT ON ALL TABLES IN SCHEMA pgtrickle TO sec1_owner, sec1_other")
         .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) \
+         TO sec1_owner, sec1_other",
+    )
+    .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(\
+            text, text, text, text, text, text, text, text, boolean, boolean, text, text, \
+            bigint, integer, text, integer, double precision, text, double precision) \
+         TO sec1_owner, sec1_other",
+    )
+    .await;
 
     // Create source table and grant access
     db.execute("CREATE TABLE sec1_src (id INT PRIMARY KEY, val TEXT)")

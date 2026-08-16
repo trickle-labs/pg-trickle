@@ -20,6 +20,8 @@ mod e2e;
 
 use e2e::E2eDb;
 
+const CURRENT_PG_TRICKLE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 // ══════════════════════════════════════════════════════════════════════
 // L1 — Catalog schema matches expected columns
 // ══════════════════════════════════════════════════════════════════════
@@ -77,12 +79,14 @@ async fn test_upgrade_catalog_schema_stability() {
         ("row_identity_version", "smallint"),
         ("scc_id", "integer"),
         ("schedule", "text"),
+        ("shadow_table_name", "text"),
         ("st_partition_key", "text"),
         ("st_placement", "text"), // CITUS-3: v0.32.0
         ("status", "text"),
         ("storage_backend", "text"),       // v0.36.0: CORR-2/UX-3
         ("storage_fillfactor", "integer"), // v0.73.0: HOT-1
-        ("temporal_mode", "boolean"),      // v0.36.0: CORR-1/UX-1
+        ("tentative_frontier", "jsonb"),
+        ("temporal_mode", "boolean"), // v0.36.0: CORR-1/UX-1
         ("topk_limit", "integer"),
         ("topk_offset", "integer"),
         ("topk_order_by", "text"),
@@ -92,6 +96,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("reindex_drift_threshold", "double precision"),
         ("rows_changed_since_last_reindex", "bigint"),
         ("last_reindex_at", "timestamp with time zone"),
+        ("in_shadow_build", "boolean"),
         ("query_complexity_class", "text"), // v0.78.0: P-2
     ];
 
@@ -139,6 +144,7 @@ async fn test_upgrade_catalog_indexes_present() {
     let expected_indexes = vec![
         ("pgt_stream_tables", "idx_pgt_status"),
         ("pgt_stream_tables", "idx_pgt_name"),
+        ("pgt_snapshots", "idx_pgt_snapshots_pgt_id"),
         ("pgt_dependencies", "idx_deps_source"),
     ];
 
@@ -154,6 +160,44 @@ async fn test_upgrade_catalog_indexes_present() {
             ))
             .await;
         assert!(exists, "Index '{index}' on '{table}' not found");
+    }
+}
+
+#[tokio::test]
+async fn test_upgrade_migration_era_catalog_tables_and_config_dump_policy_present() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    for table_name in ["pgt_snapshots", "pgt_subscriptions"] {
+        let exists: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS( \
+                    SELECT 1 FROM information_schema.tables \
+                    WHERE table_schema = 'pgtrickle' \
+                      AND table_name = '{table_name}' \
+                )"
+            ))
+            .await;
+        assert!(exists, "Table 'pgtrickle.{table_name}' not found");
+    }
+
+    let config_dump_relations: Vec<String> = sqlx::query_scalar(
+        "SELECT format('%I.%I', n.nspname, c.relname) \
+         FROM pg_extension ext \
+         JOIN LATERAL unnest(ext.extconfig) AS cfg(relid) ON true \
+         JOIN pg_class c ON c.oid = cfg.relid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE ext.extname = 'pg_trickle' \
+         ORDER BY 1",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("load pg_extension_config_dump registrations");
+
+    for relation in ["pgtrickle.pgt_snapshots", "pgtrickle.pgt_subscriptions"] {
+        assert!(
+            config_dump_relations.iter().any(|item| item == relation),
+            "Config-dump policy missing for {relation}"
+        );
     }
 }
 
@@ -476,7 +520,8 @@ async fn test_upgrade_chain_new_functions_exist() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -560,7 +605,8 @@ async fn test_upgrade_chain_stream_tables_survive() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -636,7 +682,8 @@ async fn test_upgrade_chain_views_queryable() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -679,7 +726,8 @@ async fn test_upgrade_chain_event_triggers_present() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -722,7 +770,8 @@ async fn test_upgrade_chain_version_consistency() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     // This assertion only holds when the SQL extension version being tested
     // matches the compiled binary version loaded in the container.
@@ -776,7 +825,8 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -844,7 +894,8 @@ async fn test_upgrade_schema_additions_from_sql() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.83.0".into());
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
 
     let db = E2eDb::new_without_extension().await;
 

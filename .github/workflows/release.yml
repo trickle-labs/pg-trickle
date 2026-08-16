@@ -143,6 +143,15 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
+      - name: Validate packaged version surfaces
+        if: matrix.archive_ext == 'tar.gz' && matrix.artifact_suffix == 'linux-amd64'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PKG_DIR=$(find target/release -maxdepth 1 -name 'pg_trickle-pg*' -type d | head -1)
+          ARCHIVE_PATH="dist/pg_trickle-${VERSION}-pg${PG_VERSION}-${{ matrix.artifact_suffix }}.tar.gz"
+          ./scripts/check_version_sync.sh --package-dir "$PKG_DIR" --archive "$ARCHIVE_PATH"
+
       - name: Create archive (zip)
         if: matrix.archive_ext == 'zip'
         shell: pwsh
@@ -205,11 +214,15 @@ jobs:
           mv pg_trickle-*-linux-amd64 artifact
           ls -la artifact/lib/ artifact/extension/
 
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build extension image
         run: |
           docker build \
             --build-arg REPO_URL=${{ github.server_url }}/${{ github.repository }} \
-            --build-arg VERSION=${{ needs.build-release.outputs.version || 'dev' }} \
+            --build-arg VERSION=${{ steps.version.outputs.version }} \
             -t pg_trickle-ext:test \
             -f cnpg/Dockerfile.ext \
             dist/
@@ -463,4 +476,3 @@ jobs:
 
           echo "Multi-arch manifest created for ${IMAGE}:${VERSION}"
           docker buildx imagetools inspect "${IMAGE}:${VERSION}"
-

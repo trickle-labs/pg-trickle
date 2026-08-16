@@ -18,20 +18,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Validate META.json version matches tag
-        run: |
-          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
-            TAG_VERSION="${GITHUB_REF_NAME#v}"
-            META_VERSION=$(jq -r '.version' META.json)
-            if [ "$META_VERSION" != "$TAG_VERSION" ]; then
-              echo "::error::META.json version ($META_VERSION) does not match git tag ($TAG_VERSION)."
-              echo "Run: jq --arg v '$TAG_VERSION' '.version=\$v | .provides[].version=\$v' META.json > META.json.tmp && mv META.json.tmp META.json"
-              exit 1
-            fi
-            echo "Version check passed: META.json=$META_VERSION matches tag=v$TAG_VERSION"
-          else
-            echo "Not a version tag push — skipping tag/META.json version check."
-          fi
+      - name: Check version references are in sync
+        run: ./scripts/check_version_sync.sh
 
       - name: Package and upload to PGXN
         run: |
@@ -49,6 +37,7 @@ jobs:
 
           echo "Verifying archive contents..."
           python3 scripts/verify_pgxn_archive.py "$ARCHIVE"
+          ./scripts/check_version_sync.sh --archive "$ARCHIVE"
 
           if [ -z "${PGXN_USERNAME:-}" ] || [ -z "${PGXN_PASSWORD:-}" ]; then
             echo "Error: missing PGXN credentials."

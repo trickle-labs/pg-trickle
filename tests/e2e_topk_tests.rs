@@ -448,7 +448,7 @@ async fn test_topk_no_change_skips_refresh() {
 // ── LIMIT edge cases ───────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_topk_limit_zero_accepted() {
+async fn test_topk_limit_zero_rejected() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE topk_lz_src (id INT PRIMARY KEY, val INT)")
@@ -457,11 +457,16 @@ async fn test_topk_limit_zero_accepted() {
         .await;
 
     let query = "SELECT id, val FROM topk_lz_src ORDER BY val DESC LIMIT 0";
-    db.create_st("topk_lz_st", query, "1m", "FULL").await;
-    db.assert_st_matches_query("topk_lz_st", query).await;
-
-    // LIMIT 0 produces an empty stream table
-    assert_eq!(db.count("public.topk_lz_st").await, 0);
+    let result = db
+        .try_execute(&format!(
+            "SELECT pgtrickle.create_stream_table('topk_lz_st', $${query}$$, '1m', 'FULL')"
+        ))
+        .await;
+    let error = result.expect_err("LIMIT 0 should be rejected");
+    assert!(
+        error.to_string().contains("topk_limit must be positive"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

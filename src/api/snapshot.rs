@@ -15,10 +15,14 @@
 //! A catalog table `pgtrickle.pgt_snapshots` records each snapshot's metadata
 //! so `list_snapshots()` can return size and row count information.
 
-use pgrx::prelude::*;
-
+use super::helpers::{
+    QualifiedIdentifier, RelationIdentity, check_stream_table_ownership, outer_user_id,
+    parse_qualified_identifier_with_current_schema, resolve_relation_identity,
+    transfer_output_table_ownership,
+};
 use crate::catalog::StreamTableMeta;
 use crate::error::PgTrickleError;
+use pgrx::prelude::*;
 
 // ── STAB-1 (v0.30.0): SubTransaction RAII helper ─────────────────────────
 //
@@ -85,22 +89,165 @@ impl Drop for SnapSubTransaction {
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-/// Parse a schema-qualified name like `"myschema.mytable"` into (schema, table).
-/// Uses `current_schema()` as the default when no schema is given.
-fn resolve_st_name(name: &str) -> Result<(String, String), PgTrickleError> {
-    let parts: Vec<&str> = name.splitn(2, '.').collect();
-    match parts.len() {
-        1 => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or_else(|| "public".to_string());
-            Ok((schema, parts[0].to_string()))
+const SNAPSHOT_COMMENT_PREFIX: &str = "pgtrickle:snapshot:v1|";
+const SNAPSHOT_CATALOG_MIGRATION_SQL: &str = "\
+ALTER TABLE pgtrickle.pgt_snapshots\n\
+    ADD COLUMN IF NOT EXISTS snapshot_relid oid,\n\
+    ADD COLUMN IF NOT EXISTS snapshot_provenance_token text,\n\
+    ADD COLUMN IF NOT EXISTS created_by_role_oid oid;\n\
+\n\
+\n\
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pgt_snapshots_snapshot_relid\n\
+    ON pgtrickle.pgt_snapshots (snapshot_relid);";
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotCatalogRow {
+    pgt_id: i64,
+    snapshot_schema: String,
+    snapshot_table: String,
+    snapshot_version: String,
+    frontier_json: Option<String>,
+    snapshot_relid: pg_sys::Oid,
+    snapshot_provenance_token: String,
+    created_by_role_oid: pg_sys::Oid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotProvenance {
+    pgt_id: i64,
+    pgt_relid: u32,
+    snapshot_relid: u32,
+    created_by_role_oid: u32,
+    token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpectedStreamBinding {
+    pgt_id: i64,
+    pgt_relid: u32,
+}
+
+impl SnapshotProvenance {
+    fn new(
+        meta: &StreamTableMeta,
+        snapshot_relid: pg_sys::Oid,
+        created_by_role_oid: pg_sys::Oid,
+        token: String,
+    ) -> Self {
+        Self {
+            pgt_id: meta.pgt_id,
+            pgt_relid: meta.pgt_relid.to_u32(),
+            snapshot_relid: snapshot_relid.to_u32(),
+            created_by_role_oid: created_by_role_oid.to_u32(),
+            token,
         }
-        2 => Ok((parts[0].to_string(), parts[1].to_string())),
-        _ => Err(PgTrickleError::InvalidArgument(format!(
-            "invalid stream table name: {name}"
-        ))),
     }
+
+    fn encode_comment(&self) -> String {
+        format!(
+            "{SNAPSHOT_COMMENT_PREFIX}pgt_id={}|pgt_relid={}|snapshot_relid={}|created_by_role_oid={}|token={}",
+            self.pgt_id, self.pgt_relid, self.snapshot_relid, self.created_by_role_oid, self.token
+        )
+    }
+
+    fn parse(comment: &str) -> Result<Self, PgTrickleError> {
+        let payload = comment
+            .strip_prefix(SNAPSHOT_COMMENT_PREFIX)
+            .ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "relation is missing pg_trickle snapshot provenance".to_string(),
+                )
+            })?;
+
+        let mut pgt_id = None;
+        let mut pgt_relid = None;
+        let mut snapshot_relid = None;
+        let mut created_by_role_oid = None;
+        let mut token = None;
+
+        for entry in payload.split('|') {
+            let (key, value) = entry.split_once('=').ok_or_else(|| {
+                PgTrickleError::InvalidArgument(format!(
+                    "invalid snapshot provenance entry: {entry}"
+                ))
+            })?;
+
+            match key {
+                "pgt_id" => {
+                    pgt_id = Some(value.parse::<i64>().map_err(|_| {
+                        PgTrickleError::InvalidArgument(format!(
+                            "invalid snapshot provenance pgt_id: {value}"
+                        ))
+                    })?)
+                }
+                "pgt_relid" => {
+                    pgt_relid = Some(value.parse::<u32>().map_err(|_| {
+                        PgTrickleError::InvalidArgument(format!(
+                            "invalid snapshot provenance pgt_relid: {value}"
+                        ))
+                    })?)
+                }
+                "snapshot_relid" => {
+                    snapshot_relid = Some(value.parse::<u32>().map_err(|_| {
+                        PgTrickleError::InvalidArgument(format!(
+                            "invalid snapshot provenance snapshot_relid: {value}"
+                        ))
+                    })?)
+                }
+                "created_by_role_oid" => {
+                    created_by_role_oid = Some(value.parse::<u32>().map_err(|_| {
+                        PgTrickleError::InvalidArgument(format!(
+                            "invalid snapshot provenance created_by_role_oid: {value}"
+                        ))
+                    })?)
+                }
+                "token" => {
+                    if value.is_empty() {
+                        return Err(PgTrickleError::InvalidArgument(
+                            "snapshot provenance token must not be empty".to_string(),
+                        ));
+                    }
+                    token = Some(value.to_string());
+                }
+                other => {
+                    return Err(PgTrickleError::InvalidArgument(format!(
+                        "unknown snapshot provenance key: {other}"
+                    )));
+                }
+            }
+        }
+
+        Ok(Self {
+            pgt_id: pgt_id.ok_or_else(|| {
+                PgTrickleError::InvalidArgument("snapshot provenance is missing pgt_id".to_string())
+            })?,
+            pgt_relid: pgt_relid.ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "snapshot provenance is missing pgt_relid".to_string(),
+                )
+            })?,
+            snapshot_relid: snapshot_relid.ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "snapshot provenance is missing snapshot_relid".to_string(),
+                )
+            })?,
+            created_by_role_oid: created_by_role_oid.ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "snapshot provenance is missing created_by_role_oid".to_string(),
+                )
+            })?,
+            token: token.ok_or_else(|| {
+                PgTrickleError::InvalidArgument("snapshot provenance is missing token".to_string())
+            })?,
+        })
+    }
+}
+
+fn resolve_stream_name(name: &str) -> Result<QualifiedIdentifier, PgTrickleError> {
+    parse_qualified_identifier_with_current_schema(name)
+}
+
+fn resolve_snapshot_name(name: &str) -> Result<QualifiedIdentifier, PgTrickleError> {
+    parse_qualified_identifier_with_current_schema(name)
 }
 
 /// Build a safe snapshot table name from the ST name and current timestamp (ms).
@@ -122,17 +269,17 @@ pub(super) fn auto_snapshot_table_name(st_name: &str) -> String {
     format!("pgtrickle.snapshot_{}_{}", safe_name, epoch_ms)
 }
 
-/// Parse a schema-qualified table name into (schema, table) without calling SPI.
-pub(super) fn parse_qualified_table(qualified: &str) -> (String, String) {
-    let trimmed = qualified.trim();
-    if let Some((schema, table)) = trimmed.split_once('.') {
-        (
-            schema.trim_matches('"').to_string(),
-            table.trim_matches('"').to_string(),
+fn generate_snapshot_provenance_token() -> Result<String, PgTrickleError> {
+    Spi::get_one::<String>(
+        "SELECT md5(random()::text || clock_timestamp()::text || \
+                txid_current()::text || pg_backend_pid()::text)",
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InternalError(
+            "PostgreSQL did not return a snapshot provenance token".to_string(),
         )
-    } else {
-        ("public".to_string(), trimmed.trim_matches('"').to_string())
-    }
+    })
 }
 
 /// CORR-3 (v0.30.0): Build a comma-separated list of user-visible column names from
@@ -141,7 +288,7 @@ pub(super) fn parse_qualified_table(qualified: &str) -> (String, String) {
 /// Uses `pg_attribute` catalog walk instead of `SELECT * EXCEPT (...)` so the
 /// function works on all PG 18.x minor versions without PG-minor sensitivity.
 fn build_user_column_list(
-    _src_fqn: &str,
+    relid: pg_sys::Oid,
     src_schema: &str,
     src_table: &str,
 ) -> Result<String, PgTrickleError> {
@@ -156,15 +303,12 @@ fn build_user_column_list(
             .select(
                 "SELECT a.attname::text \
                  FROM pg_catalog.pg_attribute a \
-                 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
-                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = $1 \
-                   AND c.relname  = $2 \
+                 WHERE a.attrelid = $1 \
                    AND a.attnum   > 0 \
                    AND NOT a.attisdropped \
                  ORDER BY a.attnum",
                 None,
-                &[src_schema.into(), src_table.into()],
+                &[relid.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         let mut out = Vec::new();
@@ -189,16 +333,275 @@ fn build_user_column_list(
     Ok(cols.join(", "))
 }
 
-/// Check if a relation exists by schema + table name.
-fn relation_exists(schema: &str, table: &str) -> bool {
-    Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2)",
-        &[schema.into(), table.into()],
+fn ensure_snapshot_catalog_support() -> Result<(), PgTrickleError> {
+    let present_columns: Vec<String> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT a.attname::text \
+                 FROM pg_catalog.pg_attribute a \
+                 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = 'pgtrickle' \
+                   AND c.relname = 'pgt_snapshots' \
+                   AND a.attnum > 0 \
+                   AND NOT a.attisdropped \
+                   AND a.attname IN ('snapshot_relid', 'snapshot_provenance_token', 'created_by_role_oid')",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut columns = Vec::new();
+        for row in rows {
+            if let Some(column) = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            {
+                columns.push(column);
+            }
+        }
+        Ok::<_, PgTrickleError>(columns)
+    })?;
+
+    let mut missing = Vec::new();
+    for required in [
+        "snapshot_relid",
+        "snapshot_provenance_token",
+        "created_by_role_oid",
+    ] {
+        if !present_columns.iter().any(|column| column == required) {
+            missing.push(required);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(PgTrickleError::InternalError(format!(
+            "pgtrickle.pgt_snapshots is missing required WP3 columns [{}]. Apply this migration SQL before using snapshot APIs:\n{}",
+            missing.join(", "),
+            SNAPSHOT_CATALOG_MIGRATION_SQL
+        )))
+    }
+}
+
+fn load_snapshot_catalog_row(
+    qualified: &QualifiedIdentifier,
+) -> Result<SnapshotCatalogRow, PgTrickleError> {
+    ensure_snapshot_catalog_support()?;
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT pgt_id, snapshot_schema, snapshot_table, snapshot_version, \
+                        frontier::text, snapshot_relid, snapshot_provenance_token, created_by_role_oid \
+                 FROM pgtrickle.pgt_snapshots \
+                 WHERE snapshot_schema = $1 AND snapshot_table = $2",
+                None,
+                &[qualified.schema().into(), qualified.name().into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        if rows.is_empty() {
+            return Err(PgTrickleError::SnapshotSourceNotFound(format!(
+                "{}.{}",
+                qualified.schema(),
+                qualified.name()
+            )));
+        }
+
+        let row = rows.first();
+        Ok(SnapshotCatalogRow {
+            pgt_id: row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("missing snapshot pgt_id".to_string())
+                })?,
+            snapshot_schema: row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("missing snapshot schema".to_string())
+                })?,
+            snapshot_table: row
+                .get::<String>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("missing snapshot table".to_string())
+                })?,
+            snapshot_version: row
+                .get::<String>(4)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("missing snapshot version".to_string())
+                })?,
+            frontier_json: row
+                .get::<String>(5)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+            snapshot_relid: row
+                .get::<pg_sys::Oid>(6)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument(
+                        "snapshot catalog row has no provenance relation OID; recreate or repair it"
+                            .to_string(),
+                    )
+                })?,
+            snapshot_provenance_token: row
+                .get::<String>(7)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument(
+                        "snapshot catalog row has no provenance token; recreate or repair it"
+                            .to_string(),
+                    )
+                })?,
+            created_by_role_oid: row
+                .get::<pg_sys::Oid>(8)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument(
+                        "snapshot catalog row has no creator role; recreate or repair it"
+                            .to_string(),
+                    )
+                })?,
+        })
+    })
+}
+
+fn read_snapshot_provenance(relid: pg_sys::Oid) -> Result<SnapshotProvenance, PgTrickleError> {
+    let comment = Spi::get_one_with_args::<String>(
+        "SELECT pg_catalog.obj_description($1, 'pg_class')::text",
+        &[relid.into()],
     )
-    .unwrap_or(None)
-    .unwrap_or(false)
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InvalidArgument("snapshot table is missing provenance comment".to_string())
+    })?;
+
+    SnapshotProvenance::parse(&comment)
+}
+
+fn ensure_snapshot_metadata_columns(relid: pg_sys::Oid) -> Result<(), PgTrickleError> {
+    let present_columns: Vec<String> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT a.attname::text \
+                 FROM pg_catalog.pg_attribute a \
+                 WHERE a.attrelid = $1 \
+                   AND a.attnum > 0 \
+                   AND NOT a.attisdropped \
+                   AND a.attname IN ('__pgt_snapshot_version', '__pgt_frontier', '__pgt_snapshotted_at')",
+                None,
+                &[relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut columns = Vec::new();
+        for row in rows {
+            if let Some(column) = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            {
+                columns.push(column);
+            }
+        }
+        Ok::<_, PgTrickleError>(columns)
+    })?;
+
+    let mut missing = Vec::new();
+    for required in [
+        "__pgt_snapshot_version",
+        "__pgt_frontier",
+        "__pgt_snapshotted_at",
+    ] {
+        if !present_columns.iter().any(|column| column == required) {
+            missing.push(required);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(PgTrickleError::InvalidArgument(format!(
+            "relation is not a valid pg_trickle snapshot: missing metadata columns [{}]",
+            missing.join(", "),
+        )))
+    }
+}
+
+fn validate_snapshot_relation_binding(
+    relation: &RelationIdentity,
+    catalog: &SnapshotCatalogRow,
+    provenance: &SnapshotProvenance,
+    expected_stream: Option<ExpectedStreamBinding>,
+) -> Result<(), PgTrickleError> {
+    if relation.relkind != 'r' {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "relation {}.{} is not a heap table snapshot",
+            relation.qualified.schema(),
+            relation.qualified.name()
+        )));
+    }
+
+    if relation.relid != catalog.snapshot_relid {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "snapshot relation identity mismatch for {}.{}: catalog relid {} != current relid {}",
+            catalog.snapshot_schema,
+            catalog.snapshot_table,
+            catalog.snapshot_relid.to_u32(),
+            relation.relid.to_u32(),
+        )));
+    }
+
+    if relation.relowner != catalog.created_by_role_oid {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "snapshot owner mismatch for {}.{}: catalog owner {} != current owner {}",
+            catalog.snapshot_schema,
+            catalog.snapshot_table,
+            catalog.created_by_role_oid.to_u32(),
+            relation.relowner.to_u32(),
+        )));
+    }
+
+    if let Some(expected_stream) = expected_stream
+        && (catalog.pgt_id != expected_stream.pgt_id
+            || provenance.pgt_id != expected_stream.pgt_id
+            || provenance.pgt_relid != expected_stream.pgt_relid)
+    {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "snapshot {}.{} does not belong to stream table pgt_id={} relid={}",
+            catalog.snapshot_schema,
+            catalog.snapshot_table,
+            expected_stream.pgt_id,
+            expected_stream.pgt_relid
+        )));
+    }
+
+    if provenance.pgt_id != catalog.pgt_id
+        || provenance.snapshot_relid != catalog.snapshot_relid.to_u32()
+        || provenance.created_by_role_oid != catalog.created_by_role_oid.to_u32()
+        || provenance.token != catalog.snapshot_provenance_token
+    {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "snapshot provenance mismatch for {}.{}",
+            catalog.snapshot_schema, catalog.snapshot_table
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_snapshot_version(snapshot_version: &str) -> Result<(), PgTrickleError> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let snapshot_major = snapshot_version.split('.').next().unwrap_or("0");
+    let current_major = current_version.split('.').next().unwrap_or("0");
+    if snapshot_major != current_major {
+        return Err(PgTrickleError::SnapshotSchemaVersionMismatch(format!(
+            "snapshot version {snapshot_version} incompatible with current {current_version} (major version differs)"
+        )));
+    }
+    Ok(())
 }
 
 // ── SNAP-1: snapshot_stream_table ─────────────────────────────────────────
@@ -215,25 +618,25 @@ pub fn snapshot_stream_table(p_name: &str, p_target: default!(Option<&str>, "NUL
 }
 
 fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String, PgTrickleError> {
-    let (schema, st_name) = resolve_st_name(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &st_name)?;
+    ensure_snapshot_catalog_support()?;
 
-    let snapshot_fqn = match target {
-        Some(t) => t.to_string(),
-        None => auto_snapshot_table_name(&meta.pgt_name),
+    let stream_name = resolve_stream_name(name)?;
+    let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
+    check_stream_table_ownership(meta.pgt_relid, stream_name.schema(), stream_name.name())?;
+
+    let snapshot_name = match target {
+        Some(target_name) => resolve_snapshot_name(target_name)?,
+        None => resolve_snapshot_name(&auto_snapshot_table_name(&meta.pgt_name))?,
     };
 
-    let (snap_schema, snap_table) = parse_qualified_table(&snapshot_fqn);
-
-    if target.is_some() && relation_exists(&snap_schema, &snap_table) {
-        return Err(PgTrickleError::SnapshotAlreadyExists(snapshot_fqn.clone()));
+    if resolve_relation_identity(snapshot_name.clone())?.is_some() {
+        return Err(PgTrickleError::SnapshotAlreadyExists(
+            snapshot_name.quoted(),
+        ));
     }
 
-    let storage_fqn = format!(
-        r#""{}"."{}""#,
-        meta.pgt_schema.replace('"', r#"\""#),
-        meta.pgt_name.replace('"', r#"\""#)
-    );
+    let storage_fqn = stream_name.quoted();
+    let snapshot_fqn = snapshot_name.quoted();
 
     let frontier_json = meta
         .frontier
@@ -242,11 +645,8 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
         .unwrap_or_else(|| "null".to_string());
 
     let ext_ver = env!("CARGO_PKG_VERSION");
-    let snap_fqn_quoted = format!(
-        r#""{}"."{}""#,
-        snap_schema.replace('"', r#"\""#),
-        snap_table.replace('"', r#"\""#)
-    );
+    let snapshot_provenance_token = generate_snapshot_provenance_token()?;
+    let created_by_role_oid = outer_user_id();
 
     // CREATE TABLE AS SELECT — copy all rows plus metadata columns
     let create_sql = format!(
@@ -256,7 +656,7 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
                 $2::jsonb       AS __pgt_frontier, \
                 now()           AS __pgt_snapshotted_at \
          FROM {}",
-        snap_fqn_quoted, storage_fqn
+        snapshot_fqn, storage_fqn
     );
 
     // STAB-1 (v0.30.0): Wrap CREATE TABLE AS + catalog INSERT in a SubTransaction.
@@ -274,38 +674,110 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
         return Err(e);
     }
 
-    // STAB-4 (v0.30.0): Promote catalog INSERT failure from silent discard to WARNING.
-    // A failed insert means list_snapshots() will not find this snapshot.
-    if let Err(e) = Spi::run_with_args(
-        "INSERT INTO pgtrickle.pgt_snapshots \
-         (pgt_id, snapshot_schema, snapshot_table, snapshot_version, frontier, created_at) \
-         VALUES ($1, $2, $3, $4, $5::jsonb, now()) \
-         ON CONFLICT (snapshot_schema, snapshot_table) DO NOTHING",
-        &[
-            meta.pgt_id.into(),
-            snap_schema.as_str().into(),
-            snap_table.as_str().into(),
-            ext_ver.into(),
-            frontier_json.as_str().into(),
-        ],
-    ) {
-        // Catalog insert failed: roll back the subtransaction so no orphan table is left.
+    let snapshot_relation = match resolve_relation_identity(snapshot_name.clone())? {
+        Some(relation) => relation,
+        None => {
+            subtxn.rollback();
+            return Err(PgTrickleError::InternalError(format!(
+                "snapshot relation {} was created but could not be resolved from pg_class",
+                snapshot_fqn
+            )));
+        }
+    };
+
+    if snapshot_relation.relkind != 'r' {
+        subtxn.rollback();
+        return Err(PgTrickleError::InternalError(format!(
+            "snapshot relation {} has unexpected relkind '{}'",
+            snapshot_fqn, snapshot_relation.relkind
+        )));
+    }
+
+    let provenance = SnapshotProvenance::new(
+        &meta,
+        snapshot_relation.relid,
+        created_by_role_oid,
+        snapshot_provenance_token.clone(),
+    );
+
+    let comment_sql = format!(
+        "COMMENT ON TABLE {} IS '{}'",
+        snapshot_fqn,
+        provenance.encode_comment().replace('\'', "''")
+    );
+    if let Err(e) = Spi::run(&comment_sql) {
         subtxn.rollback();
         return Err(PgTrickleError::SpiError(format!(
+            "snapshot provenance comment failed: {e}"
+        )));
+    }
+
+    if let Err(e) = transfer_output_table_ownership(snapshot_name.schema(), snapshot_name.name()) {
+        subtxn.rollback();
+        return Err(e);
+    }
+
+    let owned_snapshot_relation = match resolve_relation_identity(snapshot_name.clone())? {
+        Some(relation) => relation,
+        None => {
+            subtxn.rollback();
+            return Err(PgTrickleError::InternalError(format!(
+                "snapshot relation {} disappeared before catalog registration",
+                snapshot_fqn
+            )));
+        }
+    };
+
+    if owned_snapshot_relation.relowner != created_by_role_oid {
+        subtxn.rollback();
+        return Err(PgTrickleError::InternalError(format!(
+            "snapshot relation {} owner {} does not match creator {} after transfer",
+            snapshot_fqn,
+            owned_snapshot_relation.relowner.to_u32(),
+            created_by_role_oid.to_u32()
+        )));
+    }
+
+    let insert_result = Spi::get_one_with_args::<i64>(
+        "INSERT INTO pgtrickle.pgt_snapshots \
+         (pgt_id, snapshot_schema, snapshot_table, snapshot_version, frontier, created_at, \
+          snapshot_relid, snapshot_provenance_token, created_by_role_oid) \
+         VALUES ($1, $2, $3, $4, $5::jsonb, now(), $6, $7, $8) \
+         RETURNING snapshot_id",
+        &[
+            meta.pgt_id.into(),
+            snapshot_name.schema().into(),
+            snapshot_name.name().into(),
+            ext_ver.into(),
+            frontier_json.as_str().into(),
+            owned_snapshot_relation.relid.into(),
+            snapshot_provenance_token.as_str().into(),
+            created_by_role_oid.into(),
+        ],
+    )
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
             "[pg_trickle] SNAP-1: snapshot table created but catalog INSERT failed \
-             (snapshot at {}.{} was rolled back): {}",
-            snap_schema, snap_table, e
+             (snapshot at {} was rolled back): {}",
+            snapshot_fqn, e
+        ))
+    })?;
+
+    if insert_result.is_none() {
+        subtxn.rollback();
+        return Err(PgTrickleError::InternalError(format!(
+            "snapshot catalog insert for {} returned no snapshot_id",
+            snapshot_fqn
         )));
     }
 
     subtxn.commit();
 
     pgrx::log!(
-        "[pg_trickle] SNAP-1: snapshot created for '{}.{}' → {}.{}",
-        schema,
-        st_name,
-        snap_schema,
-        snap_table
+        "[pg_trickle] SNAP-1: snapshot created for '{}.{}' → {}",
+        stream_name.schema(),
+        stream_name.name(),
+        snapshot_fqn
     );
 
     Ok(snapshot_fqn)
@@ -324,58 +796,30 @@ pub fn restore_from_snapshot(p_name: &str, p_source: &str) {
 }
 
 fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleError> {
-    let (schema, st_name) = resolve_st_name(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &st_name)?;
+    let stream_name = resolve_stream_name(name)?;
+    let meta = StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name())?;
+    check_stream_table_ownership(meta.pgt_relid, stream_name.schema(), stream_name.name())?;
 
-    let (src_schema, src_table) = parse_qualified_table(source);
+    let snapshot_name = resolve_snapshot_name(source)?;
+    let snapshot_catalog = load_snapshot_catalog_row(&snapshot_name)?;
+    validate_snapshot_version(&snapshot_catalog.snapshot_version)?;
 
-    if !relation_exists(&src_schema, &src_table) {
-        return Err(PgTrickleError::SnapshotSourceNotFound(source.to_string()));
-    }
+    let snapshot_relation = resolve_relation_identity(snapshot_name.clone())?
+        .ok_or_else(|| PgTrickleError::SnapshotSourceNotFound(snapshot_name.quoted()))?;
+    let snapshot_provenance = read_snapshot_provenance(snapshot_relation.relid)?;
+    validate_snapshot_relation_binding(
+        &snapshot_relation,
+        &snapshot_catalog,
+        &snapshot_provenance,
+        Some(ExpectedStreamBinding {
+            pgt_id: meta.pgt_id,
+            pgt_relid: meta.pgt_relid.to_u32(),
+        }),
+    )?;
+    ensure_snapshot_metadata_columns(snapshot_relation.relid)?;
 
-    let src_fqn = format!(
-        r#""{}"."{}""#,
-        src_schema.replace('"', r#"\""#),
-        src_table.replace('"', r#"\""#)
-    );
-
-    // STAB-1 (v0.30.0): Propagate schema-version-check failure as a typed error
-    // rather than silently treating None as compatible.
-    let snap_ver: Option<String> = Spi::get_one_with_args::<String>(
-        &format!(
-            "SELECT __pgt_snapshot_version::text FROM {} LIMIT 1",
-            src_fqn
-        ),
-        &[],
-    )
-    .unwrap_or(None);
-
-    // Validate snapshot version — None means the snapshot has no metadata column,
-    // which indicates schema incompatibility (pre-v0.27 snapshot).
-    if let Some(sv) = &snap_ver {
-        let cur = env!("CARGO_PKG_VERSION");
-        let sv_maj: &str = sv.split('.').next().unwrap_or("0");
-        let cur_maj: &str = cur.split('.').next().unwrap_or("0");
-        if sv_maj != cur_maj {
-            return Err(PgTrickleError::SnapshotSchemaVersionMismatch(format!(
-                "snapshot version {sv} incompatible with current {cur} (major version differs)"
-            )));
-        }
-    } else {
-        // None = no __pgt_snapshot_version column → old snapshot format
-        return Err(PgTrickleError::SnapshotSchemaVersionMismatch(
-            "snapshot has no __pgt_snapshot_version column — \
-             it was created by a version of pg_trickle prior to v0.27.0 \
-             and cannot be restored with this version"
-                .to_string(),
-        ));
-    }
-
-    let storage_fqn = format!(
-        r#""{}"."{}""#,
-        meta.pgt_schema.replace('"', r#"\""#),
-        meta.pgt_name.replace('"', r#"\""#)
-    );
+    let src_fqn = snapshot_name.quoted();
+    let storage_fqn = stream_name.quoted();
 
     // STAB-1 (v0.30.0): Wrap TRUNCATE + INSERT in a SubTransaction with an
     // exclusive lock acquired before the TRUNCATE, so no orphan/truncated
@@ -406,7 +850,11 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
 
     // CORR-3 (v0.30.0): Build explicit column list from pg_attribute catalog walk,
     // eliminating PG-minor-version sensitivity of SELECT * EXCEPT (...).
-    let user_cols = match build_user_column_list(&src_fqn, &src_schema, &src_table) {
+    let user_cols = match build_user_column_list(
+        snapshot_relation.relid,
+        snapshot_name.schema(),
+        snapshot_name.name(),
+    ) {
         Ok(cols) => cols,
         Err(e) => {
             subtxn.rollback();
@@ -428,18 +876,12 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
     }
 
     // Restore frontier so next refresh is DIFFERENTIAL (not FULL)
-    let frontier_json: Option<String> = Spi::get_one_with_args::<String>(
-        &format!("SELECT __pgt_frontier::text FROM {} LIMIT 1", src_fqn),
-        &[],
-    )
-    .unwrap_or(None);
-
-    if let Some(fj) = frontier_json {
+    if let Some(fj) = snapshot_catalog.frontier_json.as_deref() {
         let frontier_result = Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
              SET frontier = $1::jsonb, is_populated = true \
              WHERE pgt_id = $2",
-            &[fj.as_str().into(), meta.pgt_id.into()],
+            &[fj.into(), meta.pgt_id.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(format!("frontier restore failed: {e}")));
 
@@ -456,9 +898,9 @@ fn restore_from_snapshot_impl(name: &str, source: &str) -> Result<(), PgTrickleE
 
     pgrx::log!(
         "[pg_trickle] SNAP-2: restored '{}.{}' from '{}'",
-        schema,
-        st_name,
-        source
+        stream_name.schema(),
+        stream_name.name(),
+        snapshot_name.quoted()
     );
 
     Ok(())
@@ -497,12 +939,12 @@ fn list_snapshots_impl(
     Option<pgrx::JsonB>,
     Option<i64>,
 )> {
-    let (schema, st_name) = match resolve_st_name(name) {
+    let stream_name = match resolve_stream_name(name) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
 
-    let meta = match StreamTableMeta::get_by_name(&schema, &st_name) {
+    let meta = match StreamTableMeta::get_by_name(stream_name.schema(), stream_name.name()) {
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
@@ -553,31 +995,88 @@ pub fn drop_snapshot(p_snapshot_table: &str) {
 }
 
 fn drop_snapshot_impl(snapshot_table: &str) -> Result<(), PgTrickleError> {
-    let (snap_schema, snap_table) = parse_qualified_table(snapshot_table);
+    let snapshot_name = resolve_snapshot_name(snapshot_table)?;
+    let snapshot_catalog = load_snapshot_catalog_row(&snapshot_name)?;
+    let stream_meta = StreamTableMeta::get_by_id(snapshot_catalog.pgt_id)?.ok_or_else(|| {
+        PgTrickleError::InternalError(format!(
+            "snapshot {} belongs to missing stream table pgt_id={}",
+            snapshot_name.quoted(),
+            snapshot_catalog.pgt_id
+        ))
+    })?;
+    check_stream_table_ownership(
+        stream_meta.pgt_relid,
+        &stream_meta.pgt_schema,
+        &stream_meta.pgt_name,
+    )?;
 
-    if !relation_exists(&snap_schema, &snap_table) {
-        return Err(PgTrickleError::SnapshotSourceNotFound(
-            snapshot_table.to_string(),
-        ));
+    let snapshot_relation = resolve_relation_identity(snapshot_name.clone())?
+        .ok_or_else(|| PgTrickleError::SnapshotSourceNotFound(snapshot_name.quoted()))?;
+    let snapshot_provenance = read_snapshot_provenance(snapshot_relation.relid)?;
+    validate_snapshot_relation_binding(
+        &snapshot_relation,
+        &snapshot_catalog,
+        &snapshot_provenance,
+        Some(ExpectedStreamBinding {
+            pgt_id: stream_meta.pgt_id,
+            pgt_relid: stream_meta.pgt_relid.to_u32(),
+        }),
+    )?;
+    ensure_snapshot_metadata_columns(snapshot_relation.relid)?;
+
+    let subtxn = SnapSubTransaction::begin();
+    let fqn = snapshot_name.quoted();
+
+    let drop_result =
+        Spi::run(&format!("DROP TABLE {}", fqn)) // nosemgrep: rust.spi.run.dynamic-format — DDL cannot be parameterized; fqn is a PostgreSQL-quoted catalog identifier.
+            .map_err(|e| PgTrickleError::SpiError(format!("drop snapshot failed: {e}")));
+
+    if let Err(e) = drop_result {
+        subtxn.rollback();
+        return Err(e);
     }
 
-    // Remove from catalog (best-effort)
-    let _ = Spi::run_with_args(
-        "DELETE FROM pgtrickle.pgt_snapshots \
-         WHERE snapshot_schema = $1 AND snapshot_table = $2",
-        &[snap_schema.as_str().into(), snap_table.as_str().into()],
-    );
+    let delete_result = Spi::get_one_with_args::<i64>(
+        "WITH deleted AS ( \
+             DELETE FROM pgtrickle.pgt_snapshots \
+             WHERE snapshot_schema = $1 AND snapshot_table = $2 AND snapshot_relid = $3 \
+             RETURNING 1 \
+         ) \
+         SELECT count(*) FROM deleted",
+        &[
+            snapshot_catalog.snapshot_schema.as_str().into(),
+            snapshot_catalog.snapshot_table.as_str().into(),
+            snapshot_catalog.snapshot_relid.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("drop snapshot catalog cleanup failed: {e}")));
 
-    let fqn = format!(
-        r#""{}"."{}""#,
-        snap_schema.replace('"', r#"\""#),
-        snap_table.replace('"', r#"\""#)
-    );
+    let deleted_rows = match delete_result {
+        Ok(Some(count)) => count,
+        Ok(None) => {
+            subtxn.rollback();
+            return Err(PgTrickleError::InternalError(format!(
+                "snapshot catalog cleanup for {} returned no row count",
+                fqn
+            )));
+        }
+        Err(e) => {
+            subtxn.rollback();
+            return Err(e);
+        }
+    };
 
-    Spi::run(&format!("DROP TABLE IF EXISTS {}", fqn)) // nosemgrep: rust.spi.run.dynamic-format — DDL cannot be parameterized; fqn is a double-quoted and escape-hardened catalog identifier.
-        .map_err(|e| PgTrickleError::SpiError(format!("drop snapshot failed: {e}")))?;
+    if deleted_rows != 1 {
+        subtxn.rollback();
+        return Err(PgTrickleError::InternalError(format!(
+            "snapshot catalog cleanup for {} deleted {} rows",
+            fqn, deleted_rows
+        )));
+    }
 
-    pgrx::log!("[pg_trickle] SNAP-3: dropped snapshot '{}'", snapshot_table);
+    subtxn.commit();
+
+    pgrx::log!("[pg_trickle] SNAP-3: dropped snapshot '{}'", fqn);
 
     Ok(())
 }
@@ -608,23 +1107,105 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qualified_table_with_schema() {
-        let (schema, table) = parse_qualified_table("myschema.mytable");
-        assert_eq!(schema, "myschema");
-        assert_eq!(table, "mytable");
+    fn test_snapshot_provenance_comment_round_trip() {
+        let provenance = SnapshotProvenance {
+            pgt_id: 42,
+            pgt_relid: 101,
+            snapshot_relid: 202,
+            created_by_role_oid: 303,
+            token: "abc123".to_string(),
+        };
+
+        let encoded = provenance.encode_comment();
+        let decoded = SnapshotProvenance::parse(&encoded).expect("comment should parse");
+        assert_eq!(decoded, provenance);
     }
 
     #[test]
-    fn test_parse_qualified_table_without_schema() {
-        let (schema, table) = parse_qualified_table("mytable");
-        assert_eq!(schema, "public");
-        assert_eq!(table, "mytable");
+    fn test_validate_snapshot_relation_binding_rejects_recreated_relation() {
+        let relation = RelationIdentity {
+            qualified: QualifiedIdentifier::parse_with_default(
+                "pgtrickle.snapshot_orders",
+                "public",
+            )
+            .expect("qualified name should parse"),
+            relid: pg_sys::Oid::from(55u32),
+            relkind: 'r',
+            relowner: pg_sys::Oid::from(7u32),
+        };
+        let catalog = SnapshotCatalogRow {
+            pgt_id: 9,
+            snapshot_schema: "pgtrickle".to_string(),
+            snapshot_table: "snapshot_orders".to_string(),
+            snapshot_version: "0.84.0".to_string(),
+            frontier_json: Some("null".to_string()),
+            snapshot_relid: pg_sys::Oid::from(54u32),
+            snapshot_provenance_token: "deadbeef".to_string(),
+            created_by_role_oid: pg_sys::Oid::from(7u32),
+        };
+        let provenance = SnapshotProvenance {
+            pgt_id: 9,
+            pgt_relid: 77,
+            snapshot_relid: 54,
+            created_by_role_oid: 7,
+            token: "deadbeef".to_string(),
+        };
+
+        let err = validate_snapshot_relation_binding(
+            &relation,
+            &catalog,
+            &provenance,
+            Some(ExpectedStreamBinding {
+                pgt_id: 9,
+                pgt_relid: 77,
+            }),
+        )
+        .expect_err("recreated snapshot should be rejected");
+
+        assert!(format!("{err}").contains("identity mismatch"));
     }
 
     #[test]
-    fn test_parse_qualified_table_quoted() {
-        let (schema, table) = parse_qualified_table(r#""pgtrickle"."snapshot_orders_123""#);
-        assert_eq!(schema, "pgtrickle");
-        assert_eq!(table, "snapshot_orders_123");
+    fn test_validate_snapshot_relation_binding_rejects_wrong_stream_provenance() {
+        let relation = RelationIdentity {
+            qualified: QualifiedIdentifier::parse_with_default(
+                "pgtrickle.snapshot_orders",
+                "public",
+            )
+            .expect("qualified name should parse"),
+            relid: pg_sys::Oid::from(55u32),
+            relkind: 'r',
+            relowner: pg_sys::Oid::from(7u32),
+        };
+        let catalog = SnapshotCatalogRow {
+            pgt_id: 9,
+            snapshot_schema: "pgtrickle".to_string(),
+            snapshot_table: "snapshot_orders".to_string(),
+            snapshot_version: "0.84.0".to_string(),
+            frontier_json: Some("null".to_string()),
+            snapshot_relid: pg_sys::Oid::from(55u32),
+            snapshot_provenance_token: "deadbeef".to_string(),
+            created_by_role_oid: pg_sys::Oid::from(7u32),
+        };
+        let provenance = SnapshotProvenance {
+            pgt_id: 11,
+            pgt_relid: 88,
+            snapshot_relid: 55,
+            created_by_role_oid: 7,
+            token: "deadbeef".to_string(),
+        };
+
+        let err = validate_snapshot_relation_binding(
+            &relation,
+            &catalog,
+            &provenance,
+            Some(ExpectedStreamBinding {
+                pgt_id: 9,
+                pgt_relid: 77,
+            }),
+        )
+        .expect_err("snapshot from another stream should be rejected");
+
+        assert!(format!("{err}").contains("does not belong to stream table"));
     }
 }
