@@ -20,6 +20,94 @@
 
 use std::fmt;
 
+/// Stable classification for failures from scheduler-owned refreshes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshFailureKind {
+    LockTimeout,
+    StatementTimeout,
+    Deadlock,
+    Serialization,
+    OutOfMemory,
+    Cancelled,
+    Permanent,
+    UnknownRetryable,
+}
+
+impl RefreshFailureKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::LockTimeout => "LOCK_TIMEOUT",
+            Self::StatementTimeout => "STATEMENT_TIMEOUT",
+            Self::Deadlock => "DEADLOCK",
+            Self::Serialization => "SERIALIZATION",
+            Self::OutOfMemory => "OUT_OF_MEMORY",
+            Self::Cancelled => "CANCELLED",
+            Self::Permanent => "PERMANENT",
+            Self::UnknownRetryable => "UNKNOWN_RETRYABLE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshFailure {
+    pub kind: RefreshFailureKind,
+    pub sqlstate: Option<String>,
+    pub message: String,
+    pub retryable: bool,
+    pub counts_toward_suspension: bool,
+}
+
+/// Classify a scheduler refresh failure, preferring SQLSTATE over localized text.
+pub fn classify_refresh_failure(sqlstate: Option<&str>, message: &str) -> RefreshFailure {
+    let lower = message.to_ascii_lowercase();
+    let kind = match sqlstate {
+        Some("55P03") => RefreshFailureKind::LockTimeout,
+        Some("40P01") => RefreshFailureKind::Deadlock,
+        Some("40001") => RefreshFailureKind::Serialization,
+        Some("53200") => RefreshFailureKind::OutOfMemory,
+        Some("57014") if lower.contains("user request") || lower.contains("cancel") => {
+            RefreshFailureKind::Cancelled
+        }
+        Some("57014") => RefreshFailureKind::StatementTimeout,
+        _ if lower.contains("canceling statement due to user request")
+            || lower.contains("query canceled by user")
+            || lower.contains("query cancelled by user") =>
+        {
+            RefreshFailureKind::Cancelled
+        }
+        _ if lower.contains("lock timeout")
+            || lower.contains("canceling statement due to lock timeout") =>
+        {
+            RefreshFailureKind::LockTimeout
+        }
+        _ if lower.contains("statement timeout")
+            || lower.contains("canceling statement due to statement timeout") =>
+        {
+            RefreshFailureKind::StatementTimeout
+        }
+        _ if lower.contains("out of memory") => RefreshFailureKind::OutOfMemory,
+        _ => {
+            if classify_error_for_retry(message) {
+                RefreshFailureKind::UnknownRetryable
+            } else {
+                RefreshFailureKind::Permanent
+            }
+        }
+    };
+
+    let retryable = !matches!(
+        kind,
+        RefreshFailureKind::Permanent | RefreshFailureKind::Cancelled
+    );
+    RefreshFailure {
+        kind,
+        sqlstate: sqlstate.map(str::to_owned),
+        message: message.to_owned(),
+        retryable,
+        counts_toward_suspension: !matches!(kind, RefreshFailureKind::Cancelled),
+    }
+}
+
 /// Primary error type for the extension.
 #[derive(Debug, thiserror::Error)]
 pub enum PgTrickleError {
@@ -51,6 +139,18 @@ pub enum PgTrickleError {
     /// An invalid argument was provided to an API function.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// A fixed-capacity shared-memory registry could not accept a new entry.
+    #[error("shared state capacity exhausted: {0}")]
+    SharedStateCapacity(String),
+
+    /// A scheduled refresh exceeded its transaction-local lock deadline.
+    #[error("scheduled lock timeout: {0}")]
+    ScheduledLockTimeout(String),
+
+    /// A scheduled refresh exceeded its transaction-local statement deadline.
+    #[error("scheduled statement timeout: {0}")]
+    ScheduledStatementTimeout(String),
 
     /// The defining query exceeds the maximum parse depth (G13-SD).
     #[error("query too complex: {0}")]
@@ -607,6 +707,8 @@ impl PgTrickleError {
             | PgTrickleError::PublicationNotFound(_)
             | PgTrickleError::SlaTooSmall(_) => PgTrickleErrorKind::User,
 
+            PgTrickleError::SharedStateCapacity(_) => PgTrickleErrorKind::Internal,
+
             PgTrickleError::UpstreamTableDropped(_) | PgTrickleError::UpstreamSchemaChanged(_) => {
                 PgTrickleErrorKind::Schema
             }
@@ -618,6 +720,8 @@ impl PgTrickleError {
             | PgTrickleError::CdcCutoverUnproven { .. }
             | PgTrickleError::SpiError(_)
             | PgTrickleError::SpiErrorCode(_, _)
+            | PgTrickleError::ScheduledLockTimeout(_)
+            | PgTrickleError::ScheduledStatementTimeout(_)
             | PgTrickleError::RefreshSkipped(_) => PgTrickleErrorKind::System,
 
             // F34: Permission errors are user-facing, not system-level.
@@ -1116,6 +1220,21 @@ mod tests {
         let _ = classify_spi_error_retryable("]");
         let _ = classify_spi_error_retryable("[[nested]]");
         let _ = classify_spi_error_retryable(&"[".repeat(1000));
+    }
+
+    #[test]
+    fn test_refresh_failure_prefers_sqlstate_and_preserves_cancellation() {
+        let lock =
+            classify_refresh_failure(Some("55P03"), "canceling statement due to lock timeout");
+        assert_eq!(lock.kind, RefreshFailureKind::LockTimeout);
+        assert!(lock.retryable);
+        assert_eq!(lock.sqlstate.as_deref(), Some("55P03"));
+
+        let cancelled =
+            classify_refresh_failure(Some("57014"), "canceling statement due to user request");
+        assert_eq!(cancelled.kind, RefreshFailureKind::Cancelled);
+        assert!(!cancelled.retryable);
+        assert!(!cancelled.counts_toward_suspension);
     }
 
     /// O39-13-SQLSTATE-3: sqlstate_to_string is total and stable.

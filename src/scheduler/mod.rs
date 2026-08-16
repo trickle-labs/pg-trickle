@@ -37,12 +37,57 @@ use pgrx::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
+use std::time::Duration;
 
 use crate::catalog::SchedulerJob;
 use crate::catalog::{RefreshRecord, StreamTableMeta};
 use crate::cdc;
 use crate::config;
 use crate::dag::{DiamondSchedulePolicy, NodeId, RefreshMode, Scc, StDag, StStatus};
+
+thread_local! {
+    static LAST_SUCCESSFUL_ALERT_EMISSION: RefCell<HashMap<(u32, i64, monitor::AlertEvent), u64>> =
+        RefCell::new(HashMap::new());
+}
+
+fn reminder_due(last_emitted_ms: Option<u64>, now_ms: u64, interval_ms: u64) -> bool {
+    interval_ms == 0
+        || last_emitted_ms
+            .map(|last| now_ms.saturating_sub(last) >= interval_ms)
+            .unwrap_or(true)
+}
+
+fn emit_reminder_if_due(
+    st: &StreamTableMeta,
+    event: monitor::AlertEvent,
+    extra: serde_json::Value,
+    interval: Duration,
+) {
+    if st.pooler_compatibility_mode {
+        return;
+    }
+    let now_ms = current_epoch_ms();
+    // SAFETY: MyDatabaseId is valid in a connected PostgreSQL backend.
+    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let key = (database_oid, st.pgt_id, event);
+    LAST_SUCCESSFUL_ALERT_EMISSION.with(|entries| {
+        entries
+            .borrow_mut()
+            .retain(|_, last| now_ms.saturating_sub(*last) < 86_400_000);
+    });
+    let due = LAST_SUCCESSFUL_ALERT_EMISSION.with(|entries| {
+        reminder_due(
+            entries.borrow().get(&key).copied(),
+            now_ms,
+            interval.as_millis() as u64,
+        )
+    });
+    if due && monitor::emit_alert(event, &st.pgt_schema, &st.pgt_name, extra, false).is_ok() {
+        LAST_SUCCESSFUL_ALERT_EMISSION.with(|entries| {
+            entries.borrow_mut().insert(key, now_ms);
+        });
+    }
+}
 use crate::error::{PgTrickleError, RetryPolicy, RetryState};
 use crate::monitor;
 use crate::refresh::{self, RefreshAction};
@@ -66,7 +111,6 @@ pub use scheduler_loop::{
 use citus::drive_distributed_cdc;
 pub use cost::compute_per_db_quota;
 pub use cost::{compute_per_db_quota_with_lag, lag_aware_quota_boost};
-use dispatch::extract_panic_message;
 pub use tier::RefreshTier;
 
 // ── SCAL-1 (v0.25.0): Per-backend catalog snapshot cache ─────────────────
@@ -1553,15 +1597,13 @@ fn self_monitoring_anomaly_notify() {
 
     for (fq_name, anomaly, failures) in &anomalies {
         let anomaly_str = anomaly.as_deref().unwrap_or("none");
-        let payload = format!(
-            r#"{{"event":"self_monitor_anomaly","stream_table":"{}","anomaly":"{}","recent_failures":{}}}"#,
-            fq_name.replace('"', r#"\""#),
-            anomaly_str.replace('"', r#"\""#),
-            failures,
-        );
-        let _ = Spi::run_with_args(
-            "SELECT pg_notify('pgtrickle_alert', $1)",
-            &[payload.as_str().into()],
+        let _ = monitor::emit_alert_without_stream(
+            monitor::AlertEvent::SelfMonitorAnomaly,
+            serde_json::json!({
+                "stream_table": fq_name,
+                "anomaly": anomaly_str,
+                "recent_failures": failures,
+            }),
         );
     }
 }
@@ -1701,76 +1743,6 @@ fn check_cdc_transition_health() {
 // PB1: replaces the previous `pg_try_advisory_lock` approach for
 // PgBouncer transaction‐mode compatibility.
 
-// ── QW-8: Self-healing circuit breaker ────────────────────────────────────
-
-/// QW-8 (v0.81.0): Check whether an error should be intercepted by the
-/// self-healing circuit breaker instead of counting toward auto-suspension.
-///
-/// Returns `true` if the error was intercepted (the caller should skip the
-/// `increment_errors` call). Returns `false` if normal error handling should
-/// proceed.
-///
-/// Currently handles two error classes:
-/// - **OOM** (`pg_trickle.self_heal_oom = on`): PostgreSQL "out of memory"
-///   errors often occur during large MERGE operations. When intercepted, the
-///   error counter is reset to zero and a hint is emitted to lower
-///   `pg_trickle.merge_work_mem_mb` or `pg_trickle.delta_work_mem_cap_mb`.
-/// - **Lock timeout** (`pg_trickle.self_heal_lock_timeout = on`): Lock
-///   timeout errors are transient contention spikes. When intercepted, the
-///   error counter is reset so the ST will retry on the next scheduler tick.
-fn apply_self_heal_if_needed(
-    pgt_id: i64,
-    pgt_schema: &str,
-    pgt_name: &str,
-    error_msg: &str,
-) -> bool {
-    let lower = error_msg.to_lowercase();
-
-    let intercepted_oom = config::pg_trickle_self_heal_oom() && lower.contains("out of memory");
-
-    let intercepted_lock = config::pg_trickle_self_heal_lock_timeout()
-        && (lower.contains("lock timeout")
-            || lower.contains("canceling statement due to lock timeout"));
-
-    if intercepted_oom {
-        pgrx::warning!(
-            "pg_trickle: QW-8 OOM self-heal for {}.{} — resetting error counter. \
-             Consider lowering pg_trickle.merge_work_mem_mb or \
-             pg_trickle.delta_work_mem_cap_mb to reduce MERGE memory usage.",
-            pgt_schema,
-            pgt_name,
-        );
-    } else if intercepted_lock {
-        pgrx::warning!(
-            "pg_trickle: QW-8 lock-timeout self-heal for {}.{} — resetting error \
-             counter. The refresh will retry on the next scheduler tick.",
-            pgt_schema,
-            pgt_name,
-        );
-    }
-
-    if intercepted_oom || intercepted_lock {
-        // Reset the consecutive error counter so the ST can retry without
-        // counting this transient failure toward auto-suspension.
-        if let Err(e) = Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_stream_tables \
-             SET consecutive_errors = 0, updated_at = now() \
-             WHERE pgt_id = $1",
-            &[pgt_id.into()],
-        ) {
-            pgrx::warning!(
-                "pg_trickle: QW-8 self-heal failed to reset consecutive_errors \
-                 for pgt_id={}: {}",
-                pgt_id,
-                e,
-            );
-        }
-        return true;
-    }
-
-    false
-}
-
 // ── FUSE-5: Fuse circuit breaker pre-check ─────────────────────────────────
 
 /// Count total pending change buffer rows across all TABLE/FOREIGN_TABLE
@@ -1855,26 +1827,22 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
         );
     }
 
-    // Send pg_notify alert
-    let notify_payload = format!(
-        "{{\"event\":\"fuse_blown\",\"stream_table\":\"{}.{}\",\"pending\":{},\"ceiling\":{}}}",
-        st.pgt_schema, st.pgt_name, pending, effective_ceiling
-    );
-    let _ = Spi::run_with_args(
-        "SELECT pg_notify('pgtrickle_alert', $1)",
-        &[notify_payload.as_str().into()],
+    let _ = monitor::emit_alert(
+        monitor::AlertEvent::FuseBlown,
+        &st.pgt_schema,
+        &st.pgt_name,
+        serde_json::json!({
+            "fuse_event": "fuse_blown",
+            "pending": pending,
+            "ceiling": effective_ceiling,
+        }),
+        st.pooler_compatibility_mode,
     );
 
     true
 }
 
-/// Emit a periodic reminder that a fuse is still blown.
-///
-/// To avoid spamming the NOTIFY channel every tick (~100ms), we only emit
-/// when the blown_at age crosses a 60-second boundary.  The scheduler calls
-/// `evaluate_fuse` every tick, so we use `blown_at` to throttle.
 fn emit_fuse_blown_reminder(st: &StreamTableMeta) {
-    // Only emit if we can determine how long the fuse has been blown.
     let blown_secs = Spi::get_one_with_args::<f64>(
         "SELECT EXTRACT(EPOCH FROM (now() - blown_at))::float8 \
          FROM pgtrickle.pgt_stream_tables \
@@ -1883,23 +1851,16 @@ fn emit_fuse_blown_reminder(st: &StreamTableMeta) {
     )
     .unwrap_or(None);
 
-    if let Some(secs) = blown_secs {
-        // Emit once per ~60 seconds: fire when we're in the first tick
-        // window after a 60s boundary.  The tick interval is configurable
-        // but typically 100ms–1s, so checking `secs % 60 < 1` is safe.
-        let interval = 60.0_f64;
-        if secs >= interval && (secs % interval) < 1.0 {
-            monitor::emit_alert(
-                monitor::AlertEvent::FuseBlownReminder,
-                &st.pgt_schema,
-                &st.pgt_name,
-                serde_json::json!({
-                    "blown_seconds": secs.round(),
-                    "reason": st.blow_reason.as_deref().unwrap_or("unknown"),
-                }),
-                st.pooler_compatibility_mode,
-            );
-        }
+    if let Some(secs) = blown_secs.filter(|secs| *secs >= 60.0) {
+        emit_reminder_if_due(
+            st,
+            monitor::AlertEvent::FuseBlownReminder,
+            serde_json::json!({
+                "blown_seconds": secs.round(),
+                "reason": st.blow_reason.as_deref().unwrap_or("unknown"),
+            }),
+            Duration::from_secs(60),
+        );
     }
 }
 
@@ -2505,9 +2466,6 @@ fn emit_stale_alert_if_needed(st: &StreamTableMeta) {
     }
 }
 
-/// Emit a one-per-~60s reminder that a stream table is frozen and being
-/// skipped by the scheduler.  Throttled the same way as
-/// `emit_fuse_blown_reminder` — using `last_refresh_at` age modulo.
 fn emit_frozen_tier_skip(st: &StreamTableMeta) {
     let since_last = Spi::get_one_with_args::<f64>(
         "SELECT EXTRACT(EPOCH FROM (now() - COALESCE(last_refresh_at, created_at)))::float8 \
@@ -2516,17 +2474,13 @@ fn emit_frozen_tier_skip(st: &StreamTableMeta) {
     )
     .unwrap_or(None);
 
-    if let Some(secs) = since_last {
-        let interval = 60.0_f64;
-        if secs >= interval && (secs % interval) < 1.0 {
-            monitor::emit_alert(
-                monitor::AlertEvent::FrozenTierSkip,
-                &st.pgt_schema,
-                &st.pgt_name,
-                serde_json::json!({ "frozen_seconds": secs.round() }),
-                st.pooler_compatibility_mode,
-            );
-        }
+    if let Some(secs) = since_last.filter(|secs| *secs >= 60.0) {
+        emit_reminder_if_due(
+            st,
+            monitor::AlertEvent::FrozenTierSkip,
+            serde_json::json!({ "frozen_seconds": secs.round() }),
+            Duration::from_secs(60),
+        );
     }
 }
 
@@ -3360,62 +3314,72 @@ fn refresh_single_st(
                 pgrx::pg_sys::PG_exception_stack = saved_pg_exception_stack;
             }
             subtxn.rollback();
-            let error_msg = extract_panic_message(&panic_payload);
+            let (error_msg, sqlstate) = dispatch::extract_panic_details(&panic_payload);
             log!(
                 "pg_trickle: refresh panicked for {}.{}: {} — setting error state",
                 st.pgt_schema,
                 st.pgt_name,
                 error_msg,
             );
-            // O39-6: use SQLSTATE-first classifier when use_sqlstate_classification=true.
-            let is_retryable = crate::error::classify_error_for_retry(&error_msg);
-            if !is_retryable {
-                let _ = StreamTableMeta::set_error_state(pgt_id, &error_msg);
-            } else {
-                // QW-8: Self-healing circuit breaker — intercept OOM / lock-timeout
-                // errors before counting them toward auto-suspension.
-                let self_healed =
-                    apply_self_heal_if_needed(pgt_id, &st.pgt_schema, &st.pgt_name, &error_msg);
-                if !self_healed {
-                    // ERR-1e: Track consecutive errors for auto-suspension even when
-                    // the failure manifests as a PostgreSQL panic (e.g. a trigger
-                    // raising RAISE EXCEPTION during refresh DML).  After
-                    // subtxn.rollback() the outer transaction is still valid, so
-                    // SPI calls succeed here — mirroring the Rust-error path in
-                    // run_refresh_for_st.
-                    match StreamTableMeta::increment_errors(pgt_id) {
-                        Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
-                            let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
-                            monitor::alert_auto_suspended(
-                                &st.pgt_schema,
-                                &st.pgt_name,
-                                count,
-                                st.pooler_compatibility_mode,
-                            );
-                            log!(
-                                "pg_trickle: suspended {}.{} after {} consecutive errors",
-                                st.pgt_schema,
-                                st.pgt_name,
-                                count,
-                            );
-                        }
-                        Ok(_count) => {
-                            // Still under threshold — will retry on next tick.
-                        }
-                        Err(e) => {
-                            pgrx::warning!(
-                                "pg_trickle: ERR-1e: failed to persist consecutive_errors \
-                             for pgt_id={} after panic-path failure: {}",
-                                pgt_id,
-                                e,
-                            );
-                        }
-                    }
-                } // end !self_healed
+            let failure = crate::error::classify_refresh_failure(sqlstate.as_deref(), &error_msg);
+            if let Ok(Some(now)) = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
+                && let Ok(refresh_id) = RefreshRecord::insert(
+                    pgt_id,
+                    now,
+                    action.as_str(),
+                    "RUNNING",
+                    0,
+                    0,
+                    None,
+                    Some("SCHEDULER"),
+                    None,
+                    0,
+                    None,
+                    false,
+                    tick_watermark,
+                )
+            {
+                let _ = RefreshRecord::complete_with_failure(
+                    refresh_id,
+                    "FAILED",
+                    &failure.message,
+                    failure.kind.code(),
+                    failure.sqlstate.as_deref(),
+                    failure.retryable,
+                );
             }
-            if is_retryable {
+            if failure.retryable {
+                let reduce_memory = failure.kind == crate::error::RefreshFailureKind::OutOfMemory
+                    && config::pg_trickle_self_heal_oom();
+                let increase_lock_backoff = failure.kind
+                    == crate::error::RefreshFailureKind::LockTimeout
+                    && config::pg_trickle_self_heal_lock_timeout();
+                if failure.counts_toward_suspension
+                    && let Ok(count) = StreamTableMeta::record_scheduled_failure(
+                        pgt_id,
+                        failure.kind.code(),
+                        true,
+                        reduce_memory,
+                        increase_lock_backoff,
+                    )
+                    && count >= config::pg_trickle_max_consecutive_errors()
+                {
+                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                    monitor::alert_auto_suspended(
+                        &st.pgt_schema,
+                        &st.pgt_name,
+                        count,
+                        st.pooler_compatibility_mode,
+                    );
+                }
                 RefreshOutcome::RetryableFailure
             } else {
+                let _ = StreamTableMeta::set_typed_error(
+                    pgt_id,
+                    &failure.message,
+                    failure.kind.code(),
+                    false,
+                );
                 RefreshOutcome::PermanentFailure
             }
         }
@@ -3480,6 +3444,13 @@ fn refresh_single_st(
         RefreshOutcome::RetryableFailure => {
             let will_retry = retry.record_failure(retry_policy, now_ms);
             if will_retry {
+                let lock_delay = (config::pg_trickle_scheduler_interval_ms() as u64)
+                    .saturating_mul(
+                        1u64 << (st.self_heal_lock_backoff_exponent.clamp(0, 6) as u32),
+                    );
+                retry.next_retry_at_ms = retry
+                    .next_retry_at_ms
+                    .max(now_ms.saturating_add(lock_delay));
                 log!(
                     "pg_trickle: {}.{} will retry in {}ms (attempt {}/{})",
                     st.pgt_schema,
@@ -3508,6 +3479,21 @@ fn refresh_single_st(
     }
 }
 
+fn apply_scheduled_deadlines() -> Result<(), crate::error::PgTrickleError> {
+    let lock_timeout = format!("{}ms", config::pg_trickle_scheduled_lock_timeout_ms());
+    let statement_timeout = format!("{}ms", config::pg_trickle_scheduled_statement_timeout_ms());
+    Spi::run_with_args(
+        "SELECT set_config('lock_timeout', $1, true)",
+        &[lock_timeout.into()],
+    )
+    .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run_with_args(
+        "SELECT set_config('statement_timeout', $1, true)",
+        &[statement_timeout.into()],
+    )
+    .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))
+}
+
 /// Execute a scheduled refresh for a stream table.
 ///
 /// Returns a [`RefreshOutcome`] indicating whether the refresh succeeded,
@@ -3528,6 +3514,15 @@ fn execute_scheduled_refresh(
     tick_watermark: Option<&str>,
     drift_counter: Option<&mut i32>,
 ) -> RefreshOutcome {
+    if let Err(e) = apply_scheduled_deadlines() {
+        pgrx::warning!(
+            "pg_trickle: failed to apply scheduled refresh deadlines for {}.{}: {}",
+            st.pgt_schema,
+            st.pgt_name,
+            e
+        );
+        return RefreshOutcome::RetryableFailure;
+    }
     let start_instant = std::time::Instant::now();
 
     let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
@@ -3899,7 +3894,13 @@ fn execute_scheduled_refresh(
                         version::compute_new_frontier(&slot_positions, &data_ts_frontier);
                     augment_frontier(&mut new_frontier);
 
-                    match refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier) {
+                    let tuning = st.runtime_tuning();
+                    match refresh::execute_differential_refresh_with_tuning(
+                        st,
+                        &prev_frontier,
+                        &new_frontier,
+                        &tuning,
+                    ) {
                         Ok((ins, del)) => {
                             // COR-001 (v0.72.0): Propagate frontier-store failure.
                             match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
@@ -4083,19 +4084,26 @@ fn execute_scheduled_refresh(
                 }
             }
 
+            let _ = StreamTableMeta::record_scheduled_success(st.pgt_id);
             RefreshOutcome::Success
         }
         Err(e) => {
-            let _ = RefreshRecord::complete_with_rows_updated(
+            let failure = match &e {
+                crate::error::PgTrickleError::SpiErrorCode(code, message) => {
+                    crate::error::classify_refresh_failure(
+                        Some(&crate::error::sqlstate_to_string(*code)),
+                        message,
+                    )
+                }
+                _ => crate::error::classify_refresh_failure(None, &e.to_string()),
+            };
+            let _ = RefreshRecord::complete_with_failure(
                 refresh_id,
                 "FAILED",
-                0,
-                0,
-                0,
-                Some(&e.to_string()),
-                0,
-                Some(action.as_str()),
-                was_full_fallback,
+                &failure.message,
+                failure.kind.code(),
+                failure.sqlstate.as_deref(),
+                failure.retryable,
             );
 
             monitor::alert_refresh_failed(
@@ -4106,8 +4114,8 @@ fn execute_scheduled_refresh(
                 st.pooler_compatibility_mode,
             );
 
-            let is_retryable = e.is_retryable();
-            let counts = e.counts_toward_suspension();
+            let is_retryable = failure.retryable && e.is_retryable();
+            let counts = failure.counts_toward_suspension && e.counts_toward_suspension();
 
             // Handle schema errors: mark for reinitialize
             if e.requires_reinitialize() {
@@ -4125,7 +4133,12 @@ fn execute_scheduled_refresh(
             // self-heal. Skip the consecutive_errors increment path.
             if !is_retryable {
                 let error_msg = e.to_string();
-                let _ = StreamTableMeta::set_error_state(st.pgt_id, &error_msg);
+                let _ = StreamTableMeta::set_typed_error(
+                    st.pgt_id,
+                    &error_msg,
+                    failure.kind.code(),
+                    false,
+                );
 
                 log!(
                     "pg_trickle: permanent error for {}.{} ({}): {} — set status to ERROR",
@@ -4140,41 +4153,45 @@ fn execute_scheduled_refresh(
 
             // Increment error count only for retryable errors that should count
             if counts {
-                // QW-8: Self-healing circuit breaker — intercept OOM / lock-timeout
-                // errors before counting them toward auto-suspension.
-                let error_str = e.to_string();
-                let self_healed =
-                    apply_self_heal_if_needed(st.pgt_id, &st.pgt_schema, &st.pgt_name, &error_str);
-                if !self_healed {
-                    match StreamTableMeta::increment_errors(st.pgt_id) {
-                        Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
-                            let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended);
+                let reduce_memory = failure.kind == crate::error::RefreshFailureKind::OutOfMemory
+                    && config::pg_trickle_self_heal_oom();
+                let increase_lock_backoff = failure.kind
+                    == crate::error::RefreshFailureKind::LockTimeout
+                    && config::pg_trickle_self_heal_lock_timeout();
+                match StreamTableMeta::record_scheduled_failure(
+                    st.pgt_id,
+                    failure.kind.code(),
+                    is_retryable,
+                    reduce_memory,
+                    increase_lock_backoff,
+                ) {
+                    Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
+                        let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended);
 
-                            monitor::alert_auto_suspended(
-                                &st.pgt_schema,
-                                &st.pgt_name,
-                                count,
-                                st.pooler_compatibility_mode,
-                            );
+                        monitor::alert_auto_suspended(
+                            &st.pgt_schema,
+                            &st.pgt_name,
+                            count,
+                            st.pooler_compatibility_mode,
+                        );
 
-                            log!(
-                                "pg_trickle: suspended {}.{} after {} consecutive errors",
-                                st.pgt_schema,
-                                st.pgt_name,
-                                count,
-                            );
-                        }
-                        _ => {
-                            log!(
-                                "pg_trickle: refresh failed for {}.{} ({}): {} [will retry]",
-                                st.pgt_schema,
-                                st.pgt_name,
-                                action.as_str(),
-                                e,
-                            );
-                        }
+                        log!(
+                            "pg_trickle: suspended {}.{} after {} consecutive errors",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            count,
+                        );
                     }
-                } // end !self_healed
+                    Ok(_) | Err(_) => {
+                        log!(
+                            "pg_trickle: refresh failed for {}.{} ({}): {} [will retry]",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            action.as_str(),
+                            e,
+                        );
+                    }
+                }
             } else {
                 log!(
                     "pg_trickle: refresh skipped for {}.{}: {}",
@@ -4463,6 +4480,14 @@ mod tests {
     }
 
     #[test]
+    fn reminder_throttle_uses_successful_emission_interval() {
+        assert!(reminder_due(None, 0, 60_000));
+        assert!(!reminder_due(Some(0), 59_999, 60_000));
+        assert!(reminder_due(Some(0), 60_000, 60_000));
+        assert!(reminder_due(Some(10), 10, 0));
+    }
+
+    #[test]
     fn test_refresh_outcome_debug_and_equality() {
         assert_eq!(RefreshOutcome::Success, RefreshOutcome::Success);
         assert_ne!(RefreshOutcome::Success, RefreshOutcome::RetryableFailure);
@@ -4587,20 +4612,22 @@ mod tests {
 
     #[test]
     fn test_parse_worker_extra_valid() {
-        let result = parse_worker_extra("mydb|42");
+        let result = parse_worker_extra("mydb|42|7");
         assert!(result.is_some());
-        let (db, id) = result.unwrap();
+        let (db, id, generation) = result.unwrap();
         assert_eq!(db, "mydb");
         assert_eq!(id, 42);
+        assert_eq!(generation, 7);
     }
 
     #[test]
     fn test_parse_worker_extra_long_db_name() {
-        let result = parse_worker_extra("my_production_database|999999");
+        let result = parse_worker_extra("my_production_database|999999|8");
         assert!(result.is_some());
-        let (db, id) = result.unwrap();
+        let (db, id, generation) = result.unwrap();
         assert_eq!(db, "my_production_database");
         assert_eq!(id, 999999);
+        assert_eq!(generation, 8);
     }
 
     #[test]

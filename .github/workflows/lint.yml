@@ -20,8 +20,6 @@ on:
       - 'plans/**'
       - 'coverage/**'
       - 'cnpg/**'
-      - 'scripts/**'
-      - '.github/workflows/**'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -62,3 +60,9 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets --features pg18 -- -D warnings
+
+      - name: Check dynamic SQL builders
+        run: bash scripts/check_sql_builder.sh
+
+      - name: Check fuzz inventory
+        run: python3 scripts/check_fuzz_targets.py

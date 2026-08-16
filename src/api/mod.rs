@@ -2556,14 +2556,18 @@ fn view_evolution_status() -> TableIterator<
 /// -- Confirm drained:
 /// SELECT pgtrickle.is_drained();
 /// -- Resume normal operation after maintenance:
-/// UPDATE pgtrickle.pgt_stream_tables SET status = status; -- noop, scheduler picks up
+/// SELECT pgtrickle.resume_after_drain();
 /// ```
 #[pg_extern(schema = "pgtrickle")]
 fn drain(timeout_s: default!(i32, 60)) -> bool {
-    let effective_timeout = if timeout_s < 1 {
+    let effective_timeout = if timeout_s == 0 {
         crate::config::pg_trickle_drain_timeout()
     } else {
         timeout_s
+    };
+    let effective_timeout = match validation::timeout_seconds("drain timeout", effective_timeout) {
+        Ok(value) => value,
+        Err(e) => raise_error_with_context(e),
     };
 
     let epoch = match crate::shmem::signal_drain() {
@@ -2574,20 +2578,20 @@ fn drain(timeout_s: default!(i32, 60)) -> bool {
         }
     };
 
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(effective_timeout as u64);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(effective_timeout);
 
     loop {
         if crate::shmem::check_drain_completed(epoch) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
-            // Timed out — cancel the drain request so the scheduler resumes
-            crate::shmem::cancel_drain();
             return false;
         }
-        // Poll at 100 ms intervals to avoid busy-wait
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        pgrx::check_for_interrupts!();
+        unsafe {
+            // SAFETY: pg_usleep is PostgreSQL's bounded backend sleep helper.
+            pgrx::pg_sys::pg_usleep(100_000);
+        }
     }
 }
 
@@ -2598,8 +2602,14 @@ fn drain(timeout_s: default!(i32, 60)) -> bool {
 /// in shared memory. This state is reset the next time the scheduler begins a
 /// new tick.
 #[pg_extern(schema = "pgtrickle")]
-fn is_drained() -> bool {
-    crate::shmem::is_drained()
+fn is_drained() -> Option<bool> {
+    crate::shmem::drain_status()
+}
+
+/// v0.85.0: Explicitly resume dispatch after a persistent drain.
+#[pg_extern(schema = "pgtrickle")]
+fn resume_after_drain() -> bool {
+    crate::shmem::resume_after_drain()
 }
 
 // ── v0.39.0: CDC pause status API (O39-8) ─────────────────────────────────
@@ -2649,8 +2659,6 @@ fn cdc_pause_status() -> TableIterator<
 }
 
 // ── v0.36.0: Bulk operations (A25) ────────────────────────────────────────
-
-const BULK_STREAM_TABLE_LIMIT: usize = 1000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2708,11 +2716,11 @@ fn canonicalize_bulk_stream_table_names(
             "{function_name}() names array is empty"
         )));
     }
-    if names.len() > BULK_STREAM_TABLE_LIMIT {
-        return Err(PgTrickleError::InvalidArgument(format!(
-            "{function_name}() accepts at most {BULK_STREAM_TABLE_LIMIT} names per call"
-        )));
-    }
+    validation::cardinality(
+        &format!("{function_name}() names"),
+        names.len(),
+        crate::config::pg_trickle_max_bulk_api_items(),
+    )?;
 
     let mut seen = HashSet::with_capacity(names.len());
     let mut canonical_names = Vec::with_capacity(names.len());
@@ -3801,6 +3809,11 @@ mod tests {
             storage_fillfactor: None,
             query_complexity_class: None,
             row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
+            self_heal_work_mem_percent: 100,
+            self_heal_lock_backoff_exponent: 0,
+            self_heal_success_streak: 0,
+            last_error_code: None,
+            last_error_retryable: None,
         }
     }
 
@@ -4491,10 +4504,10 @@ mod tests {
 
     #[test]
     fn test_canonicalize_bulk_stream_table_names_rejects_over_limit() {
-        let names = vec![Some("orders".to_string()); BULK_STREAM_TABLE_LIMIT + 1];
+        let names = vec![Some("orders".to_string()); 257];
         let err =
             canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables").unwrap_err();
-        assert!(err.to_string().contains("at most"));
+        assert!(err.to_string().contains("configured limit"));
     }
 
     #[test]

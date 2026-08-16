@@ -438,7 +438,7 @@ pub(crate) fn drain_pending_cleanups() {
                     );
                     // Emit NOTIFY alert on 3rd and every subsequent 10th failure
                     if *count == 3 || *count % 10 == 0 {
-                        crate::monitor::emit_alert(
+                        let _ = crate::monitor::emit_alert(
                             crate::monitor::AlertEvent::CleanupFailure,
                             "",
                             &buf_name,
@@ -849,6 +849,7 @@ pub(crate) fn apply_planner_hints(
     estimated_delta: i64,
     st_relid: pg_sys::Oid,
     scan_count: usize,
+    tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> bool {
     if !crate::config::pg_trickle_merge_planner_hints() {
         return false;
@@ -857,7 +858,7 @@ pub(crate) fn apply_planner_hints(
     // PH-D2: Manual join strategy override — bypass heuristics entirely.
     let strategy = crate::config::pg_trickle_merge_join_strategy();
     if strategy != crate::config::MergeJoinStrategy::Auto {
-        apply_fixed_join_strategy(strategy);
+        apply_fixed_join_strategy(strategy, tuning);
         return false;
     }
 
@@ -869,11 +870,11 @@ pub(crate) fn apply_planner_hints(
     // so the planner considers all join orderings, and remove the
     // temp_file_limit cap so the query can run to completion.
     if scan_count >= DEEP_JOIN_SCAN_THRESHOLD {
-        let mb = crate::config::pg_trickle_merge_work_mem_mb().max(512);
+        let mb = tuning.merge_work_mem_mb.max(512);
 
         // SCAL-3: If a work_mem cap is set and the deep-join allocation
         // would exceed it, signal fallback to FULL refresh.
-        let cap = crate::config::pg_trickle_delta_work_mem_cap_mb();
+        let cap = tuning.delta_work_mem_cap_mb;
         if cap > 0 && mb > cap {
             pgrx::notice!(
                 "[pg_trickle] SCAL-3: deep-join work_mem ({mb}MB) exceeds \
@@ -962,11 +963,11 @@ pub(crate) fn apply_planner_hints(
 
     if estimated_delta >= PLANNER_HINT_WORKMEM_THRESHOLD {
         // Large delta: disable nested loops AND raise work_mem for hash joins
-        let mb = crate::config::pg_trickle_merge_work_mem_mb();
+        let mb = tuning.merge_work_mem_mb;
 
         // SCAL-3: If a work_mem cap is set and the large-delta allocation
         // would exceed it, signal fallback to FULL refresh.
-        let cap = crate::config::pg_trickle_delta_work_mem_cap_mb();
+        let cap = tuning.delta_work_mem_cap_mb;
         if cap > 0 && mb > cap {
             pgrx::notice!(
                 "[pg_trickle] SCAL-3: large-delta work_mem ({mb}MB) exceeds \
@@ -998,7 +999,10 @@ pub(crate) fn apply_planner_hints(
 }
 
 /// PH-D2: Apply a fixed join strategy override via `SET LOCAL` hints.
-pub(crate) fn apply_fixed_join_strategy(strategy: crate::config::MergeJoinStrategy) {
+pub(crate) fn apply_fixed_join_strategy(
+    strategy: crate::config::MergeJoinStrategy,
+    tuning: &crate::catalog::RefreshRuntimeTuning,
+) {
     let (nestloop, hashjoin, mergejoin, label) = match strategy {
         crate::config::MergeJoinStrategy::HashJoin => ("off", "on", "on", "hash_join"),
         crate::config::MergeJoinStrategy::NestedLoop => ("on", "off", "off", "nested_loop"),
@@ -1020,7 +1024,7 @@ pub(crate) fn apply_fixed_join_strategy(strategy: crate::config::MergeJoinStrate
 
     // For hash_join strategy, also raise work_mem to avoid hash spills.
     if strategy == crate::config::MergeJoinStrategy::HashJoin {
-        let mb = crate::config::pg_trickle_merge_work_mem_mb();
+        let mb = tuning.merge_work_mem_mb;
         // mb is a config integer, not user-supplied input; SET LOCAL cannot use parameterized queries.
         let work_mem_sql = format!("SET LOCAL work_mem = '{mb}MB'");
         if let Err(e) = Spi::run(&work_mem_sql) {

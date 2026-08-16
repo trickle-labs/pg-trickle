@@ -191,11 +191,11 @@ pub(crate) fn bulk_create_impl(
             "bulk_create() definitions array is empty".into(),
         ));
     }
-    if defs.len() > 1_000 {
-        return Err(PgTrickleError::InvalidArgument(
-            "bulk_create() accepts at most 1000 definitions".into(),
-        ));
-    }
+    validation::cardinality(
+        "bulk_create() definitions",
+        defs.len(),
+        crate::config::pg_trickle_max_bulk_api_items(),
+    )?;
 
     let mut parsed = Vec::with_capacity(defs.len());
     let mut targets = std::collections::HashSet::with_capacity(defs.len());

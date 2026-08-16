@@ -1266,6 +1266,8 @@ fn handle_dropped_table(obj: &DroppedObject) {
         cdc::buffer_qualified_name_for_oid(&config::pg_trickle_change_buffer_schema(), obj.objid);
     let drop_buffer_sql = format!("DROP TABLE IF EXISTS {buffer} CASCADE");
     if let Err(e) = Spi::run(&drop_buffer_sql) {
+        // nosemgrep: rust.spi.run.dynamic-format — buffer name is derived from source OID.
+        // nosemgrep: rust.spi.run.dynamic-format — buffer name is derived from source OID.
         pgrx::warning!(
             "pg_trickle_ddl_tracker: failed to drop CDC buffer for {}: {}",
             identity,

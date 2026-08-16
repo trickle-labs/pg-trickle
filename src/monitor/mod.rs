@@ -523,6 +523,23 @@ pub(crate) fn collect_metrics_text() -> String {
     out
 }
 
+/// Collect metrics with a transaction-local timeout bounded by the request
+/// deadline. The caller must execute this inside a PostgreSQL transaction.
+pub(crate) fn collect_metrics_text_with_deadline(
+    remaining: std::time::Duration,
+) -> Result<String, crate::metrics_server::MetricsServerError> {
+    let millis = remaining.as_millis().min(i32::MAX as u128) as u64;
+    if millis == 0 {
+        return Err(crate::metrics_server::MetricsServerError::Timeout(
+            "metrics request deadline elapsed".to_string(),
+        ));
+    }
+    Spi::run(&format!("SET LOCAL statement_timeout = '{millis}ms'")).map_err(|e| {
+        crate::metrics_server::MetricsServerError::Io(format!("set metrics statement_timeout: {e}"))
+    })?;
+    Ok(collect_metrics_text())
+}
+
 /// Return refresh history for a specific ST, most recent first.
 ///
 /// Exposed as `pgtrickle.get_refresh_history(name, limit)`.
@@ -1854,7 +1871,7 @@ pub fn check_cdc_trigger_health() {
             .unwrap_or(None)
             .unwrap_or_else(|| format!("oid={}", oid_u32));
 
-            emit_alert(
+            let _ = emit_alert(
                 AlertEvent::CdcTriggerDisabled,
                 "", // no single ST schema — source-level alert
                 &source_name,
@@ -2238,7 +2255,7 @@ mod tests {
 
     #[test]
     fn test_alert_payload_truncation() {
-        let long_extra = "x".repeat(8000);
+        let long_extra = "😀".repeat(8000);
         let payload = build_alert_payload(
             AlertEvent::BufferGrowthWarning,
             "public",
@@ -2250,11 +2267,31 @@ mod tests {
             "payload should be truncated: len={}",
             payload.len()
         );
-        assert!(
-            payload.ends_with("...}"),
-            "should end with truncation marker, got: ...{}",
-            &payload[payload.len().saturating_sub(10)..],
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
+    fn test_alert_payload_reduces_nested_unicode_safely() {
+        let payload = build_alert_payload(
+            AlertEvent::RefreshFailed,
+            "公共",
+            "注文😀",
+            serde_json::Value::Object(
+                (0..20)
+                    .map(|index| {
+                        (
+                            format!("detail_{index}"),
+                            serde_json::json!({"error": "🦀".repeat(8000)}),
+                        )
+                    })
+                    .collect(),
+            ),
         );
+        assert!(payload.len() <= 7900);
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(value["truncated"], true);
+        assert!(value.get("omitted_fields").is_some());
     }
 
     #[test]

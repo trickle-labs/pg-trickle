@@ -492,7 +492,8 @@ pub(crate) fn execute_manual_full_refresh(
     }
 
     let truncate_sql = format!("TRUNCATE {quoted_table}");
-    Spi::run(&truncate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&truncate_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     // For aggregate/distinct STs in DIFFERENTIAL mode, inject COUNT(*)
     // into the defining query so __pgt_count is populated for subsequent

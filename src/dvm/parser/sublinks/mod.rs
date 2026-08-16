@@ -1969,7 +1969,7 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
     // conservatively as query_len / 4 (typical average node is ~4 chars
     // of SQL, e.g. ", 1" in an IN list).  This guard fires before the
     // OpTree builder allocates per-node structures, keeping peak memory bounded.
-    // When max_parse_nodes == 0 (default changed to 0 for opt-in), the check is disabled.
+    // The guard is always enabled; the GUC's default is deliberately generous.
     let max_nodes = crate::config::pg_trickle_max_parse_nodes();
     if max_nodes > 0 {
         let estimated_nodes = (query.len() / 4).max(1);

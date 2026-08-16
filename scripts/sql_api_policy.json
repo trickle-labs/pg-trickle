@@ -224,6 +224,12 @@
       "identity_arguments": "integer",
       "class": "admin_global"
     },
+    "pgtrickle.resume_after_drain()": {
+      "schema": "pgtrickle",
+      "name": "resume_after_drain",
+      "identity_arguments": "",
+      "class": "admin_global"
+    },
     "pgtrickle.drop_refresh_group(text)": {
       "schema": "pgtrickle",
       "name": "drop_refresh_group",

@@ -133,6 +133,7 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
   - [pg\_trickle.template\_cache\_max\_entries](#pg_trickletemplate_cache_max_entries)
 - [Operability, Observability & DR](#operability-observability--dr-v0270)
   - [pg\_trickle.metrics\_port](#pg_tricklemetrics_port)
+  - [pg\_trickle.metrics\_bind\_address](#pg_tricklemetrics_bind_address)
   - [pg\_trickle.metrics\_request\_timeout\_ms](#pg_tricklemetrics_request_timeout_ms)
   - [pg\_trickle.frontier\_holdback\_mode](#pg_tricklefrontier_holdback_mode)
   - [pg\_trickle.frontier\_holdback\_warn\_seconds](#pg_tricklefrontier_holdback_warn_seconds)
@@ -1348,7 +1349,7 @@ memory exhaustion during parsing. Users who genuinely need more than
 64 branches can raise this GUC.
 
 **Default:** `64`  
-**Range:** `1` – `65536`
+**Range:** `1` – `1024`
 
 ```sql
 -- Allow up to 128 grouping set branches
@@ -1434,7 +1435,7 @@ subqueries, CTEs, or set operations. When the limit is exceeded, the
 parser returns a `QueryTooComplex` error instead of crashing.
 
 **Default:** `64`
-**Range:** `1` – `10000`
+**Range:** `1` – `256`
 
 ```sql
 -- Raise the limit for deeply nested queries
@@ -2280,6 +2281,24 @@ SELECT pg_reload_conf();
 Use `0` (the default) to disable the HTTP endpoint. Each database runs its
 own scheduler, so the port must be unique per database on the same host.
 
+### pg_trickle.metrics_bind_address
+
+Literal IPv4 or IPv6 address for the Prometheus/OpenMetrics endpoint.
+Defaults to `127.0.0.1`; use `0.0.0.0` or `::` only when remote exposure is
+explicitly intended and protected by the deployment network.
+
+| Property | Value |
+|---|---|
+| Type | `string` |
+| Default | `127.0.0.1` |
+| Accepted values | Literal IPv4/IPv6 addresses only |
+| Context | `SUSET` (superuser) |
+| Restart required | Yes |
+
+```sql
+ALTER DATABASE mydb SET pg_trickle.metrics_bind_address = '127.0.0.1';
+```
+
 ### pg_trickle.metrics_request_timeout_ms
 
 Maximum milliseconds the metrics HTTP handler is allowed to run. If a slow
@@ -2452,7 +2471,7 @@ long maintenance windows.
 ### pg_trickle.max_parse_nodes
 
 Maximum estimated number of parse-tree nodes allowed in a stream table
-defining query. When `> 0`, queries whose estimated node count exceeds this
+defining query. Queries whose estimated node count exceeds this
 limit are rejected with a `QueryTooComplex` error before the OpTree builder
 allocates memory. This guards against pathological queries such as
 `WHERE id IN (1, 2, …, 1 000 000)` that would otherwise exhaust per-backend
@@ -2461,8 +2480,8 @@ memory during delta SQL generation.
 | Property | Value |
 |---|---|
 | Type | `integer` |
-| Default | `0` (disabled) |
-| Range | 0 (disabled) – 10,000,000 |
+| Default | `100000` |
+| Range | 1 – 1,000,000 |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
 
@@ -2472,9 +2491,8 @@ ALTER SYSTEM SET pg_trickle.max_parse_nodes = 100000;
 SELECT pg_reload_conf();
 ```
 
-Node count is estimated conservatively as `len(query) / 4`.  The default of
-`0` disables the check for backward compatibility.  A value of `100000` is
-recommended for production deployments.
+Node count is estimated conservatively as `len(query) / 4`. The guard is
+always enabled; `0` is no longer accepted. The hard maximum is 1,000,000.
 
 ---
 

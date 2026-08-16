@@ -37,6 +37,13 @@ postgres_exporter (:9187)
 (`pgtrickle.stream_tables_info`, `pgtrickle.pg_stat_stream_tables`, etc.)
 and exposes them as Prometheus metrics.
 
+pg_trickle also provides a scheduler-safe native endpoint. Set
+`pg_trickle.metrics_port` and, if needed, the literal IPv4/IPv6
+`pg_trickle.metrics_bind_address` (default `127.0.0.1`) per database. The
+endpoint is available at `/metrics`; `/health` is a lightweight liveness check.
+Remote binding (`0.0.0.0` or `::`) should only be used behind network access
+controls.
+
 ## Connecting to an Existing Database
 
 If you already have PostgreSQL + pg_trickle running, configure the exporter

@@ -85,6 +85,7 @@ void  errfinish(const char *filename, int lineno, const char *funcname) {
 }
 
 /* ── Transaction / type helpers ───────────────────────────────────────── */
+uint32_t MyDatabaseId                     = 0;
 int      GetDatabaseEncoding(void)             { return 0; }
 uint32_t GetOuterUserId(void)                  { return 0; }
 void    *get_config_handle(const char *name)   { (void)name; return NULL; }

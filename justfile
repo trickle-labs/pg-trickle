@@ -58,7 +58,7 @@ clippy:
 # Check formatting and run clippy
 # CI-004: docs-lint is now the final step; all local lint checks match CI.
 [group: "lint"]
-lint: fmt-check clippy security-definer-check docs-lint
+lint: fmt-check clippy security-definer-check docs-lint check-sql-builder check-fuzz-targets
 
 # Alias for consistency with prior documentation.
 [group: "lint"]
@@ -127,6 +127,11 @@ security:
 [group: "lint"]
 check-sql-builder:
     bash scripts/check_sql_builder.sh
+
+# CI-001: Ensure smoke and nightly use the Cargo fuzz inventory.
+[group: "lint"]
+check-fuzz-targets:
+    python3 scripts/check_fuzz_targets.py
 
 # TEST-005: Generate per-module coverage summary using cargo-llvm-cov.
 # Requires: cargo install cargo-llvm-cov
@@ -228,15 +233,16 @@ test-all: test-unit test-integration test-e2e test-pgrx
 # Each target runs for FUZZ_DURATION seconds (default 60).
 # Requires a nightly toolchain: `rustup install nightly`.
 # Available fuzz targets:
-#   parser_fuzz, cron_fuzz, guc_fuzz, cdc_fuzz, wal_fuzz,
-#   dag_fuzz, sql_builder_fuzz, merge_sql_fuzz, row_id_fuzz
+#   api_guard_fuzz, cron_fuzz, guc_fuzz, cdc_trigger_fuzz,
+#   error_classifier_fuzz, wal_decoder_fuzz, dag_fuzz, sql_builder_fuzz,
+#   merge_sql_fuzz, row_id_fuzz, snapshot_fingerprint_fuzz
 # Corpus directories: fuzz/corpus/<target_name>/
 # CI-002: target failures accumulate; exits 1 if any target fails.
 [group: "test"]
 fuzz-all duration="60":
     #!/usr/bin/env bash
     set -uo pipefail
-    targets=(parser_fuzz cron_fuzz guc_fuzz cdc_fuzz wal_fuzz dag_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+    mapfile -t targets < <(python3 scripts/fuzz_targets.py)
     FAILED_TARGETS=()
     for target in "${targets[@]}"; do
         echo "=== Fuzzing $target for {{duration}}s ==="
@@ -257,7 +263,7 @@ fuzz-all duration="60":
 fuzz-all-best-effort duration="60":
     #!/usr/bin/env bash
     set -uo pipefail
-    targets=(parser_fuzz cron_fuzz guc_fuzz cdc_fuzz wal_fuzz dag_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+    mapfile -t targets < <(python3 scripts/fuzz_targets.py)
     for target in "${targets[@]}"; do
         echo "=== Fuzzing $target for {{duration}}s ==="
         cargo +nightly fuzz run "$target" -- -max_total_time={{duration}} -jobs=1 -workers=1 || true
@@ -503,12 +509,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.84.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.85.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.84.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.85.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

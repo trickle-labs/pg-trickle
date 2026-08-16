@@ -74,6 +74,141 @@ pub struct SchedulerMetaState {
 // SAFETY: SchedulerMetaState is Copy + Clone + Default with only primitive types.
 unsafe impl PGRXSharedMemory for SchedulerMetaState {}
 
+/// Maximum number of database schedulers tracked in shared memory.
+///
+/// The launcher supports at least this many databases without falling back to
+/// cluster-global state. A full registry is a typed startup failure.
+pub const MAX_DATABASE_SCHEDULERS: usize = 64;
+
+/// Fixed-capacity database key used by scheduler shared state.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct DatabaseKey(pub u32);
+
+/// Database-local scheduler state. OID zero denotes an unused slot.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct DatabaseSchedulerSlot {
+    pub database_oid: u32,
+    pub scheduler_pid: i32,
+    pub running: bool,
+    pub last_wake_epoch_secs: i64,
+    pub drain_seen_epoch: u64,
+    pub inline_pgt_id: i64,
+    pub queue_depth: u32,
+    pub last_tick_oldest_xmin: u64,
+    pub last_tick_safe_lsn_u64: u64,
+}
+
+/// Fixed-capacity database scheduler registry.
+#[derive(Debug, Copy, Clone)]
+pub struct DatabaseSchedulerRegistry {
+    pub slots: [DatabaseSchedulerSlot; MAX_DATABASE_SCHEDULERS],
+    pub count: u16,
+}
+
+impl Default for DatabaseSchedulerRegistry {
+    fn default() -> Self {
+        Self {
+            slots: [DatabaseSchedulerSlot::default(); MAX_DATABASE_SCHEDULERS],
+            count: 0,
+        }
+    }
+}
+
+// SAFETY: The registry contains only fixed-size primitive fields.
+unsafe impl PGRXSharedMemory for DatabaseSchedulerRegistry {}
+
+/// Database-scoped scheduler registry.
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static DATABASE_SCHEDULER_REGISTRY: PgLwLock<DatabaseSchedulerRegistry> =
+    unsafe { PgLwLock::new(c"pg_trickle_database_schedulers") };
+
+/// Find a database slot without taking a lock. Used by pure tests and callers
+/// that already hold the registry lock.
+pub fn database_slot_index(
+    registry: &DatabaseSchedulerRegistry,
+    database_oid: u32,
+) -> Option<usize> {
+    registry
+        .slots
+        .iter()
+        .position(|slot| slot.database_oid == database_oid && database_oid != 0)
+}
+
+/// Insert or refresh a database scheduler slot.
+///
+/// Existing slots are refreshed in place. A full registry returns `false`
+/// without overwriting a live scheduler.
+pub fn register_database_scheduler(database_oid: u32, scheduler_pid: i32) -> bool {
+    if !is_shmem_available() || database_oid == 0 {
+        return false;
+    }
+    let mut registry = DATABASE_SCHEDULER_REGISTRY.exclusive();
+    if let Some(index) = database_slot_index(&registry, database_oid) {
+        let slot = &mut registry.slots[index];
+        slot.scheduler_pid = scheduler_pid;
+        slot.running = true;
+        return true;
+    }
+    let Some(index) = registry
+        .slots
+        .iter()
+        .position(|slot| slot.database_oid == 0)
+    else {
+        return false;
+    };
+    registry.slots[index] = DatabaseSchedulerSlot {
+        database_oid,
+        scheduler_pid,
+        running: true,
+        ..Default::default()
+    };
+    registry.count = registry.count.saturating_add(1);
+    true
+}
+
+/// Clear a database scheduler slot without changing another database's state.
+pub fn unregister_database_scheduler(database_oid: u32, scheduler_pid: i32) {
+    if !is_shmem_available() {
+        return;
+    }
+    let mut registry = DATABASE_SCHEDULER_REGISTRY.exclusive();
+    if let Some(index) = database_slot_index(&registry, database_oid) {
+        let slot = &mut registry.slots[index];
+        if scheduler_pid == 0 || slot.scheduler_pid == scheduler_pid {
+            *slot = DatabaseSchedulerSlot::default();
+            registry.count = registry.count.saturating_sub(1);
+        }
+    }
+}
+
+/// Update one database scheduler slot, preserving all other databases.
+pub fn update_database_scheduler<F>(database_oid: u32, update: F)
+where
+    F: FnOnce(&mut DatabaseSchedulerSlot),
+{
+    if !is_shmem_available() {
+        return;
+    }
+    let mut registry = DATABASE_SCHEDULER_REGISTRY.exclusive();
+    if let Some(index) = database_slot_index(&registry, database_oid) {
+        update(&mut registry.slots[index]);
+    }
+}
+
+/// Snapshot database scheduler slots for diagnostics and drain completion.
+pub fn database_scheduler_slots() -> Vec<DatabaseSchedulerSlot> {
+    if !is_shmem_available() {
+        return Vec::new();
+    }
+    let registry = DATABASE_SCHEDULER_REGISTRY.share();
+    registry
+        .slots
+        .iter()
+        .copied()
+        .filter(|slot| slot.database_oid != 0)
+        .collect()
+}
+
 /// SCAL-3 (v0.25.0): Tick watermark state — split from `PgTrickleSharedState`
 /// to allow the coordinator to update watermarks without taking the DAG
 /// exclusive lock.
@@ -144,6 +279,241 @@ pub static CACHE_GENERATION: PgAtomic<AtomicU64> =
 // SAFETY: PgAtomic::new requires a static CStr name.
 pub static ACTIVE_REFRESH_WORKERS: PgAtomic<AtomicU32> =
     unsafe { PgAtomic::new(c"pg_trickle_active_workers") };
+
+/// A reserved or live dynamic refresh worker slot.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct RefreshWorkerSlot {
+    pub generation: u64,
+    pub database_oid: u32,
+    pub job_id: i64,
+    pub scheduler_pid: i32,
+    pub worker_pid: i32,
+    pub state: WorkerSlotState,
+    pub reserved_at_epoch_ms: u64,
+}
+
+impl Default for RefreshWorkerSlot {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            database_oid: 0,
+            job_id: 0,
+            scheduler_pid: 0,
+            worker_pid: 0,
+            state: WorkerSlotState::Free,
+            reserved_at_epoch_ms: 0,
+        }
+    }
+}
+
+/// Exact worker lifecycle state. Reservations remain occupied until their
+/// owning coordinator proves that the job can no longer start.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum WorkerSlotState {
+    Free,
+    Reserved,
+    Live,
+}
+
+/// Fixed-capacity worker reservation table.
+#[derive(Debug, Copy, Clone)]
+pub struct WorkerSlotTable {
+    pub slots: [RefreshWorkerSlot; 128],
+}
+
+impl Default for WorkerSlotTable {
+    fn default() -> Self {
+        Self {
+            slots: [RefreshWorkerSlot::default(); 128],
+        }
+    }
+}
+
+// SAFETY: The worker table contains only fixed-size primitive fields.
+unsafe impl PGRXSharedMemory for WorkerSlotTable {}
+
+/// Serializes every worker reservation transition.
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static WORKER_SLOT_TABLE: PgLwLock<WorkerSlotTable> =
+    unsafe { PgLwLock::new(c"pg_trickle_worker_slots") };
+
+/// Snapshot of configured and effective worker capacity for one dispatch tick.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct WorkerCapacity {
+    pub pgtrickle_dynamic_limit: u32,
+    pub pgtrickle_parallel_limit: Option<u32>,
+    pub postgres_parallel_limit: u32,
+    pub effective_limit: u32,
+}
+
+impl WorkerCapacity {
+    pub fn new(
+        pgtrickle_dynamic_limit: u32,
+        pgtrickle_parallel_limit: Option<u32>,
+        postgres_parallel_limit: u32,
+    ) -> Self {
+        let mut effective_limit = pgtrickle_dynamic_limit;
+        if let Some(limit) = pgtrickle_parallel_limit.filter(|limit| *limit > 0) {
+            effective_limit = effective_limit.min(limit);
+        }
+        effective_limit = effective_limit.min(postgres_parallel_limit);
+        Self {
+            pgtrickle_dynamic_limit,
+            pgtrickle_parallel_limit,
+            postgres_parallel_limit,
+            effective_limit,
+        }
+    }
+}
+
+/// Pure worker-capacity helper used by the scheduler and unit tests.
+pub fn effective_worker_limit(
+    pgtrickle_dynamic_limit: u32,
+    pgtrickle_parallel_limit: Option<u32>,
+    postgres_parallel_limit: u32,
+) -> u32 {
+    WorkerCapacity::new(
+        pgtrickle_dynamic_limit,
+        pgtrickle_parallel_limit,
+        postgres_parallel_limit,
+    )
+    .effective_limit
+}
+
+/// Reserve an exact worker slot.
+pub fn reserve_worker_slot(
+    capacity: WorkerCapacity,
+    database_oid: u32,
+    job_id: i64,
+    scheduler_pid: i32,
+    now_ms: u64,
+) -> Option<RefreshWorkerSlot> {
+    if !is_shmem_available() || capacity.effective_limit == 0 {
+        return None;
+    }
+    let mut table = WORKER_SLOT_TABLE.exclusive();
+    let occupied = table
+        .slots
+        .iter()
+        .filter(|slot| slot.state != WorkerSlotState::Free)
+        .count() as u32;
+    if occupied >= capacity.effective_limit {
+        return None;
+    }
+    let index = table
+        .slots
+        .iter()
+        .position(|slot| slot.state == WorkerSlotState::Free)?;
+    let generation = table.slots[index].generation.wrapping_add(1).max(1);
+    let slot = RefreshWorkerSlot {
+        generation,
+        database_oid,
+        job_id,
+        scheduler_pid,
+        worker_pid: 0,
+        state: WorkerSlotState::Reserved,
+        reserved_at_epoch_ms: now_ms,
+    };
+    table.slots[index] = slot;
+    Some(slot)
+}
+
+/// Promote a reservation to a live worker only when its identity matches.
+pub fn promote_worker_slot(
+    database_oid: u32,
+    job_id: i64,
+    generation: u64,
+    worker_pid: i32,
+) -> bool {
+    if !is_shmem_available() {
+        return false;
+    }
+    let mut table = WORKER_SLOT_TABLE.exclusive();
+    if let Some(slot) = table.slots.iter_mut().find(|slot| {
+        slot.database_oid == database_oid
+            && slot.job_id == job_id
+            && slot.generation == generation
+            && slot.state == WorkerSlotState::Reserved
+    }) {
+        slot.worker_pid = worker_pid;
+        slot.state = WorkerSlotState::Live;
+        return true;
+    }
+    false
+}
+
+/// Release a reservation or live slot by its complete generation identity.
+pub fn release_worker_slot(database_oid: u32, job_id: i64, generation: u64) -> bool {
+    if !is_shmem_available() {
+        return false;
+    }
+    let mut table = WORKER_SLOT_TABLE.exclusive();
+    if let Some(slot) = table.slots.iter_mut().find(|slot| {
+        slot.database_oid == database_oid
+            && slot.job_id == job_id
+            && slot.generation == generation
+            && slot.state != WorkerSlotState::Free
+    }) {
+        *slot = RefreshWorkerSlot {
+            generation,
+            ..Default::default()
+        };
+        return true;
+    }
+    false
+}
+
+/// Reclaim live slots whose worker PID disappeared and reservations that
+/// exceeded their bounded startup grace period.
+pub fn reap_stale_worker_slots(
+    database_oid: u32,
+    live_worker_pids: &[i32],
+    live_scheduler_pids: &[i32],
+    queued_job_ids: &[i64],
+) -> u32 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    let mut table = WORKER_SLOT_TABLE.exclusive();
+    let mut reaped = 0;
+    for slot in &mut table.slots {
+        let stale_live = slot.state == WorkerSlotState::Live
+            && slot.worker_pid > 0
+            && !live_worker_pids.contains(&slot.worker_pid);
+        let stale_reservation = slot.state == WorkerSlotState::Reserved
+            && slot.database_oid == database_oid
+            && (!live_scheduler_pids.contains(&slot.scheduler_pid)
+                || !queued_job_ids.contains(&slot.job_id));
+        if stale_live || stale_reservation {
+            let generation = slot.generation;
+            *slot = RefreshWorkerSlot {
+                generation,
+                ..Default::default()
+            };
+            reaped += 1;
+        }
+    }
+    reaped
+}
+
+/// Return exact reserved/live occupancy without inventing free capacity.
+pub fn worker_slot_counts() -> (u32, u32) {
+    if !is_shmem_available() {
+        return (0, 0);
+    }
+    let table = WORKER_SLOT_TABLE.share();
+    let reserved = table
+        .slots
+        .iter()
+        .filter(|slot| slot.state == WorkerSlotState::Reserved)
+        .count() as u32;
+    let live = table
+        .slots
+        .iter()
+        .filter(|slot| slot.state == WorkerSlotState::Live)
+        .count() as u32;
+    (reserved, live)
+}
 
 // ── A46-7 (v0.45.0): Invalidation ring overflow counter ──────────────────
 /// Counts the number of times the invalidation ring overflowed since startup.
@@ -308,6 +678,39 @@ pub static DRAIN_REQUESTED: PgAtomic<AtomicU64> =
 pub static DRAIN_COMPLETED: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_drain_completed") };
 
+/// Persistent cluster drain phase.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum DrainPhase {
+    Running,
+    Draining,
+    Drained,
+}
+
+/// Persistent drain state. A completed or timed-out drain remains a dispatch
+/// gate until an explicit resume or postmaster restart.
+#[derive(Debug, Copy, Clone)]
+pub struct DrainState {
+    pub phase: DrainPhase,
+    pub epoch: u64,
+    pub requested_at_epoch_ms: u64,
+}
+
+impl Default for DrainState {
+    fn default() -> Self {
+        Self {
+            phase: DrainPhase::Running,
+            epoch: 0,
+            requested_at_epoch_ms: 0,
+        }
+    }
+}
+
+// SAFETY: DrainState contains only Copy primitive/enum fields.
+unsafe impl PGRXSharedMemory for DrainState {}
+
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static DRAIN_STATE: PgLwLock<DrainState> = unsafe { PgLwLock::new(c"pg_trickle_drain_state") };
+
 /// A46-11 (v0.45.0): Cumulative Citus worker failure counter.
 ///
 /// Counts the total number of consecutive-failure threshold crossings across
@@ -454,6 +857,13 @@ pub fn bump_launcher_install_epoch() {
 /// Maximum number of simultaneously paused stream table nodes.
 const MAX_PAUSED_NODES: usize = 256;
 
+/// Database-qualified paused stream-table identity.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct PausedNodeEntry {
+    pub database_oid: u32,
+    pub pgt_id: i64,
+}
+
 /// API-1/2 (v0.62.0): Shared set of paused stream table pgt_ids.
 ///
 /// Protected by `PAUSED_NODES_STATE` lightweight lock. When a node's pgt_id
@@ -461,8 +871,8 @@ const MAX_PAUSED_NODES: usize = 256;
 /// Zero slots are unused (pgt_ids are always > 0).
 #[derive(Copy, Clone)]
 pub struct PausedNodesState {
-    /// Sorted fixed-size array of paused pgt_ids. 0 = empty slot.
-    node_ids: [i64; MAX_PAUSED_NODES],
+    /// Fixed-size array of database-qualified paused nodes.
+    entries: [PausedNodeEntry; MAX_PAUSED_NODES],
     /// Number of occupied slots.
     count: u16,
 }
@@ -470,7 +880,7 @@ pub struct PausedNodesState {
 impl Default for PausedNodesState {
     fn default() -> Self {
         Self {
-            node_ids: [0i64; MAX_PAUSED_NODES],
+            entries: [PausedNodeEntry::default(); MAX_PAUSED_NODES],
             count: 0,
         }
     }
@@ -489,49 +899,154 @@ pub static PAUSED_NODES_STATE: PgLwLock<PausedNodesState> =
 /// The scheduler will skip dispatching refreshes for this node until
 /// `resume_node` is called. No-op if already paused or if the pause set
 /// is full (`MAX_PAUSED_NODES` reached).
-pub fn pause_node(pgt_id: i64) {
+pub fn pause_node_for_database(
+    database_oid: u32,
+    pgt_id: i64,
+) -> Result<(), crate::error::PgTrickleError> {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
+        return Err(crate::error::PgTrickleError::SharedStateCapacity(
+            "shared memory is not initialized".to_string(),
+        ));
     }
     let mut state = PAUSED_NODES_STATE.exclusive();
     let count = state.count as usize;
     // Already paused?
-    if state.node_ids[..count].contains(&pgt_id) {
-        return;
+    if state.entries[..count]
+        .iter()
+        .any(|entry| entry.database_oid == database_oid && entry.pgt_id == pgt_id)
+    {
+        return Ok(());
     }
-    if count < MAX_PAUSED_NODES {
-        state.node_ids[count] = pgt_id;
-        state.count = (count + 1) as u16;
+    if count >= MAX_PAUSED_NODES {
+        return Err(crate::error::PgTrickleError::SharedStateCapacity(format!(
+            "paused-node registry capacity {} exhausted for database OID {}",
+            MAX_PAUSED_NODES, database_oid
+        )));
     }
+    state.entries[count] = PausedNodeEntry {
+        database_oid,
+        pgt_id,
+    };
+    state.count = (count + 1) as u16;
+    Ok(())
+}
+
+/// Backward-compatible pause helper for internal callers that do not yet have
+/// a database key. New callers must use `pause_node_for_database`.
+pub fn pause_node(pgt_id: i64) {
+    let _ = pause_node_for_database(0, pgt_id);
 }
 
 /// API-2 (v0.62.0): Remove a stream table node from the paused set.
 ///
 /// The scheduler will resume dispatching refreshes for this node on the
 /// next tick. No-op if the node was not paused.
-pub fn resume_node(pgt_id: i64) {
+pub fn resume_node_for_database(database_oid: u32, pgt_id: i64) {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
     let mut state = PAUSED_NODES_STATE.exclusive();
     let count = state.count as usize;
-    if let Some(pos) = state.node_ids[..count].iter().position(|&id| id == pgt_id) {
+    if let Some(pos) = state.entries[..count]
+        .iter()
+        .position(|entry| entry.database_oid == database_oid && entry.pgt_id == pgt_id)
+    {
         // Swap-remove to keep the array compact.
         let last = count - 1;
-        state.node_ids[pos] = state.node_ids[last];
-        state.node_ids[last] = 0;
+        state.entries[pos] = state.entries[last];
+        state.entries[last] = PausedNodeEntry::default();
         state.count = last as u16;
     }
 }
 
+/// Backward-compatible resume helper for internal callers.
+pub fn resume_node(pgt_id: i64) {
+    resume_node_for_database(0, pgt_id);
+}
+
 /// API-1/2 (v0.62.0): Check whether a stream table node is currently paused.
 pub fn is_node_paused(pgt_id: i64) -> bool {
+    is_node_paused_for_database(0, pgt_id)
+}
+
+/// Check whether a database-qualified stream table node is paused.
+pub fn is_node_paused_for_database(database_oid: u32, pgt_id: i64) -> bool {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
     let state = PAUSED_NODES_STATE.share();
     let count = state.count as usize;
-    state.node_ids[..count].contains(&pgt_id)
+    state.entries[..count]
+        .iter()
+        .any(|entry| entry.database_oid == database_oid && entry.pgt_id == pgt_id)
+}
+
+/// Atomically validate and insert a batch of database-qualified pause entries.
+pub fn pause_nodes_for_database(
+    database_oid: u32,
+    pgt_ids: &[i64],
+) -> Result<(), crate::error::PgTrickleError> {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(crate::error::PgTrickleError::SharedStateCapacity(
+            "shared memory is not initialized".to_string(),
+        ));
+    }
+    let mut unique = Vec::with_capacity(pgt_ids.len());
+    for &pgt_id in pgt_ids {
+        if !unique.contains(&pgt_id) {
+            unique.push(pgt_id);
+        }
+    }
+    let mut state = PAUSED_NODES_STATE.exclusive();
+    let existing = unique
+        .iter()
+        .filter(|&&pgt_id| {
+            state.entries[..state.count as usize]
+                .iter()
+                .any(|entry| entry.database_oid == database_oid && entry.pgt_id == pgt_id)
+        })
+        .count();
+    let new_count = unique.len().saturating_sub(existing);
+    if state.count as usize + new_count > MAX_PAUSED_NODES {
+        return Err(crate::error::PgTrickleError::SharedStateCapacity(format!(
+            "paused-node registry capacity {} exhausted for database OID {}",
+            MAX_PAUSED_NODES, database_oid
+        )));
+    }
+    for pgt_id in unique {
+        if !state.entries[..state.count as usize]
+            .iter()
+            .any(|entry| entry.database_oid == database_oid && entry.pgt_id == pgt_id)
+        {
+            let index = state.count as usize;
+            state.entries[index] = PausedNodeEntry {
+                database_oid,
+                pgt_id,
+            };
+            state.count += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Atomically remove a batch of database-qualified pause entries.
+pub fn resume_nodes_for_database(database_oid: u32, pgt_ids: &[i64]) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut state = PAUSED_NODES_STATE.exclusive();
+    let mut index = 0;
+    while index < state.count as usize {
+        let entry = state.entries[index];
+        if entry.database_oid == database_oid && pgt_ids.contains(&entry.pgt_id) {
+            let last = state.count as usize - 1;
+            state.entries[index] = state.entries[last];
+            state.entries[last] = PausedNodeEntry::default();
+            state.count -= 1;
+        } else {
+            index += 1;
+        }
+    }
 }
 
 /// Maximum number of lag samples in the rolling reservoir.
@@ -612,14 +1127,32 @@ pub fn increment_parallel_queue_depth() {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Increment queue depth for one registered database scheduler.
+pub fn increment_parallel_queue_depth_for_database(database_oid: u32) {
+    increment_parallel_queue_depth();
+    update_database_scheduler(database_oid, |slot| {
+        slot.queue_depth = slot.queue_depth.saturating_add(1);
+    });
+}
+
 /// OBS-2: Decrement the parallel job queue depth (when a worker picks up a job).
 pub fn decrement_parallel_queue_depth() {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    PARALLEL_QUEUE_DEPTH
-        .get()
-        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = PARALLEL_QUEUE_DEPTH.get().fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |depth| Some(depth.saturating_sub(1)),
+    );
+}
+
+/// Decrement queue depth for one registered database scheduler.
+pub fn decrement_parallel_queue_depth_for_database(database_oid: u32) {
+    decrement_parallel_queue_depth();
+    update_database_scheduler(database_oid, |slot| {
+        slot.queue_depth = slot.queue_depth.saturating_sub(1);
+    });
 }
 
 /// OBS-2: Add idle time (milliseconds) to the cumulative worker idle counter.
@@ -673,10 +1206,12 @@ pub fn init_shared_memory() {
     pg_shmem_init!(PGS_STATE);
     // SCAL-3: Dedicated per-concern locks.
     pg_shmem_init!(SCHEDULER_META_STATE);
+    pg_shmem_init!(DATABASE_SCHEDULER_REGISTRY);
     pg_shmem_init!(TICK_WATERMARK_STATE);
     pg_shmem_init!(DAG_REBUILD_SIGNAL);
     pg_shmem_init!(CACHE_GENERATION);
     pg_shmem_init!(ACTIVE_REFRESH_WORKERS);
+    pg_shmem_init!(WORKER_SLOT_TABLE);
     pg_shmem_init!(INVALIDATION_RING_OVERFLOWS);
     pg_shmem_init!(RECONCILE_EPOCH);
     pg_shmem_init!(TOTAL_DIFF_REFRESHES);
@@ -704,6 +1239,7 @@ pub fn init_shared_memory() {
     // A35 (v0.36.0): Drain mode epoch counters.
     pg_shmem_init!(DRAIN_REQUESTED);
     pg_shmem_init!(DRAIN_COMPLETED);
+    pg_shmem_init!(DRAIN_STATE);
     pg_shmem_init!(CITUS_WORKER_FAILURE_TOTAL);
     // M-6 (v0.55.0): DVM parse-time and delta SQL size metrics.
     pg_shmem_init!(DVM_PARSE_MS);
@@ -1016,10 +1552,23 @@ pub fn signal_drain() -> Option<u64> {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    let epoch = DRAIN_REQUESTED
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let mut state = DRAIN_STATE.exclusive();
+    let epoch = match state.phase {
+        DrainPhase::Running => {
+            state.epoch = state.epoch.wrapping_add(1).max(1);
+            state.requested_at_epoch_ms = now_ms;
+            state.phase = DrainPhase::Draining;
+            state.epoch
+        }
+        DrainPhase::Draining | DrainPhase::Drained => state.epoch,
+    };
+    DRAIN_REQUESTED
         .get()
-        .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-        + 1;
+        .store(epoch, std::sync::atomic::Ordering::Release);
     Some(epoch)
 }
 
@@ -1042,45 +1591,63 @@ pub fn check_drain_completed(epoch: u64) -> bool {
 /// If a drain is requested and no refreshes are running, sets DRAIN_COMPLETED
 /// to the current DRAIN_REQUESTED epoch and returns `true` (stop scheduling).
 /// Returns `false` when no drain is requested or refreshes are still in flight.
-pub fn scheduler_check_and_complete_drain() -> bool {
+pub fn scheduler_check_and_complete_drain(database_oid: u32) -> bool {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
-    let requested = DRAIN_REQUESTED
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
-    let completed = DRAIN_COMPLETED
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
-    if requested <= completed {
-        return false; // No pending drain
+    let mut state = DRAIN_STATE.exclusive();
+    if state.phase == DrainPhase::Running {
+        return false;
     }
-    // Check if any refresh workers are still running
-    let active = ACTIVE_REFRESH_WORKERS
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
-    if active == 0 {
-        // Mark drain as completed
+    let requested_epoch = state.epoch;
+    update_database_scheduler(database_oid, |slot| {
+        slot.drain_seen_epoch = requested_epoch;
+    });
+    let registry = DATABASE_SCHEDULER_REGISTRY.share();
+    let all_schedulers_acknowledged = registry
+        .slots
+        .iter()
+        .filter(|slot| slot.database_oid != 0 && slot.running)
+        .all(|slot| slot.drain_seen_epoch >= requested_epoch);
+    let all_database_work_quiesced = registry
+        .slots
+        .iter()
+        .filter(|slot| slot.database_oid != 0 && slot.running)
+        .all(|slot| slot.queue_depth == 0 && slot.inline_pgt_id == 0);
+    let (reserved, live) = worker_slot_counts();
+    if state.phase == DrainPhase::Draining
+        && all_schedulers_acknowledged
+        && all_database_work_quiesced
+        && reserved == 0
+        && live == 0
+    {
+        state.phase = DrainPhase::Drained;
         DRAIN_COMPLETED
             .get()
-            .store(requested, std::sync::atomic::Ordering::Release);
-        return true;
+            .store(state.epoch, std::sync::atomic::Ordering::Release);
     }
-    true // Drain requested but not yet completed
+    true
 }
 
-/// Cancel a pending drain by resetting DRAIN_REQUESTED to the current
-/// DRAIN_COMPLETED value (so the scheduler resumes normal operation).
+/// Explicitly resume dispatch after a drain.
 pub fn cancel_drain() {
+    let _ = resume_after_drain();
+}
+
+/// Clear a persistent drain gate. Returns `true` only when a drain was active.
+pub fn resume_after_drain() -> bool {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
+        return false;
     }
-    let completed = DRAIN_COMPLETED
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
+    let mut state = DRAIN_STATE.exclusive();
+    if state.phase == DrainPhase::Running {
+        return false;
+    }
+    state.phase = DrainPhase::Running;
     DRAIN_REQUESTED
         .get()
-        .store(completed, std::sync::atomic::Ordering::Release);
+        .store(state.epoch, std::sync::atomic::Ordering::Release);
+    true
 }
 
 /// Returns `true` when DRAIN_COMPLETED >= DRAIN_REQUESTED, i.e., the scheduler
@@ -1089,13 +1656,20 @@ pub fn is_drained() -> bool {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return true;
     }
-    let requested = DRAIN_REQUESTED
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
-    let completed = DRAIN_COMPLETED
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
-    completed >= requested
+    DRAIN_STATE.share().phase == DrainPhase::Drained
+}
+
+/// SQL-visible tri-state drain status: `None` means Running/no request,
+/// `Some(false)` means Draining, and `Some(true)` means Drained.
+pub fn drain_status() -> Option<bool> {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    match DRAIN_STATE.share().phase {
+        DrainPhase::Running => None,
+        DrainPhase::Draining => Some(false),
+        DrainPhase::Drained => Some(true),
+    }
 }
 
 // ── Worker token management (Phase 2: parallel refresh) ───────────────────
@@ -1174,9 +1748,8 @@ pub fn active_worker_count() -> u32 {
     if !is_shmem_available() {
         return 0;
     }
-    ACTIVE_REFRESH_WORKERS
-        .get()
-        .load(std::sync::atomic::Ordering::Relaxed)
+    let (reserved, live) = worker_slot_counts();
+    reserved + live
 }
 
 /// A46-7: Returns the total number of invalidation ring overflow events since startup.
@@ -1258,6 +1831,40 @@ pub fn last_tick_oldest_xmin() -> u64 {
         return 0;
     }
     TICK_WATERMARK_STATE.share().last_tick_oldest_xmin
+}
+
+/// Read the database-scoped oldest-xmin watermark baseline.
+pub fn database_last_tick_oldest_xmin(database_oid: u32) -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    let registry = DATABASE_SCHEDULER_REGISTRY.share();
+    database_slot_index(&registry, database_oid)
+        .map(|index| registry.slots[index].last_tick_oldest_xmin)
+        .unwrap_or(0)
+}
+
+/// Read the database-scoped safe-LSN watermark baseline.
+pub fn database_last_tick_safe_lsn_u64(database_oid: u32) -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    let registry = DATABASE_SCHEDULER_REGISTRY.share();
+    database_slot_index(&registry, database_oid)
+        .map(|index| registry.slots[index].last_tick_safe_lsn_u64)
+        .unwrap_or(0)
+}
+
+/// Persist both database-scoped watermark baselines atomically.
+pub fn set_database_last_tick_holdback_state(
+    database_oid: u32,
+    oldest_xmin: u64,
+    safe_lsn_u64: u64,
+) {
+    update_database_scheduler(database_oid, |slot| {
+        slot.last_tick_oldest_xmin = oldest_xmin;
+        slot.last_tick_safe_lsn_u64 = safe_lsn_u64;
+    });
 }
 
 /// Persist the oldest-xmin from the current tick so next tick can compare.

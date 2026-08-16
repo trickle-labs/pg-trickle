@@ -3,7 +3,7 @@ use e2e::E2eDb;
 use std::process::Command;
 
 #[tokio::test]
-async fn test_pg_dump_and_restore() {
+async fn test_pg_dump_restore_fails_closed() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE source (id INT PRIMARY KEY, val TEXT)")
@@ -106,55 +106,16 @@ async fn test_pg_dump_and_restore() {
         .replace("/postgres?", "/restored_db?");
     let restored_pool = sqlx::PgPool::connect(&restored_conn_str).await.unwrap();
 
-    // Call the manual restore helper
-    sqlx::query("SELECT pgtrickle.restore_stream_tables()")
+    // Unsafe logical restore is deliberately rejected until protected
+    // reinitialization can guarantee catalog, CDC, and frontier consistency.
+    let restore_error = sqlx::query("SELECT pgtrickle.restore_stream_tables()")
         .execute(&restored_pool)
         .await
-        .unwrap();
-
-    // 6. Restore post-data to load triggers properly
-    let restore_post = Command::new("docker")
-        .args([
-            "exec",
-            container_id,
-            "pg_restore",
-            "-U",
-            "postgres",
-            "-d",
-            "restored_db",
-            "--section=post-data",
-            "/tmp/dump.backup",
-        ])
-        .output()
-        .expect("Failed to execute pg_restore post-data");
-    assert!(restore_post.status.success(), "pg_restore post-data failed");
-
-    // Validate the stream table has data!
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.dump_test_st")
-        .fetch_one(&restored_pool)
-        .await
-        .expect("Failed to query restored stream table");
-    assert_eq!(count, 2, "Data should be preserved");
-
-    // Let's modify the source table and see if ST refreshes correctly!
-    sqlx::query("INSERT INTO source VALUES (3, 'three')")
-        .execute(&restored_pool)
-        .await
-        .unwrap();
-
-    // Trigger full refresh
-    sqlx::query("SELECT pgtrickle.refresh_stream_table('dump_test_st')")
-        .execute(&restored_pool)
-        .await
-        .unwrap();
-
-    let new_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.dump_test_st")
-        .fetch_one(&restored_pool)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        new_count, 3,
-        "Stream table should continue to track updates via CDC triggers after restore"
+        .expect_err("restore_stream_tables() must fail closed");
+    assert!(
+        restore_error
+            .to_string()
+            .contains("restore_stream_tables() is disabled"),
+        "unexpected restore error: {restore_error}"
     );
 }

@@ -262,6 +262,38 @@ pub struct StreamTableMeta {
     /// NULL is treated as an unknown pre-upgrade value and fails closed on
     /// incremental paths.
     pub row_identity_version: Option<i16>,
+    pub self_heal_work_mem_percent: i16,
+    pub self_heal_lock_backoff_exponent: i16,
+    pub self_heal_success_streak: i16,
+    pub last_error_code: Option<String>,
+    pub last_error_retryable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshRuntimeTuning {
+    pub merge_work_mem_mb: i32,
+    pub delta_work_mem_mb: i32,
+    pub delta_work_mem_cap_mb: i32,
+    pub lock_backoff_exponent: i16,
+}
+
+impl StreamTableMeta {
+    pub fn runtime_tuning(&self) -> RefreshRuntimeTuning {
+        let percent = i32::from(self.self_heal_work_mem_percent.clamp(25, 100));
+        let scale = |value: i32| {
+            if value <= 0 {
+                0
+            } else {
+                ((value * percent) / 100).max(1)
+            }
+        };
+        RefreshRuntimeTuning {
+            merge_work_mem_mb: scale(crate::config::pg_trickle_merge_work_mem_mb()),
+            delta_work_mem_mb: scale(crate::config::pg_trickle_delta_work_mem()),
+            delta_work_mem_cap_mb: crate::config::pg_trickle_delta_work_mem_cap_mb(),
+            lock_backoff_exponent: self.self_heal_lock_backoff_exponent.clamp(0, 6),
+        }
+    }
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -354,6 +386,9 @@ pub struct RefreshRecord {
     /// CYC-3: Iteration of the fixed-point loop that produced this refresh.
     /// `None` for non-cyclic refreshes.
     pub fixpoint_iteration: Option<i32>,
+    pub error_code: Option<String>,
+    pub error_sqlstate: Option<String>,
+    pub retryable: Option<bool>,
 }
 
 // ── StreamTableMeta CRUD ──────────────────────────────────────────────────
@@ -472,7 +507,11 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class, row_identity_version \
+                     query_complexity_class, row_identity_version, \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
+                     last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -515,7 +554,11 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class, row_identity_version \
+                     query_complexity_class, row_identity_version, \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
+                     last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -563,7 +606,11 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class, row_identity_version \
+                     query_complexity_class, row_identity_version, \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
+                     last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -606,7 +653,11 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class, row_identity_version \
+                     query_complexity_class, row_identity_version, \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
+                     last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -653,7 +704,11 @@ impl StreamTableMeta {
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
-                     query_complexity_class, row_identity_version \
+                     query_complexity_class, row_identity_version, \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
+                     last_error_code, last_error_retryable \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -892,6 +947,65 @@ impl StreamTableMeta {
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", pgt_id)))
     }
 
+    pub fn record_scheduled_failure(
+        pgt_id: i64,
+        error_code: &str,
+        retryable: bool,
+        reduce_memory: bool,
+        increase_lock_backoff: bool,
+    ) -> Result<i32, PgTrickleError> {
+        let count = Self::increment_errors(pgt_id)?;
+        Spi::get_one_with_args::<i16>(
+            "UPDATE pgtrickle.pgt_stream_tables
+             SET self_heal_work_mem_percent = CASE WHEN $2 THEN
+                     GREATEST(25, FLOOR(self_heal_work_mem_percent * 0.75)::smallint)
+                 ELSE self_heal_work_mem_percent END,
+                 self_heal_lock_backoff_exponent = CASE WHEN $3 THEN
+                     LEAST(6, self_heal_lock_backoff_exponent + 1)
+                 ELSE self_heal_lock_backoff_exponent END,
+                 self_heal_success_streak = 0,
+                 last_error_code = $4,
+                 last_error_retryable = $5,
+                 updated_at = now()
+             WHERE pgt_id = $1
+             RETURNING self_heal_work_mem_percent",
+            &[
+                pgt_id.into(),
+                reduce_memory.into(),
+                increase_lock_backoff.into(),
+                error_code.into(),
+                retryable.into(),
+            ],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={pgt_id}")))?;
+        Ok(count)
+    }
+
+    pub fn record_scheduled_success(pgt_id: i64) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables
+             SET consecutive_errors = 0,
+                 self_heal_success_streak = CASE
+                     WHEN self_heal_work_mem_percent < 100
+                       OR self_heal_lock_backoff_exponent > 0
+                     THEN LEAST(3, self_heal_success_streak + 1)
+                     ELSE 0 END,
+                 self_heal_work_mem_percent = CASE
+                     WHEN self_heal_success_streak >= 2 THEN 100
+                     ELSE self_heal_work_mem_percent END,
+                 self_heal_lock_backoff_exponent = CASE
+                     WHEN self_heal_success_streak >= 2 THEN 0
+                     ELSE self_heal_lock_backoff_exponent END,
+                 last_error_code = NULL,
+                 last_error_retryable = NULL,
+                 updated_at = now()
+             WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
     /// ERR-1b: Set status to ERROR with an error message and timestamp.
     /// Used for permanent failures that should not be retried.
     pub fn set_error_state(pgt_id: i64, error_message: &str) -> Result<(), PgTrickleError> {
@@ -901,6 +1015,29 @@ impl StreamTableMeta {
              updated_at = now() \
              WHERE pgt_id = $2",
             &[error_message.into(), pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    pub fn set_typed_error(
+        pgt_id: i64,
+        error_message: &str,
+        error_code: &str,
+        retryable: bool,
+    ) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables
+             SET status = CASE WHEN $3 THEN status ELSE 'ERROR' END,
+                 last_error_message = $1, last_error_at = now(),
+                 last_error_code = $2, last_error_retryable = $3,
+                 updated_at = now()
+             WHERE pgt_id = $4",
+            &[
+                error_message.into(),
+                error_code.into(),
+                retryable.into(),
+                pgt_id.into(),
+            ],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -1394,6 +1531,11 @@ impl StreamTableMeta {
         let storage_fillfactor = table.get::<i32>(52).map_err(map_spi)?;
         let query_complexity_class = table.get::<String>(53).map_err(map_spi)?;
         let row_identity_version = table.get::<i16>(54).map_err(map_spi)?;
+        let self_heal_work_mem_percent = table.get::<i16>(55).map_err(map_spi)?.unwrap_or(100);
+        let self_heal_lock_backoff_exponent = table.get::<i16>(56).map_err(map_spi)?.unwrap_or(0);
+        let self_heal_success_streak = table.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
+        let last_error_code = table.get::<String>(58).map_err(map_spi)?;
+        let last_error_retryable = table.get::<bool>(59).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1450,6 +1592,11 @@ impl StreamTableMeta {
             storage_fillfactor,
             query_complexity_class,
             row_identity_version,
+            self_heal_work_mem_percent,
+            self_heal_lock_backoff_exponent,
+            self_heal_success_streak,
+            last_error_code,
+            last_error_retryable,
         })
     }
 
@@ -1579,6 +1726,11 @@ impl StreamTableMeta {
         let storage_fillfactor = row.get::<i32>(52).map_err(map_spi)?;
         let query_complexity_class = row.get::<String>(53).map_err(map_spi)?;
         let row_identity_version = row.get::<i16>(54).map_err(map_spi)?;
+        let self_heal_work_mem_percent = row.get::<i16>(55).map_err(map_spi)?.unwrap_or(100);
+        let self_heal_lock_backoff_exponent = row.get::<i16>(56).map_err(map_spi)?.unwrap_or(0);
+        let self_heal_success_streak = row.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
+        let last_error_code = row.get::<String>(58).map_err(map_spi)?;
+        let last_error_retryable = row.get::<bool>(59).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1635,6 +1787,11 @@ impl StreamTableMeta {
             storage_fillfactor,
             query_complexity_class,
             row_identity_version,
+            self_heal_work_mem_percent,
+            self_heal_lock_backoff_exponent,
+            self_heal_success_streak,
+            last_error_code,
+            last_error_retryable,
         })
     }
 }
@@ -2464,6 +2621,32 @@ impl RefreshRecord {
 
         Self::upsert_refresh_summary_for_refresh(refresh_id)
     }
+
+    pub fn complete_with_failure(
+        refresh_id: i64,
+        status: &str,
+        error_message: &str,
+        error_code: &str,
+        error_sqlstate: Option<&str>,
+        retryable: bool,
+    ) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history
+             SET end_time = now(), status = $1, error_message = $2,
+                 error_code = $3, error_sqlstate = $4, retryable = $5
+             WHERE refresh_id = $6",
+            &[
+                status.into(),
+                error_message.into(),
+                error_code.into(),
+                error_sqlstate.into(),
+                retryable.into(),
+                refresh_id.into(),
+            ],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+        Self::upsert_refresh_summary_for_refresh(refresh_id)
+    }
 }
 
 // ── Source gate CRUD (v0.5.0, Phase 3 — Bootstrap Source Gating) ──────────
@@ -3134,6 +3317,9 @@ pub struct SchedulerJob {
     pub retryable: Option<bool>,
     pub dispatch_tick_id: Option<i64>,
     pub tick_watermark_lsn: Option<String>,
+    pub outcome_code: Option<String>,
+    pub outcome_sqlstate: Option<String>,
+    pub worker_slot_generation: Option<i64>,
 }
 
 impl SchedulerJob {
@@ -3197,8 +3383,25 @@ impl SchedulerJob {
                     &[job_id.into(), worker_pid.into()],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+            if !result.is_empty() {
+                // SAFETY: Catalog transitions run in a backend attached to a database.
+                crate::shmem::decrement_parallel_queue_depth_for_database(unsafe {
+                    pg_sys::MyDatabaseId.to_u32()
+                });
+            }
             Ok(!result.is_empty())
         })
+    }
+
+    /// Persist the shared-memory generation assigned to a queued job.
+    pub fn set_worker_slot_generation(job_id: i64, generation: u64) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_scheduler_jobs \
+             SET worker_slot_generation = $2 \
+             WHERE job_id = $1 AND status = 'QUEUED'",
+            &[job_id.into(), (generation as i64).into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
 
     /// Complete a job: set terminal status, outcome detail, and retryability.
@@ -3228,8 +3431,53 @@ impl SchedulerJob {
         })
     }
 
+    pub fn complete_typed(
+        job_id: i64,
+        status: JobStatus,
+        outcome_detail: Option<&str>,
+        retryable: Option<bool>,
+        outcome_code: Option<&str>,
+        outcome_sqlstate: Option<&str>,
+    ) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_scheduler_jobs
+             SET status = $2, finished_at = now(), outcome_detail = $3,
+                 retryable = $4, outcome_code = $5, outcome_sqlstate = $6
+             WHERE job_id = $1",
+            &[
+                job_id.into(),
+                status.as_str().into(),
+                outcome_detail.into(),
+                retryable.into(),
+                outcome_code.into(),
+                outcome_sqlstate.into(),
+            ],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
     /// Cancel a job (force to CANCELLED).
     pub fn cancel(job_id: i64, reason: &str) -> Result<(), PgTrickleError> {
+        let cancelled_queued = Spi::connect_mut(|client| {
+            let result = client
+                .update(
+                    "UPDATE pgtrickle.pgt_scheduler_jobs \
+                     SET status = 'CANCELLED', finished_at = now(), \
+                         outcome_detail = $2, retryable = NULL \
+                     WHERE job_id = $1 AND status = 'QUEUED'",
+                    None,
+                    &[job_id.into(), reason.into()],
+                )
+                .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<bool, PgTrickleError>(!result.is_empty())
+        })?;
+        if cancelled_queued {
+            // SAFETY: Catalog transitions run in a backend attached to a database.
+            crate::shmem::decrement_parallel_queue_depth_for_database(unsafe {
+                pg_sys::MyDatabaseId.to_u32()
+            });
+            return Ok(());
+        }
         Self::complete(job_id, JobStatus::Cancelled, Some(reason), None)
     }
 
@@ -3241,7 +3489,8 @@ impl SchedulerJob {
                     "SELECT job_id, dag_version, unit_key, unit_kind, member_pgt_ids, \
                      root_pgt_id, status, scheduler_pid, worker_pid, attempt_no, \
                      enqueued_at, started_at, finished_at, outcome_detail, retryable, \
-                     dispatch_tick_id, tick_watermark_lsn::text \
+                     dispatch_tick_id, tick_watermark_lsn::text, \
+                     outcome_code, outcome_sqlstate, worker_slot_generation \
                      FROM pgtrickle.pgt_scheduler_jobs \
                      WHERE job_id = $1",
                     None,
@@ -3263,6 +3512,24 @@ impl SchedulerJob {
     /// Returns the number of jobs cancelled.
     pub fn cancel_orphaned_jobs() -> Result<i64, PgTrickleError> {
         Spi::connect_mut(|client| {
+            let queued_before = client
+                .select(
+                    "SELECT count(*)::bigint \
+                     FROM pgtrickle.pgt_scheduler_jobs \
+                     WHERE status = 'QUEUED' \
+                       AND (dispatch_tick_id IS NULL OR tick_watermark_lsn IS NULL \
+                            OR NOT EXISTS (SELECT 1 FROM pg_stat_activity \
+                                           WHERE pid = pgt_scheduler_jobs.worker_pid) \
+                            OR NOT EXISTS (SELECT 1 FROM pg_stat_activity \
+                                           WHERE pid = pgt_scheduler_jobs.scheduler_pid))",
+                    None,
+                    &[],
+                )
+                .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+                .first()
+                .get_one::<i64>()
+                .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(0);
             let result = client
                 .update(
                     "UPDATE pgtrickle.pgt_scheduler_jobs \
@@ -3283,6 +3550,12 @@ impl SchedulerJob {
                     &[],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
+            // SAFETY: Catalog transitions run in a backend attached to a database.
+            for _ in 0..queued_before {
+                crate::shmem::decrement_parallel_queue_depth_for_database(unsafe {
+                    pg_sys::MyDatabaseId.to_u32()
+                });
+            }
             Ok(result.len() as i64)
         })
     }
@@ -3290,15 +3563,20 @@ impl SchedulerJob {
     /// Prune completed/failed/cancelled jobs older than the given age.
     ///
     /// Returns the number of rows deleted.
-    pub fn prune_completed(max_age_seconds: i64) -> Result<i64, PgTrickleError> {
+    pub fn prune_completed(max_age_seconds: i64, batch_size: i32) -> Result<i64, PgTrickleError> {
         Spi::connect_mut(|client| {
             let result = client
                 .update(
                     "DELETE FROM pgtrickle.pgt_scheduler_jobs \
-                     WHERE status IN ('SUCCEEDED', 'RETRYABLE_FAILED', 'PERMANENT_FAILED', 'CANCELLED') \
-                       AND finished_at < now() - make_interval(secs => $1::float8)",
+                     WHERE ctid IN ( \
+                         SELECT ctid FROM pgtrickle.pgt_scheduler_jobs \
+                         WHERE status IN ('SUCCEEDED', 'RETRYABLE_FAILED', 'PERMANENT_FAILED', 'CANCELLED') \
+                           AND finished_at < now() - make_interval(secs => $1::float8) \
+                         ORDER BY finished_at, job_id \
+                         LIMIT $2 \
+                     )",
                     None,
-                    &[max_age_seconds.into()],
+                    &[max_age_seconds.into(), batch_size.into()],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
             Ok(result.len() as i64)
@@ -3328,7 +3606,8 @@ impl SchedulerJob {
     /// 1=job_id, 2=dag_version, 3=unit_key, 4=unit_kind, 5=member_pgt_ids,
     /// 6=root_pgt_id, 7=status, 8=scheduler_pid, 9=worker_pid, 10=attempt_no,
     /// 11=enqueued_at, 12=started_at, 13=finished_at, 14=outcome_detail, 15=retryable,
-    /// 16=dispatch_tick_id, 17=tick_watermark_lsn.
+    /// 16=dispatch_tick_id, 17=tick_watermark_lsn, 18=outcome_code,
+    /// 19=outcome_sqlstate, 20=worker_slot_generation.
     fn from_spi_table_row(table: &SpiTupleTable<'_>) -> Result<Self, PgTrickleError> {
         let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
 
@@ -3358,6 +3637,9 @@ impl SchedulerJob {
             retryable: table.get::<bool>(15).map_err(map_spi)?,
             dispatch_tick_id: table.get::<i64>(16).map_err(map_spi)?,
             tick_watermark_lsn: table.get::<String>(17).map_err(map_spi)?,
+            outcome_code: table.get::<String>(18).map_err(map_spi)?,
+            outcome_sqlstate: table.get::<String>(19).map_err(map_spi)?,
+            worker_slot_generation: table.get::<i64>(20).map_err(map_spi)?,
         })
     }
 }

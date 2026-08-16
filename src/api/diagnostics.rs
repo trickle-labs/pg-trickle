@@ -871,6 +871,8 @@ pub(super) fn reset_fuse_impl(name: &str, action: &str) -> Result<(), PgTrickleE
                         crate::cdc::buffer_qualified_name_for_oid(&change_schema, dep.source_relid);
                     let drain_sql = format!("TRUNCATE {buf}");
                     if let Err(e) = Spi::run(&drain_sql) {
+                        // nosemgrep: rust.spi.run.dynamic-format — buffer name is derived from source OID.
+                        // nosemgrep: rust.spi.run.dynamic-format — buffer name is derived from source OID.
                         pgrx::warning!(
                             "reset_fuse: failed to drain change buffer for source OID {}: {}",
                             dep.source_relid.to_u32(),
@@ -1075,7 +1077,8 @@ pub(super) fn gate_source(source: &str) -> Result<(), PgTrickleError> {
     let payload = format!("{}", source_relid.to_u32());
     // pg_notify does not support parameterized payloads; payload is source_relid.to_u32() (a plain integer).
     let gate_sql = format!("SELECT pg_notify('pgtrickle_source_gate', '{}')", payload);
-    Spi::run(&gate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&gate_sql) // nosemgrep: rust.spi.run.dynamic-format — source identifier is catalog-resolved.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::info!(
         "pg_trickle: source {} (oid={}) is now gated",
@@ -1098,7 +1101,8 @@ pub(super) fn ungate_source(source: &str) -> Result<(), PgTrickleError> {
     let payload = format!("{}", source_relid.to_u32());
     // pg_notify does not support parameterized payloads; payload is source_relid.to_u32() (a plain integer).
     let gate_sql = format!("SELECT pg_notify('pgtrickle_source_gate', '{}')", payload);
-    Spi::run(&gate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&gate_sql) // nosemgrep: rust.spi.run.dynamic-format — source identifier is catalog-resolved.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::info!(
         "pg_trickle: source {} (oid={}) is now ungated",
@@ -1260,7 +1264,8 @@ pub(super) fn advance_watermark(
     let payload = format!("wm:{}", source_relid.to_u32());
     // pg_notify does not support parameterized payloads; payload is "wm:" + source_relid.to_u32() (plain integer).
     let wm_sql = format!("SELECT pg_notify('pgtrickle_watermark', '{}')", payload);
-    Spi::run(&wm_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&wm_sql) // nosemgrep: rust.spi.run.dynamic-format — watermark identifier is catalog-resolved.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::info!(
         "pg_trickle: watermark for {} (oid={}) advanced",

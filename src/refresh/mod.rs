@@ -61,8 +61,9 @@ pub use codegen::{
 };
 pub(crate) use merge::compute_amplification_ratio;
 pub use merge::{
-    execute_differential_refresh, execute_full_refresh, execute_no_data_refresh,
-    execute_topk_refresh, poll_foreign_table_sources_for_st, post_full_refresh_cleanup,
+    execute_differential_refresh, execute_differential_refresh_with_tuning, execute_full_refresh,
+    execute_no_data_refresh, execute_topk_refresh, poll_foreign_table_sources_for_st,
+    post_full_refresh_cleanup,
 };
 pub use orchestrator::{
     RefreshAction, determine_refresh_action, execute_reinitialize_refresh, validate_topk_metadata,

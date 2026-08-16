@@ -11,10 +11,10 @@
 // arbitrary byte sequences.
 //
 // Run locally with:
-//   cargo +nightly fuzz run cdc_fuzz -- -max_total_time=60
+//   cargo +nightly fuzz run cdc_trigger_fuzz -- -max_total_time=60
 //
 // For 10M iterations:
-//   cargo +nightly fuzz run cdc_fuzz -- -runs=10000000
+//   cargo +nightly fuzz run cdc_trigger_fuzz -- -runs=10000000
 //
 // Functions under test (pure Rust, no PostgreSQL backend required):
 //   - detect_select_star_pub         (api/helpers — CDC guard)

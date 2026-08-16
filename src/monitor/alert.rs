@@ -4,10 +4,12 @@
 
 use super::*;
 
+const MAX_ALERT_BYTES: usize = 7_900;
+
 // ── NOTIFY Alerting ────────────────────────────────────────────────────────
 
 /// Alert event types emitted on the `pg_trickle_alert` NOTIFY channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlertEvent {
     /// data staleness exceeds 2× schedule.
     StaleData,
@@ -31,6 +33,8 @@ pub enum AlertEvent {
     AppendOnlyReverted,
     /// FUSE: Periodic reminder that a fuse is still blown.
     FuseBlownReminder,
+    /// Fuse circuit breaker was blown.
+    FuseBlown,
     /// G-7: Stream table skipped because its tier is Frozen.
     FrozenTierSkip,
     /// CDC trigger missing or disabled on a source table.
@@ -49,6 +53,12 @@ pub enum AlertEvent {
     /// SCAL-1 (v0.31.0): Change buffer has exceeded `buffer_alert_threshold`
     /// for N consecutive refresh cycles — back-pressure is building.
     ChangeBufferBackpressure,
+    /// A source watermark has stopped advancing.
+    WatermarkStuck,
+    /// A previously stuck source watermark resumed.
+    WatermarkResumed,
+    /// Self-monitoring detected an anomaly.
+    SelfMonitorAnomaly,
 }
 
 impl AlertEvent {
@@ -65,6 +75,7 @@ impl AlertEvent {
             AlertEvent::SchedulerFallingBehind => "scheduler_falling_behind",
             AlertEvent::AppendOnlyReverted => "append_only_reverted",
             AlertEvent::FuseBlownReminder => "fuse_blown_reminder",
+            AlertEvent::FuseBlown => "fuse_blown",
             AlertEvent::FrozenTierSkip => "frozen_tier_skip",
             AlertEvent::CdcTriggerDisabled => "cdc_trigger_disabled",
             AlertEvent::CleanupFailure => "cleanup_failure",
@@ -72,6 +83,9 @@ impl AlertEvent {
             AlertEvent::SpillThresholdExceeded => "spill_threshold_exceeded",
             AlertEvent::PredictedSlaBreach => "predicted_sla_breach",
             AlertEvent::ChangeBufferBackpressure => "change_buffer_backpressure",
+            AlertEvent::WatermarkStuck => "watermark_stuck",
+            AlertEvent::WatermarkResumed => "watermark_resumed",
+            AlertEvent::SelfMonitorAnomaly => "self_monitor_anomaly",
         }
     }
 }
@@ -89,19 +103,48 @@ pub fn emit_alert(
     pgt_name: &str,
     extra: serde_json::Value,
     skip_notify: bool,
-) {
+) -> Result<(), String> {
     if skip_notify {
-        return;
+        return Ok(());
     }
     let payload = build_alert_payload(event, pgt_schema, pgt_name, extra);
-
-    // Escape single quotes for PostgreSQL string literal syntax
-    let escaped = payload.replace('\'', "''");
-    let sql = format!("NOTIFY pg_trickle_alert, '{}'", escaped);
-
-    if let Err(e) = Spi::run(&sql) {
-        pgrx::warning!("pg_trickle: failed to emit alert {}: {}", event.as_str(), e);
+    let result = emit_alert_payload(&payload);
+    if let Err(ref error) = result {
+        pgrx::warning!(
+            "pg_trickle: failed to emit alert {}: {}",
+            event.as_str(),
+            error
+        );
     }
+    result
+}
+
+pub fn emit_alert_without_stream(
+    event: AlertEvent,
+    extra: serde_json::Value,
+) -> Result<(), String> {
+    let result = emit_alert_payload(&build_generic_alert_payload(event, extra));
+    if let Err(ref error) = result {
+        pgrx::warning!(
+            "pg_trickle: failed to emit alert {}: {}",
+            event.as_str(),
+            error
+        );
+    }
+    result
+}
+
+fn emit_alert_payload(payload: &str) -> Result<(), String> {
+    Spi::run_with_args(
+        "SELECT pg_notify('pg_trickle_alert', $1)",
+        &[payload.into()],
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn database_identity() -> u32 {
+    // SAFETY: MyDatabaseId is initialized for every connected PostgreSQL backend.
+    unsafe { pg_sys::MyDatabaseId }.to_u32()
 }
 
 /// Build a JSON alert payload for a NOTIFY event.
@@ -115,23 +158,131 @@ pub(crate) fn build_alert_payload(
     pgt_name: &str,
     extra: serde_json::Value,
 ) -> String {
-    let st = format!("{}.{}", pgt_schema, pgt_name);
     let mut obj = json!({
         "event": event.as_str(),
+        "database_oid": database_identity(),
         "pgt_schema": pgt_schema,
         "pgt_name": pgt_name,
-        "st": st,
+        "st": format!("{}.{}", pgt_schema, pgt_name),
     });
-    // Merge extra fields into the base object
     if let (serde_json::Value::Object(base), serde_json::Value::Object(ext)) = (&mut obj, extra) {
-        base.extend(ext);
+        for (key, value) in ext {
+            if !matches!(
+                key.as_str(),
+                "event" | "database_oid" | "pgt_schema" | "pgt_name" | "st"
+            ) {
+                base.insert(key, value);
+            }
+        }
     }
-    let payload = obj.to_string();
-    // NOTIFY payloads are limited to ~8,000 bytes; truncate if needed
-    if payload.len() > 7900 {
-        format!("{}...}}", &payload[..7890])
-    } else {
-        payload
+    reduce_alert_payload(obj)
+}
+
+fn build_generic_alert_payload(event: AlertEvent, extra: serde_json::Value) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert("event".to_string(), json!(event.as_str()));
+    obj.insert("database_oid".to_string(), json!(database_identity()));
+    if let serde_json::Value::Object(ext) = extra {
+        for (key, value) in ext {
+            if !matches!(key.as_str(), "event" | "database_oid") {
+                obj.insert(key, value);
+            }
+        }
+    }
+    reduce_alert_payload(serde_json::Value::Object(obj))
+}
+
+fn reduce_alert_payload(mut value: serde_json::Value) -> String {
+    let oversized = value.to_string().len() > MAX_ALERT_BYTES;
+    if !oversized {
+        return value.to_string();
+    }
+    if let serde_json::Value::Object(ref mut object) = value {
+        object.insert("truncated".to_string(), json!(true));
+        shrink_strings(object, 512);
+        let mut optional: Vec<String> = object
+            .keys()
+            .filter(|key| {
+                !matches!(
+                    key.as_str(),
+                    "event" | "database_oid" | "pgt_schema" | "pgt_name" | "st" | "truncated"
+                )
+            })
+            .cloned()
+            .collect();
+        optional.sort();
+        let mut omitted = Vec::new();
+        for key in optional {
+            if object_serialized_len(object) <= MAX_ALERT_BYTES {
+                break;
+            }
+            object.remove(&key);
+            omitted.push(key.chars().take(64).collect::<String>());
+        }
+        if !omitted.is_empty() {
+            object.insert("omitted_fields".to_string(), json!(omitted));
+        }
+        for limit in [128, 32, 8, 1] {
+            if object_serialized_len(object) <= MAX_ALERT_BYTES {
+                break;
+            }
+            shrink_strings(object, limit);
+        }
+        if object_serialized_len(object) > MAX_ALERT_BYTES {
+            object.insert("omitted_fields".to_string(), json!(["additional_fields"]));
+            shrink_strings(object, 1);
+        }
+    }
+    let payload = value.to_string();
+    if payload.len() <= MAX_ALERT_BYTES {
+        return payload;
+    }
+    let mut minimal = serde_json::Map::new();
+    if let serde_json::Value::Object(object) = value {
+        for key in ["event", "database_oid", "pgt_schema", "pgt_name", "st"] {
+            if let Some(value) = object.get(key) {
+                minimal.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    minimal.insert("truncated".to_string(), json!(true));
+    let payload = serde_json::Value::Object(minimal).to_string();
+    debug_assert!(payload.len() <= MAX_ALERT_BYTES);
+    payload
+}
+
+fn object_serialized_len(object: &serde_json::Map<String, serde_json::Value>) -> usize {
+    serde_json::Value::Object(object.clone()).to_string().len()
+}
+
+fn shrink_strings(value: &mut serde_json::Map<String, serde_json::Value>, max_chars: usize) {
+    fn visit(value: &mut serde_json::Value, max_chars: usize) {
+        match value {
+            serde_json::Value::String(text) => {
+                if text.chars().count() > max_chars {
+                    let end = text
+                        .char_indices()
+                        .nth(max_chars)
+                        .map(|(index, _)| index)
+                        .unwrap_or(text.len());
+                    text.truncate(end);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, max_chars);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values_mut() {
+                    visit(value, max_chars);
+                }
+            }
+            _ => {}
+        }
+    }
+    for value in value.values_mut() {
+        visit(value, max_chars);
     }
 }
 
@@ -148,7 +299,7 @@ pub fn alert_stale_data(
     } else {
         0.0
     };
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::StaleData,
         pgt_schema,
         pgt_name,
@@ -172,7 +323,7 @@ pub fn alert_no_upstream_changes(
     idle_secs: f64,
     skip_notify: bool,
 ) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::NoUpstreamChanges,
         pgt_schema,
         pgt_name,
@@ -183,7 +334,7 @@ pub fn alert_no_upstream_changes(
 
 /// Emit an auto-suspended alert.
 pub fn alert_auto_suspended(pgt_schema: &str, pgt_name: &str, error_count: i32, skip_notify: bool) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::AutoSuspended,
         pgt_schema,
         pgt_name,
@@ -194,7 +345,7 @@ pub fn alert_auto_suspended(pgt_schema: &str, pgt_name: &str, error_count: i32, 
 
 /// Emit a resumed alert (ST cleared from SUSPENDED back to ACTIVE).
 pub fn alert_resumed(pgt_schema: &str, pgt_name: &str, skip_notify: bool) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::Resumed,
         pgt_schema,
         pgt_name,
@@ -210,7 +361,7 @@ pub fn alert_reinitialize_needed(
     reason: &str,
     skip_notify: bool,
 ) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::ReinitializeNeeded,
         pgt_schema,
         pgt_name,
@@ -221,33 +372,25 @@ pub fn alert_reinitialize_needed(
 
 /// Emit a buffer growth warning.
 pub fn alert_buffer_growth(slot_name: &str, pending_bytes: i64) {
-    let payload = json!({
-        "event": "buffer_growth_warning",
+    let _ = emit_alert_without_stream(
+        AlertEvent::BufferGrowthWarning,
+        json!({
         "slot_name": slot_name,
         "pending_bytes": pending_bytes,
-    })
-    .to_string();
-    let escaped = payload.replace('\'', "''");
-    let sql = format!("NOTIFY pg_trickle_alert, '{}'", escaped);
-    if let Err(e) = Spi::run(&sql) {
-        pgrx::warning!("pg_trickle: failed to emit buffer_growth_warning: {}", e);
-    }
+        }),
+    );
 }
 
 /// Emit a WAL slot lag warning.
 pub fn alert_slot_lag(slot_name: &str, retained_wal_bytes: i64, threshold_bytes: i64) {
-    let payload = json!({
-        "event": "slot_lag_warning",
+    let _ = emit_alert_without_stream(
+        AlertEvent::SlotLagWarning,
+        json!({
         "slot_name": slot_name,
         "retained_wal_bytes": retained_wal_bytes,
         "threshold_bytes": threshold_bytes,
-    })
-    .to_string();
-    let escaped = payload.replace('\'', "''");
-    let sql = format!("NOTIFY pg_trickle_alert, '{}'", escaped);
-    if let Err(e) = Spi::run(&sql) {
-        pgrx::warning!("pg_trickle: failed to emit slot_lag_warning: {}", e);
-    }
+        }),
+    );
 }
 
 /// SCAL-1 (v0.31.0): Emit a change-buffer back-pressure alert.
@@ -261,22 +404,15 @@ pub fn alert_change_buffer_backpressure(
     consecutive_cycles: i32,
     threshold: i64,
 ) {
-    let payload = json!({
-        "event": "change_buffer_backpressure",
+    let _ = emit_alert_without_stream(
+        AlertEvent::ChangeBufferBackpressure,
+        json!({
         "source_oid": source_oid,
         "pending_rows": pending_rows,
         "consecutive_cycles": consecutive_cycles,
         "threshold": threshold,
-    })
-    .to_string();
-    let escaped = payload.replace('\'', "''");
-    let sql = format!("NOTIFY pg_trickle_alert, '{}'", escaped);
-    if let Err(e) = Spi::run(&sql) {
-        pgrx::warning!(
-            "pg_trickle: failed to emit change_buffer_backpressure alert: {}",
-            e
-        );
-    }
+        }),
+    );
 }
 
 pub(crate) fn collect_slot_health_rows() -> Vec<(String, i64, bool, i64, String)> {
@@ -397,7 +533,7 @@ pub fn alert_refresh_completed(
     duration_ms: i64,
     skip_notify: bool,
 ) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::RefreshCompleted,
         pgt_schema,
         pgt_name,
@@ -419,7 +555,7 @@ pub fn alert_refresh_failed(
     error: &str,
     skip_notify: bool,
 ) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::RefreshFailed,
         pgt_schema,
         pgt_name,
@@ -441,7 +577,7 @@ pub fn alert_falling_behind(
     ratio: f64,
     skip_notify: bool,
 ) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::SchedulerFallingBehind,
         pgt_schema,
         pgt_name,
@@ -466,7 +602,7 @@ pub fn alert_spill_threshold_exceeded(
     limit: i32,
     skip_notify: bool,
 ) {
-    emit_alert(
+    let _ = emit_alert(
         AlertEvent::SpillThresholdExceeded,
         pgt_schema,
         pgt_name,

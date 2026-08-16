@@ -4393,6 +4393,7 @@ table management.
 | `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / `hold`), and a human-readable explanation. |
 | `pgtrickle.cluster_worker_summary()` | `SetOf row` | Shows active background workers across all pg_trickle-enabled databases (requires `pg_monitor`). |
 | `pgtrickle.drain()` | — | Initiates a graceful drain: the scheduler finishes in-flight refreshes then stops. Useful before `pg_upgrade` or a rolling restart. |
+| `pgtrickle.resume_after_drain()` | `bool` | Explicitly re-enables scheduler dispatch after a persistent drain request. |
 | `pgtrickle.is_drained()` | `bool` | Returns `true` when all scheduler workers have completed their current cycle and are waiting. |
 | `pgtrickle.st_refresh_stats()` | `SetOf row` | Per-stream-table refresh metrics: counts, durations, error rates. Primary monitoring function. |
 | `pgtrickle.pgtrickle_refresh_stats()` | `SetOf row` | Cluster-wide aggregate refresh statistics. |
@@ -4405,6 +4406,15 @@ table management.
 legacy `row_identity_version` on a stream table or required CDC buffer means
 incremental maintenance is not considered safe until a protected rebuild has
 completed.
+
+### pgtrickle.resume_after_drain
+
+Explicitly re-enables scheduler dispatch after a persistent drain request.
+
+```sql
+pgtrickle.resume_after_drain() → bool
+```
+
 | `pgtrickle.self_monitoring_status()` | `SetOf row` | Shows whether each self-monitoring stream table exists, its status, and last refresh time. |
 | `pgtrickle.teardown_self_monitoring()` | — | Drops all self-monitoring stream tables. Safe to call even if some are missing. |
 | `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |

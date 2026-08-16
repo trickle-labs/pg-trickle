@@ -11,8 +11,8 @@ edition = "2024"
 cargo-fuzz = true
 
 [[bin]]
-name = "parser_fuzz"
-path = "fuzz_targets/parser_fuzz.rs"
+name = "api_guard_fuzz"
+path = "fuzz_targets/api_guard_fuzz.rs"
 test = false
 doc = false
 
@@ -32,15 +32,15 @@ doc = false
 
 # FUZZ-3 (v0.26.0): CDC trigger payload fuzz target.
 [[bin]]
-name = "cdc_fuzz"
-path = "fuzz_targets/cdc_fuzz.rs"
+name = "cdc_trigger_fuzz"
+path = "fuzz_targets/cdc_trigger_fuzz.rs"
 test = false
 doc = false
 
 # FUZZ-4 (v0.39.0): WAL/SQLSTATE error classifier fuzz target (O39-12).
 [[bin]]
-name = "wal_fuzz"
-path = "fuzz_targets/wal_fuzz.rs"
+name = "error_classifier_fuzz"
+path = "fuzz_targets/error_classifier_fuzz.rs"
 test = false
 doc = false
 
@@ -76,6 +76,12 @@ doc = false
 [[bin]]
 name = "snapshot_fingerprint_fuzz"
 path = "fuzz_targets/snapshot_fingerprint_fuzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wal_decoder_fuzz"
+path = "fuzz_targets/wal_decoder_fuzz.rs"
 test = false
 doc = false
 

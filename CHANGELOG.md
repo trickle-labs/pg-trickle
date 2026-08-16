@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.85.0 — Scheduler & Resource Resilience Gate](#0850--scheduler--resource-resilience-gate)
 - [0.84.0 — Catalog, Privilege & Upgrade Integrity](#0840--catalog-privilege--upgrade-integrity)
 - [0.83.0 — DVM Semantic Fidelity Gate](#0830--dvm-semantic-fidelity-gate)
 - [0.81.1 — Non-superuser stream-table creation](#0811--non-superuser-stream-table-creation)
@@ -129,6 +130,23 @@ The cutoff exists because:
 <!-- TOC end -->
 
 ---
+
+## [0.85.0] — Scheduler & Resource Resilience Gate
+
+### Changed
+
+- Scheduler worker capacity, pause state, watermarks, drain state, queue depth,
+  deadlines, maintenance, metrics, alerts, and API controls are bounded and
+  database-aware.
+- Scheduled refresh failures persist typed outcomes and self-healing state.
+- Fuzz and SQL-builder checks use the declared production target inventory.
+
+### Fixed
+
+- Worker reservations survive delayed startup and are reclaimed by identity
+  after crashes without inventing free capacity.
+- Drain requests remain active until explicitly resumed, while queue and
+  catalog maintenance progress in bounded batches.
 
 ## [0.84.0] — Catalog, Privilege & Upgrade Integrity
 
