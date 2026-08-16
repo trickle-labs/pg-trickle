@@ -1221,10 +1221,7 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
             let row_id_expr = if hash_cols.len() == 1 {
                 format!("pgtrickle.pg_trickle_hash({})", hash_cols[0])
             } else {
-                format!(
-                    "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                    hash_cols.join(", "),
-                )
+                crate::hash::build_composite_hash_expr(&hash_cols)
             };
 
             let repopulate_sql = format!(

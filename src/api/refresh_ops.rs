@@ -174,6 +174,10 @@ fn execute_manual_refresh(
     Spi::run("SET LOCAL row_security = off") // nosemgrep: sql.row-security.disabled — intentional R3 bypass, mirrors REFRESH MATERIALIZED VIEW semantics.
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+    if st.refresh_mode != RefreshMode::Full && !st.needs_reinit {
+        crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)?;
+    }
+
     // ERG-D: Determine the action label for history recording.
     let action = if st.topk_limit.is_some() {
         "FULL"
@@ -382,7 +386,7 @@ pub(crate) fn execute_manual_full_refresh(
 ) -> Result<(i64, i64), PgTrickleError> {
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
-        crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+        crate::cdc::validate_required_change_buffers_for_full(st, &dependencies)?;
     }
     crate::cdc::lock_source_relations(source_oids)?;
     crate::cdc::lock_stream_table_sources(st.pgt_id, &dependencies)?;
@@ -400,6 +404,18 @@ pub(crate) fn execute_manual_full_refresh(
         quote_identifier(schema),
         quote_identifier(table_name),
     );
+
+    // Incremental INTERSECT/EXCEPT admission is intentionally guarded.  A
+    // FULL refresh therefore materializes only defining-query columns and
+    // cleans up dual-count state from legacy storage.
+    if crate::dvm::query_needs_dual_count(&st.defining_query) {
+        crate::api::helpers::normalize_full_set_operation_storage(
+            schema,
+            table_name,
+            st.pgt_relid,
+            st.pgt_id,
+        )?;
+    }
 
     // Check for user triggers to suppress during FULL refresh.
     let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
@@ -493,12 +509,16 @@ pub(crate) fn execute_manual_full_refresh(
         // Also inject sum-of-squares columns for STDDEV/VAR maintenance.
         let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
         if !sum2_aux.is_empty() {
-            eq = inject_sum2_aux(&eq, &sum2_aux);
+            let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
+            let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
+            eq = inject_sum2_aux_typed(&eq, &typed);
         }
         // Also inject cross-product columns for CORR/COVAR/REGR maintenance (P3-2).
         let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
         if !covar_aux.is_empty() {
-            eq = inject_covar_aux(&eq, &covar_aux);
+            let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
+            let typed = crate::api::typed_statistical_aux_columns(&covar_aux, &types);
+            eq = inject_covar_aux_typed(&eq, &typed);
         }
         // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
         let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
@@ -512,19 +532,12 @@ pub(crate) fn execute_manual_full_refresh(
 
     // Compute row_id using the same hash formula as the delta query so
     // the MERGE ON clause matches during subsequent differential refreshes.
-    // For INTERSECT/EXCEPT, compute per-branch multiplicities for dual-count
-    // storage. For UNION (dedup), convert to UNION ALL and count.
+    // Guarded INTERSECT/EXCEPT uses the direct defining-query shape. For
+    // UNION (dedup), convert to UNION ALL and count.
     // For UNION ALL, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
     let insert_body = if crate::dvm::query_needs_dual_count(&st.defining_query) {
-        let col_names = crate::dvm::get_defining_query_columns(&st.defining_query)?;
-        if let Some(set_op_sql) = crate::dvm::try_set_op_refresh_sql(&st.defining_query, &col_names)
-        {
-            set_op_sql
-        } else {
-            let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
-            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
-        }
+        crate::dvm::direct_full_refresh_insert_body(&st.defining_query, &effective_query)
     } else if crate::dvm::query_needs_union_dedup_count(&st.defining_query) {
         let col_names = crate::dvm::get_defining_query_columns(&st.defining_query)?;
         if let Some(union_sql) =
@@ -644,6 +657,10 @@ pub(crate) fn execute_manual_full_refresh(
             schema,
             table_name
         );
+    }
+
+    if st.row_identity_version != Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION) {
+        crate::catalog::StreamTableMeta::mark_row_identity_reinitialized(st.pgt_id)?;
     }
 
     Ok((rows_inserted as i64, 0i64))

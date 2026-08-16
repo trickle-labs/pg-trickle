@@ -136,19 +136,7 @@ pub fn poll_foreign_table_changes(
     } else {
         pk_columns.clone()
     };
-    let pk_hash_expr = if hash_cols.len() == 1 {
-        let c = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.pg_trickle_hash({c}::text)")
-    } else {
-        let items: Vec<String> = hash_cols
-            .iter()
-            .map(|c| format!("\"{}\"::text", c.replace('"', "\"\"")))
-            .collect();
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            items.join(", ")
-        )
-    };
+    let pk_hash_expr = build_pk_hash_expr(&hash_cols);
 
     let cb_col_list = cb_col_names.join(", ");
     let src_col_list = src_col_names.join(", ");
@@ -293,10 +281,7 @@ pub(crate) fn build_pk_hash_expr(hash_cols: &[String]) -> String {
             .iter()
             .map(|c| format!("\"{}\"::text", c.replace('"', "\"\"")))
             .collect();
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            items.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&items)
     }
 }
 

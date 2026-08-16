@@ -536,7 +536,9 @@ SELECT pgtrickle.create_stream_table(
 
 **Set Operation Examples:**
 
-`INTERSECT`, `INTERSECT ALL`, `EXCEPT`, `EXCEPT ALL`, `UNION`, and `UNION ALL` are supported:
+`INTERSECT`, `INTERSECT ALL`, `EXCEPT`, `EXCEPT ALL`, `UNION`, and `UNION ALL`
+are supported in FULL mode.  INTERSECT/EXCEPT forms are currently guarded
+from DIFFERENTIAL and IMMEDIATE admission; AUTO falls back to FULL.
 
 ```sql
 -- INTERSECT: customers who placed orders in BOTH regions
@@ -2557,7 +2559,11 @@ Compute a row ID by hashing multiple text values (composite keys).
 pgtrickle.pg_trickle_hash_multi(inputs text[]) → bigint
 ```
 
-Marked `IMMUTABLE, PARALLEL SAFE`. Uses `\x1E` (record separator) between values and `\x00NULL\x00` for NULL entries.
+Marked `IMMUTABLE, PARALLEL SAFE`. Composite inputs use version-2 framing:
+big-endian version and component-count fields, explicit NULL/value tags, and
+byte lengths before each non-NULL UTF-8 value. This makes component boundaries,
+NULLs, empty values, and separator-like values unambiguous. The single-value
+`pg_trickle_hash` encoding remains unchanged.
 
 **Example:**
 
@@ -2576,7 +2582,7 @@ pg_trickle supports 60+ SQL constructs across three refresh modes. The table bel
 | Basic SELECT / WHERE / DISTINCT | ✅ | ✅ | ✅ | |
 | Joins (INNER, LEFT, RIGHT, FULL, CROSS, LATERAL) | ✅ | ✅ | ✅ | Hybrid delta strategy |
 | Subqueries (EXISTS, IN, NOT EXISTS, NOT IN, scalar) | ✅ | ✅ | ✅ | |
-| Set operations (UNION ALL, INTERSECT, EXCEPT) | ✅ | ✅ | ✅ | |
+| Set operations (UNION ALL, INTERSECT, EXCEPT) | ✅ | ⚠️ | ⚠️ | INTERSECT/EXCEPT are FULL-only; AUTO falls back to FULL |
 | Algebraic aggregates (COUNT, SUM, AVG, STDDEV, …) | ✅ | ✅ | ✅ | Fully invertible delta |
 | Semi-algebraic aggregates (MIN, MAX) | ✅ | ✅ | ✅ | Group rescan on ambiguous delete |
 | Group-rescan aggregates (STRING_AGG, ARRAY_AGG, …) | ✅ | ⚠️ | ⚠️ | Warning emitted at creation time |
@@ -2862,9 +2868,8 @@ SELECT pgtrickle.create_stream_table(
 
 pg_trickle checks all functions and operators in the defining query against `pg_proc.provolatile`:
 
-- **VOLATILE** functions (e.g., `random()`, `clock_timestamp()`, `gen_random_uuid()`) are **rejected** in DIFFERENTIAL and IMMEDIATE modes because they produce different results on each evaluation, breaking delta correctness.
+- **VOLATILE** and **STABLE** functions (e.g., `random()`, `clock_timestamp()`, `now()`) are FULL-only in incremental admission. AUTO falls back to FULL; explicit DIFFERENTIAL and IMMEDIATE modes are rejected.
 - **VOLATILE operators** — custom operators backed by volatile functions are also detected. The check resolves the operator’s implementation function via `pg_operator.oprcode` and checks its volatility in `pg_proc`.
-- **STABLE** functions (e.g., `now()`, `current_timestamp`, `current_setting()`) produce a **warning** in DIFFERENTIAL and IMMEDIATE modes — they are consistent within a single refresh but may differ between refreshes.
 - **IMMUTABLE** functions are always safe and produce no warnings.
 
 FULL mode accepts all volatility classes since it re-evaluates the entire query each time.
@@ -2876,8 +2881,8 @@ The `pg_trickle.volatile_function_policy` GUC controls how volatile functions ar
 | Value | Behavior |
 |-------|----------|
 | `reject` (default) | ERROR — volatile functions are rejected at creation time. |
-| `warn` | WARNING emitted but creation proceeds. Delta correctness is not guaranteed. |
-| `allow` | Silent — no warning or error. Use when you understand the implications. |
+| `warn` | Retained for compatibility; incremental admission still falls back or rejects. |
+| `allow` | Retained for compatibility; incremental admission still falls back or rejects. |
 
 ```sql
 -- Allow volatile functions with a warning
@@ -3275,9 +3280,13 @@ Added when the defining query contains `GROUP BY`, `DISTINCT`, `UNION ALL ... GR
 |------|---------|
 | `BIGINT NOT NULL DEFAULT 0` | `GROUP BY`, `DISTINCT`, `COUNT(*)`, `SUM(...)`, `AVG(...)`, `STDDEV(...)`, `VAR(...)`, `UNION` deduplication |
 
-#### `__pgt_count_l` / `__pgt_count_r` — Dual multiplicity (INTERSECT / EXCEPT)
+#### `__pgt_count_l` / `__pgt_count_r` — Legacy dual multiplicity
 
-Added when the defining query contains `INTERSECT` or `EXCEPT`. Stores independently the left-branch and right-branch row counts for Z-set delta algebra.
+Older INTERSECT/EXCEPT stream tables may contain these columns from the
+pre-WP2 boundary-update implementation. New FULL set-operation tables do not
+create them, and a successful FULL refresh removes them. INTERSECT/EXCEPT
+remain guarded from DIFFERENTIAL and IMMEDIATE admission until their durable
+private state is complete.
 
 | Type | Triggers |
 |------|---------|
@@ -3594,6 +3603,7 @@ Core metadata for each stream table.
 | `last_refresh_at` | `timestamptz` | When last refreshed |
 | `consecutive_errors` | `int` | Current error streak count |
 | `needs_reinit` | `bool` | Whether upstream DDL requires reinitialization |
+| `row_identity_version` | `smallint` | Composite row-identity framing version; legacy or `NULL` values block incremental maintenance |
 | `auto_threshold` | `double precision` | Per-ST adaptive fallback threshold (overrides GUC) |
 | `last_full_ms` | `double precision` | Last FULL refresh duration in milliseconds |
 | `functions_used` | `text[]` | Function names used in the defining query (for DDL tracking) |
@@ -4364,6 +4374,11 @@ table management.
 | `pgtrickle.recommend_schedule(st_name text)` | `jsonb` | Returns a schedule recommendation with confidence score and reasoning. |
 | `pgtrickle.schedule_recommendations()` | `SetOf row` | Bulk version of `recommend_schedule()` — one row per registered stream table. |
 | `pgtrickle.setup_self_monitoring()` | — | Creates the five self-monitoring stream tables that track pg_trickle's own performance. |
+
+`pgtrickle.preflight()` includes a hard `row_identity` check. A missing or
+legacy `row_identity_version` on a stream table or required CDC buffer means
+incremental maintenance is not considered safe until a protected rebuild has
+completed.
 | `pgtrickle.self_monitoring_status()` | `SetOf row` | Shows whether each self-monitoring stream table exists, its status, and last refresh time. |
 | `pgtrickle.teardown_self_monitoring()` | — | Drops all self-monitoring stream tables. Safe to call even if some are missing. |
 | `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |

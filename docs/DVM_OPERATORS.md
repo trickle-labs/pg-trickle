@@ -17,7 +17,7 @@ This document describes the Differential View Maintenance (DVM) operators implem
 | `EXISTS` / `NOT EXISTS` | ✅ | ✅ | ✅ | [Subqueries](#subqueries) |
 | Scalar subquery | ✅ | ✅ | ✅ | [Subqueries](#subqueries) |
 | `UNION ALL` | ✅ | ✅ | ✅ | [Set Operations](#set-operations) |
-| `INTERSECT` / `EXCEPT` | ✅ | ✅ | ✅ | [Set Operations](#set-operations) |
+| `INTERSECT` / `EXCEPT` | ✅ | ❌ | ❌ | [Set Operations](#set-operations) |
 | `COUNT`, `SUM`, `AVG` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
 | `MIN` / `MAX` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
 | `COUNT(DISTINCT)` / `SUM(DISTINCT)` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
@@ -60,7 +60,11 @@ The general contract:
 
 Updates are modeled as a delete of the old row followed by an insert of the new row.
 
-DIFFERENTIAL and IMMEDIATE maintenance require deterministic expressions. VOLATILE functions and custom operators such as `random()` or `clock_timestamp()` are rejected during stream table creation because re-evaluation would corrupt delta semantics. STABLE functions such as `now()` and `current_timestamp` are allowed with a warning; FULL mode accepts all volatility classes because it recomputes the full result on each refresh.
+DIFFERENTIAL and IMMEDIATE maintenance require deterministic expressions. VOLATILE
+and STABLE functions, including custom operators backed by them, are FULL-only:
+AUTO falls back to FULL and explicit incremental modes are rejected. FULL mode
+accepts all volatility classes because it recomputes the full result on each
+refresh.
 
 ---
 
@@ -92,8 +96,8 @@ The following table shows which SQL constructs are supported under each refresh 
 | Correlated `LATERAL` subquery | ✅ | ✅ | ✅ | |
 | **Set Operations** | | | | |
 | `UNION ALL` | ✅ | ✅ | ✅ | Dual-branch merge |
-| `INTERSECT` / `INTERSECT ALL` | ✅ | ✅ | ✅ | Dual-count tracking |
-| `EXCEPT` / `EXCEPT ALL` | ✅ | ✅ | ✅ | |
+| `INTERSECT` / `INTERSECT ALL` | ✅ | ❌ | ❌ | FULL-only; incremental admission is guarded |
+| `EXCEPT` / `EXCEPT ALL` | ✅ | ❌ | ❌ | FULL-only; incremental admission is guarded |
 | **Aggregates** | | | | |
 | `COUNT`, `SUM`, `AVG` | ✅ | ✅ | ✅ | Algebraic — fully invertible delta |
 | `MIN`, `MAX` | ✅ | ✅ | ✅ | Semi-algebraic — group rescan on ambiguous delete |
@@ -132,7 +136,7 @@ The following table shows which SQL constructs are supported under each refresh 
 | Multi-level ST chains | ✅ | ✅ | ✅ | Topological order; per-level delta propagation |
 | **Function Volatility** | | | | |
 | `IMMUTABLE` functions | ✅ | ✅ | ✅ | |
-| `STABLE` functions (`now()`, `current_timestamp`) | ✅ | ⚠️ | ⚠️ | Allowed with warning — value may differ between initial load and delta evaluation |
+| `STABLE` functions (`now()`, `current_timestamp`) | ✅ | ❌ | ❌ | FULL-only; AUTO falls back safely |
 | `VOLATILE` functions (`random()`, `clock_timestamp()`) | ✅ | ❌ | ❌ | Rejected at creation time — re-evaluation corrupts delta semantics |
 
 **Legend:** ✅ = fully supported — ⚠️ = supported with caveats (see Notes column) — ❌ = not supported (blocked at creation time)
@@ -495,7 +499,10 @@ SELECT * FROM (<right_delta>)
 
 **Module:** `src/dvm/operators/intersect.rs`
 
-Implements `INTERSECT` and `INTERSECT ALL` using dual-count per-branch multiplicity tracking.
+FULL refreshes materialize the PostgreSQL result directly.  The older
+differential implementation still contains dual-count boundary logic, but
+WP0 admission guards keep these operators out of DIFFERENTIAL and IMMEDIATE
+until private state is complete.
 
 **Delta Rule:**
 
@@ -504,14 +511,16 @@ $$\Delta(R \cap S): \text{emit rows where } \min(\text{count}_L, \text{count}_R)
 - **INTERSECT** (set): a row is present when both branches contain it.
 - **INTERSECT ALL** (bag): a row appears $\min(\text{count}_L, \text{count}_R)$ times.
 
-**SQL Generation (3-CTE chain):**
+**Legacy differential SQL shape (not admitted):**
 
 1. **Delta CTE** — tags rows from left/right child deltas with branch indicator (`'L'`/`'R'`) and computes per-row net_count.
 2. **Merge CTE** — joins with the storage table to compute old and new per-branch counts (`__pgt_count_l`, `__pgt_count_r`).
 3. **Final CTE** — detects boundary crossings using `LEAST(old_count_l, old_count_r)` vs `LEAST(new_count_l, new_count_r)`.
 
 **Notes:**
-- Storage table requires hidden columns `__pgt_count_l` and `__pgt_count_r` for multiplicity tracking.
+- New FULL tables contain only the defining-query output columns (plus the
+  normal internal row identity). Legacy dual-count columns are removed during
+  a successful FULL refresh.
 - Both set and bag variants use the same 3-CTE structure; only the boundary logic stays the same (both use LEAST).
 
 ---
@@ -520,7 +529,9 @@ $$\Delta(R \cap S): \text{emit rows where } \min(\text{count}_L, \text{count}_R)
 
 **Module:** `src/dvm/operators/except.rs`
 
-Implements `EXCEPT` and `EXCEPT ALL` using dual-count per-branch multiplicity tracking.
+FULL refreshes materialize the PostgreSQL result directly.  The older
+differential implementation remains fail-closed behind the WP0 admission
+guard until private state is complete.
 
 **Delta Rule:**
 
@@ -529,7 +540,7 @@ $$\Delta(R - S): \text{emit rows where } \max(0, \text{count}_L - \text{count}_R
 - **EXCEPT** (set): a row is present when it exists in the left but not the right branch.
 - **EXCEPT ALL** (bag): a row appears $\max(0, \text{count}_L - \text{count}_R)$ times.
 
-**SQL Generation (3-CTE chain):**
+**Legacy differential SQL shape (not admitted):**
 
 1. **Delta CTE** — same as Intersect: tags rows from both child deltas with branch indicator.
 2. **Merge CTE** — joins with storage table for old/new per-branch counts.
@@ -537,7 +548,9 @@ $$\Delta(R - S): \text{emit rows where } \max(0, \text{count}_L - \text{count}_R
 
 **Notes:**
 - EXCEPT is **not** commutative — left branch is the positive input, right is subtracted.
-- Storage table requires hidden columns `__pgt_count_l` and `__pgt_count_r`.
+- New FULL tables contain only the defining-query output columns (plus the
+  normal internal row identity). Legacy dual-count columns are removed during
+  a successful FULL refresh.
 - Same 3-CTE structure as Intersect with different effective-count function.
 
 ---

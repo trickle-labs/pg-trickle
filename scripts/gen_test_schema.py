@@ -96,7 +96,7 @@ def _strip_comments(sql: str) -> str:
     # Block comments first (may span lines)
     sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
     # Line comments
-    sql = re.sub(r"--[^\n]*", "", sql)
+    sql = re.sub(r"(?m)^[ \t]*--[^\n]*", "", sql)
     return sql
 
 

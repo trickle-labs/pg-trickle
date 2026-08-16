@@ -123,25 +123,6 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 
 // ── Group-rescan helpers ────────────────────────────────────────────
 
-/// Returns true if the child operator tree contains a FULL OUTER JOIN node.
-///
-/// Used to decide whether SUM aggregates need a rescan CTE to handle
-/// NULL-producing transitions (matched → unmatched rows) correctly. The
-/// algebraic `old + ins − del` formula gives 0 instead of NULL when all
-/// newly inserted rows carry NULL for the aggregate column (which happens
-/// when a matched pair becomes a left-only row after the right side is
-/// deleted). A rescan re-aggregates the affected groups from current source
-/// data and yields the correct NULL from `SUM(NULL, NULL, …)`.
-fn child_has_full_join(op: &OpTree) -> bool {
-    match op {
-        OpTree::FullJoin { .. } => true,
-        OpTree::Filter { child, .. }
-        | OpTree::Project { child, .. }
-        | OpTree::Subquery { child, .. } => child_has_full_join(child),
-        _ => false,
-    }
-}
-
 /// Reconstruct the FROM clause SQL from a child OpTree.
 ///
 /// Returns the SQL fragment for `FROM ...` suitable for the rescan CTE.
@@ -945,6 +926,8 @@ fn build_rescan_cte(
     }
 
     let rescan_cte = ctx.next_cte_name("agg_rescan");
+    let source_from = child_to_from_sql(child, &ctx.cte_registry);
+    let can_rescan_sum_nonnull = source_from.is_some();
 
     // Build SELECT list: group columns + rescan aggregate calls
     let mut selects = Vec::new();
@@ -976,6 +959,17 @@ fn build_rescan_cte(
             agg_to_rescan_sql(agg),
             quote_ident(&agg.alias),
         ));
+        if force_all_aggs
+            && matches!(agg.function, AggFunc::Sum)
+            && !agg.is_distinct
+            && can_rescan_sum_nonnull
+        {
+            selects.push(format!(
+                "{} AS {}",
+                agg_nonnull_count_rescan_sql(agg),
+                quote_ident(&format!("__pgt_nonnull_{}", agg.alias)),
+            ));
+        }
     }
 
     // Build GROUP BY clause
@@ -987,8 +981,6 @@ fn build_rescan_cte(
     };
 
     // Try to reconstruct the FROM clause from the child OpTree
-    let source_from = child_to_from_sql(child, &ctx.cte_registry);
-
     let rescan_sql = if let Some(from_sql) = source_from {
         // Direct source reconstruction: more efficient since we can push
         // the group filter into the WHERE clause before aggregation.
@@ -1128,6 +1120,20 @@ fn build_rescan_cte(
 }
 
 // ── P5: Direct aggregate bypass helpers ─────────────────────────────
+
+fn agg_nonnull_count_rescan_sql(agg: &AggExpr) -> String {
+    let argument = agg
+        .argument
+        .as_ref()
+        .map(Expr::to_sql)
+        .unwrap_or_else(|| "*".to_string());
+    let filter = agg
+        .filter
+        .as_ref()
+        .map(|expr| format!(" FILTER (WHERE {})", expr.to_sql()))
+        .unwrap_or_default();
+    format!("COUNT({argument}){filter}")
+}
 
 /// Check if a Scan → Aggregate tree qualifies for the P5 direct bypass.
 ///
@@ -1462,6 +1468,24 @@ fn generate_direct_agg_delta(
             "{del_expr} AS {}",
             quote_ident(&format!("__del_{}", agg.alias)),
         ));
+
+        // SUM needs a qualifying non-NULL count so the algebraic merge can
+        // restore PostgreSQL's NULL result when the last value disappears.
+        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
+            let argument = case_rewrites
+                .get(&agg.alias)
+                .cloned()
+                .unwrap_or_else(|| direct_agg_argument_expr(agg));
+            let (ins_nonnull, del_nonnull) = direct_nonnull_delta_exprs(&argument);
+            select_exprs.push(format!(
+                "{ins_nonnull} AS {}",
+                quote_ident(&format!("__ins_nonnull_{}", agg.alias)),
+            ));
+            select_exprs.push(format!(
+                "{del_nonnull} AS {}",
+                quote_ident(&format!("__del_nonnull_{}", agg.alias)),
+            ));
+        }
     }
 
     // GROUP BY — use c."col" directly (A44-10: no v.grp_* aliases needed)
@@ -1551,6 +1575,27 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
             unreachable!("P5 bypass does not support group-rescan aggregates")
         }
     }
+}
+
+fn direct_agg_argument_expr(agg: &AggExpr) -> String {
+    agg.argument
+        .as_ref()
+        .map(|expr| match expr {
+            Expr::ColumnRef { .. } => format!("c.{}", quote_ident(&expr.output_name())),
+            _ => expr.to_sql(),
+        })
+        .unwrap_or_else(|| "1".to_string())
+}
+
+fn direct_nonnull_delta_exprs(argument: &str) -> (String, String) {
+    (
+        format!(
+            "SUM(CASE WHEN c.action = 'I' AND ({argument}) IS NOT NULL THEN 1 ELSE 0 END)::bigint"
+        ),
+        format!(
+            "SUM(CASE WHEN c.action = 'D' AND ({argument}) IS NOT NULL THEN 1 ELSE 0 END)::bigint"
+        ),
+    )
 }
 
 /// Differentiate an Aggregate node.
@@ -1675,11 +1720,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 }
             }
 
-            // P2-2: SUM over a FULL JOIN child — track nonnull-count delta so the
-            // merge can maintain __pgt_aux_nonnull_{alias} algebraically and decide
-            // NULL vs algebraic SUM without a full-group rescan.
-            let has_full_join_for_delta = child_has_full_join(child);
-            if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && has_full_join_for_delta {
+            // Track nonnull-count deltas so SUM can distinguish NULL from zero
+            // without a full-group rescan.
+            if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
                 let (ins_nonnull, del_nonnull) = agg_nonnull_delta_exprs(agg, child_cols);
                 let nonnull_alias_i = format!("__ins_nonnull_{}", agg.alias);
                 let nonnull_alias_d = format!("__del_nonnull_{}", agg.alias);
@@ -1833,25 +1876,11 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     merge_selects.push(format!("{new_count_expr} AS new_count"));
     merge_selects.push("COALESCE(st.__pgt_count, 0) AS old_count".to_string());
 
-    // For SUM aggregates on top of a FULL JOIN child: the algebraic
-    // `old + ins − del` formula gives 0 instead of NULL when all newly
-    // inserted rows carry NULL for the aggregate column (matched rows
-    // transitioning to null-padded unmatched rows).
-    //
-    // P2-2: SUM over a FULL JOIN child now uses __pgt_aux_nonnull_* for
-    // algebraic NULL-transition correction instead of a rescan CTE.
-    // The flag is used per-aggregate below when building merge selects.
-    let sum_has_full_join_child = child_has_full_join(child);
-
     // Per-aggregate new values + old values for G-S1 change detection
     for agg in aggregates {
-        // For non-DISTINCT SUM over a FULL JOIN child: use nonnull-count aux
-        // (P2-2) for algebraic NULL-transition correction.
-        // SUM is NEVER routed through the rescan CTE:
-        //   - FULL JOIN child: corrected by __pgt_aux_nonnull_* (P2-2)
-        //   - Any other child: algebraic formula is already correct
-        let agg_has_nonnull_aux =
-            matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && sum_has_full_join_child;
+        // Every non-DISTINCT SUM uses nonnull-count aux for algebraic
+        // NULL-transition correction. SUM is never routed through rescan.
+        let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
         let agg_has_rescan = if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
             // SUM is always algebraic — never use the rescan path
             false
@@ -1930,14 +1959,27 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             }
         }
 
-        // P2-2: SUM over FULL JOIN — update the nonnull-count auxiliary column.
+        // Update the SUM nonnull-count auxiliary column.
         if agg_has_nonnull_aux {
             let st_alias = st_col_name(&agg.alias);
             let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_alias}"));
             let ins_nonnull = quote_ident(&format!("__ins_nonnull_{}", agg.alias));
             let del_nonnull = quote_ident(&format!("__del_nonnull_{}", agg.alias));
+            let algebraic = format!(
+                "COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)"
+            );
+            let new_nonnull = if use_having_rescan {
+                format!(
+                    "CASE WHEN st.__pgt_count IS NULL \
+                     THEN COALESCE(r.{}, 0) \
+                     ELSE {algebraic} END",
+                    quote_ident(&format!("__pgt_nonnull_{}", agg.alias)),
+                )
+            } else {
+                algebraic
+            };
             merge_selects.push(format!(
-                "COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0) AS {}",
+                "{new_nonnull} AS {}",
                 quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias)),
             ));
         }
@@ -2045,8 +2087,8 @@ END AS __pgt_meta_action"
                 output_cols.push(format!("__pgt_aux_{suffix}_{}", agg.alias));
             }
         }
-        // P2-2: SUM over FULL JOIN — propagate nonnull-count auxiliary column
-        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && sum_has_full_join_child {
+        // SUM — propagate nonnull-count auxiliary column
+        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
             output_cols.push(format!("__pgt_aux_nonnull_{}", agg.alias));
         }
     }
@@ -2139,10 +2181,10 @@ END AS __pgt_meta_action"
             }
         }
 
-        // P2-2: SUM over FULL JOIN — propagate the nonnull-count auxiliary column.
+        // Propagate the SUM nonnull-count auxiliary column.
         // D events reset to 0 (group deleted). I/U events use the algebraically
         // maintained new value.
-        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && sum_has_full_join_child {
+        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
             let new_aux_nonnull = quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias));
             let aux_nonnull_alias = quote_ident(&format!("__pgt_aux_nonnull_{}", agg.alias));
 
@@ -2425,18 +2467,27 @@ fn agg_sum2_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String
         .as_ref()
         .map(|e| resolve_expr_for_child(e, child_cols))
         .unwrap_or("1".into());
+    let cast_type = agg
+        .statistical_accumulator_type()
+        .map(|ty| ty.sql.as_str())
+        .unwrap_or("numeric");
     (
-        format!("SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN ({col}) * ({col}) ELSE 0 END)"),
-        format!("SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN ({col}) * ({col}) ELSE 0 END)"),
+        format!(
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} \
+             THEN ({col})::{cast_type} * ({col})::{cast_type} ELSE 0 END)"
+        ),
+        format!(
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} \
+             THEN ({col})::{cast_type} * ({col})::{cast_type} ELSE 0 END)"
+        ),
     )
 }
 
 /// Generate non-NULL COUNT expressions for SUM nonnull-count auxiliary tracking (P2-2).
 ///
 /// Returns `(ins_nonnull_expr, del_nonnull_expr)` — counts of non-NULL argument
-/// values in the insert and delete sides of the delta. SUM over a FULL JOIN
-/// needs these to maintain its `__pgt_aux_nonnull_{alias}` column algebraically,
-/// which enables NULL-transition correction without a full-group rescan.
+/// values in the insert and delete sides of the delta. This enables
+/// NULL-transition correction without a full-group rescan.
 fn agg_nonnull_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
     let filter_sql = agg
         .filter
@@ -2499,6 +2550,10 @@ fn agg_covar_delta_exprs(
         .as_ref()
         .map(|e| resolve_expr_for_child(e, child_cols))
         .unwrap_or_else(|| "0".into());
+    let cast_type = agg
+        .statistical_accumulator_type()
+        .map(|ty| ty.sql.as_str())
+        .unwrap_or("numeric");
 
     // Only count rows where BOTH x and y are non-NULL (SQL standard for regression)
     let non_null_guard = format!("{x_col} IS NOT NULL AND {y_col} IS NOT NULL");
@@ -2511,13 +2566,16 @@ fn agg_covar_delta_exprs(
             "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({x_col}) * ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
+         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({x_col}) * ({x_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
+         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({y_col}) * ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
+         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
         ),
     );
     let del = (
@@ -2528,13 +2586,16 @@ fn agg_covar_delta_exprs(
             "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({x_col}) * ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
+         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({x_col}) * ({x_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
+         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({y_col}) * ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
+         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
         ),
     );
     (ins, del)
@@ -2554,7 +2615,7 @@ fn agg_merge_expr_mapped(
     having_rescan: bool,
     has_nonnull_aux: bool,
     st_col: &str,
-    else_default: Option<&str>,
+    _else_default: Option<&str>,
 ) -> String {
     let alias = &agg.alias;
     let qt = quote_ident(st_col);
@@ -2605,29 +2666,23 @@ fn agg_merge_expr_mapped(
                 //   > 0 → at least one non-NULL argument value remains in the
                 //          group: the algebraic SUM formula is safe.
                 //   = 0 → all argument values in the group are now NULL.
-                //          - Bare SUM → NULL (no rescan required)
-                //          - COALESCE(SUM, default) → use algebraic formula
-                //            (equals `default` because ins/del cancel out)
-                //
-                // `else_default` carries the COALESCE default when the SUM is
-                // wrapped by a COALESCE at the Project level (detected by
-                // diff_project via ctx.agg_sum_coalesce_defaults).
+                //          Restore NULL here; an outer Project applies
+                //          COALESCE, if the defining query requested it.
                 let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
                 let ins_nonnull = quote_ident(&format!("__ins_nonnull_{alias}"));
                 let del_nonnull = quote_ident(&format!("__del_nonnull_{alias}"));
-                let else_branch = if else_default.is_some() {
-                    // COALESCE-wrapped SUM: keep algebraic formula so the ST
-                    // stores 0 (the COALESCE default) when the group empties.
-                    format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)")
+                let algebraic =
+                    format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)");
+                let value = if having_rescan {
+                    format!("CASE WHEN st.__pgt_count IS NULL THEN r.{r_qt} ELSE {algebraic} END")
                 } else {
-                    // Bare SUM: when nonnull_count drops to 0, result is NULL.
-                    "NULL".to_string()
+                    algebraic
                 };
                 format!(
                     "CASE \
                      WHEN (COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)) > 0 \
-                     THEN COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0) \
-                     ELSE {else_branch} \
+                     THEN {value} \
+                     ELSE NULL \
                      END",
                 )
             } else if has_rescan {
@@ -2994,6 +3049,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }];
         assert!(!is_direct_agg_eligible(&child, &group_by, &aggs));
     }
@@ -3196,6 +3252,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let child_cols = vec!["name".to_string()];
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
@@ -3260,6 +3317,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert!(
             !is_algebraically_invertible(&agg),
@@ -3288,6 +3346,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert!(
             !is_algebraically_invertible(&agg),
@@ -3323,6 +3382,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert!(
             !is_algebraic_via_aux(&agg),
@@ -3492,6 +3552,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let result = agg_merge_expr(&agg, false);
         // Should use LEAST for MIN
@@ -3525,6 +3586,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let result = agg_merge_expr(&agg, false);
         // Should use GREATEST for MAX
@@ -3554,6 +3616,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let child_cols = vec!["val".to_string()];
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
@@ -3579,6 +3642,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let child_cols = vec!["val".to_string()];
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
@@ -3609,6 +3673,7 @@ mod tests {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan(1, "employees", "public", "e", &["dept", "salary"])),
         };
@@ -3638,6 +3703,7 @@ mod tests {
                 filter: None,
                 second_arg: None,
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan(1, "employees", "public", "e", &["dept", "salary"])),
         };
@@ -3820,6 +3886,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(
             agg_to_rescan_sql(&agg),
@@ -3837,6 +3904,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(agg_to_rescan_sql(&agg), "JSON_ARRAYAGG(x ORDER BY x)");
     }
@@ -3851,6 +3919,7 @@ mod tests {
             second_arg: None,
             filter: Some(Expr::Raw("x > 0".into())),
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(
             agg_to_rescan_sql(&agg),
@@ -3875,6 +3944,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(agg_to_rescan_sql(&agg), "my_custom_agg(x)");
     }
@@ -3889,6 +3959,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(agg_to_rescan_sql(&agg), "myschema.my_agg(x, y)");
     }
@@ -3905,6 +3976,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(agg_to_rescan_sql(&agg), "my_agg(x) FILTER (WHERE x > 0)");
     }
@@ -3919,6 +3991,7 @@ mod tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         };
         assert_eq!(agg_to_rescan_sql(&agg), "my_agg(x ORDER BY y)");
     }
@@ -4556,6 +4629,54 @@ mod tests {
     }
 
     #[test]
+    fn test_statistical_delta_products_cast_operands_to_resolved_type() {
+        let agg = AggExpr {
+            function: AggFunc::Corr,
+            argument: Some(colref("y")),
+            alias: "corr".into(),
+            is_distinct: false,
+            filter: None,
+            second_arg: Some(colref("x")),
+            order_within_group: None,
+            statistical_support: Some(crate::dvm::parser::StatisticalAggSupport::with_accumulator(
+                crate::dvm::parser::PG_FLOAT8_TYPE_OID,
+                "double precision",
+            )),
+        };
+        let (insert, delete) = agg_covar_delta_exprs(&agg, &["x".into(), "y".into()]);
+        for expr in [insert.2, insert.3, insert.4, delete.2, delete.3, delete.4] {
+            assert!(
+                expr.contains("::double precision *"),
+                "cross-product operand must be cast before multiplication: {expr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_statistical_sum2_casts_operands_to_resolved_type() {
+        let agg = AggExpr {
+            function: AggFunc::StddevPop,
+            argument: Some(colref("amount")),
+            alias: "sd".into(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+            statistical_support: Some(crate::dvm::parser::StatisticalAggSupport::with_accumulator(
+                crate::dvm::parser::PG_NUMERIC_TYPE_OID,
+                "numeric",
+            )),
+        };
+        let (insert, delete) = agg_sum2_delta_exprs(&agg, &["amount".into()]);
+        for expr in [insert, delete] {
+            assert!(
+                expr.contains("::numeric *"),
+                "sum-of-squares operand must be cast before multiplication: {expr}"
+            );
+        }
+    }
+
+    #[test]
     fn test_diff_aggregate_stddev_pop() {
         let mut ctx = test_ctx_with_st("public", "st");
         let agg = OpTree::Aggregate {
@@ -5066,7 +5187,7 @@ mod tests {
         );
     }
 
-    // ── P2-2: SUM NULL-transition correction for FULL OUTER JOIN ────────
+    // ── SUM NULL-transition correction ─────────────────────────────────
 
     #[test]
     fn test_p2_2_sum_full_join_uses_nonnull_aux_not_rescan() {
@@ -5117,9 +5238,9 @@ mod tests {
     }
 
     #[test]
-    fn test_p2_2_sum_plain_scan_no_nonnull_aux() {
-        // P2-2: SUM above a plain scan (no FULL JOIN) must NOT generate any
-        // nonnull-count auxiliary columns or modify the algebraic path.
+    fn test_sum_plain_scan_uses_nonnull_aux() {
+        // Every non-DISTINCT SUM needs the nonnull count, including a plain
+        // scan, so the last non-NULL deletion restores SUM(NULL).
         let mut ctx = test_ctx_with_st("public", "st");
         let child = scan(1, "t", "public", "t", &["region", "amount"]);
         let tree = aggregate(
@@ -5137,11 +5258,8 @@ mod tests {
             "SUM above plain scan should not use rescan CTE:\n{sql}"
         );
 
-        // No nonnull-count columns
-        assert!(
-            !sql.contains("nonnull"),
-            "SUM above plain scan should not generate nonnull columns:\n{sql}"
-        );
+        assert_sql_contains(&sql, "__ins_nonnull_total");
+        assert_sql_contains(&sql, "__del_nonnull_total");
 
         // Standard algebraic expression
         assert_sql_contains(
@@ -5149,12 +5267,63 @@ mod tests {
             "COALESCE(d.\"__ins_total\", 0) - COALESCE(d.\"__del_total\", 0)",
         );
 
-        // No nonnull auxiliary in output columns
         assert!(
-            !result.columns.iter().any(|c| c.contains("nonnull")),
-            "output_cols should not contain nonnull columns for plain SUM: {:?}",
-            result.columns
+            result
+                .columns
+                .contains(&"__pgt_aux_nonnull_total".to_string())
         );
+    }
+
+    #[test]
+    fn test_sum_filter_tracks_only_qualifying_nonnull_values() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let child = scan(1, "t", "public", "t", &["region", "amount", "active"]);
+        let agg = AggExpr {
+            function: AggFunc::Sum,
+            argument: Some(colref("amount")),
+            alias: "total".into(),
+            is_distinct: false,
+            filter: Some(Expr::ColumnRef {
+                table_alias: None,
+                column_name: "active".into(),
+            }),
+            second_arg: None,
+            order_within_group: None,
+            statistical_support: None,
+        };
+        let tree = aggregate(vec![colref("region")], vec![agg], child);
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert!(sql.contains("amount IS NOT NULL AND active"));
+        assert!(sql.contains("__pgt_aux_nonnull_total"));
+    }
+
+    #[test]
+    fn test_coalesce_sum_restores_null_before_projection() {
+        let mut ctx = test_ctx_with_st("public", "st");
+        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let agg = aggregate(
+            vec![colref("region")],
+            vec![sum_col("amount", "total")],
+            child,
+        );
+        let tree = project(
+            vec![
+                colref("region"),
+                Expr::FuncCall {
+                    func_name: "COALESCE".into(),
+                    args: vec![colref("total"), Expr::Literal("0".into())],
+                },
+            ],
+            vec!["region", "total"],
+            agg,
+        );
+
+        let result = crate::dvm::operators::project::diff_project(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(sql.contains("ELSE NULL"));
+        assert!(sql.contains("COALESCE"));
     }
 
     #[test]
@@ -5228,6 +5397,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
 
         let tree = aggregate(
@@ -5473,6 +5643,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let (ins, del) = direct_agg_delta_exprs(&agg, true);
         assert!(
@@ -5638,6 +5809,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }];
         let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
             crate::version::Frontier::default(),
@@ -5673,6 +5845,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }];
         // Use local wrapper (empty ctx — no CDC cols).
         assert!(
@@ -5699,6 +5872,7 @@ mod tests {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         }];
         let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
             crate::version::Frontier::default(),

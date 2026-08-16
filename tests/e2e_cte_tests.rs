@@ -3058,8 +3058,8 @@ async fn test_recursive_cte_non_monotone_agg_subquery_recomputation() {
 ///
 /// The rarg `SelectStmt` has `op = SETOP_EXCEPT`, so `parse_set_operation`
 /// builds `OpTree::Except { … }` for the recursive term.
-/// `recursive_term_is_non_monotone` returns `Some("EXCEPT")`, triggering
-/// the recomputation fallback.
+/// AUTO must select FULL because EXCEPT state is not admitted for
+/// incremental execution.
 ///
 /// Verifies that rows excluded by the EXCEPT branch are correctly absent
 /// and that updates propagate via recomputation.
@@ -3095,8 +3095,9 @@ async fn test_recursive_cte_non_monotone_except_in_recursive_term() {
                       SELECT blocked_id FROM nm_blocked)\
                  ) SELECT id FROM reachable";
 
-    db.create_st("nm_except_st", query, "1m", "DIFFERENTIAL")
-        .await;
+    db.create_st("nm_except_st", query, "1m", "AUTO").await;
+    let (_, mode, _, _) = db.pgt_status("nm_except_st").await;
+    assert_eq!(mode, "FULL", "EXCEPT in a recursive term must use FULL");
 
     // Initial: root(1), child(2), child(3) reachable; 4 is blocked.
     assert_eq!(

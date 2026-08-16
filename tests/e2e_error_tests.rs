@@ -779,8 +779,8 @@ async fn test_volatile_function_rejected_in_differential_mode() {
         "Error should mention volatility, got: {err_msg}"
     );
     assert!(
-        err_msg.contains("random") || err_msg.contains("deterministic"),
-        "Error should point at the volatile function or deterministic alternative, got: {err_msg}"
+        err_msg.contains("FULL") || err_msg.contains("AUTO"),
+        "Error should include a safe refresh-mode remediation, got: {err_msg}"
     );
 }
 
@@ -810,7 +810,7 @@ async fn test_immutable_function_allowed_in_differential_mode() {
 }
 
 #[tokio::test]
-async fn test_stable_function_warned_in_differential_mode() {
+async fn test_stable_function_falls_back_to_full_in_auto_mode() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE nd_stable_src (id INT PRIMARY KEY, val INT)")
@@ -818,23 +818,16 @@ async fn test_stable_function_warned_in_differential_mode() {
     db.execute("INSERT INTO nd_stable_src VALUES (1, 10), (2, 20)")
         .await;
 
-    let notices = db
-        .try_execute_with_notices(
-            "SELECT pgtrickle.create_stream_table('nd_stable_st', \
+    db.try_execute_with_notices(
+        "SELECT pgtrickle.create_stream_table('nd_stable_st', \
              $$ SELECT id, CURRENT_TIMESTAMP AS created_at, val FROM nd_stable_src $$, \
-             '1m', 'DIFFERENTIAL')",
-        )
-        .await
-        .expect("stable-function create_stream_table call should succeed");
+             '1m', 'AUTO')",
+    )
+    .await
+    .expect("stable-function create_stream_table call should succeed");
 
-    let saw_warning = notices
-        .iter()
-        .any(|notice| notice.contains("Defining query contains stable functions"));
-    assert!(
-        saw_warning,
-        "Expected stable-function warning notice, got: {notices:?}"
-    );
-
+    let (_, mode, _, _) = db.pgt_status("nd_stable_st").await;
+    assert_eq!(mode, "FULL");
     let count = db.count("public.nd_stable_st").await;
     assert_eq!(count, 2);
 }
@@ -1166,11 +1159,10 @@ async fn test_lateral_volatile_srf_argument_rejected_in_differential() {
     );
 }
 
-/// COR-002: An immutable LATERAL SRF (jsonb_array_elements) must continue to
-/// work correctly in DIFFERENTIAL mode — the volatility scanner must not
-/// incorrectly flag stable/immutable SRFs.
+/// COR-002: An immutable but uninspectable LATERAL SRF must use the safe
+/// AUTO-to-FULL path rather than entering incremental maintenance.
 #[tokio::test]
-async fn test_lateral_immutable_srf_allowed_in_differential() {
+async fn test_lateral_immutable_srf_falls_back_to_full() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE lat_immut_src (id INT PRIMARY KEY, tags JSONB)")
@@ -1182,20 +1174,21 @@ async fn test_lateral_immutable_srf_allowed_in_differential() {
     )
     .await;
 
-    // jsonb_array_elements is immutable — must be accepted.
+    // jsonb_array_elements_text is immutable, but its correlated body cannot
+    // be independently parsed for incremental admission.
     db.create_st(
         "lat_immut_st",
         "SELECT s.id, e.tag \
          FROM lat_immut_src s, \
          jsonb_array_elements_text(s.tags) AS e(tag)",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
     let (status, mode, populated, errors) = db.pgt_status("lat_immut_st").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(mode, "DIFFERENTIAL");
+    assert_eq!(mode, "FULL");
     assert!(populated, "Stream table should be populated after creation");
     assert_eq!(errors, 0);
 

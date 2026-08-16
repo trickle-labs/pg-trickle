@@ -704,7 +704,11 @@ mod tests {
         // through the filter unconditionally because lateral columns
         // in those rows are NULL-padded and the predicate would block them.
         let mut ctx = test_ctx_with_st("public", "my_st");
-        ctx.st_user_columns = Some(vec!["name".to_string(), "price".to_string()]);
+        ctx.st_user_columns = Some(vec![
+            "id".to_string(),
+            "name".to_string(),
+            "price".to_string(),
+        ]);
 
         let child_scan = scan(
             1,

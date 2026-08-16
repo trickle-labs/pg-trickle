@@ -104,8 +104,9 @@ pub(super) fn _signal_launcher_rescan() {
 /// 0.4.0) to migrate existing row-level CDC triggers to statement-level.
 /// Can also be called manually after changing `pg_trickle.cdc_trigger_mode`.
 ///
-/// Returns `'done'` on success. Emits a `WARNING` per table on error and
-/// continues processing remaining sources.
+/// Returns `'done'` on success. Any rebuild failure aborts the transaction so
+/// callers cannot mark a buffer as migrated while its writer still emits the
+/// legacy identity encoding.
 #[pg_extern(schema = "pgtrickle")]
 pub(super) fn rebuild_cdc_triggers() -> &'static str {
     let change_schema = config::pg_trickle_change_buffer_schema();
@@ -115,7 +116,7 @@ pub(super) fn rebuild_cdc_triggers() -> &'static str {
             .select(
                 "SELECT DISTINCT source_relid \
                  FROM pgtrickle.pgt_dependencies \
-                 WHERE source_type = 'TABLE'",
+                 WHERE source_type IN ('TABLE', 'STREAM_TABLE')",
                 None,
                 &[],
             )
@@ -136,7 +137,7 @@ pub(super) fn rebuild_cdc_triggers() -> &'static str {
 
     for source_oid in source_oids {
         if let Err(e) = cdc::rebuild_cdc_trigger(source_oid, &change_schema) {
-            pgrx::warning!(
+            pgrx::error!(
                 "pg_trickle: rebuild_cdc_triggers: failed for OID {}: {}",
                 source_oid.to_u32(),
                 e
@@ -1631,7 +1632,39 @@ pub(super) fn preflight() -> String {
         }
     });
 
-    // Check 3: max_worker_processes sufficiency
+    // Check 3: persisted row-identity encoding matches this binary. Unknown
+    // or stale catalog values are intentionally a hard failure for
+    // incremental maintenance; the migration leaves them conservative.
+    let expected_identity_version = crate::hash::CURRENT_ROW_IDENTITY_VERSION;
+    let row_identity_check = match Spi::get_one_with_args::<bool>(
+        "SELECT NOT EXISTS (\
+             SELECT 1 FROM pgtrickle.pgt_stream_tables \
+             WHERE row_identity_version IS DISTINCT FROM $1\
+         ) AND NOT EXISTS (\
+             SELECT 1 FROM pgtrickle.pgt_change_buffers \
+             WHERE row_identity_version IS DISTINCT FROM $1\
+         )",
+        &[expected_identity_version.into()],
+    ) {
+        Ok(Some(true)) => serde_json::json!({
+            "ok": true,
+            "detail": format!("all persisted row-identity versions are {}", expected_identity_version)
+        }),
+        Ok(Some(false)) => serde_json::json!({
+            "ok": false,
+            "detail": format!(
+                "one or more stream tables or CDC buffers do not use row-identity version {}; \
+                 run the documented protected FULL/rebuild procedure before enabling incremental maintenance",
+                expected_identity_version
+            )
+        }),
+        Ok(None) | Err(_) => serde_json::json!({
+            "ok": false,
+            "detail": "row-identity catalog columns could not be verified; incremental maintenance is not safe"
+        }),
+    };
+
+    // Check 4: max_worker_processes sufficiency
     let (max_workers, active_workers) = Spi::connect(|client| {
         let max: i64 = client
             .select(
@@ -1739,6 +1772,7 @@ pub(super) fn preflight() -> String {
     serde_json::json!({
         "shared_preload_libraries": shared_preload_libraries,
         "scheduler_running": scheduler_running_check,
+        "row_identity": row_identity_check,
         "max_worker_processes": max_worker_processes,
         "wal_level": wal_level,
         "replication_slots": replication_slots,

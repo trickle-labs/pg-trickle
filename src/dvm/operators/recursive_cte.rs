@@ -3724,6 +3724,7 @@ mod tests {
                 filter: None,
                 alias: "total".to_string(),
                 order_within_group: None,
+                statistical_support: None,
             }],
             child: Box::new(scan),
         };

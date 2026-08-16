@@ -26,16 +26,16 @@ Only **monotone** operators are allowed in circular dependency chains.
 Monotone operators guarantee convergence — the result set grows (or stays
 the same) with each iteration until a fixed point is reached.
 
-| Allowed (Monotone) | Blocked (Non-Monotone) |
-|--------------------|----------------------|
-| Joins (INNER, LEFT, RIGHT, FULL) | Aggregates (SUM, COUNT, etc.) |
-| Filters (WHERE) | EXCEPT |
-| Projections (SELECT) | Window functions |
-| UNION ALL | NOT EXISTS / NOT IN |
-| INTERSECT | |
-| EXISTS | |
+| Allowed (proven monotone) | Blocked or unproven |
+|---------------------------|---------------------|
+| INNER JOIN | LEFT/FULL JOIN |
+| Filters (WHERE) | Aggregates (SUM, COUNT, etc.) |
+| Projections (SELECT) | INTERSECT / EXCEPT |
+| UNION ALL | Window functions |
+| EXISTS / IN | NOT EXISTS / NOT IN |
+| DISTINCT | Scalar subqueries and LATERAL |
 
-Creating a circular dependency with non-monotone operators is rejected
+Creating a circular dependency with blocked or unproven operators is rejected
 with a clear error message, regardless of the `allow_circular` setting.
 
 ## Step-by-Step Example: Transitive Closure
@@ -139,9 +139,10 @@ as `ERROR`. This prevents runaway infinite loops.
 
 ## Limitations
 
-- **Non-monotone operators are always rejected** — aggregates, EXCEPT,
-  window functions, and NOT EXISTS/NOT IN cannot appear in circular chains
-  because they prevent convergence.
+- **Blocked or unproven operators are always rejected** — outer joins,
+  aggregates, set differences, window functions, anti-joins, scalar
+  subqueries, and LATERAL cannot appear in circular chains because they can
+  remove or replace output, or lack a proof of monotonicity.
 - **Performance scales with iteration count** — each iteration runs a full
   differential refresh cycle for all SCC members. Keep cycles small.
 - **All SCC members must use DIFFERENTIAL mode** — FULL and IMMEDIATE modes

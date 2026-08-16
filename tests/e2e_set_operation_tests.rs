@@ -1,7 +1,7 @@
-//! E2E tests for INTERSECT / EXCEPT differential correctness (F19: G2.4).
+//! E2E tests for INTERSECT / EXCEPT FULL-refresh correctness (F19: G2.4).
 //!
 //! Validates set operations (INTERSECT, INTERSECT ALL, EXCEPT, EXCEPT ALL)
-//! under differential refresh with INSERT, UPDATE, and DELETE mutations.
+//! Set operations remain FULL-only until private incremental state is proven.
 //!
 //! Prerequisites: `./tests/build_e2e_image.sh`
 
@@ -14,7 +14,7 @@ use e2e::E2eDb;
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_intersect_basic_differential() {
+async fn test_intersect_basic_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE isect_a (id SERIAL PRIMARY KEY, val INT)")
         .await;
@@ -26,7 +26,7 @@ async fn test_intersect_basic_differential() {
         .await;
 
     let q = "SELECT val FROM isect_a INTERSECT SELECT val FROM isect_b";
-    db.create_st("isect_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("isect_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("isect_st", q).await;
 
     // Add value to both → appears in intersection
@@ -41,7 +41,7 @@ async fn test_intersect_basic_differential() {
 }
 
 #[tokio::test]
-async fn test_intersect_all_differential() {
+async fn test_intersect_all_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE isect_all_a (id SERIAL PRIMARY KEY, val INT)")
         .await;
@@ -53,7 +53,7 @@ async fn test_intersect_all_differential() {
         .await;
 
     let q = "SELECT val FROM isect_all_a INTERSECT ALL SELECT val FROM isect_all_b";
-    db.create_st("isect_all_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("isect_all_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("isect_all_st", q).await;
 
     // Add duplicate in A
@@ -72,7 +72,7 @@ async fn test_intersect_all_differential() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_except_basic_differential() {
+async fn test_except_basic_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE exc_a (id SERIAL PRIMARY KEY, val INT)")
         .await;
@@ -83,7 +83,7 @@ async fn test_except_basic_differential() {
     db.execute("INSERT INTO exc_b (val) VALUES (2), (4)").await;
 
     let q = "SELECT val FROM exc_a EXCEPT SELECT val FROM exc_b";
-    db.create_st("exc_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("exc_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("exc_st", q).await;
 
     // Add to B a value that exists in A → shrinks result
@@ -103,7 +103,7 @@ async fn test_except_basic_differential() {
 }
 
 #[tokio::test]
-async fn test_except_all_differential() {
+async fn test_except_all_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE exc_all_a (id SERIAL PRIMARY KEY, val INT)")
         .await;
@@ -115,7 +115,7 @@ async fn test_except_all_differential() {
         .await;
 
     let q = "SELECT val FROM exc_all_a EXCEPT ALL SELECT val FROM exc_all_b";
-    db.create_st("exc_all_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("exc_all_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("exc_all_st", q).await;
 
     // Remove duplicate from A
@@ -135,7 +135,7 @@ async fn test_except_all_differential() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_set_ops_chain_differential() {
+async fn test_set_ops_chain_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE so_a (id SERIAL PRIMARY KEY, val INT)")
         .await;
@@ -149,7 +149,7 @@ async fn test_set_ops_chain_differential() {
 
     let q = "(SELECT val FROM so_a UNION ALL SELECT val FROM so_b) \
              EXCEPT SELECT val FROM so_c";
-    db.create_st("so_chain_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("so_chain_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("so_chain_st", q).await;
 
     db.execute("INSERT INTO so_c (val) VALUES (1)").await;
@@ -166,7 +166,7 @@ async fn test_set_ops_chain_differential() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_intersect_multi_column_differential() {
+async fn test_intersect_multi_column_full() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE isect_mc_a (id SERIAL PRIMARY KEY, x INT, y TEXT)")
         .await;
@@ -178,7 +178,7 @@ async fn test_intersect_multi_column_differential() {
         .await;
 
     let q = "SELECT x, y FROM isect_mc_a INTERSECT SELECT x, y FROM isect_mc_b";
-    db.create_st("isect_mc_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("isect_mc_st", q, "1m", "FULL").await;
     db.assert_st_matches_query("isect_mc_st", q).await;
 
     // Make (2,'b') match by updating B

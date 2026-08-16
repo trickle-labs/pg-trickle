@@ -12,6 +12,45 @@ pub struct Column {
     pub is_nullable: bool,
 }
 
+pub const PG_FLOAT8_TYPE_OID: u32 = 701;
+pub const PG_NUMERIC_TYPE_OID: u32 = 1700;
+
+/// A SQL type resolved from PostgreSQL catalog metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSqlType {
+    pub oid: u32,
+    pub sql: String,
+}
+
+/// Parse/analyze support metadata for statistical aggregates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatisticalAggSupport {
+    /// Byte offset of the aggregate call in the original query, if known.
+    pub parse_location: Option<i32>,
+    /// PostgreSQL's resolved accumulator arithmetic type for square/cross
+    /// products, if supported.
+    pub accumulator_type: Option<ResolvedSqlType>,
+}
+
+impl StatisticalAggSupport {
+    pub fn with_location(parse_location: i32) -> Self {
+        Self {
+            parse_location: Some(parse_location),
+            accumulator_type: None,
+        }
+    }
+
+    pub fn with_accumulator(oid: u32, sql: impl Into<String>) -> Self {
+        Self {
+            parse_location: None,
+            accumulator_type: Some(ResolvedSqlType {
+                oid,
+                sql: sql.into(),
+            }),
+        }
+    }
+}
+
 /// A SQL expression (simplified representation).
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -500,6 +539,47 @@ pub struct AggExpr {
     /// Optional WITHIN GROUP (ORDER BY ...) clause for ordered-set aggregates
     /// (MODE, PERCENTILE_CONT, PERCENTILE_DISC).
     pub order_within_group: Option<Vec<SortExpr>>,
+    /// Statistical aggregate parse/analyzer metadata, populated for supported
+    /// STDDEV/VAR/CORR/COVAR/REGR signatures.
+    pub statistical_support: Option<StatisticalAggSupport>,
+}
+
+impl AggExpr {
+    pub fn statistical_accumulator_type(&self) -> Option<&ResolvedSqlType> {
+        self.statistical_support
+            .as_ref()
+            .and_then(|support| support.accumulator_type.as_ref())
+    }
+}
+
+/// Resolve the accumulator arithmetic type OID for a supported statistical
+/// aggregate from the resolved transition-function argument types.
+///
+/// `transition_arg_type_oids` are the PostgreSQL `pg_proc.proargtypes` OIDs for
+/// the aggregate transition function named by the resolved aggregate overload.
+/// For the supported families we only accept arithmetic in `numeric` or
+/// `double precision`; anything else remains unresolved and must fall back to
+/// FULL maintenance.
+pub fn resolve_statistical_accumulator_type_oid(
+    function: &AggFunc,
+    transition_arg_type_oids: &[u32],
+) -> Option<u32> {
+    let supported = |oid| oid == PG_NUMERIC_TYPE_OID || oid == PG_FLOAT8_TYPE_OID;
+
+    if function.needs_sum_of_squares() {
+        let oid = *transition_arg_type_oids.get(1)?;
+        return supported(oid).then_some(oid);
+    }
+
+    if function.needs_cross_products() {
+        let x_oid = *transition_arg_type_oids.get(1)?;
+        let y_oid = *transition_arg_type_oids.get(2)?;
+        if x_oid == y_oid && supported(x_oid) {
+            return Some(x_oid);
+        }
+    }
+
+    None
 }
 
 /// G12-AGG: Classify the maintenance strategy for a single aggregate expression.
@@ -525,6 +605,38 @@ pub fn classify_agg_strategy(agg: &AggExpr) -> &'static str {
 }
 
 #[cfg(test)]
+mod statistical_accumulator_type_tests {
+    use super::*;
+
+    #[test]
+    fn test_statistical_accumulator_type_stddev_numeric() {
+        let resolved = resolve_statistical_accumulator_type_oid(
+            &AggFunc::StddevPop,
+            &[0, PG_NUMERIC_TYPE_OID],
+        );
+        assert_eq!(resolved, Some(PG_NUMERIC_TYPE_OID));
+    }
+
+    #[test]
+    fn test_statistical_accumulator_type_corr_float8() {
+        let resolved = resolve_statistical_accumulator_type_oid(
+            &AggFunc::Corr,
+            &[0, PG_FLOAT8_TYPE_OID, PG_FLOAT8_TYPE_OID],
+        );
+        assert_eq!(resolved, Some(PG_FLOAT8_TYPE_OID));
+    }
+
+    #[test]
+    fn test_statistical_accumulator_type_rejects_unsupported_signature() {
+        let resolved = resolve_statistical_accumulator_type_oid(
+            &AggFunc::Corr,
+            &[0, PG_NUMERIC_TYPE_OID, PG_FLOAT8_TYPE_OID],
+        );
+        assert_eq!(resolved, None);
+    }
+}
+
+#[cfg(test)]
 mod classify_agg_strategy_tests {
     use super::*;
 
@@ -537,6 +649,7 @@ mod classify_agg_strategy_tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 
@@ -685,6 +798,7 @@ mod is_all_algebraic_agg_tests {
             second_arg: None,
             filter: None,
             order_within_group: None,
+            statistical_support: None,
         }
     }
 
@@ -1480,9 +1594,9 @@ impl OpTree {
         }
     }
 
-    /// Returns `true` if the operator tree contains Aggregate, Distinct,
-    /// Intersect, or Except — meaning the storage table needs a
-    /// `__pgt_count BIGINT` auxiliary column for differential maintenance.
+    /// Returns `true` if the operator tree contains Aggregate or Distinct,
+    /// meaning the storage table needs a `__pgt_count BIGINT` auxiliary
+    /// column for differential maintenance.
     ///
     /// Recurses through transparent wrappers (`Filter`, `Project`,
     /// `Subquery`) that may sit on top (e.g. HAVING adds a `Filter`
@@ -1499,7 +1613,8 @@ impl OpTree {
             | OpTree::Project { child, .. }
             | OpTree::Subquery { child, .. }
             | OpTree::Window { child, .. } => child.needs_pgt_count(),
-            // INTERSECT/EXCEPT use dual counts, not __pgt_count
+            // INTERSECT/EXCEPT use guarded legacy/private dual state, not
+            // __pgt_count in the FULL storage relation.
             OpTree::Intersect { .. } | OpTree::Except { .. } => false,
             _ => false,
         }
@@ -1621,44 +1736,54 @@ impl OpTree {
         }
     }
 
-    /// Whether this operator tree contains a FULL OUTER JOIN node at any depth.
-    ///
-    /// Used to determine whether SUM aggregates above this tree need
-    /// `__pgt_aux_nonnull_*` auxiliary columns for P2-2 NULL-transition
-    /// correction.
-    pub fn contains_full_join(&self) -> bool {
+    /// Return the analyzed accumulator type for each statistical auxiliary
+    /// column. The type comes from PostgreSQL's transition signature rather
+    /// than from the source expression's textual type.
+    pub fn statistical_aux_types(&self) -> Vec<(String, String)> {
         match self {
-            OpTree::FullJoin { .. } => true,
+            OpTree::Aggregate { aggregates, .. } => {
+                let mut types = Vec::new();
+                for agg in aggregates {
+                    let Some(accumulator_type) = agg.statistical_accumulator_type() else {
+                        continue;
+                    };
+                    let ty = accumulator_type.sql.clone();
+                    if agg.function.needs_sum_of_squares() && !agg.is_distinct {
+                        types.push((format!("__pgt_aux_sum2_{}", agg.alias), ty.clone()));
+                    }
+                    if agg.function.needs_cross_products() && !agg.is_distinct {
+                        let a = &agg.alias;
+                        for suffix in ["sumx", "sumy", "sumxy", "sumx2", "sumy2"] {
+                            types.push((format!("__pgt_aux_{suffix}_{a}"), ty.clone()));
+                        }
+                    }
+                }
+                types
+            }
             OpTree::Filter { child, .. }
             | OpTree::Project { child, .. }
-            | OpTree::Subquery { child, .. } => child.contains_full_join(),
-            OpTree::InnerJoin { left, right, .. } | OpTree::LeftJoin { left, right, .. } => {
-                left.contains_full_join() || right.contains_full_join()
-            }
-            _ => false,
+            | OpTree::Subquery { child, .. }
+            | OpTree::Window { child, .. } => child.statistical_aux_types(),
+            _ => Vec::new(),
         }
     }
 
-    /// For each non-DISTINCT SUM aggregate above a FULL OUTER JOIN child,
+    /// For each non-DISTINCT SUM aggregate,
     /// returns a tuple of `(nonnull_col_name, arg_sql)`:
     /// - `nonnull_col_name`: `__pgt_aux_nonnull_{alias}` — stores running
     ///   count of non-NULL argument values in the group
     /// - `arg_sql`: the SQL expression for the aggregate argument
     ///
-    /// This auxiliary column enables algebraic NULL-transition correction
-    /// (P2-2): when `nonnull_count > 0` the algebraic SUM formula is valid;
-    /// when it drops to 0 the result is definitively NULL without rescanning.
+    /// The auxiliary is maintained for every SUM because algebraic inversion
+    /// cannot distinguish an empty/non-qualifying group from a real zero
+    /// without retaining the number of qualifying non-NULL inputs.  FILTER
+    /// predicates are folded into the tracked expression so initialization and
+    /// delta maintenance count the same rows.
     ///
-    /// Returns an empty vec if no SUM aggregates sit above a FULL JOIN, or
-    /// if the operator tree is not an aggregate query.
+    /// Returns an empty vec if the operator tree is not an aggregate query.
     pub fn nonnull_aux_columns(&self) -> Vec<(String, String)> {
         match self {
-            OpTree::Aggregate {
-                aggregates, child, ..
-            } => {
-                if !child.contains_full_join() {
-                    return Vec::new();
-                }
+            OpTree::Aggregate { aggregates, .. } => {
                 let mut aux = Vec::new();
                 for agg in aggregates {
                     if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
@@ -1667,6 +1792,11 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "0".to_string());
+                        let arg_sql = if let Some(filter) = &agg.filter {
+                            format!("CASE WHEN {} THEN ({arg_sql}) END", filter.to_sql())
+                        } else {
+                            arg_sql
+                        };
                         aux.push((format!("__pgt_aux_nonnull_{}", agg.alias), arg_sql));
                     }
                 }

@@ -597,15 +597,20 @@ async fn run_three_layer_chain(mode: ScheduleMode) {
     .await;
 
     // ST₂: heavy routes (ST-on-ST)
-    db.execute(
+    let downstream_mode = if mode == ScheduleMode::Parallel {
+        "FULL"
+    } else {
+        "DIFFERENTIAL"
+    };
+    db.execute(&format!(
         "SELECT pgtrickle.create_stream_table(
             'ms3_st_heavy_routes',
             $$SELECT origin, destination, total_kg
               FROM ms3_st_routes WHERE total_kg >= 200$$,
             'calculated',
-            'DIFFERENTIAL'
-        )",
-    )
+            '{downstream_mode}'
+        )"
+    ))
     .await;
 
     // Downstream view on ST₂

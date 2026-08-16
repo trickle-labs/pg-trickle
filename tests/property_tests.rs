@@ -685,6 +685,7 @@ proptest! {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let result = pg_trickle::dvm::diff::test_helpers::agg_merge_expr_for_test(&agg, false);
 
@@ -733,6 +734,7 @@ proptest! {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
 
         // Without rescan CTE: the merge falls back to insert extremum
@@ -785,6 +787,7 @@ proptest! {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
         let child_cols = vec![col];
         let (ins, del) = pg_trickle::dvm::diff::test_helpers::agg_delta_exprs_for_test(&agg, &child_cols);
@@ -819,6 +822,7 @@ proptest! {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
 
         prop_assert!(
@@ -866,6 +870,7 @@ proptest! {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
 
         prop_assert!(
@@ -927,6 +932,7 @@ proptest! {
             filter: None,
             second_arg: None,
             order_within_group: None,
+            statistical_support: None,
         };
 
         // The function itself is algebraic, but with DISTINCT the

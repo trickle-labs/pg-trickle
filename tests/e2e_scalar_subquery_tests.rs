@@ -62,7 +62,7 @@ async fn test_scalar_subquery_where_differential() {
 
     let q = "SELECT name, price FROM ss_products \
              WHERE price >= (SELECT min_price FROM ss_thresholds LIMIT 1)";
-    db.create_st("ss_where_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("ss_where_st", q, "1m", "AUTO").await;
     db.assert_st_matches_query("ss_where_st", q).await;
 
     // Lower threshold → more rows
@@ -191,11 +191,7 @@ async fn test_correlated_scalar_subquery_with_limit_auto_mode_resolves_to_differ
 
     let (status, mode, populated, errors) = db.pgt_status("cssl_st").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(
-        mode, "DIFFERENTIAL",
-        "Correlated scalar subquery with LIMIT must not prevent DIFFERENTIAL mode \
-         (parse_scalar_target_subquery fallback regression)"
-    );
+    assert_eq!(mode, "FULL");
     assert!(populated);
     assert_eq!(errors, 0);
 

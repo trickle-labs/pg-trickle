@@ -34,6 +34,7 @@ pg_trickle in production.
   - [13. Fuse Tripped (Circuit Breaker)](#13-fuse-tripped-circuit-breaker)
   - [14. Stream Table Appears Stuck Behind a Long Transaction](#14-stream-table-appears-stuck-behind-a-long-transaction)
   - [15. Stale Data After High-Concurrency Writes (Sequence Cache Inversion)](#15-stale-data-after-high-concurrency-writes-sequence-cache-inversion)
+  - [16. Semantic Admission or Identity-Version Failure](#16-semantic-admission-or-identity-version-failure)
 
 ---
 
@@ -723,6 +724,37 @@ WHERE schemaname = 'pgtrickle_changes'
    ```sql
    SELECT pgtrickle.alter_stream_table('my_st', cdc_mode => 'wal');
    ```
+
+---
+
+### 16. Semantic Admission or Identity-Version Failure
+
+**Symptoms:**
+- Creation or `ALTER QUERY` rejects explicit `DIFFERENTIAL` or `IMMEDIATE`
+  with `DVM-81-*` and recommends `FULL` or `AUTO`.
+- `AUTO` reports an effective `FULL` mode.
+- Refresh reports an identity-version mismatch, missing change buffer, or
+  corrupt private state.
+- A scalar subquery raises PostgreSQL cardinality violation `21000`.
+
+**Resolution:**
+
+Use the documented safe mode first:
+
+```sql
+SELECT * FROM pgtrickle.pgt_status() WHERE pgt_name = 'my_stream_table';
+SELECT * FROM pgtrickle.explain_st('my_stream_table');
+```
+
+Rewrite the unsupported expression or use `AUTO`/`FULL`. Do not manually edit
+row IDs, change buffers, or private set-operation relations. For an identity
+version mismatch, missing buffer, failed protected rebuild, or private-state
+corruption, repair or reinitialize the stream table using the supported API;
+the refresh remains blocked until the binary and persisted encoding agree.
+
+A `21000` cardinality error is not converted to a successful refresh. Correct
+the source data and retry; PostgreSQL transaction rollback preserves the
+stream-table contents and frontier.
 
 ---
 

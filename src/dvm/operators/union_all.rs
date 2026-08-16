@@ -41,12 +41,16 @@ pub fn diff_union_all(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .iter()
         .enumerate()
         .map(|(i, result)| {
+            let row_id_expr = crate::hash::build_composite_hash_expr(&[
+                format!("'{}'::TEXT", i + 1),
+                "__pgt_row_id::TEXT".to_string(),
+            ]);
             format!(
-                "SELECT pgtrickle.pg_trickle_hash_multi(ARRAY['{idx}'::TEXT, __pgt_row_id::TEXT]) \
+                "SELECT {row_id_expr} \
                  AS __pgt_row_id,\n\
                  __pgt_action, {col_list}\n\
                  FROM {cte}",
-                idx = i + 1,
+                row_id_expr = row_id_expr,
                 cte = result.cte_name,
             )
         })

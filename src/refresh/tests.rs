@@ -75,6 +75,7 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         defining_query_hash: 0,
         storage_fillfactor: None,
         query_complexity_class: None,
+        row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
     }
 }
 

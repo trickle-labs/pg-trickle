@@ -2,7 +2,270 @@
 //! and monotonicity analysis.
 
 use super::*;
+use crate::dag::RefreshMode;
 use crate::error::PgTrickleError;
+
+/// A structured reason why a query cannot use incremental maintenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationIssue {
+    pub code: &'static str,
+    pub operator: &'static str,
+    pub reason: String,
+    pub hint: String,
+}
+
+/// Conservative admission result for incremental execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncrementalAdmission {
+    Proven,
+    FullOnly(Vec<ValidationIssue>),
+}
+
+impl IncrementalAdmission {
+    pub fn is_proven(&self) -> bool {
+        matches!(self, Self::Proven)
+    }
+}
+
+/// Apply the single AUTO/explicit refresh-mode admission matrix.
+pub fn resolve_incremental_mode(
+    requested: RefreshMode,
+    is_auto: bool,
+    admission: &IncrementalAdmission,
+) -> Result<RefreshMode, PgTrickleError> {
+    if requested == RefreshMode::Full || admission.is_proven() {
+        return Ok(requested);
+    }
+    if is_auto {
+        return Ok(RefreshMode::Full);
+    }
+
+    let issues = match admission {
+        IncrementalAdmission::FullOnly(issues) => issues,
+        IncrementalAdmission::Proven => unreachable!(),
+    };
+    let detail = issues
+        .iter()
+        .map(|issue| format!("{}: {}", issue.operator, issue.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(PgTrickleError::UnsupportedOperator(format!(
+        "{} mode is not safe for incremental maintenance: {}. Use FULL or AUTO. {}",
+        requested.as_str(),
+        detail,
+        issues
+            .first()
+            .map(|issue| issue.hint.as_str())
+            .unwrap_or("Rewrite the query or use FULL refresh."),
+    )))
+}
+
+/// Classify known unproven incremental forms without mutating any state.
+pub fn incremental_admission(
+    result: &ParseResult,
+    immediate: bool,
+) -> Result<IncrementalAdmission, PgTrickleError> {
+    let mut issues = Vec::new();
+    collect_admission_issues(&result.tree, immediate, &mut issues);
+    for (_, body) in &result.cte_registry.entries {
+        collect_admission_issues(body, immediate, &mut issues);
+    }
+
+    let volatility = tree_worst_volatility_with_registry(result)?;
+    if volatility >= 's' {
+        let (code, reason) = if volatility == 'v' {
+            (
+                "DVM-81-6-VOLATILE",
+                "volatile expressions have unsafe volatility and can change between evaluations",
+            )
+        } else {
+            (
+                "DVM-81-6-STABLE",
+                "stable expressions have refresh-dependent volatility and can change between refreshes",
+            )
+        };
+        issues.push(ValidationIssue {
+            code,
+            operator: if volatility == 'v' {
+                "VOLATILE"
+            } else {
+                "STABLE"
+            },
+            reason: reason.to_string(),
+            hint: "Use FULL or AUTO, or replace the expression with an IMMUTABLE one.".to_string(),
+        });
+    }
+
+    if let Err(error) = check_ivm_support_with_registry(result) {
+        issues.push(ValidationIssue {
+            code: "DVM-81-6-IVM-SUPPORT",
+            operator: "DVM",
+            reason: format!("the query is not incrementally supported: {error}"),
+            hint: "Use FULL or AUTO, or rewrite the query using supported operators.".to_string(),
+        });
+    }
+
+    if issues.is_empty() {
+        Ok(IncrementalAdmission::Proven)
+    } else {
+        Ok(IncrementalAdmission::FullOnly(issues))
+    }
+}
+
+fn collect_admission_issues(tree: &OpTree, immediate: bool, issues: &mut Vec<ValidationIssue>) {
+    match tree {
+        OpTree::Intersect { left, right, .. } => {
+            issues.push(ValidationIssue {
+                code: "DVM-81-1-SET",
+                operator: "INTERSECT",
+                reason: "INTERSECT state is not yet proven safe for incremental execution"
+                    .to_string(),
+                hint: "Use FULL or AUTO until private set-operation state is available."
+                    .to_string(),
+            });
+            collect_admission_issues(left, immediate, issues);
+            collect_admission_issues(right, immediate, issues);
+        }
+        OpTree::Except { left, right, .. } => {
+            issues.push(ValidationIssue {
+                code: "DVM-81-1-SET",
+                operator: "EXCEPT",
+                reason: "EXCEPT state is not yet proven safe for incremental execution".to_string(),
+                hint: "Use FULL or AUTO until private set-operation state is available."
+                    .to_string(),
+            });
+            collect_admission_issues(left, immediate, issues);
+            collect_admission_issues(right, immediate, issues);
+        }
+        OpTree::LateralSubquery {
+            subquery_source_oids,
+            correlation_predicates,
+            subquery_sql: _subquery_sql,
+            child,
+            ..
+        } => {
+            #[cfg(not(test))]
+            if let Err(error) = parse_defining_query_full(_subquery_sql)
+                .and_then(|inner| check_ivm_support_with_registry(&inner))
+            {
+                issues.push(ValidationIssue {
+                    code: "DVM-81-5-LATERAL-BODY",
+                    operator: "LATERAL",
+                    reason: format!("the LATERAL subquery body is not incrementally supported: {error}"),
+                    hint: "Use FULL or AUTO, or rewrite the LATERAL subquery without unsupported clauses."
+                        .to_string(),
+                });
+            }
+            let child_columns = child.output_columns();
+            match child.row_id_key_columns() {
+                Some(keys)
+                    if !keys.is_empty() && keys.iter().all(|k| child_columns.contains(k)) => {}
+                _ => issues.push(ValidationIssue {
+                    code: "DVM-81-5-LATERAL-IDENTITY",
+                    operator: "LATERAL",
+                    reason: "the outer dependency has no exact row identity available for deletion"
+                        .to_string(),
+                    hint: "Retain a stable outer key in the query output or use FULL/AUTO."
+                        .to_string(),
+                }),
+            }
+            for predicate in correlation_predicates {
+                if predicate.inner_oid == 0
+                    || !subquery_source_oids.contains(&predicate.inner_oid)
+                    || predicate.inner_alias.is_empty()
+                    || predicate.inner_col.is_empty()
+                    || !child_columns.contains(&predicate.outer_col)
+                {
+                    issues.push(ValidationIssue {
+                        code: "DVM-81-5-LATERAL-DEPENDENCY",
+                        operator: "LATERAL",
+                        reason: "an outer/inner dependency is unresolved or not represented by the parsed source metadata"
+                            .to_string(),
+                        hint: "Use FULL/AUTO or rewrite the LATERAL correlation as an explicit supported join."
+                            .to_string(),
+                    });
+                    break;
+                }
+            }
+            if subquery_source_oids.contains(&0) {
+                issues.push(ValidationIssue {
+                    code: "DVM-81-5-LATERAL-DEPENDENCY",
+                    operator: "LATERAL",
+                    reason: "the LATERAL subquery contains an unresolved inner source dependency"
+                        .to_string(),
+                    hint: "Use FULL/AUTO or resolve every inner source relation.".to_string(),
+                });
+            }
+            if immediate && !subquery_source_oids.is_empty() {
+                issues.push(ValidationIssue {
+                    code: "DVM-81-5-IMMEDIATE-LATERAL",
+                    operator: "LATERAL",
+                    reason: "IMMEDIATE transition-table maintenance for mutable inner sources is not implemented"
+                        .to_string(),
+                    hint: "Use DIFFERENTIAL, FULL, or AUTO, or remove the mutable inner source."
+                        .to_string(),
+                });
+            }
+            collect_admission_issues(child, immediate, issues);
+        }
+        OpTree::LateralFunction {
+            func_sql: _func_sql,
+            child,
+            ..
+        } => {
+            #[cfg(not(test))]
+            if let Err(error) = parse_defining_query_full(&format!("SELECT {_func_sql}"))
+                .and_then(|inner| check_ivm_support_with_registry(&inner))
+            {
+                issues.push(ValidationIssue {
+                    code: "DVM-81-5-LATERAL-BODY",
+                    operator: "LATERAL",
+                    reason: format!(
+                        "the LATERAL function body is not incrementally supported: {error}"
+                    ),
+                    hint: "Use FULL or AUTO, or rewrite the LATERAL function body without unsupported constructs."
+                        .to_string(),
+                });
+            }
+            collect_admission_issues(child, immediate, issues);
+        }
+        OpTree::Project { child, .. }
+        | OpTree::Filter { child, .. }
+        | OpTree::Distinct { child }
+        | OpTree::Subquery { child, .. }
+        | OpTree::Window { child, .. } => collect_admission_issues(child, immediate, issues),
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. }
+        | OpTree::SemiJoin { left, right, .. }
+        | OpTree::AntiJoin { left, right, .. } => {
+            collect_admission_issues(left, immediate, issues);
+            collect_admission_issues(right, immediate, issues);
+        }
+        OpTree::Aggregate { child, .. } => collect_admission_issues(child, immediate, issues),
+        OpTree::UnionAll { children } => {
+            for child in children {
+                collect_admission_issues(child, immediate, issues);
+            }
+        }
+        OpTree::ScalarSubquery {
+            child, subquery, ..
+        } => {
+            collect_admission_issues(child, immediate, issues);
+            collect_admission_issues(subquery, immediate, issues);
+        }
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => {
+            collect_admission_issues(base, immediate, issues);
+            collect_admission_issues(recursive, immediate, issues);
+        }
+        OpTree::Scan { .. }
+        | OpTree::CteScan { .. }
+        | OpTree::RecursiveSelfRef { .. }
+        | OpTree::ConstantSelect { .. } => {}
+    }
+}
 
 // ── Volatility checking ─────────────────────────────────────────────────
 
@@ -333,16 +596,35 @@ fn collect_raw_expr_volatility(_raw_sql: &str, worst: &mut char) -> Result<(), P
 /// - `SELECT col FROM t WHERE t.id = outer.id LIMIT 1` → no volatile fns → no-op
 #[cfg(not(test))]
 fn scan_sql_for_volatility(sql: &str, worst: &mut char) -> Result<(), PgTrickleError> {
-    if let Ok(list) = parse_query(sql) {
-        for raw_stmt in list.iter_ptr() {
-            let stmt = pg_deref!(raw_stmt).stmt;
-            if !stmt.is_null() {
-                walk_node_for_volatility(stmt, worst)?;
-            }
+    let list = parse_query(sql).map_err(|e| {
+        PgTrickleError::QueryParseError(format!("cannot inspect expression volatility: {e}"))
+    })?;
+    for raw_stmt in list.iter_ptr() {
+        let stmt = pg_deref!(raw_stmt).stmt;
+        if !stmt.is_null() {
+            walk_node_for_volatility(stmt, worst)?;
         }
     }
-    // If parse_query itself fails, we have no information — skip.
     Ok(())
+}
+
+/// Inspect a complete TopK query before its ORDER BY/LIMIT wrapper is removed.
+///
+/// The base DVM tree intentionally excludes the ordering expression, so TopK
+/// needs this separate raw-AST pass to keep volatile or uninspectable ordering
+/// out of incremental admission.
+pub fn topk_query_volatility(sql: &str) -> Result<char, PgTrickleError> {
+    #[cfg(not(test))]
+    {
+        let mut worst = 'i';
+        scan_sql_for_volatility(sql, &mut worst)?;
+        Ok(worst)
+    }
+    #[cfg(test)]
+    {
+        let _ = sql;
+        Ok('i')
+    }
 }
 
 pub(crate) fn sql_value_function_name(op: pg_sys::SQLValueFunctionOp::Type) -> &'static str {
@@ -838,6 +1120,49 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
             child, aggregates, ..
         } => {
             for agg in aggregates {
+                let needs_second_arg = matches!(
+                    agg.function,
+                    AggFunc::Corr
+                        | AggFunc::CovarPop
+                        | AggFunc::CovarSamp
+                        | AggFunc::RegrAvgx
+                        | AggFunc::RegrAvgy
+                        | AggFunc::RegrCount
+                        | AggFunc::RegrIntercept
+                        | AggFunc::RegrR2
+                        | AggFunc::RegrSlope
+                        | AggFunc::RegrSxx
+                        | AggFunc::RegrSxy
+                        | AggFunc::RegrSyy
+                );
+                let needs_argument = needs_second_arg
+                    || matches!(
+                        agg.function,
+                        AggFunc::StddevPop
+                            | AggFunc::StddevSamp
+                            | AggFunc::VarPop
+                            | AggFunc::VarSamp
+                    );
+                if needs_argument
+                    && (agg.argument.is_none() || (needs_second_arg && agg.second_arg.is_none()))
+                {
+                    return Err(PgTrickleError::UnsupportedOperator(format!(
+                        "{} aggregate '{}' has an unresolved operand signature; \
+                         use FULL or provide the required operand(s)",
+                        agg.function.sql_name(),
+                        agg.alias
+                    )));
+                }
+                if (agg.function.needs_sum_of_squares() || agg.function.needs_cross_products())
+                    && agg.statistical_accumulator_type().is_none()
+                {
+                    return Err(PgTrickleError::UnsupportedOperator(format!(
+                        "{} aggregate '{}' has an unresolved operand signature; \
+                         use FULL or provide a supported signature",
+                        agg.function.sql_name(),
+                        agg.alias
+                    )));
+                }
                 match agg.function {
                     AggFunc::Count
                     | AggFunc::CountStar
@@ -936,8 +1261,13 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
                 // JSON_TABLE has no unsupported IVM constructs, so skip safely.
                 if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
                     let wrapped = format!("SELECT {_func_sql}");
-                    if let Ok(inner) = parse_defining_query_full(&wrapped) {
-                        check_ivm_support_inner(&inner.tree)?;
+                    match parse_defining_query_full(&wrapped) {
+                        Ok(inner) => check_ivm_support_inner(&inner.tree)?,
+                        Err(e) => {
+                            return Err(PgTrickleError::UnsupportedOperator(format!(
+                                "cannot inspect LATERAL function body: {e}"
+                            )));
+                        }
                     }
                 }
             }
@@ -952,8 +1282,13 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
         } => {
             #[cfg(not(test))]
             {
-                if let Ok(inner) = parse_defining_query_full(_subquery_sql) {
-                    check_ivm_support_inner(&inner.tree)?;
+                match parse_defining_query_full(_subquery_sql) {
+                    Ok(inner) => check_ivm_support_inner(&inner.tree)?,
+                    Err(e) => {
+                        return Err(PgTrickleError::UnsupportedOperator(format!(
+                            "cannot inspect LATERAL subquery body: {e}"
+                        )));
+                    }
                 }
             }
             check_ivm_support(child)
@@ -1061,9 +1396,22 @@ fn check_immediate_support(tree: &OpTree) -> Result<(), PgTrickleError> {
         // ChangeBuffer and TransitionTable modes.
         OpTree::Window { child, .. } => check_immediate_support(child),
 
-        // LATERAL subqueries — row-scoped recomputation. Delta derived
-        // from child Scan nodes.
-        OpTree::LateralSubquery { child, .. } => check_immediate_support(child),
+        // LATERAL inner-source changes do not have a transition-table
+        // implementation yet. Outer-only lateral expansion remains eligible.
+        OpTree::LateralSubquery {
+            subquery_source_oids,
+            child,
+            ..
+        } => {
+            if !subquery_source_oids.is_empty() {
+                return Err(PgTrickleError::UnsupportedOperator(
+                    "IMMEDIATE LATERAL with mutable inner sources is not supported; \
+                     use DIFFERENTIAL, FULL, or AUTO."
+                        .into(),
+                ));
+            }
+            check_immediate_support(child)
+        }
 
         // LATERAL set-returning functions (unnest(), jsonb_array_elements())
         // — row-scoped recomputation via child delta.
@@ -1136,12 +1484,19 @@ pub fn check_monotonicity(tree: &OpTree) -> Result<(), PgTrickleError> {
         | OpTree::Distinct { child }
         | OpTree::Subquery { child, .. } => check_monotonicity(child),
 
-        // Joins (inner, left, full) — monotone if both sides are.
-        OpTree::InnerJoin { left, right, .. }
-        | OpTree::LeftJoin { left, right, .. }
-        | OpTree::FullJoin { left, right, .. } => {
+        // INNER JOIN preserves monotonicity when both inputs do.
+        OpTree::InnerJoin { left, right, .. } => {
             check_monotonicity(left)?;
             check_monotonicity(right)
+        }
+
+        // Outer joins can replace NULL-extended rows when the other side grows.
+        OpTree::LeftJoin { .. } | OpTree::FullJoin { .. } => {
+            Err(PgTrickleError::UnsupportedOperator(
+                "LEFT/FULL JOIN is not monotone for circular dependencies — \
+                 adding matching rows can replace NULL-extended output."
+                    .into(),
+            ))
         }
 
         // UNION ALL — monotone if all children are.
@@ -1152,11 +1507,13 @@ pub fn check_monotonicity(tree: &OpTree) -> Result<(), PgTrickleError> {
             Ok(())
         }
 
-        // INTERSECT — monotone (adding rows to either side can only add output).
-        OpTree::Intersect { left, right, .. } => {
-            check_monotonicity(left)?;
-            check_monotonicity(right)
-        }
+        // INTERSECT is conservatively excluded with the other unproven set
+        // operators until its private state has a circular-query proof.
+        OpTree::Intersect { .. } => Err(PgTrickleError::UnsupportedOperator(
+            "INTERSECT is not admitted in circular dependencies until its \
+             incremental state has been proven monotone."
+                .into(),
+        )),
 
         // SemiJoin (EXISTS/IN) — monotone (adding right rows adds left matches).
         OpTree::SemiJoin { left, right, .. } => {
@@ -1172,18 +1529,19 @@ pub fn check_monotonicity(tree: &OpTree) -> Result<(), PgTrickleError> {
             check_monotonicity(recursive)
         }
 
-        // LATERAL — monotonicity depends on child.
-        OpTree::LateralFunction { child, .. } | OpTree::LateralSubquery { child, .. } => {
-            check_monotonicity(child)
+        OpTree::LateralFunction { .. } | OpTree::LateralSubquery { .. } => {
+            Err(PgTrickleError::UnsupportedOperator(
+                "LATERAL is not monotone for circular dependencies — \
+                 row-scoped expansion can replace or retract output."
+                    .into(),
+            ))
         }
 
-        // Scalar subqueries — monotonicity depends on both.
-        OpTree::ScalarSubquery {
-            child, subquery, ..
-        } => {
-            check_monotonicity(child)?;
-            check_monotonicity(subquery)
-        }
+        OpTree::ScalarSubquery { .. } => Err(PgTrickleError::UnsupportedOperator(
+            "Scalar subqueries are not monotone for circular dependencies — \
+             cardinality or values can replace existing output."
+                .into(),
+        )),
 
         // ── Non-monotone operators ────────────────────────────────────
         OpTree::Aggregate { .. } => Err(PgTrickleError::UnsupportedOperator(
@@ -1217,6 +1575,15 @@ pub fn check_monotonicity(tree: &OpTree) -> Result<(), PgTrickleError> {
         // no source tables, so adding more data can only grow the output, never shrink it.
         OpTree::ConstantSelect { .. } => Ok(()),
     }
+}
+
+/// Check the main query and every parsed CTE body before circular admission.
+pub fn check_monotonicity_with_registry(result: &ParseResult) -> Result<(), PgTrickleError> {
+    check_monotonicity(&result.tree)?;
+    for (_, body) in &result.cte_registry.entries {
+        check_monotonicity(body)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1264,13 +1631,13 @@ mod monotonicity_tests {
     }
 
     #[test]
-    fn test_left_join_is_monotone() {
+    fn test_left_join_is_not_monotone() {
         let tree = OpTree::LeftJoin {
             condition: Expr::Literal("true".into()),
             left: Box::new(scan()),
             right: Box::new(scan()),
         };
-        assert!(check_monotonicity(&tree).is_ok());
+        assert!(check_monotonicity(&tree).is_err());
     }
 
     #[test]
@@ -1290,6 +1657,55 @@ mod monotonicity_tests {
     }
 
     #[test]
+    fn test_statistical_aggregate_missing_operand_is_full_only() {
+        let agg = AggExpr {
+            function: AggFunc::Corr,
+            argument: Some(Expr::ColumnRef {
+                table_alias: None,
+                column_name: "y".into(),
+            }),
+            alias: "corr".into(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+            statistical_support: Some(StatisticalAggSupport::with_accumulator(
+                PG_FLOAT8_TYPE_OID,
+                "double precision",
+            )),
+        };
+        let tree = OpTree::Aggregate {
+            group_by: vec![],
+            aggregates: vec![agg],
+            child: Box::new(scan()),
+        };
+        assert!(check_ivm_support(&tree).is_err());
+    }
+
+    #[test]
+    fn test_statistical_aggregate_unresolved_signature_is_full_only() {
+        let agg = AggExpr {
+            function: AggFunc::StddevPop,
+            argument: Some(Expr::ColumnRef {
+                table_alias: None,
+                column_name: "amount".into(),
+            }),
+            alias: "sd".into(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+            statistical_support: Some(StatisticalAggSupport::with_location(12)),
+        };
+        let tree = OpTree::Aggregate {
+            group_by: vec![],
+            aggregates: vec![agg],
+            child: Box::new(scan()),
+        };
+        assert!(check_ivm_support(&tree).is_err());
+    }
+
+    #[test]
     fn test_semi_join_is_monotone() {
         let tree = OpTree::SemiJoin {
             condition: Expr::Literal("true".into()),
@@ -1300,13 +1716,13 @@ mod monotonicity_tests {
     }
 
     #[test]
-    fn test_intersect_is_monotone() {
+    fn test_intersect_is_not_monotone() {
         let tree = OpTree::Intersect {
             left: Box::new(scan()),
             right: Box::new(scan()),
             all: false,
         };
-        assert!(check_monotonicity(&tree).is_ok());
+        assert!(check_monotonicity(&tree).is_err());
     }
 
     #[test]
@@ -1381,5 +1797,184 @@ mod monotonicity_tests {
             }),
         };
         assert!(check_monotonicity(&tree).is_err());
+    }
+
+    #[test]
+    fn test_admission_matrix_full_auto_and_explicit_modes() {
+        let issue = ValidationIssue {
+            code: "TEST",
+            operator: "INTERSECT",
+            reason: "unproven".into(),
+            hint: "use FULL".into(),
+        };
+        let full_only = IncrementalAdmission::FullOnly(vec![issue]);
+        assert!(matches!(
+            resolve_incremental_mode(RefreshMode::Full, false, &full_only),
+            Ok(RefreshMode::Full)
+        ));
+        assert!(matches!(
+            resolve_incremental_mode(RefreshMode::Differential, true, &full_only),
+            Ok(RefreshMode::Full)
+        ));
+        assert!(resolve_incremental_mode(RefreshMode::Differential, false, &full_only).is_err());
+        assert!(resolve_incremental_mode(RefreshMode::Immediate, false, &full_only).is_err());
+        assert!(matches!(
+            resolve_incremental_mode(
+                RefreshMode::Differential,
+                false,
+                &IncrementalAdmission::Proven
+            ),
+            Ok(RefreshMode::Differential)
+        ));
+    }
+
+    #[test]
+    fn test_scalar_and_lateral_are_not_monotone() {
+        let scalar = OpTree::ScalarSubquery {
+            alias: "s".into(),
+            subquery_source_oids: vec![],
+            subquery: Box::new(scan()),
+            child: Box::new(scan()),
+        };
+        assert!(check_monotonicity(&scalar).is_err());
+
+        let lateral = OpTree::LateralFunction {
+            func_sql: "unnest(t.tags)".into(),
+            alias: "x".into(),
+            column_aliases: vec![],
+            with_ordinality: false,
+            child: Box::new(scan()),
+        };
+        assert!(check_monotonicity(&lateral).is_err());
+    }
+
+    #[test]
+    fn test_inspection_failure_is_full_only() {
+        let result = ParseResult {
+            tree: OpTree::Filter {
+                predicate: Expr::Raw("uninspectable_expression".into()),
+                child: Box::new(scan()),
+            },
+            cte_registry: CteRegistry::default(),
+            has_recursion: false,
+            warnings: vec![],
+        };
+        let admission = incremental_admission(&result, false).unwrap();
+        assert!(matches!(admission, IncrementalAdmission::FullOnly(_)));
+        assert!(resolve_incremental_mode(RefreshMode::Differential, false, &admission).is_err());
+        assert!(matches!(
+            resolve_incremental_mode(RefreshMode::Differential, true, &admission),
+            Ok(RefreshMode::Full)
+        ));
+    }
+
+    #[test]
+    fn test_set_and_mutable_lateral_admission_is_full_only() {
+        let set_result = ParseResult {
+            tree: OpTree::Except {
+                left: Box::new(scan()),
+                right: Box::new(scan()),
+                all: false,
+            },
+            cte_registry: CteRegistry::default(),
+            has_recursion: false,
+            warnings: vec![],
+        };
+        assert!(matches!(
+            incremental_admission(&set_result, false).unwrap(),
+            IncrementalAdmission::FullOnly(_)
+        ));
+
+        let lateral_result = ParseResult {
+            tree: OpTree::LateralSubquery {
+                subquery_sql: "SELECT id FROM inner_t".into(),
+                alias: "inner".into(),
+                column_aliases: vec![],
+                output_cols: vec!["id".into()],
+                is_left_join: false,
+                subquery_source_oids: vec![42],
+                correlation_predicates: vec![],
+                child: Box::new(scan()),
+            },
+            cte_registry: CteRegistry::default(),
+            has_recursion: false,
+            warnings: vec![],
+        };
+        assert!(matches!(
+            incremental_admission(&lateral_result, true).unwrap(),
+            IncrementalAdmission::FullOnly(_)
+        ));
+    }
+
+    #[test]
+    fn test_lateral_unresolved_dependency_is_full_only() {
+        let lateral_result = ParseResult {
+            tree: OpTree::LateralSubquery {
+                subquery_sql: "SELECT x FROM inner_t i WHERE i.fk = missing.id".into(),
+                alias: "inner".into(),
+                column_aliases: vec![],
+                output_cols: vec!["x".into()],
+                is_left_join: false,
+                subquery_source_oids: vec![42],
+                correlation_predicates: vec![CorrelationPredicate {
+                    outer_col: "missing_id".into(),
+                    inner_alias: "i".into(),
+                    inner_col: "fk".into(),
+                    inner_oid: 99,
+                }],
+                child: Box::new(OpTree::Scan {
+                    table_oid: 1,
+                    table_name: "outer_t".into(),
+                    schema: "public".into(),
+                    columns: vec![Column {
+                        name: "id".into(),
+                        type_oid: 23,
+                        is_nullable: false,
+                    }],
+                    pk_columns: vec!["id".into()],
+                    alias: "o".into(),
+                }),
+            },
+            cte_registry: CteRegistry::default(),
+            has_recursion: false,
+            warnings: vec![],
+        };
+        let admission = incremental_admission(&lateral_result, false).unwrap();
+        let IncrementalAdmission::FullOnly(issues) = admission else {
+            panic!("unresolved LATERAL dependency must not be admitted");
+        };
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == "DVM-81-5-LATERAL-DEPENDENCY")
+        );
+    }
+
+    #[test]
+    fn test_lateral_missing_outer_identity_is_full_only() {
+        let lateral_result = ParseResult {
+            tree: OpTree::LateralSubquery {
+                subquery_sql: "SELECT x FROM inner_t i".into(),
+                alias: "inner".into(),
+                column_aliases: vec![],
+                output_cols: vec!["x".into()],
+                is_left_join: false,
+                subquery_source_oids: vec![42],
+                correlation_predicates: vec![],
+                child: Box::new(OpTree::InnerJoin {
+                    condition: Expr::Literal("TRUE".into()),
+                    left: Box::new(scan()),
+                    right: Box::new(scan()),
+                }),
+            },
+            cte_registry: CteRegistry::default(),
+            has_recursion: false,
+            warnings: vec![],
+        };
+        let admission = incremental_admission(&lateral_result, false).unwrap();
+        let IncrementalAdmission::FullOnly(issues) = admission else {
+            panic!("complex outer identity must not be admitted");
+        };
+        assert!(issues.iter().any(|i| i.code == "DVM-81-5-LATERAL-IDENTITY"));
     }
 }

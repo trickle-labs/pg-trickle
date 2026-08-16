@@ -69,11 +69,9 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
         }
     }
 
-    // P2-2: Detect COALESCE(aggregate_col, default) wrappers in the Project
-    // expressions and inform diff_aggregate about the ELSE branch semantics.
-    // When a SUM over FULL JOIN is wrapped in COALESCE(SUM(...), 0), the ST
-    // should store 0 (not NULL) when the group becomes empty.  For bare SUM
-    // the ST should store NULL.  We communicate this via agg_sum_coalesce_defaults.
+    // Detect COALESCE(aggregate_col, default) wrappers in the Project and
+    // inform diff_aggregate about the ELSE branch semantics.  The ST stores
+    // the default for a wrapped SUM and NULL for a bare SUM when it empties.
     // P-3: agg_sum_coalesce_defaults is Option<HashMap> — only allocated on
     // first COALESCE detection (lazy allocation).
     let saved_coalesce_defaults = ctx.agg_sum_coalesce_defaults.take();
@@ -212,8 +210,8 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
                     let items: Vec<String> =
                         hash_cols.iter().map(|e| format!("({e})::TEXT")).collect();
                     format!(
-                        "pgtrickle.pg_trickle_hash_multi(ARRAY[{}]) AS __pgt_row_id",
-                        items.join(", ")
+                        "{} AS __pgt_row_id",
+                        crate::hash::build_composite_hash_expr(&items)
                     )
                 }
             }

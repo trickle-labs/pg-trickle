@@ -92,7 +92,7 @@ pub fn diff_scalar_subquery(
     let scalar_col = subquery_cols[0].clone();
 
     let scalar_sql = format!(
-        "(SELECT {sq_alias}.{scalar_col} FROM {subquery_snapshot} {sq_alias} LIMIT 1)",
+        "(SELECT {sq_alias}.{scalar_col} FROM {subquery_snapshot} {sq_alias})",
         scalar_col = quote_ident(&scalar_col),
         sq_alias = quote_ident(subquery_alias),
     );
@@ -125,7 +125,7 @@ pub fn diff_scalar_subquery(
             delta_sq = subquery_result.cte_name,
         );
         format!(
-            "(SELECT {scalar_col} FROM {r_old_snapshot} sq_old LIMIT 1)",
+            "(SELECT {scalar_col} FROM {r_old_snapshot} sq_old)",
             scalar_col = quote_ident(&scalar_col),
         )
     };
@@ -274,6 +274,10 @@ mod tests {
         assert!(
             sql.contains("IS DISTINCT FROM"),
             "Part 2 should check for scalar value change"
+        );
+        assert!(
+            !sql.contains("LIMIT 1"),
+            "scalar snapshots must preserve PostgreSQL cardinality errors"
         );
     }
 

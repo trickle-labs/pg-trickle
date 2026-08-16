@@ -629,9 +629,16 @@ Operational events are broadcast via PostgreSQL `NOTIFY` on the `pg_trickle_aler
 Provides deterministic 64-bit row identifiers using **xxHash (xxh64)** with a fixed seed. Two SQL functions are exposed:
 
 - **`pgtrickle.pg_trickle_hash(text)`** — Hash a single text value; used for simple single-column row IDs.
-- **`pgtrickle.pg_trickle_hash_multi(text[])`** — Hash multiple values (separated by a record-separator byte `\x1E`) for composite keys (join row IDs, GROUP BY keys).
+- **`pgtrickle.pg_trickle_hash_multi(text[])`** — Hash multiple values using
+  version-2 length-delimited framing, including explicit NULL tags, for
+  composite keys (join row IDs, GROUP BY keys). Single-value hashing remains
+  byte-for-byte compatible.
 
 Row IDs are written into every stream table's storage as an internal `__pgt_row_id BIGINT` column and are used by the delta application phase to match `DELETE` candidates precisely.
+The `pgt_stream_tables.row_identity_version` and
+`pgt_change_buffers.row_identity_version` catalog fields record the framing
+version. Unknown or legacy values fail closed for incremental maintenance;
+the hash is only an accelerator, not a substitute for value equality.
 
 ### 13. Diamond Dependency Consistency (`src/dag.rs`)
 

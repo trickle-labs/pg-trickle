@@ -37,7 +37,7 @@ pub(crate) use update::*;
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
-        crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+        crate::cdc::validate_required_change_buffers_for_full(st, &dependencies)?;
     }
     let source_oids: Vec<pg_sys::Oid> = dependencies
         .iter()
@@ -65,6 +65,18 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
     let query = &st.defining_query;
+
+    // WP2 bounded subset: incremental INTERSECT/EXCEPT remains guarded, so
+    // FULL refreshes use direct defining-query storage rather than exposing
+    // branch multiplicity columns left by older versions.
+    if crate::dvm::query_needs_dual_count(query) {
+        crate::api::helpers::normalize_full_set_operation_storage(
+            schema,
+            name,
+            st.pgt_relid,
+            st.pgt_id,
+        )?;
+    }
 
     let quoted_table = format!(
         "\"{}\".\"{}\"",
@@ -101,7 +113,9 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         // Also inject sum-of-squares columns for STDDEV/VAR maintenance.
         let sum2_aux = crate::dvm::query_sum2_aux_columns(query);
         if !sum2_aux.is_empty() {
-            eq = crate::api::inject_sum2_aux(&eq, &sum2_aux);
+            let types = crate::dvm::query_statistical_aux_types(query);
+            let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
+            eq = crate::api::inject_sum2_aux_typed(&eq, &typed);
         }
         // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
         let nonnull_aux = crate::dvm::query_nonnull_aux_columns(query);
@@ -151,18 +165,12 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
 
     // Compute row_id using the same hash formula as the delta query so
     // the MERGE ON clause matches during subsequent differential refreshes.
-    // For INTERSECT/EXCEPT, compute per-branch multiplicities for dual-count
-    // storage. For UNION (dedup), convert to UNION ALL and count.
+    // Guarded INTERSECT/EXCEPT uses the direct defining-query shape. For
+    // UNION (dedup), convert to UNION ALL and count.
     // For UNION ALL, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
     let insert_body = if crate::dvm::query_needs_dual_count(query) {
-        let col_names = crate::dvm::get_defining_query_columns(query)?;
-        if let Some(set_op_sql) = crate::dvm::try_set_op_refresh_sql(query, &col_names) {
-            set_op_sql
-        } else {
-            let row_id_expr = crate::dvm::row_id_expr_for_query(query);
-            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
-        }
+        crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
     } else if crate::dvm::query_needs_union_dedup_count(query) {
         let col_names = crate::dvm::get_defining_query_columns(query)?;
         if let Some(union_sql) = crate::dvm::try_union_dedup_refresh_sql(query, &col_names) {
@@ -228,6 +236,10 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             name,
             rows_inserted,
         );
+    }
+
+    if st.row_identity_version != Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION) {
+        crate::catalog::StreamTableMeta::mark_row_identity_reinitialized(st.pgt_id)?;
     }
 
     // PART-WARN: After a successful FULL refresh, warn if the default

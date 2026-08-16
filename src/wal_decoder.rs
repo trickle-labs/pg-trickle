@@ -1078,10 +1078,7 @@ fn build_pk_hash_parameterized(
                 array_items.push("NULL".to_string());
             }
         }
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            array_items.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&array_items)
     }
 }
 
@@ -1115,10 +1112,7 @@ fn build_pk_hash_from_values(
                 }
             })
             .collect();
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            array_items.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&array_items)
     }
 }
 

@@ -1161,7 +1161,11 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
         let where_expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
-            .unwrap_or_else(|_| "TRUE".to_string());
+            .map_err(|e| {
+                PgTrickleError::QueryParseError(format!(
+                    "failed to deparse DISTINCT ON WHERE clause: {e}"
+                ))
+            })?;
         format!(" WHERE {where_expr}")
     };
 
@@ -1194,7 +1198,11 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
         let having_expr = safe_node_to_expr(select.havingClause)
             .map(|e| e.to_sql())
-            .unwrap_or_else(|_| "TRUE".to_string());
+            .map_err(|e| {
+                PgTrickleError::QueryParseError(format!(
+                    "failed to deparse DISTINCT ON HAVING clause: {e}"
+                ))
+            })?;
         format!(" HAVING {having_expr}")
     };
 
@@ -1348,7 +1356,11 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
         let where_expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
-            .unwrap_or_else(|_| "TRUE".to_string());
+            .map_err(|e| {
+                PgTrickleError::QueryParseError(format!(
+                    "failed to deparse GROUPING SETS WHERE clause: {e}"
+                ))
+            })?;
         format!(" WHERE {where_expr}")
     };
 
@@ -1358,7 +1370,11 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
         let having_expr = safe_node_to_expr(select.havingClause)
             .map(|e| e.to_sql())
-            .unwrap_or_else(|_| "TRUE".to_string());
+            .map_err(|e| {
+                PgTrickleError::QueryParseError(format!(
+                    "failed to deparse GROUPING SETS HAVING clause: {e}"
+                ))
+            })?;
         format!(" HAVING {having_expr}")
     };
 

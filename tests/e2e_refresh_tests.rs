@@ -793,32 +793,33 @@ async fn test_stddev_samp_differential_mode() {
 async fn test_stddev_alias_differential_mode() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE sda_src (id INT PRIMARY KEY, dept TEXT, amount NUMERIC)")
+    db.execute("CREATE TABLE public.sda_src (id INT PRIMARY KEY, dept TEXT, amount NUMERIC)")
         .await;
-    db.execute("INSERT INTO sda_src VALUES (1, 'a', 10), (2, 'a', 20), (3, 'a', 30)")
+    db.execute("INSERT INTO public.sda_src VALUES (1, 'a', 10), (2, 'a', 20), (3, 'a', 30)")
         .await;
 
     // STDDEV is an alias for STDDEV_SAMP
     db.create_st(
         "sda_st",
-        "SELECT dept, STDDEV(amount) AS sd FROM sda_src GROUP BY dept",
+        "SELECT dept, STDDEV(amount) AS sd FROM public.sda_src GROUP BY dept",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
     db.assert_st_matches_query(
         "public.sda_st",
-        "SELECT dept, STDDEV(amount) AS sd FROM sda_src GROUP BY dept",
+        "SELECT dept, STDDEV(amount) AS sd FROM public.sda_src GROUP BY dept",
     )
     .await;
 
-    db.execute("INSERT INTO sda_src VALUES (4, 'a', 40)").await;
+    db.execute("INSERT INTO public.sda_src VALUES (4, 'a', 40)")
+        .await;
     db.refresh_st("sda_st").await;
 
     db.assert_st_matches_query(
         "public.sda_st",
-        "SELECT dept, STDDEV(amount) AS sd FROM sda_src GROUP BY dept",
+        "SELECT dept, STDDEV(amount) AS sd FROM public.sda_src GROUP BY dept",
     )
     .await;
 }
@@ -905,32 +906,33 @@ async fn test_var_samp_differential_mode() {
 async fn test_variance_alias_differential_mode() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute("CREATE TABLE va_src (id INT PRIMARY KEY, dept TEXT, amount NUMERIC)")
+    db.execute("CREATE TABLE public.va_src (id INT PRIMARY KEY, dept TEXT, amount NUMERIC)")
         .await;
-    db.execute("INSERT INTO va_src VALUES (1, 'x', 10), (2, 'x', 30), (3, 'x', 50)")
+    db.execute("INSERT INTO public.va_src VALUES (1, 'x', 10), (2, 'x', 30), (3, 'x', 50)")
         .await;
 
     // VARIANCE is an alias for VAR_SAMP
     db.create_st(
         "va_st",
-        "SELECT dept, VARIANCE(amount) AS v FROM va_src GROUP BY dept",
+        "SELECT dept, VARIANCE(amount) AS v FROM public.va_src GROUP BY dept",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
     db.assert_st_matches_query(
         "public.va_st",
-        "SELECT dept, VARIANCE(amount) AS v FROM va_src GROUP BY dept",
+        "SELECT dept, VARIANCE(amount) AS v FROM public.va_src GROUP BY dept",
     )
     .await;
 
-    db.execute("INSERT INTO va_src VALUES (4, 'x', 70)").await;
+    db.execute("INSERT INTO public.va_src VALUES (4, 'x', 70)")
+        .await;
     db.refresh_st("va_st").await;
 
     db.assert_st_matches_query(
         "public.va_st",
-        "SELECT dept, VARIANCE(amount) AS v FROM va_src GROUP BY dept",
+        "SELECT dept, VARIANCE(amount) AS v FROM public.va_src GROUP BY dept",
     )
     .await;
 }

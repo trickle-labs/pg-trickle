@@ -313,8 +313,8 @@ fn register_change_buffer(
     let token = source_id;
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_change_buffers \
-             (buffer_key, source_kind, source_id, durability, sentinel_token) \
-         VALUES ($1, $2, $3, $4, $5) \
+             (buffer_key, source_kind, source_id, durability, sentinel_token, row_identity_version) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (source_kind, source_id) DO NOTHING",
         &[
             buffer_name.into(),
@@ -322,6 +322,7 @@ fn register_change_buffer(
             source_id.into(),
             durability.as_str().into(),
             token.into(),
+            crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
         ],
     )
     .map_err(|e| PgTrickleError::CdcStateInvalid {
@@ -398,6 +399,7 @@ pub struct ResolvedChangeBuffer {
     pub buffer_name: String,
     pub durability: config::ChangeBufferDurability,
     pub sentinel_token: i64,
+    pub row_identity_version: i16,
 }
 
 pub(crate) fn validate_st_change_buffer(
@@ -431,7 +433,8 @@ fn validate_one_change_buffer(
     let registry = Spi::connect(|client| {
         let rows = client
             .select(
-                "SELECT buffer_key::text, durability::text, sentinel_token::text \
+                "SELECT buffer_key::text, durability::text, sentinel_token::text, \
+                        row_identity_version \
                  FROM pgtrickle.pgt_change_buffers \
                  WHERE source_kind = $1 AND source_id = $2",
                 None,
@@ -456,12 +459,23 @@ fn validate_one_change_buffer(
             .ok_or_else(|| invalid("registry sentinel token is NULL".into()))?
             .parse::<i64>()
             .map_err(|e| invalid(format!("registry sentinel token malformed: {e}")))?;
-        Ok::<_, PgTrickleError>((key, durability, token))
+        let row_identity_version = row
+            .get::<i16>(4)
+            .map_err(|e| invalid(format!("registry row identity version unreadable: {e}")))?
+            .ok_or_else(|| invalid("registry row identity version is NULL".into()))?;
+        Ok::<_, PgTrickleError>((key, durability, token, row_identity_version))
     })?;
     if registry.0 != buffer_name {
         return Err(invalid(format!(
             "registered buffer name '{}' does not match expected '{buffer_name}'",
             registry.0
+        )));
+    }
+    if registry.3 != crate::hash::CURRENT_ROW_IDENTITY_VERSION {
+        return Err(invalid(format!(
+            "row identity version {} does not match binary version {}",
+            registry.3,
+            crate::hash::CURRENT_ROW_IDENTITY_VERSION
         )));
     }
     let durability = normalize_change_buffer_durability(Some(registry.1.clone()));
@@ -525,6 +539,7 @@ fn validate_one_change_buffer(
         buffer_name: buffer_name.to_string(),
         durability,
         sentinel_token: registry.2,
+        row_identity_version: registry.3,
     })
 }
 
@@ -533,6 +548,30 @@ pub fn validate_required_change_buffers(
     st: &crate::catalog::StreamTableMeta,
     dependencies: &[crate::catalog::StDependency],
 ) -> Result<Vec<ResolvedChangeBuffer>, PgTrickleError> {
+    let expected_identity_version = crate::hash::CURRENT_ROW_IDENTITY_VERSION;
+    match st.row_identity_version {
+        Some(version) if version == expected_identity_version => {}
+        Some(version) => {
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id: st.pgt_id,
+                source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
+                buffer: "pgt_stream_tables".to_string(),
+                reason: format!(
+                    "row identity version {} does not match binary version {}",
+                    version, expected_identity_version
+                ),
+            });
+        }
+        None => {
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id: st.pgt_id,
+                source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
+                buffer: "pgt_stream_tables".to_string(),
+                reason: "row identity version is unknown; FULL reinitialization is required"
+                    .to_string(),
+            });
+        }
+    }
     let change_schema_setting = config::pg_trickle_change_buffer_schema();
     let change_schema = change_schema_setting.trim_matches('"');
     dependencies
@@ -575,6 +614,25 @@ pub fn validate_required_change_buffers(
             validate_one_change_buffer(st.pgt_id, &source, kind, id, &name, change_schema)
         })
         .collect()
+}
+
+/// Validate buffers for a protected FULL reinitialization.
+///
+/// An upgrade marks existing stream tables for reinitialization before their
+/// persisted rows have been rebuilt.  The full path may validate the newly
+/// converted buffers while the catalog row still carries the legacy identity
+/// version; differential paths continue to use the strict validator above.
+pub fn validate_required_change_buffers_for_full(
+    st: &crate::catalog::StreamTableMeta,
+    dependencies: &[crate::catalog::StDependency],
+) -> Result<Vec<ResolvedChangeBuffer>, PgTrickleError> {
+    if st.row_identity_version == Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION) {
+        return validate_required_change_buffers(st, dependencies);
+    }
+
+    let mut reinitializing = st.clone();
+    reinitializing.row_identity_version = Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION);
+    validate_required_change_buffers(&reinitializing, dependencies)
 }
 
 /// Create a CDC trigger on a source table.
@@ -981,10 +1039,7 @@ pub fn build_toast_aware_hash_expr(
     if parts.len() == 1 {
         format!("pgtrickle.pg_trickle_hash({})", parts[0])
     } else {
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            parts.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&parts)
     }
 }
 
@@ -2166,14 +2221,8 @@ fn build_pk_hash_trigger_exprs(
             .map(|c| format!("OLD.\"{}\"::text", c.replace('"', "\"\"")))
             .collect();
         (
-            format!(
-                "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                new_items.join(", ")
-            ),
-            format!(
-                "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-                old_items.join(", ")
-            ),
+            crate::hash::build_composite_hash_expr(&new_items),
+            crate::hash::build_composite_hash_expr(&old_items),
         )
     }
 }
@@ -2534,10 +2583,7 @@ fn build_pk_hash_stmt_expr(
             .iter()
             .map(|c| format!("{prefix}.\"{}\"::text", c.replace('"', "\"\"")))
             .collect();
-        format!(
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
-            items.join(", ")
-        )
+        crate::hash::build_composite_hash_expr(&items)
     }
 }
 

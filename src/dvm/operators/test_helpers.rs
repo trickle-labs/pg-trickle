@@ -5,7 +5,10 @@
 //! and never touch PostgreSQL.
 
 use crate::dvm::diff::DiffContext;
-use crate::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr, WindowExpr};
+use crate::dvm::parser::{
+    AggExpr, AggFunc, Column, Expr, OpTree, PG_FLOAT8_TYPE_OID, PG_NUMERIC_TYPE_OID, SortExpr,
+    StatisticalAggSupport, WindowExpr,
+};
 use crate::version::Frontier;
 
 // ── DiffContext builder ─────────────────────────────────────────────────
@@ -304,6 +307,20 @@ pub fn lit(val: &str) -> Expr {
     Expr::Literal(val.to_string())
 }
 
+fn numeric_statistical_support() -> Option<StatisticalAggSupport> {
+    Some(StatisticalAggSupport::with_accumulator(
+        PG_NUMERIC_TYPE_OID,
+        "numeric",
+    ))
+}
+
+fn float8_statistical_support() -> Option<StatisticalAggSupport> {
+    Some(StatisticalAggSupport::with_accumulator(
+        PG_FLOAT8_TYPE_OID,
+        "double precision",
+    ))
+}
+
 // ── AggExpr helpers ─────────────────────────────────────────────────────
 
 /// Build a COUNT(*) aggregate.
@@ -316,6 +333,7 @@ pub fn count_star(alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -329,6 +347,7 @@ pub fn sum_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -342,6 +361,7 @@ pub fn count_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -355,6 +375,7 @@ pub fn avg_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -368,6 +389,7 @@ pub fn min_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -381,6 +403,7 @@ pub fn max_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -394,6 +417,7 @@ pub fn bool_and_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -407,6 +431,7 @@ pub fn bool_or_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -420,6 +445,7 @@ pub fn string_agg_col(col: &str, sep: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: Some(Expr::Literal(sep.to_string())),
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -433,6 +459,7 @@ pub fn array_agg_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -452,6 +479,7 @@ pub fn bit_and_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -465,6 +493,7 @@ pub fn bit_or_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -478,6 +507,7 @@ pub fn bit_xor_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -491,6 +521,7 @@ pub fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr
         filter: None,
         second_arg: Some(colref(val_col)),
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -504,6 +535,7 @@ pub fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExp
         filter: None,
         second_arg: Some(colref(val_col)),
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -517,6 +549,7 @@ pub fn stddev_pop_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: numeric_statistical_support(),
     }
 }
 
@@ -530,6 +563,7 @@ pub fn stddev_samp_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: numeric_statistical_support(),
     }
 }
 
@@ -543,6 +577,7 @@ pub fn var_pop_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: numeric_statistical_support(),
     }
 }
 
@@ -556,6 +591,7 @@ pub fn var_samp_col(col: &str, alias: &str) -> AggExpr {
         filter: None,
         second_arg: None,
         order_within_group: None,
+        statistical_support: numeric_statistical_support(),
     }
 }
 
@@ -573,6 +609,7 @@ pub fn mode_col(order_col: &str, alias: &str) -> AggExpr {
             ascending: true,
             nulls_first: false,
         }]),
+        statistical_support: None,
     }
 }
 
@@ -590,6 +627,7 @@ pub fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggE
             ascending: true,
             nulls_first: false,
         }]),
+        statistical_support: None,
     }
 }
 
@@ -607,6 +645,7 @@ pub fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggE
             ascending: true,
             nulls_first: false,
         }]),
+        statistical_support: None,
     }
 }
 
@@ -624,6 +663,7 @@ pub fn regression_agg(func: AggFunc, y_col: &str, x_col: &str, alias: &str) -> A
         filter: None,
         second_arg: Some(colref(x_col)),
         order_within_group: None,
+        statistical_support: float8_statistical_support(),
     }
 }
 

@@ -56,27 +56,29 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     downstream_publication_name TEXT,
     freshness_deadline_ms BIGINT,
     st_partition_key TEXT,
-    
+
     st_placement    TEXT NOT NULL DEFAULT 'local',
-    
+
     temporal_mode   BOOLEAN NOT NULL DEFAULT FALSE,
-    
+
     storage_backend TEXT NOT NULL DEFAULT 'heap',
-    
+
     post_refresh_action TEXT NOT NULL DEFAULT 'none'
                      CHECK (post_refresh_action IN ('none', 'analyze', 'reindex', 'reindex_if_drift')),
     reindex_drift_threshold DOUBLE PRECISION
                      CHECK (reindex_drift_threshold IS NULL OR (reindex_drift_threshold > 0 AND reindex_drift_threshold <= 1.0)),
     rows_changed_since_last_reindex BIGINT NOT NULL DEFAULT 0,
     last_reindex_at TIMESTAMPTZ,
-    
+
     column_lineage  JSONB,
-    
+
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
-    
+
     storage_fillfactor INT DEFAULT NULL CHECK (storage_fillfactor IS NULL OR (storage_fillfactor >= 10 AND storage_fillfactor <= 100)),
-    
+
     query_complexity_class TEXT,
+
+    row_identity_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -99,9 +101,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     transition_started_at TIMESTAMPTZ,
     cutover_target TEXT CHECK (cutover_target IN ('TRIGGER', 'WAL')),
     cutover_lsn PG_LSN,
-    
+
     source_stable_name   TEXT,
-    
+
     source_placement     TEXT NOT NULL DEFAULT 'local',
     PRIMARY KEY (pgt_id, source_relid)
 );
@@ -142,12 +144,12 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     slot_name           TEXT NOT NULL,
     last_consumed_lsn   PG_LSN,
     tracked_by_pgt_ids   BIGINT[],
-    
-    
+
+
     source_stable_name  TEXT,
-    
+
     source_placement    TEXT NOT NULL DEFAULT 'local',
-    
+
     frontier_per_node   JSONB
 );
 

@@ -254,6 +254,9 @@ int expression_tree_walker_impl(void *node, void *walker, void *context,
                                 int flags) {
     (void)node; (void)walker; (void)context; (void)flags; return 0;
 }
+int raw_expression_tree_walker_impl(void *node, void *walker, void *context) {
+    (void)node; (void)walker; (void)context; return 0;
+}
 int query_tree_walker_impl(void *query, void *walker, void *context,
                            int flags) {
     (void)query; (void)walker; (void)context; (void)flags; return 0;

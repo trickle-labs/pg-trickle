@@ -79,6 +79,7 @@ fn count_star(alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn sum_col(column: &str, alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -103,6 +105,7 @@ fn avg_col(column: &str, alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -115,6 +118,7 @@ fn min_col(column: &str, alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -127,6 +131,7 @@ fn max_col(column: &str, alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -139,6 +144,7 @@ fn string_agg_col(column: &str, alias: &str) -> AggExpr {
         second_arg: Some(lit("', '")),
         filter: None,
         order_within_group: Some(vec![sort_asc("amount")]),
+        statistical_support: None,
     }
 }
 
@@ -151,6 +157,7 @@ fn mode_col(column: &str, alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: Some(vec![sort_asc(column)]),
+        statistical_support: None,
     }
 }
 
@@ -163,6 +170,7 @@ fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
         second_arg: Some(colref(val_col)),
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -175,6 +183,7 @@ fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
         second_arg: Some(colref(val_col)),
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -187,6 +196,7 @@ fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr 
         second_arg: None,
         filter: None,
         order_within_group: Some(vec![sort_asc(order_col)]),
+        statistical_support: None,
     }
 }
 
@@ -199,6 +209,7 @@ fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr 
         second_arg: None,
         filter: None,
         order_within_group: Some(vec![sort_asc(order_col)]),
+        statistical_support: None,
     }
 }
 
@@ -211,6 +222,7 @@ fn filtered_count_col(column: &str, alias: &str, filter: Expr) -> AggExpr {
         second_arg: None,
         filter: Some(filter),
         order_within_group: None,
+        statistical_support: None,
     }
 }
 
@@ -933,6 +945,7 @@ fn jsonb_agg_col(argument: &str, alias: &str) -> AggExpr {
         second_arg: None,
         filter: None,
         order_within_group: None,
+        statistical_support: None,
     }
 }
 

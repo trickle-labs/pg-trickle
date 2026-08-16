@@ -711,6 +711,8 @@ struct ValidatedQuery {
     /// for non-DISTINCT SUM aggregates above FULL JOIN children (P2-2).
     /// Empty if no such aggregates exist.
     nonnull_aux_columns: Vec<(String, String)>,
+    /// PostgreSQL accumulator types for statistical auxiliary columns.
+    statistical_aux_types: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -852,6 +854,44 @@ fn validate_and_parse_query(
     // TopK detection — must run BEFORE reject_limit_offset
     let topk_info = crate::dvm::detect_topk_pattern(query)?;
 
+    // TopK parsing removes ORDER BY/LIMIT from the DVM tree. Inspect the
+    // original query first so volatile or uninspectable ordering expressions
+    // cannot bypass incremental admission.
+    if topk_info.is_some()
+        && (*refresh_mode == RefreshMode::Differential || *refresh_mode == RefreshMode::Immediate)
+    {
+        let topk_issue = match crate::dvm::topk_query_volatility(query) {
+            Ok(volatility) if volatility < 's' => None,
+            Ok(volatility) => Some(format!(
+                "TopK ORDER BY contains {} expressions that can change between refreshes",
+                if volatility == 'v' {
+                    "volatile"
+                } else {
+                    "stable"
+                }
+            )),
+            Err(error) => Some(format!(
+                "TopK ORDER BY could not be inspected safely: {error}"
+            )),
+        };
+        if let Some(reason) = topk_issue {
+            if is_auto && *refresh_mode == RefreshMode::Differential {
+                pgrx::warning!(
+                    "[pg_trickle] Falling back to FULL refresh [DVM-81-6-TOPK]: {}",
+                    reason
+                );
+                *refresh_mode = RefreshMode::Full;
+            } else {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "{} mode is not safe for incremental maintenance: {}. \
+                     Use FULL or AUTO, or use an immutable, inspectable ORDER BY expression.",
+                    refresh_mode.as_str(),
+                    reason
+                )));
+            }
+        }
+    }
+
     let (effective_query, topk_info) = if let Some(info) = topk_info {
         if let Some(offset) = info.offset_value {
             pgrx::info!(
@@ -989,7 +1029,7 @@ fn validate_and_parse_query(
 
     // DVM parse for DIFFERENTIAL/IMMEDIATE (non-TopK).
     // AUTO mode: if DVM parsing fails, downgrade to FULL instead of erroring.
-    let parsed_tree = if (*refresh_mode == RefreshMode::Differential
+    let mut parsed_tree = if (*refresh_mode == RefreshMode::Differential
         || *refresh_mode == RefreshMode::Immediate)
         && topk_info.is_none()
     {
@@ -1040,47 +1080,36 @@ fn validate_and_parse_query(
         None
     };
 
-    // Volatility check — VOL-1: controlled by volatile_function_policy GUC
-    if let Some(ref pr) = parsed_tree {
-        let vol = crate::dvm::tree_worst_volatility_with_registry(pr)?;
-        match vol {
-            'v' => {
-                let policy = crate::config::pg_trickle_volatile_function_policy();
-                match policy {
-                    crate::config::VolatileFunctionPolicy::Reject => {
-                        return Err(PgTrickleError::UnsupportedOperator(
-                            "Defining query contains volatile expressions (e.g., random(), \
-                             clock_timestamp(), or custom volatile operators). Volatile \
-                             functions and operators are not supported in DIFFERENTIAL or \
-                             IMMEDIATE mode because they produce different values on each \
-                             evaluation, breaking delta computation. Use FULL refresh mode \
-                             instead, or replace with a deterministic alternative. \
-                             (Override with: SET pg_trickle.volatile_function_policy = 'warn' or 'allow')"
-                                .into(),
-                        ));
-                    }
-                    crate::config::VolatileFunctionPolicy::Warn => {
-                        pgrx::warning!(
-                            "Defining query contains volatile expressions (e.g., random(), \
-                             clock_timestamp()). Volatile functions produce different values \
-                             on each evaluation, which may break delta computation. \
-                             Allowed by pg_trickle.volatile_function_policy = 'warn'."
-                        );
-                    }
-                    crate::config::VolatileFunctionPolicy::Allow => {
-                        // Silent — user explicitly opted in.
-                    }
+    // One admission matrix for CREATE, ALTER, and mode changes. Known unsafe
+    // forms are FULL-only; explicit incremental modes fail before mutation.
+    if let Some(pr) = parsed_tree.as_ref() {
+        let admission = match crate::dvm::incremental_admission(pr, refresh_mode.is_immediate()) {
+            Ok(admission) => admission,
+            Err(e) if is_auto && *refresh_mode == RefreshMode::Differential => {
+                pgrx::warning!(
+                    "[pg_trickle] Falling back to FULL refresh: incremental inspection failed: {e}"
+                );
+                *refresh_mode = RefreshMode::Full;
+                parsed_tree = None;
+                crate::dvm::IncrementalAdmission::Proven
+            }
+            Err(e) => return Err(e),
+        };
+        let resolved = crate::dvm::resolve_incremental_mode(*refresh_mode, is_auto, &admission)?;
+        if resolved == RefreshMode::Full && *refresh_mode != RefreshMode::Full {
+            if let crate::dvm::IncrementalAdmission::FullOnly(issues) = admission {
+                for issue in issues {
+                    pgrx::warning!(
+                        "[pg_trickle] Falling back to FULL refresh [{} / {}]: {} Hint: {}",
+                        issue.code,
+                        issue.operator,
+                        issue.reason,
+                        issue.hint,
+                    );
                 }
             }
-            's' => {
-                pgrx::warning!(
-                    "Defining query contains stable functions (e.g., now(), \
-                     current_timestamp). These return the same value within a \
-                     single refresh but may shift between refreshes. \
-                     Delta computation is correct within each refresh cycle."
-                );
-            }
-            _ => {} // 'i' (immutable) — no action
+            *refresh_mode = RefreshMode::Full;
+            parsed_tree = None;
         }
     }
 
@@ -1173,7 +1202,11 @@ fn validate_and_parse_query(
     // both sides cannot produce unique __pgt_row_id hashes. Treat them
     // as keyless so the storage table gets a non-unique index and the
     // refresh uses CTID-based deletion.
-    let has_keyless_source = has_keyless_source || crate::dvm::query_has_incomplete_join_pk(query);
+    let has_keyless_source = has_keyless_source
+        || crate::dvm::query_has_incomplete_join_pk(query)
+        // INTERSECT/EXCEPT ALL can legitimately materialize duplicate rows;
+        // use the keyless/non-unique storage path for all guarded variants.
+        || crate::dvm::query_needs_dual_count(query);
 
     let avg_aux_columns = parsed_tree
         .as_ref()
@@ -1194,6 +1227,10 @@ fn validate_and_parse_query(
         .as_ref()
         .map(|pr| pr.tree.nonnull_aux_columns())
         .unwrap_or_default();
+    let statistical_aux_types = parsed_tree
+        .as_ref()
+        .map(|pr| pr.tree.statistical_aux_types())
+        .unwrap_or_default();
 
     Ok(ValidatedQuery {
         columns,
@@ -1209,7 +1246,27 @@ fn validate_and_parse_query(
         sum2_aux_columns,
         covar_aux_columns,
         nonnull_aux_columns,
+        statistical_aux_types,
     })
+}
+
+/// Validate a stored defining query before switching an existing table into
+/// an incremental mode. This is deliberately side-effect free.
+pub(crate) fn validate_incremental_mode_for_query(
+    defining_query: &str,
+    mode: RefreshMode,
+) -> Result<(), PgTrickleError> {
+    if mode == RefreshMode::Full {
+        return Ok(());
+    }
+    let result = crate::dvm::parse_defining_query_full(defining_query)?;
+    crate::dvm::check_ivm_support_with_registry(&result)?;
+    if mode.is_immediate() {
+        crate::dvm::validate_immediate_mode_support(defining_query)?;
+    }
+    let admission = crate::dvm::incremental_admission(&result, mode.is_immediate())?;
+    crate::dvm::resolve_incremental_mode(mode, false, &admission)?;
+    Ok(())
 }
 
 /// F4: Post-fix vector aggregate output column types to include explicit
@@ -1271,22 +1328,28 @@ fn setup_storage_table(
     sum2_aux_columns: &[(String, String)],
     covar_aux_columns: &[(String, String)],
     nonnull_aux_columns: &[(String, String)],
+    statistical_aux_types: &[(String, String)],
     // A1-1: partition key column name, or None for non-partitioned STs.
     partition_key: Option<&str>,
     // HOT-1: heap fillfactor for HOT-friendly differential updates.
     fillfactor: Option<i32>,
 ) -> Result<pg_sys::Oid, PgTrickleError> {
     let storage_needs_pgt_count = needs_pgt_count;
+    // INTERSECT/EXCEPT admission is guarded for incremental modes.  FULL
+    // storage must therefore contain only defining-query columns, even when
+    // a legacy caller still reports the old dual-count requirement.
+    let storage_needs_dual_count = needs_dual_count && refresh_mode != RefreshMode::Full;
     let storage_ddl = build_create_table_sql(
         schema,
         table_name,
         columns,
         storage_needs_pgt_count,
-        needs_dual_count,
+        storage_needs_dual_count,
         avg_aux_columns,
         sum2_aux_columns,
         covar_aux_columns,
         nonnull_aux_columns,
+        statistical_aux_types,
         partition_key,
         fillfactor,
     );
@@ -3559,6 +3622,7 @@ mod tests {
             defining_query_hash: 0,
             storage_fillfactor: None,
             query_complexity_class: None,
+            row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
         }
     }
 
