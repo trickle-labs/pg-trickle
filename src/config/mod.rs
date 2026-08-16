@@ -32,6 +32,12 @@ pub static PGS_CHANGE_BUFFER_SCHEMA: GucSetting<Option<std::ffi::CString>> =
 /// chains in your largest DAG for maximum throughput.
 pub static PGS_MAX_CONCURRENT_REFRESHES: GucSetting<i32> = GucSetting::<i32>::new(4);
 
+/// Maximum items accepted by a bulk API call.
+pub static PGS_MAX_BULK_API_ITEMS: GucSetting<i32> = GucSetting::<i32>::new(256);
+
+/// Maximum stream-table targets accepted by a pause/resume API call.
+pub static PGS_MAX_CONTROL_TARGETS: GucSetting<i32> = GucSetting::<i32>::new(64);
+
 // ── Registration ──────────────────────────────────────────────────────────
 
 /// Register all GUC variables for the pgtrickle extension.
@@ -68,6 +74,30 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c"pg_trickle.max_bulk_api_items",
+        c"Maximum items accepted by one bulk API call.",
+        c"Bulk requests larger than this value are rejected before any target is mutated. \
+           Default: 256. Hard maximum: 1000.",
+        &PGS_MAX_BULK_API_ITEMS,
+        1,
+        1000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.max_control_targets",
+        c"Maximum targets accepted by one pause/resume API call.",
+        c"Control requests larger than this value are rejected before shared state is changed. \
+           Default: 64. Hard maximum: 256.",
+        &PGS_MAX_CONTROL_TARGETS,
+        1,
+        256,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     scheduler::register_scheduler_gucs();
     cdc::register_cdc_gucs();
     dvm::register_dvm_gucs();
@@ -92,6 +122,26 @@ pub fn pg_trickle_change_buffer_schema() -> String {
 /// Returns the maximum number of concurrent refresh workers.
 pub fn pg_trickle_max_concurrent_refreshes() -> i32 {
     PGS_MAX_CONCURRENT_REFRESHES.get()
+}
+
+#[cfg(test)]
+pub fn pg_trickle_max_bulk_api_items() -> usize {
+    256
+}
+
+#[cfg(not(test))]
+pub fn pg_trickle_max_bulk_api_items() -> usize {
+    PGS_MAX_BULK_API_ITEMS.get().clamp(1, 1000) as usize
+}
+
+#[cfg(test)]
+pub fn pg_trickle_max_control_targets() -> usize {
+    64
+}
+
+#[cfg(not(test))]
+pub fn pg_trickle_max_control_targets() -> usize {
+    PGS_MAX_CONTROL_TARGETS.get().clamp(1, 256) as usize
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

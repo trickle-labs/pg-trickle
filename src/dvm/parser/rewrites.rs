@@ -1315,7 +1315,7 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         // ROLLUP(n) produces n+1, combined CUBE+ROLLUP can easily exceed memory.
         // Reject early rather than building a query too large for PG to parse (G5.2).
         // EC-02: Limit is configurable via pg_trickle.max_grouping_set_branches GUC.
-        let max_grouping_branches = crate::config::PGS_MAX_GROUPING_SET_BRANCHES.get() as usize;
+        let max_grouping_branches = crate::config::pg_trickle_max_grouping_set_branches();
         if final_sets.len() > max_grouping_branches {
             return Err(PgTrickleError::QueryParseError(format!(
                 "CUBE/ROLLUP generates {} grouping set branches which exceeds the limit of {}. \

@@ -34,6 +34,7 @@ static LAST_HOLDBACK_WARN_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic
 /// # Returns
 /// `(tick_watermark, current_oldest_xmin, oldest_txn_age_secs)`
 pub(super) fn compute_coordinator_tick_watermark(
+    database_oid: u32,
     prev_watermark_lsn: Option<&str>,
 ) -> (Option<String>, u64, u64) {
     let mode = config::pg_trickle_frontier_holdback_mode();
@@ -42,14 +43,18 @@ pub(super) fn compute_coordinator_tick_watermark(
         config::FrontierHoldbackMode::None
         | config::FrontierHoldbackMode::Xmin
         | config::FrontierHoldbackMode::InvalidLsn => {
-            let prev_oldest_xmin = shmem::last_tick_oldest_xmin();
+            let prev_oldest_xmin = shmem::database_last_tick_oldest_xmin(database_oid);
 
             match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
                 Ok((safe_lsn, write_lsn, current_oldest_xmin, age_secs)) => {
                     // Persist for next tick and for dynamic workers under a
                     // single lock so workers never see xmin/LSN out of sync.
                     let safe_u64 = version::lsn_to_u64(&safe_lsn);
-                    shmem::set_last_tick_holdback_state(current_oldest_xmin, safe_u64);
+                    shmem::set_database_last_tick_holdback_state(
+                        database_oid,
+                        current_oldest_xmin,
+                        safe_u64,
+                    );
 
                     // Update holdback gauge metrics.
                     let write_u64 = version::lsn_to_u64(&write_lsn);
@@ -77,7 +82,9 @@ pub(super) fn compute_coordinator_tick_watermark(
                         Some(prev) => {
                             // Re-use last known-safe watermark.
                             let u = version::lsn_to_u64(prev);
-                            shmem::set_last_tick_safe_lsn(u);
+                            shmem::update_database_scheduler(database_oid, |slot| {
+                                slot.last_tick_safe_lsn_u64 = u;
+                            });
                             Some(prev.to_string())
                         }
                         None => None,
@@ -89,13 +96,17 @@ pub(super) fn compute_coordinator_tick_watermark(
         }
 
         config::FrontierHoldbackMode::LsnBytes(offset_bytes) => {
-            let prev_oldest_xmin = shmem::last_tick_oldest_xmin();
+            let prev_oldest_xmin = shmem::database_last_tick_oldest_xmin(database_oid);
             match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
                 Ok((mandatory_lsn, candidate_lsn, current_oldest_xmin, age_secs)) => {
                     let mandatory = version::lsn_to_u64(&mandatory_lsn);
                     let capped = version::lsn_to_u64(&candidate_lsn).saturating_sub(offset_bytes);
                     let safe_lsn = version::u64_to_lsn(mandatory.min(capped));
-                    shmem::set_last_tick_holdback_state(current_oldest_xmin, mandatory.min(capped));
+                    shmem::set_database_last_tick_holdback_state(
+                        database_oid,
+                        current_oldest_xmin,
+                        mandatory.min(capped),
+                    );
                     shmem::update_holdback_metrics(
                         version::lsn_to_u64(&candidate_lsn).saturating_sub(mandatory.min(capped)),
                         age_secs,

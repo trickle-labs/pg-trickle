@@ -225,7 +225,8 @@ pub fn setup_matview_polling(
         Spi::run(&create_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
         let insert_sql = format!("INSERT INTO {snapshot_table} SELECT * FROM {source_table}");
-        Spi::run(&insert_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run(&insert_sql) // nosemgrep: rust.spi.run.dynamic-format — relation names are catalog-quoted.
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_change_tracking \

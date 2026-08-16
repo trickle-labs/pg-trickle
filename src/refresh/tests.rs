@@ -76,6 +76,11 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         storage_fillfactor: None,
         query_complexity_class: None,
         row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
+        self_heal_work_mem_percent: 100,
+        self_heal_lock_backoff_exponent: 0,
+        self_heal_success_streak: 0,
+        last_error_code: None,
+        last_error_retryable: None,
     }
 }
 

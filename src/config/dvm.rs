@@ -3,6 +3,11 @@
 
 use pgrx::guc::*;
 
+pub const MAX_PARSE_NODES: usize = 1_000_000;
+pub const MAX_PARSE_DEPTH: usize = 256;
+pub const MAX_GROUPING_SET_BRANCHES: usize = 1_024;
+pub const MAX_DIFF_CTES: usize = 10_000;
+
 // ── GUC statics ───────────────────────────────────────────────────────────
 
 /// C4: Consolidated planner aggressiveness switch.
@@ -693,7 +698,7 @@ pub fn register_dvm_gucs() {
            Raise if you need more than 64 grouping set branches.",
         &PGS_MAX_GROUPING_SET_BRANCHES,
         1,
-        65536,
+        1024,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -707,7 +712,7 @@ pub fn register_dvm_gucs() {
            exceed the default.",
         &PGS_MAX_PARSE_DEPTH,
         1,
-        10000,
+        256,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -720,8 +725,8 @@ pub fn register_dvm_gucs() {
            error when the limit is exceeded. The default of 1000 is well above any \
            realistic query requirement.",
         &PGS_MAX_DIFF_CTES,
-        10,
-        100000,
+        1,
+        10000,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1021,13 +1026,13 @@ pub fn register_dvm_gucs() {
 
     GucRegistry::define_int_guc(
         c"pg_trickle.max_parse_nodes",
-        c"PERF-2: Maximum parse tree nodes per query (0 = unlimited).",
+        c"PERF-2: Maximum parse tree nodes per query.",
         c"Queries with more than this many nodes are rejected with QueryTooComplex to prevent \
            unbounded memory allocation. Does not apply to queries already registered. \
-           Default: 0 (unlimited). Recommended: 100000 for production deployments.",
+           Default: 100000. The hard maximum is 1000000.",
         &PGS_MAX_PARSE_NODES,
-        0,          // min (0 = unlimited)
-        10_000_000, // max
+        1,
+        1_000_000,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1236,13 +1241,19 @@ pub fn pg_trickle_agg_diff_cardinality_threshold() -> i32 {
 
 /// G13-SD: Returns the maximum recursion depth for query parser visitors.
 pub fn pg_trickle_max_parse_depth() -> usize {
-    PGS_MAX_PARSE_DEPTH.get() as usize
+    PGS_MAX_PARSE_DEPTH.get().clamp(1, MAX_PARSE_DEPTH as i32) as usize
+}
+
+pub fn pg_trickle_max_grouping_set_branches() -> usize {
+    PGS_MAX_GROUPING_SET_BRANCHES
+        .get()
+        .clamp(1, MAX_GROUPING_SET_BRANCHES as i32) as usize
 }
 
 /// C-7 / R-7 (v0.54.0): Returns the maximum number of CTEs the differential
 /// query generator may produce for a single refresh cycle.
 pub fn pg_trickle_max_diff_ctes() -> usize {
-    PGS_MAX_DIFF_CTES.get() as usize
+    PGS_MAX_DIFF_CTES.get().clamp(1, MAX_DIFF_CTES as i32) as usize
 }
 
 /// VOL-1: Returns the volatile function handling policy.
@@ -1368,7 +1379,7 @@ pub fn pg_trickle_template_cache_max_age_hours() -> i32 {
 
 /// PERF-2 (v0.30.0): Returns the maximum parse node count allowed per query.
 pub fn pg_trickle_max_parse_nodes() -> usize {
-    PGS_MAX_PARSE_NODES.get() as usize
+    PGS_MAX_PARSE_NODES.get().clamp(1, MAX_PARSE_NODES as i32) as usize
 }
 
 /// A44-1: Returns the max scan count for Part 3 correction term generation.

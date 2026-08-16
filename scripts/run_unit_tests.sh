@@ -87,11 +87,9 @@ cd "$PROJECT_DIR"
 
 ensure_stub
 
-# Unit tests are pure Rust and complete in < 1 s.  The standard `cargo test`
-# runner executes all tests inside a **single process** (threaded), so the
-# ~1.8 s per-process startup overhead of nextest (which spawns a new process
-# for every test) is avoided entirely.  With ~1 400 tests this makes the
-# difference between sub-second and multi-minute runs.
+# Unit tests are pure Rust and complete in a few seconds.  Run them in one
+# thread because pgrx's test stubs reject concurrent PostgreSQL FFI access.
+# This still avoids the ~1.8 s per-process startup overhead of nextest.
 #
 # Pass USE_NEXTEST=1 to force nextest (e.g. for filter expressions or CI
 # retry support):
@@ -106,4 +104,4 @@ fi
 
 echo "Running unit tests with cargo test (with $(basename "$STUB_LIB"))"
 export "$PRELOAD_VAR"="$STUB_LIB"
-cargo test --lib --features "$FEATURES" "${@:2}"
+cargo test --lib --features "$FEATURES" "${@:2}" -- --test-threads=1

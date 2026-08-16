@@ -76,15 +76,17 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.max_buffer_rows` | `int4` | `1000000` | Set to 0 to disable the limit. |
 | `pg_trickle.max_change_buffer_alert_rows` | `int4` | `0` | Set to 0 to disable (default). |
 | `pg_trickle.max_concurrent_refreshes` | `int4` | `4` | Default: 4. |
+| `pg_trickle.max_bulk_api_items` | `int4` | `256` | Maximum items accepted by one bulk API call; hard maximum 1000. |
 | `pg_trickle.max_consecutive_errors` | `int4` | `3` | Default: 3. |
 | `pg_trickle.max_delta_estimate_rows` | `int4` | `0` | Set to 0 to disable the estimation check (default). |
-| `pg_trickle.max_diff_ctes` | `int4` | `1000` | Complex queries with many operators, joins, and set operations can produce hundreds of CTEs. |
+| `pg_trickle.max_diff_ctes` | `int4` | `1000` | Complex queries with many operators, joins, and set operations can produce hundreds of CTEs; hard maximum 10000. |
 | `pg_trickle.max_dynamic_refresh_workers` | `int4` | `4` | This is distinct from `pg_trickle.max_concurrent_refreshes`, which is the per-database dispatch cap. |
 | `pg_trickle.max_fixpoint_iterations` | `int4` | `100` | When stream tables form a cyclic dependency (circular reference), the scheduler iterates to a fixed point. |
 | `pg_trickle.max_grouping_set_branches` | `int4` | `64` | Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02). |
+| `pg_trickle.max_control_targets` | `int4` | `64` | Maximum targets accepted by one pause/resume API call; hard maximum 256. |
 | `pg_trickle.max_parallel_workers` | `int4` | `0` | Default 0 = serial mode (existing behavior preserved). |
 | `pg_trickle.max_parse_depth` | `int4` | `64` | Prevents stack-overflow crashes on pathological queries with deeply nested subqueries, CTEs, or set operations. |
-| `pg_trickle.max_parse_nodes` | `int4` | `0` | Queries that exceed this limit are rejected with `QueryTooComplex` to prevent unbounded memory allocation in the parse advisory warnings cache and CTE registry. |
+| `pg_trickle.max_parse_nodes` | `int4` | `100000` | Queries exceeding this always-on guard are rejected with `QueryTooComplex`; hard maximum 1000000. |
 | `pg_trickle.merge_batch_size` | `int4` | `50000` | Default: 50 000. |
 | `pg_trickle.merge_join_strategy` | `text` | `"auto"` | Controls the join strategy hint applied via `SET LOCAL` during MERGE: - `"auto"` (default): delta-size heuristics choose the strategy. |
 | `pg_trickle.merge_planner_hints` | `bool` | `true` | Deprecated — use `pg_trickle.planner_aggressive` instead. |
@@ -93,6 +95,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.merge_strategy_threshold` | `float8` | `0.01` | Default: 0.01 (1%). |
 | `pg_trickle.merge_work_mem_mb` | `int4` | `64` | A higher value lets PostgreSQL use larger hash tables for the MERGE join, avoiding disk-spilling sort/merge strategies on large deltas. |
 | `pg_trickle.metrics_port` | `int4` | `0` | Set to 0 (default) to disable the exporter. |
+| `pg_trickle.metrics_bind_address` | `text` | `"127.0.0.1"` | Literal IPv4/IPv6 address for the metrics endpoint; remote binding must be explicit. |
 | `pg_trickle.metrics_request_timeout_ms` | `int4` | `5000` | Default: 5000 (5 seconds). |
 | `pg_trickle.min_schedule_seconds` | `int4` | `1` | Default: 1 s. |
 | `pg_trickle.notify_coalesce_ms` | `int4` | `250` | Default: 250 ms. |

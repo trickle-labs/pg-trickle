@@ -288,7 +288,7 @@ pub fn check_predicted_sla_breach(meta: &StreamTableMeta) {
     }
 
     // Emit the alert
-    crate::monitor::emit_alert(
+    let _ = crate::monitor::emit_alert(
         crate::monitor::AlertEvent::PredictedSlaBreach,
         &meta.pgt_schema,
         &meta.pgt_name,

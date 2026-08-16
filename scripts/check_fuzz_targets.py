@@ -1,62 +1,45 @@
 #!/usr/bin/env python3
-"""check_fuzz_targets.py — CI-001: Validate fuzz-smoke.yml covers every target.
-
-Reads all *.rs files under fuzz/fuzz_targets/ and checks that each one is
-mentioned in .github/workflows/fuzz-smoke.yml.  Fails with a non-zero exit
-code if any target file is absent from the workflow, preventing silent drift
-when a new fuzz target is added without updating the workflow.
-
-Usage:
-    python3 scripts/check_fuzz_targets.py
-"""
+"""Validate that smoke and nightly consume the Cargo fuzz inventory."""
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FUZZ_DIR = REPO_ROOT / "fuzz" / "fuzz_targets"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "fuzz-smoke.yml"
+ROOT = Path(__file__).resolve().parent.parent
+WORKFLOWS = [
+    ROOT / ".github" / "workflows" / "fuzz-smoke.yml",
+    ROOT / ".github" / "workflows" / "fuzz-nightly.yml",
+]
+
+
+def cargo_targets() -> list[str]:
+    text = (ROOT / "fuzz" / "Cargo.toml").read_text(encoding="utf-8")
+    bins = re.findall(r"\[\[bin\]\](.*?)(?=\[\[bin\]\]|\[dependencies\])", text, re.S)
+    return sorted(
+        name
+        for section in bins
+        for name in re.findall(r"^\s*name\s*=\s*\"([^\"]+)\"\s*$", section, re.M)
+    )
 
 
 def main() -> int:
-    if not FUZZ_DIR.is_dir():
-        print(f"ERROR: {FUZZ_DIR} not found", file=sys.stderr)
+    targets = cargo_targets()
+    if not targets:
+        print("ERROR: no fuzz targets in fuzz/Cargo.toml", file=sys.stderr)
         return 2
-    if not WORKFLOW.exists():
-        print(f"ERROR: {WORKFLOW} not found", file=sys.stderr)
-        return 2
-
-    # Collect fuzz target names from the filesystem
-    fs_targets = sorted(p.stem for p in FUZZ_DIR.glob("*.rs"))
-    if not fs_targets:
-        print("ERROR: no *.rs files found under fuzz/fuzz_targets/", file=sys.stderr)
-        return 2
-
-    # Read the workflow file and collect every word that looks like a target name
-    # (appears as a bare word adjacent to known targets in the TARGETS arrays)
-    workflow_text = WORKFLOW.read_text(encoding="utf-8")
-
-    missing = []
-    for target in fs_targets:
-        # The target name must appear as a word boundary in the workflow YAML
-        if not re.search(r'\b' + re.escape(target) + r'\b', workflow_text):
-            missing.append(target)
-
-    if missing:
-        print("ERROR: The following fuzz targets are NOT listed in fuzz-smoke.yml:", file=sys.stderr)
-        for t in missing:
-            print(f"  {t}", file=sys.stderr)
-        print(
-            "\nAdd them to the TARGETS array in .github/workflows/fuzz-smoke.yml",
-            file=sys.stderr,
-        )
-        return 1
-
-    print(f"OK: all {len(fs_targets)} fuzz targets are covered in fuzz-smoke.yml")
-    for t in fs_targets:
-        print(f"  {t}")
+    for workflow in WORKFLOWS:
+        if not workflow.exists():
+            print(f"ERROR: {workflow} not found", file=sys.stderr)
+            return 2
+        text = workflow.read_text(encoding="utf-8")
+        if "scripts/fuzz_targets.py" not in text:
+            print(f"ERROR: {workflow.name} does not consume scripts/fuzz_targets.py", file=sys.stderr)
+            return 1
+        if re.search(r"TARGETS=\([^)]*(?:_fuzz)", text):
+            print(f"ERROR: {workflow.name} contains a hard-coded fuzz inventory", file=sys.stderr)
+            return 1
+    print(f"OK: {len(targets)} targets are inventory-driven in smoke and nightly")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

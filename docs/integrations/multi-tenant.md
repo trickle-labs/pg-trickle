@@ -122,6 +122,10 @@ ALTER DATABASE tenant_a SET pg_trickle.metrics_port = 9101;
 ALTER DATABASE tenant_b SET pg_trickle.metrics_port = 9102;
 ```
 
+Both databases default to the loopback bind address. Set
+`pg_trickle.metrics_bind_address` explicitly to `0.0.0.0` or `::` only when
+remote scraping is required and network access is restricted.
+
 ---
 
 ## Grafana Dashboard Snippets

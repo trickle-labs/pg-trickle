@@ -606,14 +606,14 @@ pub fn cleanup_ivm_triggers(source_relid: pg_sys::Oid, pgt_id: i64) -> Result<()
     if let Some(ref table) = source_table {
         for trigger in &names.all_triggers() {
             let drop_sql = format!("DROP TRIGGER IF EXISTS {trigger} ON {table}");
-            let _ = Spi::run(&drop_sql);
+            let _ = Spi::run(&drop_sql); // nosemgrep: rust.spi.run.dynamic-format — trigger identifiers come from catalog metadata.
         }
     }
 
     // Drop the trigger functions (CASCADE to be safe).
     for fn_name in &names.all_functions() {
         let drop_sql = format!("DROP FUNCTION IF EXISTS {fn_name}() CASCADE");
-        let _ = Spi::run(&drop_sql);
+        let _ = Spi::run(&drop_sql); // nosemgrep: rust.spi.run.dynamic-format — function identifiers come from catalog metadata.
     }
 
     pgrx::log!(
@@ -999,11 +999,11 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
          FROM {new_topk} n \
          ON CONFLICT (__pgt_row_id) DO UPDATE SET {update_set}"
     );
-    Spi::run(&insert_sql)
+    Spi::run(&insert_sql) // nosemgrep: rust.spi.run.dynamic-format — SQL contains validated internal relation identifiers.
         .map_err(|e| PgTrickleError::SpiError(format!("TopK micro-refresh INSERT failed: {e}")))?;
 
     // Clean up.
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {new_topk}"));
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {new_topk}")); // nosemgrep: rust.spi.run.dynamic-format — relation is internal and quoted.
 
     pgrx::debug1!(
         "[pg_trickle] TopK micro-refresh applied for pgt_id={}",
@@ -1178,7 +1178,7 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
     );
 
     // Truncate the stream table.
-    Spi::run(&format!("TRUNCATE {st_qualified}"))
+    Spi::run(&format!("TRUNCATE {st_qualified}")) // nosemgrep: rust.spi.run.dynamic-format — relation is quote_ident()-escaped.
         .map_err(|e| PgTrickleError::SpiError(format!("IVM TRUNCATE failed: {e}")))?;
 
     // Re-populate from the defining query (which now reads from the

@@ -4,7 +4,7 @@
 //! Contains:
 //!   - `spawn_refresh_worker` — spawn a dynamic per-job BGW
 //!   - `pg_trickle_refresh_worker_main` — BGW entry point
-//!   - `extract_panic_message`, `parse_worker_extra` — pure helpers
+//!   - `extract_panic_details`, `parse_worker_extra` — pure helpers
 //!   - Parallel dispatch state structs and `parallel_dispatch_tick`
 //!   - `reap_dead_worker_jobs`, `reconcile_parallel_state`
 
@@ -50,10 +50,11 @@ use super::{
 pub fn spawn_refresh_worker(
     db_name: &str,
     job_id: i64,
+    generation: u64,
 ) -> Result<(), crate::error::PgTrickleError> {
     // Pack db_name + job_id into bgw_extra (max 128 bytes).
     // Use '|' as separator — see doc comment above for why not '\0'.
-    let extra = format!("{db_name}|{job_id}");
+    let extra = format!("{db_name}|{job_id}|{generation}");
     if extra.len() > 128 {
         return Err(crate::error::PgTrickleError::InternalError(format!(
             "bgw_extra too long ({} bytes) for db='{}' job_id={}",
@@ -98,14 +99,13 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
 
     // Parse bgw_extra: "db_name\0job_id"
     let extra = BackgroundWorker::get_extra();
-    let (db_name, job_id) = match parse_worker_extra(extra) {
+    let (db_name, job_id, generation) = match parse_worker_extra(extra) {
         Some(pair) => pair,
         None => {
             warning!(
                 "pg_trickle refresh worker: malformed bgw_extra '{}', exiting",
                 extra
             );
-            shmem::release_worker_token();
             return;
         }
     };
@@ -137,6 +137,17 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         }
     }));
 
+    let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
+    if !shmem::promote_worker_slot(database_oid, job_id, generation, my_pid) {
+        warning!(
+            "pg_trickle refresh worker: reservation missing (db='{}', job_id={}, generation={}), exiting",
+            db_name,
+            job_id,
+            generation
+        );
+        return;
+    }
+
     info!(
         "pg_trickle refresh worker: started (db='{}', job_id={}, pid={})",
         db_name, job_id, my_pid,
@@ -164,7 +175,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
             "pg_trickle refresh worker: job {} already claimed or cancelled, exiting",
             job_id
         );
-        shmem::release_worker_token();
+        shmem::release_worker_slot(database_oid, job_id, generation);
         return;
     }
 
@@ -183,10 +194,24 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
             BackgroundWorker::transaction(AssertUnwindSafe(|| {
                 let _ = SchedulerJob::cancel(job_id, "Job row disappeared after claim");
             }));
-            shmem::release_worker_token();
+            shmem::release_worker_slot(database_oid, job_id, generation);
             return;
         }
     };
+
+    if job.worker_slot_generation != Some(generation as i64) {
+        warning!(
+            "pg_trickle refresh worker: job {} generation mismatch (worker={}, catalog={}), cancelling",
+            job_id,
+            generation,
+            job.worker_slot_generation.unwrap_or_default()
+        );
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            let _ = SchedulerJob::cancel(job_id, "Worker slot generation mismatch");
+        }));
+        shmem::release_worker_slot(database_oid, job_id, generation);
+        return;
+    }
 
     if job.dispatch_tick_id.is_none() || job.tick_watermark_lsn.is_none() {
         warning!(
@@ -196,7 +221,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             let _ = SchedulerJob::cancel(job_id, "Missing immutable dispatch tick bound");
         }));
-        shmem::release_worker_token();
+        shmem::release_worker_slot(database_oid, job_id, generation);
         return;
     }
 
@@ -210,7 +235,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             let _ = SchedulerJob::cancel(job_id, "DAG version obsolete");
         }));
-        shmem::release_worker_token();
+        shmem::release_worker_slot(database_oid, job_id, generation);
         return;
     }
 
@@ -246,13 +271,13 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     }));
 
     let outcome = match outcome {
-        Ok(o) => (o, None),
+        Ok(o) => (o, None, None),
         Err(panic_payload) => {
             // ERR-1d: The refresh transaction panicked (PG ERROR). Extract
             // the error message from the panic payload and treat this as a
             // permanent failure. The original transaction was rolled back by
             // PostgreSQL, so we record the failure in a fresh transaction.
-            let error_msg = extract_panic_message(&panic_payload);
+            let (error_msg, sqlstate) = extract_panic_details(&panic_payload);
 
             warning!(
                 "pg_trickle refresh worker: job {} panicked (PG ERROR): {}",
@@ -271,29 +296,51 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
                 pg_sys::AbortCurrentTransaction();
             }
 
-            // Determine if this is a retryable or permanent error.
-            // O39-6: use SQLSTATE-first classifier when use_sqlstate_classification=true.
-            let is_retryable = crate::error::classify_error_for_retry(&error_msg);
+            let failure = crate::error::classify_refresh_failure(sqlstate.as_deref(), &error_msg);
 
             // Set error state on member STs in a fresh transaction.
-            if !is_retryable {
-                BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                    for &pgt_id in &job.member_pgt_ids {
-                        let _ = StreamTableMeta::set_error_state(pgt_id, &error_msg);
+            BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                for &pgt_id in &job.member_pgt_ids {
+                    if failure.retryable && failure.counts_toward_suspension {
+                        let tuning = load_st_by_id(pgt_id)
+                            .map(|st| st.runtime_tuning())
+                            .unwrap_or_else(|| crate::catalog::RefreshRuntimeTuning {
+                                merge_work_mem_mb: 0,
+                                delta_work_mem_mb: 0,
+                                delta_work_mem_cap_mb: 0,
+                                lock_backoff_exponent: 0,
+                            });
+                        let _ = StreamTableMeta::record_scheduled_failure(
+                            pgt_id,
+                            failure.kind.code(),
+                            true,
+                            failure.kind == crate::error::RefreshFailureKind::OutOfMemory
+                                && config::pg_trickle_self_heal_oom()
+                                && tuning.merge_work_mem_mb > 0,
+                            failure.kind == crate::error::RefreshFailureKind::LockTimeout
+                                && config::pg_trickle_self_heal_lock_timeout(),
+                        );
+                    } else {
+                        let _ = StreamTableMeta::set_typed_error(
+                            pgt_id,
+                            &failure.message,
+                            failure.kind.code(),
+                            failure.retryable,
+                        );
                     }
-                }));
-            }
+                }
+            }));
 
-            let outcome = if is_retryable {
+            let outcome = if failure.retryable {
                 RefreshOutcome::RetryableFailure
             } else {
                 RefreshOutcome::PermanentFailure
             };
-            (outcome, Some(error_msg))
+            (outcome, Some(error_msg), sqlstate)
         }
     };
 
-    let (outcome, panic_error_msg) = outcome;
+    let (outcome, panic_error_msg, panic_sqlstate) = outcome;
 
     // Persist outcome to the job table
     let (status, retryable) = match outcome {
@@ -302,8 +349,30 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         RefreshOutcome::PermanentFailure => (JobStatus::PermanentFailed, Some(false)),
     };
 
+    let failure = panic_error_msg
+        .as_deref()
+        .map(|message| crate::error::classify_refresh_failure(panic_sqlstate.as_deref(), message));
+    let outcome_code = failure
+        .as_ref()
+        .map(|f| f.kind.code())
+        .or_else(|| match outcome {
+            RefreshOutcome::RetryableFailure => {
+                Some(crate::error::RefreshFailureKind::UnknownRetryable.code())
+            }
+            RefreshOutcome::PermanentFailure => {
+                Some(crate::error::RefreshFailureKind::Permanent.code())
+            }
+            RefreshOutcome::Success => None,
+        });
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
-        let _ = SchedulerJob::complete(job_id, status, panic_error_msg.as_deref(), retryable);
+        let _ = SchedulerJob::complete_typed(
+            job_id,
+            status,
+            panic_error_msg.as_deref(),
+            retryable,
+            outcome_code,
+            failure.as_ref().and_then(|f| f.sqlstate.as_deref()),
+        );
     }));
 
     info!(
@@ -312,49 +381,57 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     );
 
     // Release the cluster-wide worker token
-    shmem::release_worker_token();
+    shmem::release_worker_slot(database_oid, job_id, generation);
 }
 
 /// ERR-1d: Extract a human-readable error message from a caught panic payload.
 ///
 /// Panics from PostgreSQL ERRORs are represented as `CaughtError` in pgrx.
 /// We try to downcast to known types; if that fails, we produce a generic message.
-pub(super) fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+pub(super) fn extract_panic_details(
+    payload: &Box<dyn std::any::Any + Send>,
+) -> (String, Option<String>) {
     use pgrx::pg_sys::panic::CaughtError;
 
     if let Some(caught) = payload.downcast_ref::<CaughtError>() {
         return match caught {
             CaughtError::PostgresError(ereport)
             | CaughtError::ErrorReport(ereport)
-            | CaughtError::RustPanic { ereport, .. } => {
-                // Include full debug output to capture DETAIL, HINT, etc.
-                format!("{:?}", ereport)
-            }
+            | CaughtError::RustPanic { ereport, .. } => (
+                format!("{:?}", ereport),
+                Some(crate::error::sqlstate_to_string(
+                    ereport.sql_error_code() as isize as u32,
+                )),
+            ),
         };
     }
     if let Some(msg) = payload.downcast_ref::<&str>() {
-        return msg.to_string();
+        return (msg.to_string(), None);
     }
     if let Some(msg) = payload.downcast_ref::<String>() {
-        return msg.clone();
+        return (msg.clone(), None);
     }
-    "unknown error (panic payload could not be decoded)".to_string()
+    (
+        "unknown error (panic payload could not be decoded)".to_string(),
+        None,
+    )
 }
 
 /// Parse the worker's bgw_extra string: "db_name\0job_id".
-pub(super) fn parse_worker_extra(extra: &str) -> Option<(String, i64)> {
+pub(super) fn parse_worker_extra(extra: &str) -> Option<(String, i64, u64)> {
     // Format is "<db_name>|<job_id>" — see spawn_refresh_worker for why '|'
     // is used instead of '\0' (pgrx's get_extra() truncates at null bytes).
-    let parts: Vec<&str> = extra.splitn(2, '|').collect();
-    if parts.len() != 2 {
+    let parts: Vec<&str> = extra.split('|').collect();
+    if parts.len() != 3 {
         return None;
     }
     let db_name = parts[0].to_string();
     let job_id = parts[1].parse::<i64>().ok()?;
-    if db_name.is_empty() || job_id <= 0 {
+    let generation = parts[2].parse::<u64>().ok()?;
+    if db_name.is_empty() || job_id <= 0 || generation == 0 {
         return None;
     }
-    Some((db_name, job_id))
+    Some((db_name, job_id, generation))
 }
 
 // ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
@@ -583,7 +660,7 @@ pub(super) fn parallel_dispatch_tick(
     retry_states: &mut HashMap<i64, RetryState>,
     retry_policy: &RetryPolicy,
     db_name: &str,
-    pending_spawns: &mut Vec<(String, i64)>,
+    pending_spawns: &mut Vec<(String, i64, u64)>,
     dispatch_tick_id: i64,
     tick_watermark_lsn: Option<&str>,
 ) {
@@ -593,13 +670,26 @@ pub(super) fn parallel_dispatch_tick(
     };
 
     let max_cluster = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
-    // PAR-2: If max_parallel_workers is set (> 0), use it as an additional cap.
     let par_workers = config::pg_trickle_max_parallel_workers();
-    let effective_max_cluster = if par_workers > 0 {
-        max_cluster.min(par_workers as u32)
-    } else {
-        max_cluster
+    let postgres_parallel_workers = match Spi::get_one::<i32>(
+        "SELECT setting::int FROM pg_settings WHERE name = 'max_parallel_workers'",
+    ) {
+        Ok(Some(value)) => value.max(0) as u32,
+        Ok(None) => {
+            warning!("pg_trickle: max_parallel_workers is not available");
+            return;
+        }
+        Err(e) => {
+            warning!("pg_trickle: could not read max_parallel_workers: {}", e);
+            return;
+        }
     };
+    let capacity = shmem::WorkerCapacity::new(
+        max_cluster,
+        (par_workers > 0).then_some(par_workers as u32),
+        postgres_parallel_workers,
+    );
+    let effective_max_cluster = capacity.effective_limit;
     // C3-1: Per-database quota with burst capacity.
     let max_per_db = compute_per_db_quota(
         config::pg_trickle_per_database_worker_quota(),
@@ -623,25 +713,26 @@ pub(super) fn parallel_dispatch_tick(
             reaped,
         );
 
-        // Reconcile shmem worker token counter.  Crashed workers never call
-        // `release_worker_token()`, so the atomic counter drifts upward.
-        // Re-derive from pg_stat_activity to fix it.
-        let live_workers: u32 = Spi::get_one::<i64>(
-            "SELECT COUNT(*)::bigint FROM pg_stat_activity \
-             WHERE backend_type = 'pg_trickle refresh worker'",
-        )
-        .unwrap_or(Some(0))
-        .unwrap_or(0)
-        .max(0) as u32;
-
-        let shmem_count = shmem::active_worker_count();
-        if shmem_count != live_workers {
+        let reclaimed = match (
+            live_refresh_worker_pids(),
+            live_scheduler_pids(),
+            queued_job_ids(),
+        ) {
+            (Some(live_pids), Some(scheduler_pids), Some(queued_ids)) => {
+                shmem::reap_stale_worker_slots(
+                    unsafe { pg_sys::MyDatabaseId.to_u32() },
+                    &live_pids,
+                    &scheduler_pids,
+                    &queued_ids,
+                )
+            }
+            _ => 0,
+        };
+        if reclaimed > 0 {
             info!(
-                "pg_trickle: parallel dispatch — correcting worker count: shmem={} → live={}",
-                shmem_count, live_workers,
+                "pg_trickle: parallel dispatch — reclaimed {} stale worker slot(s)",
+                reclaimed
             );
-            shmem::set_active_worker_count(live_workers);
-            shmem::bump_reconcile_epoch();
         }
     }
 
@@ -888,30 +979,15 @@ pub(super) fn parallel_dispatch_tick(
             break;
         }
 
-        if !shmem::try_acquire_worker_token(max_cluster) {
-            info!(
-                "pg_trickle: parallel dispatch — worker budget exhausted ({}/{})",
-                shmem::active_worker_count(),
-                max_cluster,
-            );
-            break;
-        }
-
         // PERF-5: O(1) lookup via unit_by_id.
         let unit = match eu_dag.unit_by_id(uid) {
             Some(u) => u,
-            None => {
-                shmem::release_worker_token();
-                continue;
-            }
+            None => continue,
         };
 
         let tick_watermark_lsn = match tick_watermark_lsn {
             Some(lsn) => lsn,
-            None => {
-                shmem::release_worker_token();
-                continue;
-            }
+            None => continue,
         };
         let job_id = match SchedulerJob::enqueue(
             dag_version_i64,
@@ -926,11 +1002,12 @@ pub(super) fn parallel_dispatch_tick(
         ) {
             Ok(id) => {
                 // OBS-2: A new job has been added to the parallel queue.
-                crate::shmem::increment_parallel_queue_depth();
+                crate::shmem::increment_parallel_queue_depth_for_database(unsafe {
+                    pg_sys::MyDatabaseId.to_u32()
+                });
                 id
             }
             Err(e) => {
-                shmem::release_worker_token();
                 warning!(
                     "pg_trickle: parallel dispatch — failed to enqueue job for {}: {}",
                     unit.label,
@@ -940,11 +1017,46 @@ pub(super) fn parallel_dispatch_tick(
             }
         };
 
+        // Reserve the exact slot only after the durable job ID exists. If
+        // capacity changed between enqueue and reservation, cancel the job
+        // instead of creating an unaccounted worker.
+        let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
+        let slot =
+            match shmem::reserve_worker_slot(capacity, database_oid, job_id, scheduler_pid, now_ms)
+            {
+                Some(slot) => slot,
+                None => {
+                    let _ = SchedulerJob::cancel(job_id, "worker capacity exhausted");
+                    crate::shmem::decrement_parallel_queue_depth_for_database(unsafe {
+                        pg_sys::MyDatabaseId.to_u32()
+                    });
+                    info!(
+                        "pg_trickle: parallel dispatch — worker capacity exhausted ({}/{})",
+                        shmem::worker_slot_counts().0 + shmem::worker_slot_counts().1,
+                        capacity.effective_limit,
+                    );
+                    continue;
+                }
+            };
+        if let Err(e) = SchedulerJob::set_worker_slot_generation(job_id, slot.generation) {
+            shmem::release_worker_slot(database_oid, job_id, slot.generation);
+            let _ = SchedulerJob::cancel(job_id, "failed to persist worker slot generation");
+            crate::shmem::decrement_parallel_queue_depth_for_database(unsafe {
+                pg_sys::MyDatabaseId.to_u32()
+            });
+            warning!(
+                "pg_trickle: parallel dispatch — failed to persist slot generation for job {}: {}",
+                job_id,
+                e
+            );
+            continue;
+        }
+
         if let Some(us) = state.unit_states.get_mut(&uid) {
             us.inflight_job_id = Some(job_id);
         }
         state.per_db_inflight += 1;
-        pending_spawns.push((db_name.to_string(), job_id));
+        pending_spawns.push((db_name.to_string(), job_id, slot.generation));
 
         info!(
             "pg_trickle: parallel dispatch — enqueued {} (job_id={}, kind={})",
@@ -1012,6 +1124,42 @@ fn reap_dead_worker_jobs() -> i64 {
     .unwrap_or(0)
 }
 
+fn live_refresh_worker_pids() -> Option<Vec<i32>> {
+    Spi::get_one::<Vec<i32>>(
+        "SELECT COALESCE(array_agg(pid), ARRAY[]::int[]) \
+         FROM pg_stat_activity \
+         WHERE backend_type = 'pg_trickle refresh worker'",
+    )
+    .unwrap_or_else(|e| {
+        warning!("pg_trickle: could not enumerate refresh worker PIDs: {}", e);
+        None
+    })
+}
+
+fn live_scheduler_pids() -> Option<Vec<i32>> {
+    Spi::get_one::<Vec<i32>>(
+        "SELECT COALESCE(array_agg(pid), ARRAY[]::int[]) \
+         FROM pg_stat_activity \
+         WHERE application_name = 'pg_trickle_scheduler'",
+    )
+    .unwrap_or_else(|e| {
+        warning!("pg_trickle: could not enumerate scheduler PIDs: {}", e);
+        None
+    })
+}
+
+fn queued_job_ids() -> Option<Vec<i64>> {
+    Spi::get_one::<Vec<i64>>(
+        "SELECT COALESCE(array_agg(job_id), ARRAY[]::bigint[]) \
+         FROM pgtrickle.pgt_scheduler_jobs \
+         WHERE status = 'QUEUED'",
+    )
+    .unwrap_or_else(|e| {
+        warning!("pg_trickle: could not enumerate queued jobs: {}", e);
+        None
+    })
+}
+
 /// Reconcile orphaned jobs and worker tokens at scheduler startup.
 ///
 /// Called once during per-database scheduler initialization:
@@ -1036,28 +1184,35 @@ pub fn reconcile_parallel_state() {
         }
     }
 
-    // Step 2: Count live refresh workers from pg_stat_activity
-    let live_workers: u32 = Spi::get_one::<i64>(
-        "SELECT COUNT(*)::bigint FROM pg_stat_activity \
-         WHERE backend_type = 'pg_trickle refresh worker'",
-    )
-    .unwrap_or(Some(0))
-    .unwrap_or(0)
-    .max(0) as u32;
-
-    // Step 3: Correct shared-memory counter if needed
-    let shmem_count = shmem::active_worker_count();
-    if shmem_count != live_workers {
+    // Step 2: Reclaim slots for workers that disappeared during a crash.
+    let reclaimed = match (
+        live_refresh_worker_pids(),
+        live_scheduler_pids(),
+        queued_job_ids(),
+    ) {
+        (Some(live_pids), Some(scheduler_pids), Some(queued_ids)) => {
+            shmem::reap_stale_worker_slots(
+                unsafe { pg_sys::MyDatabaseId.to_u32() },
+                &live_pids,
+                &scheduler_pids,
+                &queued_ids,
+            )
+        }
+        _ => 0,
+    };
+    if reclaimed > 0 {
         info!(
-            "pg_trickle: parallel reconciliation — correcting worker count: shmem={} → live={}",
-            shmem_count, live_workers,
+            "pg_trickle: parallel reconciliation — reclaimed {} stale worker slot(s)",
+            reclaimed
         );
-        shmem::set_active_worker_count(live_workers);
         shmem::bump_reconcile_epoch();
     }
 
-    // Step 4: Prune old completed jobs (keep last 1 hour)
-    match SchedulerJob::prune_completed(3600) {
+    // Step 3: Prune old completed jobs (keep last 1 hour)
+    match SchedulerJob::prune_completed(
+        config::pg_trickle_scheduler_job_retention_seconds() as i64,
+        config::pg_trickle_scheduler_maintenance_batch_size(),
+    ) {
         Ok(count) if count > 0 => {
             info!(
                 "pg_trickle: parallel reconciliation — pruned {} old job(s)",
@@ -1081,23 +1236,26 @@ mod tests {
 
     #[test]
     fn test_parse_worker_extra_valid() {
-        let (db, job_id) = parse_worker_extra("mydb|42").unwrap();
+        let (db, job_id, generation) = parse_worker_extra("mydb|42|7").unwrap();
         assert_eq!(db, "mydb");
         assert_eq!(job_id, 42);
+        assert_eq!(generation, 7);
     }
 
     #[test]
     fn test_parse_worker_extra_valid_large_job_id() {
-        let (db, job_id) = parse_worker_extra("production_db|9999999").unwrap();
+        let (db, job_id, generation) = parse_worker_extra("production_db|9999999|8").unwrap();
         assert_eq!(db, "production_db");
         assert_eq!(job_id, 9999999);
+        assert_eq!(generation, 8);
     }
 
     #[test]
     fn test_parse_worker_extra_db_with_hyphens() {
-        let (db, job_id) = parse_worker_extra("my-app-db|100").unwrap();
+        let (db, job_id, generation) = parse_worker_extra("my-app-db|100|9").unwrap();
         assert_eq!(db, "my-app-db");
         assert_eq!(job_id, 100);
+        assert_eq!(generation, 9);
     }
 
     #[test]
@@ -1113,24 +1271,24 @@ mod tests {
     #[test]
     fn test_parse_worker_extra_empty_db_name() {
         // Empty db_name is rejected.
-        assert!(parse_worker_extra("|42").is_none());
+        assert!(parse_worker_extra("|42|1").is_none());
     }
 
     #[test]
     fn test_parse_worker_extra_negative_job_id() {
         // Negative job_id is rejected (job_id <= 0 check).
-        assert!(parse_worker_extra("mydb|-1").is_none());
+        assert!(parse_worker_extra("mydb|-1|1").is_none());
     }
 
     #[test]
     fn test_parse_worker_extra_zero_job_id() {
         // Zero job_id is rejected.
-        assert!(parse_worker_extra("mydb|0").is_none());
+        assert!(parse_worker_extra("mydb|0|1").is_none());
     }
 
     #[test]
     fn test_parse_worker_extra_non_numeric_job_id() {
-        assert!(parse_worker_extra("mydb|abc").is_none());
+        assert!(parse_worker_extra("mydb|abc|1").is_none());
     }
 
     #[test]

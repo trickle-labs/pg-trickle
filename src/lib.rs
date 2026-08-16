@@ -71,7 +71,7 @@ pub mod sql_builder;
 mod template_cache;
 pub mod version;
 #[allow(dead_code)]
-mod wal_decoder;
+pub mod wal_decoder;
 
 ::pgrx::pg_module_magic!();
 
@@ -316,6 +316,17 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     blow_reason     TEXT,
     last_error_message TEXT,
     last_error_at   TIMESTAMPTZ,
+    self_heal_work_mem_percent SMALLINT NOT NULL DEFAULT 100
+        CHECK (self_heal_work_mem_percent BETWEEN 25 AND 100),
+    self_heal_lock_backoff_exponent SMALLINT NOT NULL DEFAULT 0
+        CHECK (self_heal_lock_backoff_exponent BETWEEN 0 AND 6),
+    self_heal_success_streak SMALLINT NOT NULL DEFAULT 0
+        CHECK (self_heal_success_streak BETWEEN 0 AND 3),
+    last_error_code TEXT CHECK (last_error_code IS NULL OR last_error_code IN
+                     ('LOCK_TIMEOUT', 'STATEMENT_TIMEOUT', 'DEADLOCK',
+                      'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
+                      'PERMANENT', 'UNKNOWN_RETRYABLE')),
+    last_error_retryable BOOLEAN,
     downstream_publication_name TEXT,
     freshness_deadline_ms BIGINT,
     st_partition_key TEXT,
@@ -452,11 +463,20 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     freshness_deadline TIMESTAMPTZ,
     tick_watermark_lsn PG_LSN,
     fixpoint_iteration INT
+    ,
+    error_code      TEXT CHECK (error_code IS NULL OR error_code IN
+                     ('LOCK_TIMEOUT', 'STATEMENT_TIMEOUT', 'DEADLOCK',
+                      'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
+                      'PERMANENT', 'UNKNOWN_RETRYABLE')),
+    error_sqlstate  TEXT,
+    retryable       BOOLEAN
 );
 
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt_id, data_timestamp);
 -- PERF-1: Fast lookup by (pgt_id, start_time) for self-monitoring and scheduler_overhead queries.
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_start ON pgtrickle.pgt_refresh_history (pgt_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_hist_start_time
+    ON pgtrickle.pgt_refresh_history (start_time, refresh_id);
 
 -- v0.73.0 PERF-001: Incremental summary table for refresh-history metrics.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_summary (
@@ -555,6 +575,13 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
     retryable       BOOLEAN,
     dispatch_tick_id BIGINT,
     tick_watermark_lsn PG_LSN
+    ,
+    outcome_code    TEXT CHECK (outcome_code IS NULL OR outcome_code IN
+                     ('LOCK_TIMEOUT', 'STATEMENT_TIMEOUT', 'DEADLOCK',
+                      'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
+                      'PERMANENT', 'UNKNOWN_RETRYABLE')),
+    outcome_sqlstate TEXT,
+    worker_slot_generation BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_status_enqueued
@@ -564,6 +591,9 @@ CREATE INDEX IF NOT EXISTS idx_sched_jobs_unit_status
 CREATE INDEX IF NOT EXISTS idx_sched_jobs_finished
     ON pgtrickle.pgt_scheduler_jobs (finished_at)
     WHERE finished_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sched_jobs_terminal_finished
+    ON pgtrickle.pgt_scheduler_jobs (finished_at, job_id)
+    WHERE status IN ('SUCCEEDED', 'RETRYABLE_FAILED', 'PERMANENT_FAILED', 'CANCELLED');
 
 -- Bootstrap source gates (v0.5.0, Phase 3)
 -- Records which source tables are currently "gated" (bootstrapping in progress).
@@ -609,6 +639,12 @@ INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES (
     '0.84.0',
     'Bootstrap catalog parity repair and manifest tooling baseline'
+)
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES (
+    '0.85.0',
+    'Scheduler and resource resilience gate'
 )
 ON CONFLICT (version) DO NOTHING;
 
@@ -1228,6 +1264,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.rebuild_cdc_triggers() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.restore_stream_tables() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.resume_all() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.resume_scheduler(text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.resume_after_drain() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.setup_self_monitoring() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.teardown_self_monitoring() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.ungate_source(text) FROM PUBLIC;

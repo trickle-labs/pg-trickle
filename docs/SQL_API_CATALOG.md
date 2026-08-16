@@ -46,6 +46,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.diagnose_errors()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.diagnose_errors('my_stream_table'); ```. |
 | `pgtrickle.diamond_groups()` | `pgtrickle` | `SetOf row` | Returns one row per group member, indicating which group it belongs to, whether it is a convergence (fan-in) node, the group's current epoch, and the effective schedule policy. |
 | `pgtrickle.drain()` | `pgtrickle` | `` | # Example ```sql -- Quiesce before pg_upgrade or rolling restart: SELECT pgtrickle.drain(); -- Confirm drained: SELECT pgtrickle.is_drained(); -- Resume normal operation after maintenance: UPDATE pgtrickle.pgt_stream_tables SET status = status; -- noop, scheduler picks up ```. |
+| `pgtrickle.resume_after_drain()` | `pgtrickle` | `boolean` | Explicitly re-enables scheduler dispatch after a persistent drain request. |
 | `pgtrickle.drop_refresh_group()` | `pgtrickle` | `void` | Drop a refresh group by name. |
 | `pgtrickle.drop_snapshot()` | `pgtrickle` | `` | Removes the snapshot table and its catalog row from `pgtrickle.pgt_snapshots`. |
 | `pgtrickle.drop_stream_table()` | `pgtrickle` | `` | Changed in v0.19.0 (UX-6): default flipped from `true` to `false` to prevent accidental cascading drops. |

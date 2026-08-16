@@ -43,6 +43,15 @@ fn pgt_id_for_name(name: &str) -> Result<i64, PgTrickleError> {
     Ok(meta.pgt_id)
 }
 
+fn current_database_oid() -> Result<u32, PgTrickleError> {
+    Spi::get_one::<pg_sys::Oid>(
+        "SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()",
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .map(|oid| oid.to_u32())
+    .ok_or_else(|| PgTrickleError::NotFound("current database".to_string()))
+}
+
 // ── SQL API ──────────────────────────────────────────────────────────────────
 
 /// API-1 (v0.62.0): Pause the scheduler for the given stream table nodes.
@@ -60,32 +69,55 @@ fn pgt_id_for_name(name: &str) -> Result<i64, PgTrickleError> {
 /// ```
 #[pg_extern(schema = "pgtrickle")]
 pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
-    let mut resolved: Vec<i64> = Vec::new();
+    let database_oid = current_database_oid().unwrap_or_else(|e| pgrx::error!("{}", e));
+    let names: Vec<&str> = nodes
+        .iter()
+        .map(|name| {
+            name.ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "pause_scheduler() target array must not contain NULL".into(),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| pgrx::error!("{}", e));
+    if names.is_empty() {
+        pgrx::error!("pause_scheduler() target array must not be empty");
+    }
+    let max_targets = config::pg_trickle_max_control_targets();
+    if names.len() > max_targets {
+        pgrx::error!("pause_scheduler() accepts at most {max_targets} targets");
+    }
 
-    for maybe_name in nodes.iter() {
-        match maybe_name {
-            None => {
-                pgrx::warning!("pg_trickle: pause_scheduler: NULL element ignored");
-            }
-            Some(name) => match pgt_id_for_name(name) {
-                Ok(pgt_id) => {
-                    shmem::pause_node(pgt_id);
-                    resolved.push(pgt_id);
-                    pgrx::log!(
-                        "pg_trickle: pause_scheduler: node '{}' (pgt_id={}) marked as paused",
-                        name,
-                        pgt_id
-                    );
-                }
-                Err(e) => {
-                    pgrx::error!(
-                        "pg_trickle: pause_scheduler: could not resolve '{}': {}",
-                        name,
-                        e
-                    );
-                }
-            },
+    // Resolve and validate every target before changing shared state.
+    let mut resolved = Vec::with_capacity(names.len());
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    for name in names {
+        if name.trim().is_empty() {
+            pgrx::error!("pause_scheduler() target names cannot be empty");
         }
+        let pgt_id = pgt_id_for_name(name).unwrap_or_else(|e| {
+            pgrx::error!(
+                "pg_trickle: pause_scheduler: could not resolve '{}': {}",
+                name,
+                e
+            )
+        });
+        if !seen.insert(pgt_id) {
+            pgrx::error!("pause_scheduler() contains duplicate target '{name}'");
+        }
+        resolved.push((pgt_id, name));
+    }
+    let pgt_ids: Vec<i64> = resolved.iter().map(|(pgt_id, _)| *pgt_id).collect();
+    if let Err(e) = shmem::pause_nodes_for_database(database_oid, &pgt_ids) {
+        pgrx::error!("pg_trickle: pause_scheduler: {}", e);
+    }
+    for &(pgt_id, name) in &resolved {
+        pgrx::log!(
+            "pg_trickle: pause_scheduler: node '{}' (pgt_id={}) marked as paused",
+            name,
+            pgt_id
+        );
     }
 
     if resolved.is_empty() {
@@ -99,22 +131,35 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         std::time::Instant::now() + std::time::Duration::from_secs(drain_timeout_secs as u64);
 
     loop {
-        let active = shmem::active_worker_count();
-        if active == 0 {
+        let pending = Spi::get_one_with_args::<i64>(
+            "SELECT count(*)::bigint \
+             FROM pgtrickle.pgt_scheduler_jobs \
+             WHERE status IN ('QUEUED', 'RUNNING') \
+               AND member_pgt_ids && $1::bigint[]",
+            &[pgt_ids.clone().into()],
+        )
+        .unwrap_or_else(|e| pgrx::error!("pg_trickle: pause_scheduler: {}", e))
+        .unwrap_or(0);
+        let inline = shmem::database_scheduler_slots()
+            .into_iter()
+            .find(|slot| slot.database_oid == database_oid)
+            .map(|slot| slot.inline_pgt_id != 0 && pgt_ids.contains(&slot.inline_pgt_id))
+            .unwrap_or(false);
+        if pending == 0 && !inline {
             break;
         }
         if std::time::Instant::now() >= deadline {
-            pgrx::warning!(
-                "pg_trickle: pause_scheduler: {} active refresh worker(s) still running after {}s drain timeout; \
-                 the paused nodes will not be dispatched on future ticks",
-                active,
+            pgrx::error!(
+                "pg_trickle: pause_scheduler timed out after {}s with {} relevant job(s) remaining",
                 drain_timeout_secs,
+                pending
             );
-            break;
         }
-        // Avoid sleeping inside a transaction — just do a short spin here.
-        // pgrx pg_usleep is not available on all platforms; use std::thread::sleep.
-        std::thread::sleep(poll_interval);
+        pgrx::check_for_interrupts!();
+        unsafe {
+            // SAFETY: pg_usleep is PostgreSQL's bounded backend sleep helper.
+            pgrx::pg_sys::pg_usleep(poll_interval.as_micros() as i64);
+        }
     }
 
     "OK"
@@ -131,29 +176,51 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
 /// ```
 #[pg_extern(schema = "pgtrickle")]
 pub fn resume_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
-    for maybe_name in nodes.iter() {
-        match maybe_name {
-            None => {
-                pgrx::warning!("pg_trickle: resume_scheduler: NULL element ignored");
-            }
-            Some(name) => match pgt_id_for_name(name) {
-                Ok(pgt_id) => {
-                    shmem::resume_node(pgt_id);
-                    pgrx::log!(
-                        "pg_trickle: resume_scheduler: node '{}' (pgt_id={}) removed from paused set",
-                        name,
-                        pgt_id
-                    );
-                }
-                Err(e) => {
-                    pgrx::error!(
-                        "pg_trickle: resume_scheduler: could not resolve '{}': {}",
-                        name,
-                        e
-                    );
-                }
-            },
+    let database_oid = current_database_oid().unwrap_or_else(|e| pgrx::error!("{}", e));
+    let names: Vec<&str> = nodes
+        .iter()
+        .map(|name| {
+            name.ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "resume_scheduler() target array must not contain NULL".into(),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| pgrx::error!("{}", e));
+    if names.is_empty() {
+        pgrx::error!("resume_scheduler() target array must not be empty");
+    }
+    let max_targets = config::pg_trickle_max_control_targets();
+    if names.len() > max_targets {
+        pgrx::error!("resume_scheduler() accepts at most {max_targets} targets");
+    }
+    let mut resolved = Vec::with_capacity(names.len());
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    for name in names {
+        if name.trim().is_empty() {
+            pgrx::error!("resume_scheduler() target names cannot be empty");
         }
+        let pgt_id = pgt_id_for_name(name).unwrap_or_else(|e| {
+            pgrx::error!(
+                "pg_trickle: resume_scheduler: could not resolve '{}': {}",
+                name,
+                e
+            )
+        });
+        if !seen.insert(pgt_id) {
+            pgrx::error!("resume_scheduler() contains duplicate target '{name}'");
+        }
+        resolved.push((pgt_id, name));
+    }
+    let pgt_ids: Vec<i64> = resolved.iter().map(|(pgt_id, _)| *pgt_id).collect();
+    shmem::resume_nodes_for_database(database_oid, &pgt_ids);
+    for (pgt_id, name) in resolved {
+        pgrx::log!(
+            "pg_trickle: resume_scheduler: node '{}' (pgt_id={}) removed from paused set",
+            name,
+            pgt_id
+        );
     }
 
     "OK"

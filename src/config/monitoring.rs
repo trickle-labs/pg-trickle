@@ -7,11 +7,18 @@ use pgrx::guc::*;
 /// Prometheus metrics exporter port.
 ///
 /// When set to a non-zero value, the background launcher starts a lightweight
-/// HTTP server on `0.0.0.0:<port>` that exposes the pg_trickle metrics in
-/// Prometheus exposition format at `/metrics`.
+/// HTTP server on `pg_trickle.metrics_bind_address:<port>` that exposes the
+/// pg_trickle metrics in Prometheus exposition format at `/metrics`.
 ///
 /// Set to 0 (default) to disable the exporter.
 pub static PGS_METRICS_PORT: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Prometheus metrics exporter bind address.
+///
+/// Must be a literal IPv4 or IPv6 address. Defaults to loopback; use
+/// `0.0.0.0` or `::` only when remote exposure is explicitly intended.
+pub static PGS_METRICS_BIND_ADDRESS: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"127.0.0.1"));
 
 /// History retention in days.
 ///
@@ -145,11 +152,22 @@ pub fn register_monitoring_gucs() {
     GucRegistry::define_int_guc(
         c"pg_trickle.metrics_port",
         c"Prometheus metrics exporter port (0 = disabled).",
-        c"When non-zero, starts an HTTP server on 0.0.0.0:<port> exposing metrics \
-           in Prometheus exposition format at /metrics. Set to 0 to disable.",
+        c"When non-zero, starts an HTTP server on the configured bind address \
+           exposing metrics in Prometheus exposition format at /metrics. Set \
+           to 0 to disable.",
         &PGS_METRICS_PORT,
         0,
         65535,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_trickle.metrics_bind_address",
+        c"Prometheus metrics exporter bind address.",
+        c"Literal IPv4 or IPv6 address (default: 127.0.0.1). Use 0.0.0.0 or :: \
+           only when remote exposure is explicitly intended.",
+        &PGS_METRICS_BIND_ADDRESS,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -250,6 +268,14 @@ pub fn register_monitoring_gucs() {
 /// Returns the Prometheus metrics exporter port (0 = disabled).
 pub fn pg_trickle_metrics_port() -> i32 {
     PGS_METRICS_PORT.get()
+}
+
+/// Returns the configured Prometheus metrics bind address.
+pub fn pg_trickle_metrics_bind_address() -> String {
+    PGS_METRICS_BIND_ADDRESS
+        .get()
+        .and_then(|value| value.to_str().ok().map(str::to_owned))
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 /// Returns the history retention period in days.

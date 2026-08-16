@@ -423,6 +423,21 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         .unwrap_or_default()
         .as_secs() as i64;
     crate::shmem::set_scheduler_meta(my_pid, true, now_ts);
+    let database_oid = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        Spi::get_one::<pg_sys::Oid>(
+            "SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()",
+        )
+        .ok()
+        .flatten()
+        .map(|oid| oid.to_u32())
+        .unwrap_or(0)
+    }));
+    if !crate::shmem::register_database_scheduler(database_oid, my_pid) {
+        pgrx::error!(
+            "pg_trickle scheduler: database scheduler registry is full (database_oid={})",
+            database_oid
+        );
+    }
 
     let mut dag_version: u64 = 0;
     let mut dag: Option<StDag> = None;
@@ -440,7 +455,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // (avoids a one-tick window where the frontier could advance past an
     // in-flight transaction that was already open before the restart).
     let mut prev_tick_watermark: Option<String> = {
-        let last_safe = crate::shmem::last_tick_safe_lsn_u64();
+        let last_safe = crate::shmem::database_last_tick_safe_lsn_u64(database_oid);
         if last_safe != 0 {
             Some(crate::version::u64_to_lsn(last_safe))
         } else {
@@ -519,10 +534,17 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut interference_overlap_count: i64 = 0;
 
     // OP-2: Start the Prometheus metrics HTTP server if metrics_port is non-zero.
-    let metrics_server = {
+    let mut metrics_server = {
         let port = config::pg_trickle_metrics_port();
         if port > 0 {
-            crate::metrics_server::MetricsServer::start(port as u16)
+            crate::metrics_server::MetricsServer::start_with_address(
+                &config::pg_trickle_metrics_bind_address(),
+                port as u16,
+            )
+            .unwrap_or_else(|e| {
+                pgrx::warning!("[pg_trickle] metrics endpoint unavailable: {e}");
+                None
+            })
         } else {
             None
         }
@@ -556,12 +578,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
 
         // OP-2: Service one pending Prometheus scrape request per tick (non-blocking).
-        if let Some(ref ms) = metrics_server {
-            // Collect metrics inside a transaction so SPI queries work.
-            let metrics_text = BackgroundWorker::transaction(std::panic::AssertUnwindSafe(|| {
-                crate::monitor::collect_metrics_text()
-            }));
-            ms.serve_one_request(&metrics_text);
+        if let Some(ref mut ms) = metrics_server {
+            let timeout = config::pg_trickle_metrics_request_timeout_ms().max(1) as u64;
+            ms.set_request_timeout(std::time::Duration::from_millis(timeout));
+            ms.poll(|remaining| {
+                BackgroundWorker::transaction(std::panic::AssertUnwindSafe(|| {
+                    crate::monitor::collect_metrics_text_with_deadline(remaining)
+                }))
+            });
         }
 
         // Update the last-wake timestamp in shared memory every 60 seconds.
@@ -573,6 +597,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // SAFETY: MyProcPid is always valid inside a background worker.
             let my_pid = unsafe { pg_sys::MyProcPid };
             crate::shmem::set_scheduler_meta(my_pid, true, (now_for_stats / 1000) as i64);
+            crate::shmem::update_database_scheduler(database_oid, |slot| {
+                slot.scheduler_pid = my_pid;
+                slot.running = true;
+                slot.last_wake_epoch_secs = (now_for_stats / 1000) as i64;
+            });
         }
 
         unsafe {
@@ -589,6 +618,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         if !should_continue {
             // SIGTERM received — shut down gracefully.
             info!("pg_trickle scheduler shutting down");
+            crate::shmem::unregister_database_scheduler(database_oid, my_pid);
             crate::shmem::set_scheduler_meta(0, false, 0);
             break;
         }
@@ -599,7 +629,19 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         // are active, this marks the drain as completed (DRAIN_COMPLETED =
         // DRAIN_REQUESTED) and returns true.  We skip new dispatches for that
         // tick so callers see a clean quiesced state before drain() returns.
-        if crate::shmem::scheduler_check_and_complete_drain() {
+        let queued_depth = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            Spi::get_one::<i64>(
+                "SELECT count(*)::bigint \
+                 FROM pgtrickle.pgt_scheduler_jobs \
+                 WHERE status = 'QUEUED'",
+            )
+        }));
+        if let Ok(Some(depth)) = queued_depth {
+            crate::shmem::update_database_scheduler(database_oid, |slot| {
+                slot.queue_depth = depth.max(0) as u32;
+            });
+        }
+        if crate::shmem::scheduler_check_and_complete_drain(database_oid) {
             continue;
         }
 
@@ -628,6 +670,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 db_name
             );
             crate::shmem::set_scheduler_meta(0, false, 0);
+            crate::shmem::unregister_database_scheduler(database_oid, my_pid);
             return;
         }
 
@@ -752,14 +795,13 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             // Emit NOTIFY for newly-stuck sources only.
                             for (group_name, source_oid, age_secs) in &stuck_list {
                                 if !reported_stuck_sources.contains(source_oid) {
-                                    let payload = format!(
-                                        "{{\"event\":\"watermark_stuck\",\"group\":\"{}\",\
-                                          \"source_oid\":{},\"age_secs\":{:.0}}}",
-                                        group_name, source_oid, age_secs
-                                    );
-                                    let _ = Spi::run_with_args(
-                                        "SELECT pg_notify('pgtrickle_alert', $1)",
-                                        &[payload.as_str().into()],
+                                    let _ = monitor::emit_alert_without_stream(
+                                        monitor::AlertEvent::WatermarkStuck,
+                                        serde_json::json!({
+                                            "group": group_name,
+                                            "source_oid": source_oid,
+                                            "age_secs": (*age_secs).round(),
+                                        }),
                                     );
                                     pgrx::warning!(
                                         "pg_trickle: watermark stuck in group '{}' — \
@@ -776,14 +818,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             // have since advanced (auto-resume).
                             for previously_stuck in &reported_stuck_sources {
                                 if !current_stuck.contains(previously_stuck) {
-                                    let payload = format!(
-                                        "{{\"event\":\"watermark_resumed\",\
-                                          \"source_oid\":{}}}",
-                                        previously_stuck
-                                    );
-                                    let _ = Spi::run_with_args(
-                                        "SELECT pg_notify('pgtrickle_alert', $1)",
-                                        &[payload.as_str().into()],
+                                    let _ = monitor::emit_alert_without_stream(
+                                        monitor::AlertEvent::WatermarkResumed,
+                                        serde_json::json!({
+                                            "source_oid": previously_stuck,
+                                        }),
                                     );
                                     pgrx::info!(
                                         "pg_trickle: watermark resumed for source OID {}",
@@ -974,7 +1013,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         }
 
         // Collect jobs to spawn (populated inside the transaction, spawned after).
-        let mut pending_spawns: Vec<(String, i64)> = Vec::new();
+        let mut pending_spawns: Vec<(String, i64, u64)> = Vec::new();
 
         // Run the scheduler tick inside a transaction
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
@@ -982,7 +1021,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // with frontier holdback to prevent silent data loss from long-running
             // transactions that span a tick boundary.
             let (tick_watermark, _current_oldest_xmin, _holdback_age_secs) =
-                compute_coordinator_tick_watermark(prev_tick_watermark.as_deref());
+                compute_coordinator_tick_watermark(database_oid, prev_tick_watermark.as_deref());
             dispatch_tick_id = dispatch_tick_id.saturating_add(1);
             // Persist this tick's safe watermark for the next tick's holdback comparison.
             prev_tick_watermark.clone_from(&tick_watermark);
@@ -1298,7 +1337,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }
                     // API-1/2 (v0.62.0): Skip nodes that are paused via
                     // pgtrickle.pause_scheduler().
-                    if crate::shmem::is_node_paused(pgt_id) {
+                    if crate::shmem::is_node_paused_for_database(database_oid, pgt_id) {
                         log!("pg_trickle scheduler: skipping {pgt_id} — node is paused");
                         continue;
                     }
@@ -1392,7 +1431,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             _ => continue,
                         };
                         // API-1/2 (v0.62.0): Skip paused nodes.
-                        if crate::shmem::is_node_paused(pgt_id) {
+                        if crate::shmem::is_node_paused_for_database(database_oid, pgt_id) {
                             log!(
                                 "pg_trickle scheduler: skipping {pgt_id} — node is paused (group)"
                             );
@@ -1585,9 +1624,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         }));
 
         // Phase 4: Spawn workers outside the transaction (after commit).
-        for (db, job_id) in pending_spawns.drain(..) {
-            if let Err(e) = spawn_refresh_worker(&db, job_id) {
-                shmem::release_worker_token();
+        for (db, job_id, generation) in pending_spawns.drain(..) {
+            if let Err(e) = spawn_refresh_worker(&db, job_id, generation) {
+                let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
+                shmem::release_worker_slot(database_oid, job_id, generation);
                 parallel_state.per_db_inflight = parallel_state.per_db_inflight.saturating_sub(1);
                 // Find and clear the in-flight tracking for this job.
                 for us in parallel_state.unit_states.values_mut() {

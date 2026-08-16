@@ -13,7 +13,7 @@
 //   - contains_word_boundary        (dvm/parser/rewrites — internal)
 //
 // Run locally with:
-//   cargo +nightly fuzz run parser_fuzz -- -max_total_time=60
+//   cargo +nightly fuzz run api_guard_fuzz -- -max_total_time=60
 //
 // ⚠ The rewrite functions that call pg_parse_query() are NOT exercised here
 // because they require a live PostgreSQL backend.  Integration-level fuzzing

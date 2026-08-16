@@ -113,6 +113,15 @@ pub static PGS_ALLOW_CIRCULAR: GucSetting<bool> = GucSetting::<bool>::new(false)
 /// from overcommitting the shared PostgreSQL `max_worker_processes` budget.
 pub static PGS_MAX_DYNAMIC_REFRESH_WORKERS: GucSetting<i32> = GucSetting::<i32>::new(4);
 
+/// v0.85.0: Hard upper bound for explicit drain waits.
+pub static PGS_DRAIN_TIMEOUT_MAX_SECONDS: GucSetting<i32> = GucSetting::<i32>::new(86_400);
+
+/// v0.85.0: Maximum rows processed by one scheduler maintenance category per tick.
+pub static PGS_SCHEDULER_MAINTENANCE_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1_000);
+
+/// v0.85.0: Age of terminal scheduler jobs before bounded pruning.
+pub static PGS_SCHEDULER_JOB_RETENTION_SECONDS: GucSetting<i32> = GucSetting::<i32>::new(3_600);
+
 /// C3-1: Per-database dynamic refresh worker quota.
 ///
 /// When > 0, each per-database scheduler limits itself to this many
@@ -552,6 +561,12 @@ pub static PGS_SELF_HEAL_OOM: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Reverts after 3 consecutive successes.
 pub static PGS_SELF_HEAL_LOCK_TIMEOUT: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// OPS-81-4: Maximum lock wait for scheduler-initiated refresh statements.
+pub static PGS_SCHEDULED_LOCK_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
+
+/// OPS-81-4: Maximum execution time for scheduler-initiated refresh statements.
+pub static PGS_SCHEDULED_STATEMENT_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(900_000);
+
 /// Register all scheduler-related GUC variables.
 pub fn register_scheduler_gucs() {
     GucRegistry::define_int_guc(
@@ -725,6 +740,59 @@ pub fn register_scheduler_gucs() {
         &PGS_MAX_DYNAMIC_REFRESH_WORKERS,
         1,  // min
         64, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.scheduled_lock_timeout_ms",
+        c"Lock wait deadline for scheduler refreshes in milliseconds.",
+        c"Applied with SET LOCAL to scheduler-initiated refresh transactions. \
+           Manual refreshes retain the caller's lock_timeout.",
+        &PGS_SCHEDULED_LOCK_TIMEOUT_MS,
+        100,
+        600_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_trickle.scheduled_statement_timeout_ms",
+        c"Execution deadline for scheduler refreshes in milliseconds.",
+        c"Applied with SET LOCAL to scheduler-initiated refresh transactions. \
+           Manual refreshes retain the caller's statement_timeout.",
+        &PGS_SCHEDULED_STATEMENT_TIMEOUT_MS,
+        1_000,
+        86_400_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_trickle.drain_timeout_max_seconds",
+        c"Hard maximum explicit drain timeout in seconds.",
+        c"Explicit drain waits are capped at this value and never clear drain on timeout.",
+        &PGS_DRAIN_TIMEOUT_MAX_SECONDS,
+        1,
+        86_400,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_trickle.scheduler_maintenance_batch_size",
+        c"Maximum rows per maintenance category per scheduler tick.",
+        c"Bounds terminal-job, history, and deferred-cleanup work outside dispatch.",
+        &PGS_SCHEDULER_MAINTENANCE_BATCH_SIZE,
+        10,
+        10_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_trickle.scheduler_job_retention_seconds",
+        c"Retention period for terminal scheduler jobs.",
+        c"Terminal jobs older than this period are removed in bounded batches.",
+        &PGS_SCHEDULER_JOB_RETENTION_SECONDS,
+        60,
+        2_592_000,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1311,7 +1379,7 @@ pub fn pg_trickle_enable_change_buffer_fanout() -> bool {
 
 /// API-1/2 (v0.62.0): Returns the pause_scheduler drain timeout in seconds.
 pub fn pg_trickle_scheduler_drain_timeout() -> i32 {
-    PGS_SCHEDULER_DRAIN_TIMEOUT.get()
+    PGS_SCHEDULER_DRAIN_TIMEOUT.get().clamp(1, 3_600)
 }
 
 /// PERF-2 (v0.63.0): Returns whether CTE-fused multi-node refresh is enabled.
@@ -1402,7 +1470,7 @@ pub fn pg_trickle_history_prune_interval_seconds() -> i32 {
 
 /// A35 (v0.36.0): Returns the drain timeout in seconds.
 pub fn pg_trickle_drain_timeout() -> i32 {
-    PGS_DRAIN_TIMEOUT.get()
+    PGS_DRAIN_TIMEOUT.get().clamp(1, 3_600)
 }
 
 /// DVM-3 (v0.77.0): Returns whether differential refresh result validation is enabled.
@@ -1429,4 +1497,22 @@ pub fn pg_trickle_self_heal_oom() -> bool {
 /// QW-8 (v0.81.0): Returns whether lock-timeout interval backoff is enabled.
 pub fn pg_trickle_self_heal_lock_timeout() -> bool {
     PGS_SELF_HEAL_LOCK_TIMEOUT.get()
+}
+
+pub fn pg_trickle_scheduled_lock_timeout_ms() -> i32 {
+    PGS_SCHEDULED_LOCK_TIMEOUT_MS.get()
+}
+
+pub fn pg_trickle_scheduled_statement_timeout_ms() -> i32 {
+    PGS_SCHEDULED_STATEMENT_TIMEOUT_MS.get()
+}
+
+pub fn pg_trickle_scheduler_maintenance_batch_size() -> i32 {
+    PGS_SCHEDULER_MAINTENANCE_BATCH_SIZE.get().clamp(10, 10_000)
+}
+
+pub fn pg_trickle_scheduler_job_retention_seconds() -> i32 {
+    PGS_SCHEDULER_JOB_RETENTION_SECONDS
+        .get()
+        .clamp(60, 2_592_000)
 }

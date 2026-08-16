@@ -11,7 +11,7 @@
 //   - sqlstate_to_string               (error.rs — SQLSTATE code formatter)
 //
 // Run locally with:
-//   cargo +nightly fuzz run wal_fuzz -- -max_total_time=60
+//   cargo +nightly fuzz run error_classifier_fuzz -- -max_total_time=60
 //
 // Invariants verified:
 //   1. No panic on any byte sequence.

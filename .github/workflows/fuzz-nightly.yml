@@ -55,16 +55,25 @@ jobs:
       - name: Extended fuzz run (300 s per target)
         env:
           FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '300' }}
+          FUZZ_NIGHTLY_CASES: ${{ vars.FUZZ_NIGHTLY_CASES || '1000' }}
+          FUZZ_SEED: '8502'
         run: |
           set -euo pipefail
-          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+          mapfile -t TARGETS < <(python3 scripts/fuzz_targets.py)
+          test "${#TARGETS[@]}" -gt 0
+          test "${FUZZ_NIGHTLY_CASES}" -ge 1
+          echo "fuzz seed=${FUZZ_SEED} required_cases=${FUZZ_NIGHTLY_CASES} targets=${#TARGETS[@]}"
           for TARGET in "${TARGETS[@]}"; do
             echo "=== Fuzzing $TARGET for ${FUZZ_SECONDS}s ==="
             CORPUS_DIR="fuzz/corpus/$TARGET"
-            mkdir -p "$CORPUS_DIR"
-
             # Run extended fuzz, seeding from existing corpus.
-            cargo fuzz run "$TARGET" "$CORPUS_DIR" -- -max_total_time="${FUZZ_SECONDS}" 2>&1 || {
+            if [ -d "$CORPUS_DIR" ]; then
+              CORPUS_ARGS=("$CORPUS_DIR")
+            else
+              echo "No corpus for $TARGET — using bounded seed fuzz"
+              CORPUS_ARGS=()
+            fi
+            cargo fuzz run "$TARGET" "${CORPUS_ARGS[@]}" -- -max_total_time="${FUZZ_SECONDS}" -runs="${FUZZ_NIGHTLY_CASES}" -seed="${FUZZ_SEED}" 2>&1 || {
               echo "FAIL: $TARGET found a crash during nightly fuzz run"
               exit 1
             }
@@ -78,7 +87,8 @@ jobs:
       - name: Log corpus size summary
         run: |
           echo "=== Corpus size summary ==="
-          for TARGET in parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz; do
+          mapfile -t TARGETS < <(python3 scripts/fuzz_targets.py)
+          for TARGET in "${TARGETS[@]}"; do
             COUNT=$(ls "fuzz/corpus/$TARGET" 2>/dev/null | wc -l | tr -d ' ')
             echo "  $TARGET: $COUNT"
           done

@@ -160,6 +160,11 @@ for notify in conn.notifies():
 
 ## Prometheus & Grafana Stack
 
+For the native scheduler endpoint, set `pg_trickle.metrics_port` and leave
+`pg_trickle.metrics_bind_address` at its loopback default unless remote
+scraping is explicitly required. Only literal IPv4/IPv6 bind addresses are
+accepted; use `0.0.0.0` or `::` with appropriate network controls.
+
 For production deployments, use the pre-built observability stack in the
 `monitoring/` directory:
 

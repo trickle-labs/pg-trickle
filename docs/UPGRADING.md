@@ -128,6 +128,28 @@ the 0.84.0 package. Verify that `pgtrickle.version()`,
 `pgtrickle.restore_stream_tables()` completes protected FULL baselines and
 post-restore DML converges with each defining query.
 
+### 0.84.0 → 0.85.0 scheduler and resource resilience
+
+Install the 0.85.0 shared library and SQL together, restart PostgreSQL to
+initialize the new shared-memory layout, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.85.0';
+```
+
+The migration adds typed refresh outcomes, worker-generation tracking, and
+self-healing state to the scheduler catalogs. Drain requests now remain active
+after completion or timeout; resume dispatch explicitly with:
+
+```sql
+SELECT pgtrickle.resume_after_drain();
+```
+
+Before upgrading, review parser, bulk-control, and metrics settings against the
+new finite limits. `is_drained()` returns `NULL` before the first drain
+request, and metrics remain loopback-bound unless
+`pg_trickle.metrics_bind_address` is configured explicitly.
+
 ### 5. Verify the Upgrade
 
 ```sql
@@ -712,7 +734,7 @@ other than documentation comments.
 |-----|---------|---------|
 | `pg_trickle.use_sqlstate_classification` | `false` | Locale-safe SQLSTATE-based retry classification |
 | `pg_trickle.template_cache_max_age_hours` | `168` | Max age for L2 template-cache entries (hours) |
-| `pg_trickle.max_parse_nodes` | `0` | Parser node-count guard (0 = disabled) |
+| `pg_trickle.max_parse_nodes` | `100000` | Parser node-count guard (always enabled; hard maximum 1000000) |
 
 **Behavioral changes:**
 

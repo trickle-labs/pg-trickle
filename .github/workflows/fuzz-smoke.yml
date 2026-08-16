@@ -59,20 +59,25 @@ jobs:
       - name: Replay corpus (PR smoke — fast, no new findings)
         env:
           FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '30' }}
+          FUZZ_SMOKE_CASES: ${{ vars.FUZZ_SMOKE_CASES || '100' }}
+          FUZZ_SEED: '8501'
         run: |
           set -euo pipefail
-          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz snapshot_fingerprint_fuzz)
+          mapfile -t TARGETS < <(python3 scripts/fuzz_targets.py)
+          test "${#TARGETS[@]}" -gt 0
+          test "${FUZZ_SMOKE_CASES}" -ge 1
+          echo "fuzz seed=${FUZZ_SEED} required_cases=${FUZZ_SMOKE_CASES} targets=${#TARGETS[@]}"
           for TARGET in "${TARGETS[@]}"; do
             echo "=== Replaying corpus for $TARGET ==="
             CORPUS_DIR="fuzz/corpus/$TARGET"
             if [ -d "$CORPUS_DIR" ] && [ "$(ls -A "$CORPUS_DIR" 2>/dev/null)" ]; then
-              cargo fuzz run "$TARGET" "$CORPUS_DIR" -- -max_total_time=0 -runs=0 2>&1 || {
+              cargo fuzz run "$TARGET" "$CORPUS_DIR" -- -runs="${FUZZ_SMOKE_CASES}" -seed="${FUZZ_SEED}" 2>&1 || {
                 echo "FAIL: $TARGET crashed on existing corpus"
                 exit 1
               }
             else
-              echo "No corpus for $TARGET — running ${FUZZ_SECONDS}s seed smoke"
-              cargo fuzz run "$TARGET" -- -max_total_time="${FUZZ_SECONDS}" 2>&1 || {
+              echo "No corpus for $TARGET — running ${FUZZ_SMOKE_CASES} seed cases"
+              cargo fuzz run "$TARGET" -- -max_total_time="${FUZZ_SECONDS}" -runs="${FUZZ_SMOKE_CASES}" -seed="${FUZZ_SEED}" 2>&1 || {
                 echo "FAIL: $TARGET crashed during seed smoke"
                 exit 1
               }
@@ -83,9 +88,13 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '60' }}
+          FUZZ_SMOKE_CASES: ${{ vars.FUZZ_SMOKE_CASES || '100' }}
+          FUZZ_SEED: '8501'
         run: |
           set -euo pipefail
-          TARGETS=(parser_fuzz cron_fuzz dag_fuzz guc_fuzz cdc_fuzz wal_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz snapshot_fingerprint_fuzz)
+          mapfile -t TARGETS < <(python3 scripts/fuzz_targets.py)
+          test "${#TARGETS[@]}" -gt 0
+          test "${FUZZ_SMOKE_CASES}" -ge 1
           for TARGET in "${TARGETS[@]}"; do
             echo "=== Fuzzing $TARGET for ${FUZZ_SECONDS}s ==="
             cargo fuzz run "$TARGET" -- -max_total_time="${FUZZ_SECONDS}" 2>&1 || {

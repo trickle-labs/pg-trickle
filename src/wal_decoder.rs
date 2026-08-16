@@ -113,12 +113,13 @@ pub fn create_publication(source_oid: pg_sys::Oid) -> Result<(), PgTrickleError>
             source_table,
             with_clause,
         );
-        Spi::run(&sql).map_err(|e| {
-            PgTrickleError::WalTransitionError(format!(
-                "Failed to create publication {}: {}",
-                pub_name, e
-            ))
-        })?;
+        Spi::run(&sql) // nosemgrep: rust.spi.run.dynamic-format — publication name is quote_ident()-escaped.
+            .map_err(|e| {
+                PgTrickleError::WalTransitionError(format!(
+                    "Failed to create publication {}: {}",
+                    pub_name, e
+                ))
+            })?;
     }
 
     Ok(())
@@ -130,12 +131,13 @@ pub fn create_publication(source_oid: pg_sys::Oid) -> Result<(), PgTrickleError>
 pub fn drop_publication(source_oid: pg_sys::Oid) -> Result<(), PgTrickleError> {
     let pub_name = publication_name_for_source(source_oid);
     let sql = format!("DROP PUBLICATION IF EXISTS {}", quote_ident(&pub_name));
-    Spi::run(&sql).map_err(|e| {
-        PgTrickleError::WalTransitionError(format!(
-            "Failed to drop publication {}: {}",
-            pub_name, e
-        ))
-    })?;
+    Spi::run(&sql) // nosemgrep: rust.spi.run.dynamic-format — publication name is quote_ident()-escaped.
+        .map_err(|e| {
+            PgTrickleError::WalTransitionError(format!(
+                "Failed to drop publication {}: {}",
+                pub_name, e
+            ))
+        })?;
     Ok(())
 }
 
@@ -644,6 +646,11 @@ pub(crate) fn extract_table_name_from_test_decoding(data: &str) -> Option<&str> 
     Some(&rest[..colon_pos])
 }
 
+#[doc(hidden)]
+pub fn extract_test_decoding_table_for_fuzz(data: &str) -> Option<&str> {
+    extract_table_name_from_test_decoding(data)
+}
+
 /// COR-5: Resolve the set of canonical qualified table names to match against
 /// WAL filter output during a poll cycle.
 ///
@@ -718,40 +725,43 @@ fn parse_pgoutput_action(data: &str) -> Option<char> {
     }
 }
 
+#[doc(hidden)]
+pub fn parse_test_decoding_action_for_fuzz(data: &str) -> Option<char> {
+    parse_pgoutput_action(data)
+}
+
 /// Parse column values from a pgoutput data line.
 ///
 /// Extracts `column_name[type]:value` pairs from the pgoutput text format.
 /// Returns a map from column name to string value.
 fn parse_pgoutput_columns(data: &str) -> std::collections::HashMap<String, String> {
     let mut cols = std::collections::HashMap::new();
-
-    // Find the part after the action type (INSERT:/UPDATE:/DELETE:)
     let payload = if let Some(pos) = data.find("INSERT:") {
         &data[pos + 8..]
     } else if let Some(pos) = data.find("UPDATE:") {
-        // UPDATE has "old-key:" and "new-tuple:" sections
         &data[pos + 8..]
     } else if let Some(pos) = data.find("DELETE:") {
         &data[pos + 8..]
     } else {
         return cols;
     };
-
-    // Parse column_name[type]:value pairs
-    // Format: col_name[type_name]:value col_name2[type_name2]:value2
     for segment in payload.split_whitespace() {
         if let Some(bracket_pos) = segment.find('[') {
             let col_name = &segment[..bracket_pos];
             if let Some(colon_pos) = segment.find("]:") {
-                let value = &segment[colon_pos + 2..];
-                // Strip surrounding quotes if present
-                let clean_value = value.trim_matches('\'');
-                cols.insert(col_name.to_string(), clean_value.to_string());
+                let value = segment[colon_pos + 2..].trim_matches('\'');
+                cols.insert(col_name.to_string(), value.to_string());
             }
         }
     }
-
     cols
+}
+
+#[doc(hidden)]
+pub fn parse_test_decoding_columns_for_fuzz(
+    data: &str,
+) -> std::collections::HashMap<String, String> {
+    parse_pgoutput_columns(data)
 }
 
 /// Parse old-tuple column values from a pgoutput UPDATE data line.
@@ -768,34 +778,31 @@ fn parse_pgoutput_columns(data: &str) -> std::collections::HashMap<String, Strin
 /// columns appear in old-key).
 fn parse_pgoutput_old_columns(data: &str) -> std::collections::HashMap<String, String> {
     let mut cols = std::collections::HashMap::new();
-
-    // Find the "old-key:" section in UPDATE messages.
     let old_key_start = match data.find("old-key:") {
-        Some(pos) => pos + 9, // skip past "old-key: "
+        Some(pos) => pos + 9,
         None => return cols,
     };
-
-    // The old-key section ends at "new-tuple:" (if present) or at end of string.
     let old_key_end = data[old_key_start..]
         .find("new-tuple:")
         .map(|pos| old_key_start + pos)
         .unwrap_or(data.len());
-
-    let old_section = &data[old_key_start..old_key_end];
-
-    // Parse column_name[type]:value pairs from the old-key section.
-    for segment in old_section.split_whitespace() {
+    for segment in data[old_key_start..old_key_end].split_whitespace() {
         if let Some(bracket_pos) = segment.find('[') {
             let col_name = &segment[..bracket_pos];
             if let Some(colon_pos) = segment.find("]:") {
-                let value = &segment[colon_pos + 2..];
-                let clean_value = value.trim_matches('\'');
-                cols.insert(col_name.to_string(), clean_value.to_string());
+                let value = segment[colon_pos + 2..].trim_matches('\'');
+                cols.insert(col_name.to_string(), value.to_string());
             }
         }
     }
-
     cols
+}
+
+#[doc(hidden)]
+pub fn parse_test_decoding_old_columns_for_fuzz(
+    data: &str,
+) -> std::collections::HashMap<String, String> {
+    parse_pgoutput_old_columns(data)
 }
 
 /// Write a decoded WAL change to the buffer table.
@@ -1080,6 +1087,16 @@ fn build_pk_hash_parameterized(
         }
         crate::hash::build_composite_hash_expr(&array_items)
     }
+}
+
+#[doc(hidden)]
+pub fn build_test_decoding_parameter_plan_for_fuzz(
+    pk_columns: &[String],
+    parsed: &std::collections::HashMap<String, String>,
+) -> (String, Vec<Option<String>>) {
+    let mut params = Vec::new();
+    let expression = build_pk_hash_parameterized(pk_columns, parsed, &mut params);
+    (expression, params)
 }
 
 /// Build a pk_hash expression from parsed column values (legacy — kept for
@@ -2338,6 +2355,7 @@ fn detect_schema_mismatch(
     if parsed.is_empty() {
         return false;
     }
+
     let expected_names: std::collections::HashSet<&str> = expected_columns
         .iter()
         .map(|(name, _)| name.as_str())
@@ -2365,6 +2383,14 @@ fn detect_schema_mismatch(
     }
 
     false
+}
+
+#[doc(hidden)]
+pub fn detect_test_decoding_schema_mismatch_for_fuzz(
+    parsed: &std::collections::HashMap<String, String>,
+    expected_columns: &[(String, String)],
+) -> bool {
+    detect_schema_mismatch(parsed, expected_columns)
 }
 
 // ── Per-worker change buffer write (Citus distributed CDC) ───────────────────

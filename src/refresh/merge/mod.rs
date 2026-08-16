@@ -360,6 +360,15 @@ pub fn execute_differential_refresh(
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
 ) -> Result<(i64, i64), PgTrickleError> {
+    execute_differential_refresh_with_tuning(st, prev_frontier, new_frontier, &st.runtime_tuning())
+}
+
+pub fn execute_differential_refresh_with_tuning(
+    st: &StreamTableMeta,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    tuning: &crate::catalog::RefreshRuntimeTuning,
+) -> Result<(i64, i64), PgTrickleError> {
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
     // F10: record start time for OTLP span (nanoseconds since Unix epoch).
@@ -914,7 +923,7 @@ pub fn execute_differential_refresh(
             // Flush MERGE template cache so next cycle rebuilds with MERGE path.
             crate::shmem::bump_cache_generation();
             // NS-2: Emit NOTIFY alert so operators are informed of the revert.
-            crate::monitor::emit_alert(
+            let _ = crate::monitor::emit_alert(
                 crate::monitor::AlertEvent::AppendOnlyReverted,
                 schema,
                 name,
@@ -1820,7 +1829,7 @@ pub fn execute_differential_refresh(
 
     // ── P5-1 / P5-2: Delta-specific planner hints from GUCs ────────
     {
-        let delta_wm = crate::config::pg_trickle_delta_work_mem();
+        let delta_wm = tuning.delta_work_mem_mb;
         if delta_wm > 0 {
             let work_mem_sql = format!("SET LOCAL work_mem = '{delta_wm}MB'");
             if let Err(e) = Spi::run(&work_mem_sql) {
@@ -1846,7 +1855,8 @@ pub fn execute_differential_refresh(
     // SET LOCAL hints that are automatically reset at transaction end.
     // Deep joins (5+ tables) get aggressive hints to avoid pathological
     // plans that spill excessive temp files.
-    let work_mem_cap_exceeded = apply_planner_hints(total_change_count, st.pgt_relid, scan_count);
+    let work_mem_cap_exceeded =
+        apply_planner_hints(total_change_count, st.pgt_relid, scan_count, tuning);
 
     // ── SCAL-3: Work-mem cap exceeded — fall back to FULL ───────────
     if work_mem_cap_exceeded {
@@ -1957,7 +1967,9 @@ pub fn execute_differential_refresh(
             );
             let ao_disable_sql = format!("ALTER TABLE {} DISABLE TRIGGER USER", ao_quoted_table);
             let ao_enable_sql = format!("ALTER TABLE {} ENABLE TRIGGER USER", ao_quoted_table);
-            if ao_suppress && let Err(e) = Spi::run(&ao_disable_sql) {
+            if ao_suppress && let Err(e) = Spi::run(&ao_disable_sql)
+            // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
+            {
                 pgrx::debug1!(
                     "[pg_trickle] A-3a: failed to disable triggers for {}.{}: {}",
                     schema,
@@ -1973,7 +1985,9 @@ pub fn execute_differential_refresh(
                 Ok::<i64, PgTrickleError>(result.len() as i64)
             })?;
 
-            if ao_suppress && let Err(e) = Spi::run(&ao_enable_sql) {
+            if ao_suppress && let Err(e) = Spi::run(&ao_enable_sql)
+            // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
+            {
                 pgrx::debug1!(
                     "[pg_trickle] A-3a: failed to re-enable triggers for {}.{}: {}",
                     schema,
