@@ -106,7 +106,8 @@ async fn test_drain_resume_catches_up() {
     // (drain does not truncate the stream table, just stops new cycles)
     let _ = view_count_during_drain; // value is non-deterministic; just verify no crash
 
-    // Resume: re-enable the scheduler.
+    // Resume the persistent drain gate, then re-enable the scheduler.
+    db.execute("SELECT pgtrickle.resume_after_drain()").await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = on").await;
     db.execute("SELECT pg_reload_conf()").await;
     common::wait_for_refresh_history(&db.pool, "public.drain_view", 2, Duration::from_secs(60))
@@ -190,7 +191,8 @@ async fn test_drain_under_workload() {
         .query_scalar("SELECT count(*) FROM public.drain_wl_view")
         .await;
 
-    // Resume and verify catch-up.
+    // Resume the persistent drain gate and verify catch-up.
+    db.execute("SELECT pgtrickle.resume_after_drain()").await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = on").await;
     db.execute("SELECT pg_reload_conf()").await;
     common::wait_for_refresh_history(&db.pool, "public.drain_wl_view", 2, Duration::from_secs(60))
@@ -277,7 +279,8 @@ async fn test_drain_buffer_accumulates_during_drain() {
         .await;
     let _ = buf_table; // used above
 
-    // Resume.
+    // Resume the persistent drain gate.
+    db.execute("SELECT pgtrickle.resume_after_drain()").await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = on").await;
     db.execute("SELECT pg_reload_conf()").await;
     common::wait_for_refresh_history(
