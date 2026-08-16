@@ -158,7 +158,7 @@ pub fn pause_scheduler(nodes: pgrx::Array<&str>) -> &'static str {
         pgrx::check_for_interrupts!();
         unsafe {
             // SAFETY: pg_usleep is PostgreSQL's bounded backend sleep helper.
-            pgrx::pg_sys::pg_usleep(poll_interval.as_micros() as i64);
+            pgrx::pg_sys::pg_usleep(poll_interval.as_micros() as std::os::raw::c_long);
         }
     }
 

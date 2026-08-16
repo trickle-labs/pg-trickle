@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**133 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**134 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -45,8 +45,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.detach_outbox()` | `pgtrickle` | `` | Removes the entry from `pgtrickle.pgt_outbox_config`. |
 | `pgtrickle.diagnose_errors()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.diagnose_errors('my_stream_table'); ```. |
 | `pgtrickle.diamond_groups()` | `pgtrickle` | `SetOf row` | Returns one row per group member, indicating which group it belongs to, whether it is a convergence (fan-in) node, the group's current epoch, and the effective schedule policy. |
-| `pgtrickle.drain()` | `pgtrickle` | `` | # Example ```sql -- Quiesce before pg_upgrade or rolling restart: SELECT pgtrickle.drain(); -- Confirm drained: SELECT pgtrickle.is_drained(); -- Resume normal operation after maintenance: UPDATE pgtrickle.pgt_stream_tables SET status = status; -- noop, scheduler picks up ```. |
-| `pgtrickle.resume_after_drain()` | `pgtrickle` | `boolean` | Explicitly re-enables scheduler dispatch after a persistent drain request. |
+| `pgtrickle.drain()` | `pgtrickle` | `` | # Example ```sql -- Quiesce before pg_upgrade or rolling restart: SELECT pgtrickle.drain(); -- Confirm drained: SELECT pgtrickle.is_drained(); -- Resume normal operation after maintenance: SELECT pgtrickle.resume_after_drain(); ```. |
 | `pgtrickle.drop_refresh_group()` | `pgtrickle` | `void` | Drop a refresh group by name. |
 | `pgtrickle.drop_snapshot()` | `pgtrickle` | `` | Removes the snapshot table and its catalog row from `pgtrickle.pgt_snapshots`. |
 | `pgtrickle.drop_stream_table()` | `pgtrickle` | `` | Changed in v0.19.0 (UX-6): default flipped from `true` to `false` to prevent accidental cascading drops. |
@@ -70,7 +69,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.health_check()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_check()`. |
 | `pgtrickle.health_summary()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_summary()`. |
 | `pgtrickle.history_prune_status()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.history_prune_status()`. |
-| `pgtrickle.is_drained()` | `pgtrickle` | `boolean` | A scheduler is considered drained when `DRAIN_COMPLETED >= DRAIN_REQUESTED` in shared memory. |
+| `pgtrickle.is_drained()` | `pgtrickle` | `boolean (nullable)` | A scheduler is considered drained when `DRAIN_COMPLETED >= DRAIN_REQUESTED` in shared memory. |
 | `pgtrickle.list_auxiliary_columns()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.list_auxiliary_columns('my_stream_table'); ```. |
 | `pgtrickle.list_distance_subscriptions()` | `pgtrickle` | `` | When `p_stream_table` is provided (e.g. |
 | `pgtrickle.list_snapshots()` | `pgtrickle` | `SetOf row` | Returns one row per snapshot ordered by creation time descending. |
@@ -104,6 +103,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
 | `pgtrickle.restore_stream_tables()` | `pgtrickle` | `void` | During a `pg_restore`, `pg_dump` will restore the base storage tables and the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers, dependency wiring, frontiers, and ownership state cannot be safely reconstructed here without a protected reconciliation flow. |
+| `pgtrickle.resume_after_drain()` | `pgtrickle` | `boolean` | v0.85.0: Explicitly resume dispatch after a persistent drain. |
 | `pgtrickle.resume_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.resume_scheduler(ARRAY['public.my_view']); ```. |
 | `pgtrickle.resume_stream_table()` | `pgtrickle` | `` | Resume a suspended stream table, clearing its consecutive error count and re-enabling automated and manual refreshes. |
 | `pgtrickle.schedule_recommendations()` | `pgtrickle` | `SetOf row` | PLAN-2 (v0.27.0): Return one schedule recommendation row per registered stream table, sortable by `delta_pct DESC`. |

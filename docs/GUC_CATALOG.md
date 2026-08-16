@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**129 configuration parameters** extracted from `src/config/`.
+**137 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -48,6 +48,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.diff_output_format` | `text` | `"split"` | Controls how the DI-2 aggregate UPDATE-split surfaces changes: - `"split"` (default): Emit DELETE+INSERT pairs for aggregate UPDATEs. |
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
+| `pg_trickle.drain_timeout_max_seconds` | `int4` | `86400` | v0.85.0: Hard upper bound for explicit drain waits. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `false` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | When `true`, trace context is propagated through refresh cycles for distributed tracing with OpenTelemetry. |
@@ -74,19 +75,19 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.log_merge_sql` | `bool` | `false` | Intended for debugging MERGE query generation only. |
 | `pg_trickle.matview_polling` | `bool` | `false` | When `true`, materialized views referenced in DIFFERENTIAL/IMMEDIATE defining queries will be supported via a snapshot-comparison approach (same mechanism as foreign table polling). |
 | `pg_trickle.max_buffer_rows` | `int4` | `1000000` | Set to 0 to disable the limit. |
+| `pg_trickle.max_bulk_api_items` | `int4` | `256` | Maximum items accepted by a bulk API call. |
 | `pg_trickle.max_change_buffer_alert_rows` | `int4` | `0` | Set to 0 to disable (default). |
 | `pg_trickle.max_concurrent_refreshes` | `int4` | `4` | Default: 4. |
-| `pg_trickle.max_bulk_api_items` | `int4` | `256` | Maximum items accepted by one bulk API call; hard maximum 1000. |
 | `pg_trickle.max_consecutive_errors` | `int4` | `3` | Default: 3. |
+| `pg_trickle.max_control_targets` | `int4` | `64` | Maximum stream-table targets accepted by a pause/resume API call. |
 | `pg_trickle.max_delta_estimate_rows` | `int4` | `0` | Set to 0 to disable the estimation check (default). |
-| `pg_trickle.max_diff_ctes` | `int4` | `1000` | Complex queries with many operators, joins, and set operations can produce hundreds of CTEs; hard maximum 10000. |
+| `pg_trickle.max_diff_ctes` | `int4` | `1000` | Complex queries with many operators, joins, and set operations can produce hundreds of CTEs. |
 | `pg_trickle.max_dynamic_refresh_workers` | `int4` | `4` | This is distinct from `pg_trickle.max_concurrent_refreshes`, which is the per-database dispatch cap. |
 | `pg_trickle.max_fixpoint_iterations` | `int4` | `100` | When stream tables form a cyclic dependency (circular reference), the scheduler iterates to a fixed point. |
 | `pg_trickle.max_grouping_set_branches` | `int4` | `64` | Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02). |
-| `pg_trickle.max_control_targets` | `int4` | `64` | Maximum targets accepted by one pause/resume API call; hard maximum 256. |
 | `pg_trickle.max_parallel_workers` | `int4` | `0` | Default 0 = serial mode (existing behavior preserved). |
 | `pg_trickle.max_parse_depth` | `int4` | `64` | Prevents stack-overflow crashes on pathological queries with deeply nested subqueries, CTEs, or set operations. |
-| `pg_trickle.max_parse_nodes` | `int4` | `100000` | Queries exceeding this always-on guard are rejected with `QueryTooComplex`; hard maximum 1000000. |
+| `pg_trickle.max_parse_nodes` | `int4` | `0` | Queries that exceed this limit are rejected with `QueryTooComplex` to prevent unbounded memory allocation in the parse advisory warnings cache and CTE registry. |
 | `pg_trickle.merge_batch_size` | `int4` | `50000` | Default: 50 000. |
 | `pg_trickle.merge_join_strategy` | `text` | `"auto"` | Controls the join strategy hint applied via `SET LOCAL` during MERGE: - `"auto"` (default): delta-size heuristics choose the strategy. |
 | `pg_trickle.merge_planner_hints` | `bool` | `true` | Deprecated — use `pg_trickle.planner_aggressive` instead. |
@@ -94,8 +95,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.merge_strategy` | `text` | `"auto"` | The former `"delete_insert"` value was removed in v0.19.0 (CORR-1). |
 | `pg_trickle.merge_strategy_threshold` | `float8` | `0.01` | Default: 0.01 (1%). |
 | `pg_trickle.merge_work_mem_mb` | `int4` | `64` | A higher value lets PostgreSQL use larger hash tables for the MERGE join, avoiding disk-spilling sort/merge strategies on large deltas. |
+| `pg_trickle.metrics_bind_address` | `text` | `"127.0.0.1"` | Must be a literal IPv4 or IPv6 address. |
 | `pg_trickle.metrics_port` | `int4` | `0` | Set to 0 (default) to disable the exporter. |
-| `pg_trickle.metrics_bind_address` | `text` | `"127.0.0.1"` | Literal IPv4/IPv6 address for the metrics endpoint; remote binding must be explicit. |
 | `pg_trickle.metrics_request_timeout_ms` | `int4` | `5000` | Default: 5000 (5 seconds). |
 | `pg_trickle.min_schedule_seconds` | `int4` | `1` | Default: 1 s. |
 | `pg_trickle.notify_coalesce_ms` | `int4` | `250` | Default: 250 ms. |
@@ -113,8 +114,12 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.reindex_drift_threshold` | `float8` | `0.20` | Default: 0.20. |
 | `pg_trickle.schedule_alert_cooldown_seconds` | `int4` | `300` | Prevents alert spam when the cost model consistently predicts SLA breach. |
 | `pg_trickle.schedule_recommendation_min_samples` | `int4` | `20` | When fewer samples are available, `confidence` is returned as 0.0 and the recommendation fields are NULL or conservative defaults. |
+| `pg_trickle.scheduled_lock_timeout_ms` | `int4` | `30000` | OPS-81-4: Maximum lock wait for scheduler-initiated refresh statements. |
+| `pg_trickle.scheduled_statement_timeout_ms` | `int4` | `900000` | OPS-81-4: Maximum execution time for scheduler-initiated refresh statements. |
 | `pg_trickle.scheduler_drain_timeout` | `int4` | `30` | Default: 30 seconds. |
 | `pg_trickle.scheduler_interval_ms` | `int4` | `1000` | Default: 1,000 ms (1 s). |
+| `pg_trickle.scheduler_job_retention_seconds` | `int4` | `3600` | v0.85.0: Age of terminal scheduler jobs before bounded pruning. |
+| `pg_trickle.scheduler_maintenance_batch_size` | `int4` | `1000` | v0.85.0: Maximum rows processed by one scheduler maintenance category per tick. |
 | `pg_trickle.self_heal_lock_timeout` | `bool` | `true` | When `true`, a refresh error containing "lock timeout" doubles the effective refresh interval for the affected stream table (exponential backoff). |
 | `pg_trickle.self_heal_oom` | `bool` | `true` | When `true`, a refresh error containing "out of memory" causes the scheduler to reduce the effective `merge_work_mem_mb` for the affected stream table by 25% on the next tick and retry. |
 | `pg_trickle.self_monitoring_auto_apply` | `text` | `"off"` | Controls when self-monitoring insights are automatically applied: - `"off"` (default): Never auto-apply. |

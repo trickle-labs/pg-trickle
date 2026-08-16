@@ -1,4 +1,4 @@
-# pg_trickle unsafe { block baseline — generated 2026-08-15
+# pg_trickle unsafe { block baseline — generated 2026-08-16
 # Tracks `grep -c "unsafe {"` counts per source file.
 # Files with 0 unsafe blocks are omitted.
 #
@@ -7,15 +7,19 @@
 #
 # Files and their unsafe block counts:
 src/api/helpers.rs 13
+src/api/mod.rs 1
+src/api/scheduler_control.rs 1
 src/api/snapshot.rs 6
+src/catalog.rs 3
 src/dvm/parser/mod.rs 20
 src/dvm/parser/rewrites.rs 65
 src/dvm/parser/sublinks/mod.rs 178
 src/dvm/parser/validation.rs 2
 src/lib.rs 2
+src/monitor/alert.rs 1
 src/scheduler/citus.rs 1
-src/scheduler/dispatch.rs 2
-src/scheduler/mod.rs 10
-src/scheduler/scheduler_loop.rs 4
-src/shmem.rs 46
+src/scheduler/dispatch.rs 9
+src/scheduler/mod.rs 11
+src/scheduler/scheduler_loop.rs 5
+src/shmem.rs 49
 src/wal_decoder.rs 5

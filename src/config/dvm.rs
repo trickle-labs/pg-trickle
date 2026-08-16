@@ -1031,7 +1031,7 @@ pub fn register_dvm_gucs() {
            unbounded memory allocation. Does not apply to queries already registered. \
            Default: 100000. The hard maximum is 1000000.",
         &PGS_MAX_PARSE_NODES,
-        1,
+        100_000,
         1_000_000,
         GucContext::Suset,
         GucFlags::default(),

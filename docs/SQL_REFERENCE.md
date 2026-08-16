@@ -4406,6 +4406,15 @@ table management.
 legacy `row_identity_version` on a stream table or required CDC buffer means
 incremental maintenance is not considered safe until a protected rebuild has
 completed.
+
+### pgtrickle.resume_after_drain
+
+Explicitly re-enables scheduler dispatch after a persistent drain request.
+
+```sql
+pgtrickle.resume_after_drain() → bool
+```
+
 | `pgtrickle.self_monitoring_status()` | `SetOf row` | Shows whether each self-monitoring stream table exists, its status, and last refresh time. |
 | `pgtrickle.teardown_self_monitoring()` | — | Drops all self-monitoring stream tables. Safe to call even if some are missing. |
 | `pgtrickle.reliability_counters()` | `SetOf row` | Returns shared-memory reliability counters (scheduler errors, worker crashes, CDC pause events). Useful for alert dashboards. |
