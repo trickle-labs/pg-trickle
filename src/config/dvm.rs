@@ -503,8 +503,8 @@ pub static PGS_TEMPLATE_CACHE_MAX_AGE_HOURS: GucSetting<i32> = GucSetting::<i32>
 ///
 /// Queries that exceed this limit are rejected with `QueryTooComplex` to prevent
 /// unbounded memory allocation in the parse advisory warnings cache and CTE registry.
-/// Set to 0 to disable the limit (default).
-pub static PGS_MAX_PARSE_NODES: GucSetting<i32> = GucSetting::<i32>::new(0);
+/// Default: 100,000. The hard maximum is 1,000,000.
+pub static PGS_MAX_PARSE_NODES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 
 /// A44-1 (v0.43.0): Maximum number of Scan nodes in the left child for which
 /// Part 3 correction term is emitted in inner-join differentiation.

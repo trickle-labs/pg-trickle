@@ -96,4 +96,9 @@ INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES ('0.85.0', 'Scheduler and resource resilience gate')
 ON CONFLICT (version) DO NOTHING;
 
+CREATE OR REPLACE FUNCTION pgtrickle."resume_after_drain"() RETURNS bool
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'resume_after_drain_wrapper';
+
 REVOKE EXECUTE ON FUNCTION pgtrickle.resume_after_drain() FROM PUBLIC;
