@@ -737,11 +737,11 @@ pub fn parse_test_decoding_action_for_fuzz(data: &str) -> Option<char> {
 fn parse_pgoutput_columns(data: &str) -> std::collections::HashMap<String, String> {
     let mut cols = std::collections::HashMap::new();
     let payload = if let Some(pos) = data.find("INSERT:") {
-        &data[pos + 8..]
+        data.get(pos + "INSERT:".len()..).unwrap_or("")
     } else if let Some(pos) = data.find("UPDATE:") {
-        &data[pos + 8..]
+        data.get(pos + "UPDATE:".len()..).unwrap_or("")
     } else if let Some(pos) = data.find("DELETE:") {
-        &data[pos + 8..]
+        data.get(pos + "DELETE:".len()..).unwrap_or("")
     } else {
         return cols;
     };
@@ -2618,6 +2618,13 @@ mod tests {
         let data = "BEGIN 12345";
         let cols = parse_pgoutput_columns(data);
         assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pgoutput_columns_truncated_action_marker() {
+        let data = format!("{}DELETE:", "x".repeat(24));
+        assert_eq!(data.len(), 31);
+        assert!(parse_pgoutput_columns(&data).is_empty());
     }
 
     // ── build_pk_hash_from_values tests ────────────────────────────
