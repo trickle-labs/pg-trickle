@@ -120,7 +120,11 @@ const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &[];
 /// The regression guard at the end of the test will fail if any query not in
 /// this list is skipped, catching silent regressions as the DVM evolves.
 #[rustfmt::skip]
-const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[];
+const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
+    // v0.85 fail-closed volatility admission rejects the stable expressions
+    // in q07/q08/q09 for IMMEDIATE mode. Use FULL or AUTO for these queries.
+    "q07", "q08", "q09",
+];
 
 // ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
 //
