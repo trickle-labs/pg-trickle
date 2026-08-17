@@ -67,10 +67,11 @@ fn rf_count() -> usize {
 // signalling a DVM regression where a previously-passing query no longer
 // creates or runs correctly.
 //
-// DIFFERENTIAL: all 22 queries pass at SF<10. At SF≥10, queries with correlated
-//               scalar subqueries in WHERE clauses become quadratic in the DVM delta
-//               SQL and exceed the 90-minute nextest slow-timeout. Those queries are
-//               in LARGE_SCALE_DIFFERENTIAL_SKIP below and are skipped automatically.
+// DIFFERENTIAL: all 22 queries previously passed at SF<10. The v0.83+ fail-closed
+//               volatility admission currently makes q07/q08/q09 FULL-only, and
+//               queries with correlated scalar subqueries in WHERE clauses become
+//               quadratic in the DVM delta SQL at SF≥10. The latter are in
+//               LARGE_SCALE_DIFFERENTIAL_SKIP below and are skipped automatically.
 // IMMEDIATE:    a subset cannot be created (IVM restriction). Populate by
 //               running with the guard disabled, then hardening the set.
 //
@@ -82,7 +83,12 @@ fn rf_count() -> usize {
 const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // DI-11 deep-join planner hints (disable nestloop, raise work_mem,
     // bump join_collapse_limit, temp_file_limit=-1) resolved Q05/Q09.
-    // All 22 TPC-H queries pass DIFFERENTIAL mode at SF<10.
+    // v0.83+ fail-closed volatility admission: q07/q08/q09 use EXTRACT(YEAR
+    // FROM date), which resolves to immutable date_part(text,date), but the
+    // name-only overload check also sees the stable timestamptz overload.
+    // They remain intentionally FULL-only until overload-aware function
+    // volatility resolution is implemented.
+    "q07", "q08", "q09",
     // v0.77.0: q12 uses CASE aggregate + IN-list predicate and is currently
     // forced to FULL refresh by CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK.
     "q12",
@@ -1474,7 +1480,7 @@ async fn test_tpch_full_vs_differential() {
     );
 
     // P0.2: Minimum threshold — must pass at least as many as the non-skipped set.
-    // With 5 known DIFFERENTIAL skips, at least 15/22 should pass.
+    // Allow two additional skips beyond the known DIFFERENTIAL limitations.
     let min_passing = queries.len() - DIFFERENTIAL_SKIP_ALLOWLIST.len() - 2; // -2 tolerance
     assert!(
         passed >= min_passing,
@@ -1878,7 +1884,7 @@ async fn test_tpch_performance_comparison() {
     );
 
     // P0.2: Minimum threshold — at least 15 queries must be benchmarked
-    // (22 queries minus the 5 known DIFFERENTIAL skips minus 2 tolerance).
+    // (22 queries minus the known DIFFERENTIAL skips minus 2 tolerance).
     let min_benchmarked = queries.len() - DIFFERENTIAL_SKIP_ALLOWLIST.len() - 2;
     assert!(
         results.len() >= min_benchmarked,

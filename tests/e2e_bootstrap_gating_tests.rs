@@ -598,9 +598,16 @@ async fn test_scheduler_logs_skip_when_source_gated() {
     db.execute("INSERT INTO sched_gate_src VALUES (2, 'trigger')")
         .await;
 
-    // Wait for at least one COMPLETED scheduler refresh.
+    // Wait for the scheduler to apply the CDC change. Checking the materialized
+    // row count avoids relying on data_timestamp precision when fast refreshes
+    // happen within the same timestamp value.
     let refreshed = db
-        .wait_for_auto_refresh("sched_gate_st", Duration::from_secs(60))
+        .wait_for_condition(
+            "sched_gate_st contains the CDC row",
+            "SELECT count(*) >= 2 FROM public.sched_gate_st",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
         .await;
     assert!(
         refreshed,
