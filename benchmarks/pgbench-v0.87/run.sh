@@ -215,6 +215,11 @@ run_one() {
     if [[ "$config" == active ]]; then
         IFS='|' read -r refresh_count refresh_duration <<<"$(db_query "SELECT count(*)::bigint, coalesce(sum(extract(epoch FROM end_time - start_time) * 1000), 0)::double precision FROM pgtrickle.pgt_refresh_history WHERE refresh_id > $history_before AND status = 'COMPLETED'")"
         correct="$(correctness_check)"
+        if [[ "$correct" == t ]]; then
+            correct=true
+        else
+            correct=false
+        fi
     else
         refresh_count=0
         refresh_duration=0

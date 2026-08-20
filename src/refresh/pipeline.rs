@@ -4,6 +4,7 @@
 //! transaction. Each batch is an apply unit; frontier and refresh history are
 //! still finalized once by the normal refresh finalizer.
 
+#[cfg(not(test))]
 use pgrx::prelude::*;
 
 use crate::error::PgTrickleError;
@@ -238,17 +239,8 @@ fn copy_table_rows(
     Ok(copied)
 }
 
-#[cfg(test)]
-fn copy_table_rows(
-    _table: pgrx::spi::SpiTupleTable<'_>,
-    _relation_oid: pg_sys::Oid,
-) -> Result<usize, PgTrickleError> {
-    Err(PgTrickleError::InternalError(
-        "pipeline row copying requires a PostgreSQL backend".to_string(),
-    ))
-}
-
 /// Execute an ordinary MERGE through a detached SPI cursor and bounded temp batch relation.
+#[cfg(not(test))]
 pub fn execute_merge_pipeline(
     pgt_id: i64,
     delta_sql: &str,
@@ -325,6 +317,19 @@ pub fn execute_merge_pipeline(
     })();
     let _ = Spi::connect_mut(|client| client.find_cursor(&cursor_name).map(drop));
     result.map(|()| (applied, stats))
+}
+
+#[cfg(test)]
+pub fn execute_merge_pipeline(
+    _pgt_id: i64,
+    _delta_sql: &str,
+    _merge_sql: &str,
+    _batch_size: usize,
+    _byte_limit: u64,
+) -> Result<(usize, PipelineStats), PgTrickleError> {
+    Err(PgTrickleError::InternalError(
+        "pipeline execution requires a PostgreSQL backend".to_string(),
+    ))
 }
 
 #[cfg(test)]
