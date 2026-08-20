@@ -115,7 +115,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 db_query() {
-    docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -Atqc "$1"
+    docker exec "$container" psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres -Atqc "$1"
 }
 
 cpu_sample() {
@@ -149,7 +149,7 @@ cpu_sample() {
 
 wait_for_postgres() {
     for _ in $(seq 1 60); do
-        if docker exec "$container" pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+        if docker exec "$container" pg_isready -h 127.0.0.1 -U postgres -d postgres >/dev/null 2>&1; then
             return
         fi
         sleep 1
@@ -219,21 +219,21 @@ run_one() {
         db_query "CREATE EXTENSION IF NOT EXISTS pg_trickle;" >/dev/null
     fi
     docker exec "$container" sh -ceu 'command -v pgbench >/dev/null'
-    docker exec "$container" pgbench -U postgres -i -s "$scale" postgres >"$run_dir/init.stdout"
+    docker exec "$container" pgbench -h 127.0.0.1 -U postgres -i -s "$scale" postgres >"$run_dir/init.stdout"
 
     if [[ "$config" == active ]]; then
         setup_active_streams
         wait_for_scheduler
     fi
 
-    docker exec "$container" pgbench -U postgres -c "$clients" -j "$jobs" -T "$warmup" -n postgres >"$warmup_file"
+    docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$warmup" -n postgres >"$warmup_file"
     if [[ "$config" == active ]]; then
         history_before="$(db_query "SELECT coalesce(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")"
     else
         history_before=0
     fi
     cpu_before="$(cpu_sample)"
-    docker exec "$container" pgbench -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
+    docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
         -l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres >"$stdout_file"
     cpu_after="$(cpu_sample)"
 
