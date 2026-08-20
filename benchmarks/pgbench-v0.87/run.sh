@@ -186,6 +186,16 @@ correctness_check() {
     db_query "SELECT (SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE status <> 'ACTIVE') = 0 AND NOT EXISTS ((SELECT aid, bid, abalance FROM pgbench_accounts EXCEPT ALL SELECT aid, bid, abalance FROM bench_projection) UNION ALL (SELECT aid, bid, abalance FROM bench_projection EXCEPT ALL SELECT aid, bid, abalance FROM pgbench_accounts)) AND NOT EXISTS ((SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid EXCEPT ALL SELECT bid, total_balance FROM bench_balances) UNION ALL (SELECT bid, total_balance FROM bench_balances EXCEPT ALL SELECT bid, sum(abalance) FROM pgbench_accounts GROUP BY bid)) AND NOT EXISTS ((SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid EXCEPT ALL SELECT aid, bid, abalance, bbalance FROM bench_join) UNION ALL (SELECT aid, bid, abalance, bbalance FROM bench_join EXCEPT ALL SELECT a.aid, a.bid, a.abalance, b.bbalance FROM pgbench_accounts a JOIN pgbench_branches b ON b.bid = a.bid))"
 }
 
+wait_for_correctness() {
+    for _ in $(seq 1 120); do
+        if [[ "$(correctness_check)" == t ]]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 run_one() {
     local config="$1"
     local repetition="$2"
@@ -226,16 +236,14 @@ run_one() {
     docker exec "$container" pgbench -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
         -l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres >"$stdout_file"
     cpu_after="$(cpu_sample)"
-    sleep 2
 
     if [[ "$config" == active ]]; then
-        IFS='|' read -r refresh_count refresh_duration <<<"$(db_query "SELECT count(*)::bigint, coalesce(sum(extract(epoch FROM end_time - start_time) * 1000), 0)::double precision FROM pgtrickle.pgt_refresh_history WHERE refresh_id > $history_before AND status = 'COMPLETED'")"
-        correct="$(correctness_check)"
-        if [[ "$correct" == t ]]; then
+        if wait_for_correctness; then
             correct=true
         else
             correct=false
         fi
+        IFS='|' read -r refresh_count refresh_duration <<<"$(db_query "SELECT count(*)::bigint, coalesce(sum(extract(epoch FROM end_time - start_time) * 1000), 0)::double precision FROM pgtrickle.pgt_refresh_history WHERE refresh_id > $history_before AND status = 'COMPLETED'")"
     else
         refresh_count=0
         refresh_duration=0

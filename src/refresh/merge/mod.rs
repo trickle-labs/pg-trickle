@@ -2245,6 +2245,7 @@ pub fn execute_differential_refresh_with_tuning(
     // operations via a materialized temp table, avoiding the hash-join
     // cost of MERGE which dominates for aggregate queries with many groups.
     let use_agg_fast_path = resolved.is_all_algebraic
+        && !resolved.is_deduplicated
         && crate::config::pg_trickle_aggregate_fast_path()
         && !st.has_keyless_source
         && !use_explicit_dml

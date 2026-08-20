@@ -1333,6 +1333,8 @@ fn handle_dropped_table(obj: &DroppedObject) {
         }
     }
 
+    shmem::signal_dag_rebuild();
+
     let total = affected_pgt_ids.len() + cascade_ids.len();
     log!(
         "pg_trickle_ddl_tracker: DROP TABLE {} → {} ST(s) set to ERROR",
