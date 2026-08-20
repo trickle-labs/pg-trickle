@@ -65,7 +65,8 @@ fn sample_load_snapshot() -> LoadSnapshot {
                                               AND state = 'active' \
                                               AND wait_event_type IS NULL)::bigint, \
                             count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
-                                              AND wait_event_type = 'Lock')::bigint",
+                                              AND wait_event_type = 'Lock')::bigint \
+                            FROM pg_stat_activity",
                     None,
                     &[],
                 )

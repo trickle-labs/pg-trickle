@@ -702,6 +702,8 @@ pub(super) fn parallel_dispatch_tick(
     let dag_version_i64 = state.dag_version as i64;
     // SAFETY: MyProcPid is always valid inside a background worker.
     let scheduler_pid: i32 = unsafe { pg_sys::MyProcPid };
+    // SAFETY: MyDatabaseId is valid in a connected scheduler backend.
+    let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
 
     // ── Step 0: Reap orphaned RUNNING jobs whose worker died ─────────────
     // A background worker can die (OOM, crash, etc.) while its job is still
@@ -921,6 +923,15 @@ pub(super) fn parallel_dispatch_tick(
             None => continue,
         };
 
+        // API-1/2: A paused member must not enter a parallel refresh job.
+        if unit
+            .member_pgt_ids
+            .iter()
+            .any(|&pgt_id| shmem::is_node_paused_for_database(database_oid, pgt_id))
+        {
+            continue;
+        }
+
         // Check retry backoff.
         let retry = retry_states.entry(unit.root_pgt_id).or_default();
         if retry.is_in_backoff(now_ms) {
@@ -1005,7 +1016,6 @@ pub(super) fn parallel_dispatch_tick(
         };
         // Reserve capacity before creating a durable job row. A queued row
         // without a permit would be indistinguishable from dispatchable work.
-        let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
         let Some(slot) =
             shmem::reserve_worker_slot(capacity, database_oid, 0, scheduler_pid, now_ms)
         else {
