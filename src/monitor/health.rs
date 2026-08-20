@@ -251,15 +251,12 @@ fn health_check() -> TableIterator<
         let threshold_bytes = config::pg_trickle_slot_lag_warning_threshold_bytes();
         let lagging: Vec<String> = client
             .select(
-                &format!(
-                    "SELECT slot_name || ' (' || pg_size_pretty(retained_wal_bytes) || ')' \
-                     FROM pgtrickle.slot_health() \
-                     WHERE retained_wal_bytes > {} \
-                     ORDER BY retained_wal_bytes DESC",
-                    threshold_bytes
-                ),
+                "SELECT slot_name || ' (' || pg_size_pretty(retained_wal_bytes) || ')' \
+                 FROM pgtrickle.slot_health() \
+                 WHERE retained_wal_bytes > $1 \
+                 ORDER BY retained_wal_bytes DESC",
                 None,
-                &[],
+                &[threshold_bytes.into()],
             )
             .map(|r| {
                 r.filter_map(|row| row.get::<String>(1).unwrap_or(None))

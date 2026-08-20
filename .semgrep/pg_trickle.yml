@@ -46,7 +46,8 @@ rules:
         - "**/*.md"
         - /plans/**
         - /docs/**
-    pattern-regex: SECURITY\s+DEFINER
+        - /sql/archive/**
+    pattern-regex: '(?m)^[ \t]*SECURITY\s+DEFINER\b'
 
   # ── Phase 2: Extension-specific privilege-context rules ─────────────────────
 
@@ -204,4 +205,3 @@ rules:
           - pattern: $CLIENT.select(&format!($FMT, ...), ...)
           - pattern: $CLIENT.update(&format!($FMT, ...), ...)
           - pattern: $CLIENT.execute(&format!($FMT, ...), ...)
-

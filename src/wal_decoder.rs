@@ -1236,11 +1236,8 @@ pub fn check_and_complete_transition(
         // Check if we've exceeded the final deadline (3× base timeout)
         let final_deadline = base_timeout * 3;
         let exceeded_final = Spi::get_one_with_args::<bool>(
-            &format!(
-                "SELECT (now() - $1::timestamptz) > interval '{} seconds'",
-                final_deadline
-            ),
-            &[started_at.as_str().into()],
+            "SELECT (now() - $1::timestamptz) > ($2 * interval '1 second')",
+            &[started_at.as_str().into(), final_deadline.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false);
@@ -1260,22 +1257,16 @@ pub fn check_and_complete_transition(
 
         // Emit warnings at intermediate checkpoints (1× and 2× base timeout)
         let exceeded_first = Spi::get_one_with_args::<bool>(
-            &format!(
-                "SELECT (now() - $1::timestamptz) > interval '{} seconds'",
-                base_timeout
-            ),
-            &[started_at.as_str().into()],
+            "SELECT (now() - $1::timestamptz) > ($2 * interval '1 second')",
+            &[started_at.as_str().into(), base_timeout.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .unwrap_or(false);
 
         if exceeded_first {
             let exceeded_second = Spi::get_one_with_args::<bool>(
-                &format!(
-                    "SELECT (now() - $1::timestamptz) > interval '{} seconds'",
-                    base_timeout * 2
-                ),
-                &[started_at.as_str().into()],
+                "SELECT (now() - $1::timestamptz) > ($2 * interval '1 second')",
+                &[started_at.as_str().into(), (base_timeout * 2).into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .unwrap_or(false);
@@ -1334,14 +1325,13 @@ fn complete_wal_transition(
     Spi::run_with_args("SELECT pg_advisory_lock($1)", &[lock_key.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("advisory lock for COR-003: {}", e)))?;
     let source_table = cdc::get_qualified_table_name(source_oid)?;
-    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")).map_err(|e| {
-        PgTrickleError::CdcCutoverUnproven {
+    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — source_table is PostgreSQL format('%I.%I') output from a catalog OID.
+        .map_err(|e| PgTrickleError::CdcCutoverUnproven {
             source_oid: oid_u32,
             target: "WAL".to_string(),
             required_lsn: "source lock".to_string(),
             confirmed_lsn: Some(e.to_string()),
-        }
-    })?;
+        })?;
 
     // Step 1: Update catalog to WAL mode FIRST.
     // After this point the scheduler knows the source is in WAL mode.  Any
@@ -1403,14 +1393,13 @@ pub fn abort_wal_transition(
     })?;
 
     let source_table = cdc::get_qualified_table_name(source_oid)?;
-    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")).map_err(|e| {
-        PgTrickleError::CdcCutoverUnproven {
+    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — source_table is PostgreSQL format('%I.%I') output from a catalog OID.
+        .map_err(|e| PgTrickleError::CdcCutoverUnproven {
             source_oid: oid_u32,
             target: "TRIGGER".to_string(),
             required_lsn: "source lock".to_string(),
             confirmed_lsn: Some(e.to_string()),
-        }
-    })?;
+        })?;
 
     // Future writes must be captured before WAL resources are released.
     ensure_trigger_for_source(source_oid, change_schema)?;
@@ -1573,14 +1562,13 @@ pub fn force_source_to_trigger(
     };
 
     let source_table = cdc::get_qualified_table_name(source_oid)?;
-    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")).map_err(|e| {
-        PgTrickleError::CdcCutoverUnproven {
+    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — source_table is PostgreSQL format('%I.%I') output from a catalog OID.
+        .map_err(|e| PgTrickleError::CdcCutoverUnproven {
             source_oid: source_oid.to_u32(),
             target: "TRIGGER".to_string(),
             required_lsn: "source lock".to_string(),
             confirmed_lsn: Some(e.to_string()),
-        }
-    })?;
+        })?;
     ensure_trigger_for_source(source_oid, change_schema)?;
 
     let slot_name = slot_name_for_source(source_oid);

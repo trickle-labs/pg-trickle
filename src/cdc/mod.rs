@@ -203,9 +203,10 @@ pub fn lock_source_relations(source_oids: &[pg_sys::Oid]) -> Result<(), PgTrickl
         let Some(table) = resolve_relation_name(pg_sys::Oid::from(oid))? else {
             continue;
         };
-        Spi::run(&format!("LOCK TABLE {table} IN SHARE MODE")).map_err(|e| {
-            PgTrickleError::LockTimeout(format!("could not lock source {table}: {e}"))
-        })?;
+        Spi::run(&format!("LOCK TABLE {table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — table is returned by PostgreSQL format('%I.%I') from a catalog OID.
+            .map_err(|e| {
+                PgTrickleError::LockTimeout(format!("could not lock source {table}: {e}"))
+            })?;
     }
     Ok(())
 }
@@ -521,6 +522,7 @@ fn validate_one_change_buffer(
     if !columns_ok {
         return Err(invalid("required control columns are missing".into()));
     }
+    // nosemgrep: rust.spi.get_one_with_args.dynamic-format — change_schema is quote-escaped config and buffer_name is OID-derived.
     let sentinel_ok = Spi::get_one_with_args::<bool>(
         &format!(
             "SELECT COUNT(*) = 1 AND MIN(pk_hash) = $1 FROM {change_schema}.{buffer_name} \

@@ -9,7 +9,7 @@
 ALTER FUNCTION pgtrickle.create_stream_table(
     TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT,
     double precision, TEXT, bool, TEXT, INT
-) SECURITY DEFINER;
+) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.create_stream_table(
     TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT,
     double precision, TEXT, bool, TEXT, INT
@@ -18,50 +18,50 @@ ALTER FUNCTION pgtrickle.create_stream_table(
 ALTER FUNCTION pgtrickle.create_stream_table_if_not_exists(
     TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT,
     double precision, TEXT, bool, TEXT, INT
-) SECURITY DEFINER;
+) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.create_stream_table_if_not_exists(
     TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT,
     double precision, TEXT, bool, TEXT, INT
 ) SET search_path = pgtrickle, pg_catalog, pg_temp;
 
-ALTER FUNCTION pgtrickle.bulk_create(jsonb) SECURITY DEFINER;
+ALTER FUNCTION pgtrickle.bulk_create(jsonb) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.bulk_create(jsonb)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 
 ALTER FUNCTION pgtrickle.create_stream_table_fast_append_only(
     TEXT, TEXT, TEXT, TEXT, TEXT, INT, double precision
-) SECURITY DEFINER;
+) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.create_stream_table_fast_append_only(
     TEXT, TEXT, TEXT, TEXT, TEXT, INT, double precision
 ) SET search_path = pgtrickle, pg_catalog, pg_temp;
 
 ALTER FUNCTION pgtrickle.create_stream_table_realtime(
     TEXT, TEXT, TEXT, bool, TEXT, INT, double precision
-) SECURITY DEFINER;
+) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.create_stream_table_realtime(
     TEXT, TEXT, TEXT, bool, TEXT, INT, double precision
 ) SET search_path = pgtrickle, pg_catalog, pg_temp;
 
 ALTER FUNCTION pgtrickle.create_stream_table_batch(
     TEXT, TEXT, TEXT, bool, TEXT, INT, double precision
-) SECURITY DEFINER;
+) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.create_stream_table_batch(
     TEXT, TEXT, TEXT, bool, TEXT, INT, double precision
 ) SET search_path = pgtrickle, pg_catalog, pg_temp;
 
 ALTER FUNCTION pgtrickle.create_stream_table_cost_optimized(
     TEXT, TEXT, TEXT, bool, TEXT, INT, double precision
-) SECURITY DEFINER;
+) SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.create_stream_table_cost_optimized(
     TEXT, TEXT, TEXT, bool, TEXT, INT, double precision
 ) SET search_path = pgtrickle, pg_catalog, pg_temp;
 
-ALTER FUNCTION pgtrickle._on_ddl_end() SECURITY DEFINER;
+ALTER FUNCTION pgtrickle._on_ddl_end() SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle._on_ddl_end()
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_ddl_end() FROM PUBLIC;
 
-ALTER FUNCTION pgtrickle._on_sql_drop() SECURITY DEFINER;
+ALTER FUNCTION pgtrickle._on_sql_drop() SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle._on_sql_drop()
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 REVOKE EXECUTE ON FUNCTION pgtrickle._on_sql_drop() FROM PUBLIC;

@@ -790,14 +790,14 @@ extension_sql!(
 -- event triggers. We create them manually here with the correct return type.
 CREATE FUNCTION pgtrickle."_on_ddl_end"()
     RETURNS event_trigger
-    SECURITY DEFINER
+    SECURITY DEFINER -- nosemgrep: sql.security-definer.present — event trigger runs with pinned pgtrickle catalog search_path below.
     SET search_path TO pgtrickle, pg_catalog, pg_temp
     LANGUAGE c
     AS 'MODULE_PATHNAME', 'pg_trickle_on_ddl_end_wrapper';
 
 CREATE FUNCTION pgtrickle."_on_sql_drop"()
     RETURNS event_trigger
-    SECURITY DEFINER
+    SECURITY DEFINER -- nosemgrep: sql.security-definer.present — event trigger runs with pinned pgtrickle catalog search_path below.
     SET search_path TO pgtrickle, pg_catalog, pg_temp
     LANGUAGE c
     AS 'MODULE_PATHNAME', 'pg_trickle_on_sql_drop_wrapper';
