@@ -133,6 +133,7 @@ fn replace_merge_source(merge_sql: &str, relation: &str) -> Result<String, PgTri
     ))
 }
 
+#[cfg(not(test))]
 fn copy_table_rows(
     table: pgrx::spi::SpiTupleTable<'_>,
     relation_oid: pg_sys::Oid,
@@ -235,6 +236,16 @@ fn copy_table_rows(
         pg_sys::table_close(relation, pg_sys::RowExclusiveLock as _);
     }
     Ok(copied)
+}
+
+#[cfg(test)]
+fn copy_table_rows(
+    _table: pgrx::spi::SpiTupleTable<'_>,
+    _relation_oid: pg_sys::Oid,
+) -> Result<usize, PgTrickleError> {
+    Err(PgTrickleError::InternalError(
+        "pipeline row copying requires a PostgreSQL backend".to_string(),
+    ))
 }
 
 /// Execute an ordinary MERGE through a detached SPI cursor and bounded temp batch relation.
