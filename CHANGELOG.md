@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.86.0 — Product UX & Transparency](#0860--product-ux--transparency)
 - [0.85.0 — Scheduler & Resource Resilience Gate](#0850--scheduler--resource-resilience-gate)
 - [0.84.0 — Catalog, Privilege & Upgrade Integrity](#0840--catalog-privilege--upgrade-integrity)
 - [0.83.0 — DVM Semantic Fidelity Gate](#0830--dvm-semantic-fidelity-gate)
@@ -128,6 +129,35 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.86.0] — Product UX & Transparency
+
+v0.86.0 makes stream tables easier to understand, troubleshoot, and monitor.
+It exposes the evidence behind refresh decisions instead of making operators
+piece it together from several low-level views.
+
+### What's New
+
+- `pgtrickle.explain()` gives a readable snapshot of a stream table's refresh
+  mode, pending changes, dominant cost, expected refresh time, current lag,
+  next refresh, FULL fallback reason, and write-path overhead.
+- `pgtrickle.explain_json()` exposes the same information as structured JSON,
+  including evidence sources and sample counts for dashboards and automation.
+- `pgtrickle.pg_stat_pgtrickle` provides bounded cumulative statistics for
+  standard monitoring tools, with `stat_reset()` and `stat_reset_all()` for
+  PostgreSQL-style counter resets.
+- FULL refreshes now retain a machine-readable reason and a plain-language
+  explanation, including cases where `AUTO` chooses recomputation.
+- Stream-table creation and preview report risky or expensive queries early,
+  with actionable `HINT`s for always-FULL plans, missing source identity, RLS,
+  excessive joins, and write-path overhead.
+- PostgreSQL `EXPLAIN` can include pg_trickle lag and refresh-mode annotations
+  when `pg_trickle.explain_annotations` is enabled. It remains off by default.
+- `target_freshness` is accepted by the function-based create and alter APIs,
+  stored and validated, and translated into existing scheduling, `on_commit`,
+  or `manual` controls. Closed-loop freshness control remains a future step.
 
 ---
 
