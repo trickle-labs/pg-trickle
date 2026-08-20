@@ -158,6 +158,22 @@ wait_for_postgres() {
     exit 1
 }
 
+wait_for_scheduler() {
+    local attempt
+    for attempt in $(seq 0 450); do
+        if [[ "$(db_query "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE backend_type = 'pg_trickle scheduler' AND datname = current_database())")" == t ]]; then
+            return
+        fi
+        if (( attempt % 50 == 0 )); then
+            db_query "SELECT pgtrickle._signal_launcher_rescan();" >/dev/null 2>&1 || true
+            db_query "SELECT pg_reload_conf();" >/dev/null 2>&1 || true
+        fi
+        sleep 0.2
+    done
+    echo "pg_trickle scheduler did not start: $container" >&2
+    exit 1
+}
+
 setup_active_streams() {
     db_query "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = '100';" >/dev/null
     db_query "SELECT pg_reload_conf();" >/dev/null
@@ -197,7 +213,7 @@ run_one() {
 
     if [[ "$config" == active ]]; then
         setup_active_streams
-        sleep 2
+        wait_for_scheduler
     fi
 
     docker exec "$container" pgbench -U postgres -c "$clients" -j "$jobs" -T "$warmup" -n postgres >"$warmup_file"
