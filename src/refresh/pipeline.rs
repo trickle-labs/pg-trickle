@@ -11,36 +11,6 @@ use crate::error::PgTrickleError;
 
 const FETCH_CHUNK: std::os::raw::c_long = 256;
 
-#[cfg(not(test))]
-/// Keeps an SPI value raw; `pg_sys::Datum` is registered as SQL `int8`.
-struct RawDatum(pg_sys::Datum);
-
-#[cfg(not(test))]
-impl pgrx::IntoDatum for RawDatum {
-    fn into_datum(self) -> Option<pg_sys::Datum> {
-        Some(self.0)
-    }
-
-    fn type_oid() -> pg_sys::Oid {
-        pg_sys::ANYELEMENTOID
-    }
-
-    fn is_compatible_with(_other: pg_sys::Oid) -> bool {
-        true
-    }
-}
-
-#[cfg(not(test))]
-impl pgrx::FromDatum for RawDatum {
-    unsafe fn from_polymorphic_datum(
-        datum: pg_sys::Datum,
-        is_null: bool,
-        _typoid: pg_sys::Oid,
-    ) -> Option<Self> {
-        if is_null { None } else { Some(Self(datum)) }
-    }
-}
-
 /// Stable reason for choosing the direct or portal path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineReason {
@@ -206,9 +176,9 @@ fn copy_table_rows(
                 .get_datum_by_ordinal(ordinal)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             let datum = entry
-                .value::<RawDatum>()
+                .value::<pgrx::AnyElement>()
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            let datum = datum.map(|value| value.0);
+            let datum = datum.map(|value| value.datum());
             nulls.push(datum.is_none());
             values.push(datum.unwrap_or_else(|| pg_sys::Datum::from(0)));
             let target_oid = unsafe {
