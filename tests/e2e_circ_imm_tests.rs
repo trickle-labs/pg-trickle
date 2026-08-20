@@ -26,6 +26,14 @@ async fn create_immediate_st(db: &E2eDb, name: &str, query: &str) {
     db.execute(&sql).await;
 }
 
+async fn test_db() -> E2eDb {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 1 — Diamond with IMMEDIATE on both branches
 // ═══════════════════════════════════════════════════════════════════════════
@@ -35,7 +43,7 @@ async fn create_immediate_st(db: &E2eDb, name: &str, query: &str) {
 /// Manual refresh of D should pick up both branches' changes correctly.
 #[tokio::test]
 async fn test_diamond_immediate_both_branches_insert() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE circ_diam_src (
@@ -114,7 +122,7 @@ async fn test_diamond_immediate_both_branches_insert() {
 /// Diamond with IMMEDIATE branches: UPDATE propagates correctly.
 #[tokio::test]
 async fn test_diamond_immediate_both_branches_update() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE circ_diamu_src (
@@ -178,7 +186,7 @@ async fn test_diamond_immediate_both_branches_update() {
 /// Diamond with IMMEDIATE branches: DELETE removes rows through all layers.
 #[tokio::test]
 async fn test_diamond_immediate_both_branches_delete() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE circ_diamd_src (
@@ -247,7 +255,7 @@ async fn test_diamond_immediate_both_branches_delete() {
 /// Validates that topological refresh order produces correct results.
 #[tokio::test]
 async fn test_near_circular_topology_insert() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE nc_src (
@@ -329,7 +337,7 @@ async fn test_near_circular_topology_insert() {
 /// chain paths to the convergence point.
 #[tokio::test]
 async fn test_near_circular_topology_update() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE ncu_src (
@@ -399,7 +407,7 @@ async fn test_near_circular_topology_update() {
 /// Near-circular: DELETE at the base removes rows from both paths.
 #[tokio::test]
 async fn test_near_circular_topology_delete() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE ncd_src (
@@ -473,7 +481,7 @@ async fn test_near_circular_topology_delete() {
 /// the DIFFERENTIAL tip is manually refreshed.
 #[tokio::test]
 async fn test_near_circular_immediate_branches() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE nci_src (
@@ -549,7 +557,7 @@ async fn test_near_circular_immediate_branches() {
 /// deadlocks occur and final state is correct.
 #[tokio::test]
 async fn test_diamond_immediate_rapid_sequential_dml() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE circ_rapid_src (
@@ -610,7 +618,7 @@ async fn test_diamond_immediate_rapid_sequential_dml() {
 /// verifies no stale rows or phantom rows after diamond tip refresh.
 #[tokio::test]
 async fn test_diamond_immediate_mixed_dml_sequence() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute(
         "CREATE TABLE circ_mix_src (
@@ -696,7 +704,7 @@ async fn test_diamond_immediate_mixed_dml_sequence() {
 /// see both sides updated. Exercises the multi-source advisory lock path.
 #[tokio::test]
 async fn test_fan_in_immediate_multi_source() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = test_db().await;
 
     db.execute("CREATE TABLE fan_src_a (id INT PRIMARY KEY, val_a INT NOT NULL)")
         .await;
