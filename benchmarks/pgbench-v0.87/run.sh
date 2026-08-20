@@ -175,7 +175,7 @@ wait_for_scheduler() {
 }
 
 setup_active_streams() {
-    db_query "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = '100';" >/dev/null
+    db_query "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = '1000';" >/dev/null
     db_query "SELECT pg_reload_conf();" >/dev/null
     db_query "SELECT pgtrickle.create_stream_table('bench_projection', \$\$SELECT aid, bid, abalance FROM pgbench_accounts\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
     db_query "SELECT pgtrickle.create_stream_table('bench_balances', \$\$SELECT bid, sum(abalance) AS total_balance FROM pgbench_accounts GROUP BY bid\$\$, '1s', 'DIFFERENTIAL');" >/dev/null
