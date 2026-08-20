@@ -730,6 +730,7 @@ fn execute_manual_differential_refresh(
     let mut safe_bound = cdc::get_current_wal_lsn()?;
     for source_oid in source_oids {
         let buffer_name = cdc::buffer_base_name_for_oid(*source_oid);
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format — change_schema is a quoted config identifier and buffer_name is OID-derived.
         safe_bound = Spi::get_one_with_args::<String>(
             &format!(
                 "SELECT GREATEST($1::pg_lsn, COALESCE(MAX(lsn), '0/0'::pg_lsn))::text \

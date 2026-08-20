@@ -18,6 +18,7 @@ pub(crate) fn execute_incremental_truncate_delete(
     );
 
     let rows_deleted = Spi::connect_mut(|client| {
+        // nosemgrep: rust.spi.connect_mut.dynamic-format — quoted_table is built from double-quote-escaped relation identifiers.
         let result = client
             .update(&format!("DELETE FROM {quoted_table}"), None, &[])
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

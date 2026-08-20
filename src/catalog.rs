@@ -1873,19 +1873,11 @@ impl StDependency {
         slot_name: Option<&str>,
         decoder_confirmed_lsn: Option<&str>,
     ) -> Result<(), PgTrickleError> {
-        let transition_started = if cdc_mode == CdcMode::Transitioning {
-            "now()"
-        } else {
-            "NULL"
-        };
         Spi::run_with_args(
-            &format!(
-                "UPDATE pgtrickle.pgt_dependencies \
-                 SET cdc_mode = $1, slot_name = $2, decoder_confirmed_lsn = $3::pg_lsn, \
-                     transition_started_at = {} \
-                 WHERE pgt_id = $4 AND source_relid = $5",
-                transition_started
-            ),
+            "UPDATE pgtrickle.pgt_dependencies \
+             SET cdc_mode = $1, slot_name = $2, decoder_confirmed_lsn = $3::pg_lsn, \
+                 transition_started_at = CASE WHEN $1 = 'TRANSITIONING' THEN now() ELSE NULL END \
+             WHERE pgt_id = $4 AND source_relid = $5",
             &[
                 cdc_mode.as_str().into(),
                 slot_name.into(),
@@ -1904,19 +1896,11 @@ impl StDependency {
         slot_name: Option<&str>,
         decoder_confirmed_lsn: Option<&str>,
     ) -> Result<(), PgTrickleError> {
-        let transition_started = if cdc_mode == CdcMode::Transitioning {
-            "now()"
-        } else {
-            "NULL"
-        };
         Spi::run_with_args(
-            &format!(
-                "UPDATE pgtrickle.pgt_dependencies \
-                 SET cdc_mode = $1, slot_name = $2, decoder_confirmed_lsn = $3::pg_lsn, \
-                     transition_started_at = {} \
-                 WHERE source_relid = $4",
-                transition_started
-            ),
+            "UPDATE pgtrickle.pgt_dependencies \
+             SET cdc_mode = $1, slot_name = $2, decoder_confirmed_lsn = $3::pg_lsn, \
+                 transition_started_at = CASE WHEN $1 = 'TRANSITIONING' THEN now() ELSE NULL END \
+             WHERE source_relid = $4",
             &[
                 cdc_mode.as_str().into(),
                 slot_name.into(),

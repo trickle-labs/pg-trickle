@@ -2209,6 +2209,7 @@ pub(crate) fn normalize_full_set_operation_storage(
         } else {
             String::new()
         };
+        // nosemgrep: rust.spi.run.dynamic-format — table and column names are quote_identifier()-escaped catalog identifiers.
         Spi::run(&format!(
             "CREATE INDEX ON {quoted_table} (__pgt_row_id){include_clause}"
         ))

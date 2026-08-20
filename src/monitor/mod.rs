@@ -534,7 +534,11 @@ pub(crate) fn collect_metrics_text_with_deadline(
             "metrics request deadline elapsed".to_string(),
         ));
     }
-    Spi::run(&format!("SET LOCAL statement_timeout = '{millis}ms'")).map_err(|e| {
+    Spi::run_with_args(
+        "SELECT pg_catalog.set_config('statement_timeout', $1, true)",
+        &[format!("{millis}ms").into()],
+    )
+    .map_err(|e| {
         crate::metrics_server::MetricsServerError::Io(format!("set metrics statement_timeout: {e}"))
     })?;
     Ok(collect_metrics_text())

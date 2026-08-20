@@ -48,6 +48,7 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         name.replace('"', "\"\""),
     );
     let pre_table = format!("__pgt_topk_state_{}", st.pgt_id);
+    // nosemgrep: rust.spi.run.dynamic-format — pre_table is OID-derived and quoted_table is double-quote-escaped.
     Spi::run(&format!(
         "DROP TABLE IF EXISTS {pre_table}; \
          CREATE TEMP TABLE {pre_table} ON COMMIT DROP AS SELECT * FROM {quoted_table}"
