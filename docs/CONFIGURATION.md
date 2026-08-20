@@ -11,7 +11,7 @@ catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).
 | Source | What it contains | When to use |
 |--------|-----------------|-------------|
 | **This file** | Curated narrative for the GUCs you are most likely to touch, with examples and cross-references | Day-to-day tuning and troubleshooting |
-| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 130 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
+| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 140 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
 
 This file does **not** attempt to document every GUC — it focuses on the ones
 that have the most impact in production. If you do not see a GUC here, check
@@ -50,9 +50,21 @@ Not sure which GUC to change? Start here.
 | **Improve cost-model accuracy** | `cost_model_safety_margin`, `planner_aggressive`, `differential_max_change_ratio` |
 | **Enable WAL-based CDC** | `cdc_mode`, `wal_transition_timeout`, `slot_lag_warning_threshold_mb` |
 | **Prevent a runaway stream table** | `max_consecutive_errors`, `fuse_threshold`, `buffer_alert_threshold` |
+| **Make diagnostics explainable** | `explain_annotations`, `warn_join_sources`, `warn_write_path_overhead_us` |
 
 See the full reference below for each variable's defaults, valid values, and
 notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
+
+## Diagnostics and creation warnings
+
+`pg_trickle.warn_join_sources` controls the source-count threshold for a
+creation warning (default `6`; `0` disables it). `pg_trickle.warn_write_path_overhead_us`
+is reserved for compatible sampled trigger statistics and is disabled at its
+default of `0`.
+
+Set `pg_trickle.explain_annotations = on` to add compact pg_trickle properties
+to PostgreSQL 18 `EXPLAIN` output. The default is `off`, so normal planning has
+no annotation lookup cost.
 
 ---
 

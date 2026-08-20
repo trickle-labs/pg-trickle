@@ -26,7 +26,7 @@
 
 use crate::catalog::{RefreshRecord, StreamTableMeta};
 use crate::error::PgTrickleError;
-use pgrx::prelude::TimestampWithTimeZone;
+use pgrx::{Spi, prelude::TimestampWithTimeZone};
 
 pub(crate) mod codegen;
 pub(crate) mod fused;
@@ -70,6 +70,143 @@ pub use orchestrator::{
 };
 // phd1: cross-cycle phantom cleanup (CORR-1, deferred — see merge.rs).
 
+/// Stable machine-readable causes for FULL/recomputation refreshes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullRefreshReasonCode {
+    FirstRefresh,
+    ConfiguredFull,
+    AutoQueryFullOnly,
+    DeltaRatioExceeded,
+    CostModelPreferredFull,
+    CorrelatedSubqueryDeltaQuadratic,
+    CaseInListDvmDriftFullFallback,
+    RegexComplexityClassifierUncertain,
+    SourceTruncated,
+    SchemaChanged,
+    FunctionChanged,
+    RowIdentityUpgrade,
+    CdcStateRecovery,
+    FrontierMissing,
+    ForceFullRefresh,
+    BufferRowLimitExceeded,
+    JoinLimitExceeded,
+    AggregateSaturation,
+    DeltaEstimateExceeded,
+    WorkMemCapExceeded,
+    TempSpillThresholdExceeded,
+    RecursiveCteRecompute,
+    SccFixpointRecompute,
+    TopKRecompute,
+    ManualImmediateRebuild,
+    StreamTableSourceManualRebuild,
+}
+
+impl FullRefreshReasonCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstRefresh => "FIRST_REFRESH",
+            Self::ConfiguredFull => "CONFIGURED_FULL",
+            Self::AutoQueryFullOnly => "AUTO_QUERY_FULL_ONLY",
+            Self::DeltaRatioExceeded => "DELTA_RATIO_EXCEEDED",
+            Self::CostModelPreferredFull => "COST_MODEL_PREFERRED_FULL",
+            Self::CorrelatedSubqueryDeltaQuadratic => "CORRELATED_SUBQUERY_DELTA_QUADRATIC",
+            Self::CaseInListDvmDriftFullFallback => "CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK",
+            Self::RegexComplexityClassifierUncertain => "REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN",
+            Self::SourceTruncated => "SOURCE_TRUNCATED",
+            Self::SchemaChanged => "SCHEMA_CHANGED",
+            Self::FunctionChanged => "FUNCTION_CHANGED",
+            Self::RowIdentityUpgrade => "ROW_IDENTITY_UPGRADE",
+            Self::CdcStateRecovery => "CDC_STATE_RECOVERY",
+            Self::FrontierMissing => "FRONTIER_MISSING",
+            Self::ForceFullRefresh => "FORCE_FULL_REFRESH",
+            Self::BufferRowLimitExceeded => "BUFFER_ROW_LIMIT_EXCEEDED",
+            Self::JoinLimitExceeded => "JOIN_LIMIT_EXCEEDED",
+            Self::AggregateSaturation => "AGGREGATE_SATURATION",
+            Self::DeltaEstimateExceeded => "DELTA_ESTIMATE_EXCEEDED",
+            Self::WorkMemCapExceeded => "WORK_MEM_CAP_EXCEEDED",
+            Self::TempSpillThresholdExceeded => "TEMP_SPILL_THRESHOLD_EXCEEDED",
+            Self::RecursiveCteRecompute => "RECURSIVE_CTE_RECOMPUTE",
+            Self::SccFixpointRecompute => "SCC_FIXPOINT_RECOMPUTE",
+            Self::TopKRecompute => "TOP_K_RECOMPUTE",
+            Self::ManualImmediateRebuild => "MANUAL_IMMEDIATE_REBUILD",
+            Self::StreamTableSourceManualRebuild => "STREAM_TABLE_SOURCE_MANUAL_REBUILD",
+        }
+    }
+
+    pub fn from_str(code: &str) -> Option<Self> {
+        Some(match code {
+            "FIRST_REFRESH" => Self::FirstRefresh,
+            "CONFIGURED_FULL" => Self::ConfiguredFull,
+            "AUTO_QUERY_FULL_ONLY" => Self::AutoQueryFullOnly,
+            "DELTA_RATIO_EXCEEDED" => Self::DeltaRatioExceeded,
+            "COST_MODEL_PREFERRED_FULL" => Self::CostModelPreferredFull,
+            "CORRELATED_SUBQUERY_DELTA_QUADRATIC" => Self::CorrelatedSubqueryDeltaQuadratic,
+            "CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK" => Self::CaseInListDvmDriftFullFallback,
+            "REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN" => Self::RegexComplexityClassifierUncertain,
+            "SOURCE_TRUNCATED" => Self::SourceTruncated,
+            "SCHEMA_CHANGED" => Self::SchemaChanged,
+            "FUNCTION_CHANGED" => Self::FunctionChanged,
+            "ROW_IDENTITY_UPGRADE" => Self::RowIdentityUpgrade,
+            "CDC_STATE_RECOVERY" => Self::CdcStateRecovery,
+            "FRONTIER_MISSING" => Self::FrontierMissing,
+            "FORCE_FULL_REFRESH" => Self::ForceFullRefresh,
+            "BUFFER_ROW_LIMIT_EXCEEDED" => Self::BufferRowLimitExceeded,
+            "JOIN_LIMIT_EXCEEDED" => Self::JoinLimitExceeded,
+            "AGGREGATE_SATURATION" => Self::AggregateSaturation,
+            "DELTA_ESTIMATE_EXCEEDED" => Self::DeltaEstimateExceeded,
+            "WORK_MEM_CAP_EXCEEDED" => Self::WorkMemCapExceeded,
+            "TEMP_SPILL_THRESHOLD_EXCEEDED" => Self::TempSpillThresholdExceeded,
+            "RECURSIVE_CTE_RECOMPUTE" => Self::RecursiveCteRecompute,
+            "SCC_FIXPOINT_RECOMPUTE" => Self::SccFixpointRecompute,
+            "TOP_K_RECOMPUTE" => Self::TopKRecompute,
+            "MANUAL_IMMEDIATE_REBUILD" => Self::ManualImmediateRebuild,
+            "STREAM_TABLE_SOURCE_MANUAL_REBUILD" => Self::StreamTableSourceManualRebuild,
+            _ => return None,
+        })
+    }
+}
+
+/// A typed, durable FULL-refresh reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullRefreshReason {
+    pub code: FullRefreshReasonCode,
+    pub detail: String,
+}
+
+impl FullRefreshReason {
+    pub fn new(code: FullRefreshReasonCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn from_catalog(code: Option<String>, detail: Option<String>) -> Option<Self> {
+        Some(Self::new(
+            FullRefreshReasonCode::from_str(code.as_deref()?)?,
+            detail.unwrap_or_default(),
+        ))
+    }
+
+    pub fn for_action(action: RefreshAction, first_refresh: bool) -> Option<Self> {
+        match action {
+            RefreshAction::Full | RefreshAction::Reinitialize if first_refresh => Some(Self::new(
+                FullRefreshReasonCode::FirstRefresh,
+                "The stream table has not been populated yet.",
+            )),
+            RefreshAction::Full => Some(Self::new(
+                FullRefreshReasonCode::ConfiguredFull,
+                "FULL refresh was selected by the configured refresh mode.",
+            )),
+            RefreshAction::Reinitialize => Some(Self::new(
+                FullRefreshReasonCode::SchemaChanged,
+                "A rebuild was requested because the stored stream-table definition changed.",
+            )),
+            _ => None,
+        }
+    }
+}
+
 /// The durable result of a refresh executor before catalog finalization.
 ///
 /// Executors are allowed to mutate only the target and CDC buffers.  Callers
@@ -85,6 +222,7 @@ pub struct RefreshExecution {
     pub rows_deleted: i64,
     pub data_changed: bool,
     pub was_full_fallback: bool,
+    pub full_reason: Option<FullRefreshReason>,
     pub downstream_capture_complete: bool,
 }
 
@@ -127,7 +265,45 @@ pub fn finalize_success(
         "NO_DATA" => RefreshAction::NoData,
         _ => execution.effective_action,
     };
-    RefreshRecord::complete_with_rows_updated(
+    let catalog_reason = if execution.full_reason.is_none()
+        && matches!(
+            history_action,
+            RefreshAction::Full | RefreshAction::Reinitialize
+        ) {
+        Spi::get_one_with_args::<String>(
+            "SELECT refresh_reason FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+            &[st.pgt_id.into()],
+        )
+        .unwrap_or(None)
+        .and_then(|code| {
+            let detail = Spi::get_one_with_args::<String>(
+                "SELECT refresh_reason_detail FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+                &[st.pgt_id.into()],
+            )
+            .unwrap_or(None);
+            FullRefreshReason::from_catalog(Some(code), detail)
+        })
+    } else {
+        None
+    };
+    let derived_reason = execution
+        .full_reason
+        .clone()
+        .or(catalog_reason)
+        .or_else(|| FullRefreshReason::for_action(history_action, !st.is_populated));
+    let full_reason = derived_reason.as_ref();
+    if matches!(
+        history_action,
+        RefreshAction::Full | RefreshAction::Reinitialize
+    ) && full_reason.is_none()
+    {
+        return Err(PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: st.pgt_id,
+            stage: "refresh reason".to_string(),
+            reason: "FULL refresh completed without a typed reason".to_string(),
+        });
+    }
+    RefreshRecord::complete_with_rows_updated_and_reason(
         refresh_id,
         "COMPLETED",
         execution.rows_inserted,
@@ -137,7 +313,22 @@ pub fn finalize_success(
         execution.rows_inserted + execution.rows_updated + execution.rows_deleted,
         Some(history_action.as_str()),
         execution.was_full_fallback,
+        full_reason,
     )?;
+
+    if let Some(reason) = full_reason {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables
+                SET refresh_reason = $1, refresh_reason_detail = $2, updated_at = now()
+              WHERE pgt_id = $3",
+            &[
+                reason.code.as_str().into(),
+                reason.detail.as_str().into(),
+                st.pgt_id.into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
 
     if !effective_mode.is_empty() {
         StreamTableMeta::update_effective_refresh_mode(st.pgt_id, effective_mode)?;
@@ -200,7 +391,7 @@ pub fn finalize_success(
     Ok(())
 }
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 // ── B-4: Query complexity classification ────────────────────────────────
 
@@ -455,30 +646,6 @@ pub fn take_last_temp_blks_written() -> i64 {
         c.set(-1);
         v
     })
-}
-
-// ── ARCH-2: Refresh reason tracking ──────────────────────────────────────
-//
-// Captures the machine-readable reason when the executor takes a non-default
-// path (e.g. recomputation fallback for non-monotone recursive CTEs).
-// Written to `pgt_refresh_history.refresh_reason` via the scheduler.
-
-thread_local! {
-    static LAST_REFRESH_REASON: RefCell<Option<&'static str>> = const { RefCell::new(None) };
-}
-
-/// Set the refresh reason for the current execution.
-///
-/// Called whenever a non-default execution path is taken; the scheduler
-/// reads this with `take_refresh_reason()` and writes it to history.
-pub(crate) fn set_refresh_reason(reason: &'static str) {
-    LAST_REFRESH_REASON.with(|r| *r.borrow_mut() = Some(reason));
-}
-
-/// Take (read and reset) the refresh reason set by the current execution path.
-/// Returns `None` if the default path was taken.
-pub fn take_refresh_reason() -> Option<&'static str> {
-    LAST_REFRESH_REASON.with(|r| r.borrow_mut().take())
 }
 
 #[cfg(test)]

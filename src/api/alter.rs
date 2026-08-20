@@ -5,6 +5,114 @@
 use super::refresh_ops::execute_manual_full_refresh;
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetFreshnessMode {
+    Interval,
+    OnCommit,
+    Manual,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TargetFreshness {
+    pub(crate) mode: TargetFreshnessMode,
+    pub(crate) milliseconds: Option<i64>,
+}
+
+/// Parse a PostgreSQL interval once and translate it to the existing deadline
+/// control. Month-bearing intervals are rejected because their cadence is not
+/// stable in milliseconds.
+pub(crate) fn parse_target_freshness(
+    value: Option<&str>,
+) -> Result<Option<TargetFreshness>, PgTrickleError> {
+    let Some(raw) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(Some(TargetFreshness {
+            mode: TargetFreshnessMode::Clear,
+            milliseconds: None,
+        }));
+    }
+    match raw.to_ascii_lowercase().as_str() {
+        "manual" => {
+            return Ok(Some(TargetFreshness {
+                mode: TargetFreshnessMode::Manual,
+                milliseconds: None,
+            }));
+        }
+        "on_commit" | "on commit" => {
+            return Ok(Some(TargetFreshness {
+                mode: TargetFreshnessMode::OnCommit,
+                milliseconds: None,
+            }));
+        }
+        _ => {}
+    }
+
+    let months = Spi::get_one_with_args::<i32>(
+        "SELECT (EXTRACT(YEAR FROM $1::interval) * 12 + EXTRACT(MONTH FROM $1::interval))::int",
+        &[raw.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InvalidArgument("target_freshness interval is NULL".into()))?;
+    if months != 0 {
+        return Err(PgTrickleError::InvalidArgument(
+            "target_freshness cannot contain calendar months; use days or smaller units".into(),
+        ));
+    }
+    let milliseconds = Spi::get_one_with_args::<f64>(
+        "SELECT EXTRACT(EPOCH FROM $1::interval)::float8 * 1000",
+        &[raw.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InvalidArgument("target_freshness interval is NULL".into()))?;
+    if !milliseconds.is_finite() || milliseconds <= 0.0 || milliseconds > i64::MAX as f64 {
+        return Err(PgTrickleError::InvalidArgument(
+            "target_freshness must be a positive finite interval".into(),
+        ));
+    }
+    let milliseconds = milliseconds.round() as i64;
+    if milliseconds <= 0 {
+        return Err(PgTrickleError::InvalidArgument(
+            "target_freshness must be at least one millisecond".into(),
+        ));
+    }
+    Ok(Some(TargetFreshness {
+        mode: TargetFreshnessMode::Interval,
+        milliseconds: Some(milliseconds),
+    }))
+}
+
+pub(crate) fn apply_target_freshness(
+    pgt_id: i64,
+    target: TargetFreshness,
+) -> Result<(), PgTrickleError> {
+    let (mode, milliseconds) = match target.mode {
+        TargetFreshnessMode::Interval => (Some("INTERVAL"), target.milliseconds),
+        TargetFreshnessMode::OnCommit => (Some("ON_COMMIT"), None),
+        TargetFreshnessMode::Manual => (Some("MANUAL"), None),
+        TargetFreshnessMode::Clear => (None, None),
+    };
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET target_freshness_mode = $1,
+                freshness_deadline_ms = $2,
+                schedule = CASE
+                    WHEN $3::text = 'ON_COMMIT' THEN NULL
+                    WHEN $3::text = 'MANUAL' THEN 'manual'
+                    WHEN $3::text = 'INTERVAL'
+                        AND (schedule IS NULL OR schedule = 'calculated')
+                        THEN GREATEST(1, CEIL($2::double precision / 1000.0))::bigint::text || 's'
+                    ELSE schedule
+                END,
+                updated_at = now()
+          WHERE pgt_id = $4",
+        &[mode.into(), milliseconds.into(), mode.into(), pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
 // ── Schema comparison for ALTER QUERY ──────────────────────────────────────
 
 /// Classification of how the output schema changed between old and new query.
@@ -1128,6 +1236,8 @@ pub(crate) struct CreateStreamTableOptions<'a> {
     pub(crate) storage_backend: Option<&'a str>,
     /// HOT-1 (v0.73.0): heap fillfactor (10–100). `None` = PostgreSQL default (100).
     pub(crate) storage_fillfactor: Option<i32>,
+    /// v0.86.0: declared freshness target (`interval`, `on_commit`, `manual`).
+    pub(crate) target_freshness: Option<&'a str>,
 }
 
 impl<'a> CreateStreamTableOptions<'a> {
@@ -1163,9 +1273,16 @@ pub(crate) fn create_stream_table_impl(
         temporal_mode,
         storage_backend,
         storage_fillfactor,
+        target_freshness,
     } = opts;
     let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
     let mut refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
+    let target = parse_target_freshness(target_freshness)?;
+    if let Some(target) = target
+        && target.mode == TargetFreshnessMode::OnCommit
+    {
+        refresh_mode = RefreshMode::Immediate;
+    }
     let invoker_search_path = invoker_search_path()?;
 
     // Parse diamond consistency — default to 'atomic' when not specified
@@ -1253,6 +1370,15 @@ pub(crate) fn create_stream_table_impl(
         }
     };
 
+    if let Some(target) = target
+        && target.mode != TargetFreshnessMode::Clear
+        && schedule.is_some_and(|value| !value.trim().eq_ignore_ascii_case("calculated"))
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "schedule and target_freshness are ambiguous; choose one control (HINT: use target_freshness or schedule, not both)".into(),
+        ));
+    }
+
     let (requested_cdc_mode_override, effective_requested_cdc_mode, cdc_mode_source) =
         resolve_requested_cdc_mode(requested_cdc_mode)?;
     enforce_cdc_refresh_mode_interaction(
@@ -1281,9 +1407,12 @@ pub(crate) fn create_stream_table_impl(
     validate_source_access(&vq.source_relids)?;
     // Warnings
     warn_source_table_properties(&vq.source_relids);
-    warn_select_star(query);
-    // OP-6: Warn if the defining query uses volatile/non-deterministic functions.
-    warn_volatile_functions(query);
+    emit_creation_warnings(&collect_creation_warnings(
+        query,
+        refresh_mode_str,
+        refresh_mode,
+        &vq.source_relids,
+    ));
 
     // Summary warning when AUTO mode resulted in FULL refresh
     if is_auto && refresh_mode == RefreshMode::Full {
@@ -1495,6 +1624,15 @@ pub(crate) fn create_stream_table_impl(
         storage_fillfactor,
     )?;
 
+    if let Some(target) = target {
+        apply_target_freshness(pgt_id, target)?;
+    }
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables SET requested_refresh_mode = $1 WHERE pgt_id = $2",
+        &[refresh_mode_str.to_ascii_uppercase().into(), pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
     // ── Phase 2: CDC / IVM trigger setup ──
     setup_trigger_infrastructure(&vq.source_relids, refresh_mode, pgt_id, pgt_relid, query)?;
     transfer_output_table_ownership(&schema, &table_name)?;
@@ -1669,6 +1807,7 @@ fn alter_stream_table(
     // VP-1/VP-2 (v0.47.0): post-refresh action and drift threshold
     post_refresh_action: default!(Option<&str>, "NULL"),
     reindex_drift_threshold: default!(Option<f64>, "NULL"),
+    target_freshness: default!(Option<&str>, "NULL"),
 ) {
     let result = alter_stream_table_impl(AlterStreamTableOptions {
         name,
@@ -1690,6 +1829,7 @@ fn alter_stream_table(
         max_delta_fraction,
         post_refresh_action,
         reindex_drift_threshold,
+        target_freshness,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -1725,6 +1865,8 @@ pub(crate) struct AlterStreamTableOptions<'a> {
     pub(crate) post_refresh_action: Option<&'a str>,
     /// VP-2 (v0.47.0): reindex drift threshold.
     pub(crate) reindex_drift_threshold: Option<f64>,
+    /// v0.86.0: declared freshness target.
+    pub(crate) target_freshness: Option<&'a str>,
 }
 
 pub(crate) fn alter_stream_table_impl(
@@ -1750,6 +1892,7 @@ pub(crate) fn alter_stream_table_impl(
         max_delta_fraction,
         post_refresh_action,
         reindex_drift_threshold,
+        target_freshness,
     } = opts;
     if let Some(value) = max_differential_joins {
         validation::nonnegative_i32("max_differential_joins", i64::from(value))?;
@@ -1784,6 +1927,31 @@ pub(crate) fn alter_stream_table_impl(
 
     // SEC-1: Ownership check — only the owner (or superuser) can alter.
     check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+
+    if let Some(raw_target) = target_freshness {
+        if schedule.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "schedule and target_freshness cannot be changed together (HINT: choose one control)".into(),
+            ));
+        }
+        let target = parse_target_freshness(Some(raw_target))?
+            .ok_or_else(|| PgTrickleError::InvalidArgument("target_freshness is missing".into()))?;
+        if target.mode == TargetFreshnessMode::OnCommit && refresh_mode.is_some() {
+            return Err(PgTrickleError::InvalidArgument(
+                "on_commit target_freshness cannot be changed together with refresh_mode (HINT: choose IMMEDIATE or target_freshness => 'on_commit')".into(),
+            ));
+        }
+        if target.mode == TargetFreshnessMode::OnCommit {
+            crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
+            Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'IMMEDIATE', requested_refresh_mode = 'IMMEDIATE', updated_at = now() WHERE pgt_id = $1",
+                &[st.pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+        apply_target_freshness(st.pgt_id, target)?;
+        st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    }
 
     // ── Query migration (must run first, before other parameter changes) ──
     if let Some(new_query) = query {
@@ -1976,7 +2144,7 @@ pub(crate) fn alter_stream_table_impl(
             // ── Update catalog ──────────────────────────────────────
             Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables \
-                 SET refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
+                 SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
                 &[mode_str.to_uppercase().into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -2004,7 +2172,7 @@ pub(crate) fn alter_stream_table_impl(
             // Same mode — just update catalog (no-op but harmless).
             Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables \
-                 SET refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
+                 SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
                 &[mode_str.to_uppercase().into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

@@ -1134,6 +1134,7 @@ fn try_fused_chain_refresh(
             rows_deleted,
             data_changed: rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0,
             was_full_fallback: false,
+            full_reason: None,
             downstream_capture_complete: true,
         };
         refresh::set_effective_mode("DIFFERENTIAL");
@@ -1405,7 +1406,7 @@ fn sla_tier_adjustment_tick() {
     let st_ids: Vec<i64> = Spi::connect(|client| {
         let result = match client.select(
             "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
-                 WHERE freshness_deadline_ms IS NOT NULL AND status = 'ACTIVE'",
+                 WHERE freshness_deadline_ms IS NOT NULL AND target_freshness_mode IS NULL AND status = 'ACTIVE'",
             None,
             &[],
         ) {
@@ -2282,6 +2283,12 @@ fn load_st_by_id(pgt_id: i64) -> Option<StreamTableMeta> {
 /// dependants are unaffected: they detect upstream changes via
 /// `has_stream_table_source_changes()` independently.
 fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
+    // v0.86.0: MANUAL declarations are scheduler-ineligible regardless of
+    // tier scheduling configuration.
+    if st.schedule.as_deref() == Some("manual") {
+        return false;
+    }
+
     // DI-9: IMMEDIATE-mode tables refresh inline — the scheduler must not
     // compete for locks on them.
     if st.refresh_mode.is_immediate() {
@@ -3233,7 +3240,6 @@ fn refresh_single_st(
                     st.pgt_name,
                     config::pg_trickle_prediction_ratio(),
                 );
-                refresh::set_refresh_reason("predicted_cost_exceeds_full");
                 base_action = RefreshAction::Full;
             }
         }
@@ -3802,9 +3808,44 @@ fn execute_scheduled_refresh(
         }
     };
 
+    let requested_mode = Spi::get_one_with_args::<String>(
+        "SELECT requested_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .unwrap_or(None);
+    let mut full_reason = match action {
+        RefreshAction::Full if !st.is_populated => Some(refresh::FullRefreshReason::new(
+            refresh::FullRefreshReasonCode::FirstRefresh,
+            "The stream table has not been populated yet.",
+        )),
+        RefreshAction::Full => Some(refresh::FullRefreshReason::new(
+            match requested_mode.as_deref() {
+                Some("AUTO") => refresh::FullRefreshReasonCode::AutoQueryFullOnly,
+                Some("IMMEDIATE") => refresh::FullRefreshReasonCode::ManualImmediateRebuild,
+                _ => refresh::FullRefreshReasonCode::ConfiguredFull,
+            },
+            match requested_mode.as_deref() {
+                Some("AUTO") => "AUTO admission selected a FULL-only execution path.",
+                Some("IMMEDIATE") => "An IMMEDIATE stream table was manually rebuilt.",
+                _ => "FULL refresh was selected by the configured refresh mode.",
+            },
+        )),
+        RefreshAction::Reinitialize => Some(refresh::FullRefreshReason::new(
+            refresh::FullRefreshReasonCode::SchemaChanged,
+            "A rebuild was requested because the stored stream-table definition changed.",
+        )),
+        _ => None,
+    };
+    let mut was_full_fallback = action == RefreshAction::Reinitialize;
+
     let result = if st.topk_limit.is_some() {
         // TopK tables bypass the normal Full/Differential refresh paths and use
         // scoped-recomputation MERGE (ORDER BY … LIMIT N) instead.
+        full_reason = Some(refresh::FullRefreshReason::new(
+            refresh::FullRefreshReasonCode::TopKRecompute,
+            "TopK maintenance recomputes the bounded ordered result set.",
+        ));
+        was_full_fallback = action != RefreshAction::Full;
         refresh::execute_topk_refresh(st)
     } else {
         match action {
@@ -3868,6 +3909,19 @@ fn execute_scheduled_refresh(
                         st.pgt_schema,
                         st.pgt_name
                     );
+                    full_reason = Some(refresh::FullRefreshReason::new(
+                        if st.is_populated {
+                            refresh::FullRefreshReasonCode::FrontierMissing
+                        } else {
+                            refresh::FullRefreshReasonCode::FirstRefresh
+                        },
+                        if st.is_populated {
+                            "Differential state had no usable frontier, so a FULL baseline was rebuilt."
+                        } else {
+                            "The stream table has not been populated yet."
+                        },
+                    ));
+                    was_full_fallback = true;
                     let mut new_frontier =
                         version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
                     augment_frontier(&mut new_frontier);
@@ -3923,6 +3977,23 @@ fn execute_scheduled_refresh(
                                 st.pgt_name,
                                 msg
                             );
+                            let message = msg.to_ascii_lowercase();
+                            let code = if message.contains("case") && message.contains("in") {
+                                refresh::FullRefreshReasonCode::CaseInListDvmDriftFullFallback
+                            } else if message.contains("correlated") {
+                                refresh::FullRefreshReasonCode::CorrelatedSubqueryDeltaQuadratic
+                            } else if message.contains("regex") {
+                                refresh::FullRefreshReasonCode::RegexComplexityClassifierUncertain
+                            } else {
+                                refresh::FullRefreshReasonCode::JoinLimitExceeded
+                            };
+                            full_reason = Some(refresh::FullRefreshReason::new(
+                                code,
+                                format!(
+                                    "Differential maintenance exceeded a configured complexity limit: {msg}"
+                                ),
+                            ));
+                            was_full_fallback = true;
                             match refresh::execute_full_refresh(st) {
                                 Ok((ins, del)) => {
                                     // COR-001 (v0.72.0): Propagate frontier-store failure.
@@ -3966,8 +4037,6 @@ fn execute_scheduled_refresh(
     crate::shmem::record_cdc_lag_ms(elapsed_ms as u64);
 
     // Record refresh completion and determine outcome
-    let was_full_fallback = matches!(action, RefreshAction::Reinitialize);
-
     match result {
         Ok((rows_inserted, rows_deleted)) => {
             let rows_updated = refresh::take_last_rows_updated();
@@ -3999,6 +4068,7 @@ fn execute_scheduled_refresh(
                 data_changed: action != RefreshAction::NoData
                     && (rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0),
                 was_full_fallback,
+                full_reason,
                 downstream_capture_complete: true,
             };
             if let Err(e) = refresh::finalize_success(

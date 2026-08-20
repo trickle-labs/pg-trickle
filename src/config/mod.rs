@@ -38,6 +38,15 @@ pub static PGS_MAX_BULK_API_ITEMS: GucSetting<i32> = GucSetting::<i32>::new(256)
 /// Maximum stream-table targets accepted by a pause/resume API call.
 pub static PGS_MAX_CONTROL_TARGETS: GucSetting<i32> = GucSetting::<i32>::new(64);
 
+/// Maximum number of distinct joined sources before creation warnings fire.
+pub static PGS_WARN_JOIN_SOURCES: GucSetting<i32> = GucSetting::<i32>::new(6);
+
+/// Sampled CDC trigger overhead threshold in microseconds; zero disables it.
+pub static PGS_WARN_WRITE_PATH_OVERHEAD_US: GucSetting<f64> = GucSetting::<f64>::new(0.0);
+
+/// Add pg_trickle properties to PostgreSQL EXPLAIN output.
+pub static PGS_EXPLAIN_ANNOTATIONS: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // ── Registration ──────────────────────────────────────────────────────────
 
 /// Register all GUC variables for the pgtrickle extension.
@@ -98,6 +107,37 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c"pg_trickle.warn_join_sources",
+        c"Warn when a stream table joins more than this many sources.",
+        c"Set to zero to disable the warning.",
+        &PGS_WARN_JOIN_SOURCES,
+        0,
+        1024,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_float_guc(
+        c"pg_trickle.warn_write_path_overhead_us",
+        c"Warn when sampled generated CDC trigger overhead exceeds this value.",
+        c"The value is in microseconds per call; zero disables the warning.",
+        &PGS_WARN_WRITE_PATH_OVERHEAD_US,
+        0.0,
+        1_000_000.0,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.explain_annotations",
+        c"Add pg_trickle diagnostics to EXPLAIN output.",
+        c"When enabled, stream-table scans include lag, last verification, and refresh mode.",
+        &PGS_EXPLAIN_ANNOTATIONS,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     scheduler::register_scheduler_gucs();
     cdc::register_cdc_gucs();
     dvm::register_dvm_gucs();
@@ -117,6 +157,21 @@ pub fn pg_trickle_change_buffer_schema() -> String {
         .get()
         .map(|cs| cs.to_str().unwrap_or("pgtrickle_changes").to_string())
         .unwrap_or_else(|| "pgtrickle_changes".to_string())
+}
+
+/// Returns the join-source warning threshold.
+pub fn pg_trickle_warn_join_sources() -> i32 {
+    PGS_WARN_JOIN_SOURCES.get()
+}
+
+/// Returns the sampled write-path warning threshold in microseconds.
+pub fn pg_trickle_warn_write_path_overhead_us() -> f64 {
+    PGS_WARN_WRITE_PATH_OVERHEAD_US.get()
+}
+
+/// Returns whether EXPLAIN annotations are enabled for this session.
+pub fn pg_trickle_explain_annotations() -> bool {
+    PGS_EXPLAIN_ANNOTATIONS.get()
 }
 
 /// Returns the maximum number of concurrent refresh workers.

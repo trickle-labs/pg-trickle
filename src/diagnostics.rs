@@ -21,6 +21,219 @@ use crate::dvm;
 use crate::dvm::parser::{AggExpr, OpTree};
 use crate::error::PgTrickleError;
 
+/// The bounded, evidence-aware diagnostic snapshot shared by the text and
+/// JSON explainers.
+#[derive(Debug, Clone)]
+pub(crate) struct StreamTableExplanation {
+    pub(crate) refresh_mode: String,
+    pub(crate) estimated_changed_rows: Option<i64>,
+    pub(crate) expected_refresh_ms: Option<f64>,
+    pub(crate) expected_refresh_source: &'static str,
+    pub(crate) expected_refresh_samples: i32,
+    pub(crate) current_lag_ms: Option<f64>,
+    pub(crate) next_scheduled_refresh: String,
+    pub(crate) full_fallback_threshold: Option<f64>,
+    pub(crate) last_full_reason: Option<String>,
+    pub(crate) last_full_reason_detail: Option<String>,
+    pub(crate) dominant_cost: String,
+    pub(crate) dominant_cost_units: Option<f64>,
+    pub(crate) dominant_cost_source: &'static str,
+}
+
+fn dominant_plan_cost(query: &str) -> Option<(String, f64)> {
+    fn walk(node: &serde_json::Value) -> Option<(String, f64)> {
+        let total = node.get("Total Cost")?.as_f64()?;
+        let children = node
+            .get("Plans")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let child_total = children
+            .iter()
+            .filter_map(|child| child.get("Total Cost").and_then(serde_json::Value::as_f64))
+            .sum::<f64>();
+        let exclusive = (total - child_total).max(0.0);
+        let label = node
+            .get("Relation Name")
+            .and_then(serde_json::Value::as_str)
+            .map(|relation| {
+                format!(
+                    "{} ({relation})",
+                    node.get("Node Type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown operator")
+                )
+            })
+            .or_else(|| {
+                node.get("Node Type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown operator".to_string());
+        let mut best = (label, exclusive);
+        for child in children {
+            if let Some(candidate) = walk(child)
+                && candidate.1 > best.1
+            {
+                best = candidate;
+            }
+        }
+        Some(best)
+    }
+
+    let explain_sql = format!("EXPLAIN (FORMAT JSON, ANALYZE false) {query}");
+    let plan_text = Spi::get_one::<String>(&explain_sql).unwrap_or(None)?;
+    let explain: serde_json::Value = serde_json::from_str(&plan_text).ok()?;
+    let root = explain.as_array()?.first()?.get("Plan")?;
+    walk(root)
+}
+
+pub(crate) fn build_stream_table_explanation(
+    name: &str,
+) -> Result<StreamTableExplanation, PgTrickleError> {
+    let (schema, table) = crate::api::helpers::parse_qualified_name_pub(name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table)?;
+    let requested_mode = Spi::get_one_with_args::<String>(
+        "SELECT COALESCE(requested_refresh_mode, refresh_mode) FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or_else(|| st.refresh_mode.as_str().to_string());
+    let target_mode = Spi::get_one_with_args::<String>(
+        "SELECT target_freshness_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let summary = Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT s.last_full_reason, s.last_full_reason_detail,
+                        EXTRACT(EPOCH FROM (now() - COALESCE(st.last_refresh_at, st.created_at))) * 1000,
+                        c.avg_full_ms, c.avg_diff_ms, c.sample_count
+                   FROM pgtrickle.pgt_stream_tables st
+              LEFT JOIN pgtrickle.pgt_refresh_summary s ON s.pgt_id = st.pgt_id
+              LEFT JOIN pgtrickle.pgt_cost_model_summary c ON c.pgt_id = st.pgt_id
+                  WHERE st.pgt_id = $1",
+                None,
+                &[st.pgt_id.into()],
+            )?;
+        let row = table.first();
+        Ok::<_, pgrx::spi::SpiError>((
+            row.get::<String>(1)?,
+            row.get::<String>(2)?,
+            row.get::<f64>(3)?,
+            row.get::<f64>(4)?,
+            row.get::<f64>(5)?,
+            row.get::<i32>(6)?,
+        ))
+    })
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let (
+        last_full_reason,
+        last_full_reason_detail,
+        current_lag_ms,
+        avg_full_ms,
+        avg_diff_ms,
+        samples,
+    ) = summary;
+    let effective = st.refresh_mode.as_str();
+    let pending = crate::cdc::estimate_pending_changes(st.pgt_id);
+    let expected_refresh_ms = if effective == "FULL" {
+        avg_full_ms
+    } else {
+        avg_diff_ms.and_then(|per_delta_row| pending.map(|rows| per_delta_row * rows.max(0) as f64))
+    };
+    let (dominant_cost, dominant_cost_units, dominant_cost_source) =
+        dominant_plan_cost(&st.defining_query)
+            .map(|(label, cost)| (label, Some(cost), "postgres_explain"))
+            .unwrap_or_else(|| {
+                (
+                    st.query_complexity_class
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    None,
+                    "optree_classifier",
+                )
+            });
+    let next_scheduled_refresh = match target_mode.as_deref() {
+        Some("MANUAL") => "manual".to_string(),
+        Some("ON_COMMIT") => "on_commit".to_string(),
+        _ if st.schedule.is_some() => st.schedule.clone().unwrap_or_default(),
+        _ => "unknown".to_string(),
+    };
+    Ok(StreamTableExplanation {
+        refresh_mode: if requested_mode == effective {
+            effective.to_string()
+        } else {
+            format!("{requested_mode} → {effective}")
+        },
+        estimated_changed_rows: pending,
+        expected_refresh_ms,
+        expected_refresh_source: if samples.unwrap_or(0) > 0 {
+            if effective == "FULL" {
+                "observed_full_history"
+            } else {
+                "observed_differential_history"
+            }
+        } else {
+            "unavailable"
+        },
+        expected_refresh_samples: samples.unwrap_or(0),
+        current_lag_ms,
+        next_scheduled_refresh,
+        full_fallback_threshold: requested_mode.eq_ignore_ascii_case("AUTO").then(|| {
+            st.auto_threshold
+                .unwrap_or_else(crate::config::pg_trickle_differential_max_change_ratio)
+        }),
+        last_full_reason,
+        last_full_reason_detail,
+        dominant_cost,
+        dominant_cost_units,
+        dominant_cost_source,
+    })
+}
+
+pub(crate) fn render_stream_table_explanation_text(explanation: &StreamTableExplanation) -> String {
+    let changed = explanation
+        .estimated_changed_rows
+        .map_or_else(|| "unknown".into(), |rows| rows.to_string());
+    let expected = explanation
+        .expected_refresh_ms
+        .map_or_else(|| "unknown".into(), |ms| format!("~{ms:.1} ms"));
+    let lag = explanation
+        .current_lag_ms
+        .map_or_else(|| "unknown".into(), |ms| format!("{ms:.0} ms"));
+    let threshold = explanation
+        .full_fallback_threshold
+        .map_or_else(|| "not applicable".into(), |value| format!("{value:.3}"));
+    format!(
+        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFULL fallback threshold/reason: {} / {}\nWrite-path overhead: unknown",
+        explanation.refresh_mode,
+        changed,
+        explanation.dominant_cost,
+        expected,
+        lag,
+        explanation.next_scheduled_refresh,
+        threshold,
+        explanation.last_full_reason.as_deref().unwrap_or("none"),
+    )
+}
+
+pub(crate) fn render_stream_table_explanation_json(
+    explanation: &StreamTableExplanation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "refresh_mode": explanation.refresh_mode,
+        "estimated_changed_rows": explanation.estimated_changed_rows.map(|rows| serde_json::json!({"rows": rows, "source": "cdc_pending_changes"})),
+        "dominant_cost": {"label": explanation.dominant_cost, "planner_cost_units": explanation.dominant_cost_units, "source": explanation.dominant_cost_source},
+        "expected_refresh_time": {"milliseconds": explanation.expected_refresh_ms, "source": explanation.expected_refresh_source, "sample_count": explanation.expected_refresh_samples},
+        "current_lag": {"milliseconds": explanation.current_lag_ms, "meaning": "time_since_last_successful_verification"},
+        "next_scheduled_refresh": explanation.next_scheduled_refresh,
+        "full_fallback": {"threshold": explanation.full_fallback_threshold, "reason": explanation.last_full_reason, "detail": explanation.last_full_reason_detail},
+        "write_path_overhead": null
+    })
+}
+
 // ── DT-1: explain_query_rewrite ───────────────────────────────────────────
 
 /// DT-1 — Walk a query through the full DVM rewrite pipeline and report

@@ -50,6 +50,8 @@ fn create_stream_table(
     storage_backend: default!(Option<&str>, "NULL"),
     // HOT-1 (v0.73.0): heap fillfactor for HOT-friendly differential refreshes
     fillfactor: default!(Option<i32>, "NULL"),
+    // v0.86.0: declared freshness target
+    target_freshness: default!(Option<&str>, "NULL"),
 ) {
     let result = create_stream_table_impl(CreateStreamTableOptions {
         name,
@@ -69,6 +71,7 @@ fn create_stream_table(
         temporal_mode: temporal,
         storage_backend,
         storage_fillfactor: fillfactor,
+        target_freshness,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -106,6 +109,8 @@ fn create_stream_table_if_not_exists(
     storage_backend: default!(Option<&str>, "NULL"),
     // HOT-1 (v0.73.0): heap fillfactor for HOT-friendly differential refreshes
     fillfactor: default!(Option<i32>, "NULL"),
+    // v0.86.0: declared freshness target
+    target_freshness: default!(Option<&str>, "NULL"),
 ) {
     let result = create_stream_table_if_not_exists_impl(CreateStreamTableOptions {
         name,
@@ -125,6 +130,7 @@ fn create_stream_table_if_not_exists(
         temporal_mode: temporal,
         storage_backend,
         storage_fillfactor: fillfactor,
+        target_freshness,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -276,6 +282,7 @@ pub(crate) fn bulk_create_impl(
             temporal_mode: definition.temporal,
             storage_backend: definition.storage_backend.as_deref(),
             storage_fillfactor,
+            target_freshness: None,
         }) {
             Ok(()) => {
                 // Look up pgt_id for the result
@@ -640,6 +647,7 @@ fn create_or_replace_stream_table_impl(
                 temporal_mode,   // passed through from caller
                 storage_backend, // passed through from caller
                 storage_fillfactor: None,
+                target_freshness: None,
             })
         }
         Err(e) => Err(e),

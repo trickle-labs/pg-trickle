@@ -562,6 +562,8 @@ fn get_refresh_history(
         name!(rows_deleted, i64),
         name!(duration_ms, Option<f64>),
         name!(error_message, Option<String>),
+        name!(refresh_reason, Option<String>),
+        name!(refresh_reason_detail, Option<String>),
     ),
 > {
     let parts: Vec<&str> = name.splitn(2, '.').collect();
@@ -588,7 +590,9 @@ fn get_refresh_history(
                          THEN EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000
                          ELSE NULL
                     END::float8,
-                    h.error_message
+                    h.error_message,
+                    h.refresh_reason,
+                    h.refresh_reason_detail
                 FROM pgtrickle.pgt_refresh_history h
                 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
                 WHERE st.pgt_schema = $1 AND st.pgt_name = $2
@@ -634,9 +638,23 @@ fn get_refresh_history(
             let del = row.get::<i64>(9).unwrap_or(None).unwrap_or(0);
             let dur = row.get::<f64>(10).unwrap_or(None);
             let err = row.get::<String>(11).unwrap_or(None);
+            let reason = row.get::<String>(12).unwrap_or(None);
+            let reason_detail = row.get::<String>(13).unwrap_or(None);
 
             out.push((
-                refresh_id, data_ts, start, end, action, status, ins, updated, del, dur, err,
+                refresh_id,
+                data_ts,
+                start,
+                end,
+                action,
+                status,
+                ins,
+                updated,
+                del,
+                dur,
+                err,
+                reason,
+                reason_detail,
             ));
         }
         out

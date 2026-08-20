@@ -123,6 +123,31 @@ fn test_refresh_action_variants_exist() {
 }
 
 #[test]
+fn test_full_refresh_reason_codes_round_trip() {
+    for code in [
+        FullRefreshReasonCode::FirstRefresh,
+        FullRefreshReasonCode::DeltaRatioExceeded,
+        FullRefreshReasonCode::SchemaChanged,
+        FullRefreshReasonCode::TopKRecompute,
+    ] {
+        assert_eq!(FullRefreshReasonCode::from_str(code.as_str()), Some(code));
+    }
+    assert_eq!(FullRefreshReasonCode::from_str("unknown"), None);
+}
+
+#[test]
+fn test_full_refresh_reason_for_action() {
+    assert_eq!(
+        FullRefreshReason::for_action(RefreshAction::Full, true).map(|reason| reason.code),
+        Some(FullRefreshReasonCode::FirstRefresh)
+    );
+    assert_eq!(
+        FullRefreshReason::for_action(RefreshAction::Differential, false),
+        None
+    );
+}
+
+#[test]
 fn test_execute_differential_refresh_rejects_unpopulated_stream_table() {
     let mut st = test_st(RefreshMode::Differential, false);
     st.is_populated = false;

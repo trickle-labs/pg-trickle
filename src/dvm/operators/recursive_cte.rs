@@ -147,7 +147,6 @@ pub fn diff_recursive_cte(
             reason
         );
         // ARCH-2: Record the fallback reason for pgt_refresh_history.
-        crate::refresh::set_refresh_reason("recursive_cte_fallback");
         return generate_recomputation_delta(ctx, alias, columns, base, recursive, *union_all);
     }
 

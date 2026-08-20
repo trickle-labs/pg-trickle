@@ -1,6 +1,6 @@
 {
   "policy_version": 1,
-  "generated_from": "sql/archive/pg_trickle--0.83.0.sql",
+  "generated_from": "sql/archive/pg_trickle--0.86.0.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
@@ -26,10 +26,10 @@
       "identity_arguments": "text, timestamp with time zone",
       "class": "admin_global"
     },
-    "pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision)": {
+    "pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text)": {
       "schema": "pgtrickle",
       "name": "alter_stream_table",
-      "identity_arguments": "text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision",
+      "identity_arguments": "text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text",
       "class": "owner_lifecycle"
     },
     "pgtrickle.attach_embedding_outbox(text, text, integer, integer)": {
@@ -146,10 +146,10 @@
       "identity_arguments": "text, text[], text",
       "class": "admin_global"
     },
-    "pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer)": {
+    "pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text)": {
       "schema": "pgtrickle",
       "name": "create_stream_table",
-      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer",
+      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text",
       "class": "owner_lifecycle"
     },
     "pgtrickle.create_stream_table_batch(text, text, text, boolean, text, integer, double precision)": {
@@ -170,10 +170,10 @@
       "identity_arguments": "text, text, text, text, text, integer, double precision",
       "class": "owner_lifecycle"
     },
-    "pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer)": {
+    "pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_if_not_exists",
-      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer",
+      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text",
       "class": "owner_lifecycle"
     },
     "pgtrickle.create_stream_table_realtime(text, text, text, boolean, text, integer, double precision)": {
@@ -224,12 +224,6 @@
       "identity_arguments": "integer",
       "class": "admin_global"
     },
-    "pgtrickle.resume_after_drain()": {
-      "schema": "pgtrickle",
-      "name": "resume_after_drain",
-      "identity_arguments": "",
-      "class": "admin_global"
-    },
     "pgtrickle.drop_refresh_group(text)": {
       "schema": "pgtrickle",
       "name": "drop_refresh_group",
@@ -272,6 +266,12 @@
       "identity_arguments": "text",
       "class": "owner_lifecycle"
     },
+    "pgtrickle.explain(text)": {
+      "schema": "pgtrickle",
+      "name": "explain",
+      "identity_arguments": "text",
+      "class": "public_read"
+    },
     "pgtrickle.explain_dag(text)": {
       "schema": "pgtrickle",
       "name": "explain_dag",
@@ -287,6 +287,12 @@
     "pgtrickle.explain_diff_sql(text)": {
       "schema": "pgtrickle",
       "name": "explain_diff_sql",
+      "identity_arguments": "text",
+      "class": "public_read"
+    },
+    "pgtrickle.explain_json(text)": {
+      "schema": "pgtrickle",
+      "name": "explain_json",
       "identity_arguments": "text",
       "class": "public_read"
     },
@@ -500,10 +506,10 @@
       "identity_arguments": "",
       "class": "public_read"
     },
-    "pgtrickle.preview_stream_table(text)": {
+    "pgtrickle.preview_stream_table(text, text, text, text)": {
       "schema": "pgtrickle",
       "name": "preview_stream_table",
-      "identity_arguments": "text",
+      "identity_arguments": "text, text, text, text",
       "class": "public_read"
     },
     "pgtrickle.rebuild_cdc_triggers()": {
@@ -581,6 +587,12 @@
     "pgtrickle.restore_stream_tables()": {
       "schema": "pgtrickle",
       "name": "restore_stream_tables",
+      "identity_arguments": "",
+      "class": "admin_global"
+    },
+    "pgtrickle.resume_after_drain()": {
+      "schema": "pgtrickle",
+      "name": "resume_after_drain",
       "identity_arguments": "",
       "class": "admin_global"
     },
@@ -691,6 +703,18 @@
       "name": "st_refresh_stats",
       "identity_arguments": "",
       "class": "public_read"
+    },
+    "pgtrickle.stat_reset(bigint)": {
+      "schema": "pgtrickle",
+      "name": "stat_reset",
+      "identity_arguments": "bigint",
+      "class": "owner_lifecycle"
+    },
+    "pgtrickle.stat_reset_all()": {
+      "schema": "pgtrickle",
+      "name": "stat_reset_all",
+      "identity_arguments": "",
+      "class": "admin_global"
     },
     "pgtrickle.stream_table_definition(text)": {
       "schema": "pgtrickle",

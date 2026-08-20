@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**134 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**138 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -53,9 +53,11 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.drop_watermark_group()` | `pgtrickle` | `void` | Drop a watermark group by name. |
 | `pgtrickle.embedding_stream_table()` | `pgtrickle` | `` | # Returns A single-column table with one row per action taken (or SQL line for dry_run). |
 | `pgtrickle.exec_stream_ddl()` | `pgtrickle` | `boolean` | # Example ```sql SELECT pgtrickle.exec_stream_ddl(   'CREATE STREAM TABLE revenue AS SELECT SUM(amount) FROM orders' ); ```. |
+| `pgtrickle.explain()` | `pgtrickle` | `text` | v0.86.0: Explain the bounded refresh/cost/freshness snapshot as text. |
 | `pgtrickle.explain_dag()` | `pgtrickle` | `` | Node colours: user STs = blue, self-monitoring STs = green, suspended = red, fused = orange. |
 | `pgtrickle.explain_delta()` | `pgtrickle` | `` | Example: ```sql SELECT line FROM pgtrickle.explain_delta('public.orders_summary'); SELECT line FROM pgtrickle.explain_delta('public.orders_summary', 'json'); ```. |
 | `pgtrickle.explain_diff_sql()` | `pgtrickle` | `text (nullable)` | Exposed as `pgtrickle.explain_diff_sql(name)`. |
+| `pgtrickle.explain_json()` | `pgtrickle` | `Result<jsonb, PgTrickleError>` | v0.86.0: Explain the same snapshot as evidence-aware JSON. |
 | `pgtrickle.explain_query_rewrite()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.explain_query_rewrite(   'SELECT customer_id, SUM(amount) FROM orders GROUP BY customer_id' ); ```. |
 | `pgtrickle.explain_refresh_mode()` | `pgtrickle` | `SetOf row` | Example: ```sql SELECT * FROM pgtrickle.explain_refresh_mode('public.orders_summary'); ```. |
 | `pgtrickle.explain_st()` | `pgtrickle` | `` | PERF-3: When `with_analyze` is true, the defining query is EXPLAINed with ANALYZE to show actual row counts, timings, and buffer usage. |
@@ -90,7 +92,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.pgt_status()` | `pgtrickle` | `SetOf row` | Returns a summary row per stream table including schedule configuration, data timestamp, and computed staleness interval. |
 | `pgtrickle.pgtrickle_refresh_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.pgtrickle_refresh_stats()`. |
 | `pgtrickle.preflight()` | `pgtrickle` | `text` | Returns a JSON string with one entry per check: `pass` (bool), `check` (name), `detail` (human-readable message). |
-| `pgtrickle.preview_stream_table()` | `pgtrickle` | `SetOf row` | # Example ```sql SELECT * FROM pgtrickle.preview_stream_table(     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id' ); ```. |
+| `pgtrickle.preview_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT * FROM pgtrickle.preview_stream_table(     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id' ); ```. |
 | `pgtrickle.rebuild_cdc_triggers()` | `pgtrickle` | `text` | Returns `'done'` on success. |
 | `pgtrickle.recommend_refresh_mode()` | `pgtrickle` | `` | Read-only — no side effects. |
 | `pgtrickle.recommend_schedule()` | `pgtrickle` | `jsonb` | PLAN-1 (v0.27.0): Return a schedule recommendation for the given stream table as a JSONB object with keys: `recommended_interval_seconds`, `peak_window_cron`, `confidence` (0–1), `reasoning`. |
@@ -121,6 +123,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.source_stable_name()` | `pgtrickle` | `text (nullable)` | Returns `NULL` when the relation no longer exists (e.g. |
 | `pgtrickle.st_auto_threshold()` | `pgtrickle` | `double precision (nullable)` | Returns the per-ST `auto_threshold` if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
 | `pgtrickle.st_refresh_stats()` | `pgtrickle` | `SetOf row` | This is the primary monitoring function, exposed as `pgtrickle.st_refresh_stats()`. |
+| `pgtrickle.stat_reset()` | `pgtrickle` | `` | Reset cumulative diagnostics for one owned stream table without deleting immutable refresh history or operational error state. |
+| `pgtrickle.stat_reset_all()` | `pgtrickle` | `` | Reset cumulative diagnostics for all stream tables. |
 | `pgtrickle.stream_table_lineage()` | `pgtrickle` | `SetOf row` | # Example ```sql SELECT * FROM pgtrickle.stream_table_lineage('public.revenue_summary'); ```. |
 | `pgtrickle.stream_table_spec()` | `pgtrickle` | `jsonb (nullable)` | Example: ```sql SELECT pgtrickle.stream_table_spec('public.my_view'::regclass); ```. |
 | `pgtrickle.stream_table_spec()` | `pgtrickle` | `jsonb (nullable)` | Example: ```sql SELECT pgtrickle.stream_table_spec('public.my_view'); ```. |

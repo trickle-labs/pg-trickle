@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**137 configuration parameters** extracted from `src/config/`.
+**140 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -55,6 +55,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
 | `pg_trickle.enforce_backpressure` | `bool` | `false` | Default: `false` (alerts only, no throttling). |
+| `pg_trickle.explain_annotations` | `bool` | `false` | Add pg_trickle properties to PostgreSQL EXPLAIN output. |
 | `pg_trickle.force_full_refresh` | `bool` | `false` | Useful for SRE diagnosis when a cluster-wide `refresh_strategy = 'full'` still has DIFFERENTIAL STs due to explicit per-ST row values. |
 | `pg_trickle.foreign_table_polling` | `bool` | `false` | When enabled, foreign tables used in DIFFERENTIAL / IMMEDIATE mode defining queries will be supported via a snapshot-comparison approach: before each refresh cycle the scheduler materializes a snapshot of the foreign table into a local shadow table, then computes EXCEPT ALL deltas against the previous snapshot. |
 | `pg_trickle.frontier_holdback_mode` | `text` | `"xmin"` | \| Value \| Meaning \| \|-------\|---------\| \| `"xmin"` (default) \| Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
@@ -146,5 +147,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.wal_max_changes_per_poll` | `int4` | `10000` | Default: 10 000. |
 | `pg_trickle.wal_max_lag_bytes` | `int4` | `65536` | Default: 65 536 (64 KiB). |
 | `pg_trickle.wal_transition_timeout` | `int4` | `300` | Maximum time (seconds) to wait for the WAL decoder to catch up during transition from triggers to WAL-based CDC before falling back to triggers. |
+| `pg_trickle.warn_join_sources` | `int4` | `6` | Maximum number of distinct joined sources before creation warnings fire. |
+| `pg_trickle.warn_write_path_overhead_us` | `float8` | `0.0` | Sampled CDC trigger overhead threshold in microseconds; zero disables it. |
 | `pg_trickle.watermark_holdback_timeout` | `int4` | `0` | Set to 0 to disable stuck-watermark detection (default). |
 | `pg_trickle.worker_pool_size` | `int4` | `0` | Set to 0 (default) to use the existing spawn-per-task model. |

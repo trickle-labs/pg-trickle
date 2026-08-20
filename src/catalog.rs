@@ -1067,9 +1067,29 @@ impl StreamTableMeta {
     pub fn mark_for_reinitialize(pgt_id: i64) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
-             SET needs_reinit = true, updated_at = now() \
+             SET needs_reinit = true,
+                 refresh_reason = 'SCHEMA_CHANGED',
+                 refresh_reason_detail = 'A catalog or source-definition change requires a FULL rebuild.',
+                 updated_at = now() \
              WHERE pgt_id = $1",
             &[pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    pub fn set_refresh_reason(
+        pgt_id: i64,
+        reason: &crate::refresh::FullRefreshReason,
+    ) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables
+                SET refresh_reason = $1, refresh_reason_detail = $2, updated_at = now()
+              WHERE pgt_id = $3",
+            &[
+                reason.code.as_str().into(),
+                reason.detail.as_str().into(),
+                pgt_id.into(),
+            ],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -2459,6 +2479,11 @@ impl RefreshRecord {
                  total_rows_updated,
                  total_rows_deleted,
                  total_duration_ms,
+                 total_full_refreshes,
+                 total_diff_refreshes,
+                 total_delta_rows_processed,
+                 last_full_reason,
+                 last_full_reason_detail,
                  last_refresh_action,
                  last_refresh_status,
                  last_refresh_at
@@ -2476,6 +2501,11 @@ impl RefreshRecord {
                          (EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
                      ELSE 0
                  END,
+                 CASE WHEN h.status = 'COMPLETED' AND h.action IN ('FULL', 'REINITIALIZE') THEN 1 ELSE 0 END,
+                 CASE WHEN h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' THEN 1 ELSE 0 END,
+                 CASE WHEN h.status = 'COMPLETED' THEN COALESCE(h.delta_row_count, 0) ELSE 0 END,
+                 CASE WHEN h.action IN ('FULL', 'REINITIALIZE') THEN h.refresh_reason END,
+                 CASE WHEN h.action IN ('FULL', 'REINITIALIZE') THEN h.refresh_reason_detail END,
                  h.action,
                  h.status,
                  COALESCE(h.end_time, h.start_time)
@@ -2490,6 +2520,11 @@ impl RefreshRecord {
                  total_rows_updated = pgtrickle.pgt_refresh_summary.total_rows_updated + EXCLUDED.total_rows_updated,
                  total_rows_deleted = pgtrickle.pgt_refresh_summary.total_rows_deleted + EXCLUDED.total_rows_deleted,
                  total_duration_ms = pgtrickle.pgt_refresh_summary.total_duration_ms + EXCLUDED.total_duration_ms,
+                 total_full_refreshes = pgtrickle.pgt_refresh_summary.total_full_refreshes + EXCLUDED.total_full_refreshes,
+                 total_diff_refreshes = pgtrickle.pgt_refresh_summary.total_diff_refreshes + EXCLUDED.total_diff_refreshes,
+                 total_delta_rows_processed = pgtrickle.pgt_refresh_summary.total_delta_rows_processed + EXCLUDED.total_delta_rows_processed,
+                 last_full_reason = COALESCE(EXCLUDED.last_full_reason, pgtrickle.pgt_refresh_summary.last_full_reason),
+                 last_full_reason_detail = COALESCE(EXCLUDED.last_full_reason_detail, pgtrickle.pgt_refresh_summary.last_full_reason_detail),
                  last_refresh_action = EXCLUDED.last_refresh_action,
                  last_refresh_status = EXCLUDED.last_refresh_status,
                  last_refresh_at = EXCLUDED.last_refresh_at,
@@ -2598,13 +2633,42 @@ impl RefreshRecord {
         merge_strategy_used: Option<&str>,
         was_full_fallback: bool,
     ) -> Result<(), PgTrickleError> {
+        Self::complete_with_rows_updated_and_reason(
+            refresh_id,
+            status,
+            rows_inserted,
+            rows_updated,
+            rows_deleted,
+            error_message,
+            delta_row_count,
+            merge_strategy_used,
+            was_full_fallback,
+            None,
+        )
+    }
+
+    /// Complete a refresh record and persist a typed FULL-refresh reason.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_with_rows_updated_and_reason(
+        refresh_id: i64,
+        status: &str,
+        rows_inserted: i64,
+        rows_updated: i64,
+        rows_deleted: i64,
+        error_message: Option<&str>,
+        delta_row_count: i64,
+        merge_strategy_used: Option<&str>,
+        was_full_fallback: bool,
+        full_reason: Option<&crate::refresh::FullRefreshReason>,
+    ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_refresh_history \
              SET end_time = now(), status = $1, rows_inserted = $2, \
              rows_updated = $3, rows_deleted = $4, error_message = $5, \
              delta_row_count = $6, merge_strategy_used = $7, \
-             was_full_fallback = $8 \
-             WHERE refresh_id = $9",
+             was_full_fallback = $8, refresh_reason = $9, \
+             refresh_reason_detail = $10 \
+             WHERE refresh_id = $11",
             &[
                 status.into(),
                 rows_inserted.into(),
@@ -2614,6 +2678,8 @@ impl RefreshRecord {
                 delta_row_count.into(),
                 merge_strategy_used.into(),
                 was_full_fallback.into(),
+                full_reason.map(|reason| reason.code.as_str()).into(),
+                full_reason.map(|reason| reason.detail.as_str()).into(),
                 refresh_id.into(),
             ],
         )

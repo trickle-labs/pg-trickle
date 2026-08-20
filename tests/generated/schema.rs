@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     schedule      TEXT,
     refresh_mode    TEXT NOT NULL DEFAULT 'DIFFERENTIAL'
                      CHECK (refresh_mode IN ('FULL', 'DIFFERENTIAL', 'IMMEDIATE')),
+    requested_refresh_mode TEXT NOT NULL DEFAULT 'DIFFERENTIAL'
+                     CHECK (requested_refresh_mode IN ('AUTO', 'FULL', 'DIFFERENTIAL', 'IMMEDIATE')),
     status          TEXT NOT NULL DEFAULT 'INITIALIZING'
                      CHECK (status IN ('INITIALIZING', 'ACTIVE', 'SUSPENDED', 'ERROR')),
     is_populated    BOOLEAN NOT NULL DEFAULT FALSE,
@@ -70,6 +72,10 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     last_error_retryable BOOLEAN,
     downstream_publication_name TEXT,
     freshness_deadline_ms BIGINT,
+    target_freshness_mode TEXT
+        CHECK (target_freshness_mode IS NULL OR target_freshness_mode IN ('INTERVAL', 'ON_COMMIT', 'MANUAL')),
+    refresh_reason TEXT,
+    refresh_reason_detail TEXT,
     st_partition_key TEXT,
     in_shadow_build BOOLEAN NOT NULL DEFAULT FALSE,
     shadow_table_name TEXT,
@@ -144,6 +150,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     delta_row_count BIGINT DEFAULT 0,
     merge_strategy_used TEXT,
     was_full_fallback BOOLEAN NOT NULL DEFAULT FALSE,
+    refresh_reason TEXT,
+    refresh_reason_detail TEXT,
     error_message   TEXT,
     status          TEXT NOT NULL
                      CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED')),
@@ -165,6 +173,8 @@ CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_start ON pgtrickle.pgt_refresh_history (pgt_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_hist_start_time
     ON pgtrickle.pgt_refresh_history (start_time, refresh_id);
+CREATE INDEX IF NOT EXISTS idx_hist_pgt_stats_window
+    ON pgtrickle.pgt_refresh_history (pgt_id, start_time, status, action);
 
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     source_relid        OID PRIMARY KEY,
