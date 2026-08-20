@@ -1460,6 +1460,25 @@ jobs:
             docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
           fi
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        continue-on-error: true  # GHCR login is optional (cache pull only); transient timeouts must not fail the job
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull builder image from GHCR
+        run: |
+          # Pull the pre-built builder image to avoid a ~30–60 min local build.
+          # Falls back to building locally if the GHCR image is unavailable.
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+            echo "Builder image pulled from GHCR — skipping local build"
+          else
+            echo "::warning::Builder image not in GHCR (first run?). Will build locally."
+          fi
+
       - name: Build E2E Docker image (security gate)
         run: ./tests/build_e2e_image.sh
 
