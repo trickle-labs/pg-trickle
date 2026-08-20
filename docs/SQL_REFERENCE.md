@@ -1897,24 +1897,37 @@ SELECT * FROM pgtrickle.preview_stream_table(
 );
 ```
 
-### pgtrickle.explain and pgtrickle.explain_json
+### pgtrickle.explain
 
 Return a bounded explanation of one stream table's refresh mode, recent
-refresh evidence, cost-model summary, and target freshness state.
+refresh evidence, cost-model summary, and target freshness state as text.
 
 ```sql
 SELECT pgtrickle.explain('public.orders_summary');
+```
+
+### pgtrickle.explain_json
+
+Return the same bounded explanation as evidence-aware JSON.
+
+```sql
 SELECT pgtrickle.explain_json('public.orders_summary');
 ```
 
-### pgtrickle.stat_reset and pgtrickle.stat_reset_all
+### pgtrickle.stat_reset
 
 Reset cumulative refresh and cost-model statistics without deleting refresh
 history. `stat_reset` requires ownership of the selected stream table;
-`stat_reset_all` requires superuser or extension-owner privilege.
-
 ```sql
 SELECT pgtrickle.stat_reset(42);
+```
+
+### pgtrickle.stat_reset_all
+
+Reset cumulative refresh and cost-model statistics for all stream tables.
+This requires superuser or extension-owner privilege.
+
+```sql
 SELECT pgtrickle.stat_reset_all();
 ```
 
