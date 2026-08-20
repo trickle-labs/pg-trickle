@@ -78,6 +78,9 @@ async fn test_upgrade_catalog_schema_stability() {
         ("refresh_tier", "text"),
         ("requested_cdc_mode", "text"),
         ("refresh_mode", "text"),
+        ("requested_refresh_mode", "text"),
+        ("refresh_reason", "text"),
+        ("refresh_reason_detail", "text"),
         ("row_identity_version", "smallint"),
         ("scc_id", "integer"),
         ("schedule", "text"),
@@ -90,6 +93,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("status", "text"),
         ("storage_backend", "text"),       // v0.36.0: CORR-2/UX-3
         ("storage_fillfactor", "integer"), // v0.73.0: HOT-1
+        ("target_freshness_mode", "text"),
         ("tentative_frontier", "jsonb"),
         ("temporal_mode", "boolean"), // v0.36.0: CORR-1/UX-1
         ("topk_limit", "integer"),
