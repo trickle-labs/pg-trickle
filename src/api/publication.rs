@@ -143,11 +143,12 @@ fn set_stream_table_sla_impl(name: &str, sla: Interval) -> Result<(), PgTrickleE
     let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
     let meta = StreamTableMeta::get_by_name(&schema, &table)?;
 
-    // Convert interval to milliseconds.
-    // pgrx Interval has months, days, and microseconds.
-    let total_ms = sla.months() as i64 * 30 * 24 * 3600 * 1000 + // rough month conversion
-        sla.days() as i64 * 24 * 3600 * 1000 +
-        sla.micros() / 1000; // microseconds to milliseconds
+    if sla.months() != 0 {
+        return Err(PgTrickleError::InvalidArgument(
+            "SLA interval cannot contain calendar months; use days or smaller units".into(),
+        ));
+    }
+    let total_ms = sla.days() as i64 * 24 * 3600 * 1000 + sla.micros() / 1000;
 
     if total_ms <= 0 {
         return Err(PgTrickleError::InvalidArgument(
@@ -158,14 +159,22 @@ fn set_stream_table_sla_impl(name: &str, sla: Interval) -> Result<(), PgTrickleE
     // SLA-2: Determine the initial tier assignment based on the SLA.
     let tier = assign_tier_for_sla(total_ms)?;
 
+    super::alter::apply_target_freshness(
+        meta.pgt_id,
+        super::alter::TargetFreshness {
+            mode: super::alter::TargetFreshnessMode::Interval,
+            milliseconds: Some(total_ms),
+        },
+    )?;
+
     Spi::connect_mut(|client| {
         client
             .update(
                 "UPDATE pgtrickle.pgt_stream_tables \
-                 SET freshness_deadline_ms = $1, refresh_tier = $2, updated_at = now() \
-                 WHERE pgt_id = $3",
+                 SET refresh_tier = $1, updated_at = now() \
+                 WHERE pgt_id = $2",
                 None,
-                &[total_ms.into(), tier.as_str().into(), meta.pgt_id.into()],
+                &[tier.as_str().into(), meta.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 

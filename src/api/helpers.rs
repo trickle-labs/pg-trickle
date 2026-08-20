@@ -1453,46 +1453,6 @@ pub(super) fn warn_source_table_properties(source_relids: &[(pg_sys::Oid, String
                 table_name,
             );
         }
-
-        // EC-06: Keyless table warning — source tables without a PRIMARY KEY
-        // use content-based hashing for change detection, which is slower and
-        // cannot distinguish between identical duplicate rows.
-        match cdc::resolve_pk_columns(*oid) {
-            Ok(pk_cols) if pk_cols.is_empty() => {
-                pgrx::warning!(
-                    "pg_trickle: source table {} has no PRIMARY KEY. Change detection \
-                     will use content-based hashing, which is slower for wide tables \
-                     and cannot distinguish identical duplicate rows. Consider adding \
-                     a PRIMARY KEY for best performance.",
-                    table_name,
-                );
-            }
-            _ => {}
-        }
-
-        // A45-3: RLS bypass warning — if the source table has RLS enabled,
-        // warn that source-table RLS does NOT protect stream-table contents.
-        // The refresh query runs as the superuser (SECURITY DEFINER), which // nosemgrep: semgrep.sql.security-definer.present
-        // bypasses RLS by default. To protect the stream table contents,
-        // apply RLS directly on the stream table itself.
-        let rls_enabled = Spi::get_one_with_args::<bool>(
-            "SELECT relrowsecurity FROM pg_catalog.pg_class WHERE oid = $1",
-            &[(*oid).into()],
-        )
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
-
-        if rls_enabled {
-            pgrx::warning!(
-                "pg_trickle: source table {} has Row Level Security (RLS) enabled. \
-                 RLS on source tables does NOT protect stream table contents — the \
-                 refresh query runs as the superuser, which bypasses RLS by default. \
-                 To restrict access to the stream table's contents, enable and configure \
-                 RLS on the stream table itself. \
-                 See docs/SECURITY_MODEL.md for details.",
-                table_name,
-            );
-        }
     }
 }
 

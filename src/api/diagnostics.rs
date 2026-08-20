@@ -2284,6 +2284,24 @@ pub(super) fn tune_recommendations() -> TableIterator<
 
 // ── QW-3 (v0.81.0): preview_stream_table ─────────────────────────────────
 
+/// v0.86.0: Explain the bounded refresh/cost/freshness snapshot as text.
+#[pg_extern(schema = "pgtrickle", name = "explain")]
+pub(super) fn explain(name: &str) -> Result<String, PgTrickleError> {
+    let snapshot = crate::diagnostics::build_stream_table_explanation(name)?;
+    Ok(crate::diagnostics::render_stream_table_explanation_text(
+        &snapshot,
+    ))
+}
+
+/// v0.86.0: Explain the same snapshot as evidence-aware JSON.
+#[pg_extern(schema = "pgtrickle", name = "explain_json")]
+pub(super) fn explain_json(name: &str) -> Result<pgrx::JsonB, PgTrickleError> {
+    let snapshot = crate::diagnostics::build_stream_table_explanation(name)?;
+    Ok(pgrx::JsonB(
+        crate::diagnostics::render_stream_table_explanation_json(&snapshot),
+    ))
+}
+
 /// QW-3 (v0.81.0): Analyse a query to preview what a stream table would
 /// look like if created with `create_stream_table`, without creating anything.
 ///
@@ -2304,8 +2322,24 @@ pub(super) fn tune_recommendations() -> TableIterator<
 #[pg_extern(schema = "pgtrickle")]
 pub(super) fn preview_stream_table(
     query: &str,
+    schedule: default!(Option<&str>, "'calculated'"),
+    refresh_mode: default!(&str, "'AUTO'"),
+    target_freshness: default!(Option<&str>, "NULL"),
 ) -> TableIterator<'static, (name!(property, String), name!(value, String))> {
     let mut rows: Vec<(String, String)> = Vec::new();
+
+    rows.push((
+        "schedule".to_string(),
+        schedule.unwrap_or("calculated").to_string(),
+    ));
+    rows.push((
+        "requested_refresh_mode".to_string(),
+        refresh_mode.to_string(),
+    ));
+    rows.push((
+        "target_freshness".to_string(),
+        target_freshness.unwrap_or("unavailable").to_string(),
+    ));
 
     let parse_result = crate::dvm::parser::parse_defining_query_full(query);
 
@@ -2316,7 +2350,8 @@ pub(super) fn preview_stream_table(
             rows.push(("parse_error".to_string(), e.to_string()));
             rows.push(("source_tables".to_string(), String::new()));
             rows.push(("op_tree_root".to_string(), "unknown".to_string()));
-            rows.push(("warnings".to_string(), String::new()));
+            rows.push(("warnings".to_string(), "[]".to_string()));
+            rows.push(("warning_count".to_string(), "0".to_string()));
             rows.push(("complexity_estimate".to_string(), "unknown".to_string()));
         }
         Ok(result) => {
@@ -2344,8 +2379,56 @@ pub(super) fn preview_stream_table(
                 preview_root_type(&result.tree).to_string(),
             ));
 
-            let warnings_str = result.warnings.join("; ");
-            rows.push(("warnings".to_string(), warnings_str));
+            let warnings = serde_json::Value::Array(
+                result
+                    .warnings
+                    .iter()
+                    .map(|warning| serde_json::json!({"code": "PARSER", "message": warning}))
+                    .collect(),
+            );
+            rows.push((
+                "warning_count".to_string(),
+                result.warnings.len().to_string(),
+            ));
+            rows.push(("warnings".to_string(), warnings.to_string()));
+
+            let source_relids = result
+                .tree
+                .source_oids()
+                .into_iter()
+                .map(|oid| {
+                    (
+                        oid.into(),
+                        crate::api::helpers::classify_source_relation(oid.into()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let creation_warnings = crate::api::collect_creation_warnings(
+                query,
+                refresh_mode,
+                if dvm_supported {
+                    RefreshMode::Differential
+                } else {
+                    RefreshMode::Full
+                },
+                &source_relids,
+            );
+            let mut warning_values = warnings;
+            if let serde_json::Value::Array(values) = &mut warning_values {
+                values.extend(creation_warnings.iter().map(|warning| {
+                    serde_json::json!({
+                        "code": warning.code,
+                        "message": warning.message,
+                        "hint": warning.hint,
+                    })
+                }));
+            }
+            if let Some(row) = rows.iter_mut().find(|(key, _)| key == "warnings") {
+                row.1 = warning_values.to_string();
+            }
+            if let Some(row) = rows.iter_mut().find(|(key, _)| key == "warning_count") {
+                row.1 = warning_values.as_array().map_or(0, Vec::len).to_string();
+            }
 
             if result.has_recursion {
                 rows.push((
@@ -2370,6 +2453,78 @@ pub(super) fn preview_stream_table(
     }
 
     TableIterator::new(rows)
+}
+
+/// Reset cumulative diagnostics for one owned stream table without deleting
+/// immutable refresh history or operational error state.
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn stat_reset(pgt_id: i64) {
+    let result = (|| {
+        let st = StreamTableMeta::get_by_id(pgt_id)?
+            .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={pgt_id}")))?;
+        check_stream_table_ownership(st.pgt_relid, &st.pgt_schema, &st.pgt_name)?;
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+            &[pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run_with_args(
+            "INSERT INTO pgtrickle.pgt_refresh_summary (pgt_id, stats_reset_at)
+             VALUES ($1, now())
+             ON CONFLICT (pgt_id) DO UPDATE SET
+                 total_refreshes = 0, successful_refreshes = 0, failed_refreshes = 0,
+                 total_rows_inserted = 0, total_rows_updated = 0, total_rows_deleted = 0,
+                 total_duration_ms = 0, total_full_refreshes = 0, total_diff_refreshes = 0,
+                 total_delta_rows_processed = 0, stats_reset_at = now(), updated_at = now()",
+            &[pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    })();
+    if let Err(error) = result {
+        raise_error_with_context(error);
+    }
+}
+
+/// Reset cumulative diagnostics for all stream tables. Superuser only.
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn stat_reset_all() {
+    let result = (|| {
+        let can_reset_all = Spi::get_one_with_args::<bool>(
+            "SELECT r.rolsuper OR e.extowner = r.oid
+               FROM pg_catalog.pg_roles r
+               CROSS JOIN pg_catalog.pg_extension e
+              WHERE r.oid = $1 AND e.extname = 'pg_trickle'",
+            &[outer_user_id().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !can_reset_all {
+            return Err(PgTrickleError::PermissionDenied(
+                "stat_reset_all() requires the pg_trickle extension owner or superuser privilege"
+                    .into(),
+            ));
+        }
+        Spi::run("SELECT pgt_id FROM pgtrickle.pgt_stream_tables FOR UPDATE")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run(
+            "UPDATE pgtrickle.pgt_refresh_summary
+                  SET total_refreshes = 0, successful_refreshes = 0, failed_refreshes = 0,
+                      total_rows_inserted = 0, total_rows_updated = 0, total_rows_deleted = 0,
+                      total_duration_ms = 0, total_full_refreshes = 0, total_diff_refreshes = 0,
+                      total_delta_rows_processed = 0, stats_reset_at = now(), updated_at = now()",
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Spi::run("DELETE FROM pgtrickle.pgt_cost_model_summary")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    })();
+    if let Err(error) = result {
+        raise_error_with_context(error);
+    }
 }
 
 fn preview_collect_sources(tree: &crate::dvm::parser::OpTree) -> Vec<String> {

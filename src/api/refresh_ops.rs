@@ -313,6 +313,14 @@ fn execute_manual_refresh(
                 data_changed: !refresh::effective_mode_is_no_data()
                     && (*rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0),
                 was_full_fallback: false,
+                full_reason: refresh::FullRefreshReason::for_action(
+                    match action {
+                        "FULL" => RefreshAction::Full,
+                        "DIFFERENTIAL" => RefreshAction::Differential,
+                        _ => RefreshAction::Reinitialize,
+                    },
+                    !st.is_populated,
+                ),
                 downstream_capture_complete: true,
             };
             refresh::finalize_success(st, &execution, refresh_id, now, schema, table_name)?;

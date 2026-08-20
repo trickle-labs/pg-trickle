@@ -413,18 +413,20 @@ pub(crate) fn batch_update_cost_model_summary() {
             now()                                AS updated_at
         FROM (
             SELECT
-                pgt_id,
-                CASE WHEN action = 'FULL' THEN
-                    EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0
+                h.pgt_id,
+                CASE WHEN h.action = 'FULL' THEN
+                    EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0
                 END AS full_ms,
-                CASE WHEN action = 'DIFFERENTIAL' AND delta_row_count > 0 THEN
-                    EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0
-                    / GREATEST(delta_row_count, 1)
+                CASE WHEN h.action = 'DIFFERENTIAL' AND h.delta_row_count > 0 THEN
+                    EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0
+                    / GREATEST(h.delta_row_count, 1)
                 END AS diff_ms
-            FROM pgtrickle.pgt_refresh_history
-            WHERE status = 'COMPLETED'
-              AND end_time IS NOT NULL
-              AND action IN ('FULL', 'DIFFERENTIAL')
+            FROM pgtrickle.pgt_refresh_history h
+            JOIN pgtrickle.pgt_refresh_summary s ON s.pgt_id = h.pgt_id
+            WHERE h.status = 'COMPLETED'
+              AND h.end_time IS NOT NULL
+              AND h.start_time >= s.stats_reset_at
+              AND h.action IN ('FULL', 'DIFFERENTIAL')
         ) sub
         WHERE full_ms IS NOT NULL OR diff_ms IS NOT NULL
         GROUP BY pgt_id
@@ -437,6 +439,28 @@ pub(crate) fn batch_update_cost_model_summary() {
     ";
     if let Err(e) = pgrx::Spi::run(sql) {
         pgrx::warning!("[pg_trickle] P-3: failed to batch-update pgt_cost_model_summary: {e}");
+    }
+    let percentile_sql = "
+        UPDATE pgtrickle.pgt_cost_model_summary c
+           SET p95_ms = stats.p95_ms,
+               p99_ms = stats.p99_ms,
+               updated_at = now()
+          FROM (
+                SELECT h.pgt_id,
+                       percentile_cont(0.95) WITHIN GROUP
+                           (ORDER BY EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS p95_ms,
+                       percentile_cont(0.99) WITHIN GROUP
+                           (ORDER BY EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS p99_ms
+                  FROM pgtrickle.pgt_refresh_history h
+                  JOIN pgtrickle.pgt_refresh_summary s USING (pgt_id)
+                 WHERE h.status = 'COMPLETED'
+                   AND h.end_time IS NOT NULL
+                   AND h.start_time >= s.stats_reset_at
+                 GROUP BY h.pgt_id
+               ) stats
+         WHERE c.pgt_id = stats.pgt_id";
+    if let Err(e) = pgrx::Spi::run(percentile_sql) {
+        pgrx::warning!("[pg_trickle] P-3: failed to update refresh percentiles: {e}");
     }
 }
 

@@ -46,7 +46,7 @@ async fn setup_ownership_test(db: &E2eDb) {
     db.execute(
         "GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(\
             text, text, text, text, text, text, text, text, boolean, boolean, text, text, \
-            bigint, integer, text, integer, double precision, text, double precision) \
+            bigint, integer, text, integer, double precision, text, double precision, text) \
          TO sec1_owner, sec1_other",
     )
     .await;
@@ -205,7 +205,7 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = 'pgtrickle' \
                AND p.proname = 'create_stream_table' \
-               AND p.pronargs = 17",
+               AND p.pronargs = 18",
         )
         .await;
     assert!(secured_api, "creation API must be SECURITY DEFINER");
@@ -218,7 +218,7 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
              unnest(p.proconfig) AS setting \
              WHERE n.nspname = 'pgtrickle' \
                AND p.proname = 'create_stream_table' \
-               AND p.pronargs = 17 \
+               AND p.pronargs = 18 \
                AND setting = 'search_path=pgtrickle, pg_catalog, pg_temp' \
              )",
         )

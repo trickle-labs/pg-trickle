@@ -837,6 +837,122 @@ fn validate_requested_cdc_mode_requirements(
     Ok(())
 }
 
+/// A warning produced by the shared create/preview analysis path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CreationWarning {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+    pub(crate) hint: String,
+}
+
+pub(crate) fn collect_creation_warnings(
+    query: &str,
+    requested_mode: &str,
+    effective_mode: RefreshMode,
+    source_relids: &[(pg_sys::Oid, String)],
+) -> Vec<CreationWarning> {
+    let mut warnings = Vec::new();
+
+    if requested_mode.eq_ignore_ascii_case("FULL") || effective_mode == RefreshMode::Full {
+        warnings.push(CreationWarning {
+            code: "ALWAYS_FULL",
+            message: if requested_mode.eq_ignore_ascii_case("FULL") {
+                "The stream table is configured for FULL refreshes.".to_string()
+            } else {
+                "The query was admitted as FULL-only and cannot use differential maintenance.".to_string()
+            },
+            hint: "Use a supported rewrite for differential maintenance, or keep FULL explicitly if that is intentional.".to_string(),
+        });
+    }
+
+    let join_source_count = source_relids
+        .iter()
+        .filter(|(_, source_type)| {
+            matches!(source_type.as_str(), "TABLE" | "VIEW" | "STREAM_TABLE")
+        })
+        .count();
+    let join_limit = config::pg_trickle_warn_join_sources();
+    if join_limit > 0 && join_source_count > join_limit as usize {
+        warnings.push(CreationWarning {
+            code: "JOIN_SOURCE_COUNT_HIGH",
+            message: format!(
+                "The defining query references {join_source_count} joined sources, above the configured warning threshold of {join_limit}."
+            ),
+            hint: "Reduce or split the join graph, or accept the measured refresh and write cost.".to_string(),
+        });
+    }
+
+    if crate::api::helpers::detect_select_star(query) {
+        warnings.push(CreationWarning {
+            code: "SELECT_STAR",
+            message: "The defining query uses SELECT *, so source schema changes can require reinitialization.".to_string(),
+            hint: "List output columns explicitly for a more stable stream-table schema.".to_string(),
+        });
+    }
+    if let Some(pattern) = crate::api::helpers::detect_volatile_functions(query) {
+        warnings.push(CreationWarning {
+            code: "VOLATILE_FUNCTION",
+            message: format!(
+                "The defining query contains the volatile or non-deterministic function '{pattern}'."
+            ),
+            hint: "Use stable row inputs, or choose FULL refresh mode if this is intentional.".to_string(),
+        });
+    }
+
+    for (oid, source_type) in source_relids {
+        if source_type != "TABLE" {
+            continue;
+        }
+        let source_name = Spi::get_one_with_args::<String>(
+            "SELECT format('%I.%I', n.nspname, c.relname) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = $1",
+            &[(*oid).into()],
+        )
+        .unwrap_or(None)
+        .unwrap_or_else(|| format!("OID {}", oid.to_u32()));
+
+        if cdc::resolve_pk_columns(*oid)
+            .map(|columns| columns.is_empty())
+            .unwrap_or(false)
+        {
+            warnings.push(CreationWarning {
+                code: "SOURCE_IDENTITY_INADEQUATE",
+                message: format!("Source table {source_name} has no PRIMARY KEY; change identity falls back to content hashing."),
+                hint: "Add a stable PRIMARY KEY or suitable replica identity for reliable, faster maintenance.".to_string(),
+            });
+        }
+
+        let rls_enabled = Spi::get_one_with_args::<bool>(
+            "SELECT relrowsecurity FROM pg_catalog.pg_class WHERE oid = $1",
+            &[(*oid).into()],
+        )
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+        if rls_enabled {
+            warnings.push(CreationWarning {
+                code: "SOURCE_RLS_ENABLED",
+                message: format!("Source table {source_name} has Row Level Security enabled."),
+                hint: "Review owner and policy semantics; source RLS does not protect refreshed stream-table contents.".to_string(),
+            });
+        }
+    }
+
+    warnings
+}
+
+pub(crate) fn emit_creation_warnings(warnings: &[CreationWarning]) {
+    for warning in warnings {
+        pgrx::warning!(
+            "[pg_trickle] {}: {} HINT: {}",
+            warning.code,
+            warning.message,
+            warning.hint,
+        );
+    }
+}
+
 /// Validate a rewritten query and parse it for DVM. This runs the LIMIT 0
 /// check, TopK detection, unsupported construct rejection, DVM parsing,
 /// volatility checks, and source relation extraction.
@@ -2831,6 +2947,7 @@ fn build_bulk_alter_stream_table_options<'a>(
         max_delta_fraction: params.max_delta_fraction,
         post_refresh_action: params.post_refresh_action.as_deref(),
         reindex_drift_threshold: params.reindex_drift_threshold,
+        target_freshness: None,
     }
 }
 

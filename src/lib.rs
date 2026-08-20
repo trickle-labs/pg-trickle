@@ -44,10 +44,13 @@ pub mod config;
 // the main production path but are retained for future use or test support.
 #[allow(dead_code)]
 pub mod dag;
-mod diagnostics;
+pub(crate) mod diagnostics;
 #[allow(dead_code)]
 pub mod dvm;
 pub mod error;
+#[cfg(feature = "pg18")]
+#[allow(dead_code)]
+mod explain_hook;
 pub mod fuzz_pub;
 mod hash;
 #[allow(dead_code)]
@@ -123,6 +126,8 @@ fn build_init_decision(in_shared_preload: bool, cdc_mode: &str, wal_level: i32) 
 pub extern "C-unwind" fn _PG_init() {
     // Register GUC variables first (always available)
     config::register_gucs();
+    #[cfg(feature = "pg18")]
+    explain_hook::register();
 
     // Check if loaded via shared_preload_libraries
     // SAFETY: Reading a global boolean set by PostgreSQL during startup.
@@ -271,6 +276,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     schedule      TEXT,
     refresh_mode    TEXT NOT NULL DEFAULT 'DIFFERENTIAL'
                      CHECK (refresh_mode IN ('FULL', 'DIFFERENTIAL', 'IMMEDIATE')),
+    requested_refresh_mode TEXT NOT NULL DEFAULT 'DIFFERENTIAL'
+                     CHECK (requested_refresh_mode IN ('AUTO', 'FULL', 'DIFFERENTIAL', 'IMMEDIATE')),
     status          TEXT NOT NULL DEFAULT 'INITIALIZING'
                      CHECK (status IN ('INITIALIZING', 'ACTIVE', 'SUSPENDED', 'ERROR')),
     is_populated    BOOLEAN NOT NULL DEFAULT FALSE,
@@ -329,6 +336,10 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     last_error_retryable BOOLEAN,
     downstream_publication_name TEXT,
     freshness_deadline_ms BIGINT,
+    target_freshness_mode TEXT
+        CHECK (target_freshness_mode IS NULL OR target_freshness_mode IN ('INTERVAL', 'ON_COMMIT', 'MANUAL')),
+    refresh_reason TEXT,
+    refresh_reason_detail TEXT,
     st_partition_key TEXT,
     in_shadow_build BOOLEAN NOT NULL DEFAULT FALSE,
     shadow_table_name TEXT,
@@ -455,6 +466,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     delta_row_count BIGINT DEFAULT 0,
     merge_strategy_used TEXT,
     was_full_fallback BOOLEAN NOT NULL DEFAULT FALSE,
+    refresh_reason TEXT,
+    refresh_reason_detail TEXT,
     error_message   TEXT,
     status          TEXT NOT NULL
                      CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED')),
@@ -477,6 +490,8 @@ CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_start ON pgtrickle.pgt_refresh_history (pgt_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_hist_start_time
     ON pgtrickle.pgt_refresh_history (start_time, refresh_id);
+CREATE INDEX IF NOT EXISTS idx_hist_pgt_stats_window
+    ON pgtrickle.pgt_refresh_history (pgt_id, start_time, status, action);
 
 -- v0.73.0 PERF-001: Incremental summary table for refresh-history metrics.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_summary (
@@ -492,6 +507,12 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_summary (
     last_refresh_action TEXT,
     last_refresh_status TEXT,
     last_refresh_at TIMESTAMPTZ,
+    stats_reset_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    total_full_refreshes BIGINT NOT NULL DEFAULT 0,
+    total_diff_refreshes BIGINT NOT NULL DEFAULT 0,
+    total_delta_rows_processed BIGINT NOT NULL DEFAULT 0,
+    last_full_reason TEXT,
+    last_full_reason_detail TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -504,6 +525,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_cost_model_summary (
     avg_full_ms  DOUBLE PRECISION,
     avg_diff_ms  DOUBLE PRECISION,
     sample_count INTEGER     NOT NULL DEFAULT 0,
+    p95_ms       DOUBLE PRECISION,
+    p99_ms       DOUBLE PRECISION,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT pgt_cost_model_summary_pk PRIMARY KEY (pgt_id)
 );
@@ -858,6 +881,39 @@ LEFT JOIN LATERAL (
     FROM pgtrickle.pgt_refresh_history h
     WHERE h.pgt_id = st.pgt_id
 ) stats ON true;
+
+-- v0.86.0: Bounded per-stream-table diagnostic statistics.
+-- All cumulative values come from summary tables; scraping this view never
+-- scans refresh history.
+CREATE OR REPLACE VIEW pgtrickle.pg_stat_pgtrickle AS
+SELECT
+    st.pgt_id,
+    st.pgt_schema AS schema_name,
+    st.pgt_name AS table_name,
+    COALESCE(s.total_refreshes, 0)::bigint AS total_refreshes,
+    COALESCE(s.total_full_refreshes, 0)::bigint AS total_full_refreshes,
+    COALESCE(s.total_diff_refreshes, 0)::bigint AS total_diff_refreshes,
+    COALESCE(s.total_delta_rows_processed, 0)::bigint AS total_delta_rows_processed,
+    CASE WHEN COALESCE(s.total_refreshes, 0) > 0
+         THEN s.total_duration_ms::double precision / s.total_refreshes
+    END AS avg_refresh_duration_ms,
+    c.p95_ms AS p95_refresh_duration_ms,
+    c.p99_ms AS p99_refresh_duration_ms,
+    s.last_refresh_at,
+    CASE WHEN COALESCE(s.last_refresh_at, st.created_at) IS NOT NULL
+         THEN EXTRACT(EPOCH FROM (now() - COALESCE(s.last_refresh_at, st.created_at))) * 1000
+    END AS current_lag_ms,
+    COALESCE(st.requested_refresh_mode, st.refresh_mode) AS requested_refresh_mode,
+    st.target_freshness_mode,
+    st.freshness_deadline_ms AS target_freshness_ms,
+    s.last_full_reason,
+    s.last_full_reason_detail,
+    st.last_error_message AS last_error,
+    st.last_error_at,
+    s.stats_reset_at
+FROM pgtrickle.pgt_stream_tables st
+LEFT JOIN pgtrickle.pgt_refresh_summary s ON s.pgt_id = st.pgt_id
+LEFT JOIN pgtrickle.pgt_cost_model_summary c ON c.pgt_id = st.pgt_id;
 
 -- Per-source CDC status view (G5): exposes cdc_mode, slot names, and
 -- transition timestamps for every TABLE dependency of a stream table.
@@ -1268,6 +1324,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.resume_after_drain() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.setup_self_monitoring() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.teardown_self_monitoring() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.ungate_source(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset_all() FROM PUBLIC;
 
 -- arbitrary_sql
 REVOKE EXECUTE ON FUNCTION pgtrickle.write_and_refresh(text, text) FROM PUBLIC;
@@ -1280,7 +1337,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_apply_delta_enr(bigint, integer, bo
 REVOKE EXECUTE ON FUNCTION pgtrickle.pgt_ivm_handle_truncate(bigint) FROM PUBLIC;
 
 -- owner_lifecycle
-REVOKE EXECUTE ON FUNCTION pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_embedding_outbox(text, text, integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.bulk_alter_stream_tables(text[], json) FROM PUBLIC;
@@ -1290,11 +1347,11 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.canary_begin(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.canary_diff(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.canary_promote(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_or_replace_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_batch(text, text, text, boolean, text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_cost_optimized(text, text, text, boolean, text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_fast_append_only(text, text, text, text, text, integer, double precision) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_realtime(text, text, text, boolean, text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.detach_outbox(text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_snapshot(text) FROM PUBLIC;
@@ -1321,6 +1378,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.subscribe_distance(text, text, text, text, text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.unsubscribe_distance(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.stat_reset(bigint) FROM PUBLIC;
 
 -- public_read
 GRANT EXECUTE ON FUNCTION pgtrickle.bootstrap_gate_status() TO PUBLIC;
@@ -1337,6 +1395,8 @@ GRANT EXECUTE ON FUNCTION pgtrickle.diamond_groups() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_dag(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_delta(text, text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_diff_sql(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.explain(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.explain_json(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_query_rewrite(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_refresh_mode(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_st(text, boolean) TO PUBLIC;
@@ -1363,7 +1423,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.pgt_scc_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pgt_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pgtrickle_refresh_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.preflight() TO PUBLIC;
-GRANT EXECUTE ON FUNCTION pgtrickle.preview_stream_table(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.preview_stream_table(text, text, text, text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.recommend_refresh_mode(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.recommend_schedule(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.reliability_counters() TO PUBLIC;

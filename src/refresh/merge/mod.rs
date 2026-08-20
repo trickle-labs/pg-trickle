@@ -4,10 +4,8 @@
 // execute_differential_refresh, partition helpers, and capture_delta_explain.
 //
 // Q-1 (v0.79.0): Removed per-import #[allow(unused_imports)] shims. Imports
-// are now concrete; `use super::*` is retained because it provides items
-// defined directly in refresh/mod.rs — set_effective_mode, set_refresh_reason,
-// classify_query_complexity*, classify_case_in_list_aggregate_drift, and
-// classify_correlated_aggregate_subquery_in_where.
+// are now concrete; `use super::*` is retained for the refresh helpers defined
+// directly in refresh/mod.rs.
 
 use crate::catalog::{StDependency, StreamTableMeta};
 
@@ -433,7 +431,6 @@ pub fn execute_differential_refresh_with_tuning(
     if crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query)
         && !st.is_append_only
     {
-        crate::refresh::set_refresh_reason("CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK");
         return Err(PgTrickleError::QueryTooComplex(format!(
             "CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK: {schema}.{name} uses a CASE \
              aggregate with an IN-list WHERE predicate on a mutable source — \
@@ -468,7 +465,6 @@ pub fn execute_differential_refresh_with_tuning(
                 }
                 _ => {
                     // Rewrite did not eliminate the correlated aggregate — unsafe pattern.
-                    crate::refresh::set_refresh_reason("CORRELATED_SUBQUERY_DELTA_QUADRATIC");
                     return Err(PgTrickleError::QueryTooComplex(format!(
                         "CORRELATED_SUBQUERY_DELTA_QUADRATIC: {schema}.{name} has a \
                          correlated aggregate subquery in WHERE that cannot be safely \
@@ -488,7 +484,6 @@ pub fn execute_differential_refresh_with_tuning(
     // Force FULL refresh and emit the REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN reason
     // code so operators can identify affected stream tables.
     if crate::refresh::classify_case_aggregate_subquery_uncertain(&effective_defining_query) {
-        crate::refresh::set_refresh_reason("REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN");
         return Err(PgTrickleError::QueryTooComplex(format!(
             "REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN: {schema}.{name} has a CASE \
              aggregate with a subquery or EXISTS predicate — the string-based \
@@ -1098,6 +1093,13 @@ pub fn execute_differential_refresh_with_tuning(
             schema,
             name,
         );
+        StreamTableMeta::set_refresh_reason(
+            st.pgt_id,
+            &crate::refresh::FullRefreshReason::new(
+                crate::refresh::FullRefreshReasonCode::SourceTruncated,
+                "A source TRUNCATE cannot be represented as a differential delta.",
+            ),
+        )?;
         let truncate_full_result = execute_full_refresh(st);
         if truncate_full_result.is_ok() {
             post_full_refresh_cleanup(st);
@@ -1285,6 +1287,17 @@ pub fn execute_differential_refresh_with_tuning(
             max_ratio * 100.0,
             max_ratio,
         );
+        let fallback_reason = if crate::config::pg_trickle_force_full_refresh() {
+            crate::refresh::FullRefreshReasonCode::ForceFullRefresh
+        } else if strategy == crate::config::RefreshStrategy::Full {
+            crate::refresh::FullRefreshReasonCode::ConfiguredFull
+        } else {
+            crate::refresh::FullRefreshReasonCode::DeltaRatioExceeded
+        };
+        StreamTableMeta::set_refresh_reason(
+            st.pgt_id,
+            &crate::refresh::FullRefreshReason::new(fallback_reason, reason.clone()),
+        )?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -1352,6 +1365,16 @@ pub fn execute_differential_refresh_with_tuning(
                 total_change_count,
                 st_group_count,
             );
+            StreamTableMeta::set_refresh_reason(
+                st.pgt_id,
+                &crate::refresh::FullRefreshReason::new(
+                    crate::refresh::FullRefreshReasonCode::AggregateSaturation,
+                    format!(
+                        "{} changes affected at least {} aggregate groups.",
+                        total_change_count, st_group_count
+                    ),
+                ),
+            )?;
             let t_full_start = Instant::now();
             let result = execute_full_refresh(st);
             let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -1870,6 +1893,13 @@ pub fn execute_differential_refresh_with_tuning(
 
     // ── SCAL-3: Work-mem cap exceeded — fall back to FULL ───────────
     if work_mem_cap_exceeded {
+        StreamTableMeta::set_refresh_reason(
+            st.pgt_id,
+            &crate::refresh::FullRefreshReason::new(
+                crate::refresh::FullRefreshReasonCode::WorkMemCapExceeded,
+                "The differential plan exceeded the configured work-memory cap.",
+            ),
+        )?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -1901,6 +1931,15 @@ pub fn execute_differential_refresh_with_tuning(
             st.pgt_schema,
             st.pgt_name,
         );
+        StreamTableMeta::set_refresh_reason(
+            st.pgt_id,
+            &crate::refresh::FullRefreshReason::new(
+                crate::refresh::FullRefreshReasonCode::DeltaEstimateExceeded,
+                format!(
+                    "The estimated differential output ({estimate}) exceeded the configured limit ({max_estimate})."
+                ),
+            ),
+        )?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;

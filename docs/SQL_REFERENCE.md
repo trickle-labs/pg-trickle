@@ -37,6 +37,10 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.commit\_latency\_stats](#pgtricklecommit_latency_stats)
     - [pgtrickle.tune\_recommendations](#pgtrickletune_recommendations)
     - [pgtrickle.preview\_stream\_table](#pgtricklepreview_stream_table)
+    - [pgtrickle.explain](#pgtrickleexplain)
+    - [pgtrickle.explain\_json](#pgtrickleexplain_json)
+    - [pgtrickle.stat\_reset](#pgtricklestat_reset)
+    - [pgtrickle.stat\_reset\_all](#pgtricklestat_reset_all)
     - [pgtrickle.history\_prune\_status](#pgtricklehistory_prune_status)
     - [pgtrickle.metrics\_summary](#pgtricklemetrics_summary)
   - [CDC Diagnostics](#cdc-diagnostics)
@@ -97,6 +101,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 - [Views](#views)
   - [pgtrickle.stream\_tables\_info](#pgtricklestream_tables_info)
   - [pgtrickle.pg\_stat\_stream\_tables](#pgtricklepg_stat_stream_tables)
+  - [pgtrickle.pg\_stat\_pgtrickle](#pgtricklepg_stat_pgtrickle)
   - [pgtrickle.quick\_health](#pgtricklequick_health)
   - [pgtrickle.pgt\_cdc\_status](#pgtricklepgt_cdc_status)
 - [Stream Table Lifecycle](#stream-table-lifecycle)
@@ -1892,6 +1897,40 @@ SELECT * FROM pgtrickle.preview_stream_table(
 );
 ```
 
+### pgtrickle.explain
+
+Return a bounded explanation of one stream table's refresh mode, recent
+refresh evidence, cost-model summary, and target freshness state as text.
+
+```sql
+SELECT pgtrickle.explain('public.orders_summary');
+```
+
+### pgtrickle.explain_json
+
+Return the same bounded explanation as evidence-aware JSON.
+
+```sql
+SELECT pgtrickle.explain_json('public.orders_summary');
+```
+
+### pgtrickle.stat_reset
+
+Reset cumulative refresh and cost-model statistics without deleting refresh
+history. `stat_reset` requires ownership of the selected stream table;
+```sql
+SELECT pgtrickle.stat_reset(42);
+```
+
+### pgtrickle.stat_reset_all
+
+Reset cumulative refresh and cost-model statistics for all stream tables.
+This requires superuser or extension-owner privilege.
+
+```sql
+SELECT pgtrickle.stat_reset_all();
+```
+
 ---
 
 ### pgtrickle.history_prune_status
@@ -3461,6 +3500,21 @@ Key columns:
 | `cdc_modes` | `text[]` | Distinct CDC modes across TABLE-type sources (e.g. `{wal}`, `{trigger,wal}`, `{transitioning,wal}`) |
 | `scc_id` | `int` | SCC group identifier for circular dependencies (`NULL` if not in a cycle) |
 | `last_fixpoint_iterations` | `int` | Number of fixpoint iterations in the last SCC convergence (`NULL` if not cyclic) |
+
+---
+
+### pgtrickle.pg_stat_pgtrickle
+
+Bounded PostgreSQL-style statistics view. Its counters and percentiles come
+from maintained summary tables, so scraping it does not scan refresh history.
+
+```sql
+SELECT * FROM pgtrickle.pg_stat_pgtrickle;
+```
+
+The view reports refresh totals, average/p95/p99 duration, current lag,
+requested and target freshness modes, the last machine-readable FULL reason
+and detail, the last operational error, and `stats_reset_at`.
 
 ---
 
