@@ -791,28 +791,18 @@ fn handle_policy_change(cmd: &DdlCommand) {
 /// a ST storage table itself.
 fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     // Check if this OID is an upstream source of any ST.
-    // SEC-3: Retry once on SPI error; escalate to pgrx::error!() on repeated failure
-    // so the originating ALTER TABLE is blocked rather than silently proceeding.
+    // Fail closed when relevance cannot be determined: allowing the DDL could
+    // leave a tracked source's CDC and downstream stream tables inconsistent.
     let affected_pgt_ids = match find_downstream_pgt_ids(objid) {
         Ok(ids) => ids,
         Err(e) => {
-            pgrx::warning!(
-                "pg_trickle_ddl_tracker: dependency query for {} failed ({}); retrying once",
+            pgrx::error!(
+                "pg_trickle: DDL hook could not inspect dependencies — \
+                 schema change blocked to prevent inconsistent state \
+                 (source: {}, error: {})",
                 identity,
                 e
             );
-            match find_downstream_pgt_ids(objid) {
-                Ok(ids) => ids,
-                Err(e2) => {
-                    pgrx::error!(
-                        "pg_trickle: DDL hook could not inspect dependencies — \
-                         schema change blocked to prevent inconsistent state \
-                         (source: {}, error: {})",
-                        identity,
-                        e2
-                    );
-                }
-            }
         }
     };
 
@@ -1300,12 +1290,12 @@ fn handle_dropped_table(obj: &DroppedObject) {
     let affected_pgt_ids = match find_downstream_pgt_ids(obj.objid) {
         Ok(ids) => ids,
         Err(e) => {
-            pgrx::warning!(
-                "pg_trickle_ddl_tracker: failed to query deps for dropped {}: {}",
+            pgrx::error!(
+                "pg_trickle: DROP TABLE hook could not inspect dependencies — \
+                 drop blocked to prevent inconsistent state (source: {}, error: {})",
                 identity,
-                e,
+                e
             );
-            return;
         }
     };
 

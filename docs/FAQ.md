@@ -1259,6 +1259,15 @@ pg_trickle has DDL event triggers that listen for `ALTER TABLE` and `DROP TABLE`
 
 If the DDL change breaks the defining query (e.g., a column referenced in the query was dropped), the reinitialization will fail and the stream table will enter ERROR status. In that case, you need to drop and recreate the stream table with an updated query.
 
+Dependency inspection is deliberately **fail-closed**. PostgreSQL event
+triggers are database-wide, so pg_trickle must read
+`pgtrickle.pgt_dependencies` before it can determine whether an altered or
+dropped table is tracked. If that lookup cannot complete, for example because
+an `ACCESS EXCLUSIVE` lock causes `lock_timeout`, the originating DDL is
+aborted rather than risk missing a schema change and leaving CDC or a stream
+table inconsistent. This can temporarily block DDL on an unrelated table;
+retry the statement after the catalog contention clears.
+
 ### How do I check if a source table has switched from trigger-based CDC to WAL-based CDC?
 
 When you enable hybrid CDC (`pg_trickle.cdc_mode = 'auto'`), pg_trickle starts capturing changes with triggers and can automatically transition to WAL-based logical replication once conditions are met. There are several ways to check the current CDC mode for each source table:

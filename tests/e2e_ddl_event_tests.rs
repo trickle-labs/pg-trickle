@@ -10,6 +10,42 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_ddl_hook_dependency_lookup_timeout_fails_closed() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE evt_lock_unrelated (id INT)").await;
+
+    let mut blocker = db.pool.acquire().await.expect("acquire blocker connection");
+    sqlx::query("BEGIN")
+        .execute(&mut *blocker)
+        .await
+        .expect("begin blocker transaction");
+    sqlx::query("LOCK TABLE pgtrickle.pgt_dependencies IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("lock dependency catalog");
+
+    let blocked = db
+        .try_execute_with_config(
+            &["SET lock_timeout = '100ms'"],
+            "ALTER TABLE evt_lock_unrelated ADD COLUMN added INT",
+        )
+        .await;
+    assert!(
+        blocked.is_err(),
+        "DDL must fail closed when dependency relevance cannot be determined"
+    );
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("release dependency catalog lock");
+    drop(blocker);
+
+    db.execute("ALTER TABLE evt_lock_unrelated ADD COLUMN added INT")
+        .await;
+}
+
+#[tokio::test]
 async fn test_drop_source_fires_event_trigger() {
     let db = E2eDb::new().await.with_extension().await;
 
