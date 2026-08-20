@@ -396,8 +396,7 @@ async fn run_sibling_isolation_trace(seed: u64, config: TraceConfig) {
     for cycle in 1..=config.cycles {
         // Roll: 0=insert bad row(denom=0), 1-3=insert good row
         let roll = rng.usize_range(0, 3);
-        let step;
-        if roll == 0 {
+        let step = if roll == 0 {
             let id = ids.alloc();
             let grp = *rng.choose(&ERR_GROUPS);
             let val = rng.i32_range(1, 50);
@@ -405,7 +404,7 @@ async fn run_sibling_isolation_trace(seed: u64, config: TraceConfig) {
                 "INSERT INTO err_prop_src (id, grp, val, denom) VALUES ({id}, '{grp}', {val}, 0)"
             ))
             .await;
-            step = format!("ins-bad(id={id})");
+            format!("ins-bad(id={id})")
         } else {
             let id = ids.alloc();
             let grp = *rng.choose(&ERR_GROUPS);
@@ -416,8 +415,8 @@ async fn run_sibling_isolation_trace(seed: u64, config: TraceConfig) {
                  VALUES ({id}, '{grp}', {val}, {denom})"
             ))
             .await;
-            step = format!("ins-good(id={id})");
-        }
+            format!("ins-good(id={id})")
+        };
 
         // Healthy branch must always succeed.
         db.refresh_st("err_prop_ok").await;
