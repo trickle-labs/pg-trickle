@@ -464,6 +464,83 @@ fn health_check() -> TableIterator<
         rows.push(("ring_overflow_trend".to_string(), sev.to_string(), detail));
     });
 
+    // v0.87: report the closest observed pg_trickle-owned memory component.
+    // This is deliberately bounded and uses existing live counters; it is not
+    // a claim about PostgreSQL-wide RSS.
+    let budget = crate::config::pg_trickle_memory_budget();
+    let pipeline_metrics = crate::shmem::pipeline_metrics();
+    let change_buffer_bytes = Spi::get_one::<i64>(
+        "SELECT COALESCE(max(buffer_bytes), 0)::bigint \
+         FROM pgtrickle.change_buffer_sizes()",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+    .max(0) as u64;
+    let component_values = [
+        (
+            "delta_pipeline",
+            pipeline_metrics.largest_bytes,
+            budget.delta_pipeline_bytes,
+        ),
+        (
+            "template_plan_cache",
+            crate::shmem::template_cache_bytes(),
+            budget.template_plan_cache_bytes,
+        ),
+        (
+            "dag_queue",
+            crate::shmem::parallel_queue_depth().saturating_mul(256),
+            budget.dag_queue_bytes,
+        ),
+        (
+            "invalidation_ring",
+            crate::shmem::invalidation_ring_bytes(),
+            budget.invalidation_ring_bytes,
+        ),
+        (
+            "change_buffer",
+            change_buffer_bytes,
+            budget.change_buffer_bytes,
+        ),
+    ];
+    let (component, used, limit) = component_values
+        .into_iter()
+        .max_by_key(|(_, used, limit)| used.saturating_mul(10_000).checked_div(*limit).unwrap_or(0))
+        .unwrap_or(("delta_pipeline", 0, budget.delta_pipeline_bytes));
+    let utilization = used
+        .saturating_mul(100)
+        .checked_div(limit.max(1))
+        .unwrap_or(0);
+    let severity = if utilization >= 100 {
+        "ERROR"
+    } else if utilization >= 80 {
+        "WARN"
+    } else {
+        "OK"
+    };
+    rows.push((
+        "memory_budget".to_string(),
+        severity.to_string(),
+        format!(
+            "closest component={component}; observed/high-water={used} bytes; limit={limit} bytes; utilization={utilization}%"
+        ),
+    ));
+
+    let (pressure, deferrals, factor) = crate::shmem::scheduler_load_stats();
+    let threshold = crate::config::pg_trickle_load_shed_threshold();
+    rows.push((
+        "scheduler_load".to_string(),
+        if threshold > 0.0 && pressure >= threshold {
+            "WARN".to_string()
+        } else {
+            "OK".to_string()
+        },
+        format!(
+            "pressure={pressure:.3}; threshold={threshold:.3}; deferral_factor={factor}; cumulative_deferrals={deferrals}"
+        ),
+    ));
+
     TableIterator::new(rows)
 }
 

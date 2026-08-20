@@ -480,6 +480,36 @@ pub(crate) fn collect_metrics_text() -> String {
         worker_idle_ms as f64 / 1000.0
     ));
 
+    let pipeline = crate::shmem::pipeline_metrics();
+    out.push_str(
+        "# HELP pg_trickle_pipeline_decisions_total Differential pipeline decisions by reason\n",
+    );
+    out.push_str("# TYPE pg_trickle_pipeline_decisions_total counter\n");
+    out.push_str(&format!(
+        "pg_trickle_pipeline_decisions_total{{reason=\"small_non_amplifying\"}} {}\n",
+        pipeline.direct_small
+    ));
+    out.push_str(&format!(
+        "pg_trickle_pipeline_decisions_total{{reason=\"large_input\"}} {}\n",
+        pipeline.pipelined_large
+    ));
+    out.push_str(&format!(
+        "pg_trickle_pipeline_decisions_total{{reason=\"potential_amplification\"}} {}\n",
+        pipeline.pipelined_amplifying
+    ));
+    out.push_str(&format!(
+        "pg_trickle_pipeline_decisions_total{{reason=\"compatibility_fallback\"}} {}\n",
+        pipeline.compatibility_fallback
+    ));
+    out.push_str(&format!(
+        "pg_trickle_pipeline_batches_total {}\npg_trickle_pipeline_rows_staged_total {}\npg_trickle_pipeline_bytes_staged_total {}\npg_trickle_pipeline_oversize_batches_total {}\n",
+        pipeline.batches, pipeline.rows, pipeline.bytes, pipeline.oversize_batches
+    ));
+    out.push_str(&format!(
+        "pg_trickle_pipeline_largest_batch_rows {}\npg_trickle_pipeline_largest_batch_bytes {}\n",
+        pipeline.largest_rows, pipeline.largest_bytes
+    ));
+
     // ── OBS-3 (v0.59.0): WAL decoder pending-record metric ───────────────
     let wal_pending = crate::shmem::read_wal_decoder_pending_records();
     out.push_str(

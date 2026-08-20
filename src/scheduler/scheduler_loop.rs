@@ -29,6 +29,7 @@ use super::dispatch::{
     ParallelDispatchState, compute_adaptive_poll_ms, parallel_dispatch_tick,
     reconcile_parallel_state, spawn_refresh_worker,
 };
+use super::tenancy::{LoadSnapshot, PressureState};
 use super::watermark::compute_coordinator_tick_watermark;
 use super::{
     RefreshOutcome, SubTransaction, batched_has_source_changes, check_cdc_transition_health,
@@ -41,6 +42,51 @@ use super::{
     upstream_change_state,
 };
 use crate::refresh::orchestrator::batch_update_cost_model_summary;
+
+fn sample_load_snapshot() -> LoadSnapshot {
+    let available_cpus = std::thread::available_parallelism()
+        .map(|count| count.get() as u64)
+        .unwrap_or(1);
+    let fallback = LoadSnapshot::new(
+        0,
+        1,
+        0,
+        available_cpus,
+        0,
+        shmem::active_worker_count() as u64,
+    );
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT count(*) FILTER (WHERE backend_type = 'client backend')::bigint, \
+                            current_setting('max_connections')::bigint, \
+                            count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
+                                              AND state = 'active' \
+                                              AND wait_event_type IS NULL)::bigint, \
+                            count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
+                                              AND wait_event_type = 'Lock')::bigint",
+                    None,
+                    &[],
+                )
+                .ok()
+                .map(|rows| {
+                    let row = rows.first();
+                    let value =
+                        |ordinal| row.get::<i64>(ordinal).ok().flatten().unwrap_or(0).max(0) as u64;
+                    LoadSnapshot::new(
+                        value(1),
+                        value(2).max(1),
+                        value(3),
+                        available_cpus.max(1),
+                        value(4),
+                        shmem::active_worker_count() as u64,
+                    )
+                })
+                .unwrap_or(fallback)
+        })
+    }))
+}
 
 /// Register the launcher background worker.
 ///
@@ -470,6 +516,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
     // Phase 4: Parallel dispatch state (persisted across ticks)
     let mut parallel_state = ParallelDispatchState::new();
+    let mut pressure_state = PressureState::new();
 
     // Per-ST drift reset counters (differential cycles since last reinit)
     let mut drift_counters: HashMap<i64, i32> = HashMap::new();
@@ -675,6 +722,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         }
 
         let now_ms = current_epoch_ms();
+        let load_snapshot = sample_load_snapshot();
+        let load_deferred = pressure_state.observe(
+            load_snapshot.pressure(),
+            config::pg_trickle_load_shed_threshold(),
+        );
+        shmem::record_scheduler_load(
+            load_snapshot.pressure(),
+            load_deferred,
+            pressure_state.deferral_factor(),
+        );
 
         // WAL transition processing — three phases with separate transactions
         // to ensure slot creation happens in a pristine transaction (no prior
@@ -1189,6 +1246,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         &mut pending_spawns,
                         dispatch_tick_id,
                         tick_watermark.as_deref(),
+                        load_deferred,
                     );
 
                     // Prune retry states for STs that no longer exist.
@@ -1339,6 +1397,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     // pgtrickle.pause_scheduler().
                     if crate::shmem::is_node_paused_for_database(database_oid, pgt_id) {
                         log!("pg_trickle scheduler: skipping {pgt_id} — node is paused");
+                        continue;
+                    }
+                    // v0.87: shed only non-urgent scheduler work under pressure.
+                    // Reinitialization and observed source changes always drain.
+                    if load_deferred
+                        && !load_st_by_id(pgt_id)
+                            .map(|st| st.needs_reinit)
+                            .unwrap_or(false)
+                        && !initial_table_changes.get(&pgt_id).copied().unwrap_or(false)
+                    {
                         continue;
                     }
                     // P3-5: Auto-backoff — skip this tick if the backoff

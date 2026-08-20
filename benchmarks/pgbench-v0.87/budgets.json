@@ -1,0 +1,12 @@
+{
+  "version": "0.87.0",
+  "product_budgets": {
+    "installed_no_st_tps_ratio_min": 0.99,
+    "active_p99_latency_ratio_max": 2.0,
+    "refresh_cpu_share_max": 0.5
+  },
+  "ci_noise_tolerance": {
+    "description": "Keep statistical noise separate from the product budgets; compare medians of paired repetitions.",
+    "paired_repetitions_min": 3
+  }
+}

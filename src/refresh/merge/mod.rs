@@ -2217,35 +2217,27 @@ pub fn execute_differential_refresh_with_tuning(
             use_delete_insert
         };
 
-    // QW-9 (v0.81.0): Chunked MERGE — when the delta exceeds
-    // `pg_trickle.merge_batch_size` rows and the MERGE strategy has not
-    // already been forced to PH-D1, route the refresh through the
-    // DELETE+INSERT path.  The PH-D1 path materialises the full delta into
-    // a single temp table and applies it via bulk DELETE+INSERT, which is
-    // better suited than a MERGE join for very large deltas.
-    //
-    // Set `pg_trickle.merge_batch_size = 0` to disable (default behaviour).
-    let use_delete_insert = {
-        let batch_size = crate::config::pg_trickle_merge_batch_size();
-        if !use_delete_insert
-            && !use_explicit_dml
-            && st.st_partition_key.is_none()
-            && batch_size > 0
-            && total_change_count > batch_size as i64
-        {
-            pgrx::debug1!(
-                "[pg_trickle] QW-9: chunked MERGE — delta {} rows > batch_size {} for \
-                 {}.{}; routing through PH-D1 DELETE+INSERT",
-                total_change_count,
-                batch_size,
-                schema,
-                name,
-            );
-            true
-        } else {
-            use_delete_insert
-        }
+    // v0.87: one pure decision replaces QW-9's full-delta materialization.
+    // Proven incompatible shapes retain their existing strategy; ordinary
+    // large MERGE deltas use the bounded portal pipeline.
+    let pipeline_decision = crate::refresh::pipeline::decide_pipeline(
+        total_change_count,
+        crate::config::pg_trickle_pipeline_batch_size(),
+        resolved.is_deduplicated,
+        use_explicit_dml || is_distributed_st || st.st_partition_key.is_some() || has_recursive_cte,
+    );
+    let use_pipeline = pipeline_decision.mode == crate::refresh::pipeline::PipelineMode::Pipelined
+        && !use_delete_insert
+        && !resolved.is_all_algebraic;
+    let pipeline_metric_reason = if pipeline_decision.mode
+        == crate::refresh::pipeline::PipelineMode::Pipelined
+        && !use_pipeline
+    {
+        "compatibility_fallback"
+    } else {
+        pipeline_decision.reason.as_str()
     };
+    crate::shmem::record_pipeline_metrics(pipeline_metric_reason, None);
 
     // When the GUC is on and ALL aggregates are algebraically invertible
     // (COUNT, SUM, AVG, etc.), use explicit DML (DELETE+UPDATE+INSERT)
@@ -2351,6 +2343,35 @@ pub fn execute_differential_refresh_with_tuning(
     let (merge_count, strategy_label) = if let Some(result) = hash_merge_result {
         // A1-3b: HASH per-partition MERGE already executed above.
         result
+    } else if use_pipeline {
+        let (count, stats) = crate::refresh::pipeline::execute_merge_pipeline(
+            st.pgt_id,
+            &resolved.trigger_using_sql,
+            &resolved.merge_sql,
+            crate::config::pg_trickle_pipeline_batch_size(),
+            crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
+        )?;
+        pgrx::debug1!(
+            "[pg_trickle] v0.87 pipeline {}.{} reason={} batches={} rows={} bytes={}",
+            schema,
+            name,
+            pipeline_decision.reason.as_str(),
+            stats.batches_completed,
+            stats.rows_staged,
+            stats.bytes_staged,
+        );
+        crate::shmem::record_pipeline_metrics(
+            pipeline_decision.reason.as_str(),
+            Some((
+                stats.batches_completed,
+                stats.rows_staged,
+                stats.bytes_staged,
+                stats.largest_batch_rows,
+                stats.largest_batch_bytes,
+                stats.oversize_batches,
+            )),
+        );
+        (count, "pipeline")
     } else if use_delete_insert {
         // ── PH-D1: DELETE+INSERT path ───────────────────────────────
         // For small deltas against large tables, separate DELETE + INSERT

@@ -1,5 +1,19 @@
 # Configuration
 
+## v0.87 refresh tenancy controls
+
+`pg_trickle.pipeline_batch_size` (default `4096`) is the maximum logical row
+count in one bounded differential apply batch. `pg_trickle.merge_batch_size`
+is a deprecated v0.87 alias and will be removed in v0.88; both names share one
+effective value.
+
+`pg_trickle.memory_budget_mb` (default `256`) derives pg_trickle-owned limits:
+75% for the delta pipeline, 15% for template/plan cache, and 5% each for the
+DAG queue and invalidation ring. Change-buffer growth uses the budget as a
+lossless storage guard: committed rows are never discarded to satisfy it.
+`pg_trickle.load_shed_threshold` (default `0.80`, `0` disables) defers only
+non-urgent scheduled work under the documented load-pressure proxy.
+
 Narrative reference for the pg_trickle GUC (Grand Unified Configuration)
 variables operators are most likely to tune. For the exhaustive generated
 catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).

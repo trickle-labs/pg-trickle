@@ -1132,17 +1132,27 @@ pub fn register_dvm_gucs() {
         GucFlags::default(),
     );
 
-    // QW-9: Chunked MERGE for large deltas.
+    // v0.87: The canonical bounded pipeline batch size.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.pipeline_batch_size",
+        c"Maximum logical rows in one differential pipeline batch.",
+        c"Large or potentially amplifying differential deltas are fetched and applied in bounded batches. Default 4096.",
+        &PGS_MERGE_BATCH_SIZE,
+        1,
+        1_048_576,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // v0.87 compatibility alias. Both names intentionally point to the same
+    // GUC storage so SET/SHOW/reset have one effective value.
     GucRegistry::define_int_guc(
         c"pg_trickle.merge_batch_size",
-        c"QW-9: Delta rows above which the MERGE is split into batches.",
-        c"When the delta result set exceeds this row count, the refresh executor \
-          materialises the delta into a temporary table and runs the MERGE in \
-          windows of this many rows. Reduces peak memory and lock hold time for \
-          large deltas. Default 50000. Set to 0 to disable chunking.",
+        c"Deprecated alias for pipeline_batch_size.",
+        c"Accepted in v0.87 only. It controls the maximum logical rows in one pipeline apply batch and will be removed in v0.88.",
         &PGS_MERGE_BATCH_SIZE,
-        0,          // min (0 = disabled)
-        10_000_000, // max
+        1,
+        1_048_576,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1451,17 +1461,10 @@ pub fn pg_trickle_ivm_recursive_max_depth() -> Option<i32> {
 /// caches that live in `src/dvm/mod.rs`.
 pub static PGS_L1_CACHE_MAX_ENTRIES: GucSetting<i32> = GucSetting::<i32>::new(256);
 
-/// QW-9 (v0.81.0): Delta row count above which the MERGE is split into
-/// batched chunks to reduce peak memory and lock hold time.
+/// v0.87: Maximum logical rows in one differential pipeline apply batch.
 ///
-/// When the number of rows in the delta result set exceeds this threshold,
-/// the refresh executor:
-/// 1. Materialises the delta into a temporary table.
-/// 2. Runs the MERGE in windows of `merge_batch_size` rows.
-/// 3. Drops the temporary table.
-///
-/// Default: 50 000. Set to 0 to disable chunking (use the single large MERGE).
-pub static PGS_MERGE_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(50_000);
+/// `pg_trickle.merge_batch_size` remains a one-release alias for this setting.
+pub static PGS_MERGE_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(4096);
 
 /// QW-1 (v0.81.0): Enable commit-to-visible latency tracking.
 ///
@@ -1481,9 +1484,14 @@ pub fn pg_trickle_l1_cache_max_entries() -> i32 {
     PGS_L1_CACHE_MAX_ENTRIES.get().max(0)
 }
 
-/// QW-9 (v0.81.0): Returns the chunked-MERGE batch size (0 = disabled).
+/// v0.87: Returns the canonical differential pipeline batch size.
 pub fn pg_trickle_merge_batch_size() -> i32 {
-    PGS_MERGE_BATCH_SIZE.get().max(0)
+    PGS_MERGE_BATCH_SIZE.get().clamp(1, 1_048_576)
+}
+
+/// v0.87: Returns the canonical differential pipeline batch size.
+pub fn pg_trickle_pipeline_batch_size() -> usize {
+    pg_trickle_merge_batch_size() as usize
 }
 
 /// QW-1 (v0.81.0): Returns whether commit-timestamp latency tracking is enabled.

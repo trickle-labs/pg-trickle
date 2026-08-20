@@ -418,6 +418,30 @@ pub fn reserve_worker_slot(
     Some(slot)
 }
 
+/// Bind a durable scheduler job ID to a permit reserved before enqueue.
+pub fn bind_worker_slot(
+    database_oid: u32,
+    scheduler_pid: i32,
+    generation: u64,
+    job_id: i64,
+) -> bool {
+    if !is_shmem_available() {
+        return false;
+    }
+    let mut table = WORKER_SLOT_TABLE.exclusive();
+    if let Some(slot) = table.slots.iter_mut().find(|slot| {
+        slot.database_oid == database_oid
+            && slot.scheduler_pid == scheduler_pid
+            && slot.generation == generation
+            && slot.job_id == 0
+            && slot.state == WorkerSlotState::Reserved
+    }) {
+        slot.job_id = job_id;
+        return true;
+    }
+    false
+}
+
 /// Promote a reservation to a live worker only when its identity matches.
 pub fn promote_worker_slot(
     database_oid: u32,
@@ -750,6 +774,43 @@ pub fn increment_cdc_compact_contended() {
 // SAFETY: PgAtomic::new requires a static CStr name.
 pub static PARALLEL_QUEUE_DEPTH: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_parallel_queue_depth") };
+
+/// v0.87.0: Cumulative scheduler ticks deferred by application load pressure.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LOAD_DEFERRALS_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_load_deferrals_total") };
+
+/// v0.87.0: Latest scheduler load pressure in millionths, for health reporting.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LOAD_PRESSURE_MILLIONTHS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_load_pressure") };
+
+/// v0.87.0: Current scheduler pressure deferral multiplier.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static LOAD_DEFERRAL_FACTOR: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_load_deferral_factor") };
+
+/// v0.87.0: Bounded differential-pipeline counters and high-water marks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PipelineMetricState {
+    pub direct_small: u64,
+    pub pipelined_large: u64,
+    pub pipelined_amplifying: u64,
+    pub compatibility_fallback: u64,
+    pub batches: u64,
+    pub rows: u64,
+    pub bytes: u64,
+    pub largest_rows: u64,
+    pub largest_bytes: u64,
+    pub oversize_batches: u64,
+}
+
+// SAFETY: PipelineMetricState contains only Copy integer counters.
+unsafe impl PGRXSharedMemory for PipelineMetricState {}
+
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static PIPELINE_METRICS: PgLwLock<PipelineMetricState> =
+    unsafe { PgLwLock::new(c"pg_trickle_pipeline_metrics") };
 
 /// OBS-2: Cumulative milliseconds pool workers have spent in the idle-wait loop.
 // SAFETY: PgAtomic::new requires a static CStr name.
@@ -1155,6 +1216,97 @@ pub fn decrement_parallel_queue_depth_for_database(database_oid: u32) {
     });
 }
 
+/// OBS-2: Read the current parallel job queue depth.
+pub fn parallel_queue_depth() -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    PARALLEL_QUEUE_DEPTH
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Return the current logical invalidation-ring occupancy in bytes.
+pub fn invalidation_ring_bytes() -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    PGS_STATE.share().inv_count as u64 * std::mem::size_of::<i64>() as u64
+}
+
+/// Record the scheduler's current load-pressure admission decision.
+pub fn record_scheduler_load(pressure: f64, deferred: bool, factor: u8) {
+    if !is_shmem_available() {
+        return;
+    }
+    let millionths = (pressure.clamp(0.0, 1.0) * 1_000_000.0).round() as u64;
+    LOAD_PRESSURE_MILLIONTHS
+        .get()
+        .store(millionths, std::sync::atomic::Ordering::Relaxed);
+    LOAD_DEFERRAL_FACTOR
+        .get()
+        .store(factor.max(1) as u64, std::sync::atomic::Ordering::Relaxed);
+    if deferred {
+        LOAD_DEFERRALS_TOTAL
+            .get()
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Read the latest scheduler load pressure and cumulative deferral count.
+pub fn scheduler_load_stats() -> (f64, u64, u64) {
+    if !is_shmem_available() {
+        return (0.0, 0, 1);
+    }
+    (
+        LOAD_PRESSURE_MILLIONTHS
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed) as f64
+            / 1_000_000.0,
+        LOAD_DEFERRALS_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        LOAD_DEFERRAL_FACTOR
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1),
+    )
+}
+
+/// Record one pipeline decision and its bounded apply statistics.
+pub fn record_pipeline_metrics(reason: &str, stats: Option<(u64, u64, u64, u64, u64, u64)>) {
+    if !is_shmem_available() {
+        return;
+    }
+    let mut metrics = PIPELINE_METRICS.exclusive();
+    if stats.is_none() {
+        match reason {
+            "small_non_amplifying" => metrics.direct_small = metrics.direct_small.saturating_add(1),
+            "large_input" => metrics.pipelined_large = metrics.pipelined_large.saturating_add(1),
+            "potential_amplification" => {
+                metrics.pipelined_amplifying = metrics.pipelined_amplifying.saturating_add(1)
+            }
+            _ => metrics.compatibility_fallback = metrics.compatibility_fallback.saturating_add(1),
+        }
+    }
+    if let Some((batches, rows, bytes, largest_rows, largest_bytes, oversize)) = stats {
+        metrics.batches = metrics.batches.saturating_add(batches);
+        metrics.rows = metrics.rows.saturating_add(rows);
+        metrics.bytes = metrics.bytes.saturating_add(bytes);
+        metrics.largest_rows = metrics.largest_rows.max(largest_rows);
+        metrics.largest_bytes = metrics.largest_bytes.max(largest_bytes);
+        metrics.oversize_batches = metrics.oversize_batches.saturating_add(oversize);
+    }
+}
+
+/// Read the bounded pipeline counters.
+pub fn pipeline_metrics() -> PipelineMetricState {
+    if !is_shmem_available() {
+        return PipelineMetricState::default();
+    }
+    *PIPELINE_METRICS.share()
+}
+
 /// OBS-2: Add idle time (milliseconds) to the cumulative worker idle counter.
 pub fn add_worker_idle_ms(ms: u64) {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1250,6 +1402,10 @@ pub fn init_shared_memory() {
     pg_shmem_init!(CDC_LAG_SAMPLER);
     // OBS-2 (v0.59.0): Parallel worker utilisation metrics.
     pg_shmem_init!(PARALLEL_QUEUE_DEPTH);
+    pg_shmem_init!(LOAD_DEFERRALS_TOTAL);
+    pg_shmem_init!(LOAD_PRESSURE_MILLIONTHS);
+    pg_shmem_init!(LOAD_DEFERRAL_FACTOR);
+    pg_shmem_init!(PIPELINE_METRICS);
     pg_shmem_init!(WORKER_IDLE_MS_TOTAL);
     // OBS-3 (v0.59.0): WAL decoder pending-record metric.
     pg_shmem_init!(WAL_DECODER_PENDING_RECORDS);

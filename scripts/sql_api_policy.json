@@ -1,6 +1,6 @@
 {
   "policy_version": 1,
-  "generated_from": "sql/archive/pg_trickle--0.86.0.sql",
+  "generated_from": "sql/archive/pg_trickle--0.87.0.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",

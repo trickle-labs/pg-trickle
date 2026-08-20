@@ -2191,10 +2191,12 @@ impl StDependency {
         Spi::connect(|client| {
             let table = client
                 .select(
-                    "SELECT columns_used \
-                     FROM pgtrickle.pgt_dependencies \
-                     WHERE source_relid = $1 \
-                       AND source_type IN ('TABLE', 'FOREIGN_TABLE')",
+                    "SELECT d.columns_used \
+                     FROM pgtrickle.pgt_dependencies d \
+                     JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id \
+                     WHERE d.source_relid = $1 \
+                       AND d.source_type IN ('TABLE', 'FOREIGN_TABLE') \
+                       AND st.status IN ('ACTIVE', 'INITIALIZING')",
                     None,
                     &[source_oid.into()],
                 )

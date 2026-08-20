@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**140 configuration parameters** extracted from `src/config/`.
+**142 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -71,6 +71,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.ivm_use_enr` | `bool` | `false` | When false, the legacy temp-table copy behaviour is used. |
 | `pg_trickle.l1_cache_max_entries` | `int4` | `256` | Note: `pg_trickle.template_cache_max_entries` caps the L2 (MERGE template) cache; this GUC caps the L0/L1 (delta-template / placeholder-resolver) caches that live in `src/dvm/mod.rs`. |
 | `pg_trickle.lag_aware_scheduling` | `bool` | `false` | Off by default — use static quotas. |
+| `pg_trickle.load_shed_threshold` | `float8` | `0.80` | v0.87: Pressure threshold for deferring non-urgent scheduled work. |
 | `pg_trickle.log_delta_sql` | `bool` | `false` | **Do not enable in production** — every refresh will emit potentially large SQL strings to the server log. |
 | `pg_trickle.log_format` | `text` | `"text"` | - `"text"` (default): Standard PostgreSQL log format. |
 | `pg_trickle.log_merge_sql` | `bool` | `false` | Intended for debugging MERGE query generation only. |
@@ -89,7 +90,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.max_parallel_workers` | `int4` | `0` | Default 0 = serial mode (existing behavior preserved). |
 | `pg_trickle.max_parse_depth` | `int4` | `64` | Prevents stack-overflow crashes on pathological queries with deeply nested subqueries, CTEs, or set operations. |
 | `pg_trickle.max_parse_nodes` | `int4` | `100000` | Queries that exceed this limit are rejected with `QueryTooComplex` to prevent unbounded memory allocation in the parse advisory warnings cache and CTE registry. |
-| `pg_trickle.merge_batch_size` | `int4` | `50000` | Default: 50 000. |
+| `pg_trickle.memory_budget_mb` | `int4` | `256` | Master budget for pg_trickle-owned in-process accumulations, in MiB. |
+| `pg_trickle.merge_batch_size` | `int4` | `4096` | `pg_trickle.merge_batch_size` remains a one-release alias for this setting. |
 | `pg_trickle.merge_join_strategy` | `text` | `"auto"` | Controls the join strategy hint applied via `SET LOCAL` during MERGE: - `"auto"` (default): delta-size heuristics choose the strategy. |
 | `pg_trickle.merge_planner_hints` | `bool` | `true` | Deprecated — use `pg_trickle.planner_aggressive` instead. |
 | `pg_trickle.merge_seqscan_threshold` | `float8` | `0.001` | Set to 0.0 to disable this optimization. |

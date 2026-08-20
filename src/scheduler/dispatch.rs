@@ -25,9 +25,10 @@ use crate::shmem;
 use super::cost::compute_per_db_quota;
 use super::tier::RefreshTier;
 use super::{
-    RefreshOutcome, check_schedule, emit_stale_alert_if_needed, execute_worker_atomic_group,
-    execute_worker_cyclic_scc, execute_worker_fused_chain, execute_worker_immediate_closure,
-    execute_worker_singleton, load_st_by_id,
+    RefreshOutcome, check_schedule, check_upstream_changes, emit_stale_alert_if_needed,
+    execute_worker_atomic_group, execute_worker_cyclic_scc, execute_worker_fused_chain,
+    execute_worker_immediate_closure, execute_worker_singleton, has_table_source_changes,
+    load_st_by_id,
 };
 
 // ── Dynamic Refresh Worker (Phase 3) ──────────────────────────────────────
@@ -663,6 +664,7 @@ pub(super) fn parallel_dispatch_tick(
     pending_spawns: &mut Vec<(String, i64, u64)>,
     dispatch_tick_id: i64,
     tick_watermark_lsn: Option<&str>,
+    load_deferred: bool,
 ) {
     let eu_dag = match &state.eu_dag {
         Some(d) => d,
@@ -936,6 +938,18 @@ pub(super) fn parallel_dispatch_tick(
             continue;
         }
 
+        // Load shedding applies equally to parallel and sequential paths.
+        // Reinitialization and observed upstream changes remain urgent.
+        if load_deferred
+            && !unit.member_pgt_ids.iter().any(|&pgt_id| {
+                load_st_by_id(pgt_id).is_some_and(|st| {
+                    st.needs_reinit || has_table_source_changes(&st) || check_upstream_changes(&st)
+                })
+            })
+        {
+            continue;
+        }
+
         // Guard against duplicate in-flight jobs.
         match SchedulerJob::has_inflight_job(&unit.stable_key()) {
             Ok(true) => continue,
@@ -989,6 +1003,19 @@ pub(super) fn parallel_dispatch_tick(
             Some(lsn) => lsn,
             None => continue,
         };
+        // Reserve capacity before creating a durable job row. A queued row
+        // without a permit would be indistinguishable from dispatchable work.
+        let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
+        let Some(slot) =
+            shmem::reserve_worker_slot(capacity, database_oid, 0, scheduler_pid, now_ms)
+        else {
+            info!(
+                "pg_trickle: parallel dispatch — worker capacity exhausted ({}/{})",
+                shmem::worker_slot_counts().0 + shmem::worker_slot_counts().1,
+                capacity.effective_limit,
+            );
+            continue;
+        };
         let job_id = match SchedulerJob::enqueue(
             dag_version_i64,
             &unit.stable_key(),
@@ -1000,14 +1027,9 @@ pub(super) fn parallel_dispatch_tick(
             dispatch_tick_id,
             tick_watermark_lsn,
         ) {
-            Ok(id) => {
-                // OBS-2: A new job has been added to the parallel queue.
-                crate::shmem::increment_parallel_queue_depth_for_database(unsafe {
-                    pg_sys::MyDatabaseId.to_u32()
-                });
-                id
-            }
+            Ok(id) => id,
             Err(e) => {
+                shmem::release_worker_slot(database_oid, 0, slot.generation);
                 warning!(
                     "pg_trickle: parallel dispatch — failed to enqueue job for {}: {}",
                     unit.label,
@@ -1016,28 +1038,18 @@ pub(super) fn parallel_dispatch_tick(
                 continue;
             }
         };
-
-        // Reserve the exact slot only after the durable job ID exists. If
-        // capacity changed between enqueue and reservation, cancel the job
-        // instead of creating an unaccounted worker.
-        let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
-        let slot =
-            match shmem::reserve_worker_slot(capacity, database_oid, job_id, scheduler_pid, now_ms)
-            {
-                Some(slot) => slot,
-                None => {
-                    let _ = SchedulerJob::cancel(job_id, "worker capacity exhausted");
-                    crate::shmem::decrement_parallel_queue_depth_for_database(unsafe {
-                        pg_sys::MyDatabaseId.to_u32()
-                    });
-                    info!(
-                        "pg_trickle: parallel dispatch — worker capacity exhausted ({}/{})",
-                        shmem::worker_slot_counts().0 + shmem::worker_slot_counts().1,
-                        capacity.effective_limit,
-                    );
-                    continue;
-                }
-            };
+        // OBS-2: A new job has been added to the parallel queue.
+        crate::shmem::increment_parallel_queue_depth_for_database(database_oid);
+        if !shmem::bind_worker_slot(database_oid, scheduler_pid, slot.generation, job_id) {
+            shmem::release_worker_slot(database_oid, 0, slot.generation);
+            let _ = SchedulerJob::cancel(job_id, "worker permit binding failed");
+            crate::shmem::decrement_parallel_queue_depth_for_database(database_oid);
+            warning!(
+                "pg_trickle: parallel dispatch — failed to bind permit to job {}",
+                job_id
+            );
+            continue;
+        }
         if let Err(e) = SchedulerJob::set_worker_slot_generation(job_id, slot.generation) {
             shmem::release_worker_slot(database_oid, job_id, slot.generation);
             let _ = SchedulerJob::cancel(job_id, "failed to persist worker slot generation");

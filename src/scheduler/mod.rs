@@ -98,6 +98,7 @@ pub mod citus;
 pub mod cost;
 pub mod dispatch;
 pub mod scheduler_loop;
+pub mod tenancy;
 pub mod tier;
 pub mod watermark;
 
@@ -111,6 +112,10 @@ pub use scheduler_loop::{
 use citus::drive_distributed_cdc;
 pub use cost::compute_per_db_quota;
 pub use cost::{compute_per_db_quota_with_lag, lag_aware_quota_boost};
+pub use tenancy::{
+    FairnessKey, LoadSnapshot, PressureState, derive_scheduled_deadlines, deterministic_jitter_ms,
+    pressure_ratio,
+};
 pub use tier::RefreshTier;
 
 // ── SCAL-1 (v0.25.0): Per-backend catalog snapshot cache ─────────────────
@@ -2341,15 +2346,29 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
             } else {
                 max_secs
             };
-            let stale = Spi::get_one_with_args::<bool>(
-                "SELECT CASE WHEN last_refresh_at IS NULL THEN true \
-                 ELSE EXTRACT(EPOCH FROM (now() - last_refresh_at)) > $2 END \
+            let last_refresh_epoch = Spi::get_one_with_args::<f64>(
+                "SELECT EXTRACT(EPOCH FROM last_refresh_at) \
                  FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
-                &[st.pgt_id.into(), effective_secs.into()],
+                &[st.pgt_id.into()],
             )
-            .unwrap_or(Some(false))
-            .unwrap_or(false);
-            return stale;
+            .unwrap_or(None);
+            let interval_ms = (effective_secs.max(0) as u64).saturating_mul(1_000);
+            // Stable phase spreading avoids synchronized periodic refreshes;
+            // the offset is derived only from server identity, table identity,
+            // and the effective schedule epoch.
+            // SAFETY: MyDatabaseId is valid in a connected scheduler backend.
+            let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
+            let jitter_ms = tenancy::deterministic_jitter_ms(
+                database_oid,
+                st.pgt_id,
+                effective_secs.max(0) as u64,
+                interval_ms,
+                config::pg_trickle_scheduler_interval_ms() as u64,
+            );
+            let due_after_ms = interval_ms.saturating_add(jitter_ms);
+            return last_refresh_epoch
+                .map(|epoch| current_epoch_ms() > (epoch.max(0.0) * 1_000.0) as u64 + due_after_ms)
+                .unwrap_or(true);
         }
 
         // Unparseable schedule — log a warning and skip
@@ -3485,9 +3504,27 @@ fn refresh_single_st(
     }
 }
 
-fn apply_scheduled_deadlines() -> Result<(), crate::error::PgTrickleError> {
-    let lock_timeout = format!("{}ms", config::pg_trickle_scheduled_lock_timeout_ms());
-    let statement_timeout = format!("{}ms", config::pg_trickle_scheduled_statement_timeout_ms());
+fn apply_scheduled_deadlines(st: &StreamTableMeta) -> Result<(), crate::error::PgTrickleError> {
+    let interval_ms = st
+        .schedule
+        .as_deref()
+        .and_then(|schedule| crate::api::parse_duration(schedule).ok())
+        .map(|seconds| (seconds as u64).saturating_mul(1_000))
+        .unwrap_or_else(|| config::pg_trickle_scheduler_interval_ms() as u64);
+    let (lock_timeout_ms, statement_timeout_ms) = if st.needs_reinit {
+        (
+            config::pg_trickle_scheduled_lock_timeout_ms() as u64,
+            config::pg_trickle_scheduled_statement_timeout_ms() as u64,
+        )
+    } else {
+        tenancy::derive_scheduled_deadlines(
+            interval_ms,
+            config::pg_trickle_scheduled_lock_timeout_ms() as u64,
+            config::pg_trickle_scheduled_statement_timeout_ms() as u64,
+        )
+    };
+    let lock_timeout = format!("{lock_timeout_ms}ms");
+    let statement_timeout = format!("{statement_timeout_ms}ms");
     Spi::run_with_args(
         "SELECT set_config('lock_timeout', $1, true)",
         &[lock_timeout.into()],
@@ -3520,7 +3557,7 @@ fn execute_scheduled_refresh(
     tick_watermark: Option<&str>,
     drift_counter: Option<&mut i32>,
 ) -> RefreshOutcome {
-    if let Err(e) = apply_scheduled_deadlines() {
+    if let Err(e) = apply_scheduled_deadlines(st) {
         pgrx::warning!(
             "pg_trickle: failed to apply scheduled refresh deadlines for {}.{}: {}",
             st.pgt_schema,

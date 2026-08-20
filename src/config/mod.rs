@@ -7,11 +7,13 @@ use pgrx::guc::*;
 
 pub mod cdc;
 pub mod dvm;
+pub mod memory;
 pub mod monitoring;
 pub mod scheduler;
 
 pub use cdc::*;
 pub use dvm::*;
+pub use memory::*;
 pub use monitoring::*;
 pub use scheduler::*;
 
@@ -141,6 +143,7 @@ pub fn register_gucs() {
     scheduler::register_scheduler_gucs();
     cdc::register_cdc_gucs();
     dvm::register_dvm_gucs();
+    memory::register_memory_gucs();
     monitoring::register_monitoring_gucs();
 }
 
