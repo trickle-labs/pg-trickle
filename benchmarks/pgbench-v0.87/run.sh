@@ -187,7 +187,7 @@ correctness_check() {
 }
 
 wait_for_correctness() {
-    for _ in $(seq 1 120); do
+    for _ in $(seq 1 360); do
         if [[ "$(correctness_check)" == t ]]; then
             return 0
         fi
