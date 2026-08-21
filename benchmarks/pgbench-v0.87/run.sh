@@ -191,11 +191,17 @@ wait_for_correctness() {
     local workload_finished_at="$2"
     for _ in $(seq 1 360); do
         if [[ "$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables st WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at')")" == t ]]; then
-            break
+            for _ in $(seq 1 120); do
+                if [[ "$(correctness_check)" == t ]]; then
+                    return 0
+                fi
+                sleep 0.5
+            done
+            return 1
         fi
         sleep 0.5
     done
-    [[ "$(correctness_check)" == t ]]
+    return 1
 }
 
 run_one() {
