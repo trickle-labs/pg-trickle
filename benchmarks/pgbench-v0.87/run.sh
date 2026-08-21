@@ -190,7 +190,7 @@ wait_for_correctness() {
     local history_before="$1"
     local workload_finished_at="$2"
     for _ in $(seq 1 360); do
-        if [[ "$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables st WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.end_time >= '$workload_finished_at')")" == t ]]; then
+        if [[ "$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables st WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at')")" == t ]]; then
             break
         fi
         sleep 0.5
