@@ -2322,7 +2322,8 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
             // Cron-based: check if the cron schedule says we're due
             // (tier multiplier not applied to cron schedules)
             let last_refresh_epoch = Spi::get_one_with_args::<f64>(
-                "SELECT EXTRACT(EPOCH FROM last_refresh_at) FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+                "SELECT EXTRACT(EPOCH FROM last_refresh_at)::double precision \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
                 &[st.pgt_id.into()],
             )
             .unwrap_or(None)
@@ -2347,7 +2348,7 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
                 max_secs
             };
             let last_refresh_epoch = Spi::get_one_with_args::<f64>(
-                "SELECT EXTRACT(EPOCH FROM last_refresh_at) \
+                "SELECT EXTRACT(EPOCH FROM last_refresh_at)::double precision \
                  FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
                 &[st.pgt_id.into()],
             )
