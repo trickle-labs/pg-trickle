@@ -212,7 +212,8 @@ fn copy_table_rows(
         unsafe {
             // SAFETY: heap_tuple matches relation's descriptor and is inserted
             // in the current transaction with the current command id.
-            let slot = pg_sys::MakeSingleTupleTableSlot(tuple_desc, std::ptr::null());
+            let slot =
+                pg_sys::MakeSingleTupleTableSlot(tuple_desc, &pg_sys::TTSOpsHeapTuple as *const _);
             if slot.is_null() {
                 pg_sys::heap_freetuple(heap_tuple);
                 pg_sys::table_close(relation, pg_sys::RowExclusiveLock as _);
