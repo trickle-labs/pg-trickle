@@ -189,15 +189,15 @@ correctness_check() {
 wait_for_correctness() {
     local history_before="$1"
     local workload_finished_at="$2"
+    local checked_through="$history_before"
+    local latest_refresh
     for _ in $(seq 1 360); do
-        if [[ "$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables st WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at')")" == t ]]; then
-            for _ in $(seq 1 120); do
-                if [[ "$(correctness_check)" == t ]]; then
-                    return 0
-                fi
-                sleep 0.5
-            done
-            return 1
+        latest_refresh="$(db_query "SELECT coalesce(min(max_refresh_id), $history_before) FROM (SELECT st.pgt_id, max(h.refresh_id) AS max_refresh_id FROM pgtrickle.pgt_stream_tables st JOIN pgtrickle.pgt_refresh_history h ON h.pgt_id = st.pgt_id WHERE h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at' GROUP BY st.pgt_id) ready")"
+        if (( latest_refresh > checked_through )); then
+            if [[ "$(correctness_check)" == t ]]; then
+                return 0
+            fi
+            checked_through="$latest_refresh"
         fi
         sleep 0.5
     done
