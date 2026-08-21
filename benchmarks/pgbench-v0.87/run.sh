@@ -187,13 +187,14 @@ correctness_check() {
 }
 
 wait_for_correctness() {
+    local workload_finished_at="$1"
     for _ in $(seq 1 360); do
-        if [[ "$(correctness_check)" == t ]]; then
-            return 0
+        if [[ "$(db_query "SELECT count(*) = 3 FROM pgtrickle.pgt_stream_tables st WHERE EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED' AND h.end_time >= '$workload_finished_at')")" == t ]]; then
+            break
         fi
         sleep 0.5
     done
-    return 1
+    [[ "$(correctness_check)" == t ]]
 }
 
 run_one() {
@@ -204,7 +205,7 @@ run_one() {
     local stdout_file="$run_dir/pgbench.stdout"
     local log_dir="$run_dir/logs"
     local warmup_file="$run_dir/warmup.stdout"
-    local history_before refresh_stats refresh_count refresh_duration correct
+    local history_before refresh_stats refresh_count refresh_duration correct workload_finished_at
     local cpu_before cpu_after
 
     mkdir -p "$log_dir"
@@ -236,9 +237,10 @@ run_one() {
     docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
         -l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres >"$stdout_file"
     cpu_after="$(cpu_sample)"
+    workload_finished_at="$(db_query "SELECT clock_timestamp()")"
 
     if [[ "$config" == active ]]; then
-        if wait_for_correctness; then
+        if wait_for_correctness "$workload_finished_at"; then
             correct=true
         else
             correct=false
