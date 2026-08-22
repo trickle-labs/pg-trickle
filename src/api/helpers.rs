@@ -90,17 +90,59 @@ pub(crate) fn outer_user_id() -> pg_sys::Oid {
 }
 
 /// Construct PostgreSQL's standard caller search path for a SECURITY DEFINER API.
+///
+/// SEC-1: uses `pg_catalog.quote_ident()` (PostgreSQL's own conditional
+/// quoting — only adds quotes when the identifier actually needs them),
+/// not this module's `quote_identifier()` helper, which always quotes
+/// unconditionally. That's correct for building DDL text, but wrong here:
+/// this string round-trips through `current_setting('search_path')`
+/// elsewhere (e.g. `resolve_rangevar_schema`'s naive
+/// `string_to_array(current_setting('search_path'), ', ')` split), and an
+/// always-quoted role name like `"sec_cor_author"` doesn't match
+/// `pg_namespace.nspname = 'sec_cor_author'` (bare) if the quotes survive
+/// that round-trip — surfacing as a spurious "table not found in the
+/// current search_path" error for a schema named identically to its role,
+/// exactly the common convention `CREATE SCHEMA foo AUTHORIZATION foo`
+/// establishes.
 pub(super) fn invoker_search_path() -> Result<String, PgTrickleError> {
-    Ok(format!("{}, public", quote_identifier(&outer_user_name()?)))
+    let invoker = outer_user_id();
+    Spi::get_one_with_args::<String>(
+        "SELECT pg_catalog.quote_ident(rolname::text) || ', public' \
+         FROM pg_catalog.pg_roles WHERE oid = $1",
+        &[invoker.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("Role with OID {invoker} not found")))
 }
 
 /// Run caller-controlled SQL with a captured invoker search path, restoring
-/// the locked SECURITY DEFINER path afterwards.
+/// whatever search path was actually active beforehand.
+///
+/// SEC-1: this used to unconditionally restore the hardcoded SECURITY
+/// DEFINER pin (`pgtrickle, pg_catalog, pg_temp`), which was safe as long as
+/// every caller was itself reached through a SECURITY DEFINER boundary (the
+/// only case that existed at the time — `create_stream_table_impl`'s three
+/// uses). `alter_stream_table_impl` is now reachable through a SECURITY
+/// INVOKER path too (`bulk_alter_stream_tables_impl`, deliberately left
+/// unpatched), which never pins search_path at all — unconditionally
+/// restoring the pin there would leak it into the rest of the caller's
+/// transaction instead of their own ambient search_path. Capturing the
+/// actual prior value keeps every existing (SECURITY DEFINER-only) call
+/// site behaved identically (the active value at that point already *is*
+/// the pin, so restoring it is a no-op) while making this safe to call from
+/// a plain invoker context too.
 pub(super) fn with_invoker_search_path<T>(
     invoker_search_path: &str,
     f: impl FnOnce() -> Result<T, PgTrickleError>,
 ) -> Result<T, PgTrickleError> {
     use std::panic::AssertUnwindSafe;
+
+    let prior_search_path = Spi::get_one::<String>("SELECT current_setting('search_path')")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or_else(|| "pgtrickle, pg_catalog, pg_temp".to_string());
+    let prior_search_path_c = std::ffi::CString::new(prior_search_path).map_err(|e| {
+        PgTrickleError::SpiError(format!("search_path contained an unexpected NUL byte: {e}"))
+    })?;
 
     Spi::run_with_args(
         "SELECT pg_catalog.set_config('search_path', $1, true)",
@@ -115,7 +157,7 @@ pub(super) fn with_invoker_search_path<T>(
             .finally(|| {
                 pg_sys::set_config_option(
                     c"search_path".as_ptr(),
-                    c"pgtrickle, pg_catalog, pg_temp".as_ptr(),
+                    prior_search_path_c.as_ptr(),
                     pg_sys::GucContext::PGC_USERSET,
                     pg_sys::GucSource::PGC_S_SESSION,
                     pg_sys::GucAction::GUC_ACTION_LOCAL,

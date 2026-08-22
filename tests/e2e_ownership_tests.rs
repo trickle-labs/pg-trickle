@@ -319,3 +319,228 @@ async fn test_ownership_nonsuperuser_create_requires_source_select() {
         "permission errors must not crash PostgreSQL"
     );
 }
+
+/// SEC-1: `create_or_replace_stream_table` was the one lifecycle entry point
+/// (the one `dbt-pgtrickle`'s `stream_table` materialization actually calls)
+/// left SECURITY INVOKER while its siblings were SECURITY DEFINER, forcing
+/// callers to hold direct grants on pg_trickle's private catalog/change-buffer
+/// schemas just to create a stream table. Mirrors
+/// `test_ownership_nonsuperuser_create_uses_private_infrastructure` (#903),
+/// but additionally exercises the "already exists" replace path (which
+/// delegates internally to `alter_stream_table_impl`), since dbt's own usage
+/// is a repeated, idempotent `create_or_replace_stream_table` call.
+#[tokio::test]
+async fn test_ownership_nonsuperuser_create_or_replace_uses_private_infrastructure() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec_cor_author LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("CREATE SCHEMA sec_cor_author AUTHORIZATION sec_cor_author")
+        .await;
+    db.execute("CREATE TABLE sec_cor_author.source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO sec_cor_author.source VALUES (1, 'one'), (2, 'two')")
+        .await;
+    db.execute("ALTER TABLE sec_cor_author.source OWNER TO sec_cor_author")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, sec_cor_author TO sec_cor_author")
+        .await;
+    db.execute("GRANT USAGE, CREATE ON SCHEMA public TO sec_cor_author")
+        .await;
+    db.execute("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO sec_cor_author")
+        .await;
+
+    // First call: table does not exist yet — routes to create_stream_table_impl.
+    let create_result = db
+        .try_execute_with_role(
+            "SET ROLE sec_cor_author",
+            "SELECT pgtrickle.create_or_replace_stream_table(\
+                 'sec_cor_stream', \
+                 'SELECT id, val FROM source'\
+             )",
+            "RESET ROLE",
+        )
+        .await;
+    assert!(
+        create_result.is_ok(),
+        "Non-superuser create-or-replace (create path) should succeed: {:?}",
+        create_result.err()
+    );
+
+    // Second call, same definition but a changed schedule: table already
+    // exists — routes to alter_stream_table_impl instead.
+    let replace_result = db
+        .try_execute_with_role(
+            "SET ROLE sec_cor_author",
+            "SELECT pgtrickle.create_or_replace_stream_table(\
+                 'sec_cor_stream', \
+                 'SELECT id, val FROM source', \
+                 schedule => '2m'\
+             )",
+            "RESET ROLE",
+        )
+        .await;
+    assert!(
+        replace_result.is_ok(),
+        "Non-superuser create-or-replace (replace path) should succeed: {:?}",
+        replace_result.err()
+    );
+
+    let secured_api: bool = db
+        .query_scalar(
+            "SELECT prosecdef \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname = 'create_or_replace_stream_table' \
+               AND p.pronargs = 16",
+        )
+        .await;
+    assert!(
+        secured_api,
+        "create_or_replace_stream_table must be SECURITY DEFINER"
+    );
+
+    let locked_search_path: bool = db
+        .query_scalar(
+            "SELECT EXISTS ( \
+             SELECT 1 FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace, \
+             unnest(p.proconfig) AS setting \
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname = 'create_or_replace_stream_table' \
+               AND p.pronargs = 16 \
+               AND setting = 'search_path=pgtrickle, pg_catalog, pg_temp' \
+             )",
+        )
+        .await;
+    assert!(
+        locked_search_path,
+        "SECURITY DEFINER create_or_replace_stream_table must use a locked search_path"
+    );
+
+    let owner: String = db
+        .query_scalar(
+            "SELECT pg_get_userbyid(relowner) \
+             FROM pg_class WHERE oid = 'public.sec_cor_stream'::regclass",
+        )
+        .await;
+    assert_eq!(owner, "sec_cor_author");
+
+    let catalog_access: bool = db
+        .query_scalar(
+            "SELECT has_table_privilege('sec_cor_author', \
+             'pgtrickle.pgt_stream_tables', 'SELECT')",
+        )
+        .await;
+    assert!(!catalog_access, "catalog tables must remain private");
+
+    let change_schema_usage: bool = db
+        .query_scalar(
+            "SELECT has_schema_privilege('sec_cor_author', \
+             'pgtrickle_changes', 'USAGE')",
+        )
+        .await;
+    assert!(
+        !change_schema_usage,
+        "authors must not receive change-buffer schema access"
+    );
+}
+
+/// SEC-1: The elevated `create_or_replace_stream_table` API must not grant its
+/// owner privileges to the defining query; PostgreSQL should return a normal
+/// permission error instead. Mirrors
+/// `test_ownership_nonsuperuser_create_requires_source_select` (#903).
+#[tokio::test]
+async fn test_ownership_nonsuperuser_create_or_replace_requires_source_select() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec_cor_no_select LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("CREATE SCHEMA sec_cor_denied").await;
+    db.execute("CREATE TABLE sec_cor_denied.source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO sec_cor_denied.source VALUES (1, 'secret')")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle, sec_cor_denied TO sec_cor_no_select")
+        .await;
+    db.execute("GRANT USAGE, CREATE ON SCHEMA public TO sec_cor_no_select")
+        .await;
+    db.execute("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO sec_cor_no_select")
+        .await;
+
+    let result = db
+        .try_execute_with_role(
+            "SET ROLE sec_cor_no_select",
+            "SELECT pgtrickle.create_or_replace_stream_table(\
+                 'sec_cor_denied_stream', \
+                 'SELECT id, val FROM sec_cor_denied.source', \
+                 initialize => false\
+             )",
+            "RESET ROLE",
+        )
+        .await;
+    let err = result
+        .expect_err("source SELECT must not be bypassed")
+        .to_string();
+    assert!(
+        err.contains("permission denied"),
+        "Expected a PostgreSQL permission error, got: {err}"
+    );
+
+    let backend_still_usable: i32 = db.query_scalar("SELECT 1").await;
+    assert_eq!(
+        backend_still_usable, 1,
+        "permission errors must not crash PostgreSQL"
+    );
+}
+
+/// SEC-1: Regression-lock the security_definer + locked search_path status of
+/// every stream-table lifecycle function patched to close the grant-surface
+/// gap (`create_or_replace_stream_table`, `alter_stream_table`,
+/// `drop_stream_table`), so a future refactor can't silently drop either
+/// property without a catalog-level test failing.
+#[tokio::test]
+async fn test_ownership_lifecycle_functions_are_security_definer() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    for (name, pronargs) in [
+        ("create_or_replace_stream_table", 16),
+        ("alter_stream_table", 20),
+        ("drop_stream_table", 2),
+    ] {
+        let secured: bool = db
+            .query_scalar(&format!(
+                "SELECT prosecdef \
+                 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = 'pgtrickle' \
+                   AND p.proname = '{name}' \
+                   AND p.pronargs = {pronargs}",
+            ))
+            .await;
+        assert!(secured, "pgtrickle.{name} must be SECURITY DEFINER");
+
+        let locked_search_path: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_proc p \
+                 JOIN pg_namespace n ON n.oid = p.pronamespace, \
+                 unnest(p.proconfig) AS setting \
+                 WHERE n.nspname = 'pgtrickle' \
+                   AND p.proname = '{name}' \
+                   AND p.pronargs = {pronargs} \
+                   AND setting = 'search_path=pgtrickle, pg_catalog, pg_temp' \
+                 )",
+            ))
+            .await;
+        assert!(
+            locked_search_path,
+            "pgtrickle.{name} must use a locked search_path"
+        );
+    }
+}
