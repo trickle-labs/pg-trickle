@@ -277,9 +277,7 @@ async fn test_ownership_owner_lifecycle_ops_succeed() {
     );
 
     let status_after_pause: String = db
-        .query_scalar(
-            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'sec1_st'",
-        )
+        .query_scalar("SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'sec1_st'")
         .await;
     assert_eq!(status_after_pause, "SUSPENDED");
 
@@ -297,9 +295,7 @@ async fn test_ownership_owner_lifecycle_ops_succeed() {
     );
 
     let status_after_resume: String = db
-        .query_scalar(
-            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'sec1_st'",
-        )
+        .query_scalar("SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'sec1_st'")
         .await;
     assert_eq!(status_after_resume, "ACTIVE");
 
