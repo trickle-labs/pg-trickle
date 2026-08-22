@@ -78,7 +78,14 @@ you do not have full superuser access:
 4. After installation, non-superuser roles can use the explicitly granted
    `pgtrickle.*` functions. Creation APIs use `SECURITY DEFINER` only for
    private infrastructure; creation explicitly checks the caller's source
-   `SELECT` and target-schema `CREATE` privileges.
+   `SELECT` and target-schema `CREATE` privileges. `create_or_replace_stream_table`
+   — the fast-path entry point `dbt-pgtrickle`'s `stream_table` materialization
+   actually calls — and the `alter_stream_table`/`drop_stream_table` lifecycle
+   functions are `SECURITY DEFINER` too, for the same reason: without it, a
+   non-superuser role needs direct grants on the
+   private `pgtrickle`/`pgtrickle_changes` schemas instead of just `EXECUTE`
+   on the function. See "API privilege boundary" below for how their
+   ownership check keeps this safe.
 
 See [INSTALL.md](../INSTALL.md) for distribution-specific instructions.
 
