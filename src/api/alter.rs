@@ -2832,7 +2832,11 @@ fn drop_stream_table_impl_inner(
 
 /// Resume a suspended stream table, clearing its consecutive error count and
 /// re-enabling automated and manual refreshes.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — closes the same create/alter/drop lifecycle
+/// gap; `resume_stream_table_impl` enforces `check_stream_table_ownership`
+/// before making any change.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn resume_stream_table(name: &str) {
     let result = resume_stream_table_impl(name);
     if let Err(e) = result {
@@ -2843,6 +2847,9 @@ fn resume_stream_table(name: &str) {
 fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+
+    // SEC-1: Ownership check — only the owner (or superuser) can resume.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
     if st.status != StStatus::Suspended && st.status != StStatus::Error {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -2903,7 +2910,11 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
 /// 5. Rebuild any missing CDC triggers / change-buffer tables.
 /// 6. Verify that all declared source dependencies still exist.
 /// 7. Return a summary of all actions taken.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — closes the same create/alter/drop lifecycle
+/// gap; `repair_stream_table_impl` enforces `check_stream_table_ownership`
+/// before making any change.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn repair_stream_table(name: &str) -> String {
     match repair_stream_table_impl(name) {
         Ok(summary) => summary,
@@ -2914,6 +2925,9 @@ fn repair_stream_table(name: &str) -> String {
 fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+
+    // SEC-1: Ownership check — only the owner (or superuser) can repair.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
     // Step 1: Acquire a transaction-scoped advisory lock.
     let got_lock =
@@ -3088,7 +3102,12 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
 /// ```sql
 /// SELECT pgtrickle.set_stream_table_refresh_policy('my_schema.my_st', 'DIFFERENTIAL');
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — delegates directly to `alter_stream_table_impl`,
+/// which already re-derives the caller via `outer_user_id()` and enforces
+/// `check_stream_table_ownership` before making any change (see
+/// `alter_stream_table`'s own SEC-1 note). No new authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn set_stream_table_refresh_policy(name: &str, refresh_mode: &str) {
     let result = alter_stream_table_impl(AlterStreamTableOptions {
         name,
@@ -3115,7 +3134,12 @@ fn set_stream_table_refresh_policy(name: &str, refresh_mode: &str) {
 /// ```sql
 /// SELECT pgtrickle.set_stream_table_storage_policy('my_schema.my_st', true, 'hot');
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — delegates directly to `alter_stream_table_impl`,
+/// which already re-derives the caller via `outer_user_id()` and enforces
+/// `check_stream_table_ownership` before making any change (see
+/// `alter_stream_table`'s own SEC-1 note). No new authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn set_stream_table_storage_policy(
     name: &str,
     append_only: default!(Option<bool>, "NULL"),
@@ -3147,7 +3171,11 @@ fn set_stream_table_storage_policy(
 /// SELECT pgtrickle.pause_stream_table('my_schema.my_st');
 /// SELECT pgtrickle.resume_stream_table('my_schema.my_st');
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — closes the same create/alter/drop lifecycle
+/// gap; `pause_stream_table_impl` enforces `check_stream_table_ownership`
+/// before making any change.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn pause_stream_table(name: &str) {
     let result = pause_stream_table_impl(name);
     if let Err(e) = result {
@@ -3158,6 +3186,9 @@ fn pause_stream_table(name: &str) {
 fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+
+    // SEC-1: Ownership check — only the owner (or superuser) can pause.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
     if st.status != StStatus::Active {
         return Err(PgTrickleError::InvalidArgument(format!(

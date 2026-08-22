@@ -13,7 +13,11 @@ use crate::error::PgTrickleError;
 /// Creates a PostgreSQL publication exposing the named stream table so that
 /// Kafka Connect, Debezium, and other logical replication subscribers can
 /// receive change events without a separate replication slot.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `stream_table_to_publication_impl` already
+/// enforces `check_stream_table_ownership` before making any change. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn stream_table_to_publication(name: &str) {
     // ERR-2 (v0.26.0): Use typed into_pg_error() at the API boundary.
     stream_table_to_publication_impl(name).unwrap_or_else(|e| e.into_pg_error());
@@ -75,7 +79,11 @@ fn stream_table_to_publication_impl(name: &str) -> Result<(), PgTrickleError> {
 // ── CDC-PUB-2: drop_stream_table_publication() ──────────────────────────
 
 /// CDC-PUB-2: Drop the logical replication publication for a stream table.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `drop_stream_table_publication_impl` already
+/// enforces `check_stream_table_ownership` before making any change. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn drop_stream_table_publication(name: &str) {
     // ERR-2 (v0.26.0): Use typed into_pg_error() at the API boundary.
     drop_stream_table_publication_impl(name).unwrap_or_else(|e| e.into_pg_error());

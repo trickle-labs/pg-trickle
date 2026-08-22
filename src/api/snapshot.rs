@@ -612,7 +612,11 @@ fn validate_snapshot_version(snapshot_version: &str) -> Result<(), PgTrickleErro
 /// The snapshot table is created in the `pgtrickle` schema with the naming
 /// convention `snapshot_<name>_<epoch_ms>` unless `p_target` is given.
 /// Returns the fully-qualified name of the created snapshot table.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `snapshot_stream_table_impl` already enforces
+/// `check_stream_table_ownership` before creating the snapshot. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn snapshot_stream_table(p_name: &str, p_target: default!(Option<&str>, "NULL")) -> String {
     snapshot_stream_table_impl(p_name, p_target).unwrap_or_else(|e| pgrx::error!("{}", e))
 }
@@ -790,7 +794,11 @@ fn snapshot_stream_table_impl(name: &str, target: Option<&str>) -> Result<String
 /// The stream table must already be registered. After restore the frontier is
 /// set to the snapshot's frontier so the next refresh cycle is DIFFERENTIAL
 /// (skipping the initial FULL re-scan).
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `restore_from_snapshot_impl` already enforces
+/// `check_stream_table_ownership` before restoring. No new authorization
+/// code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn restore_from_snapshot(p_name: &str, p_source: &str) {
     restore_from_snapshot_impl(p_name, p_source).unwrap_or_else(|e| pgrx::error!("{}", e))
 }
@@ -989,7 +997,11 @@ fn list_snapshots_impl(
 /// SNAP-3 (v0.27.0): Drop an archival snapshot table.
 ///
 /// Removes the snapshot table and its catalog row from `pgtrickle.pgt_snapshots`.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `drop_snapshot_impl` already enforces
+/// `check_stream_table_ownership` before dropping. No new authorization
+/// code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn drop_snapshot(p_snapshot_table: &str) {
     drop_snapshot_impl(p_snapshot_table).unwrap_or_else(|e| pgrx::error!("{}", e))
 }

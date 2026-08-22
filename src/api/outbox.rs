@@ -100,7 +100,11 @@ pub(crate) fn get_outbox_table_name(pgt_id: i64) -> Option<String> {
 ///
 /// Requires `pg_tide` to be installed. If `pg_tide` is absent the function
 /// raises an actionable error with an install hint.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `attach_outbox_impl` already enforces
+/// `check_stream_table_ownership` before registering the outbox. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn attach_outbox(
     p_name: &str,
     p_retention_hours: default!(i32, 24),
@@ -187,7 +191,11 @@ fn attach_outbox_impl(
 /// Removes the entry from `pgtrickle.pgt_outbox_config`. The `pg_tide` outbox
 /// table itself is NOT dropped -- use `tide.outbox_drop()` in `pg_tide` after
 /// detaching if you also want to remove the outbox data.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `detach_outbox_impl` already enforces
+/// `check_stream_table_ownership` before removing the outbox. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn detach_outbox(p_name: &str, p_if_exists: default!(bool, false)) {
     detach_outbox_impl(p_name, p_if_exists).unwrap_or_else(|e| pgrx::error!("{}", e))
 }
@@ -297,7 +305,11 @@ pub(crate) fn write_outbox_row(
 /// The `vector_column` parameter documents which column carries the embedding —
 /// it is stored in the outbox headers so consumers can identify the embedding
 /// field without inspecting the payload.
-#[pgrx::pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — delegates to `attach_outbox_impl` first, which
+/// already enforces `check_stream_table_ownership` before this function does
+/// any embedding-specific catalog work. No new authorization code needed.
+#[pgrx::pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn attach_embedding_outbox(
     p_name: &str,
     p_vector_column: &str,
