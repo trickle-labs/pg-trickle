@@ -35,7 +35,7 @@
 use pgrx::prelude::*;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
@@ -2391,8 +2391,38 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
     check_upstream_changes(st)
 }
 
+const LOAD_SHED_BUFFER_GUARD_SAMPLE_MS: u64 = 10_000;
+
+fn load_shed_buffer_guard_sample_due(last_sample_ms: u64, now_ms: u64) -> bool {
+    last_sample_ms == 0 || now_ms.saturating_sub(last_sample_ms) >= LOAD_SHED_BUFFER_GUARD_SAMPLE_MS
+}
+
+/// Stream tables whose source buffer reached the storage guard.
+fn load_shed_buffer_guard_ids() -> Option<HashSet<i64>> {
+    let change_schema = config::pg_trickle_change_buffer_schema();
+    let budget = config::pg_trickle_memory_budget().change_buffer_bytes as i64;
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT DISTINCT d.pgt_id \
+                 FROM pgtrickle.pgt_dependencies d \
+                 JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid = d.source_relid \
+                 JOIN pg_class cb ON cb.relname = 'changes_' || ct.source_stable_name \
+                 JOIN pg_namespace n ON n.oid = cb.relnamespace AND n.nspname = $2 \
+                 WHERE pg_total_relation_size(cb.oid) >= $1",
+                None,
+                &[budget.into(), change_schema.trim_matches('"').into()],
+            )
+            .ok()?;
+        Some(
+            rows.filter_map(|row| row.get::<i64>(1).ok().flatten())
+                .collect(),
+        )
+    })
+}
+
 /// Work that must bypass application-load deferral.
-fn is_load_shed_exempt(st: &StreamTableMeta) -> bool {
+fn is_load_shed_exempt(st: &StreamTableMeta, buffer_guard_ids: Option<&HashSet<i64>>) -> bool {
     if st.needs_reinit
         || !st.is_populated
         || st.refresh_mode.is_immediate()
@@ -2401,23 +2431,7 @@ fn is_load_shed_exempt(st: &StreamTableMeta) -> bool {
         return true;
     }
 
-    let change_schema = config::pg_trickle_change_buffer_schema();
-    let budget = config::pg_trickle_memory_budget().change_buffer_bytes as i64;
-    Spi::get_one_with_args::<bool>(
-        "SELECT COALESCE(bool_or(pg_total_relation_size(cb.oid) >= $2), false) \
-         FROM pgtrickle.pgt_dependencies d \
-         JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid = d.source_relid \
-         JOIN pg_class cb ON cb.relname = 'changes_' || ct.source_stable_name \
-         JOIN pg_namespace n ON n.oid = cb.relnamespace AND n.nspname = $3 \
-         WHERE d.pgt_id = $1",
-        &[
-            st.pgt_id.into(),
-            budget.into(),
-            change_schema.trim_matches('"').into(),
-        ],
-    )
-    .unwrap_or(Some(true))
-    .unwrap_or(true)
+    buffer_guard_ids.is_none_or(|ids| ids.contains(&st.pgt_id))
 }
 
 /// Emit a StaleData or NoUpstreamChanges alert depending on whether the
@@ -4630,6 +4644,13 @@ mod tests {
         assert!(!reminder_due(Some(0), 59_999, 60_000));
         assert!(reminder_due(Some(0), 60_000, 60_000));
         assert!(reminder_due(Some(10), 10, 0));
+    }
+
+    #[test]
+    fn load_shed_buffer_guard_is_sampled_at_most_every_ten_seconds() {
+        assert!(load_shed_buffer_guard_sample_due(0, 1));
+        assert!(!load_shed_buffer_guard_sample_due(1, 10_000));
+        assert!(load_shed_buffer_guard_sample_due(1, 10_001));
     }
 
     #[test]

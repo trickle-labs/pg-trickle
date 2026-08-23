@@ -37,9 +37,10 @@ use super::{
     current_epoch_ms, emit_stale_alert_if_needed, evaluate_fuse, execute_scheduled_refresh,
     group_schedule_policy, has_table_source_changes, is_any_source_gated, is_group_due,
     is_load_shed_exempt, is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint,
-    load_gated_source_oids, load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash,
-    refresh_single_st, self_monitoring_auto_apply_tick, sla_tier_adjustment_tick,
-    update_backoff_factor, upstream_change_state,
+    load_gated_source_oids, load_shed_buffer_guard_ids, load_shed_buffer_guard_sample_due,
+    load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash, refresh_single_st,
+    self_monitoring_auto_apply_tick, sla_tier_adjustment_tick, update_backoff_factor,
+    upstream_change_state,
 };
 use crate::refresh::orchestrator::batch_update_cost_model_summary;
 
@@ -523,6 +524,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // Phase 4: Parallel dispatch state (persisted across ticks)
     let mut parallel_state = ParallelDispatchState::new();
     let mut pressure_state = PressureState::new();
+    let mut load_shed_buffer_guards = Some(HashSet::new());
+    let mut load_shed_buffer_guards_sampled_at_ms = 0;
 
     // Per-ST drift reset counters (differential cycles since last reinit)
     let mut drift_counters: HashMap<i64, i32> = HashMap::new();
@@ -608,6 +611,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         // that resets to 20ms on worker completion, making parallel mode
         // competitive for cheap refreshes.
         let mut base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+        base_interval_ms =
+            base_interval_ms.saturating_mul(u64::from(pressure_state.deferral_factor()));
 
         // OPS-6: Workload-aware poll — if df_scheduling_interference detects
         // heavy overlap, slightly increase the base interval to reduce
@@ -1213,6 +1218,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 return;
             }
 
+            if load_deferred
+                && load_shed_buffer_guard_sample_due(load_shed_buffer_guards_sampled_at_ms, now_ms)
+            {
+                load_shed_buffer_guards = load_shed_buffer_guard_ids();
+                load_shed_buffer_guards_sampled_at_ms = now_ms;
+            }
+            let load_shed_buffer_guards = load_shed_buffer_guards.as_ref();
+
             // Step B2: Build execution unit DAG for parallel-refresh awareness.
             let parallel_mode = config::pg_trickle_parallel_refresh_mode();
             match parallel_mode {
@@ -1253,6 +1266,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         dispatch_tick_id,
                         tick_watermark.as_deref(),
                         load_deferred,
+                        load_shed_buffer_guards,
                     );
 
                     // Prune retry states for STs that no longer exist.
@@ -1324,6 +1338,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
             // Step C: Compute consistency groups and refresh group-by-group
             let groups = dag_ref.compute_consistency_groups();
+            let all_groups_load_deferred = load_deferred
+                && !groups.iter().any(|group| {
+                    group.members.iter().any(|member| match member {
+                        NodeId::StreamTable(pgt_id) => load_st_by_id(*pgt_id)
+                            .is_none_or(|st| is_load_shed_exempt(&st, load_shed_buffer_guards)),
+                        NodeId::BaseTable(_) => false,
+                    })
+                });
 
             // PERF-1 (v0.62.0): Build a per-tick change-buffer fanout cache.
             //
@@ -1336,7 +1358,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // If fanout is disabled we fall back to the per-group per-member
             // path used in earlier versions.
             let fanout_cache: Option<std::collections::HashSet<i64>> =
-                if config::pg_trickle_enable_change_buffer_fanout() {
+                if !all_groups_load_deferred && config::pg_trickle_enable_change_buffer_fanout() {
                     // Collect all active STs referenced in the consistency groups.
                     let all_pgt_ids: Vec<i64> = groups
                         .iter()
@@ -1368,9 +1390,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 // population, IMMEDIATE work, and full buffers bypass deferral.
                 if load_deferred
                     && !group.members.iter().any(|member| match member {
-                        NodeId::StreamTable(pgt_id) => {
-                            load_st_by_id(*pgt_id).is_none_or(|st| is_load_shed_exempt(&st))
-                        }
+                        NodeId::StreamTable(pgt_id) => load_st_by_id(*pgt_id)
+                            .is_none_or(|st| is_load_shed_exempt(&st, load_shed_buffer_guards)),
                         NodeId::BaseTable(_) => false,
                     })
                 {

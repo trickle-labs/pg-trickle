@@ -8,7 +8,7 @@
 //!   - Parallel dispatch state structs and `parallel_dispatch_tick`
 //!   - `reap_dead_worker_jobs`, `reconcile_parallel_state`
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 
 use pgrx::bgworkers::*;
@@ -664,6 +664,7 @@ pub(super) fn parallel_dispatch_tick(
     dispatch_tick_id: i64,
     tick_watermark_lsn: Option<&str>,
     load_deferred: bool,
+    load_shed_buffer_guards: Option<&HashSet<i64>>,
 ) {
     let eu_dag = match &state.eu_dag {
         Some(d) => d,
@@ -943,19 +944,20 @@ pub(super) fn parallel_dispatch_tick(
             continue;
         }
 
-        // Check if unit is due for refresh.
-        if !is_unit_due(unit, dag) {
-            continue;
-        }
-
         // Load shedding applies equally to parallel and sequential paths.
         // Committed source changes remain buffered and drain after pressure falls.
         if load_deferred
-            && !unit
-                .member_pgt_ids
-                .iter()
-                .any(|&pgt_id| load_st_by_id(pgt_id).is_none_or(|st| is_load_shed_exempt(&st)))
+            && !unit.member_pgt_ids.iter().any(|&pgt_id| {
+                load_st_by_id(pgt_id)
+                    .is_none_or(|st| is_load_shed_exempt(&st, load_shed_buffer_guards))
+            })
         {
+            continue;
+        }
+
+        // Check if unit is due for refresh only after admission. Schedule
+        // discovery performs SPI reads that deferred work does not need.
+        if !is_unit_due(unit, dag) {
             continue;
         }
 
