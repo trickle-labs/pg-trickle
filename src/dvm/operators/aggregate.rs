@@ -139,13 +139,21 @@ fn child_to_from_sql(child: &OpTree, registry: &CteRegistry) -> Option<String> {
             schema,
             table_name,
             alias,
+            columns,
             ..
-        } => Some(format!(
-            "\"{}\".\"{}\" AS \"{}\"",
-            schema.replace('"', "\"\""),
-            table_name.replace('"', "\"\""),
-            alias.replace('"', "\"\""),
-        )),
+        } => {
+            let columns = columns
+                .iter()
+                .map(|column| quote_ident(&column.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!(
+                "(SELECT {columns} FROM {}.{}) AS {}",
+                quote_ident(schema),
+                quote_ident(table_name),
+                quote_ident(alias),
+            ))
+        }
         OpTree::Filter { predicate, child } => {
             let inner = child_to_from_sql(child, registry)?;
             Some(format!("{inner} WHERE {}", predicate.to_sql()))
@@ -5456,6 +5464,24 @@ mod tests {
     }
 
     // ── child_to_from_sql tests (SF-4) ──────────────────────────────
+
+    #[test]
+    fn test_child_to_from_sql_scan_projects_pruned_columns() {
+        let child = scan(
+            1,
+            "events",
+            "public",
+            "e",
+            &["id", "group_id", "created_at"],
+        );
+
+        let sql = child_to_from_sql(&child, &CteRegistry::default()).unwrap();
+
+        assert_eq!(
+            sql,
+            "(SELECT \"id\", \"group_id\", \"created_at\" FROM \"public\".\"events\") AS \"e\""
+        );
+    }
 
     #[test]
     fn test_child_to_from_sql_project_over_scan() {

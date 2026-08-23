@@ -548,6 +548,97 @@ async fn test_chained_ctes_differential_refresh() {
     );
 }
 
+#[tokio::test]
+async fn test_cte_chained_left_join_rescans_with_pruned_columns_stay_correct() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE rescan_parent (id INT PRIMARY KEY, created_at INT NOT NULL)",
+        "CREATE TABLE rescan_d (\
+             id INT PRIMARY KEY, parent_id INT NOT NULL REFERENCES rescan_parent(id), \
+             unused TEXT, flag INT NOT NULL, created_at INT NOT NULL\
+         )",
+        "CREATE TABLE rescan_e (\
+             id INT PRIMARY KEY, parent_id INT NOT NULL REFERENCES rescan_parent(id), \
+             unused TEXT, label TEXT NOT NULL, created_at INT NOT NULL\
+         )",
+        "INSERT INTO rescan_parent VALUES (1, 10), (2, 20)",
+    ])
+    .await;
+
+    let query = "WITH agg_d AS (\
+                     SELECT d.parent_id, \
+                            count(*) FILTER (WHERE d.flag = 1) AS cnt_pos, \
+                            count(*) FILTER (WHERE d.flag = 0) AS cnt_zero, \
+                            max(d.created_at) AS latest_d \
+                     FROM rescan_d d GROUP BY d.parent_id\
+                 ), agg_e AS (\
+                     SELECT e.parent_id, count(*) AS cnt_e, \
+                            min(e.created_at) AS earliest_e, \
+                            string_agg(e.label, ',' ORDER BY e.label) AS labels \
+                     FROM rescan_e e GROUP BY e.parent_id\
+                 ) \
+                 SELECT p.id AS parent_id, \
+                        coalesce(d.cnt_pos, 0)::bigint AS cnt_pos, \
+                        coalesce(d.cnt_zero, 0)::bigint AS cnt_zero, \
+                        coalesce(e.cnt_e, 0)::bigint AS cnt_e, \
+                        d.latest_d, e.earliest_e, e.labels \
+                 FROM rescan_parent p \
+                 LEFT JOIN agg_d d ON d.parent_id = p.id \
+                 LEFT JOIN agg_e e ON e.parent_id = p.id";
+
+    db.create_st("rescan_join_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // Fold the first deltas into groups that already have NULL-padded ST rows.
+    db.execute("INSERT INTO rescan_d VALUES (1, 1, 'ignored', 1, 30)")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    db.execute("INSERT INTO rescan_e VALUES (1, 1, 'ignored', 'beta', 40)")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // Change both joined aggregate branches in one refresh, including a newly
+    // populated parent group.
+    db.execute(
+        "INSERT INTO rescan_d VALUES (2, 1, 'ignored', 0, 50), \
+                                           (3, 2, 'ignored', 1, 60)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO rescan_e VALUES (2, 1, 'ignored', 'alpha', 35), \
+                                           (3, 2, 'ignored', 'gamma', 70)",
+    )
+    .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // UPDATE emits D/I pairs and changes each non-algebraic aggregate family.
+    db.execute("UPDATE rescan_d SET flag = 1, created_at = 55 WHERE id = 2")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    db.execute("UPDATE rescan_e SET label = 'aardvark', created_at = 25 WHERE id = 2")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // Delete extrema and the only rows for parent 2 to exercise group rescans
+    // and the transition back to NULL-padded outer-join rows.
+    db.execute("DELETE FROM rescan_d WHERE id IN (2, 3)").await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    db.execute("DELETE FROM rescan_e WHERE id IN (2, 3)").await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Tier 2 — Multi-Reference CTEs (Shared Delta)
 // ═══════════════════════════════════════════════════════════════════════════

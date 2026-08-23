@@ -1673,12 +1673,29 @@ pub fn tree_contains_join(op: &OpTree) -> bool {
     }
 }
 
+/// Returns whether every leaf in a join subtree can be reconstructed from
+/// its pre-change state.
+pub(crate) fn supports_pre_change_join_snapshot(op: &OpTree) -> bool {
+    match op {
+        OpTree::Scan { .. } => true,
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            supports_pre_change_join_snapshot(left) && supports_pre_change_join_snapshot(right)
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. } => supports_pre_change_join_snapshot(child),
+        _ => false,
+    }
+}
+
 /// Returns true when the pre-change snapshot (via per-leaf CTE-based
 /// reconstruction) should be used for the given child node.  This is
 /// safe when:
 /// - The child is a simple Scan (cheap single-table EXCEPT ALL)
-/// - The child is NOT a join (Subquery/Aggregate — safe for EXCEPT ALL)
-/// - The child is a join without SemiJoin/AntiJoin (any depth)
+/// - The child is NOT a join (safe for leaf EXCEPT ALL reconstruction)
+/// - Every leaf in a join can be reconstructed, without SemiJoin/AntiJoin
 ///
 /// When false, the post-change snapshot should be used (with a correction
 /// term for shallow join children).
@@ -1706,6 +1723,9 @@ pub fn use_pre_change_snapshot(
 ) -> bool {
     if is_simple_child(child) || !is_join_child(child) {
         return true;
+    }
+    if !supports_pre_change_join_snapshot(child) {
+        return false;
     }
     if contains_semijoin(child) || inside_semijoin {
         return false;
@@ -2029,6 +2049,18 @@ mod tests {
         assert!(
             use_pre_change_snapshot(&child, false, 999),
             "Non-join child (Aggregate) should use pre-change snapshot"
+        );
+    }
+
+    #[test]
+    fn test_pre_change_snapshot_join_with_cte_scan_falls_back() {
+        let parent = scan(1, "parent", "public", "p", &["id"]);
+        let aggregate_cte = cte_scan(0, "agg", "a", vec!["parent_id", "count"], vec![], vec![]);
+        let child = left_join(eq_cond("p", "id", "a", "parent_id"), parent, aggregate_cte);
+
+        assert!(
+            !use_pre_change_snapshot(&child, false, 999),
+            "A join containing a CTE scan cannot reconstruct an exact pre-change snapshot"
         );
     }
 
