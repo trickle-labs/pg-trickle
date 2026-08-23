@@ -1,5 +1,14 @@
 # Architecture
 
+## v0.87 refresh transaction semantics
+
+Large ordinary differential MERGE deltas are read through a detached SPI
+cursor into bounded temporary batch relations. Each batch is applied inside
+the caller's outer refresh transaction; frontier advancement, downstream CDC,
+cleanup, history, and final status still finalize once at the end. Internal
+savepoints bound error cleanup but do not provide progressive visibility or
+early lock release.
+
 This document describes the internal architecture of pg_trickle — a PostgreSQL 18 extension that implements stream tables with differential view maintenance.
 For a high-level description of what pg_trickle does and why, read [ESSENCE.md](ESSENCE.md). For release milestones and future plans, see [Roadmap](roadmap.md).
 

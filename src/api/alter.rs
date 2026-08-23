@@ -2791,6 +2791,21 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         )));
     }
 
+    let deps = StDependency::get_for_st(st.pgt_id)?;
+    let source_oids: Vec<_> = deps
+        .iter()
+        .filter(|dep| matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+        .map(|dep| dep.source_relid)
+        .collect();
+    cdc::lock_source_relations(&source_oids)?;
+    // Restore capture before exposing the consumer as ACTIVE. Changes made
+    // while the source was inactive are intentionally repaired by FULL refresh.
+    for dep in &deps {
+        if matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE") {
+            cdc::refresh_capture_body_for_source(dep.source_relid, true)?;
+        }
+    }
+    StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
          SET status = 'ACTIVE', consecutive_errors = 0, \
@@ -3092,7 +3107,22 @@ fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         )));
     }
 
+    let deps = StDependency::get_for_st(st.pgt_id)?;
+    let source_oids: Vec<_> = deps
+        .iter()
+        .filter(|dep| matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+        .map(|dep| dep.source_relid)
+        .collect();
+    cdc::lock_source_relations(&source_oids)?;
+    // Establish the repair contract before disabling capture. This keeps an
+    // uncaptured interval from being mistaken for a differential catch-up.
+    StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
     StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
+    for dep in &deps {
+        if matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE") {
+            cdc::sync_capture_body_for_source(dep.source_relid)?;
+        }
+    }
 
     pgrx::info!(
         "Stream table {}.{} paused (pgt_id={}); use pgtrickle.resume_stream_table() to re-enable.",

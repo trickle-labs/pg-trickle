@@ -422,12 +422,13 @@ mod tests {
         f1.set_source(200, "0/20".to_string(), "ts1".to_string());
 
         let mut f2 = Frontier::new();
+        f2.set_source(100, "0/05".to_string(), "ts2".to_string()); // lower
         f2.set_source(200, "0/30".to_string(), "ts2".to_string()); // higher
         f2.set_source(300, "0/40".to_string(), "ts2".to_string()); // new
 
         f1.merge_from(&f2);
 
-        assert_eq!(f1.get_lsn(100), "0/10"); // unchanged
+        assert_eq!(f1.get_lsn(100), "0/10"); // lower frontier rejected
         assert_eq!(f1.get_lsn(200), "0/30"); // updated (higher)
         assert_eq!(f1.get_lsn(300), "0/40"); // added
     }

@@ -164,6 +164,9 @@ async fn test_ec01_join_diff_vs_full_converges_under_random_co_deletes() {
     let mut rng = SeededRng::new(seed);
     let cycles = ec01_cycles();
     let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
 
     let (mut accounts, mut products, mut orders) = seed_tables(&db).await;
     let mut next_account_id = 9;
@@ -277,8 +280,8 @@ async fn test_ec01_join_diff_vs_full_converges_under_random_co_deletes() {
             .await;
         }
 
-        db.refresh_st("ec01_diff_st").await;
-        db.refresh_st("ec01_full_st").await;
+        db.refresh_st_with_retry("ec01_diff_st").await;
+        db.refresh_st_with_retry("ec01_full_st").await;
 
         assert_st_query_invariant(&db, "ec01_full_st", query, seed, cycle, "full").await;
         assert_st_query_invariant(&db, "ec01_diff_st", query, seed, cycle, "diff").await;

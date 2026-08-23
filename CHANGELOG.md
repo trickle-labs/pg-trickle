@@ -132,6 +132,20 @@ The cutoff exists because:
 
 ---
 
+## [0.87.0] — Low-Impact Refresh
+
+v0.87.0 bounds differential refresh work and scheduler pressure while keeping
+frontier advancement, downstream CDC, and refresh history atomic.
+
+- Large ordinary MERGE deltas use a bounded SPI-cursor pipeline; small proven
+  non-amplifying deltas retain the direct path.
+- `pg_trickle.pipeline_batch_size` is canonical; `merge_batch_size` is a
+  deprecated one-release alias and no longer controls full-delta materialization.
+- Added the master `memory_budget_mb` policy, load-shed threshold, and
+  inactive-consumer CDC recovery contract.
+- Internal subtransactions remain atomic savepoints inside one outer
+  transaction; they do not provide progressive visibility or early lock release.
+
 ## [0.86.0] — Product UX & Transparency
 
 v0.86.0 makes stream tables easier to understand, troubleshoot, and monitor.

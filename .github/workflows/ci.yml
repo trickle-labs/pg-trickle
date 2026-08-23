@@ -24,6 +24,7 @@ on:
       - 'tests/**'
       - '.github/workflows/ci.yml'
       - '.github/actions/**'
+      - 'benchmarks/**'
   pull_request:
     branches: [main]
     paths:
@@ -35,6 +36,7 @@ on:
       - 'tests/**'
       - '.github/workflows/ci.yml'
       - '.github/actions/**'
+      - 'benchmarks/**'
   schedule:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
@@ -180,6 +182,44 @@ jobs:
         with:
           report_paths: 'target/nextest/ci/junit.xml'
           commit: ${{github.event.pull_request.head.sha}}
+
+  # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
+  # This is intentionally separate from the long weekly E2E benchmark history.
+  # The three configurations and budgets are versioned under benchmarks/.
+  pgbench-v087:
+    name: v0.87 pgbench overhead gate
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Pull PostgreSQL benchmark image
+        run: docker pull postgres:18.3
+
+      - name: Pull builder image when available
+        run: |
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          fi
+
+      - name: Build pg_trickle benchmark image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run v0.87 pgbench gate
+        run: benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87
+
+      - name: Upload v0.87 pgbench result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pgbench-v0.87
+          retention-days: 90
+          if-no-files-found: ignore
+          path: target/pgbench-v0.87/
 
   # ── Light-E2E tests (stock postgres container, PR-friendly) ──────────────
   # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.3

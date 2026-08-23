@@ -19,6 +19,8 @@
 | [PLAN_0_84_0.md](PLAN_0_84_0.md) | PLAN | v0.84.0 Implementation Plan — Catalog, Privilege, and Upgrade Integrity |
 | [PLAN_0_85_0.md](PLAN_0_85_0.md) | PLAN | v0.85.0 Implementation Plan — Scheduler and Resource Resilience Gate |
 | [PLAN_0_86_0.md](PLAN_0_86_0.md) | PLAN | v0.86.0 Implementation Plan — Product UX and Transparency |
+| [PLAN_0_87_0.md](PLAN_0_87_0.md) | PLAN | v0.87.0 Implementation Plan — Low-Impact Refresh |
+| [PLAN_0_88_0.md](PLAN_0_88_0.md) | PLAN | v0.88.0 Implementation Plan: Vectorized Aggregates and Delta Planning |
 | [PLAN_0_89_0.md](PLAN_0_89_0.md) | PLAN | v0.89.0 Implementation Plan: Incremental Window Functions |
 | [PLAN_0_90_0.md](PLAN_0_90_0.md) | PLAN | v0.90.0 Implementation Plan: Freshness Controller and Self-Tuning |
 | [PLAN_AGENT_SKILLS.md](PLAN_AGENT_SKILLS.md) | PLAN | PLAN_AGENT_SKILLS.md — Agent Skill Proposals for pg_trickle |

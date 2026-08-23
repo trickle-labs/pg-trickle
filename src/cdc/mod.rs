@@ -2098,18 +2098,19 @@ pub fn resolve_referenced_column_defs(
     // Step 2: always include PK columns.
     let pk_cols = resolve_pk_columns(source_oid)?;
 
-    // Build a lookup set: referenced names (lower-case for case-insensitive match).
-    let mut keep: std::collections::HashSet<String> =
-        referenced.iter().map(|c| c.to_lowercase()).collect();
+    // Quoted PostgreSQL identifiers are case-sensitive. Keep the catalog and
+    // parser spellings exact; unquoted identifiers have already been folded by
+    // PostgreSQL before they reach this path.
+    let mut keep: std::collections::HashSet<String> = referenced.iter().cloned().collect();
     for pk in &pk_cols {
-        keep.insert(pk.to_lowercase());
+        keep.insert(pk.clone());
     }
 
     // Step 3: filter the full column list to the keep set, preserving ordinal order.
     let all_cols = resolve_source_column_defs(source_oid)?;
     let filtered: Vec<(String, String)> = all_cols
         .into_iter()
-        .filter(|(name, _)| keep.contains(&name.to_lowercase()))
+        .filter(|(name, _)| keep.contains(name))
         .collect();
 
     // Safety: if the filter would drop all columns (should not happen), fall back.
@@ -2139,10 +2140,9 @@ pub fn is_selective_capture_active(source_oid: pg_sys::Oid) -> bool {
     let Ok(all_cols) = resolve_source_column_defs(source_oid) else {
         return false;
     };
-    let mut keep: std::collections::HashSet<String> =
-        referenced.iter().map(|c| c.to_lowercase()).collect();
+    let mut keep: std::collections::HashSet<String> = referenced.iter().cloned().collect();
     for pk in &pk_cols {
-        keep.insert(pk.to_lowercase());
+        keep.insert(pk.clone());
     }
     keep.len() < all_cols.len()
 }
@@ -2558,6 +2558,76 @@ fn build_stmt_trigger_fn_sql(
 
     (ins_fn, upd_fn, del_fn)
 }
+
+/// Build a trigger function body that performs no CDC writes.
+pub(crate) fn build_inactive_trigger_fn_sql(
+    change_schema: &str,
+    name: &str,
+) -> (String, String, String, String, String) {
+    let body = |function: &str| {
+        let guard = sync_guard_sql(&format!("changes_{name}"));
+        format!(
+            "CREATE OR REPLACE FUNCTION {change_schema}.{function}_{name}()\n             RETURNS trigger LANGUAGE plpgsql\n             SECURITY DEFINER -- nosemgrep: sql.security-definer.present\n             SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$\n             BEGIN\n                 {guard}\n                 RETURN NULL;\n             END;\n             $$",
+            function = function,
+        )
+    };
+    (
+        body("pg_trickle_cdc_fn"),
+        body("pg_trickle_cdc_ins_fn"),
+        body("pg_trickle_cdc_upd_fn"),
+        body("pg_trickle_cdc_del_fn"),
+        body("pg_trickle_cdc_truncate_fn"),
+    )
+}
+
+/// Install either the normal capture body or the inactive no-op body for a source.
+pub fn refresh_capture_body_for_source(
+    source_oid: pg_sys::Oid,
+    capture_enabled: bool,
+) -> Result<(), PgTrickleError> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema();
+    let name = get_cdc_name_for_source(source_oid);
+    if capture_enabled {
+        return rebuild_cdc_trigger_function(source_oid, &change_schema);
+    }
+
+    let (row, insert, update, delete, truncate) =
+        build_inactive_trigger_fn_sql(&change_schema, &name);
+    let functions = if crate::config::pg_trickle_cdc_trigger_mode()
+        == crate::config::CdcTriggerMode::Statement
+    {
+        vec![insert, update, delete, truncate]
+    } else {
+        vec![row, truncate]
+    };
+    for sql in functions {
+        Spi::run(&sql).map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "failed to install inactive CDC body for source {}: {}",
+                source_oid.to_u32(),
+                e
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Recompute whether a source still has an active capture consumer.
+pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTrickleError> {
+    let has_active_consumer = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (\
+             SELECT 1 FROM pgtrickle.pgt_dependencies d\
+             JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id\
+             WHERE d.source_relid = $1\
+               AND st.status IN ('ACTIVE', 'INITIALIZING')\
+         )",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    refresh_capture_body_for_source(source_oid, has_active_consumer)
+}
+
 /// Build a `pk_hash` expression for statement-level triggers using a table alias.
 ///
 /// Echoes `build_pk_hash_trigger_exprs` but generates `{prefix}."col"` instead
@@ -2698,7 +2768,8 @@ pub fn get_slot_positions(
 
 /// Build per-source frontier positions from one already-proven safe bound.
 /// WAL sources use only the decoder position that was committed with buffer
-/// writes; trigger sources use the immutable visibility bound.
+/// writes; trigger sources use the visible buffer high-water mark, capped by
+/// the immutable visibility bound.
 pub fn get_slot_positions_at_bound(
     source_oids: &[pg_sys::Oid],
     safe_bound: &str,
@@ -2736,7 +2807,46 @@ pub fn get_slot_positions_at_bound(
                     reason: "required committed decoder position is unavailable".to_string(),
                 });
             }
-            None => safe_bound.to_string(),
+            None if !Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking \
+                                WHERE source_relid = $1)",
+                &[(*oid).into()],
+            )
+            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                context: format!("source OID {}", oid.to_u32()),
+                reason: e.to_string(),
+            })?
+            .unwrap_or(false) =>
+            {
+                // IMMEDIATE sources use IVM triggers and intentionally have no
+                // base CDC buffer to cap against.
+                safe_bound.to_string()
+            }
+            None => {
+                // A trigger row can become visible after the coordinator's
+                // frontier probe but before this refresh takes its snapshot.
+                // Advancing directly to safe_bound would consume that row's
+                // LSN without ever evaluating it.  Cap at the highest visible
+                // buffer row; when no rows are pending, the safe bound still
+                // lets an idle source advance normally.
+                let change_schema = crate::config::pg_trickle_change_buffer_schema();
+                let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
+                Spi::get_one_with_args::<String>(
+                    &format!(
+                        "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \
+                         FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
+                    ),
+                    &[safe_bound.into()],
+                )
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("trigger source OID {}", oid.to_u32()),
+                    reason: format!("visible buffer frontier lookup failed: {e}"),
+                })?
+                .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("trigger source OID {}", oid.to_u32()),
+                    reason: "visible buffer frontier was NULL".to_string(),
+                })?
+            }
         };
         positions.insert(oid.to_u32(), position);
     }
@@ -3421,6 +3531,17 @@ mod tests {
         assert_eq!(trigger_name_for_source(oid), "pg_trickle_cdc_4294967295");
     }
 
+    #[test]
+    fn test_inactive_trigger_bodies_are_write_free() {
+        let (row, insert, update, delete, truncate) =
+            build_inactive_trigger_fn_sql("pgtrickle_changes", "pg_trickle_cdc_42");
+        for body in [row, insert, update, delete, truncate] {
+            assert!(body.contains("RETURN NULL;"));
+            assert!(!body.contains("INSERT INTO"));
+            assert!(!body.contains("NOTIFY"));
+        }
+    }
+
     // ── build_pk_hash_trigger_exprs tests ────────────────────────────
 
     #[test]
@@ -3713,15 +3834,14 @@ mod tests {
             Some(r) => r,
         };
 
-        let mut keep: std::collections::HashSet<String> =
-            referenced.iter().map(|c| c.to_lowercase()).collect();
+        let mut keep: std::collections::HashSet<String> = referenced.iter().cloned().collect();
         for pk in pk_cols {
-            keep.insert(pk.to_lowercase());
+            keep.insert(pk.clone());
         }
 
         let filtered: Vec<&(String, String)> = all_cols
             .iter()
-            .filter(|(name, _)| keep.contains(&name.to_lowercase()))
+            .filter(|(name, _)| keep.contains(name))
             .collect();
 
         if filtered.is_empty() {
@@ -3741,6 +3861,19 @@ mod tests {
         let all = vec![s("id", "int4"), s("name", "text"), s("secret", "text")];
         let result = filter_cdc_columns(&all, None, &[]);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_f15_filter_preserves_quoted_identifier_case() {
+        let all = vec![s("Value", "text"), s("value", "text"), s("id", "int4")];
+        let result = filter_cdc_columns(&all, Some(&["Value".to_string()]), &["id".to_string()]);
+        assert_eq!(
+            result
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["Value", "id"]
+        );
     }
 
     #[test]
@@ -3796,17 +3929,14 @@ mod tests {
     }
 
     #[test]
-    fn test_f15_filter_case_insensitive() {
+    fn test_f15_filter_preserves_identifier_case() {
         let all = vec![s("UserID", "int4"), s("Email", "text"), s("Notes", "text")];
-        let referenced = vec!["email".to_string()];
-        let pk = vec!["userid".to_string()];
+        let referenced = vec!["Email".to_string()];
+        let pk = vec!["UserID".to_string()];
         let result = filter_cdc_columns(&all, Some(&referenced), &pk);
         let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"UserID"), "PK matched case-insensitively");
-        assert!(
-            names.contains(&"Email"),
-            "referenced matched case-insensitively"
-        );
+        assert!(names.contains(&"UserID"), "PK matched exactly");
+        assert!(names.contains(&"Email"), "referenced matched exactly");
         assert!(!names.contains(&"Notes"), "unreferenced column dropped");
     }
 

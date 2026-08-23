@@ -12,6 +12,40 @@ The core question the benchmarks answer:
 
 > **How much faster is an DIFFERENTIAL refresh compared to a FULL refresh, given a specific workload?**
 
+## v0.87 low-impact overhead gate
+
+`benchmarks/pgbench-v0.87/run.sh` is the versioned three-configuration gate
+for the v0.87 write-path contract. It recreates each database for every
+paired repetition and rotates the configuration order deterministically:
+
+| Configuration | PostgreSQL contents |
+|---|---|
+| `absent` | Stock PostgreSQL, without pg_trickle |
+| `installed` | pg_trickle installed and preloaded, with no stream tables |
+| `active` | pg_trickle with projection, aggregate, and join stream tables |
+
+The blocking profile uses PostgreSQL 18.3, scale 10, 8 clients, 2 jobs, a
+10-second warm-up, a 30-second measurement, and 3 paired repetitions. It
+samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
+stream-table correctness and refresh history, and samples Linux `/proc`
+jiffies for the scheduler/refresh workers. The publication profile is a
+five-repetition, 60-second run.
+
+```bash
+./tests/build_e2e_image.sh
+benchmarks/pgbench-v0.87/run.sh --profile blocking
+```
+
+The machine-readable result is `target/pgbench-v0.87/result.json`; the
+versioned product budgets are in
+[`benchmarks/pgbench-v0.87/budgets.json`](../benchmarks/pgbench-v0.87/budgets.json).
+The gate fails closed for missing repetitions, malformed/non-finite values,
+missing latency samples, unavailable Linux CPU samples, failed correctness,
+or a budget regression. The initial v0.87 product floor preserves the
+roadmap requirement of at least 99% installed/no-stream TPS; active p99 and
+refresh CPU share are separately budgeted so CI noise cannot silently change
+the product contract.
+
 ---
 
 ## Prerequisites

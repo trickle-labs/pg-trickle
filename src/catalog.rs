@@ -2191,10 +2191,12 @@ impl StDependency {
         Spi::connect(|client| {
             let table = client
                 .select(
-                    "SELECT columns_used \
-                     FROM pgtrickle.pgt_dependencies \
-                     WHERE source_relid = $1 \
-                       AND source_type IN ('TABLE', 'FOREIGN_TABLE')",
+                    "SELECT d.columns_used \
+                     FROM pgtrickle.pgt_dependencies d \
+                     JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id \
+                     WHERE d.source_relid = $1 \
+                       AND d.source_type IN ('TABLE', 'FOREIGN_TABLE') \
+                       AND st.status IN ('ACTIVE', 'INITIALIZING')",
                     None,
                     &[source_oid.into()],
                 )
@@ -2647,7 +2649,7 @@ impl RefreshRecord {
     ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_refresh_history \
-             SET end_time = now(), status = $1, rows_inserted = $2, \
+             SET end_time = clock_timestamp(), status = $1, rows_inserted = $2, \
              rows_updated = $3, rows_deleted = $4, error_message = $5, \
              delta_row_count = $6, merge_strategy_used = $7, \
              was_full_fallback = $8, refresh_reason = $9, \
@@ -2682,7 +2684,7 @@ impl RefreshRecord {
     ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_refresh_history
-             SET end_time = now(), status = $1, error_message = $2,
+             SET end_time = clock_timestamp(), status = $1, error_message = $2,
                  error_code = $3, error_sqlstate = $4, retryable = $5
              WHERE refresh_id = $6",
             &[

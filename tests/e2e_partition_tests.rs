@@ -829,6 +829,9 @@ async fn test_partitioned_st_validate_partition_key_error() {
 #[tokio::test]
 async fn test_partitioned_st_partition_key_in_explain_plan() {
     let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
 
     db.execute(
         "CREATE TABLE explain_src (

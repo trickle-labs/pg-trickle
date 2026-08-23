@@ -104,7 +104,10 @@ pub fn classify_refresh_failure(sqlstate: Option<&str>, message: &str) -> Refres
         sqlstate: sqlstate.map(str::to_owned),
         message: message.to_owned(),
         retryable,
-        counts_toward_suspension: !matches!(kind, RefreshFailureKind::Cancelled),
+        counts_toward_suspension: !matches!(
+            kind,
+            RefreshFailureKind::LockTimeout | RefreshFailureKind::Cancelled
+        ),
     }
 }
 
@@ -430,16 +433,28 @@ impl PgTrickleError {
     /// Skipped refreshes and some transient errors don't count because the
     /// ST itself isn't broken — the scheduler just couldn't run it this time.
     pub fn counts_toward_suspension(&self) -> bool {
-        !matches!(
-            self,
-            PgTrickleError::RefreshSkipped(_)
-                | PgTrickleError::SpiPermissionError(_)
-                | PgTrickleError::PermissionDenied(_)
-                | PgTrickleError::SafeFrontierUnavailable { .. }
-                | PgTrickleError::CdcStateInvalid { .. }
-                | PgTrickleError::CdcCutoverUnproven { .. }
-        )
+        match self {
+            PgTrickleError::LockTimeout(_) | PgTrickleError::ScheduledLockTimeout(_) => false,
+            PgTrickleError::SpiError(message) => !is_lock_conflict_message(message),
+            PgTrickleError::SpiErrorCode(code, _) => sqlstate_to_string(*code) != "55P03",
+            _ => !matches!(
+                self,
+                PgTrickleError::RefreshSkipped(_)
+                    | PgTrickleError::SpiPermissionError(_)
+                    | PgTrickleError::PermissionDenied(_)
+                    | PgTrickleError::SafeFrontierUnavailable { .. }
+                    | PgTrickleError::CdcStateInvalid { .. }
+                    | PgTrickleError::CdcCutoverUnproven { .. }
+            ),
+        }
     }
+}
+
+fn is_lock_conflict_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("lock timeout")
+        || message.contains("lock not available")
+        || message.contains("could not obtain lock")
 }
 
 /// F29 (G8.6): Classify an SPI error message for retry eligibility.
@@ -953,7 +968,16 @@ mod tests {
     #[test]
     fn test_counts_toward_suspension() {
         assert!(PgTrickleError::SpiError("x".into()).counts_toward_suspension());
-        assert!(PgTrickleError::LockTimeout("x".into()).counts_toward_suspension());
+        assert!(!PgTrickleError::LockTimeout("x".into()).counts_toward_suspension());
+        assert!(!PgTrickleError::ScheduledLockTimeout("x".into()).counts_toward_suspension());
+        assert!(
+            !PgTrickleError::SpiError("canceling statement due to lock timeout".into())
+                .counts_toward_suspension()
+        );
+        assert!(
+            !PgTrickleError::SpiErrorCode(545_326_814, "lock_not_available".into())
+                .counts_toward_suspension()
+        );
         assert!(!PgTrickleError::RefreshSkipped("x".into()).counts_toward_suspension());
         // F34: SpiPermissionError does not count toward suspension
         assert!(!PgTrickleError::SpiPermissionError("x".into()).counts_toward_suspension());
@@ -1228,6 +1252,7 @@ mod tests {
             classify_refresh_failure(Some("55P03"), "canceling statement due to lock timeout");
         assert_eq!(lock.kind, RefreshFailureKind::LockTimeout);
         assert!(lock.retryable);
+        assert!(!lock.counts_toward_suspension);
         assert_eq!(lock.sqlstate.as_deref(), Some("55P03"));
 
         let cancelled =

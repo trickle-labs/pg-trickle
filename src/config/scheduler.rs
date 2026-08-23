@@ -567,6 +567,9 @@ pub static PGS_SCHEDULED_LOCK_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::n
 /// OPS-81-4: Maximum execution time for scheduler-initiated refresh statements.
 pub static PGS_SCHEDULED_STATEMENT_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(900_000);
 
+/// v0.87: Pressure threshold for deferring non-urgent scheduled work.
+pub static PGS_LOAD_SHED_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new(0.80);
+
 /// Register all scheduler-related GUC variables.
 pub fn register_scheduler_gucs() {
     GucRegistry::define_int_guc(
@@ -576,6 +579,17 @@ pub fn register_scheduler_gucs() {
         &PGS_SCHEDULER_INTERVAL_MS,
         100,     // min
         600_000, // max (DI-9: raised from 60s to 600s for long-running benchmarks)
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_float_guc(
+        c"pg_trickle.load_shed_threshold",
+        c"Application-load pressure threshold for scheduler deferral.",
+        c"Defers non-urgent scheduled work when the connection, runnable-backend, or lock-wait pressure proxy reaches this value. Set to 0 to disable load-aware deferral.",
+        &PGS_LOAD_SHED_THRESHOLD,
+        0.0,
+        1.0,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1505,6 +1519,11 @@ pub fn pg_trickle_scheduled_lock_timeout_ms() -> i32 {
 
 pub fn pg_trickle_scheduled_statement_timeout_ms() -> i32 {
     PGS_SCHEDULED_STATEMENT_TIMEOUT_MS.get()
+}
+
+/// v0.87: Returns the application-load pressure threshold.
+pub fn pg_trickle_load_shed_threshold() -> f64 {
+    PGS_LOAD_SHED_THRESHOLD.get().clamp(0.0, 1.0)
 }
 
 pub fn pg_trickle_scheduler_maintenance_batch_size() -> i32 {

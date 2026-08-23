@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       job:
-        description: 'Run a specific job only (refresh | latency | cdc | tpch | all)'
+        description: 'Run a specific job only (refresh | latency | cdc | tpch | overhead | all)'
         required: false
         default: 'all'
 
@@ -348,3 +348,45 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
           path: target/bench_results/tpch-stdout.txt
+
+  # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
+  # Unlike the historical refresh/CDC jobs, this LOW-6 decision is blocking
+  # so a missing or regressed budget cannot be silently published.
+  bench-overhead:
+    name: Bench — v0.87 pgbench overhead gate
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      inputs.job == 'all' ||
+      inputs.job == 'overhead'
+    timeout-minutes: 180
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Pull PostgreSQL benchmark image
+        run: docker pull postgres:18.3
+
+      - name: Pull builder image when available
+        run: |
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          fi
+
+      - name: Build pg_trickle benchmark image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run publication profile
+        run: benchmarks/pgbench-v0.87/run.sh --profile publication --output target/pgbench-v0.87
+
+      - name: Upload v0.87 pgbench result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-overhead-v087
+          retention-days: 90
+          if-no-files-found: ignore
+          path: target/pgbench-v0.87/

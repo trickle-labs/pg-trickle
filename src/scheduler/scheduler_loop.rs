@@ -29,18 +29,71 @@ use super::dispatch::{
     ParallelDispatchState, compute_adaptive_poll_ms, parallel_dispatch_tick,
     reconcile_parallel_state, spawn_refresh_worker,
 };
+use super::tenancy::{LoadSnapshot, PressureState};
 use super::watermark::compute_coordinator_tick_watermark;
 use super::{
     RefreshOutcome, SubTransaction, batched_has_source_changes, check_cdc_transition_health,
     check_extension_version_match, check_schedule, check_skip_needed, check_upstream_changes,
     current_epoch_ms, emit_stale_alert_if_needed, evaluate_fuse, execute_scheduled_refresh,
     group_schedule_policy, has_table_source_changes, is_any_source_gated, is_group_due,
-    is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint, load_gated_source_oids,
+    is_load_shed_exempt, is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint,
+    load_gated_source_oids, load_shed_buffer_guard_ids, load_shed_buffer_guard_sample_due,
     load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash, refresh_single_st,
     self_monitoring_auto_apply_tick, sla_tier_adjustment_tick, update_backoff_factor,
     upstream_change_state,
 };
 use crate::refresh::orchestrator::batch_update_cost_model_summary;
+
+fn sample_load_snapshot() -> LoadSnapshot {
+    let available_cpus = std::thread::available_parallelism()
+        .map(|count| count.get() as u64)
+        .unwrap_or(1);
+    let sampling_window_ms = i64::from(
+        config::pg_trickle_scheduler_interval_ms()
+            .max(1)
+            .saturating_mul(2),
+    );
+    let fallback = LoadSnapshot::new(
+        0,
+        1,
+        0,
+        available_cpus,
+        0,
+        shmem::active_worker_count() as u64,
+    );
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT count(*) FILTER (WHERE backend_type = 'client backend')::bigint, \
+                            current_setting('max_connections')::bigint, \
+                            count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
+                                              AND (state = 'active' OR state_change >= \
+                                                   clock_timestamp() - $1 * INTERVAL '1 millisecond'))::bigint, \
+                            count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
+                                              AND wait_event_type = 'Lock')::bigint \
+                            FROM pg_stat_activity",
+                    None,
+                    &[sampling_window_ms.into()],
+                )
+                .ok()
+                .map(|rows| {
+                    let row = rows.first();
+                    let value =
+                        |ordinal| row.get::<i64>(ordinal).ok().flatten().unwrap_or(0).max(0) as u64;
+                    LoadSnapshot::new(
+                        value(1),
+                        value(2).max(1),
+                        value(3),
+                        available_cpus.max(1),
+                        value(4),
+                        shmem::active_worker_count() as u64,
+                    )
+                })
+                .unwrap_or(fallback)
+        })
+    }))
+}
 
 /// Register the launcher background worker.
 ///
@@ -470,6 +523,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
     // Phase 4: Parallel dispatch state (persisted across ticks)
     let mut parallel_state = ParallelDispatchState::new();
+    let mut pressure_state = PressureState::new();
+    let mut load_shed_buffer_guards = Some(HashSet::new());
+    let mut load_shed_buffer_guards_sampled_at_ms = 0;
 
     // Per-ST drift reset counters (differential cycles since last reinit)
     let mut drift_counters: HashMap<i64, i32> = HashMap::new();
@@ -555,6 +611,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         // that resets to 20ms on worker completion, making parallel mode
         // competitive for cheap refreshes.
         let mut base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+        base_interval_ms =
+            base_interval_ms.saturating_mul(u64::from(pressure_state.deferral_factor()));
 
         // OPS-6: Workload-aware poll — if df_scheduling_interference detects
         // heavy overlap, slightly increase the base interval to reduce
@@ -675,6 +733,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         }
 
         let now_ms = current_epoch_ms();
+        let load_snapshot = sample_load_snapshot();
+        let load_deferred = pressure_state.observe(
+            load_snapshot.pressure(),
+            config::pg_trickle_load_shed_threshold(),
+        );
+        shmem::record_scheduler_load(
+            load_snapshot.pressure(),
+            load_deferred,
+            pressure_state.deferral_factor(),
+        );
 
         // WAL transition processing — three phases with separate transactions
         // to ensure slot creation happens in a pristine transaction (no prior
@@ -1150,6 +1218,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 return;
             }
 
+            if load_deferred
+                && load_shed_buffer_guard_sample_due(load_shed_buffer_guards_sampled_at_ms, now_ms)
+            {
+                load_shed_buffer_guards = load_shed_buffer_guard_ids();
+                load_shed_buffer_guards_sampled_at_ms = now_ms;
+            }
+            let load_shed_buffer_guards = load_shed_buffer_guards.as_ref();
+
             // Step B2: Build execution unit DAG for parallel-refresh awareness.
             let parallel_mode = config::pg_trickle_parallel_refresh_mode();
             match parallel_mode {
@@ -1189,6 +1265,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         &mut pending_spawns,
                         dispatch_tick_id,
                         tick_watermark.as_deref(),
+                        load_deferred,
+                        load_shed_buffer_guards,
                     );
 
                     // Prune retry states for STs that no longer exist.
@@ -1260,6 +1338,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
             // Step C: Compute consistency groups and refresh group-by-group
             let groups = dag_ref.compute_consistency_groups();
+            let all_groups_load_deferred = load_deferred
+                && !groups.iter().any(|group| {
+                    group.members.iter().any(|member| match member {
+                        NodeId::StreamTable(pgt_id) => load_st_by_id(*pgt_id)
+                            .is_none_or(|st| is_load_shed_exempt(&st, load_shed_buffer_guards)),
+                        NodeId::BaseTable(_) => false,
+                    })
+                });
 
             // PERF-1 (v0.62.0): Build a per-tick change-buffer fanout cache.
             //
@@ -1272,7 +1358,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // If fanout is disabled we fall back to the per-group per-member
             // path used in earlier versions.
             let fanout_cache: Option<std::collections::HashSet<i64>> =
-                if config::pg_trickle_enable_change_buffer_fanout() {
+                if !all_groups_load_deferred && config::pg_trickle_enable_change_buffer_fanout() {
                     // Collect all active STs referenced in the consistency groups.
                     let all_pgt_ids: Vec<i64> = groups
                         .iter()
@@ -1299,6 +1385,18 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 };
 
             for group in &groups {
+                // Committed changes remain buffered while ordinary scheduled work yields
+                // to application load. Repairs, explicit freshness targets, initial
+                // population, IMMEDIATE work, and full buffers bypass deferral.
+                if load_deferred
+                    && !group.members.iter().any(|member| match member {
+                        NodeId::StreamTable(pgt_id) => load_st_by_id(*pgt_id)
+                            .is_none_or(|st| is_load_shed_exempt(&st, load_shed_buffer_guards)),
+                        NodeId::BaseTable(_) => false,
+                    })
+                {
+                    continue;
+                }
                 // PERF-1: Use the per-tick fanout cache when available; otherwise
                 // fall back to per-member has_table_source_changes calls (legacy path).
                 let initial_table_changes: HashMap<i64, bool> = match &fanout_cache {

@@ -260,7 +260,6 @@ async fn test_scheduler_continues_after_permission_error() {
     // ── Inject fault: mark st_perm for reinit then drop the source ──────
     // Dropping the source table triggers a permanent error for st_perm,
     // exercising the error-isolation path.
-    db.execute("INSERT INTO src_ok VALUES (3, 30)").await;
     db.execute("DROP TABLE src_perm CASCADE").await;
 
     // ── Wait for st_perm to enter ERROR status ─────────────────────────
@@ -271,6 +270,8 @@ async fn test_scheduler_continues_after_permission_error() {
         perm_failed,
         "st_perm should be ERROR after its source table is dropped"
     );
+
+    db.execute("INSERT INTO src_ok VALUES (3, 30)").await;
 
     // ── Verify: scheduler is still running ──────────────────────────────
     let sched_alive: i64 = db

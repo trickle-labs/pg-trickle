@@ -743,7 +743,10 @@ fn execute_manual_differential_refresh(
     }
     let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
-    let new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
+    let mut new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
+    // A bounded buffer position can trail the stored frontier. Never replay
+    // deltas by letting a differential frontier move backward.
+    new_frontier.merge_from(&prev_frontier);
 
     // Execute the differential refresh via the DVM engine.
     // DI-7: When QueryTooComplex is returned (e.g. join count exceeds

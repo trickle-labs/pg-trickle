@@ -18,9 +18,10 @@ src/dvm/parser/validation.rs 2
 src/explain_hook.rs 10
 src/lib.rs 2
 src/monitor/alert.rs 1
+src/refresh/pipeline.rs 10
 src/scheduler/citus.rs 1
-src/scheduler/dispatch.rs 9
-src/scheduler/mod.rs 11
+src/scheduler/dispatch.rs 7
+src/scheduler/mod.rs 12
 src/scheduler/scheduler_loop.rs 5
-src/shmem.rs 49
+src/shmem.rs 53
 src/wal_decoder.rs 5

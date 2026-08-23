@@ -35,7 +35,7 @@
 use pgrx::prelude::*;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
@@ -98,6 +98,7 @@ pub mod citus;
 pub mod cost;
 pub mod dispatch;
 pub mod scheduler_loop;
+pub mod tenancy;
 pub mod tier;
 pub mod watermark;
 
@@ -111,6 +112,10 @@ pub use scheduler_loop::{
 use citus::drive_distributed_cdc;
 pub use cost::compute_per_db_quota;
 pub use cost::{compute_per_db_quota_with_lag, lag_aware_quota_boost};
+pub use tenancy::{
+    FairnessKey, LoadSnapshot, PressureState, derive_scheduled_deadlines, deterministic_jitter_ms,
+    pressure_ratio,
+};
 pub use tier::RefreshTier;
 
 // ── SCAL-1 (v0.25.0): Per-backend catalog snapshot cache ─────────────────
@@ -918,6 +923,9 @@ fn try_fused_chain_refresh(
                 })?;
             new_frontier.set_st_source(*upstream_id, lsn, data_ts_str.clone());
         }
+        // A bounded buffer position can trail the stored frontier. Never replay
+        // deltas by letting a differential frontier move backward.
+        new_frontier.merge_from(&prev_frontier);
 
         // Determine refresh action.
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
@@ -2317,7 +2325,8 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
             // Cron-based: check if the cron schedule says we're due
             // (tier multiplier not applied to cron schedules)
             let last_refresh_epoch = Spi::get_one_with_args::<f64>(
-                "SELECT EXTRACT(EPOCH FROM last_refresh_at) FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+                "SELECT EXTRACT(EPOCH FROM last_refresh_at)::double precision \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
                 &[st.pgt_id.into()],
             )
             .unwrap_or(None)
@@ -2341,15 +2350,29 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
             } else {
                 max_secs
             };
-            let stale = Spi::get_one_with_args::<bool>(
-                "SELECT CASE WHEN last_refresh_at IS NULL THEN true \
-                 ELSE EXTRACT(EPOCH FROM (now() - last_refresh_at)) > $2 END \
+            let last_refresh_epoch = Spi::get_one_with_args::<f64>(
+                "SELECT EXTRACT(EPOCH FROM last_refresh_at)::double precision \
                  FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
-                &[st.pgt_id.into(), effective_secs.into()],
+                &[st.pgt_id.into()],
             )
-            .unwrap_or(Some(false))
-            .unwrap_or(false);
-            return stale;
+            .unwrap_or(None);
+            let interval_ms = (effective_secs.max(0) as u64).saturating_mul(1_000);
+            // Stable phase spreading avoids synchronized periodic refreshes;
+            // the offset is derived only from server identity, table identity,
+            // and the effective schedule epoch.
+            // SAFETY: MyDatabaseId is valid in a connected scheduler backend.
+            let database_oid = unsafe { pg_sys::MyDatabaseId.to_u32() };
+            let jitter_ms = tenancy::deterministic_jitter_ms(
+                database_oid,
+                st.pgt_id,
+                effective_secs.max(0) as u64,
+                interval_ms,
+                config::pg_trickle_scheduler_interval_ms() as u64,
+            );
+            let due_after_ms = interval_ms.saturating_add(jitter_ms);
+            return last_refresh_epoch
+                .map(|epoch| current_epoch_ms() > (epoch.max(0.0) * 1_000.0) as u64 + due_after_ms)
+                .unwrap_or(true);
         }
 
         // Unparseable schedule — log a warning and skip
@@ -2366,6 +2389,49 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
     // first within a tick, so their change buffers are already populated by
     // the time we check here.
     check_upstream_changes(st)
+}
+
+const LOAD_SHED_BUFFER_GUARD_SAMPLE_MS: u64 = 10_000;
+
+fn load_shed_buffer_guard_sample_due(last_sample_ms: u64, now_ms: u64) -> bool {
+    last_sample_ms == 0 || now_ms.saturating_sub(last_sample_ms) >= LOAD_SHED_BUFFER_GUARD_SAMPLE_MS
+}
+
+/// Stream tables whose source buffer reached the storage guard.
+fn load_shed_buffer_guard_ids() -> Option<HashSet<i64>> {
+    let change_schema = config::pg_trickle_change_buffer_schema();
+    let budget = config::pg_trickle_memory_budget().change_buffer_bytes as i64;
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT DISTINCT d.pgt_id \
+                 FROM pgtrickle.pgt_dependencies d \
+                 JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid = d.source_relid \
+                 JOIN pg_class cb ON cb.relname = 'changes_' || ct.source_stable_name \
+                 JOIN pg_namespace n ON n.oid = cb.relnamespace AND n.nspname = $2 \
+                 WHERE pg_total_relation_size(cb.oid) >= $1",
+                None,
+                &[budget.into(), change_schema.trim_matches('"').into()],
+            )
+            .ok()?;
+        Some(
+            rows.filter_map(|row| row.get::<i64>(1).ok().flatten())
+                .collect(),
+        )
+    })
+}
+
+/// Work that must bypass application-load deferral.
+fn is_load_shed_exempt(st: &StreamTableMeta, buffer_guard_ids: Option<&HashSet<i64>>) -> bool {
+    if st.needs_reinit
+        || !st.is_populated
+        || st.refresh_mode.is_immediate()
+        || st.freshness_deadline_ms.is_some()
+    {
+        return true;
+    }
+
+    buffer_guard_ids.is_none_or(|ids| ids.contains(&st.pgt_id))
 }
 
 /// Emit a StaleData or NoUpstreamChanges alert depending on whether the
@@ -3485,9 +3551,27 @@ fn refresh_single_st(
     }
 }
 
-fn apply_scheduled_deadlines() -> Result<(), crate::error::PgTrickleError> {
-    let lock_timeout = format!("{}ms", config::pg_trickle_scheduled_lock_timeout_ms());
-    let statement_timeout = format!("{}ms", config::pg_trickle_scheduled_statement_timeout_ms());
+fn apply_scheduled_deadlines(st: &StreamTableMeta) -> Result<(), crate::error::PgTrickleError> {
+    let interval_ms = st
+        .schedule
+        .as_deref()
+        .and_then(|schedule| crate::api::parse_duration(schedule).ok())
+        .map(|seconds| (seconds as u64).saturating_mul(1_000))
+        .unwrap_or_else(|| config::pg_trickle_scheduler_interval_ms() as u64);
+    let (lock_timeout_ms, statement_timeout_ms) = if st.needs_reinit {
+        (
+            config::pg_trickle_scheduled_lock_timeout_ms() as u64,
+            config::pg_trickle_scheduled_statement_timeout_ms() as u64,
+        )
+    } else {
+        tenancy::derive_scheduled_deadlines(
+            interval_ms,
+            config::pg_trickle_scheduled_lock_timeout_ms() as u64,
+            config::pg_trickle_scheduled_statement_timeout_ms() as u64,
+        )
+    };
+    let lock_timeout = format!("{lock_timeout_ms}ms");
+    let statement_timeout = format!("{statement_timeout_ms}ms");
     Spi::run_with_args(
         "SELECT set_config('lock_timeout', $1, true)",
         &[lock_timeout.into()],
@@ -3520,7 +3604,7 @@ fn execute_scheduled_refresh(
     tick_watermark: Option<&str>,
     drift_counter: Option<&mut i32>,
 ) -> RefreshOutcome {
-    if let Err(e) = apply_scheduled_deadlines() {
+    if let Err(e) = apply_scheduled_deadlines(st) {
         pgrx::warning!(
             "pg_trickle: failed to apply scheduled refresh deadlines for {}.{}: {}",
             st.pgt_schema,
@@ -3947,6 +4031,9 @@ fn execute_scheduled_refresh(
                     let mut new_frontier =
                         version::compute_new_frontier(&slot_positions, &data_ts_frontier);
                     augment_frontier(&mut new_frontier);
+                    // A bounded buffer position can trail the stored frontier. Never replay
+                    // deltas by letting a differential frontier move backward.
+                    new_frontier.merge_from(&prev_frontier);
 
                     let tuning = st.runtime_tuning();
                     match refresh::execute_differential_refresh_with_tuning(
@@ -4014,12 +4101,14 @@ fn execute_scheduled_refresh(
                         }
                         Err(e) => {
                             log!(
-                                "pg_trickle: differential refresh failed for {}.{}: {}, will reinitialize on next cycle",
+                                "pg_trickle: differential refresh failed for {}.{}: {}",
                                 st.pgt_schema,
                                 st.pgt_name,
                                 e
                             );
-                            let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                            if e.requires_reinitialize() {
+                                let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                            }
                             Err(e)
                         }
                     }
@@ -4555,6 +4644,13 @@ mod tests {
         assert!(!reminder_due(Some(0), 59_999, 60_000));
         assert!(reminder_due(Some(0), 60_000, 60_000));
         assert!(reminder_due(Some(10), 10, 0));
+    }
+
+    #[test]
+    fn load_shed_buffer_guard_is_sampled_at_most_every_ten_seconds() {
+        assert!(load_shed_buffer_guard_sample_due(0, 1));
+        assert!(!load_shed_buffer_guard_sample_due(1, 10_000));
+        assert!(load_shed_buffer_guard_sample_due(1, 10_001));
     }
 
     #[test]

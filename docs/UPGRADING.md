@@ -2,6 +2,22 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.86.0 → 0.87.0
+
+v0.87.0 keeps the existing stream-table and change-buffer schema. Large
+ordinary differential MERGE deltas use the bounded portal pipeline; small
+proven non-amplifying deltas remain direct. `pg_trickle.pipeline_batch_size`
+defaults to 4096. `pg_trickle.merge_batch_size` is a deprecated alias for the
+same setting, now meaning apply-batch size rather than a materialization
+threshold, and is scheduled for removal in v0.88.
+
+Pipeline batches use internal savepoints inside one outer refresh transaction.
+They do not become visible to other sessions until the outer transaction
+commits, and they do not release row locks early. Logged change-buffer
+durability remains the default. `pg_trickle.memory_budget_mb` defaults to 256
+MiB and bounds pg_trickle-owned accumulations; it is not a PostgreSQL-wide RSS
+limit, and the lossless change-buffer guard never drops committed rows.
+
 ---
 
 ## Quick Upgrade (Recommended)
