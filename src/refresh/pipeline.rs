@@ -241,7 +241,7 @@ fn copy_table_rows(
     Ok(copied)
 }
 
-/// Execute an ordinary MERGE through a detached SPI cursor and bounded temp batch relation.
+/// Execute an ordinary MERGE through a named SQL cursor and bounded temp batch relation.
 #[cfg(not(test))]
 pub fn execute_merge_pipeline(
     pgt_id: i64,
@@ -268,23 +268,25 @@ pub fn execute_merge_pipeline(
         PgTrickleError::InternalError("pipeline batch relation OID is NULL".to_string())
     })?;
 
-    let cursor_name = Spi::connect_mut(|client| {
-        let cursor = client
-            .try_open_cursor(delta_sql, &[])
-            .map_err(|e| PgTrickleError::SpiError(format!("pipeline cursor open: {e}")))?;
-        Ok::<String, PgTrickleError>(cursor.detach_into_name())
-    })?;
+    let cursor_name = format!("__pgt_pipeline_cursor_{pgt_id}_{backend_pid}");
+    let quoted_cursor = format!("\"{cursor_name}\"");
+    Spi::run(&format!(
+        "DECLARE {quoted_cursor} NO SCROLL CURSOR FOR {delta_sql}"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(format!("pipeline cursor open: {e}")))?;
 
     let mut stats = PipelineStats::default();
     let mut applied = 0usize;
     let result = (|| {
         loop {
             let fetched = Spi::connect_mut(|client| {
-                let mut cursor = client
-                    .find_cursor(&cursor_name)
-                    .map_err(|e| PgTrickleError::SpiError(format!("pipeline cursor find: {e}")))?;
-                let table = cursor
-                    .fetch(FETCH_CHUNK.min(batch_size.max(1) as _))
+                let fetch_count = FETCH_CHUNK.min(batch_size.max(1) as _);
+                let table = client
+                    .update(
+                        &format!("FETCH FORWARD {fetch_count} FROM {quoted_cursor}"),
+                        None,
+                        &[],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(format!("pipeline cursor fetch: {e}")))?;
                 if table.is_empty() {
                     return Ok::<usize, PgTrickleError>(0);
@@ -317,7 +319,7 @@ pub fn execute_merge_pipeline(
         }
         Ok::<(), PgTrickleError>(())
     })();
-    let _ = Spi::connect_mut(|client| client.find_cursor(&cursor_name).map(drop));
+    let _ = Spi::run(&format!("CLOSE {quoted_cursor}"));
     result.map(|()| (applied, stats))
 }
 

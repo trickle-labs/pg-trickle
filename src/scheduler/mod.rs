@@ -4052,12 +4052,14 @@ fn execute_scheduled_refresh(
                         }
                         Err(e) => {
                             log!(
-                                "pg_trickle: differential refresh failed for {}.{}: {}, will reinitialize on next cycle",
+                                "pg_trickle: differential refresh failed for {}.{}: {}",
                                 st.pgt_schema,
                                 st.pgt_name,
                                 e
                             );
-                            let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                            if e.requires_reinitialize() {
+                                let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                            }
                             Err(e)
                         }
                     }
