@@ -974,12 +974,12 @@ impl StDag {
 
                 // Merge other overlapping groups into target.
                 for &other in overlapping.iter().skip(1) {
-                    let other_members: HashSet<NodeId> = groups[other].drain().collect();
+                    let other_members = std::mem::take(&mut groups[other]);
                     for m in &other_members {
                         node_to_group.insert(*m, target);
                     }
                     groups[target].extend(other_members);
-                    let other_cp: HashSet<NodeId> = convergence_map[other].drain().collect();
+                    let other_cp = std::mem::take(&mut convergence_map[other]);
                     convergence_map[target].extend(other_cp);
                 }
             }
