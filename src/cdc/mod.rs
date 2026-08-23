@@ -2807,6 +2807,21 @@ pub fn get_slot_positions_at_bound(
                     reason: "required committed decoder position is unavailable".to_string(),
                 });
             }
+            None if !Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking \
+                                WHERE source_relid = $1)",
+                &[(*oid).into()],
+            )
+            .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                context: format!("source OID {}", oid.to_u32()),
+                reason: e.to_string(),
+            })?
+            .unwrap_or(false) =>
+            {
+                // IMMEDIATE sources use IVM triggers and intentionally have no
+                // base CDC buffer to cap against.
+                safe_bound.to_string()
+            }
             None => {
                 // A trigger row can become visible after the coordinator's
                 // frontier probe but before this refresh takes its snapshot.
