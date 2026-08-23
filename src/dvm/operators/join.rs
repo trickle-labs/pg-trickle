@@ -84,8 +84,9 @@
 use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
-    is_simple_child, join_scan_count, rewrite_join_condition, use_pre_change_snapshot,
+    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, contains_semijoin,
+    is_join_child, is_simple_child, join_scan_count, rewrite_join_condition,
+    supports_pre_change_join_snapshot, use_pre_change_snapshot,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::error::PgTrickleError;
@@ -328,10 +329,16 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // interacts with the SemiJoin's R_old computation.
     // A44-1: Read L0 scan threshold from GUC (default 4, previously hardcoded).
     let deep_join_l0_threshold = config::pg_trickle_deep_join_l0_scan_threshold();
-    let use_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, deep_join_l0_threshold);
+    let use_per_leaf_l0 =
+        use_pre_change_snapshot(left, ctx.inside_semijoin, deep_join_l0_threshold);
+    let use_combined_l0 = is_join_child(left)
+        && !supports_pre_change_join_snapshot(left)
+        && !contains_semijoin(left)
+        && !ctx.inside_semijoin;
+    let use_l0 = use_per_leaf_l0 || use_combined_l0;
 
     let left_part2_source = if use_l0 {
-        if is_join_child(left) {
+        if is_join_child(left) && !use_combined_l0 {
             // DI-1: Register per-leaf pre-change snapshot as a named CTE.
             // Subsequent references to the same subtree reuse the CTE,
             // eliminating redundant EXCEPT ALL evaluations.

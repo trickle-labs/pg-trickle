@@ -54,6 +54,46 @@ async fn test_full_join_basic_differential() {
     db.assert_st_matches_query("fj_basic_st", q).await;
 }
 
+#[tokio::test]
+async fn test_full_join_multi_event_null_transitions_emit_once() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE fj_transition_l (id INT PRIMARY KEY, key INT, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE fj_transition_r (id INT PRIMARY KEY, key INT, val TEXT)")
+        .await;
+    db.execute(
+        "INSERT INTO fj_transition_l VALUES \
+         (1, 1, 'l1'), (2, 2, 'l2a'), (3, 2, 'l2b')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO fj_transition_r VALUES \
+         (1, 1, 'r1a'), (2, 1, 'r1b'), (3, 2, 'r2')",
+    )
+    .await;
+
+    let q = "SELECT l.id AS lid, l.key AS lkey, l.val AS lval, \
+                    r.id AS rid, r.key AS rkey, r.val AS rval \
+             FROM fj_transition_l l FULL JOIN fj_transition_r r ON l.key = r.key";
+    db.create_st("fj_transition_st", q, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("fj_transition_st", q).await;
+
+    db.execute("DELETE FROM fj_transition_r WHERE key = 1")
+        .await;
+    db.execute("DELETE FROM fj_transition_l WHERE key = 2")
+        .await;
+    db.refresh_st("fj_transition_st").await;
+    db.assert_st_matches_query("fj_transition_st", q).await;
+
+    db.execute("INSERT INTO fj_transition_r VALUES (4, 1, 'r1c'), (5, 1, 'r1d')")
+        .await;
+    db.execute("INSERT INTO fj_transition_l VALUES (4, 2, 'l2c'), (5, 2, 'l2d')")
+        .await;
+    db.refresh_st("fj_transition_st").await;
+    db.assert_st_matches_query("fj_transition_st", q).await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // FULL JOIN with NULL join keys (F26)
 // ═══════════════════════════════════════════════════════════════════════

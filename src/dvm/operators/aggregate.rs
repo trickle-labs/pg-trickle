@@ -214,15 +214,47 @@ fn child_to_from_sql(child: &OpTree, registry: &CteRegistry) -> Option<String> {
                 inner,
             ))
         }
-        OpTree::CteScan { cte_id, .. } => {
+        OpTree::CteScan {
+            cte_id,
+            alias,
+            cte_def_aliases,
+            column_aliases,
+            ..
+        } => {
             // Resolve the CTE body via the registry and recursively determine
             // the FROM clause. This handles chained CTEs where the aggregate's
             // child is a CTE alias (e.g., `FROM raw`) that is not a real
             // relation — using the alias directly would cause a PostgreSQL
             // "relation does not exist" error in the rescan CTE.
-            registry
-                .get(*cte_id)
-                .and_then(|(_, body)| child_to_from_sql(body, registry))
+            let (_, body) = registry.get(*cte_id)?;
+            let inner = child_to_from_sql(body, registry)?;
+            let source_cols = body.output_columns();
+            let output_cols = if !column_aliases.is_empty() {
+                column_aliases
+            } else if !cte_def_aliases.is_empty() {
+                cte_def_aliases
+            } else {
+                &source_cols
+            };
+            if source_cols.len() != output_cols.len() {
+                return None;
+            }
+            let selects = source_cols
+                .iter()
+                .zip(output_cols)
+                .map(|(source, output)| {
+                    if source == output {
+                        quote_ident(source)
+                    } else {
+                        format!("{} AS {}", quote_ident(source), quote_ident(output))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!(
+                "(SELECT {selects} FROM {inner}) AS {}",
+                quote_ident(alias)
+            ))
         }
         OpTree::Subquery {
             child,
@@ -544,7 +576,10 @@ fn build_intermediate_agg_delta(
         String::new()
     } else if group_output.len() == 1 {
         let col = &group_output[0];
-        format!("{col} IN (SELECT {} FROM {delta_cte})", quote_ident(col),)
+        format!(
+            "EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE {col} IS NOT DISTINCT FROM __pgt_d2.{})",
+            quote_ident(col),
+        )
     } else {
         let corr: Vec<String> = group_output
             .iter()
@@ -5583,9 +5618,32 @@ mod tests {
             "Should resolve to the underlying table, not the CTE alias: {sql}"
         );
         assert!(
-            !sql.contains("\"raw\""),
-            "Should NOT emit the CTE alias as a bare table reference: {sql}"
+            sql.ends_with("AS \"raw\""),
+            "Should preserve the CTE reference alias: {sql}"
         );
+    }
+
+    #[test]
+    fn test_child_to_from_sql_cte_scan_applies_definition_aliases() {
+        let body = scan(1, "metrics", "public", "m", &["grp", "val"]);
+        let registry = CteRegistry {
+            entries: vec![("raw".to_string(), body)],
+        };
+        let child = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "raw".to_string(),
+            alias: "r".to_string(),
+            columns: vec!["grp".to_string(), "val".to_string()],
+            cte_def_aliases: vec!["g".to_string(), "v".to_string()],
+            column_aliases: vec![],
+            body: None,
+        };
+
+        let sql = child_to_from_sql(&child, &registry).unwrap();
+
+        assert!(sql.contains("\"grp\" AS \"g\""), "{sql}");
+        assert!(sql.contains("\"val\" AS \"v\""), "{sql}");
+        assert!(sql.ends_with("AS \"r\""), "{sql}");
     }
 
     #[test]

@@ -156,7 +156,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // the current cycle's changes, preventing spurious NULL-padded D/I.
     let right_user_cols: Vec<&String> = right_cols.iter().filter(|c| *c != "__pgt_count").collect();
 
-    let r_old_snapshot = if is_join_child(right) {
+    let r_old_snapshot = if is_join_child(right) && supports_pre_change_join_snapshot(right) {
         // DI-1: Named CTE snapshot for right pre-change state.
         ctx.get_or_register_snapshot_cte(right)
     } else {
@@ -426,9 +426,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_part2} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {flags_cte})
+WHERE (SELECT has_ins FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -444,9 +446,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {flags_cte})
+WHERE (SELECT has_del FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond}
   )
@@ -498,9 +502,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_part2} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {flags_cte})
+WHERE (SELECT has_ins FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -512,9 +518,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {flags_cte})
+WHERE (SELECT has_del FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond}
   )

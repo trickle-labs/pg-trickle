@@ -68,10 +68,12 @@ pub fn diff_cte_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
         base_result.columns.clone()
     };
 
-    // CteScan rows use the CTE's visible output columns as their content-hash
-    // row identity, even when the body delta uses a different row_id strategy.
+    // Hash the source expressions before their positional aliases are applied.
+    // The values are identical to the CTE's visible columns, while referring
+    // to select-list aliases here would make the generated SQL invalid.
     let row_id_expr = build_hash_expr(
-        &effective_cols
+        &base_result
+            .columns
             .iter()
             .map(|col| format!("{}::TEXT", quote_ident(col)))
             .collect::<Vec<_>>(),
@@ -166,6 +168,7 @@ mod tests {
         // Columns should be renamed
         assert_eq!(result.columns, vec!["a", "b"]);
         let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "ARRAY[(\"id\"::TEXT)::TEXT, (\"name\"::TEXT)::TEXT]");
         assert_sql_contains(&sql, "\"id\" AS \"a\"");
         assert_sql_contains(&sql, "\"name\" AS \"b\"");
     }
