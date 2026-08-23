@@ -923,6 +923,9 @@ fn try_fused_chain_refresh(
                 })?;
             new_frontier.set_st_source(*upstream_id, lsn, data_ts_str.clone());
         }
+        // A bounded buffer position can trail the stored frontier. Never replay
+        // deltas by letting a differential frontier move backward.
+        new_frontier.merge_from(&prev_frontier);
 
         // Determine refresh action.
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
@@ -2386,6 +2389,35 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
     // first within a tick, so their change buffers are already populated by
     // the time we check here.
     check_upstream_changes(st)
+}
+
+/// Work that must bypass application-load deferral.
+fn is_load_shed_exempt(st: &StreamTableMeta) -> bool {
+    if st.needs_reinit
+        || !st.is_populated
+        || st.refresh_mode.is_immediate()
+        || st.freshness_deadline_ms.is_some()
+    {
+        return true;
+    }
+
+    let change_schema = config::pg_trickle_change_buffer_schema();
+    let budget = config::pg_trickle_memory_budget().change_buffer_bytes as i64;
+    Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE(bool_or(pg_total_relation_size(cb.oid) >= $2), false) \
+         FROM pgtrickle.pgt_dependencies d \
+         JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid = d.source_relid \
+         JOIN pg_class cb ON cb.relname = 'changes_' || ct.source_stable_name \
+         JOIN pg_namespace n ON n.oid = cb.relnamespace AND n.nspname = $3 \
+         WHERE d.pgt_id = $1",
+        &[
+            st.pgt_id.into(),
+            budget.into(),
+            change_schema.trim_matches('"').into(),
+        ],
+    )
+    .unwrap_or(Some(true))
+    .unwrap_or(true)
 }
 
 /// Emit a StaleData or NoUpstreamChanges alert depending on whether the
@@ -3985,6 +4017,9 @@ fn execute_scheduled_refresh(
                     let mut new_frontier =
                         version::compute_new_frontier(&slot_positions, &data_ts_frontier);
                     augment_frontier(&mut new_frontier);
+                    // A bounded buffer position can trail the stored frontier. Never replay
+                    // deltas by letting a differential frontier move backward.
+                    new_frontier.merge_from(&prev_frontier);
 
                     let tuning = st.runtime_tuning();
                     match refresh::execute_differential_refresh_with_tuning(

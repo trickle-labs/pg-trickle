@@ -36,10 +36,10 @@ use super::{
     check_extension_version_match, check_schedule, check_skip_needed, check_upstream_changes,
     current_epoch_ms, emit_stale_alert_if_needed, evaluate_fuse, execute_scheduled_refresh,
     group_schedule_policy, has_table_source_changes, is_any_source_gated, is_group_due,
-    is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint, load_gated_source_oids,
-    load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash, refresh_single_st,
-    self_monitoring_auto_apply_tick, sla_tier_adjustment_tick, update_backoff_factor,
-    upstream_change_state,
+    is_load_shed_exempt, is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint,
+    load_gated_source_oids, load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash,
+    refresh_single_st, self_monitoring_auto_apply_tick, sla_tier_adjustment_tick,
+    update_backoff_factor, upstream_change_state,
 };
 use crate::refresh::orchestrator::batch_update_cost_model_summary;
 
@@ -47,6 +47,11 @@ fn sample_load_snapshot() -> LoadSnapshot {
     let available_cpus = std::thread::available_parallelism()
         .map(|count| count.get() as u64)
         .unwrap_or(1);
+    let sampling_window_ms = i64::from(
+        config::pg_trickle_scheduler_interval_ms()
+            .max(1)
+            .saturating_mul(2),
+    );
     let fallback = LoadSnapshot::new(
         0,
         1,
@@ -62,13 +67,13 @@ fn sample_load_snapshot() -> LoadSnapshot {
                     "SELECT count(*) FILTER (WHERE backend_type = 'client backend')::bigint, \
                             current_setting('max_connections')::bigint, \
                             count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
-                                              AND state = 'active' \
-                                              AND wait_event_type IS NULL)::bigint, \
+                                              AND (state = 'active' OR state_change >= \
+                                                   clock_timestamp() - $1 * INTERVAL '1 millisecond'))::bigint, \
                             count(*) FILTER (WHERE backend_type NOT LIKE 'pg_trickle%' \
                                               AND wait_event_type = 'Lock')::bigint \
                             FROM pg_stat_activity",
                     None,
-                    &[],
+                    &[sampling_window_ms.into()],
                 )
                 .ok()
                 .map(|rows| {
@@ -1358,6 +1363,19 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 };
 
             for group in &groups {
+                // Committed changes remain buffered while ordinary scheduled work yields
+                // to application load. Repairs, explicit freshness targets, initial
+                // population, IMMEDIATE work, and full buffers bypass deferral.
+                if load_deferred
+                    && !group.members.iter().any(|member| match member {
+                        NodeId::StreamTable(pgt_id) => {
+                            load_st_by_id(*pgt_id).is_none_or(|st| is_load_shed_exempt(&st))
+                        }
+                        NodeId::BaseTable(_) => false,
+                    })
+                {
+                    continue;
+                }
                 // PERF-1: Use the per-tick fanout cache when available; otherwise
                 // fall back to per-member has_table_source_changes calls (legacy path).
                 let initial_table_changes: HashMap<i64, bool> = match &fanout_cache {
@@ -1398,16 +1416,6 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     // pgtrickle.pause_scheduler().
                     if crate::shmem::is_node_paused_for_database(database_oid, pgt_id) {
                         log!("pg_trickle scheduler: skipping {pgt_id} — node is paused");
-                        continue;
-                    }
-                    // v0.87: shed only non-urgent scheduler work under pressure.
-                    // Reinitialization and observed source changes always drain.
-                    if load_deferred
-                        && !load_st_by_id(pgt_id)
-                            .map(|st| st.needs_reinit)
-                            .unwrap_or(false)
-                        && !initial_table_changes.get(&pgt_id).copied().unwrap_or(false)
-                    {
                         continue;
                     }
                     // P3-5: Auto-backoff — skip this tick if the backoff

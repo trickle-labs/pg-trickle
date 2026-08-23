@@ -25,10 +25,9 @@ use crate::shmem;
 use super::cost::compute_per_db_quota;
 use super::tier::RefreshTier;
 use super::{
-    RefreshOutcome, check_schedule, check_upstream_changes, emit_stale_alert_if_needed,
-    execute_worker_atomic_group, execute_worker_cyclic_scc, execute_worker_fused_chain,
-    execute_worker_immediate_closure, execute_worker_singleton, has_table_source_changes,
-    load_st_by_id,
+    RefreshOutcome, check_schedule, emit_stale_alert_if_needed, execute_worker_atomic_group,
+    execute_worker_cyclic_scc, execute_worker_fused_chain, execute_worker_immediate_closure,
+    execute_worker_singleton, is_load_shed_exempt, load_st_by_id,
 };
 
 // ── Dynamic Refresh Worker (Phase 3) ──────────────────────────────────────
@@ -950,13 +949,12 @@ pub(super) fn parallel_dispatch_tick(
         }
 
         // Load shedding applies equally to parallel and sequential paths.
-        // Reinitialization and observed upstream changes remain urgent.
+        // Committed source changes remain buffered and drain after pressure falls.
         if load_deferred
-            && !unit.member_pgt_ids.iter().any(|&pgt_id| {
-                load_st_by_id(pgt_id).is_some_and(|st| {
-                    st.needs_reinit || has_table_source_changes(&st) || check_upstream_changes(&st)
-                })
-            })
+            && !unit
+                .member_pgt_ids
+                .iter()
+                .any(|&pgt_id| load_st_by_id(pgt_id).is_none_or(|st| is_load_shed_exempt(&st)))
         {
             continue;
         }

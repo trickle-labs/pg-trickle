@@ -37,7 +37,7 @@ impl LoadSnapshot {
     }
 }
 
-/// Maximum normalized pressure across connections, runnable backends, and lock waiters.
+/// Maximum normalized pressure across connections, runnable work, and lock waiters.
 pub fn pressure_ratio(snapshot: LoadSnapshot) -> f64 {
     fn ratio(numerator: u64, denominator: u64) -> f64 {
         if denominator == 0 {
@@ -48,7 +48,12 @@ pub fn pressure_ratio(snapshot: LoadSnapshot) -> f64 {
     }
 
     ratio(snapshot.connected_clients, snapshot.max_connections)
-        .max(ratio(snapshot.runnable_backends, snapshot.available_cpus))
+        .max(ratio(
+            snapshot
+                .runnable_backends
+                .saturating_add(snapshot.active_refreshes),
+            snapshot.available_cpus,
+        ))
         .max(ratio(
             snapshot.lock_waiters,
             snapshot.connected_clients.max(1),
@@ -202,6 +207,12 @@ mod tests {
     fn pressure_uses_the_maximum_proxy() {
         let snapshot = LoadSnapshot::new(50, 100, 8, 4, 0, 0);
         assert_eq!(pressure_ratio(snapshot), 1.0);
+    }
+
+    #[test]
+    fn pressure_includes_active_refreshes() {
+        let snapshot = LoadSnapshot::new(0, 100, 6, 10, 0, 2);
+        assert_eq!(pressure_ratio(snapshot), 0.8);
     }
 
     #[test]
