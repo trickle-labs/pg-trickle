@@ -2768,7 +2768,8 @@ pub fn get_slot_positions(
 
 /// Build per-source frontier positions from one already-proven safe bound.
 /// WAL sources use only the decoder position that was committed with buffer
-/// writes; trigger sources use the immutable visibility bound.
+/// writes; trigger sources use the visible buffer high-water mark, capped by
+/// the immutable visibility bound.
 pub fn get_slot_positions_at_bound(
     source_oids: &[pg_sys::Oid],
     safe_bound: &str,
@@ -2806,7 +2807,31 @@ pub fn get_slot_positions_at_bound(
                     reason: "required committed decoder position is unavailable".to_string(),
                 });
             }
-            None => safe_bound.to_string(),
+            None => {
+                // A trigger row can become visible after the coordinator's
+                // frontier probe but before this refresh takes its snapshot.
+                // Advancing directly to safe_bound would consume that row's
+                // LSN without ever evaluating it.  Cap at the highest visible
+                // buffer row; when no rows are pending, the safe bound still
+                // lets an idle source advance normally.
+                let change_schema = crate::config::pg_trickle_change_buffer_schema();
+                let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
+                Spi::get_one_with_args::<String>(
+                    &format!(
+                        "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \
+                         FROM {buffer} WHERE lsn > '0/0'::pg_lsn"
+                    ),
+                    &[safe_bound.into()],
+                )
+                .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("trigger source OID {}", oid.to_u32()),
+                    reason: format!("visible buffer frontier lookup failed: {e}"),
+                })?
+                .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("trigger source OID {}", oid.to_u32()),
+                    reason: "visible buffer frontier was NULL".to_string(),
+                })?
+            }
         };
         positions.insert(oid.to_u32(), position);
     }
