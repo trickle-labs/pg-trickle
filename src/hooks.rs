@@ -812,6 +812,21 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
         return;
     }
 
+    // IMMEDIATE consumers use transition-table IVM triggers, not CDC buffers.
+    // A source shared with any deferred consumer still needs CDC maintenance.
+    let uses_deferred_cdc = match StDependency::effective_requested_mode_for_source(objid) {
+        Ok(mode) => mode.is_some(),
+        Err(e) => {
+            pgrx::error!(
+                "pg_trickle: DDL hook could not inspect refresh modes — \
+                 schema change blocked to prevent inconsistent state \
+                 (source: {}, error: {})",
+                identity,
+                e
+            );
+        }
+    };
+
     // Classify the schema change and only reinitialize for column-affecting
     // changes.  Benign DDL (adding indexes, comments, statistics) and
     // constraint-only changes skip reinit when column tracking is populated.
@@ -851,6 +866,23 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                          and re-enable: SET pg_trickle.block_source_ddl = true.",
                         identity,
                     );
+                }
+                if !uses_deferred_cdc {
+                    pgrx::notice!(
+                        "pg_trickle_ddl_tracker: ALTER TABLE ADD COLUMN on {} for ST {} \
+                         — no change buffer update needed for IMMEDIATE mode",
+                        identity,
+                        pgt_id,
+                    );
+                    if let Err(e) = crate::catalog::store_column_snapshot_for_pgt_id(*pgt_id, objid)
+                    {
+                        pgrx::warning!(
+                            "pg_trickle_ddl_tracker: failed to refresh column snapshot for ST {}: {}",
+                            pgt_id,
+                            e,
+                        );
+                    }
+                    continue;
                 }
                 // Task 3.5: Only new columns were added — extend the change buffer
                 // and rebuild the CDC trigger in-place without a full reinit.
@@ -996,7 +1028,7 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     // Always rebuild — even for benign changes — to stay in sync with the
     // catalog. The cost is negligible (single CREATE OR REPLACE FUNCTION).
     let change_schema = config::pg_trickle_change_buffer_schema();
-    if let Err(e) = cdc::rebuild_cdc_trigger_function(objid, &change_schema) {
+    if uses_deferred_cdc && let Err(e) = cdc::rebuild_cdc_trigger_function(objid, &change_schema) {
         pgrx::warning!(
             "pg_trickle_ddl_tracker: failed to rebuild CDC trigger function for {}: {}",
             identity,
