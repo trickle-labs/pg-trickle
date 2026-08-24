@@ -203,7 +203,9 @@ jobs:
           filters: |
             benchmark_changed:
               - 'src/**'
-              - 'sql/**'
+              - 'sql/*.sql'
+              - '!sql/archive/**'
+              - '!sql/*--*--*.sql'
               - 'benchmarks/**'
               - 'tests/Dockerfile.builder'
               - 'tests/Dockerfile.e2e'
