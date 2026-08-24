@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.1 -> 0.87.2 upgrade migration
+-- v0.87.2: deterministic DVM scenario replay and regression corpus.
+-- No catalog schema changes in this release.

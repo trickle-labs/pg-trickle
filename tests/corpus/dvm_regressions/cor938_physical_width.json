@@ -1,0 +1,48 @@
+{
+  "scenario_id": "cor938_physical_width",
+  "format_version": 1,
+  "generator_version": "v0.87.2-corpus-1",
+  "seed": 938,
+  "schema": {
+    "name": "dvmf_cor938",
+    "setup_sql": [
+      "CREATE TABLE dvmf_cor938.parent (id INT PRIMARY KEY, label TEXT)",
+      "CREATE TABLE dvmf_cor938.child (id INT PRIMARY KEY, parent_id INT NOT NULL, c1 INT, c2 TEXT, c3 INT, target_val INT NOT NULL)"
+    ]
+  },
+  "initial_data": [
+    "INSERT INTO dvmf_cor938.parent VALUES (1, 'p1'), (2, 'p2')",
+    "INSERT INTO dvmf_cor938.child VALUES (1, 1, 0, 'a', 10, 100), (2, 1, 0, 'b', 20, 200), (3, 2, 0, 'c', 30, 300)"
+  ],
+  "query": {
+    "stream_table": "dvmf_cor938.physical_width_st",
+    "defining_query": "WITH child_max AS (SELECT parent_id, max(target_val) AS top_val FROM dvmf_cor938.child GROUP BY parent_id) SELECT p.id, cm.top_val FROM dvmf_cor938.parent p LEFT JOIN child_max cm ON cm.parent_id = p.id",
+    "columns": ["id", "top_val"]
+  },
+  "cycles": [
+    {
+      "name": "delete-winning-aggregate-row",
+      "mutations": [
+        {
+          "sql": "DELETE FROM dvmf_cor938.child WHERE id = 2 RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    }
+  ],
+  "execution": {
+    "schedule": "1m",
+    "requested_refresh_mode": "DIFFERENTIAL"
+  },
+  "expected_capability": {
+    "differential": true,
+    "expected_mode": "DIFFERENTIAL"
+  },
+  "features": {
+    "aggregates": ["MAX"],
+    "joins": ["LEFT"],
+    "simultaneous_source_changes": false,
+    "nullable_groups": false,
+    "duplicate_rows": false
+  }
+}

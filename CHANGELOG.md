@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.2 — Deterministic Reproduction and Regression Corpus](#0872--deterministic-reproduction-and-regression-corpus)
 - [0.87.1 — Correctness Oracle Hardening](#0871--correctness-oracle-hardening)
 - [0.87.0 — Low-Impact Refresh](#0870--low-impact-refresh)
 - [0.86.0 — Product UX & Transparency](#0860--product-ux--transparency)
@@ -131,6 +132,28 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.2] — Deterministic Reproduction and Regression Corpus
+
+v0.87.2 makes DVM correctness failures durable and replayable.
+
+- Added a versioned scenario format containing setup SQL, initial data,
+  defining query, mutation cycles, execution settings, capability, and feature
+  vector.
+- Added isolated replay with the dvm-replay recipe; every mutation verifies
+  its affected-row count before the refresh.
+- Added standalone failure artifacts and a PR-gated corpus for the #938
+  physical-width and #939 simultaneous-leaf regressions.
+
+No extension catalog or SQL API changes were made in this release.
+
+## Upgrade
+
+Run ALTER EXTENSION pg_trickle UPDATE after installing the v0.87.2 files. The
+upgrade migration is intentionally empty because this release changes the test
+and release tooling only.
 
 ---
 

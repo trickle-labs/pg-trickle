@@ -183,12 +183,45 @@ jobs:
           report_paths: 'target/nextest/ci/junit.xml'
           commit: ${{github.event.pull_request.head.sha}}
 
+  # Run the blocking pgbench gate when runtime or benchmark inputs change.
+  # Test-only and documentation-only changes use the functional gates below.
+  detect-pgbench-changes:
+    name: Detect pgbench path changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      benchmark_changed: ${{ steps.filter.outputs.benchmark_changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Filter benchmark inputs
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            benchmark_changed:
+              - 'src/**'
+              - 'sql/*.sql'
+              - '!sql/archive/**'
+              - '!sql/*--*--*.sql'
+              - 'benchmarks/**'
+              - 'tests/Dockerfile.builder'
+              - 'tests/Dockerfile.e2e'
+              - '.github/actions/setup-pgrx/**'
+
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
   # This is intentionally separate from the long weekly E2E benchmark history.
   # The three configurations and budgets are versioned under benchmarks/.
   pgbench-v087:
     name: v0.87 pgbench overhead gate
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: detect-pgbench-changes
+    if: >
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (needs.detect-pgbench-changes.result == 'success' &&
+        needs.detect-pgbench-changes.outputs.benchmark_changed == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -210,7 +243,12 @@ jobs:
         run: ./tests/build_e2e_image.sh
 
       - name: Run v0.87 pgbench gate
-        run: benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87
+        run: |
+          # Shared runners can produce noisy p99/TPS samples. Require two
+          # independent failures before blocking the PR; the budgets remain
+          # unchanged in benchmarks/pgbench-v0.87/budgets.json.
+          benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87 \
+            || benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87
 
       - name: Upload v0.87 pgbench result
         if: always()
@@ -336,6 +374,18 @@ jobs:
             --test 'e2e_*' \
             -E "test(smoke) | test(basic) | test(create_stream_table) | test(health_check) | test(~join) | test(~aggregate) | test(~window) | test(~subquery)" \
             --test-threads 4
+
+      - name: Run v0.87.2 DVM regression corpus
+        run: cargo nextest run --profile ci --test e2e_dvm_corpus_tests --no-capture
+
+      - name: Upload v0.87.2 DVM artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dvm-fuzz-artifacts
+          path: artifacts/dvm-fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
 
   # ── E2E tests (full extension in Docker, Linux only) ────────────────────
   # Skipped on PRs (takes ~20 min to build the Docker image). Runs on
