@@ -123,6 +123,39 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 
 // ── Group-rescan helpers ────────────────────────────────────────────
 
+/// Build a NULL-safe affected-group filter without shadowing source columns.
+///
+/// The delta columns are renamed inside the subquery so an unqualified source
+/// expression such as `c_custkey` cannot resolve to the inner delta row.
+fn build_group_filter(delta_cte: &str, group_output: &[String]) -> String {
+    let delta_cols = group_output
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            format!(
+                "{} AS {}",
+                quote_ident(column),
+                quote_ident(&format!("__pgt_group_{index}")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let conditions = group_output
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            format!(
+                "{column} IS NOT DISTINCT FROM __pgt_d2.{}",
+                quote_ident(&format!("__pgt_group_{index}")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "EXISTS (SELECT 1 FROM (SELECT {delta_cols} FROM {delta_cte}) __pgt_d2 WHERE {conditions})"
+    )
+}
+
 /// Reconstruct the FROM clause SQL from a child OpTree.
 ///
 /// Returns the SQL fragment for `FROM ...` suitable for the rescan CTE.
@@ -589,21 +622,8 @@ fn build_intermediate_agg_delta(
     // Group filter: only rescan affected groups
     let group_filter = if group_output.is_empty() {
         String::new()
-    } else if group_output.len() == 1 {
-        let col = &group_output[0];
-        format!(
-            "EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE {col} IS NOT DISTINCT FROM __pgt_d2.{})",
-            quote_ident(col),
-        )
     } else {
-        let corr: Vec<String> = group_output
-            .iter()
-            .map(|c| format!("{c} IS NOT DISTINCT FROM __pgt_d2.{}", quote_ident(c)))
-            .collect();
-        format!(
-            "EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE {})",
-            corr.join(" AND "),
-        )
+        build_group_filter(delta_cte, group_output)
     };
 
     // Determine WHERE/AND connector based on existing WHERE in from_sql.
@@ -1044,25 +1064,8 @@ fn build_rescan_cte(
         // the group filter into the WHERE clause before aggregation.
         let group_filter = if group_output.is_empty() {
             String::new()
-        } else if group_output.len() == 1 {
-            // Use EXISTS with IS NOT DISTINCT FROM instead of IN to
-            // correctly match NULL group-key values (NULL IN (...) → NULL).
-            let col = &group_output[0];
-            format!(
-                "EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE {col} IS NOT DISTINCT FROM __pgt_d2.{})",
-                quote_ident(col),
-            )
         } else {
-            // Multi-column group key: use EXISTS with IS NOT DISTINCT FROM
-            // to correctly handle NULL group-key values.
-            let corr: Vec<String> = group_output
-                .iter()
-                .map(|c| format!("{c} IS NOT DISTINCT FROM __pgt_d2.{}", quote_ident(c),))
-                .collect();
-            format!(
-                "EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE {})",
-                corr.join(" AND "),
-            )
+            build_group_filter(delta_cte, group_output)
         };
 
         // If the child is a Filter, the FROM already includes WHERE.
@@ -5531,6 +5534,52 @@ mod tests {
             sql,
             "(SELECT \"id\", \"group_id\", \"created_at\" FROM \"public\".\"events\") AS \"e\""
         );
+    }
+
+    #[test]
+    fn test_q13_shaped_nested_left_join_aggregate_sql() {
+        let customer = scan_with_pk(
+            1,
+            "customer",
+            "public",
+            "customer",
+            &["c_custkey"],
+            &["c_custkey"],
+        );
+        let orders = scan_with_pk(
+            2,
+            "orders",
+            "public",
+            "orders",
+            &["o_orderkey", "o_custkey", "o_comment"],
+            &["o_orderkey"],
+        );
+        let join = left_join(
+            Expr::Raw("c_custkey = o_custkey AND o_comment NOT LIKE '%special%requests%'".into()),
+            customer,
+            orders,
+        );
+        let inner = aggregate(
+            vec![colref("c_custkey")],
+            vec![count_col("o_orderkey", "c_count")],
+            join,
+        );
+        let outer = aggregate(
+            vec![colref("c_count")],
+            vec![count_star("custdist")],
+            subquery("c_orders", vec![], inner),
+        );
+
+        let mut ctx = test_ctx_with_st("public", "q13");
+        ctx.st_user_columns = Some(vec!["c_count".into(), "custdist".into()]);
+        ctx.st_has_pgt_count = true;
+        let result = diff_aggregate(&mut ctx, &outer).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert!(sql.contains("LEFT JOIN"), "{sql}");
+        assert!(sql.contains("agg_new"), "{sql}");
+        assert!(sql.contains("\"__ins_c_count\""), "{sql}");
+        assert!(sql.contains("\"__pgt_group_0\""), "{sql}");
     }
 
     #[test]
