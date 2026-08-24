@@ -309,35 +309,26 @@ fn child_to_from_sql(
             alias,
             column_aliases,
         } => {
-            // Only recurse into Subquery when the child is an Aggregate.
-            // An Aggregate child produces a complete subquery expression
-            // (SELECT ... GROUP BY ...) that can be aliased and used as FROM.
-            //
-            // For other child types (Project, Filter over joins, etc.),
-            // return None so callers fall back to the defining-query approach.
-            // This is important because Project nodes rename columns with
-            // aliases (e.g., `extract(year from o_orderdate) AS o_year`)
-            // that are lost when child_to_from_sql recurses through them.
-            match child.as_ref() {
-                OpTree::Aggregate { .. } => {
-                    let inner = child_to_from_sql(child, registry, project_scan_columns)?;
-                    if column_aliases.is_empty() {
-                        Some(format!("{inner} AS {}", quote_ident(alias)))
-                    } else {
-                        // Apply positional column aliases using PostgreSQL's
-                        // AS alias(col1, col2) syntax to match the delta's
-                        // renamed columns from diff_subquery.
-                        let col_list: Vec<String> =
-                            column_aliases.iter().map(|a| quote_ident(a)).collect();
-                        Some(format!(
-                            "{inner} AS {}({})",
-                            quote_ident(alias),
-                            col_list.join(", ")
-                        ))
-                    }
-                }
-                _ => None,
-            }
+            // Wrap the reconstructed child so its internal alias (for
+            // example, the Project helper's `__pgt_proj`) does not replace
+            // the alias visible to the parent query.
+            let inner = child_to_from_sql(child, registry, project_scan_columns)?;
+            let col_list = if column_aliases.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "({})",
+                    column_aliases
+                        .iter()
+                        .map(|a| quote_ident(a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            Some(format!(
+                "(SELECT * FROM {inner}) AS {}{col_list}",
+                quote_ident(alias)
+            ))
         }
         OpTree::Aggregate {
             group_by,
@@ -5627,9 +5618,9 @@ mod tests {
     }
 
     #[test]
-    fn test_child_to_from_sql_project_over_non_agg_subquery_returns_none() {
-        // Project over Subquery { child: Scan } — Subquery returns None
-        // for non-Aggregate children, so Project should also return None.
+    fn test_child_to_from_sql_project_over_subquery() {
+        // A Project over a simple Subquery should preserve both the
+        // projected columns and the subquery's visible alias.
         let child = project(
             vec![colref("id")],
             vec!["id"],
@@ -5641,10 +5632,9 @@ mod tests {
         );
 
         let result = child_to_from_sql(&child, &CteRegistry::default(), true);
-        assert!(
-            result.is_none(),
-            "Project over non-Aggregate Subquery should return None"
-        );
+        let sql = result.expect("Project over Subquery should be reconstructible");
+        assert!(sql.contains("SELECT * FROM"), "{sql}");
+        assert!(sql.contains("AS \"sub\""), "{sql}");
     }
 
     #[test]

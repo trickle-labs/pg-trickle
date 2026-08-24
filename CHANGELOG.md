@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.3 — Composition-Aware Differential Testing](#0873--composition-aware-differential-testing)
 - [0.87.2 — Deterministic Reproduction and Regression Corpus](#0872--deterministic-reproduction-and-regression-corpus)
 - [0.87.1 — Correctness Oracle Hardening](#0871--correctness-oracle-hardening)
 - [0.87.0 — Low-Impact Refresh](#0870--low-impact-refresh)
@@ -132,6 +133,28 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.3] — Composition-Aware Differential Testing
+
+v0.87.3 makes composition risks explicit in the DVM correctness suite.
+
+- Added 18 deterministic #938/#939-neighborhood cases covering joins,
+  aggregate CTEs, aliases, nullable keys, physical-width pruning, duplicate
+  matches, simultaneous source changes, and batching histories.
+- Added a typed Wave A relation model that computes logical schemas before SQL
+  rendering and rejects invalid joins or projections early.
+- Added deterministic P0 pairwise coverage with a checked-in coverage contract;
+  every mandatory case runs through the exact differential-vs-direct oracle.
+
+No extension catalog or SQL API changes were made in this release.
+
+## Upgrade
+
+Run ALTER EXTENSION pg_trickle UPDATE after installing the v0.87.3 files. The
+upgrade migration is intentionally empty because this release changes the DVM
+correctness test tooling only.
 
 ---
 

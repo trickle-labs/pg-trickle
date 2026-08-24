@@ -378,6 +378,9 @@ jobs:
       - name: Run v0.87.2 DVM regression corpus
         run: cargo nextest run --profile ci --test e2e_dvm_corpus_tests --no-capture
 
+      - name: Run v0.87.3 DVM composition matrix
+        run: cargo nextest run --profile ci --test e2e_dvm_composition_tests --no-capture
+
       - name: Upload v0.87.2 DVM artifacts
         if: failure()
         uses: actions/upload-artifact@v7

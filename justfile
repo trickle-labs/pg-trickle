@@ -392,6 +392,17 @@ dvm-replay SCENARIO:
 dvm-fuzz-fast:
     cargo test --test e2e_dvm_fuzz_tests --features pg18
 
+# v0.87.3: run the mandatory composition matrix and P0 pairwise gate.
+[group: "dvm"]
+dvm-composition: build-e2e-image
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_composition_tests --no-capture
+
+# v0.87.3: run the pure matrix and coverage checks without Docker.
+[group: "dvm"]
+dvm-composition-unit:
+    cargo test --test e2e_dvm_composition_tests --features pg18 test_v0873_matrix_matches_published_requirements
+    cargo test --test e2e_dvm_composition_tests --features pg18 test_v0873_generated_queries_have_schemas_and_render_sql
+
 # ── SQLancer Fuzzing (Phase 4) ─────────────────────────────────────────────
 
 # Run SQLancer crash + equivalence oracle (rebuilds Docker image first).
@@ -531,12 +542,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.87.2": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.87.3": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.87.2": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.87.3": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture
