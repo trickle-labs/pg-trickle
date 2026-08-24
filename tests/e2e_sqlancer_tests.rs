@@ -38,6 +38,7 @@
 mod e2e;
 
 use e2e::E2eDb;
+use e2e::oracle::{self, CaseOutcome};
 
 // ── Query generator ────────────────────────────────────────────────────────
 
@@ -386,12 +387,7 @@ async fn run_crash_oracle(db: &E2eDb) {
         // Try to create the stream table.
         let st_name = format!("sqlancer_st_{i}");
         let create_sql = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_name}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL'\
-             )",
+            "SELECT pgtrickle.create_stream_table('{st_name}', $SQL${}$SQL$, '1m', 'FULL')",
             gq.query
         );
 
@@ -498,30 +494,31 @@ async fn run_equivalence_oracle(db: &E2eDb) {
         // Use an inner async block so cleanup always runs regardless of the exit path.
         let st_name = format!("sqlancer_eq_{i}");
         let create_sql = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_name}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL'\
-             )",
+            "SELECT pgtrickle.create_stream_table('{st_name}', $SQL${}$SQL$, '1m', 'FULL')",
             gq.query
         );
         let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_name}')");
 
-        let result: Option<(i64, i64)> = async {
-            if db.try_execute(&create_sql).await.is_err() {
-                return None;
+        let outcome: CaseOutcome = async {
+            if let Err(e) = db.try_execute(&create_sql).await {
+                return oracle::classify_admission_error(&e.to_string());
             }
-            if db.try_execute(&refresh_sql).await.is_err() {
-                return None;
+            if let Err(e) = db.try_execute(&refresh_sql).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("refresh failed after creation: {e}"),
+                    details: Some(gq.query.clone()),
+                });
             }
-            let st_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_name}"))
-                .await;
-            let direct_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM ({}) AS _q", gq.query))
-                .await;
-            Some((st_count, direct_count))
+            match oracle::compare_st_to_query(db, &st_name, &gq.query).await {
+                Ok(()) => CaseOutcome::Passed(oracle::PassReport {
+                    effective_mode: "FULL".to_string(),
+                    row_count: 0,
+                }),
+                Err(diff) => CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("Multiset equivalence mismatch:\n{diff}"),
+                    details: Some(gq.query.clone()),
+                }),
+            }
         }
         .await;
 
@@ -536,19 +533,28 @@ async fn run_equivalence_oracle(db: &E2eDb) {
                 .await;
         }
 
-        match result {
-            None => {
+        match outcome {
+            CaseOutcome::UnsupportedAtAdmission(_) => {
                 skipped += 1;
             }
-            Some((st_count, direct_count)) => {
+            CaseOutcome::Passed(_) => {
                 checked += 1;
-                if st_count != direct_count {
-                    let msg = format!(
-                        "count mismatch: st={st_count} vs direct={direct_count} | query: {}",
-                        gq.query
-                    );
-                    mismatches.push((gq.seed, gq.description.clone(), msg));
-                }
+            }
+            CaseOutcome::ProductFailure(pf) => {
+                checked += 1;
+                mismatches.push((gq.seed, gq.description.clone(), pf.reason));
+            }
+            CaseOutcome::GeneratorInvalid(ge) => {
+                panic!(
+                    "Generator error (seed=0x{:016x}): {}: {}",
+                    gq.seed, ge.stage, ge.message
+                );
+            }
+            CaseOutcome::InfrastructureFailure(inf) => {
+                panic!(
+                    "Infrastructure failure (seed=0x{:016x}): {}",
+                    gq.seed, inf.message
+                );
             }
         }
 
@@ -638,12 +644,7 @@ async fn test_sqlancer_crash_oracle_light() {
 
         let st_name = format!("sqlancer_light1_{i}");
         let create_sql = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_name}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL'\
-             )",
+            "SELECT pgtrickle.create_stream_table('{st_name}', $SQL${}$SQL$, '1m', 'FULL')",
             gq.query
         );
         let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_name}')");
@@ -714,30 +715,31 @@ async fn test_sqlancer_equivalence_oracle_light() {
 
         let st_name = format!("sqlancer_light2_{i}");
         let create_sql = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_name}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL'\
-             )",
+            "SELECT pgtrickle.create_stream_table('{st_name}', $SQL${}$SQL$, '1m', 'FULL')",
             gq.query
         );
         let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_name}')");
 
-        let result: Option<(i64, i64)> = async {
-            if db.try_execute(&create_sql).await.is_err() {
-                return None;
+        let outcome: CaseOutcome = async {
+            if let Err(e) = db.try_execute(&create_sql).await {
+                return oracle::classify_admission_error(&e.to_string());
             }
-            if db.try_execute(&refresh_sql).await.is_err() {
-                return None;
+            if let Err(e) = db.try_execute(&refresh_sql).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("refresh failed: {e}"),
+                    details: Some(gq.query.clone()),
+                });
             }
-            let st_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_name}"))
-                .await;
-            let direct_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM ({}) AS _q", gq.query))
-                .await;
-            Some((st_count, direct_count))
+            match oracle::compare_st_to_query(&db, &st_name, &gq.query).await {
+                Ok(()) => CaseOutcome::Passed(oracle::PassReport {
+                    effective_mode: "FULL".to_string(),
+                    row_count: 0,
+                }),
+                Err(diff) => CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("exact oracle mismatch:\n{diff}"),
+                    details: Some(gq.query.clone()),
+                }),
+            }
         }
         .await;
 
@@ -750,19 +752,22 @@ async fn test_sqlancer_equivalence_oracle_light() {
                 .await;
         }
 
-        match result {
-            None => {
+        match outcome {
+            CaseOutcome::UnsupportedAtAdmission(_) => {
                 skipped += 1;
             }
-            Some((st_count, direct_count)) => {
+            CaseOutcome::Passed(_) => {
                 checked += 1;
-                if st_count != direct_count {
-                    mismatches.push((
-                        gq.seed,
-                        gq.query.clone(),
-                        format!("{st_count} vs {direct_count}"),
-                    ));
-                }
+            }
+            CaseOutcome::ProductFailure(pf) => {
+                checked += 1;
+                mismatches.push((gq.seed, gq.query.clone(), pf.reason));
+            }
+            CaseOutcome::GeneratorInvalid(ge) => {
+                panic!("Generator error: {}: {}", ge.stage, ge.message);
+            }
+            CaseOutcome::InfrastructureFailure(inf) => {
+                panic!("Infrastructure failure: {}", inf.message);
             }
         }
     }
@@ -883,40 +888,43 @@ async fn run_diff_vs_full_oracle(db: &E2eDb) {
         let st_full = format!("sqlancer_s3_full_{i}");
 
         let create_diff = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_diff}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'DIFFERENTIAL')",
+            "SELECT pgtrickle.create_stream_table('{st_diff}', $SQL${}$SQL$, '1m', 'DIFFERENTIAL')",
             gq.query
         );
         let create_full = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_full}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL')",
+            "SELECT pgtrickle.create_stream_table('{st_full}', $SQL${}$SQL$, '1m', 'FULL')",
             gq.query
         );
 
         let refresh_diff_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_diff}')");
         let refresh_full_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_full}')");
 
-        // Run the oracle logic in an inner async block so cleanup always runs
-        // regardless of which early-exit path is taken.
-        let result: Option<(i64, i64)> = async {
+        let outcome: CaseOutcome = async {
             // Skip if DIFFERENTIAL mode is not supported for this query.
-            if db.try_execute(&create_diff).await.is_err() {
-                return None;
+            if let Err(e) = db.try_execute(&create_diff).await {
+                return oracle::classify_admission_error(&e.to_string());
             }
-            if db.try_execute(&create_full).await.is_err() {
-                return None;
+            if let Err(e) = db.try_execute(&create_full).await {
+                return oracle::classify_admission_error(&e.to_string());
             }
 
-            if db.try_execute(&refresh_diff_sql).await.is_err()
-                || db.try_execute(&refresh_full_sql).await.is_err()
+            if let Err(e) = db.try_execute(&refresh_diff_sql).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("initial refresh_diff failed: {e}"),
+                    details: Some(gq.query.clone()),
+                });
+            }
+            if let Err(e) = db.try_execute(&refresh_full_sql).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("initial refresh_full failed: {e}"),
+                    details: Some(gq.query.clone()),
+                });
+            }
+
+            if let Err(pf) =
+                oracle::assert_effective_refresh_mode(db, &st_diff, "DIFFERENTIAL").await
             {
-                return None;
+                return CaseOutcome::ProductFailure(pf);
             }
 
             // Apply a short DML sequence (4 mutations) to the first source table.
@@ -925,24 +933,54 @@ async fn run_diff_vs_full_oracle(db: &E2eDb) {
             if let Some(tbl) = gq.tables.first() {
                 for _ in 0..4 {
                     let sql = apply_random_mutation(&mut rng, tbl, &mut next_id);
-                    let _ = db.try_execute(&sql).await;
+                    if let Err(e) = db.try_execute(&sql).await {
+                        return CaseOutcome::GeneratorInvalid(oracle::GeneratorError {
+                            stage: "DML mutation".to_string(),
+                            message: e.to_string(),
+                        });
+                    }
                 }
             }
 
-            if db.try_execute(&refresh_diff_sql).await.is_err()
-                || db.try_execute(&refresh_full_sql).await.is_err()
-            {
-                return None;
+            if let Err(e) = db.try_execute(&refresh_diff_sql).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("post-DML refresh_diff failed: {e}"),
+                    details: Some(gq.query.clone()),
+                });
+            }
+            if let Err(e) = db.try_execute(&refresh_full_sql).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("post-DML refresh_full failed: {e}"),
+                    details: Some(gq.query.clone()),
+                });
             }
 
-            let diff_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_diff}"))
-                .await;
-            let full_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_full}"))
-                .await;
+            if let Err(pf) =
+                oracle::assert_effective_refresh_mode(db, &st_diff, "DIFFERENTIAL").await
+            {
+                return CaseOutcome::ProductFailure(pf);
+            }
 
-            Some((diff_count, full_count))
+            // Compare DIFFERENTIAL vs FULL as exact multisets
+            if let Err(diff) = oracle::compare_sts(db, &st_diff, &st_full).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("DIFF vs FULL multiset mismatch after DML:\n{diff}"),
+                    details: Some(gq.query.clone()),
+                });
+            }
+
+            // Compare DIFFERENTIAL vs Direct Query as exact multisets
+            if let Err(diff) = oracle::compare_st_to_query(db, &st_diff, &gq.query).await {
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("DIFF vs Direct Query multiset mismatch after DML:\n{diff}"),
+                    details: Some(gq.query.clone()),
+                });
+            }
+
+            CaseOutcome::Passed(oracle::PassReport {
+                effective_mode: "DIFFERENTIAL".to_string(),
+                row_count: 0,
+            })
         }
         .await;
 
@@ -960,22 +998,22 @@ async fn run_diff_vs_full_oracle(db: &E2eDb) {
                 .await;
         }
 
-        match result {
-            None => {
+        match outcome {
+            CaseOutcome::UnsupportedAtAdmission(_) => {
                 skipped += 1;
             }
-            Some((diff_count, full_count)) => {
+            CaseOutcome::Passed(_) => {
                 checked += 1;
-                if diff_count != full_count {
-                    mismatches.push((
-                        gq.seed,
-                        gq.description.clone(),
-                        format!(
-                            "count mismatch after DML: diff={diff_count} vs full={full_count} | query: {}",
-                            gq.query
-                        ),
-                    ));
-                }
+            }
+            CaseOutcome::ProductFailure(pf) => {
+                checked += 1;
+                mismatches.push((gq.seed, gq.description.clone(), pf.reason));
+            }
+            CaseOutcome::GeneratorInvalid(ge) => {
+                panic!("Generator error: {}: {}", ge.stage, ge.message);
+            }
+            CaseOutcome::InfrastructureFailure(inf) => {
+                panic!("Infrastructure failure: {}", inf.message);
             }
         }
 
@@ -1056,11 +1094,7 @@ async fn run_stateful_dml_fuzzing() {
         db.execute(&tbl.insert_dml(&mut rng)).await;
 
         let create_sql = format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => 'soak_probe', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'DIFFERENTIAL')",
+            "SELECT pgtrickle.create_stream_table('soak_probe', $SQL${}$SQL$, '1m', 'DIFFERENTIAL')",
             gq.query
         );
 
@@ -1097,22 +1131,14 @@ async fn run_stateful_dml_fuzzing() {
     let st_full = "sqlancer_soak_full";
 
     db.execute(&format!(
-        "SELECT pgtrickle.create_stream_table(\
-         name => '{st_diff}', \
-         defining_query => $SQL${}$SQL$, \
-         schedule => '1m', \
-         mode => 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('{st_diff}', $SQL${}$SQL$, '1m', 'DIFFERENTIAL')",
         gq.query
     ))
     .await;
 
     let _ = db
         .try_execute(&format!(
-            "SELECT pgtrickle.create_stream_table(\
-             name => '{st_full}', \
-             defining_query => $SQL${}$SQL$, \
-             schedule => '1m', \
-             mode => 'FULL')",
+            "SELECT pgtrickle.create_stream_table('{st_full}', $SQL${}$SQL$, '1m', 'FULL')",
             gq.query
         ))
         .await;
@@ -1131,7 +1157,7 @@ async fn run_stateful_dml_fuzzing() {
     let mut rng = Lcg::new(seed ^ 0xfeedfacecafebeef);
     let mut next_id = 50_000u64;
     let mut applied = 0usize;
-    let mut mismatches: Vec<(usize, i64, i64)> = Vec::new();
+    let mut mismatches: Vec<(usize, String)> = Vec::new();
 
     for m in 0..mutations {
         let sql = apply_random_mutation(&mut rng, &source_tbl, &mut next_id);
@@ -1140,15 +1166,16 @@ async fn run_stateful_dml_fuzzing() {
         }
 
         if (m + 1) % CHECKPOINT_INTERVAL == 0 {
-            if db
+            if let Err(e) = db
                 .try_execute(&format!(
                     "SELECT pgtrickle.refresh_stream_table('{st_diff}')"
                 ))
                 .await
-                .is_err()
             {
-                println!("[sqlancer-4] refresh_diff failed at mutation {m} — skipping checkpoint");
-                continue;
+                panic!(
+                    "[sqlancer-4] Product failure: refresh_diff failed at mutation {m}: {e}\n  query: {}",
+                    gq.query
+                );
             }
             let _ = db
                 .try_execute(&format!(
@@ -1156,24 +1183,12 @@ async fn run_stateful_dml_fuzzing() {
                 ))
                 .await;
 
-            let diff_count: i64 = db
-                .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_diff}"))
-                .await;
-            // Baseline: FULL-mode count when available, else compare diff against itself.
-            let full_count: i64 = db
-                .query_scalar_opt::<i64>(&format!("SELECT COUNT(*) FROM public.{st_full}"))
-                .await
-                .unwrap_or(diff_count);
-
-            if diff_count != full_count {
-                mismatches.push((m + 1, diff_count, full_count));
-                eprintln!(
-                    "[sqlancer-4] MISMATCH at mutation {}: diff={diff_count} full={full_count}",
-                    m + 1
-                );
+            if let Err(diff) = oracle::compare_st_to_query(&db, st_diff, &gq.query).await {
+                mismatches.push((m + 1, format!("DIFF vs Query mismatch:\n{diff}")));
+                eprintln!("[sqlancer-4] MISMATCH at mutation {}:\n{diff}", m + 1);
             } else {
                 println!(
-                    "[sqlancer-4] checkpoint {}/{mutations}: ok (diff={diff_count} applied={applied})",
+                    "[sqlancer-4] checkpoint {}/{mutations}: ok (applied={applied})",
                     m + 1
                 );
             }

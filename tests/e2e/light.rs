@@ -857,86 +857,13 @@ impl E2eDb {
 
     /// Verify a ST's contents match its defining query exactly.
     pub async fn assert_st_matches_query(&self, st_table: &str, defining_query: &str) {
-        let cols_sql = format!(
-            "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position), \
-                    string_agg(\
-                        CASE WHEN data_type = 'json' \
-                             THEN column_name || '::text' \
-                             ELSE column_name END, \
-                        ', ' ORDER BY ordinal_position) \
-             FROM information_schema.columns \
-             WHERE (table_schema || '.' || table_name = '{st_table}' \
-                OR table_name = '{st_table}') \
-             AND column_name NOT LIKE '__pgt_%'"
-        );
-        let (raw_cols, cast_cols): (Option<String>, Option<String>) =
-            sqlx::query_as(sqlx::AssertSqlSafe(cols_sql.as_str()))
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or_else(|e| panic!("cols query failed: {e}"));
-        let raw_cols = raw_cols.unwrap_or_else(|| "*".to_string());
-        let cast_cols = cast_cols.unwrap_or_else(|| "*".to_string());
-
-        let has_dual_counts: bool = self
-            .query_scalar(&format!(
-                "SELECT EXISTS( \
-                    SELECT 1 FROM information_schema.columns \
-                    WHERE (table_schema || '.' || table_name = '{st_table}' \
-                       OR table_name = '{st_table}') \
-                    AND column_name = '__pgt_count_l')"
-            ))
-            .await;
-
-        // Build a visibility filter for set operation STs.
-        // INTERSECT/EXCEPT STs keep invisible rows for multiplicity tracking.
-        // - INTERSECT (set): visible iff LEAST(count_l, count_r) > 0
-        // - INTERSECT ALL:   visible rows = LEAST(count_l, count_r), expanded
-        // - EXCEPT (set):    visible iff count_l > 0 AND count_r = 0
-        // - EXCEPT ALL:      visible iff count_l > count_r
-        let dq_upper = defining_query.to_uppercase();
-        let set_op_filter = if has_dual_counts {
-            if dq_upper.contains("INTERSECT ALL") {
-                ", generate_series(1, LEAST(__pgt_count_l, __pgt_count_r)) WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
-            } else if dq_upper.contains("INTERSECT") {
-                " WHERE __pgt_count_l > 0 AND __pgt_count_r > 0"
-            } else if dq_upper.contains("EXCEPT ALL") {
-                ", generate_series(1, __pgt_count_l - __pgt_count_r) WHERE __pgt_count_l > __pgt_count_r"
-            } else if dq_upper.contains("EXCEPT") {
-                " WHERE __pgt_count_l > 0 AND __pgt_count_r = 0"
-            } else {
-                ""
-            }
-        } else {
-            ""
-        };
-
-        let sql = if raw_cols != cast_cols {
-            format!(
-                "SELECT NOT EXISTS ( \
-                    (SELECT {cast_cols} FROM {st_table}{set_op_filter} \
-                     EXCEPT ALL \
-                     SELECT {cast_cols} FROM ({defining_query}) __pgt_dq) \
-                    UNION ALL \
-                    (SELECT {cast_cols} FROM ({defining_query}) __pgt_dq2 \
-                     EXCEPT ALL \
-                     SELECT {cast_cols} FROM {st_table}{set_op_filter}) \
-                )"
-            )
-        } else {
-            format!(
-                "SELECT NOT EXISTS ( \
-                    (SELECT {raw_cols} FROM {st_table}{set_op_filter} EXCEPT ALL ({defining_query})) \
-                    UNION ALL \
-                    (({defining_query}) EXCEPT ALL SELECT {raw_cols} FROM {st_table}{set_op_filter}) \
-                )"
-            )
-        };
-        let matches: bool = self.query_scalar(&sql).await;
-        assert!(
-            matches,
-            "ST '{}' contents do not match defining query:\n  {}",
-            st_table, defining_query,
-        );
+        super::oracle::assert_st_query_exact(
+            self,
+            st_table,
+            defining_query,
+            "assert_st_matches_query",
+        )
+        .await;
     }
 
     // ── Infrastructure Query Helpers ───────────────────────────────────

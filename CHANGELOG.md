@@ -36,6 +36,8 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.1 — Correctness Oracle Hardening](#0871--correctness-oracle-hardening)
+- [0.87.0 — Low-Impact Refresh](#0870--low-impact-refresh)
 - [0.86.0 — Product UX & Transparency](#0860--product-ux--transparency)
 - [0.85.0 — Scheduler & Resource Resilience Gate](#0850--scheduler--resource-resilience-gate)
 - [0.84.0 — Catalog, Privilege & Upgrade Integrity](#0840--catalog-privilege--upgrade-integrity)
@@ -129,6 +131,28 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.1] — Correctness Oracle Hardening
+
+v0.87.1 hardens the correctness oracle across all differential view maintenance
+test paths and introduces fail-closed case outcome classification.
+
+### What's New
+
+- **One exact oracle (`COR-1`):** Shared E2E exact oracle helper (`tests/e2e/oracle.rs`)
+  comparing schema (column count, names, type OIDs, typmods, collations) and exact
+  row multiset (bag semantics via symmetric `EXCEPT ALL`). Removed all count-only
+  assertions from fuzz and equivalence paths.
+- **Fail-closed case outcomes (`COR-2`):** Introduced typed `CaseOutcome` (Passed,
+  UnsupportedAtAdmission, GeneratorInvalid, ProductFailure, InfrastructureFailure).
+  Post-admission refresh errors and silent fallbacks to FULL refresh fail immediately
+  as product failures.
+- **#938/#939 sensitivity baseline (`COR-3`):** Deterministic reproductions and negative
+  controls verifying that physical-width rescan divergence, stale CTE snapshot rows,
+  same-count different-content, and duplicate multiplicity mismatches are detected
+  unconditionally.
 
 ---
 
