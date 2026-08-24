@@ -57,7 +57,8 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
+    build_leaf_snapshot_sql, build_snapshot_sql, contains_semijoin, extract_equijoin_keys_aliased,
+    is_join_child, rewrite_join_condition, supports_pre_change_join_snapshot,
     use_pre_change_snapshot,
 };
 use crate::dvm::parser::OpTree;
@@ -182,7 +183,12 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     //
     // L₀ and EC-01 R₀ are mutually exclusive: when L₀ is available,
     // Part 1 is unsplit (no EC-01), and the standard formula is exact.
-    let use_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
+    let use_per_leaf_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
+    let use_combined_l0 = is_join_child(left)
+        && !supports_pre_change_join_snapshot(left)
+        && !contains_semijoin(left)
+        && !ctx.inside_semijoin;
+    let use_l0 = use_per_leaf_l0 || use_combined_l0;
 
     // ── EC-01: Pre-change right snapshot for Parts 1b / 3b ─────────
     //
@@ -220,7 +226,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // ── L₀ snapshot for Part 2 (when use_l0=true) ──────────────────
     let left_part2_source = if use_l0 {
-        if is_join_child(left) {
+        if is_join_child(left) && !use_combined_l0 {
             let pre_change = ctx.get_or_register_snapshot_cte(left);
             mark_leaf_delta_ctes_not_materialized(left, ctx);
             pre_change
@@ -250,7 +256,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .filter(|c| *c != "__pgt_count")
         .cloned()
         .collect();
-    let r_old_snapshot = if is_join_child(right) {
+    let r_old_snapshot = if is_join_child(right) && supports_pre_change_join_snapshot(right) {
         ctx.get_or_register_snapshot_cte(right)
     } else {
         build_leaf_snapshot_sql(
@@ -269,7 +275,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .filter(|c| *c != "__pgt_count")
         .cloned()
         .collect();
-    let l_old_snapshot = if is_join_child(left) {
+    let l_old_snapshot = if is_join_child(left) && supports_pre_change_join_snapshot(left) {
         ctx.get_or_register_snapshot_cte(left)
     } else {
         build_leaf_snapshot_sql(
@@ -297,14 +303,37 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Guard: AND NOT EXISTS (SELECT 1 FROM delta_left dl2
     //                        WHERE dl2.__pgt_action = 'I'
     //                          AND join_cond(l, dl2))
-    // NOTE: This uses right→dl2 substitution in the join condition, which
-    // is correct for symmetric join conditions (ON l.k = r.k). For
-    // asymmetric conditions, the guard may be imprecise but errs on the
-    // side of allowing Part 5 to fire (duplicates are less harmful than
-    // missed insertions for most queries).
-    let part5_excl_cond = rewrite_join_condition(condition, left, "l", right, "dl2");
-    // Symmetric for Part 7b: AND NOT EXISTS ΔR_I with same join key as r.
-    let part7b_excl_cond = rewrite_join_condition(condition, left, "dr2", right, "r");
+    let current_keys = extract_equijoin_keys_aliased(condition, left, "l", right, "r");
+    let delta_left_keys = extract_equijoin_keys_aliased(condition, left, "dl2", right, "r");
+    let delta_right_keys = extract_equijoin_keys_aliased(condition, left, "l", right, "dr2");
+    let same_side_condition = |current: &[(String, String)],
+                               delta: &[(String, String)],
+                               current_alias: &str,
+                               delta_alias: &str| {
+        let current_prefix = format!("\"{current_alias}\".");
+        let delta_prefix = format!("\"{delta_alias}\".");
+        let comparisons = current
+            .iter()
+            .zip(delta)
+            .filter_map(|(current_pair, delta_pair)| {
+                let current_expr = [&current_pair.0, &current_pair.1]
+                    .into_iter()
+                    .find(|expr| expr.contains(&current_prefix))?;
+                let delta_expr = [&delta_pair.0, &delta_pair.1]
+                    .into_iter()
+                    .find(|expr| expr.contains(&delta_prefix))?;
+                Some(format!("{current_expr} IS NOT DISTINCT FROM {delta_expr}"))
+            })
+            .collect::<Vec<_>>();
+        if comparisons.is_empty() {
+            "FALSE".to_string()
+        } else {
+            comparisons.join(" AND ")
+        }
+    };
+    let part5_excl_cond = same_side_condition(&current_keys, &delta_left_keys, "l", "dl2");
+    // Symmetric for Part 7b: AND NOT EXISTS ΔR_I with the same right-side key.
+    let part7b_excl_cond = same_side_condition(&current_keys, &delta_right_keys, "r", "dr2");
 
     // ── Part 4 exclusion guard ───────────────────────────────────────
     //
@@ -424,9 +453,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_part2} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {right_flags_cte})
+WHERE (SELECT has_ins FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -445,9 +476,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {right_flags_cte})
+WHERE (SELECT has_del FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond_lr}
   )
@@ -494,9 +527,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {r_old_snapshot} r
-JOIN {delta_left} dl ON {join_cond_antijoin_l}
-WHERE dl.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {left_flags_cte})
+WHERE (SELECT has_ins FROM {left_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_left} dl
+    WHERE dl.__pgt_action = 'I' AND {join_cond_antijoin_l}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {l_old_snapshot} __pgt_l_old WHERE {l_old_cond}
   )
@@ -512,9 +547,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
-JOIN {delta_left} dl ON {join_cond_antijoin_l}
-WHERE dl.__pgt_action = 'D'
-  AND (SELECT has_del FROM {left_flags_cte})
+WHERE (SELECT has_del FROM {left_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_left} dl
+    WHERE dl.__pgt_action = 'D' AND {join_cond_antijoin_l}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {left_table} l WHERE {not_exists_cond_lr}
   )
@@ -595,9 +632,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {right_flags_cte})
+WHERE (SELECT has_ins FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -613,9 +652,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {right_flags_cte})
+WHERE (SELECT has_del FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond_lr}
   )
@@ -659,9 +700,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {r0_snapshot} r
-JOIN {delta_left} dl ON {join_cond_antijoin_l}
-WHERE dl.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {left_flags_cte})
+WHERE (SELECT has_ins FROM {left_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_left} dl
+    WHERE dl.__pgt_action = 'I' AND {join_cond_antijoin_l}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {l_old_snapshot} __pgt_l_old WHERE {l_old_cond}
   )
@@ -674,9 +717,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
-JOIN {delta_left} dl ON {join_cond_antijoin_l}
-WHERE dl.__pgt_action = 'D'
-  AND (SELECT has_del FROM {left_flags_cte})
+WHERE (SELECT has_del FROM {left_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_left} dl
+    WHERE dl.__pgt_action = 'D' AND {join_cond_antijoin_l}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {left_table} l WHERE {not_exists_cond_lr}
   )
@@ -736,9 +781,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {right_flags_cte})
+WHERE (SELECT has_ins FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -754,9 +801,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {right_flags_cte})
+WHERE (SELECT has_del FROM {right_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond_lr}
   )
@@ -786,9 +835,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
-JOIN {delta_left} dl ON {join_cond_antijoin_l}
-WHERE dl.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {left_flags_cte})
+WHERE (SELECT has_ins FROM {left_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_left} dl
+    WHERE dl.__pgt_action = 'I' AND {join_cond_antijoin_l}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {l_old_snapshot} __pgt_l_old WHERE {l_old_cond}
   )
@@ -801,9 +852,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
-JOIN {delta_left} dl ON {join_cond_antijoin_l}
-WHERE dl.__pgt_action = 'D'
-  AND (SELECT has_del FROM {left_flags_cte})
+WHERE (SELECT has_del FROM {left_flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_left} dl
+    WHERE dl.__pgt_action = 'D' AND {join_cond_antijoin_l}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {left_table} l WHERE {not_exists_cond_lr}
   )
@@ -888,6 +941,11 @@ mod tests {
         // R_old and L_old guards present
         assert_sql_contains(&sql, "__pgt_r_old");
         assert_sql_contains(&sql, "__pgt_l_old");
+        assert_sql_contains(
+            &sql,
+            "\"l\".\"cust_id\" IS NOT DISTINCT FROM \"dl2\".\"cust_id\"",
+        );
+        assert_sql_contains(&sql, "\"r\".\"id\" IS NOT DISTINCT FROM \"dr2\".\"id\"");
     }
 
     #[test]

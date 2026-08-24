@@ -38,8 +38,8 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, is_simple_child,
-    rewrite_join_condition, use_pre_change_snapshot,
+    build_leaf_snapshot_sql, build_snapshot_sql, contains_semijoin, is_join_child, is_simple_child,
+    rewrite_join_condition, supports_pre_change_join_snapshot, use_pre_change_snapshot,
 };
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
@@ -156,7 +156,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // the current cycle's changes, preventing spurious NULL-padded D/I.
     let right_user_cols: Vec<&String> = right_cols.iter().filter(|c| *c != "__pgt_count").collect();
 
-    let r_old_snapshot = if is_join_child(right) {
+    let r_old_snapshot = if is_join_child(right) && supports_pre_change_join_snapshot(right) {
         // DI-1: Named CTE snapshot for right pre-change state.
         ctx.get_or_register_snapshot_cte(right)
     } else {
@@ -189,8 +189,13 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // When use_l0 is true (Part 2 uses L₀), the standard DBSP formula
     // is already exact — no EC-01 split needed. See diff_inner_join
     // for the full derivation.
-    let l0_available = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
-    let use_r0 = if l0_available {
+    let use_per_leaf_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
+    let use_combined_l0 = is_join_child(left)
+        && !supports_pre_change_join_snapshot(left)
+        && !contains_semijoin(left)
+        && !ctx.inside_semijoin;
+    let use_exact_l0 = use_per_leaf_l0 || use_combined_l0;
+    let use_r0 = if use_exact_l0 {
         false
     } else {
         use_pre_change_snapshot(right, ctx.inside_semijoin, 4)
@@ -238,9 +243,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Same logic as diff_inner_join: use L₀ for simple/Scan children,
     // fall back to L₁ for SemiJoin-containing deep chains where
     // EXCEPT ALL interacts badly.
-    let use_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
-
-    let left_part2_source = if use_l0 {
+    let left_part2_source = if use_per_leaf_l0 {
         if is_join_child(left) {
             let pre_change = ctx.get_or_register_snapshot_cte(left);
             mark_leaf_delta_ctes_not_materialized(left, ctx);
@@ -253,6 +256,13 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 &ctx.fallback_leaf_oids,
             )
         }
+    } else if use_combined_l0 {
+        build_leaf_snapshot_sql(
+            left,
+            &left_result.cte_name,
+            left_cols,
+            &ctx.fallback_leaf_oids,
+        )
     } else {
         left_table.clone()
     };
@@ -260,7 +270,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // When use_l0 is true and left is a Scan, the left delta CTE is
     // referenced in both Part 1 and the L₀ EXCEPT ALL sub-selects.
     // Mark NOT MATERIALIZED to prevent spilling.
-    if use_l0 {
+    if use_exact_l0 {
         ctx.mark_cte_not_materialized(&left_result.cte_name);
     }
 
@@ -289,7 +299,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         "dr.__pgt_row_id::TEXT".to_string(),
     ]);
 
-    let correction_sql = if !use_l0 && is_join_child(left) && !is_simple_child(left) {
+    let correction_sql = if !use_exact_l0 && is_join_child(left) && !is_simple_child(left) {
         // Part 2 uses L₁: correction for (L₁ − L₀) ⋈ ΔR error.
         // Same as inner join Part 3: ΔL_I ⋈ ΔR flipped, ΔL_D ⋈ ΔR kept.
         format!(
@@ -407,6 +417,7 @@ UNION ALL
 -- Part 4: Delete stale NULL-padded rows when a left row gains its FIRST right match.
 -- When a right INSERT creates a new match for a left row that previously had NO
 -- matching right rows (was NULL-padded), the NULL-padded ST row must be removed.
+-- Use L₀ so simultaneous left changes delete the row that actually existed.
 -- We check R_old (pre-change right) to verify the left row truly had no matches
 -- before. Without this check, left rows that ALREADY had matches would get
 -- spurious D(NULL-padded) rows that corrupt intermediate aggregate old-state
@@ -414,10 +425,12 @@ UNION ALL
 SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
-FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {flags_cte})
+FROM {left_part2} l
+WHERE (SELECT has_ins FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -433,9 +446,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {flags_cte})
+WHERE (SELECT has_del FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond}
   )
@@ -482,13 +497,16 @@ WHERE NOT EXISTS (
 UNION ALL
 
 -- Part 4: Delete stale NULL-padded rows when a left row gains its FIRST right match.
+-- Use L₀ so simultaneous left changes delete the row that actually existed.
 SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
-FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'I'
-  AND (SELECT has_ins FROM {flags_cte})
+FROM {left_part2} l
+WHERE (SELECT has_ins FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'I' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
   )
@@ -500,9 +518,11 @@ SELECT 0::BIGINT AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l
-JOIN {delta_right} dr ON {join_cond_part2}
-WHERE dr.__pgt_action = 'D'
-  AND (SELECT has_del FROM {flags_cte})
+WHERE (SELECT has_del FROM {flags_cte})
+  AND EXISTS (
+    SELECT 1 FROM {delta_right} dr
+    WHERE dr.__pgt_action = 'D' AND {join_cond_part2}
+  )
   AND NOT EXISTS (
     SELECT 1 FROM {right_table} r WHERE {not_exists_cond}
   )

@@ -548,6 +548,286 @@ async fn test_chained_ctes_differential_refresh() {
     );
 }
 
+#[tokio::test]
+async fn test_cte_chained_left_join_rescans_with_pruned_columns_stay_correct() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE rescan_parent (id INT PRIMARY KEY, created_at INT NOT NULL)",
+        "CREATE TABLE rescan_d (\
+             id INT PRIMARY KEY, parent_id INT NOT NULL REFERENCES rescan_parent(id), \
+             unused TEXT, flag INT NOT NULL, created_at INT NOT NULL\
+         )",
+        "CREATE TABLE rescan_e (\
+             id INT PRIMARY KEY, parent_id INT NOT NULL REFERENCES rescan_parent(id), \
+             unused TEXT, label TEXT NOT NULL, created_at INT NOT NULL\
+         )",
+        "INSERT INTO rescan_parent VALUES (1, 10), (2, 20)",
+    ])
+    .await;
+
+    let query = "WITH agg_d AS (\
+                     SELECT d.parent_id, \
+                            count(*) FILTER (WHERE d.flag = 1) AS cnt_pos, \
+                            count(*) FILTER (WHERE d.flag = 0) AS cnt_zero, \
+                            max(d.created_at) AS latest_d \
+                     FROM rescan_d d GROUP BY d.parent_id\
+                 ), agg_e AS (\
+                     SELECT e.parent_id, count(*) AS cnt_e, \
+                            min(e.created_at) AS earliest_e, \
+                            string_agg(e.label, ',' ORDER BY e.label) AS labels \
+                     FROM rescan_e e GROUP BY e.parent_id\
+                 ) \
+                 SELECT p.id AS parent_id, \
+                        coalesce(d.cnt_pos, 0)::bigint AS cnt_pos, \
+                        coalesce(d.cnt_zero, 0)::bigint AS cnt_zero, \
+                        coalesce(e.cnt_e, 0)::bigint AS cnt_e, \
+                        d.latest_d, e.earliest_e, e.labels \
+                 FROM rescan_parent p \
+                 LEFT JOIN agg_d d ON d.parent_id = p.id \
+                 LEFT JOIN agg_e e ON e.parent_id = p.id";
+
+    db.create_st("rescan_join_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // Fold the first deltas into groups that already have NULL-padded ST rows.
+    db.execute("INSERT INTO rescan_d VALUES (1, 1, 'ignored', 1, 30)")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    db.execute("INSERT INTO rescan_e VALUES (1, 1, 'ignored', 'beta', 40)")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // Change both joined aggregate branches in one refresh, including a newly
+    // populated parent group.
+    db.execute(
+        "INSERT INTO rescan_d VALUES (2, 1, 'ignored', 0, 50), \
+                                           (3, 2, 'ignored', 1, 60)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO rescan_e VALUES (2, 1, 'ignored', 'alpha', 35), \
+                                           (3, 2, 'ignored', 'gamma', 70)",
+    )
+    .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // UPDATE emits D/I pairs and changes each non-algebraic aggregate family.
+    db.execute("UPDATE rescan_d SET flag = 1, created_at = 55 WHERE id = 2")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    db.execute("UPDATE rescan_e SET label = 'aardvark', created_at = 25 WHERE id = 2")
+        .await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    // Delete extrema and the only rows for parent 2 to exercise group rescans
+    // and the transition back to NULL-padded outer-join rows.
+    db.execute("DELETE FROM rescan_d WHERE id IN (2, 3)").await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+
+    db.execute("DELETE FROM rescan_e WHERE id IN (2, 3)").await;
+    db.refresh_st("rescan_join_st").await;
+    db.assert_st_matches_query("rescan_join_st", query).await;
+}
+
+#[tokio::test]
+async fn test_cte_aliases_survive_group_rescans() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE cte_alias_src (\
+             id INT PRIMARY KEY, grp TEXT, val INT NOT NULL, unused TEXT\
+         )",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO cte_alias_src VALUES \
+         (1, 'a', 10, 'ignored'), (2, 'a', 20, 'ignored'), (3, 'b', 30, 'ignored')",
+    )
+    .await;
+
+    let query = "WITH raw(g, v) AS (\
+                     SELECT s.grp, s.val FROM cte_alias_src s\
+                 ) \
+                 SELECT r.g, min(r.v) AS min_v, \
+                        string_agg(r.v::text, ',' ORDER BY r.v) AS vals \
+                 FROM raw AS r GROUP BY r.g";
+
+    db.create_st("cte_alias_rescan_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("cte_alias_rescan_st", query)
+        .await;
+
+    db.execute("DELETE FROM cte_alias_src WHERE id = 1").await;
+    db.refresh_st("cte_alias_rescan_st").await;
+    db.assert_st_matches_query("cte_alias_rescan_st", query)
+        .await;
+
+    db.execute("UPDATE cte_alias_src SET grp = 'a', val = 5 WHERE id = 3")
+        .await;
+    db.refresh_st("cte_alias_rescan_st").await;
+    db.assert_st_matches_query("cte_alias_rescan_st", query)
+        .await;
+}
+
+#[tokio::test]
+async fn test_cte_aggregate_join_kinds_handle_simultaneous_dml() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE cte_join_parent (id INT PRIMARY KEY)",
+        "CREATE TABLE cte_join_l (\
+             id INT PRIMARY KEY, parent_id INT REFERENCES cte_join_parent(id), \
+             val INT NOT NULL, unused TEXT\
+         )",
+        "CREATE TABLE cte_join_r (\
+             id INT PRIMARY KEY, parent_id INT REFERENCES cte_join_parent(id), \
+             val INT NOT NULL, unused TEXT\
+         )",
+        "INSERT INTO cte_join_parent VALUES (1), (2)",
+        "INSERT INTO cte_join_l VALUES \
+             (1, 1, 10, 'ignored'), (2, 2, 20, 'ignored'), (4, NULL, 7, 'ignored')",
+        "INSERT INTO cte_join_r VALUES \
+             (1, 1, 100, 'ignored'), (2, 2, 200, 'ignored'), (4, NULL, 300, 'ignored')",
+    ])
+    .await;
+
+    let queries: Vec<(&str, String)> = [("inner", "INNER"), ("full", "FULL")]
+        .into_iter()
+        .map(|(name, join_kind)| {
+            (
+                name,
+                format!(
+                    "WITH agg_l AS (\
+                         SELECT parent_id, count(*) AS cnt_l, max(val) AS max_l \
+                         FROM cte_join_l GROUP BY parent_id\
+                     ), agg_r AS (\
+                         SELECT parent_id, count(*) AS cnt_r, min(val) AS min_r \
+                         FROM cte_join_r GROUP BY parent_id\
+                     ) \
+                     SELECT p.id AS parent_id, l.cnt_l, l.max_l, r.cnt_r, r.min_r \
+                     FROM cte_join_parent p \
+                     {join_kind} JOIN agg_l l ON l.parent_id = p.id \
+                     {join_kind} JOIN agg_r r ON r.parent_id = p.id"
+                ),
+            )
+        })
+        .collect();
+
+    for (name, query) in &queries {
+        db.create_st(
+            &format!("cte_{name}_agg_join_st"),
+            query,
+            "1m",
+            "DIFFERENTIAL",
+        )
+        .await;
+        db.assert_st_matches_query(&format!("cte_{name}_agg_join_st"), query)
+            .await;
+    }
+
+    db.execute("INSERT INTO cte_join_l VALUES (3, 1, 30, 'ignored')")
+        .await;
+    db.execute("INSERT INTO cte_join_r VALUES (3, 1, 50, 'ignored')")
+        .await;
+    db.execute("INSERT INTO cte_join_l VALUES (5, NULL, 3, 'ignored')")
+        .await;
+    db.execute("INSERT INTO cte_join_r VALUES (5, NULL, 400, 'ignored')")
+        .await;
+    for (name, query) in &queries {
+        let st_name = format!("cte_{name}_agg_join_st");
+        db.refresh_st(&st_name).await;
+        db.assert_st_matches_query(&st_name, query).await;
+    }
+
+    db.execute("UPDATE cte_join_l SET val = 40 WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM cte_join_l WHERE id = 3").await;
+    db.execute("UPDATE cte_join_r SET val = 25 WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM cte_join_r WHERE id = 3").await;
+    db.execute("UPDATE cte_join_l SET val = 9 WHERE id = 4")
+        .await;
+    db.execute("DELETE FROM cte_join_l WHERE id = 5").await;
+    db.execute("UPDATE cte_join_r SET val = 250 WHERE id = 4")
+        .await;
+    db.execute("DELETE FROM cte_join_r WHERE id = 5").await;
+    for (name, query) in &queries {
+        let st_name = format!("cte_{name}_agg_join_st");
+        db.refresh_st(&st_name).await;
+        db.assert_st_matches_query(&st_name, query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_cte_nested_right_join_uses_consistent_old_snapshot() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE cte_nested_left (id INT PRIMARY KEY)",
+        "CREATE TABLE cte_nested_dim (\
+             id INT PRIMARY KEY, left_id INT NOT NULL REFERENCES cte_nested_left(id), \
+             unused TEXT\
+         )",
+        "CREATE TABLE cte_nested_event (\
+             id INT PRIMARY KEY, dim_id INT NOT NULL REFERENCES cte_nested_dim(id), \
+             val INT NOT NULL\
+         )",
+        "INSERT INTO cte_nested_left VALUES (1), (2), (3)",
+        "INSERT INTO cte_nested_dim VALUES (10, 1, 'ignored'), (20, 2, 'ignored')",
+        "INSERT INTO cte_nested_event VALUES (1, 10, 5), (2, 10, 8), (3, 20, 11)",
+    ])
+    .await;
+
+    let query = "WITH agg AS (\
+                     SELECT dim_id, count(*) AS cnt, max(val) AS max_v \
+                     FROM cte_nested_event GROUP BY dim_id\
+                 ) \
+                 SELECT l.id AS left_id, r.dim_id, r.cnt, r.max_v \
+                 FROM cte_nested_left l \
+                 LEFT JOIN (\
+                     SELECT d.left_id, a.dim_id, a.cnt, a.max_v \
+                     FROM cte_nested_dim d \
+                     INNER JOIN agg a ON a.dim_id = d.id\
+                 ) r ON r.left_id = l.id";
+
+    db.create_st("cte_nested_right_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("cte_nested_right_st", query)
+        .await;
+
+    db.execute_seq(&[
+        "UPDATE cte_nested_dim SET left_id = 3 WHERE id = 10",
+        "DELETE FROM cte_nested_event WHERE id = 2",
+        "DELETE FROM cte_nested_event WHERE id = 3",
+        "INSERT INTO cte_nested_dim VALUES (30, 1, 'ignored')",
+        "INSERT INTO cte_nested_event VALUES (4, 30, 4)",
+    ])
+    .await;
+    db.refresh_st("cte_nested_right_st").await;
+    db.assert_st_matches_query("cte_nested_right_st", query)
+        .await;
+
+    db.execute_seq(&[
+        "UPDATE cte_nested_dim SET left_id = 2 WHERE id = 30",
+        "UPDATE cte_nested_event SET val = 12 WHERE id = 4",
+        "DELETE FROM cte_nested_event WHERE id = 1",
+    ])
+    .await;
+    db.refresh_st("cte_nested_right_st").await;
+    db.assert_st_matches_query("cte_nested_right_st", query)
+        .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Tier 2 — Multi-Reference CTEs (Shared Delta)
 // ═══════════════════════════════════════════════════════════════════════════
