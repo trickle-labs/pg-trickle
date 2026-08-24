@@ -8,6 +8,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 pub mod coverage;
+pub mod metamorphic;
+pub mod mutation;
 pub mod query;
 
 pub const SCENARIO_FORMAT_VERSION: u32 = 1;
@@ -44,6 +46,10 @@ pub struct QuerySpec {
 pub struct MutationCycle {
     pub name: String,
     pub mutations: Vec<Mutation>,
+    #[serde(default)]
+    pub changed_leaves: Vec<String>,
+    #[serde(default)]
+    pub mutation_intents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +77,10 @@ pub struct FeatureVector {
     pub simultaneous_source_changes: bool,
     pub nullable_groups: bool,
     pub duplicate_rows: bool,
+    #[serde(default)]
+    pub changed_leaf_buckets: Vec<u8>,
+    #[serde(default)]
+    pub mutation_intents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +167,15 @@ pub fn validate_scenario(scenario: &Scenario) -> Result<(), String> {
                     "cycle {cycle_index} mutation {mutation_index} has empty SQL"
                 ));
             }
+        }
+        if cycle
+            .changed_leaves
+            .iter()
+            .any(|leaf| leaf.trim().is_empty())
+        {
+            return Err(format!(
+                "cycle {cycle_index} contains an empty changed source leaf"
+            ));
         }
     }
     Ok(())

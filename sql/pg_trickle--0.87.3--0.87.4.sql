@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.3 -> 0.87.4 upgrade migration
+-- v0.87.4: Stateful and metamorphic DVM correctness testing.
+-- No catalog schema or SQL API changes in this release.
