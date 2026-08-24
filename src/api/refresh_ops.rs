@@ -6,7 +6,11 @@ use super::*;
 use crate::refresh::RefreshAction;
 
 /// Manually trigger a synchronous refresh of a stream table.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — closes the same create/alter/drop lifecycle
+/// gap; `refresh_stream_table_impl` enforces `check_stream_table_ownership`
+/// before doing any work.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn refresh_stream_table(name: &str) {
     let result = refresh_stream_table_impl(name);
     if let Err(e) = result {
@@ -67,6 +71,17 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
 
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+
+    // SEC-1: Ownership check — only the owner (or superuser) can refresh.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+    // SEC-1: captured once and passed to execute_manual_refresh below, which
+    // (for a full refresh) replays the stored defining query — a mirror of
+    // alter_stream_table_impl's own handling of the same full-refresh path.
+    // Unqualified source-table references in that query must resolve
+    // against the invoker's own search_path, not the security_definer-pinned
+    // one, or refresh fails with "relation ... does not exist" the moment the
+    // source table doesn't also happen to live in pgtrickle/pg_catalog/pg_temp.
+    let invoker_search_path = invoker_search_path()?;
 
     // Phase 10: Check if ST is suspended or in error — refuse manual refresh
     if st.status == StStatus::Suspended || st.status == StStatus::Error {
@@ -146,7 +161,9 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
 
     // Transaction-level advisory lock is released automatically at
     // transaction end (commit or rollback); no explicit unlock needed.
-    execute_manual_refresh(&st, &schema, &table_name, &source_oids)
+    with_invoker_search_path(&invoker_search_path, || {
+        execute_manual_refresh(&st, &schema, &table_name, &source_oids)
+    })
 }
 
 /// Inner function for manual refresh, called while advisory lock is held.

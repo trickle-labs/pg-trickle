@@ -2998,7 +2998,13 @@ fn bulk_drop_stream_tables_impl(names: Vec<Option<String>>) -> Result<i32, PgTri
 ///     '{"schedule": "5m", "tier": "warm"}'::jsonb
 /// );
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `bulk_alter_stream_tables_impl` validates every
+/// target via `alter::prevalidate_stream_table_target` (which enforces
+/// `check_stream_table_ownership`) before altering any of them, and then
+/// applies each change through `alter::alter_stream_table_impl`, which
+/// re-enforces the same check per target. No new authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn bulk_alter_stream_tables(names: Vec<Option<String>>, params: pgrx::Json) -> i32 {
     match bulk_alter_stream_tables_impl(names, params.0) {
         Ok(count) => count,
@@ -3021,7 +3027,14 @@ fn bulk_alter_stream_tables(names: Vec<Option<String>>, params: pgrx::Json) -> i
 ///     ARRAY['public.orders_summary', 'public.stale_view']
 /// );
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `bulk_drop_stream_tables_impl` plans the batch
+/// via `alter::plan_drop_stream_tables`, which resolves every target through
+/// `alter::prevalidate_stream_table_target` (enforcing
+/// `check_stream_table_ownership`) before dropping any of them, and then each
+/// drop goes through `alter::drop_stream_table_impl`, which re-enforces the
+/// same check. No new authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn bulk_drop_stream_tables(names: Vec<Option<String>>) -> i32 {
     match bulk_drop_stream_tables_impl(names) {
         Ok(count) => count,

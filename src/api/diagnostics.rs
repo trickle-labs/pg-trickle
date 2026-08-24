@@ -829,7 +829,11 @@ pub(super) fn shared_buffer_stats_impl()
 ///
 /// Returns nothing on success; raises an ERROR if the stream table does not
 /// exist or the fuse is not blown.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `reset_fuse_impl` already enforces
+/// `check_stream_table_ownership` before making any change. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub(super) fn reset_fuse(name: &str, action: default!(&str, "'apply'")) {
     let result = reset_fuse_impl(name, action);
     if let Err(e) = result {
@@ -2457,7 +2461,11 @@ pub(super) fn preview_stream_table(
 
 /// Reset cumulative diagnostics for one owned stream table without deleting
 /// immutable refresh history or operational error state.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — the closure below already enforces
+/// `check_stream_table_ownership` before resetting any stats. No new
+/// authorization code needed.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub(super) fn stat_reset(pgt_id: i64) {
     let result = (|| {
         let st = StreamTableMeta::get_by_id(pgt_id)?
