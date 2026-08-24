@@ -183,12 +183,43 @@ jobs:
           report_paths: 'target/nextest/ci/junit.xml'
           commit: ${{github.event.pull_request.head.sha}}
 
+  # Run the blocking pgbench gate when runtime or benchmark inputs change.
+  # Test-only and documentation-only changes use the functional gates below.
+  detect-pgbench-changes:
+    name: Detect pgbench path changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      benchmark_changed: ${{ steps.filter.outputs.benchmark_changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Filter benchmark inputs
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            benchmark_changed:
+              - 'src/**'
+              - 'sql/**'
+              - 'benchmarks/**'
+              - 'tests/Dockerfile.builder'
+              - 'tests/Dockerfile.e2e'
+              - '.github/actions/setup-pgrx/**'
+
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
   # This is intentionally separate from the long weekly E2E benchmark history.
   # The three configurations and budgets are versioned under benchmarks/.
   pgbench-v087:
     name: v0.87 pgbench overhead gate
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: detect-pgbench-changes
+    if: >
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (needs.detect-pgbench-changes.result == 'success' &&
+        needs.detect-pgbench-changes.outputs.benchmark_changed == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
