@@ -436,6 +436,13 @@ federation, object-storage state) has moved to [Beyond v1.0](#beyond-v10). It
 is optional infrastructure for deployments that have genuinely outgrown one
 machine — not the path to 1.0.
 
+The #938 and #939 review found a separate risk before v0.88.0 changes DVM
+internals: current correctness tests can hide wrong results behind row counts,
+skips, or fallback. Six releases, about 42 person-weeks in total, build the
+exact oracle and durable test system first. The sequence hardens failure
+detection, makes cases replayable, broadens composition and state coverage,
+adds DVM contracts, and ends with a machine-enforced release gate.
+
 | Version | Theme | User promise | Status | Scope | Full details |
 |---------|-------|--------------|--------|-------|--------------|
 | [v0.81.0](roadmap/v0.81.0.md) | Observability, Self-Tuning & Quick Wins: commit-to-visible latency metric using pg_xact_commit_timestamp (QW-1), configuration advisor function pgtrickle.tune_recommendations() (QW-2), preview/dry-run mode pgtrickle.preview_stream_table() (QW-3), OpenTelemetry trace spans on scheduler_tick/refresh_cycle/delta_execute/merge_apply with OTLP export (QW-4), bounded LRU eviction on thread-local L0/L1 template caches (QW-5), DeltaOperator trait for extensible operator dispatch (QW-6), split config.rs into config/scheduler.rs + config/cdc.rs + config/dvm.rs + config/monitoring.rs (QW-7), self-healing circuit breaker with auto-remediation for OOM/lock-timeout/sustained-lag (QW-8), chunked MERGE for large deltas with configurable merge_batch_size GUC (QW-9), stream table presets ('real-time'/'batch'/'cost-optimized') (QW-10) | — | ✅ Released | Large | [Full details](roadmap/v0.81.0.md) |
@@ -445,6 +452,12 @@ machine — not the path to 1.0.
 | [v0.85.0](roadmap/v0.85.0.md) | Scheduler & Resource Resilience Gate: authoritative worker limits and race-free tokens, database-scoped pause/health state, persistent drain, enforceable refresh deadlines, complete self-healing/error accounting, bounded queue/catalog maintenance, scheduler-safe metrics/alerts, API resource ceilings and real fuzz/property assurance | "Can I trust this table?" | Planned | Large | [Full details](roadmap/v0.85.0.md) |
 | [v0.86.0](roadmap/v0.86.0.md) | Product UX & Transparency: pgtrickle.explain() reporting refresh mode, estimated changed rows, dominant cost, expected refresh time, current lag, next refresh and FULL fallback threshold in human terms (UX-2), machine-readable "why did AUTO choose FULL?" reason codes on every FULL path (UX-3), creation-time warnings with HINTs for always-FULL queries, cost exceeding the refresh interval, RLS, missing replica identity and excessive write overhead (UX-4), pg_stat_pgtrickle statistics view (UX-5), opt-in lag and refresh-mode annotations in EXPLAIN output (UX-6), and target_freshness accepted, stored, reported and feasibility-checked four releases before the controller has to honour it (UX-7) | "I understand what pg_trickle is doing." | ✅ Implemented | Large | [Full details](roadmap/v0.86.0.md) |
 | [v0.87.0](roadmap/v0.87.0.md) | Low-Impact Refresh: pipelined refresh execution streaming delta rows through a cursor with per-batch MERGE, superseding the v0.81.0 chunked MERGE (LOW-1), cheaper capture via statement-level batching, capture-time column pruning and trigger short-circuit for paused consumers (LOW-2), load-aware deferral, refresh spike smoothing and bounded concurrency extending the v0.85.0 deadline machinery (LOW-4), a single memory_budget_mb bounding every accumulation point (LOW-5), and a published pgbench overhead benchmark wired into CI as a blocking regression gate (LOW-6). The shared-memory change buffer ring (LOW-3) is deferred past 1.0 | "Keeping views fresh won't hurt my application." | ✅ Implemented | Large | [Full details](roadmap/v0.87.0.md) |
+| [v0.87.1](roadmap/v0.87.1.md) | Correctness Oracle Hardening: one exact schema and multiset oracle, fail-closed outcomes, effective-mode assertions, and #938/#939 sensitivity controls | "A wrong result cannot pass as a count, skip, or fallback." | Planned | 6-7 pw | [Full details](roadmap/v0.87.1.md) |
+| [v0.87.2](roadmap/v0.87.2.md) | Deterministic Reproduction and Regression Corpus: versioned scenarios, one-command replay, complete failure artifacts, and permanent #938/#939 cases | "Every correctness failure can be replayed exactly." | Planned | 6-7 pw | [Full details](roadmap/v0.87.2.md) |
+| [v0.87.3](roadmap/v0.87.3.md) | Composition-Aware Differential Testing: mandatory high-risk combinations, a typed Wave A query model, and deterministic P0 pairwise coverage | "Tests cover operator combinations, not only isolated features." | Planned | 7-8 pw | [Full details](roadmap/v0.87.3.md) |
+| [v0.87.4](roadmap/v0.87.4.md) | Stateful and Metamorphic Correctness: directed boundary transitions, simultaneous multi-source histories, and equivalent query and mutation paths | "Equivalent queries and mutation histories stay equivalent." | Planned | 7-8 pw | [Full details](roadmap/v0.87.4.md) |
+| [v0.87.5](roadmap/v0.87.5.md) | DVM Correctness Contracts and Semantic Coverage: typed relation schemas, structured snapshot plans, decision traces, and observed-path coverage floors | "The DVM checks and reports the assumptions behind each delta." | Planned | 7-8 pw | [Full details](roadmap/v0.87.5.md) |
+| [v0.87.6](roadmap/v0.87.6.md) | Deep Fuzzing, Shrinking, and Release Gate: automatic minimization, coverage-selected corpus retention, tiered deep jobs, and active negative controls | "Known differential defect classes cannot return unnoticed." | Planned | 6-8 pw | [Full details](roadmap/v0.87.6.md) |
 | [v0.88.0](roadmap/v0.88.0.md) | Vectorized Aggregates & Delta Planning: DiffContext decomposition into CdcContext/CacheContext/OptimizationContext first (ENG-1), a vectorized columnar path for pure-aggregate stream tables gated on an ADR that revisits the v0.76.0 Arrow dependency removal (MT-8), and cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.88.0.md) |
 | [v0.89.0](roadmap/v0.89.0.md) | Incremental Window Functions: a bounded, crash-safe auxiliary state model (LT-7a), rank-family algorithms (LT-7b), offset and boundary algorithms (LT-7c), aggregate-over-window algorithms (LT-7d), and documented fallback with reason codes and support-matrix entries for uncovered frames (LT-7e) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.89.0.md) |
 | [v0.90.0](roadmap/v0.90.0.md) | Freshness Controller & Self-Tuning: target_freshness becomes authoritative with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), continuous infeasible-SLA detection (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.90.0.md) |
@@ -466,12 +479,10 @@ GA and pgrx's PG 19 support are outside this project's control, and holding the
 stability contract for finished PG 18 work hostage to someone else's schedule
 is not a plan.
 
-> **On the version count.** The unreleased part of this arc grew from ten
-> planned releases to twelve. No new scope was invented: four patch-numbered
-> gates became minor releases, and two releases that each contained two
-> independent programmes (the engine work, and production polish) were split.
-> Twelve honestly sized releases are a more realistic plan than ten that hide
-> their size.
+> **On the version count.** The six v0.87.x correctness releases add about 42
+> person-weeks before v0.88.0. They do not add SQL features. They build the
+> oracle, generation, contracts, corpus, and release gates that must protect
+> later DVM changes.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
@@ -620,6 +631,8 @@ v0.85    ─── Scheduler & resource resilience gate: worker caps, database s
 v0.86    ─── Product UX & transparency: pgtrickle.explain(), FULL-reason codes, creation-time warnings, pg_stat_pgtrickle, target_freshness accepted
     │
 v0.87    ─── Low-impact refresh: pipelined execution (supersedes chunked MERGE), cheaper capture, backpressure, memory budget, overhead benchmark gate
+    │
+v0.87.1-6 ─── DVM correctness program: exact oracle, replay corpus, composition and state testing, contracts, shrinking, release gate
     │
 v0.88    ─── Vectorized aggregates & delta planning: DiffContext split first, columnar aggregate path behind a dependency ADR, cost-based operator scheduling
     │
@@ -982,10 +995,13 @@ controller has to honour it. v0.87.0 makes pg_trickle nearly invisible to OLTP:
 pipelined refresh execution replacing the v0.81.0 chunked MERGE, cheaper capture
 on the write path, backpressure that yields to the application, a single memory
 budget, and a published write-overhead benchmark enforced as a CI gate. v0.88.0
-and v0.89.0 are where deep complexity is justified, because all of it is inside
-the engine — a vectorized aggregate path and cost-based delta planning first,
-then genuinely incremental window-function algorithms, with no change to
-deployment or API.
+does not start immediately after that work. v0.87.1 through v0.87.6 make wrong
+results impossible to hide behind counts, skips, or fallback, preserve every
+failure as a replayable scenario, exercise operator compositions and stateful
+histories, add explicit DVM schema and snapshot contracts, and enforce the
+result in CI. v0.88.0 and v0.89.0 then change engine internals: a vectorized
+aggregate path and cost-based delta planning first, followed by incremental
+window-function algorithms, with no deployment or API change.
 
 v0.90.0 makes freshness authoritative: the closed-loop controller derives the
 schedule, the DIFFERENTIAL/FULL decision, batch sizes, concurrency and priority
