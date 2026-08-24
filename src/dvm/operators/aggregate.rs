@@ -808,7 +808,8 @@ FROM {new_rescan_cte} n",
 
         Ok(DiffResult {
             cte_name: final_cte,
-            columns: output_cols,
+            columns: output_cols.clone(),
+            schema: crate::dvm::schema::RelationSchema::from_names(&output_cols).mark_internal(),
             is_deduplicated: false,
             has_key_changed: false,
         })
@@ -944,7 +945,8 @@ FROM {new_rescan_cte} n",
 
         Ok(DiffResult {
             cte_name: final_cte,
-            columns: output_cols,
+            columns: output_cols.clone(),
+            schema: crate::dvm::schema::RelationSchema::from_names(&output_cols).mark_internal(),
             is_deduplicated: false,
             has_key_changed: false,
         })
@@ -2289,7 +2291,8 @@ WHERE m.__pgt_meta_action IN ('I', 'D')
 
     Ok(DiffResult {
         cte_name: final_cte,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema: crate::dvm::schema::RelationSchema::from_names(&output_cols).mark_internal(),
         is_deduplicated: true,
         has_key_changed: false,
     })

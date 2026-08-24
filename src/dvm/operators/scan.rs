@@ -184,6 +184,7 @@ FROM {new_table}",
     Ok(DiffResult {
         cte_name,
         columns: col_names,
+        schema: crate::dvm::schema::RelationSchema::from_parser_columns(columns),
         is_deduplicated,
         has_key_changed: false,
     })
@@ -515,6 +516,7 @@ CROSS JOIN generate_series(1, -sub.net_count) gs",
         return Ok(DiffResult {
             cte_name,
             columns: col_names,
+            schema: crate::dvm::schema::RelationSchema::from_parser_columns(columns),
             is_deduplicated: false,
             has_key_changed: false,
         });
@@ -730,6 +732,7 @@ FROM (
     Ok(DiffResult {
         cte_name,
         columns: col_names,
+        schema: crate::dvm::schema::RelationSchema::from_parser_columns(columns),
         is_deduplicated,
         has_key_changed: key_change_expr.is_some(),
     })

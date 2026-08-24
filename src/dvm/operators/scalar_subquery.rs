@@ -226,7 +226,12 @@ WHERE (SELECT has_changes FROM {gate_cte})
 
     Ok(DiffResult {
         cte_name,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema: child_result
+            .schema
+            .concat(&crate::dvm::schema::RelationSchema::from_names(
+                std::slice::from_ref(alias),
+            )),
         is_deduplicated: false,
         has_key_changed: false,
     })

@@ -528,7 +528,8 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
 
     Ok(DiffResult {
         cte_name: final_cte,
-        columns: all_output_cols,
+        columns: all_output_cols.clone(),
+        schema: crate::dvm::schema::RelationSchema::from_names(&all_output_cols).mark_internal(),
         is_deduplicated: false,
         has_key_changed: false,
     })

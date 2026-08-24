@@ -112,7 +112,8 @@ WHERE old_count > 0 AND new_count > 0 AND new_count != old_count",
 
     Ok(DiffResult {
         cte_name: final_cte,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema: child_result.schema.with_internal("__pgt_count", 20),
         is_deduplicated: false,
         has_key_changed: false,
     })

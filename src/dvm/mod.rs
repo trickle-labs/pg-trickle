@@ -54,6 +54,8 @@ pub mod diff;
 pub mod operators;
 pub mod parser;
 pub mod row_id;
+pub mod schema;
+pub mod snapshot;
 
 pub use diff::DiffContext;
 pub use parser::{

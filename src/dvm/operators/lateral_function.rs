@@ -169,7 +169,12 @@ pub fn diff_lateral_function(
 
     Ok(DiffResult {
         cte_name: final_cte,
-        columns: all_output_cols,
+        columns: all_output_cols.clone(),
+        schema: child_result
+            .schema
+            .concat(&crate::dvm::schema::RelationSchema::from_names(
+                &srf_cols_with_ord,
+            )),
         is_deduplicated: false,
         has_key_changed: false,
     })

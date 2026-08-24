@@ -12,6 +12,7 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::scan::build_hash_expr;
 use crate::dvm::parser::OpTree;
+use crate::dvm::schema::validate_set_operation;
 use crate::error::PgTrickleError;
 
 /// Differentiate an Intersect node.
@@ -28,6 +29,7 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Differentiate both children
     let left_result = ctx.diff_node(left)?;
     let right_result = ctx.diff_node(right)?;
+    validate_set_operation("INTERSECT", &left_result.schema, &right_result.schema)?;
 
     let cols = &left_result.columns;
     let col_refs: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
@@ -157,10 +159,16 @@ WHERE LEAST(old_count_l, old_count_r) > 0
     let mut output_cols = cols.clone();
     output_cols.push("__pgt_count_l".to_string());
     output_cols.push("__pgt_count_r".to_string());
+    let schema = left_result
+        .schema
+        .clone()
+        .with_internal("__pgt_count_l", 20)
+        .with_internal("__pgt_count_r", 20);
 
     Ok(DiffResult {
         cte_name: final_cte,
         columns: output_cols,
+        schema,
         is_deduplicated: false,
         has_key_changed: false,
     })

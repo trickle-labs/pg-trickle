@@ -655,9 +655,23 @@ JOIN {delta_right} dr ON {join_cond_part2}{correction_sql}",
 
     ctx.add_cte(cte_name.clone(), sql);
 
+    let left_output_cols: Vec<String> = left_cols
+        .iter()
+        .map(|column| format!("{left_prefix}__{column}"))
+        .collect();
+    let right_output_cols: Vec<String> = right_cols
+        .iter()
+        .map(|column| format!("{right_prefix}__{column}"))
+        .collect();
+    let schema = left_result
+        .schema
+        .renamed(&left_output_cols)
+        .concat(&right_result.schema.renamed(&right_output_cols));
+
     Ok(DiffResult {
         cte_name,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema,
         is_deduplicated: false,
         has_key_changed: false,
     })

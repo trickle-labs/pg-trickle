@@ -877,9 +877,24 @@ WHERE (SELECT has_del FROM {left_flags_cte})
 
     ctx.add_cte(cte_name.clone(), sql);
 
+    let left_output_cols: Vec<String> = left_cols
+        .iter()
+        .map(|column| format!("{left_prefix}__{column}"))
+        .collect();
+    let right_output_cols: Vec<String> = right_cols
+        .iter()
+        .map(|column| format!("{right_prefix}__{column}"))
+        .collect();
+    let schema = left_result
+        .schema
+        .renamed(&left_output_cols)
+        .nullable()
+        .concat(&right_result.schema.renamed(&right_output_cols).nullable());
+
     Ok(DiffResult {
         cte_name,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema,
         is_deduplicated: false,
         has_key_changed: false,
     })

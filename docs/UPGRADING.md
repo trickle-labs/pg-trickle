@@ -2,6 +2,13 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.4 → 0.87.5
+
+v0.87.5 makes no catalog or SQL API changes. Install the new extension files
+and run ALTER EXTENSION pg_trickle UPDATE; the migration is intentionally empty
+because this release adds DVM schema contracts, structured snapshot planning,
+decision tracing, and semantic coverage checks.
+
 ## 0.87.3 → 0.87.4
 
 v0.87.4 makes no catalog or SQL API changes. Install the new extension files

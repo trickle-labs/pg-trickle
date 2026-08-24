@@ -47,6 +47,7 @@ pub mod dag;
 pub(crate) mod diagnostics;
 #[allow(dead_code)]
 pub mod dvm;
+pub mod dvm_trace;
 pub mod error;
 #[cfg(feature = "pg18")]
 #[allow(dead_code)]
