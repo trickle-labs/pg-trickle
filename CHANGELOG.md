@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.4 — Stateful and Metamorphic Correctness](#0874--stateful-and-metamorphic-correctness)
 - [0.87.3 — Composition-Aware Differential Testing](#0873--composition-aware-differential-testing)
 - [0.87.2 — Deterministic Reproduction and Regression Corpus](#0872--deterministic-reproduction-and-regression-corpus)
 - [0.87.1 — Correctness Oracle Hardening](#0871--correctness-oracle-hardening)
@@ -133,6 +134,32 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.4] — Stateful and Metamorphic Correctness
+
+v0.87.4 drives the DVM correctness suite through meaningful state boundaries
+and compares equivalent mutation histories.
+
+- Added a deterministic state-directed mutation planner for group creation and
+  removal, aggregate winner replacement, join-match transitions, key movement,
+  NULL transitions, and unused-column changes.
+- Added explicit one-source, two-source, and all-source cycle coverage with
+  affected-leaf and mutation-intent metadata.
+- Added metamorphic families for refresh batching, UPDATE decomposition, query
+  wrappers and aliases, irrelevant-column widening, join reordering, projection
+  placement, idempotence, no-op changes, and mutation ordering.
+- Added an exact-oracle batching regression covering simultaneous changes to
+  both aggregate leaves.
+
+No extension catalog or SQL API changes were made in this release.
+
+## Upgrade
+
+Run ALTER EXTENSION pg_trickle UPDATE after installing the v0.87.4 files. The
+upgrade migration is intentionally empty because this release changes the DVM
+correctness test tooling only.
 
 ---
 
