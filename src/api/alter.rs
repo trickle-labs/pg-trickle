@@ -744,6 +744,12 @@ fn alter_stream_table_query(
                 reason
             );
 
+            // SECURITY DEFINER recreation would otherwise leave the new
+            // storage table owned by the extension owner. Preserve the exact
+            // prior relowner (which can differ from the outer caller when the
+            // caller is a member of the owning role).
+            let storage_owner = relation_owner_name(st.pgt_relid)?;
+
             // Detach pgt_relid before DROP so the sql_drop event trigger
             // does not recognise the table as ST storage and delete the
             // catalog row.
@@ -766,7 +772,7 @@ fn alter_stream_table_query(
 
             // Recreate with new schema
             let storage_needs_pgt_count = vq.needs_pgt_count || vq.needs_union_dedup;
-            setup_storage_table(
+            let new_pgt_relid = setup_storage_table(
                 schema,
                 table_name,
                 &vq.columns,
@@ -782,7 +788,9 @@ fn alter_stream_table_query(
                 &vq.statistical_aux_types,
                 st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
                 st.storage_fillfactor,          // HOT-1: preserve fillfactor
-            )?
+            )?;
+            transfer_output_table_ownership_to(schema, table_name, &storage_owner)?;
+            new_pgt_relid
         }
     };
 
@@ -1103,6 +1111,9 @@ fn alter_stream_table_partition_key(
          The storage table will be recreated and a full refresh applied."
     );
 
+    // Preserve the existing relowner across SECURITY DEFINER recreation.
+    let storage_owner = relation_owner_name(st.pgt_relid)?;
+
     // Detach pgt_relid so the sql_drop event trigger does not delete the
     // catalog row when we drop the old table.
     Spi::run_with_args(
@@ -1148,6 +1159,7 @@ fn alter_stream_table_partition_key(
         new_partition_key,
         st.storage_fillfactor, // HOT-1: preserve fillfactor
     )?;
+    transfer_output_table_ownership_to(schema, table_name, &storage_owner)?;
 
     // Update catalog: new relid + new partition key.
     Spi::run_with_args(
@@ -1858,6 +1870,7 @@ fn alter_stream_table(
         post_refresh_action,
         reindex_drift_threshold,
         target_freshness,
+        search_path_source: SearchPathSource::SecurityDefinerCaller,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -1870,6 +1883,15 @@ fn alter_stream_table(
 /// pattern and eliminates `#[allow(clippy::too_many_arguments)]` from the
 /// business-logic function.  The pg_extern wrapper retains individual parameters
 /// as required by pgrx.
+#[derive(Debug, Default)]
+pub(crate) enum SearchPathSource {
+    /// The API runs with the invoker's path still active.
+    #[default]
+    Current,
+    /// PostgreSQL pinned the API's definer path and saved the caller's value.
+    SecurityDefinerCaller,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AlterStreamTableOptions<'a> {
     pub(crate) name: &'a str,
@@ -1895,6 +1917,8 @@ pub(crate) struct AlterStreamTableOptions<'a> {
     pub(crate) reindex_drift_threshold: Option<f64>,
     /// v0.86.0: declared freshness target.
     pub(crate) target_freshness: Option<&'a str>,
+    /// Selects how the caller's effective search path is captured.
+    pub(crate) search_path_source: SearchPathSource,
 }
 
 pub(crate) fn alter_stream_table_impl(
@@ -1921,6 +1945,7 @@ pub(crate) fn alter_stream_table_impl(
         post_refresh_action,
         reindex_drift_threshold,
         target_freshness,
+        search_path_source,
     } = opts;
     if let Some(value) = max_differential_joins {
         validation::nonnegative_i32("max_differential_joins", i64::from(value))?;
@@ -1955,16 +1980,14 @@ pub(crate) fn alter_stream_table_impl(
 
     // SEC-1: Ownership check — only the owner (or superuser) can alter.
     check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
-    // SEC-1: captured once and threaded through every place below that
-    // resolves caller-supplied, unqualified SQL (a new query, or replaying
-    // the stored defining query for a full refresh) — this call is cheap
-    // (a role-name lookup) and safe to make unconditionally regardless of
-    // whether we were reached through a SECURITY DEFINER wrapper
-    // (alter_stream_table, create_or_replace_stream_table) or the plain
-    // SECURITY INVOKER bulk path (bulk_alter_stream_tables_impl), since
-    // with_invoker_search_path now restores whatever was actually active
-    // beforehand rather than assuming a SECURITY DEFINER context.
-    let invoker_search_path = invoker_search_path()?;
+    // SEC-1: capture once and thread the path through every place below that
+    // resolves caller-supplied, unqualified SQL. SECURITY DEFINER entry points
+    // recover the caller's exact value from PostgreSQL's function GUC stack;
+    // invoker entry points can read their still-active value directly.
+    let invoker_search_path = match search_path_source {
+        SearchPathSource::Current => current_search_path()?,
+        SearchPathSource::SecurityDefinerCaller => invoker_search_path()?,
+    };
 
     if let Some(raw_target) = target_freshness {
         if schedule.is_some() {
@@ -2531,9 +2554,9 @@ pub(crate) fn alter_stream_table_impl(
 /// prevent accidental cascading drops.
 /// SEC-1: `security_definer` — `drop_stream_table_impl_inner` already
 /// re-derives the true caller via `outer_user_id()` and enforces
-/// `check_stream_table_ownership` (including on each cascaded target) before
-/// dropping anything, so this only needed the attribute + pinned
-/// `search_path` to close the same lifecycle gap fixed on
+/// `check_stream_table_ownership` on the root and every cascaded target before
+/// dropping it, so this only needed the attribute + pinned `search_path` to
+/// close the same lifecycle gap fixed on
 /// `create_or_replace_stream_table`.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
@@ -2674,12 +2697,10 @@ fn drop_stream_table_impl_inner(
         return Ok(());
     }
 
-    // SEC-1: Ownership check — only the owner (or superuser) can drop.
-    // Only enforce on the top-level call (visited_pgt_ids has exactly 1 entry);
-    // cascaded drops inherit the permission from the top-level check.
-    if visited_pgt_ids.len() == 1 {
-        check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
-    }
+    // SEC-1: Ownership check — only the owner (or superuser) can drop each
+    // stream table. A SECURITY DEFINER cascade must not inherit the root's
+    // authorization for a differently owned downstream stream table.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
     // CASCADE: drop all stream tables that depend on this one first.
     // `get_downstream_pgt_ids` finds STs whose defining queries read from

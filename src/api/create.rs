@@ -3,7 +3,7 @@
 // All shared helpers, types, and utilities are in api/mod.rs (use super::*).
 
 use super::alter::{
-    AlterStreamTableOptions, CreateStreamTableOptions, alter_stream_table_impl,
+    AlterStreamTableOptions, CreateStreamTableOptions, SearchPathSource, alter_stream_table_impl,
     create_stream_table_impl,
 };
 use super::*;
@@ -646,6 +646,7 @@ fn create_or_replace_stream_table_impl(
                     pooler_compatibility_mode: config_diff.pooler_compatibility_mode,
                     max_differential_joins,
                     max_delta_fraction,
+                    search_path_source: SearchPathSource::SecurityDefinerCaller,
                     ..Default::default()
                 })?;
 
