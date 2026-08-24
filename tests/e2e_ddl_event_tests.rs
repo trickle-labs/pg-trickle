@@ -429,6 +429,49 @@ async fn test_add_column_unused_st_survives_refresh() {
         .await;
 }
 
+#[tokio::test]
+async fn test_add_column_unused_immediate_st_stays_functional() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE ddl_add_imm_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO ddl_add_imm_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "ddl_add_imm_st",
+        "SELECT id, val FROM ddl_add_imm_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    db.execute_seq(&[
+        "SET pg_trickle.block_source_ddl = false",
+        "ALTER TABLE ddl_add_imm_src ADD COLUMN extra TEXT DEFAULT 'unused'",
+        "SET pg_trickle.block_source_ddl = true",
+    ])
+    .await;
+    db.execute("UPDATE ddl_add_imm_src SET val = 20 WHERE id = 1")
+        .await;
+
+    db.assert_st_matches_query(
+        "public.ddl_add_imm_st",
+        "SELECT id, val FROM ddl_add_imm_src",
+    )
+    .await;
+
+    let source_oid = db.table_oid("ddl_add_imm_src").await;
+    let buffer_exists: bool = db
+        .query_scalar(&format!(
+            "SELECT to_regclass('pgtrickle_changes.changes_{source_oid}') IS NOT NULL"
+        ))
+        .await;
+    assert!(
+        !buffer_exists,
+        "IMMEDIATE source DDL must not create a CDC change buffer"
+    );
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // B2 — DROP COLUMN not referenced in query → ST remains functional
 // ══════════════════════════════════════════════════════════════════════
