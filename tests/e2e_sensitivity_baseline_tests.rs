@@ -127,6 +127,39 @@ async fn test_oracle_detects_schema_mismatch() {
     );
 }
 
+#[tokio::test]
+async fn test_oracle_detects_incompatible_type_mismatch() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE oracle_type_st (id INT PRIMARY KEY, payload INT)",
+        "CREATE TABLE oracle_type_exp (id INT PRIMARY KEY, payload TEXT)",
+        "INSERT INTO oracle_type_st VALUES (1, 100)",
+        "INSERT INTO oracle_type_exp VALUES (1, '100')",
+    ])
+    .await;
+
+    let diff_result = oracle::compare_st_to_query(
+        &db,
+        "oracle_type_st",
+        "SELECT id, payload FROM oracle_type_exp",
+    )
+    .await;
+
+    assert!(
+        diff_result.is_err(),
+        "Oracle must detect incompatible column type mismatch (INT vs TEXT)"
+    );
+
+    let diff = diff_result.unwrap_err();
+    assert!(diff.schema_mismatch.is_some());
+    let mismatch = diff.schema_mismatch.unwrap();
+    assert!(
+        mismatch.contains("incompatible type OID"),
+        "Got: {mismatch}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  2. Issue #938 / #939 Sensitivity Baseline Reproductions
 // ═══════════════════════════════════════════════════════════════════════════

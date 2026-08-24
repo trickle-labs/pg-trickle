@@ -274,9 +274,9 @@ pub fn compare_signatures(
         .zip(expected.columns.iter())
         .enumerate()
     {
-        if act.type_oid != exp.type_oid && act.type_oid != 0 && exp.type_oid != 0 {
+        if !is_type_compatible(act.type_oid, exp.type_oid) {
             return Err(format!(
-                "Column {} ('{}' vs '{}') type OID mismatch: actual={}, expected={}",
+                "Column {} ('{}' vs '{}') incompatible type OID: actual={}, expected={}",
                 i + 1,
                 act.name,
                 exp.name,
@@ -287,6 +287,39 @@ pub fn compare_signatures(
     }
 
     Ok(())
+}
+
+/// Check if two PostgreSQL type OIDs are compatible for query comparison.
+pub fn is_type_compatible(act_oid: u32, exp_oid: u32) -> bool {
+    if act_oid == exp_oid || act_oid == 0 || exp_oid == 0 {
+        return true;
+    }
+    // Integer family (int2=21, int4=23, int8=20, oid=26)
+    let is_int = |oid| matches!(oid, 20 | 21 | 23 | 26);
+    if is_int(act_oid) && is_int(exp_oid) {
+        return true;
+    }
+    // String family (text=25, varchar=1043, bpchar=1042, name=19)
+    let is_str = |oid| matches!(oid, 19 | 25 | 1042 | 1043);
+    if is_str(act_oid) && is_str(exp_oid) {
+        return true;
+    }
+    // Floating-point / numeric family (float4=700, float8=701, numeric=1700)
+    let is_num = |oid| matches!(oid, 700 | 701 | 1700);
+    if (is_int(act_oid) || is_num(act_oid)) && (is_int(exp_oid) || is_num(exp_oid)) {
+        return true;
+    }
+    // Timestamp family (timestamp=1114, timestamptz=1184)
+    let is_ts = |oid| matches!(oid, 1114 | 1184);
+    if is_ts(act_oid) && is_ts(exp_oid) {
+        return true;
+    }
+    // JSON family (json=114, jsonb=3802)
+    let is_json = |oid| matches!(oid, 114 | 3802);
+    if is_json(act_oid) && is_json(exp_oid) {
+        return true;
+    }
+    false
 }
 
 /// Compare a stream table's content and schema against a defining query.
@@ -305,10 +338,8 @@ pub async fn compare_st_to_query(
 
     let schema_mismatch = compare_signatures(&actual_sig, &expected_sig).err();
 
-    // If columns could not be fetched or arity mismatch, build early diff
-    if let Some(ref mismatch) = schema_mismatch
-        && actual_sig.columns.len() != expected_sig.columns.len()
-    {
+    // If there is any schema mismatch (arity or incompatible type), build early diff
+    if let Some(ref mismatch) = schema_mismatch {
         let actual_count: i64 = db
             .query_scalar_opt(&format!("SELECT count(*) FROM {st_table}"))
             .await
@@ -470,6 +501,28 @@ pub async fn compare_sts(db: &E2eDb, left_st: &str, right_st: &str) -> Result<()
         .unwrap_or_else(|e| panic!("Failed to fetch signature for right ST '{right_st}': {e}"));
 
     let schema_mismatch = compare_signatures(&left_sig, &right_sig).err();
+    if let Some(ref mismatch) = schema_mismatch {
+        let left_count: i64 = db
+            .query_scalar_opt(&format!("SELECT count(*) FROM {left_st}"))
+            .await
+            .unwrap_or(0);
+        let right_count: i64 = db
+            .query_scalar_opt(&format!("SELECT count(*) FROM {right_st}"))
+            .await
+            .unwrap_or(0);
+
+        return Err(RelationDiff {
+            actual_count: left_count,
+            expected_count: right_count,
+            extra_count: -1,
+            missing_count: -1,
+            extra_rows: vec![],
+            missing_rows: vec![],
+            schema_mismatch: Some(mismatch.clone()),
+            actual_signature: left_sig,
+            expected_signature: right_sig,
+        });
+    }
 
     let select_cols = if left_sig.columns.is_empty() {
         "*".to_string()
