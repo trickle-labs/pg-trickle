@@ -60,14 +60,40 @@ pub(super) fn transfer_output_table_ownership(
     table_name: &str,
 ) -> Result<(), PgTrickleError> {
     let invoker_name = outer_user_name()?;
+    transfer_output_table_ownership_to(schema, table_name, &invoker_name)
+}
+
+/// Make a recreated stream table belong to its previous owner.
+pub(super) fn transfer_output_table_ownership_to(
+    schema: &str,
+    table_name: &str,
+    owner_name: &str,
+) -> Result<(), PgTrickleError> {
     let sql = format!(
         "ALTER TABLE {}.{} OWNER TO {}",
         quote_identifier(schema),
         quote_identifier(table_name),
-        quote_identifier(&invoker_name),
+        quote_identifier(owner_name),
     );
     Spi::run(&sql).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to transfer stream table ownership: {e}"))
+    })
+}
+
+/// Resolve a relation owner's role name before destructive storage recreation.
+pub(super) fn relation_owner_name(relid: pg_sys::Oid) -> Result<String, PgTrickleError> {
+    Spi::get_one_with_args::<String>(
+        "SELECT r.rolname::text \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_roles r ON r.oid = c.relowner \
+         WHERE c.oid = $1",
+        &[relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::NotFound(format!(
+            "owner for stream table relation with OID {relid} not found"
+        ))
     })
 }
 
@@ -89,18 +115,147 @@ pub(crate) fn outer_user_id() -> pg_sys::Oid {
     }
 }
 
-/// Construct PostgreSQL's standard caller search path for a SECURITY DEFINER API.
+/// Recover the caller's effective `search_path` for a SECURITY DEFINER API.
+///
+/// PostgreSQL applies a function's `SET search_path` option with
+/// `GUC_ACTION_SAVE`. The top `search_path` GUC stack entry therefore retains
+/// the exact value that was active immediately before the pinned definer path
+/// was installed, including session-level `SET search_path` customizations.
+/// Reading that saved value avoids inventing a `<role>, public` path that may
+/// resolve an unqualified relation differently from the caller's statement.
+/// The special `"$user"` entry is expanded to the outer role before the path
+/// is re-applied under the definer identity, preserving its caller-side
+/// meaning as well.
 pub(super) fn invoker_search_path() -> Result<String, PgTrickleError> {
-    Ok(format!("{}, public", quote_identifier(&outer_user_name()?)))
+    let saved = unsafe {
+        // SAFETY: `find_option` returns PostgreSQL's backend-owned permanent
+        // GUC record for `search_path`. A pg_extern call runs on the backend's
+        // main thread, and the function-level GUC stack entry remains alive
+        // until `fmgr_security_definer` returns after this Rust call.
+        let option = pg_sys::find_option(
+            c"search_path".as_ptr(),
+            false,
+            false,
+            pgrx::PgLogLevel::ERROR as i32,
+        );
+        if option.is_null() || (*option).vartype != pg_sys::config_type::PGC_STRING {
+            return Err(PgTrickleError::InternalError(
+                "PostgreSQL search_path GUC record is unavailable".to_string(),
+            ));
+        }
+
+        let stack = (*option).stack;
+        if stack.is_null() || (*stack).state != pg_sys::GucStackState::GUC_SAVE {
+            return Err(PgTrickleError::InternalError(
+                "definer search_path did not retain its caller value".to_string(),
+            ));
+        }
+
+        let saved = (*stack).prior.val.stringval;
+        if saved.is_null() {
+            return Err(PgTrickleError::InternalError(
+                "definer caller search_path is unavailable".to_string(),
+            ));
+        }
+
+        std::ffi::CStr::from_ptr(saved)
+            .to_str()
+            .map(str::to_owned)
+            .map_err(|e| {
+                PgTrickleError::InternalError(format!(
+                    "definer caller search_path is not valid UTF-8: {e}"
+                ))
+            })?
+    };
+
+    let invoker_name = outer_user_name()?;
+    Ok(expand_search_path_user(&saved, &invoker_name))
+}
+
+/// Replace a standalone `"$user"` search-path entry with the quoted caller.
+///
+/// Commas inside quoted identifiers are ignored. Other entries retain their
+/// original spelling and whitespace so a custom path round-trips unchanged.
+fn expand_search_path_user(search_path: &str, user_name: &str) -> String {
+    let quoted_user = quote_identifier(user_name);
+    let mut expanded = String::with_capacity(search_path.len() + quoted_user.len());
+    let mut segment_start = 0;
+    let mut in_quotes = false;
+    let mut chars = search_path.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek().is_some_and(|(_, next)| *next == '"') => {
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                append_expanded_search_path_segment(
+                    &mut expanded,
+                    &search_path[segment_start..index],
+                    &quoted_user,
+                );
+                expanded.push(',');
+                segment_start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    append_expanded_search_path_segment(&mut expanded, &search_path[segment_start..], &quoted_user);
+    expanded
+}
+
+fn append_expanded_search_path_segment(output: &mut String, segment: &str, quoted_user: &str) {
+    let trimmed = segment.trim();
+    if trimmed == "\"$user\"" {
+        let leading_whitespace = segment.len() - segment.trim_start().len();
+        let trailing_start = segment.trim_end().len();
+        output.push_str(&segment[..leading_whitespace]);
+        output.push_str(quoted_user);
+        output.push_str(&segment[trailing_start..]);
+    } else {
+        output.push_str(segment);
+    }
+}
+
+/// Read the effective search path of a SECURITY INVOKER entry point.
+pub(super) fn current_search_path() -> Result<String, PgTrickleError> {
+    Spi::get_one::<String>("SELECT current_setting('search_path')")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| {
+            PgTrickleError::InternalError("current search_path is unavailable".to_string())
+        })
 }
 
 /// Run caller-controlled SQL with a captured invoker search path, restoring
-/// the locked SECURITY DEFINER path afterwards.
+/// whatever search path was actually active beforehand.
+///
+/// SEC-1: this used to unconditionally restore the hardcoded SECURITY
+/// DEFINER pin (`pgtrickle, pg_catalog, pg_temp`), which was safe as long as
+/// every caller was itself reached through a SECURITY DEFINER boundary (the
+/// only case that existed at the time — `create_stream_table_impl`'s three
+/// uses). `alter_stream_table_impl` is now reachable through a SECURITY
+/// INVOKER path too (`bulk_alter_stream_tables_impl`, deliberately left
+/// unpatched), which never pins search_path at all — unconditionally
+/// restoring the pin there would leak it into the rest of the caller's
+/// transaction instead of their own ambient search_path. Capturing the
+/// actual prior value keeps every existing (SECURITY DEFINER-only) call
+/// site behaved identically (the active value at that point already *is*
+/// the pin, so restoring it is a no-op) while making this safe to call from
+/// a plain invoker context too.
 pub(super) fn with_invoker_search_path<T>(
     invoker_search_path: &str,
     f: impl FnOnce() -> Result<T, PgTrickleError>,
 ) -> Result<T, PgTrickleError> {
     use std::panic::AssertUnwindSafe;
+
+    let prior_search_path = Spi::get_one::<String>("SELECT current_setting('search_path')")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or_else(|| "pgtrickle, pg_catalog, pg_temp".to_string());
+    let prior_search_path_c = std::ffi::CString::new(prior_search_path).map_err(|e| {
+        PgTrickleError::SpiError(format!("search_path contained an unexpected NUL byte: {e}"))
+    })?;
 
     Spi::run_with_args(
         "SELECT pg_catalog.set_config('search_path', $1, true)",
@@ -115,7 +270,7 @@ pub(super) fn with_invoker_search_path<T>(
             .finally(|| {
                 pg_sys::set_config_option(
                     c"search_path".as_ptr(),
-                    c"pgtrickle, pg_catalog, pg_temp".as_ptr(),
+                    prior_search_path_c.as_ptr(),
                     pg_sys::GucContext::PGC_USERSET,
                     pg_sys::GucSource::PGC_S_SESSION,
                     pg_sys::GucAction::GUC_ACTION_LOCAL,
@@ -3187,6 +3342,30 @@ fn restore_stream_tables_blocked_error() -> PgTrickleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_expand_search_path_user_preserves_custom_path() {
+        assert_eq!(
+            expand_search_path_user("tenant_schema, public", "app_user"),
+            "tenant_schema, public"
+        );
+    }
+
+    #[test]
+    fn test_expand_search_path_user_replaces_standalone_entry() {
+        assert_eq!(
+            expand_search_path_user("  \"$user\" , public", "Mixed\"Role"),
+            "  \"Mixed\"\"Role\" , public"
+        );
+    }
+
+    #[test]
+    fn test_expand_search_path_user_ignores_text_inside_other_quoted_entries() {
+        assert_eq!(
+            expand_search_path_user("\"tenant,$user\", \"foo\"\"$user\"\"bar\"", "app_user"),
+            "\"tenant,$user\", \"foo\"\"$user\"\"bar\""
+        );
+    }
 
     #[test]
     fn test_statistical_auxiliary_products_cast_to_numeric() {

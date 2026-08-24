@@ -3,7 +3,7 @@
 // All shared helpers, types, and utilities are in api/mod.rs (use super::*).
 
 use super::alter::{
-    AlterStreamTableOptions, CreateStreamTableOptions, alter_stream_table_impl,
+    AlterStreamTableOptions, CreateStreamTableOptions, SearchPathSource, alter_stream_table_impl,
     create_stream_table_impl,
 };
 use super::*;
@@ -376,8 +376,23 @@ fn default_true() -> bool {
 ///
 /// This is the declarative API for idempotent deployments (dbt, migrations,
 /// GitOps). Mirrors PostgreSQL's `CREATE OR REPLACE` convention.
+/// SEC-1: `security_definer` — this is the fast-path lifecycle entry point
+/// (the one `dbt-pgtrickle`'s `stream_table` materialization actually calls)
+/// and was previously the only member of the create/alter/drop lifecycle
+/// family left as SECURITY INVOKER, forcing callers to hold direct grants on
+/// the `pgtrickle`/`pgtrickle_changes` catalog objects instead of just EXECUTE
+/// on this function. Safe as a pure attribute change: this function is a thin
+/// dispatcher with no SQL of its own — it delegates entirely to
+/// `create_stream_table_impl` (new table) or `alter_stream_table_impl`
+/// (existing table), both of which already re-derive the true caller via
+/// `outer_user_id()`/`GetOuterUserId()` for their own authorization checks
+/// (`validate_output_schema_create`/`validate_source_access`/
+/// `transfer_output_table_ownership` on the create path,
+/// `check_stream_table_ownership` on the alter path), so those checks keep
+/// gating the real caller regardless of which entry point reached them.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_or_replace_stream_table(
     name: &str,
     query: &str,
@@ -561,71 +576,90 @@ fn create_or_replace_stream_table_impl(
 
     match StreamTableMeta::get_by_name(&schema, &table_name) {
         Ok(existing) => {
-            // Stream table exists — determine what changed.
-            let rw = run_query_rewrite_pipeline(query)?;
-            let new_query_rewritten = rw.query;
+            // SEC-1: wrap the ENTIRE existing-stream-table branch — not just
+            // the query-diff-detection step — under the caller's own
+            // search_path, including the delegated alter_stream_table_impl
+            // call. Several rounds of CI failures each found one more
+            // internal call along this path (query rewrite, TopK detection,
+            // view-soft-dependency extraction, the stored defining query's
+            // own incremental-mode admission check) that parses or resolves
+            // the caller-supplied, unqualified query text — chasing them
+            // piecemeal proved unreliable, so wrap the whole flow instead.
+            // alter_stream_table_impl computes and applies its own
+            // invoker_search_path independently (needed since it's also
+            // reachable through bulk_alter_stream_tables_impl's plain
+            // SECURITY INVOKER path, which this call is not), so nesting
+            // here is redundant but harmless — with_invoker_search_path
+            // restores whatever was actually active beforehand, so nested
+            // calls compose correctly rather than clobbering each other.
+            with_invoker_search_path(&invoker_search_path()?, || {
+                // Stream table exists — determine what changed.
+                let rw = run_query_rewrite_pipeline(query)?;
+                let new_query_rewritten = rw.query;
 
-            // TopK detection: if the new query is TopK, compare against the
-            // base query (ORDER BY/LIMIT stripped) since that's what is stored
-            // in `defining_query`.
-            let topk_info = crate::dvm::detect_topk_pattern(&new_query_rewritten)?;
-            let effective_new_query = match &topk_info {
-                Some(info) => &info.base_query,
-                None => &new_query_rewritten,
-            };
+                // TopK detection: if the new query is TopK, compare against
+                // the base query (ORDER BY/LIMIT stripped) since that's
+                // what is stored in `defining_query`.
+                let topk_info = crate::dvm::detect_topk_pattern(&new_query_rewritten)?;
+                let effective_new_query = match &topk_info {
+                    Some(info) => &info.base_query,
+                    None => &new_query_rewritten,
+                };
 
-            // Normalize whitespace before comparison so cosmetic differences
-            // (extra spaces, newlines, tabs) are treated as no-ops.
-            let query_changed = normalize_sql_whitespace(&existing.defining_query)
-                != normalize_sql_whitespace(effective_new_query);
+                // Normalize whitespace before comparison so cosmetic
+                // differences (extra spaces, newlines, tabs) are no-ops.
+                let query_changed = normalize_sql_whitespace(&existing.defining_query)
+                    != normalize_sql_whitespace(effective_new_query);
 
-            let config_diff = compute_config_diff(
-                &existing,
-                schedule,
-                refresh_mode_str,
-                diamond_consistency,
-                diamond_schedule_policy,
-                cdc_mode,
-                append_only,
-                pooler_compatibility_mode,
-            );
+                let config_diff = compute_config_diff(
+                    &existing,
+                    schedule,
+                    refresh_mode_str,
+                    diamond_consistency,
+                    diamond_schedule_policy,
+                    cdc_mode,
+                    append_only,
+                    pooler_compatibility_mode,
+                );
 
-            if !query_changed && config_diff.is_empty() {
+                if !query_changed && config_diff.is_empty() {
+                    pgrx::info!(
+                        "Stream table {}.{} already exists with identical definition — no changes made.",
+                        schema,
+                        table_name,
+                    );
+                    return Ok(());
+                }
+
+                // Delegate to alter_stream_table_impl with the appropriate
+                // combination of query + config changes.
+                alter_stream_table_impl(AlterStreamTableOptions {
+                    name,
+                    query: if query_changed { Some(query) } else { None },
+                    schedule: config_diff.schedule,
+                    refresh_mode: config_diff.refresh_mode,
+                    status: None, // keep current
+                    diamond_consistency: config_diff.diamond_consistency,
+                    diamond_schedule_policy: config_diff.diamond_schedule_policy,
+                    cdc_mode: config_diff.cdc_mode,
+                    append_only: config_diff.append_only,
+                    pooler_compatibility_mode: config_diff.pooler_compatibility_mode,
+                    max_differential_joins,
+                    max_delta_fraction,
+                    search_path_source: SearchPathSource::SecurityDefinerCaller,
+                    ..Default::default()
+                })?;
+
                 pgrx::info!(
-                    "Stream table {}.{} already exists with identical definition — no changes made.",
+                    "Stream table {}.{} replaced (query_changed={}, config_changed={}).",
                     schema,
                     table_name,
+                    query_changed,
+                    !config_diff.is_empty(),
                 );
-                return Ok(());
-            }
 
-            // Delegate to alter_stream_table_impl with the appropriate
-            // combination of query + config changes.
-            alter_stream_table_impl(AlterStreamTableOptions {
-                name,
-                query: if query_changed { Some(query) } else { None },
-                schedule: config_diff.schedule,
-                refresh_mode: config_diff.refresh_mode,
-                status: None, // keep current
-                diamond_consistency: config_diff.diamond_consistency,
-                diamond_schedule_policy: config_diff.diamond_schedule_policy,
-                cdc_mode: config_diff.cdc_mode,
-                append_only: config_diff.append_only,
-                pooler_compatibility_mode: config_diff.pooler_compatibility_mode,
-                max_differential_joins,
-                max_delta_fraction,
-                ..Default::default()
-            })?;
-
-            pgrx::info!(
-                "Stream table {}.{} replaced (query_changed={}, config_changed={}).",
-                schema,
-                table_name,
-                query_changed,
-                !config_diff.is_empty(),
-            );
-
-            Ok(())
+                Ok(())
+            })
         }
         Err(PgTrickleError::NotFound(_)) => {
             // Does not exist — create from scratch.

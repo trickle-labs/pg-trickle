@@ -610,24 +610,30 @@ fn alter_stream_table_query(
     schema: &str,
     table_name: &str,
     new_query: &str,
+    invoker_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // ── Phase 0: Validate & classify ──
-
-    // Run the full rewrite pipeline on the new query
-    let original_new_query = new_query.to_string();
-    let rw = run_query_rewrite_pipeline(new_query)?;
-    let rewritten_query = rw.query;
 
     // Determine the effective refresh mode — use the ST's current mode
     let mut refresh_mode = st.refresh_mode;
 
-    // Validate and parse the new query
-    let vq = validate_and_parse_query(
-        &rewritten_query,
-        &mut refresh_mode,
-        false,
-        rw.had_nested_window_rewrite,
-    )?;
+    // SEC-1: run the rewrite pipeline and parse/validate the new query under
+    // the caller's own search_path (mirrors create_stream_table_impl), since
+    // this ALTER...query path introduces source-table references of its own
+    // that the top-level check_stream_table_ownership call doesn't cover.
+    let original_new_query = new_query.to_string();
+    let (rw, vq) = with_invoker_search_path(invoker_search_path, || {
+        let rw = run_query_rewrite_pipeline(new_query)?;
+        let vq = validate_and_parse_query(
+            &rw.query,
+            &mut refresh_mode,
+            false,
+            rw.had_nested_window_rewrite,
+        )?;
+        Ok((rw, vq))
+    })?;
+    let rewritten_query = rw.query;
+    validate_source_access(&vq.source_relids)?;
 
     // Cycle detection on the new dependency set (ALTER-aware: replaces
     // the existing ST's edges rather than creating a sentinel node).
@@ -738,6 +744,12 @@ fn alter_stream_table_query(
                 reason
             );
 
+            // SECURITY DEFINER recreation would otherwise leave the new
+            // storage table owned by the extension owner. Preserve the exact
+            // prior relowner (which can differ from the outer caller when the
+            // caller is a member of the owning role).
+            let storage_owner = relation_owner_name(st.pgt_relid)?;
+
             // Detach pgt_relid before DROP so the sql_drop event trigger
             // does not recognise the table as ST storage and delete the
             // catalog row.
@@ -760,7 +772,7 @@ fn alter_stream_table_query(
 
             // Recreate with new schema
             let storage_needs_pgt_count = vq.needs_pgt_count || vq.needs_union_dedup;
-            setup_storage_table(
+            let new_pgt_relid = setup_storage_table(
                 schema,
                 table_name,
                 &vq.columns,
@@ -776,7 +788,9 @@ fn alter_stream_table_query(
                 &vq.statistical_aux_types,
                 st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
                 st.storage_fillfactor,          // HOT-1: preserve fillfactor
-            )?
+            )?;
+            transfer_output_table_ownership_to(schema, table_name, &storage_owner)?;
+            new_pgt_relid
         }
     };
 
@@ -984,8 +998,15 @@ fn alter_stream_table_query(
     }
 
     // Register view soft-dependencies if view inlining was applied
+    //
+    // SEC-1: extract_source_relations re-parses and semantically analyzes
+    // the raw, unrewritten query text (parse_analyze_fixedparams resolves
+    // relation names the same way the rewrite pipeline's own parse does),
+    // so it needs the caller's own search_path too.
     if original_query_opt.is_some()
-        && let Ok(original_sources) = extract_source_relations(&original_new_query)
+        && let Ok(original_sources) = with_invoker_search_path(invoker_search_path, || {
+            extract_source_relations(&original_new_query)
+        })
     {
         for (src_oid, src_type) in &original_sources {
             if src_type == "VIEW" {
@@ -1016,7 +1037,12 @@ fn alter_stream_table_query(
 
     // Re-load ST with updated metadata for the refresh
     let updated_st = StreamTableMeta::get_by_name(schema, table_name)?;
-    execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)?;
+    // SEC-1: the defining query is stored and replayed unqualified, relying
+    // on search_path to resolve source tables — run it under the caller's
+    // own search_path rather than the pinned SECURITY DEFINER one.
+    with_invoker_search_path(invoker_search_path, || {
+        execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)
+    })?;
 
     // ERR-1f: Clear any previous error state now that the query has been fixed
     // and the refresh succeeded. This ensures alter_stream_table with a fixed
@@ -1070,6 +1096,7 @@ fn alter_stream_table_partition_key(
     schema: &str,
     table_name: &str,
     new_partition_key: Option<&str>,
+    invoker_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // Get current storage columns for validation.
     let columns = get_storage_table_columns(schema, table_name)?;
@@ -1083,6 +1110,9 @@ fn alter_stream_table_partition_key(
         "pg_trickle: ALTER partition_by on {schema}.{table_name} requires full storage rebuild. \
          The storage table will be recreated and a full refresh applied."
     );
+
+    // Preserve the existing relowner across SECURITY DEFINER recreation.
+    let storage_owner = relation_owner_name(st.pgt_relid)?;
 
     // Detach pgt_relid so the sql_drop event trigger does not delete the
     // catalog row when we drop the old table.
@@ -1129,6 +1159,7 @@ fn alter_stream_table_partition_key(
         new_partition_key,
         st.storage_fillfactor, // HOT-1: preserve fillfactor
     )?;
+    transfer_output_table_ownership_to(schema, table_name, &storage_owner)?;
 
     // Update catalog: new relid + new partition key.
     Spi::run_with_args(
@@ -1157,7 +1188,10 @@ fn alter_stream_table_partition_key(
         .filter(|d| d.source_type == "TABLE")
         .map(|d| d.source_relid)
         .collect();
-    execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)?;
+    // SEC-1: see alter_stream_table_query's identical comment.
+    with_invoker_search_path(invoker_search_path, || {
+        execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)
+    })?;
 
     pgrx::info!(
         "pg_trickle: partition key for {schema}.{table_name} changed to {}; full refresh applied.",
@@ -1784,8 +1818,14 @@ pub(crate) fn create_stream_table_impl(
 }
 
 /// Alter properties of an existing stream table.
+/// SEC-1: `security_definer` — `alter_stream_table_impl` already re-derives
+/// the true caller via `outer_user_id()` and enforces `check_stream_table_ownership`
+/// (see below) before making any change, so this only needed the attribute +
+/// pinned `search_path` to close the same create/alter/drop lifecycle gap
+/// fixed on `create_or_replace_stream_table`.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn alter_stream_table(
     name: &str,
     query: default!(Option<&str>, "NULL"),
@@ -1830,6 +1870,7 @@ fn alter_stream_table(
         post_refresh_action,
         reindex_drift_threshold,
         target_freshness,
+        search_path_source: SearchPathSource::SecurityDefinerCaller,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -1842,6 +1883,15 @@ fn alter_stream_table(
 /// pattern and eliminates `#[allow(clippy::too_many_arguments)]` from the
 /// business-logic function.  The pg_extern wrapper retains individual parameters
 /// as required by pgrx.
+#[derive(Debug, Default)]
+pub(crate) enum SearchPathSource {
+    /// The API runs with the invoker's path still active.
+    #[default]
+    Current,
+    /// PostgreSQL pinned the API's definer path and saved the caller's value.
+    SecurityDefinerCaller,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AlterStreamTableOptions<'a> {
     pub(crate) name: &'a str,
@@ -1867,6 +1917,8 @@ pub(crate) struct AlterStreamTableOptions<'a> {
     pub(crate) reindex_drift_threshold: Option<f64>,
     /// v0.86.0: declared freshness target.
     pub(crate) target_freshness: Option<&'a str>,
+    /// Selects how the caller's effective search path is captured.
+    pub(crate) search_path_source: SearchPathSource,
 }
 
 pub(crate) fn alter_stream_table_impl(
@@ -1893,6 +1945,7 @@ pub(crate) fn alter_stream_table_impl(
         post_refresh_action,
         reindex_drift_threshold,
         target_freshness,
+        search_path_source,
     } = opts;
     if let Some(value) = max_differential_joins {
         validation::nonnegative_i32("max_differential_joins", i64::from(value))?;
@@ -1927,6 +1980,14 @@ pub(crate) fn alter_stream_table_impl(
 
     // SEC-1: Ownership check — only the owner (or superuser) can alter.
     check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+    // SEC-1: capture once and thread the path through every place below that
+    // resolves caller-supplied, unqualified SQL. SECURITY DEFINER entry points
+    // recover the caller's exact value from PostgreSQL's function GUC stack;
+    // invoker entry points can read their still-active value directly.
+    let invoker_search_path = match search_path_source {
+        SearchPathSource::Current => current_search_path()?,
+        SearchPathSource::SecurityDefinerCaller => invoker_search_path()?,
+    };
 
     if let Some(raw_target) = target_freshness {
         if schedule.is_some() {
@@ -1955,7 +2016,7 @@ pub(crate) fn alter_stream_table_impl(
 
     // ── Query migration (must run first, before other parameter changes) ──
     if let Some(new_query) = query {
-        alter_stream_table_query(&st, &schema, &table_name, new_query)?;
+        alter_stream_table_query(&st, &schema, &table_name, new_query, &invoker_search_path)?;
         st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     }
 
@@ -1973,7 +2034,13 @@ pub(crate) fn alter_stream_table_impl(
         // Only act when the partition key is actually changing.
         let old_pk = st.st_partition_key.as_deref();
         if new_pk != old_pk {
-            alter_stream_table_partition_key(&st, &schema, &table_name, new_pk)?;
+            alter_stream_table_partition_key(
+                &st,
+                &schema,
+                &table_name,
+                new_pk,
+                &invoker_search_path,
+            )?;
             st = StreamTableMeta::get_by_name(&schema, &table_name)?;
         }
     }
@@ -1997,8 +2064,16 @@ pub(crate) fn alter_stream_table_impl(
 
     // Validate the complete incremental admission before changing CDC mode,
     // schedule, catalog state, or trigger infrastructure.
+    //
+    // SEC-1: this parses the stored (unqualified, caller-authored) defining
+    // query via the same DVM parser machinery as the rewrite/validate path,
+    // so it needs the caller's own search_path too — and it runs
+    // unconditionally whenever the target mode isn't FULL, regardless of
+    // what field is actually being changed (e.g. a schedule-only ALTER).
     if target_refresh_mode != RefreshMode::Full {
-        super::validate_incremental_mode_for_query(&st.defining_query, target_refresh_mode)?;
+        with_invoker_search_path(&invoker_search_path, || {
+            super::validate_incremental_mode_for_query(&st.defining_query, target_refresh_mode)
+        })?;
     }
 
     if requested_cdc_mode_override != st.requested_cdc_mode {
@@ -2157,7 +2232,10 @@ pub(crate) fn alter_stream_table_impl(
                 .collect();
             // Re-load ST with updated mode for the refresh dispatch.
             let updated_st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-            execute_manual_full_refresh(&updated_st, &schema, &table_name, &source_oids)?;
+            // SEC-1: see alter_stream_table_query's identical comment.
+            with_invoker_search_path(&invoker_search_path, || {
+                execute_manual_full_refresh(&updated_st, &schema, &table_name, &source_oids)
+            })?;
 
             // ERG-F: warn so the client sees the implicit full refresh regardless of log_min_messages.
             pgrx::warning!(
@@ -2474,7 +2552,14 @@ pub(crate) fn alter_stream_table_impl(
 ///
 /// Changed in v0.19.0 (UX-6): default flipped from `true` to `false` to
 /// prevent accidental cascading drops.
-#[pg_extern(schema = "pgtrickle")]
+/// SEC-1: `security_definer` — `drop_stream_table_impl_inner` already
+/// re-derives the true caller via `outer_user_id()` and enforces
+/// `check_stream_table_ownership` on the root and every cascaded target before
+/// dropping it, so this only needed the attribute + pinned `search_path` to
+/// close the same lifecycle gap fixed on
+/// `create_or_replace_stream_table`.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn drop_stream_table(name: &str, cascade: default!(bool, false)) {
     let result = drop_stream_table_impl(name, cascade);
     if let Err(e) = result {
@@ -2612,12 +2697,10 @@ fn drop_stream_table_impl_inner(
         return Ok(());
     }
 
-    // SEC-1: Ownership check — only the owner (or superuser) can drop.
-    // Only enforce on the top-level call (visited_pgt_ids has exactly 1 entry);
-    // cascaded drops inherit the permission from the top-level check.
-    if visited_pgt_ids.len() == 1 {
-        check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
-    }
+    // SEC-1: Ownership check — only the owner (or superuser) can drop each
+    // stream table. A SECURITY DEFINER cascade must not inherit the root's
+    // authorization for a differently owned downstream stream table.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
     // CASCADE: drop all stream tables that depend on this one first.
     // `get_downstream_pgt_ids` finds STs whose defining queries read from
