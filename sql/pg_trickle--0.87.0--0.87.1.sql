@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.0 -> 0.87.1 upgrade migration
+-- v0.87.1: Correctness oracle hardening (COR-1, COR-2, COR-3)
+-- No catalog schema changes in this release.

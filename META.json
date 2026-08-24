@@ -1,7 +1,7 @@
 {
   "name": "pg_trickle",
   "abstract": "pg_trickle turns PostgreSQL 18 into a real-time data platform. Define stream tables on top of any base table and let the extension maintain materialized views incrementally — keeping only the delta in flight rather than recomputing the full result set. Built on a trigger-based CDC pipeline and a differential dataflow engine written in Rust, pg_trickle delivers sub-millisecond propagation latency with no external dependencies, no message broker, and no ETL pipeline. Your views stay fresh, your queries stay fast, and your data never leaves the database.",
-  "version": "0.87.0",
+  "version": "0.87.1",
   "maintainer": "pg_trickle contributors",
   "license": "apache_2_0",
   "provides": {
@@ -9,7 +9,7 @@
       "abstract": "Streaming tables with differential (incremental) view maintenance for PostgreSQL 18. Captures row-level changes via after-row triggers, propagates only the delta through a dependency DAG, and applies differential updates to downstream materialized views — all inside a single transaction, with zero external dependencies.",
       "file": "pg_trickle.control",
       "docfile": "doc/pg_trickle.md",
-      "version": "0.87.0"
+      "version": "0.87.1"
     }
   },
   "prereqs": {

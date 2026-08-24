@@ -31,6 +31,7 @@ mod light;
 #[cfg(feature = "light-e2e")]
 pub use light::E2eDb;
 
+pub mod oracle;
 pub mod property_support;
 
 // ── Full E2E harness (default) ─────────────────────────────────────────
@@ -1216,168 +1217,9 @@ impl E2eDb {
     }
 
     /// Verify a ST's contents match its defining query exactly (multiset equality).
-    ///
-    /// Ignores the internal `__pgt_row_id` column by comparing only the
-    /// user-visible columns produced by the defining query.
-    ///
-    /// Uses `EXCEPT ALL` (not `EXCEPT`) so that duplicate rows are
-    /// correctly accounted for — a bag/multiset comparison.
-    ///
-    /// Columns of type `json` are cast to `text` because the `json` type
-    /// does not have an equality operator (needed by `EXCEPT ALL`).
-    ///
-    /// For EXCEPT STs (which keep invisible rows with dual-count tracking),
-    /// the comparison filters to visible rows only.
     pub async fn assert_st_matches_query(&self, st_table: &str, defining_query: &str) {
-        // Get column names from the ST, excluding internal columns.
-        // Also get the cast expressions (json → text) for EXCEPT compatibility.
-        let cols_sql = format!(
-            "SELECT string_agg(column_name, ', ' ORDER BY ordinal_position), \
-                    string_agg(\
-                        CASE WHEN data_type = 'json' \
-                             THEN column_name || '::text' \
-                             ELSE column_name END, \
-                        ', ' ORDER BY ordinal_position) \
-             FROM information_schema.columns \
-             WHERE (table_schema || '.' || table_name = '{st_table}' \
-                OR table_name = '{st_table}') \
-             AND column_name NOT LIKE '__pgt_%'"
-        );
-        let (raw_cols, cast_cols): (Option<String>, Option<String>) =
-            sqlx::query_as(sqlx::AssertSqlSafe(cols_sql))
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or_else(|e| panic!("cols query failed: {e}"));
-        let raw_cols = raw_cols.unwrap_or_else(|| "*".to_string());
-        let cast_cols = cast_cols.unwrap_or_else(|| "*".to_string());
-
-        // Check whether the ST has dual-count columns (__pgt_count_l,
-        // __pgt_count_r), indicating an EXCEPT or INTERSECT set operation.
-        // EXCEPT STs keep invisible rows for multiplicity tracking, so we
-        // must filter to visible rows only.
-        let has_dual_counts: bool = self
-            .query_scalar(&format!(
-                "SELECT EXISTS( \
-                    SELECT 1 FROM information_schema.columns \
-                    WHERE (table_schema || '.' || table_name = '{st_table}' \
-                       OR table_name = '{st_table}') \
-                    AND column_name = '__pgt_count_l')"
-            ))
+        oracle::assert_st_query_exact(self, st_table, defining_query, "assert_st_matches_query")
             .await;
-
-        // Build a visibility filter for set operation STs.
-        // INTERSECT/EXCEPT STs keep invisible rows for multiplicity tracking.
-        // - INTERSECT (set): visible iff LEAST(count_l, count_r) > 0
-        // - INTERSECT ALL:   visible rows = LEAST(count_l, count_r), expanded
-        // - EXCEPT (set):    visible iff count_l > 0 AND count_r = 0
-        // - EXCEPT ALL:      visible iff count_l > count_r
-        let dq_upper = defining_query.to_uppercase();
-        let st_relation = if has_dual_counts {
-            if dq_upper.contains("INTERSECT ALL") {
-                format!(
-                    "{st_table} CROSS JOIN generate_series(1, LEAST(__pgt_count_l, __pgt_count_r)::integer) WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
-                )
-            } else if dq_upper.contains("INTERSECT") {
-                format!("{st_table} WHERE __pgt_count_l > 0 AND __pgt_count_r > 0")
-            } else if dq_upper.contains("EXCEPT ALL") {
-                format!(
-                    "{st_table} CROSS JOIN generate_series(1, GREATEST(0, __pgt_count_l - __pgt_count_r)::integer) WHERE GREATEST(0, __pgt_count_l - __pgt_count_r) > 0"
-                )
-            } else if dq_upper.contains("EXCEPT") {
-                format!("{st_table} WHERE __pgt_count_l > 0 AND __pgt_count_r = 0")
-            } else {
-                st_table.to_string()
-            }
-        } else {
-            st_table.to_string()
-        };
-
-        // If there are json columns, wrap both sides to cast consistently.
-        // Otherwise use the simpler direct comparison.
-        // Use EXCEPT ALL (not EXCEPT) for multiset/bag comparison so
-        // that duplicate rows are properly detected.
-        let sql = if raw_cols != cast_cols {
-            // json columns present: cast them on both sides of EXCEPT ALL
-            format!(
-                "SELECT NOT EXISTS ( \
-                    (SELECT {cast_cols} FROM {st_relation} \
-                     EXCEPT ALL \
-                     SELECT {cast_cols} FROM ({defining_query}) __pgt_dq) \
-                    UNION ALL \
-                    (SELECT {cast_cols} FROM ({defining_query}) __pgt_dq2 \
-                     EXCEPT ALL \
-                     SELECT {cast_cols} FROM {st_relation}) \
-                )"
-            )
-        } else {
-            format!(
-                "SELECT NOT EXISTS ( \
-                    (SELECT {raw_cols} FROM {st_relation} EXCEPT ALL ({defining_query})) \
-                    UNION ALL \
-                    (({defining_query}) EXCEPT ALL SELECT {raw_cols} FROM {st_relation}) \
-                )"
-            )
-        };
-        let matches: bool = self.query_scalar(&sql).await;
-        if !matches {
-            // Dump the actual ST contents and expected query result for
-            // diagnostic purposes before panicking.
-            let st_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT row_to_json(t)::text FROM (SELECT {raw_cols} FROM {st_relation}) t"
-            )))
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
-            let dq_rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT row_to_json(t)::text FROM ({defining_query}) t"
-            )))
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
-            let extra_in_st: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT row_to_json(t)::text FROM (SELECT {raw_cols} FROM {st_relation} EXCEPT ALL ({defining_query})) t"
-            )))
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
-            let missing_from_st: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT row_to_json(t)::text FROM (({defining_query}) EXCEPT ALL SELECT {raw_cols} FROM {st_relation}) t"
-            )))
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
-            panic!(
-                "ST '{}' contents do not match defining query:\n  {}\n\
-                 ST rows ({}):\n{}\n\
-                 Query rows ({}):\n{}\n\
-                 Extra in ST:\n{}\n\
-                 Missing from ST:\n{}",
-                st_table,
-                defining_query,
-                st_rows.len(),
-                st_rows
-                    .iter()
-                    .map(|(r,)| format!("    {r}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                dq_rows.len(),
-                dq_rows
-                    .iter()
-                    .map(|(r,)| format!("    {r}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                extra_in_st
-                    .iter()
-                    .map(|(r,)| format!("    {r}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                missing_from_st
-                    .iter()
-                    .map(|(r,)| format!("    {r}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-        }
     }
 
     // ── Infrastructure Query Helpers ───────────────────────────────────
