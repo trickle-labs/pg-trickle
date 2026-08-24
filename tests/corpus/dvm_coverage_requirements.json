@@ -1,0 +1,36 @@
+{
+  "format_version": 1,
+  "release": "0.87.3",
+  "required_mandatory_cases": 18,
+  "pairwise_dimensions": {
+    "physical_width": ["minimal", "wide"],
+    "logical_width": ["all", "narrow"],
+    "nullable_key": ["non_null", "nullable"],
+    "aliases": ["plain", "definition_and_reference"]
+  },
+  "generated_coverage": {
+    "total_pairs": 24,
+    "covered_pairs": 24,
+    "uncovered_pairs": []
+  },
+  "mandatory_cases": [
+    "chained_left_aggregate_ctes",
+    "simultaneous_two_aggregate_leaves",
+    "mixed_algebraic_rescan",
+    "two_rescan_families",
+    "existing_multigroup_min_winner",
+    "existing_multigroup_max_winner",
+    "singleton_empty_repopulate",
+    "nullable_group_key_transition",
+    "cte_definition_reference_aliases",
+    "nested_join_subtree",
+    "full_join_simultaneous_changes",
+    "inner_join_duplicate_matches",
+    "join_and_aggregate_same_cycle",
+    "three_aggregate_leaves",
+    "four_level_left_deep_join",
+    "wide_source_narrow_projection",
+    "inline_subquery_equivalent",
+    "batching_history_equivalent"
+  ]
+}

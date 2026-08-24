@@ -2,6 +2,12 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.2 → 0.87.3
+
+v0.87.3 makes no catalog or SQL API changes. Install the new extension files
+and run ALTER EXTENSION pg_trickle UPDATE; the migration is intentionally empty
+because this release adds composition-aware differential correctness coverage.
+
 ## 0.87.1 → 0.87.2
 
 v0.87.2 makes no catalog or SQL API changes. Install the new extension files

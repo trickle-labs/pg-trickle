@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.2 -> 0.87.3 upgrade migration
+-- v0.87.3: Composition-aware differential correctness testing.
+-- No catalog schema changes in this release.

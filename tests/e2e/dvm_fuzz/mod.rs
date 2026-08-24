@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::path::Path;
 
+pub mod coverage;
+pub mod query;
+
 pub const SCENARIO_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

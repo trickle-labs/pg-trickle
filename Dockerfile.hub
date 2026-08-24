@@ -28,7 +28,7 @@
 # ── Stage 1: Prepare build environment ─────────────────────────────────────
 FROM postgres:18-bookworm AS build-env
 
-ARG VERSION=0.87.2
+ARG VERSION=0.87.3
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -101,7 +101,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # ── Stage 2: Runtime image ────────────────────────────────────────────────────
 FROM postgres:18-bookworm
 
-ARG VERSION=0.87.2
+ARG VERSION=0.87.3
 ARG REPO_URL=https://github.com/trickle-labs/pg-trickle
 
 LABEL org.opencontainers.image.title="pg_trickle" \
