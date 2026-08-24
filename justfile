@@ -370,6 +370,28 @@ test-correctness-gate: build-e2e-image
 test-correctness-gate-fast:
     ./scripts/run_e2e_tests.sh --test e2e_correctness_gate_tests --no-capture
 
+# v0.87.2: validate and replay the permanent DVM regression corpus.
+[group: "dvm"]
+dvm-corpus: build-e2e-image
+    python3 scripts/dvm_replay.py --validate-only tests/corpus/dvm_regressions/*.json
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_corpus_tests --no-capture
+
+# v0.87.2: replay the corpus against an already-built E2E image.
+[group: "dvm"]
+dvm-corpus-fast:
+    python3 scripts/dvm_replay.py --validate-only tests/corpus/dvm_regressions/*.json
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_corpus_tests --no-capture
+
+# v0.87.2: replay one stored scenario without regenerating it.
+[group: "dvm"]
+dvm-replay SCENARIO:
+    python3 scripts/dvm_replay.py "{{SCENARIO}}"
+
+# v0.87.2: run the standalone internal serialized-case entry point.
+[group: "dvm"]
+dvm-fuzz-fast:
+    cargo test --test e2e_dvm_fuzz_tests --features pg18
+
 # ── SQLancer Fuzzing (Phase 4) ─────────────────────────────────────────────
 
 # Run SQLancer crash + equivalence oracle (rebuilds Docker image first).
@@ -509,12 +531,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.87.1": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.87.2": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.87.1": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.87.2": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

@@ -337,6 +337,18 @@ jobs:
             -E "test(smoke) | test(basic) | test(create_stream_table) | test(health_check) | test(~join) | test(~aggregate) | test(~window) | test(~subquery)" \
             --test-threads 4
 
+      - name: Run v0.87.2 DVM regression corpus
+        run: cargo nextest run --profile ci --test e2e_dvm_corpus_tests --no-capture
+
+      - name: Upload v0.87.2 DVM artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dvm-fuzz-artifacts
+          path: artifacts/dvm-fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
+
   # ── E2E tests (full extension in Docker, Linux only) ────────────────────
   # Skipped on PRs (takes ~20 min to build the Docker image). Runs on
   # schedule and manual dispatch only (not push-to-main — too slow).

@@ -126,6 +126,7 @@ LIGHT_E2E_TESTS=(
     e2e_ec01_property_tests
     e2e_sensitivity_baseline_tests
     e2e_sqlancer_tests
+    e2e_dvm_corpus_tests
 )
 
 usage() {
