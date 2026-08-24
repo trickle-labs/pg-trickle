@@ -2275,12 +2275,15 @@ impl OpTree {
                 if matches!(
                     unwrapped,
                     OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. }
-                ) && join_pk_aliases(expressions, aliases, unwrapped).is_none()
+                ) && (join_pk_aliases(expressions, aliases, unwrapped).is_none()
+                    || full_join_has_nullable_key(unwrapped))
                 {
                     // At least one side's PK is missing from the output.
                     // Check if the join is many-to-one (the uncovered side
                     // is joined on its PK), making the covered PK sufficient.
-                    if !is_many_to_one_join(expressions, aliases, unwrapped) {
+                    if full_join_has_nullable_key(unwrapped)
+                        || !is_many_to_one_join(expressions, aliases, unwrapped)
+                    {
                         return true;
                     }
                 }
@@ -3116,7 +3119,8 @@ pub fn join_pk_expr_indices(expressions: &[Expr], join_child: &OpTree) -> Vec<us
     indices
 }
 
-/// Extract PK column names from a Scan or Filter-over-Scan node.
+/// Extract stable key column names from a Scan, transparent wrapper, or
+/// aggregate CTE scan node.
 ///
 /// Uses the real PK columns from `pg_constraint` if available, otherwise
 /// falls back to non-nullable columns as a heuristic.
@@ -3143,7 +3147,175 @@ pub(crate) fn scan_pk_columns(op: &OpTree) -> Vec<String> {
             }
         }
         OpTree::Filter { child, .. } => scan_pk_columns(child),
+        OpTree::Project {
+            child,
+            expressions,
+            aliases,
+        } => {
+            let child_columns = child.output_columns();
+            scan_pk_columns(child)
+                .iter()
+                .filter_map(|key| {
+                    expressions
+                        .iter()
+                        .position(|expr| {
+                            matches!(expr, Expr::ColumnRef { column_name, .. } if column_name == key)
+                        })
+                        .or_else(|| child_columns.iter().position(|column| column == key))
+                        .and_then(|index| aliases.get(index))
+                        .cloned()
+                })
+                .collect()
+        }
+        OpTree::Subquery {
+            child,
+            column_aliases,
+            ..
+        } if !column_aliases.is_empty() => {
+            let child_columns = child.output_columns();
+            scan_pk_columns(child)
+                .iter()
+                .filter_map(|key| {
+                    child_columns
+                        .iter()
+                        .position(|column| column == key)
+                        .and_then(|index| column_aliases.get(index))
+                        .cloned()
+                })
+                .collect()
+        }
+        OpTree::Subquery { child, .. } => scan_pk_columns(child),
+        OpTree::CteScan {
+            body: Some(body),
+            columns,
+            cte_def_aliases,
+            column_aliases,
+            ..
+        } => {
+            let body_keys = body.row_id_key_columns().unwrap_or_default();
+            let body_columns = body.output_columns();
+            let visible_columns = if !column_aliases.is_empty() {
+                column_aliases
+            } else if !cte_def_aliases.is_empty() {
+                cte_def_aliases
+            } else {
+                columns
+            };
+            body_keys
+                .iter()
+                .filter_map(|key| {
+                    body_columns
+                        .iter()
+                        .position(|column| column == key)
+                        .and_then(|index| visible_columns.get(index))
+                        .cloned()
+                })
+                .collect()
+        }
         _ => Vec::new(),
+    }
+}
+
+/// Return whether any candidate key can contain NULL in the operator output.
+/// Unknown expressions are treated conservatively as nullable.
+fn key_columns_are_nullable(op: &OpTree, keys: &[String]) -> bool {
+    keys.iter().any(|key| !key_column_is_non_nullable(op, key))
+}
+
+fn full_join_has_nullable_key(op: &OpTree) -> bool {
+    let OpTree::FullJoin { left, right, .. } = op else {
+        return false;
+    };
+    let left_keys = scan_pk_columns(left);
+    let right_keys = scan_pk_columns(right);
+    key_columns_are_nullable(left, &left_keys) || key_columns_are_nullable(right, &right_keys)
+}
+
+fn key_column_is_non_nullable(op: &OpTree, key: &str) -> bool {
+    match op {
+        OpTree::Scan {
+            columns,
+            pk_columns,
+            ..
+        } => {
+            pk_columns.iter().any(|pk| pk == key)
+                || columns
+                    .iter()
+                    .find(|column| column.name == key)
+                    .is_some_and(|column| !column.is_nullable)
+        }
+        OpTree::Filter { child, .. } => key_column_is_non_nullable(child, key),
+        OpTree::Project {
+            child,
+            expressions,
+            aliases,
+        } => expressions
+            .iter()
+            .zip(aliases)
+            .find_map(|(expr, alias)| {
+                (alias == key).then(|| match expr {
+                    Expr::ColumnRef { column_name, .. } => {
+                        key_column_is_non_nullable(child, column_name)
+                    }
+                    _ => false,
+                })
+            })
+            .unwrap_or(false),
+        OpTree::Subquery {
+            child,
+            column_aliases,
+            ..
+        } => {
+            if column_aliases.is_empty() {
+                return key_column_is_non_nullable(child, key);
+            }
+            let child_columns = child.output_columns();
+            column_aliases
+                .iter()
+                .position(|alias| alias == key)
+                .is_some_and(|index| {
+                    child_columns
+                        .get(index)
+                        .is_some_and(|child_key| key_column_is_non_nullable(child, child_key))
+                })
+        }
+        OpTree::Aggregate {
+            child, group_by, ..
+        } => group_by
+            .iter()
+            .find(|expr| expr.output_name() == key)
+            .and_then(|expr| match expr {
+                Expr::ColumnRef { column_name, .. } => {
+                    Some(key_column_is_non_nullable(child, column_name))
+                }
+                _ => None,
+            })
+            .unwrap_or(false),
+        OpTree::CteScan {
+            body: Some(body),
+            columns,
+            cte_def_aliases,
+            column_aliases,
+            ..
+        } => {
+            let visible_columns = if !column_aliases.is_empty() {
+                column_aliases
+            } else if !cte_def_aliases.is_empty() {
+                cte_def_aliases
+            } else {
+                columns
+            };
+            let body_columns = body.output_columns();
+            visible_columns
+                .iter()
+                .position(|column| column == key)
+                .is_some_and(|index| {
+                    body_columns
+                        .get(index)
+                        .is_some_and(|body_key| key_column_is_non_nullable(body, body_key))
+                })
+        }
+        _ => false,
     }
 }
 

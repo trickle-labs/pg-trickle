@@ -427,7 +427,12 @@ impl RelNode {
                     )
                     .collect::<Vec<_>>()
                     .join(", ");
-                let operator = if left_key.nullable || right_key.nullable {
+                // PostgreSQL requires FULL JOIN conditions to be
+                // merge-joinable or hash-joinable; IS NOT DISTINCT FROM is
+                // rejected there even though it is valid for INNER/LEFT JOIN.
+                let operator = if matches!(kind, JoinKind::Full) {
+                    "="
+                } else if left_key.nullable || right_key.nullable {
                     "IS NOT DISTINCT FROM"
                 } else {
                     "="

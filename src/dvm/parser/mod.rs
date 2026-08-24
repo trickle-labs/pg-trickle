@@ -2932,6 +2932,25 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    #[test]
+    fn test_full_join_nullable_key_uses_stable_ids_but_keyless_storage() {
+        let join = OpTree::FullJoin {
+            condition: qualified_col("a", "grp"),
+            left: Box::new(scan_node("a", 1, &["grp", "value"])),
+            right: Box::new(scan_node("b", 2, &["grp", "value"])),
+        };
+        let expressions = vec![qualified_col("a", "grp"), qualified_col("b", "grp")];
+        let aliases = vec!["grp".to_string(), "right_grp".to_string()];
+        let projected = OpTree::Project {
+            expressions: expressions.clone(),
+            aliases: aliases.clone(),
+            child: Box::new(join.clone()),
+        };
+
+        assert!(join_pk_aliases(&expressions, &aliases, &join).is_some());
+        assert!(projected.has_incomplete_join_pk());
+    }
+
     // ── join_pk_expr_indices tests ──────────────────────────────────
 
     #[test]
@@ -3009,6 +3028,36 @@ mod tests {
         };
         let pks = scan_pk_columns(&filter);
         assert_eq!(pks, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn test_scan_pk_columns_nested_aggregate_cte_delegates() {
+        let body = OpTree::Aggregate {
+            group_by: vec![col("grp")],
+            aggregates: vec![],
+            child: Box::new(scan_node("t", 1, &["grp", "value"])),
+        };
+        let cte = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "grouped".to_string(),
+            alias: "grouped".to_string(),
+            columns: vec!["grp".to_string()],
+            cte_def_aliases: vec![],
+            column_aliases: vec![],
+            body: Some(Box::new(body)),
+        };
+        let projected = OpTree::Project {
+            expressions: vec![col("grp")],
+            aliases: vec!["grp".to_string()],
+            child: Box::new(cte),
+        };
+        let nested = OpTree::Subquery {
+            alias: "grouped".to_string(),
+            column_aliases: vec![],
+            child: Box::new(projected),
+        };
+
+        assert_eq!(scan_pk_columns(&nested), vec!["grp".to_string()]);
     }
 
     #[test]
