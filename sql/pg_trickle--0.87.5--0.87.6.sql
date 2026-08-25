@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.5 -> 0.87.6 upgrade migration
+-- v0.87.6: Deep fuzzing, shrinking, and a machine-enforced release gate.
+-- No catalog schema or SQL API changes in this release.

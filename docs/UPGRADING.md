@@ -2,6 +2,14 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.5 → 0.87.6
+
+v0.87.6 makes no catalog or SQL API changes. Install the new extension files
+and run ALTER EXTENSION pg_trickle UPDATE; the migration is intentionally empty
+because this release adds DVM scenario shrinking, strategy and failpoint
+replay, an active negative-control corpus, and a machine-enforced release
+gate.
+
 ## 0.87.4 → 0.87.5
 
 v0.87.5 makes no catalog or SQL API changes. Install the new extension files

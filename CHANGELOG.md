@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.6 — Deep Fuzzing, Shrinking, and Release Gate](#0876--deep-fuzzing-shrinking-and-release-gate)
 - [0.87.5 — DVM Correctness Contracts and Semantic Coverage](#0875--dvm-correctness-contracts-and-semantic-coverage)
 - [0.87.4 — Stateful and Metamorphic Correctness](#0874--stateful-and-metamorphic-correctness)
 - [0.87.3 — Composition-Aware Differential Testing](#0873--composition-aware-differential-testing)
@@ -135,6 +136,49 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.6] — Deep Fuzzing, Shrinking, and Release Gate
+
+v0.87.6 turns the correctness system built by v0.87.1–v0.87.5 into a durable
+pull-request, nightly, weekly, and release gate.
+
+- Added `scripts/dvm_shrink.py`, an automatic shrinker that removes whole
+  mutation cycles, then individual mutations, then unused initial-data rows,
+  from a failing DVM scenario while re-verifying against a live database
+  that the same failure class still reproduces — turning a large corpus
+  failure into its minimal reproducer with `just dvm-shrink`.
+- Added `scripts/dvm_corpus_retain.py`, a greedy set-cover pass over the
+  permanent regression corpus that flags any scenario whose feature coverage
+  is already fully covered by another retained scenario.
+- Added DVM strategy replay: the permanent regression corpus is now replayed
+  under every combination of requested refresh mode (DIFFERENTIAL/FULL) and
+  `pg_trickle.cdc_mode` (trigger/wal), proving every supported combination
+  converges to the same result as the direct query.
+- Added a DVM refresh failpoint test that uses the existing
+  `pg_trickle.test_chaos_for_table` TEST-MODE hook to suspend a stream
+  table mid-refresh and confirms the last committed correct result is
+  preserved, then that the stream table converges again after recovery.
+- Added an active negative-control corpus: three scenarios that are
+  deliberately wrong (silent fallback, multiset mismatch, and an injected
+  affected-row-count defect) which must always fail replay — proving the
+  correctness harness's own detectors are still working.
+- Added `scripts/dvm_release_gate.py`, a machine-enforced release gate that
+  checks formatting, the composition matrix, semantic coverage floors,
+  corpus retention, the shrink self-test, and the negative-control corpus
+  before a release is built.
+- Added a nightly/weekly deep CI tier (on top of the existing PR, cargo-fuzz
+  nightly, and release tiers) that reruns the full DVM correctness suite
+  (weekly) plus an extended cargo-fuzz budget.
+
+No extension catalog or SQL API changes were made in this release.
+
+## Upgrade
+
+Run ALTER EXTENSION pg_trickle UPDATE after installing the v0.87.6 files. The
+upgrade migration is intentionally empty because this release changes DVM
+correctness tooling and CI gates only.
 
 ---
 

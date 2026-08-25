@@ -1,0 +1,71 @@
+{
+  "scenario_id": "negctl_multiset_mismatch_v1",
+  "format_version": 1,
+  "generator_version": "v0.87.6-negctl-1",
+  "seed": 2,
+  "schema": {
+    "name": "dvmf_negctl_mm",
+    "setup_sql": [
+      "CREATE TABLE dvmf_negctl_mm.parent (id INT PRIMARY KEY, name TEXT)",
+      "CREATE TABLE dvmf_negctl_mm.left_leaf (id INT PRIMARY KEY, parent_id INT, score INT)",
+      "CREATE TABLE dvmf_negctl_mm.right_leaf (id INT PRIMARY KEY, parent_id INT, rating INT)"
+    ]
+  },
+  "initial_data": [
+    "INSERT INTO dvmf_negctl_mm.parent VALUES (1, 'p1'), (2, 'p2')",
+    "INSERT INTO dvmf_negctl_mm.left_leaf VALUES (1, 1, 50), (2, 2, 80)",
+    "INSERT INTO dvmf_negctl_mm.right_leaf VALUES (1, 1, 4), (2, 2, 5)"
+  ],
+  "query": {
+    "stream_table": "dvmf_negctl_mm.two_leaf_st",
+    "defining_query": "WITH al AS (SELECT parent_id, sum(score) AS sum_s, count(*) AS cnt_l FROM dvmf_negctl_mm.left_leaf GROUP BY parent_id), ar AS (SELECT parent_id, avg(rating) AS avg_r, count(*) AS cnt_r FROM dvmf_negctl_mm.right_leaf GROUP BY parent_id) SELECT p.id, p.name, al.sum_s, al.cnt_l, ar.avg_r, ar.cnt_r FROM dvmf_negctl_mm.parent p LEFT JOIN al ON al.parent_id = p.id LEFT JOIN ar ON ar.parent_id = p.id",
+    "columns": ["id", "name", "sum_s", "cnt_l", "avg_r", "cnt_r"]
+  },
+  "cycles": [
+    {
+      "name": "simultaneous-two-leaf-change",
+      "mutations": [
+        {
+          "sql": "INSERT INTO dvmf_negctl_mm.left_leaf VALUES (3, 1, 25), (4, 2, 10) RETURNING 1",
+          "expected_affected_rows": 2
+        },
+        {
+          "sql": "UPDATE dvmf_negctl_mm.right_leaf SET rating = 3 WHERE id = 1 RETURNING 1",
+          "expected_affected_rows": 1
+        },
+        {
+          "sql": "INSERT INTO dvmf_negctl_mm.right_leaf VALUES (3, 2, 1) RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    },
+    {
+      "name": "direct_st_corruption",
+      "mutations": [
+        {
+          "sql": "UPDATE dvmf_negctl_mm.two_leaf_st SET sum_s = sum_s + 999999 WHERE id = 1 RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    }
+  ],
+  "execution": {
+    "schedule": "1m",
+    "requested_refresh_mode": "DIFFERENTIAL"
+  },
+  "expected_capability": {
+    "differential": true,
+    "expected_mode": "DIFFERENTIAL"
+  },
+  "features": {
+    "aggregates": ["SUM", "COUNT", "AVG"],
+    "joins": ["LEFT", "LEFT"],
+    "simultaneous_source_changes": true,
+    "nullable_groups": false,
+    "duplicate_rows": false
+  },
+  "negative_control": {
+    "reason": "Schema, defining_query, and the first mutation cycle are copied verbatim from cor939_two_leaf_snapshot (a real, correct scenario). A second cycle, 'direct_st_corruption', issues a raw UPDATE straight against the stream table's own backing relation, bypassing the tracked source tables entirely. Because DIFFERENTIAL refresh reconciles only deltas observed on tracked sources, it never undoes this out-of-band corruption, so the stream table permanently diverges from a fresh evaluation of defining_query.",
+    "expected_failure_class": "MultisetMismatch"
+  }
+}

@@ -39,6 +39,18 @@ jobs:
       - name: Check version references are in sync
         run: ./scripts/check_version_sync.sh
 
+      - name: Setup pgrx environment (for the DVM release gate's build-dependent checks)
+        uses: ./.github/actions/setup-pgrx
+
+      - name: COR-20 machine-enforced DVM correctness release gate
+        # No --database: this only runs the gate's no-Docker steps
+        # (fmt-check, composition-matrix, coverage-floors, corpus-retention,
+        # shrink-selftest, structural negative-control validation). The
+        # live-database steps (corpus-replay, metamorphic-checks, live
+        # negative-control detection) already ran as part of the PR and
+        # deep-tier gates before this tag was pushed.
+        run: python3 scripts/dvm_release_gate.py
+
   # ── Build release artifacts for each platform ───────────────────────────
   build-release:
     name: Build (${{ matrix.artifact_suffix }})
