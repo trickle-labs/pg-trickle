@@ -1104,6 +1104,34 @@ unsafe extern "C-unwind" fn collect_function_oid(
 }
 
 #[cfg(not(test))]
+fn record_function_call(
+    oid: pg_sys::Oid,
+    args: &pgrx::PgList<pg_sys::Node>,
+    collector: &mut VolatilityCollector,
+) {
+    let mut supplied_arg_numbers = args
+        .iter_ptr()
+        .enumerate()
+        .map(|(index, arg)| {
+            // SAFETY: args comes from a valid analyzed FuncExpr or WindowFunc
+            // and its nodes remain valid for the collector's duration.
+            unsafe {
+                if pgrx::is_a(arg, pg_sys::NodeTag::T_NamedArgExpr) {
+                    (*(arg as *const pg_sys::NamedArgExpr)).argnumber
+                } else {
+                    index as i32
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    supplied_arg_numbers.sort_unstable();
+    collector.function_calls.push(AnalyzedFunctionCall {
+        oid,
+        supplied_arg_numbers,
+    });
+}
+
+#[cfg(not(test))]
 unsafe extern "C-unwind" fn collect_volatility_nodes(
     node: *mut pg_sys::Node,
     context: *mut std::ffi::c_void,
@@ -1127,22 +1155,13 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
         if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
             let function = &*(node as *const pg_sys::FuncExpr);
             let args = pgrx::PgList::<pg_sys::Node>::from_pg(function.args);
-            let mut supplied_arg_numbers = args
-                .iter_ptr()
-                .enumerate()
-                .map(|(index, arg)| {
-                    if pgrx::is_a(arg, pg_sys::NodeTag::T_NamedArgExpr) {
-                        (*(arg as *const pg_sys::NamedArgExpr)).argnumber
-                    } else {
-                        index as i32
-                    }
-                })
-                .collect::<Vec<_>>();
-            supplied_arg_numbers.sort_unstable();
-            collector.function_calls.push(AnalyzedFunctionCall {
-                oid: function.funcid,
-                supplied_arg_numbers,
-            });
+            record_function_call(function.funcid, &args, collector);
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) {
+            let window = &*(node as *const pg_sys::WindowFunc);
+            if !window.winagg {
+                let args = pgrx::PgList::<pg_sys::Node>::from_pg(window.args);
+                record_function_call(window.winfnoid, &args, collector);
+            }
         }
 
         if pgrx::is_a(node, pg_sys::NodeTag::T_CoerceViaIO) {

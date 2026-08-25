@@ -977,6 +977,42 @@ async fn test_function_volatility_checks_omitted_default_arguments() {
 }
 
 #[tokio::test]
+async fn test_function_volatility_checks_omitted_window_defaults() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_window_default_src (id INT PRIMARY KEY, tenant INT, value TEXT)")
+        .await;
+    db.execute("INSERT INTO nd_window_default_src VALUES (1, 1, 'one'), (2, 1, 'two')")
+        .await;
+    db.execute(
+        "CREATE FUNCTION nth_value_dynamic(\
+             value anyelement,\
+             n integer DEFAULT (1 + EXTRACT(DAY FROM CURRENT_DATE)::integer % 2)) \
+         RETURNS anyelement LANGUAGE internal WINDOW IMMUTABLE STRICT \
+         AS 'window_nth_value'",
+    )
+    .await;
+
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_window_default_st',\
+             $$ SELECT id, tenant, nth_value_dynamic(value) OVER (\
+                    PARTITION BY tenant ORDER BY id \
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) \
+                FROM nd_window_default_src $$,\
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("a STABLE omitted window-function default must be rejected")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected omitted window-default rejection: {error}"
+    );
+}
+
+#[tokio::test]
 async fn test_io_cast_checks_destination_input_volatility() {
     let db = E2eDb::new().await.with_extension().await;
 
