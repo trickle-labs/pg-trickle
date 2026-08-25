@@ -887,6 +887,74 @@ async fn test_function_volatility_resolves_exact_overload_and_schema() {
 }
 
 #[tokio::test]
+async fn test_function_volatility_checks_omitted_default_arguments() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_default_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO nd_default_src VALUES (1), (2)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_immutable(value int DEFAULT 7) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_stable(\
+             value timestamptz DEFAULT now()) RETURNS timestamptz \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_nested(\
+             value timestamptz DEFAULT nd_default_stable()) RETURNS timestamptz \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+
+    let immutable_default_query = "SELECT id, nd_default_immutable() AS value FROM nd_default_src";
+    db.create_st(
+        "nd_default_immutable_st",
+        immutable_default_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.nd_default_immutable_st", immutable_default_query)
+        .await;
+
+    let supplied_argument_query = "SELECT id, nd_default_stable(\
+        TIMESTAMPTZ '2025-01-01 00:00+00') AS value FROM nd_default_src";
+    db.create_st(
+        "nd_default_supplied_st",
+        supplied_argument_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.nd_default_supplied_st", supplied_argument_query)
+        .await;
+
+    for query in [
+        "SELECT id, nd_default_stable() FROM nd_default_src",
+        "SELECT id, nd_default_nested() FROM nd_default_src",
+    ] {
+        let error = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table(\
+                 'nd_default_rejected_st', $$ {query} $$, '1m', 'DIFFERENTIAL')"
+            ))
+            .await
+            .expect_err("a STABLE omitted default must be rejected");
+        let error = error.to_string();
+        assert!(
+            error.contains("stable expressions have refresh-dependent volatility"),
+            "unexpected omitted-default rejection: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_temporal_volatility_uses_resolved_function_and_operator() {
     let db = E2eDb::new().await.with_extension().await;
 
