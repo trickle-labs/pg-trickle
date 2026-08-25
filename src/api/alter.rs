@@ -1247,6 +1247,8 @@ pub(crate) struct CreateStreamTableOptions<'a> {
     pub(crate) storage_fillfactor: Option<i32>,
     /// v0.86.0: declared freshness target (`interval`, `on_commit`, `manual`).
     pub(crate) target_freshness: Option<&'a str>,
+    /// Entry context used to capture the defining query's search path.
+    pub(crate) entry_context: Option<security_context::EntryContext>,
 }
 
 impl<'a> CreateStreamTableOptions<'a> {
@@ -1283,6 +1285,7 @@ pub(crate) fn create_stream_table_impl(
         storage_backend,
         storage_fillfactor,
         target_freshness,
+        entry_context,
     } = opts;
     let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
     let mut refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
@@ -1294,9 +1297,10 @@ pub(crate) fn create_stream_table_impl(
     }
     // LSEC-1 (v0.87.7): capture the exact original-caller search_path (with
     // a bare `$user` expanded) instead of guessing `"<user>", public`.
-    let invoker_search_path =
-        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?
-            .search_path;
+    let invoker_search_path = security_context::capture_caller_context(
+        entry_context.unwrap_or(security_context::EntryContext::SecurityDefiner),
+    )?
+    .search_path;
 
     // Parse diamond consistency — default to 'atomic' when not specified
     let dc = match diamond_consistency {

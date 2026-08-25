@@ -89,6 +89,11 @@ uint32_t MyDatabaseId                     = 0;
 int      GetDatabaseEncoding(void)             { return 0; }
 uint32_t GetOuterUserId(void)                  { return 0; }
 void    *get_config_handle(const char *name)   { (void)name; return NULL; }
+void    *find_option(const char *name, _Bool missing_ok, _Bool is_assign,
+                     int elevel) {
+    (void)name; (void)missing_ok; (void)is_assign; (void)elevel;
+    return NULL;
+}
 int      set_config_option(const char *name, const char *value,
                            unsigned int context, unsigned int source,
                            unsigned int action, _Bool change_val,
