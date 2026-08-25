@@ -443,6 +443,14 @@ exact oracle and durable test system first. The sequence hardens failure
 detection, makes cases replayable, broadens composition and state coverage,
 adds DVM contracts, and ends with a machine-enforced release gate.
 
+The lifecycle-security review for issue #941 found another boundary that must
+land before v0.88.0. Seven releases, about 42 person-weeks in total, separate
+private extension work from caller-authored SQL, move every refresh mode to
+stream-owner execution, harden each lifecycle API, and finish with independent
+snapshot, publication, and pg_tide outbox gates. The
+[reimplementation plan](plans/pg_trickle_lifecycle_security_reimplementation_plan.md)
+defines the shared invariants and test matrix.
+
 | Version | Theme | User promise | Status | Scope | Full details |
 |---------|-------|--------------|--------|-------|--------------|
 | [v0.81.0](roadmap/v0.81.0.md) | Observability, Self-Tuning & Quick Wins: commit-to-visible latency metric using pg_xact_commit_timestamp (QW-1), configuration advisor function pgtrickle.tune_recommendations() (QW-2), preview/dry-run mode pgtrickle.preview_stream_table() (QW-3), OpenTelemetry trace spans on scheduler_tick/refresh_cycle/delta_execute/merge_apply with OTLP export (QW-4), bounded LRU eviction on thread-local L0/L1 template caches (QW-5), DeltaOperator trait for extensible operator dispatch (QW-6), split config.rs into config/scheduler.rs + config/cdc.rs + config/dvm.rs + config/monitoring.rs (QW-7), self-healing circuit breaker with auto-remediation for OOM/lock-timeout/sustained-lag (QW-8), chunked MERGE for large deltas with configurable merge_batch_size GUC (QW-9), stream table presets ('real-time'/'batch'/'cost-optimized') (QW-10) | — | ✅ Released | Large | [Full details](roadmap/v0.81.0.md) |
@@ -458,6 +466,13 @@ adds DVM contracts, and ends with a machine-enforced release gate.
 | [v0.87.4](roadmap/v0.87.4.md) | Stateful and Metamorphic Correctness: directed boundary transitions, simultaneous multi-source histories, and equivalent query and mutation paths | "Equivalent queries and mutation histories stay equivalent." | ✅ Released | 7-8 pw | [Full details](roadmap/v0.87.4.md) |
 | [v0.87.5](roadmap/v0.87.5.md) | DVM Correctness Contracts and Semantic Coverage: typed relation schemas, structured snapshot plans, decision traces, and observed-path coverage floors | "The DVM checks and reports the assumptions behind each delta." | Planned | 7-8 pw | [Full details](roadmap/v0.87.5.md) |
 | [v0.87.6](roadmap/v0.87.6.md) | Deep Fuzzing, Shrinking, and Release Gate: automatic minimization, coverage-selected corpus retention, tiered deep jobs, and active negative controls | "Known differential defect classes cannot return unnoticed." | Planned | 6-8 pw | [Full details](roadmap/v0.87.6.md) |
+| [v0.87.7](roadmap/v0.87.7.md) | Security Context and Catalog Foundation: exact outer-caller identity and path capture, restricted stream-owner execution, guaranteed restoration, and defining-path catalog migration | "Lifecycle APIs never lend extension-owner privileges to defining SQL." | Planned | 6 pw | [Full details](roadmap/v0.87.7.md) |
+| [v0.87.8](roadmap/v0.87.8.md) | Refresh Execution Identity: prepare, owner-execute, and finalize phases for full and differential refresh, private CDC staging, and owner execution in every refresh mode | "Every refresh evaluates defining SQL as the stream owner." | Planned | 6 pw | [Full details](roadmap/v0.87.8.md) |
+| [v0.87.9](roadmap/v0.87.9.md) | Core Lifecycle Security: canonical name resolution, hardened create-or-replace and alter, owner-preserving recreation, and fully preauthorized cascade drop | "An owner can manage a stream table without private-schema grants." | Planned | 6 pw | [Full details](roadmap/v0.87.9.md) |
+| [v0.87.10](roadmap/v0.87.10.md) | Complete Lifecycle Policy: remaining owner APIs, atomic bulk operations, exact SQL policy, static boundary checks, upgrade preflight, and least-privilege documentation | "Every lifecycle API has one enforced execution and authorization policy." | Planned | 6 pw | [Full details](roadmap/v0.87.10.md) |
+| [v0.87.11](roadmap/v0.87.11.md) | Snapshot Security: caller-checked target schemas, explicit snapshot ownership, provenance-bound restore and drop, and transfer-safe behavior | "Snapshots cannot cross ownership or schema boundaries by accident." | Planned | 6 pw | [Full details](roadmap/v0.87.11.md) |
+| [v0.87.12](roadmap/v0.87.12.md) | Publication Security: caller-equivalent database privileges, explicit publication ownership, provenance-safe bindings, and atomic catalog integration | "Publication APIs grant no authority beyond the caller's own database rights." | Planned | 6 pw | [Full details](roadmap/v0.87.12.md) |
+| [v0.87.13](roadmap/v0.87.13.md) | pg_tide Outbox Boundary: caller-context pg_tide calls, separate private bookkeeping, rollback-safe integration, and absent, denied, and authorized compatibility tests | "pg_trickle never lends its owner identity to pg_tide." | Planned | 6 pw | [Full details](roadmap/v0.87.13.md) |
 | [v0.88.0](roadmap/v0.88.0.md) | Vectorized Aggregates & Delta Planning: DiffContext decomposition into CdcContext/CacheContext/OptimizationContext first (ENG-1), a vectorized columnar path for pure-aggregate stream tables gated on an ADR that revisits the v0.76.0 Arrow dependency removal (MT-8), and cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.88.0.md) |
 | [v0.89.0](roadmap/v0.89.0.md) | Incremental Window Functions: a bounded, crash-safe auxiliary state model (LT-7a), rank-family algorithms (LT-7b), offset and boundary algorithms (LT-7c), aggregate-over-window algorithms (LT-7d), and documented fallback with reason codes and support-matrix entries for uncovered frames (LT-7e) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.89.0.md) |
 | [v0.90.0](roadmap/v0.90.0.md) | Freshness Controller & Self-Tuning: target_freshness becomes authoritative with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), continuous infeasible-SLA detection (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.90.0.md) |
@@ -482,7 +497,9 @@ is not a plan.
 > **On the version count.** The six v0.87.x correctness releases add about 42
 > person-weeks before v0.88.0. They do not add SQL features. They build the
 > oracle, generation, contracts, corpus, and release gates that must protect
-> later DVM changes.
+> later DVM changes. The seven lifecycle-security releases add another 42
+> person-weeks. They establish the execution boundary that later engine changes
+> must preserve.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
@@ -633,6 +650,8 @@ v0.86    ─── Product UX & transparency: pgtrickle.explain(), FULL-reason c
 v0.87    ─── Low-impact refresh: pipelined execution (supersedes chunked MERGE), cheaper capture, backpressure, memory budget, overhead benchmark gate
     │
 v0.87.1-6 ─── DVM correctness program: exact oracle, replay corpus, composition and state testing, contracts, shrinking, release gate
+    │
+v0.87.7-13 ─── Lifecycle security: owner execution, refresh isolation, hardened APIs, snapshots, publications, pg_tide boundary
     │
 v0.88    ─── Vectorized aggregates & delta planning: DiffContext split first, columnar aggregate path behind a dependency ADR, cost-based operator scheduling
     │
@@ -999,9 +1018,12 @@ does not start immediately after that work. v0.87.1 through v0.87.6 make wrong
 results impossible to hide behind counts, skips, or fallback, preserve every
 failure as a replayable scenario, exercise operator compositions and stateful
 histories, add explicit DVM schema and snapshot contracts, and enforce the
-result in CI. v0.88.0 and v0.89.0 then change engine internals: a vectorized
-aggregate path and cost-based delta planning first, followed by incremental
-window-function algorithms, with no deployment or API change.
+result in CI. v0.87.7 through v0.87.13 then ensure that caller-authored SQL
+runs only as the stream owner. The sequence hardens refresh, lifecycle,
+snapshot, publication, and pg_tide boundaries with separate release gates.
+v0.88.0 and v0.89.0 then change engine internals: a vectorized aggregate path
+and cost-based delta planning first, followed by incremental window-function
+algorithms, with no deployment or API change.
 
 v0.90.0 makes freshness authoritative: the closed-loop controller derives the
 schedule, the DIFFERENTIAL/FULL decision, batch sizes, concurrency and priority
