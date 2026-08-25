@@ -22,9 +22,9 @@ async fn test_refresh_stats_aggregation() {
     // Insert a ST
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, is_populated, data_timestamp)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status, is_populated, data_timestamp)
          VALUES
-            ((SELECT 'source_a'::regclass::oid), 'my_st', 'public', 'SELECT 1', '1m', 'FULL', 'ACTIVE', true, now() - interval '30 seconds')"
+            ((SELECT 'source_a'::regclass::oid), 'my_st', 'public', 'SELECT 1', 'public', '1m', 'FULL', 'ACTIVE', true, now() - interval '30 seconds')"
     ).await;
 
     // Insert some refresh history
@@ -74,9 +74,9 @@ async fn test_refresh_history_by_name() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_hist'::regclass::oid), 'hist_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+            ((SELECT 'src_hist'::regclass::oid), 'hist_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE')"
     ).await;
 
     let pgt_id: i64 = db
@@ -135,9 +135,9 @@ async fn test_staleness_calculation() {
     // ST with data_timestamp 60 seconds ago → staleness should be ~60s
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, data_timestamp)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, data_timestamp)
          VALUES
-            ((SELECT 'src_sched'::regclass::oid), 'sched_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE', now() - interval '60 seconds')"
+            ((SELECT 'src_sched'::regclass::oid), 'sched_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', now() - interval '60 seconds')"
     ).await;
 
     let staleness: f64 = db
@@ -159,9 +159,9 @@ async fn test_staleness_calculation() {
     db.execute("CREATE TABLE src_sched2 (id int)").await;
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_sched2'::regclass::oid), 'no_sched_st', 'public', 'SELECT 1', 'FULL', 'INITIALIZING')"
+            ((SELECT 'src_sched2'::regclass::oid), 'no_sched_st', 'public', 'SELECT 1', 'public', 'FULL', 'INITIALIZING')"
     ).await;
 
     let staleness_opt: Option<f64> = db
@@ -188,9 +188,9 @@ async fn test_stale_flag() {
     // ST with schedule=30s but data_timestamp 120s ago → stale = true
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status, data_timestamp)
          VALUES
-            ((SELECT 'src_exceed'::regclass::oid), 'exceed_st', 'public', 'SELECT 1', '30s', 'FULL', 'ACTIVE', now() - interval '120 seconds')"
+            ((SELECT 'src_exceed'::regclass::oid), 'exceed_st', 'public', 'SELECT 1', 'public', '30s', 'FULL', 'ACTIVE', now() - interval '120 seconds')"
     ).await;
 
     let exceeded: bool = db
@@ -210,9 +210,9 @@ async fn test_stale_flag() {
     db.execute("CREATE TABLE src_ok (id int)").await;
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status, data_timestamp)
          VALUES
-            ((SELECT 'src_ok'::regclass::oid), 'ok_st', 'public', 'SELECT 1', '5m', 'FULL', 'ACTIVE', now() - interval '10 seconds')"
+            ((SELECT 'src_ok'::regclass::oid), 'ok_st', 'public', 'SELECT 1', 'public', '5m', 'FULL', 'ACTIVE', now() - interval '10 seconds')"
     ).await;
 
     let not_exceeded: bool = db
@@ -242,9 +242,9 @@ async fn test_stream_tables_info_view() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp, last_refresh_at)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status, data_timestamp, last_refresh_at)
          VALUES
-            ((SELECT 'src_info'::regclass::oid), 'info_st', 'public', 'SELECT 1', '1m', 'FULL', 'ACTIVE', now() - interval '30 seconds', now() - interval '30 seconds')"
+            ((SELECT 'src_info'::regclass::oid), 'info_st', 'public', 'SELECT 1', 'public', '1m', 'FULL', 'ACTIVE', now() - interval '30 seconds', now() - interval '30 seconds')"
     ).await;
 
     // Check the view exists and returns data
@@ -318,9 +318,9 @@ async fn test_full_stats_lateral_join() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, is_populated, data_timestamp)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status, is_populated, data_timestamp)
          VALUES
-            ((SELECT 'src_stats'::regclass::oid), 'stats_st', 'public', 'SELECT 1', '1m', 'DIFFERENTIAL', 'ACTIVE', true, now() - interval '10 seconds')"
+            ((SELECT 'src_stats'::regclass::oid), 'stats_st', 'public', 'SELECT 1', 'public', '1m', 'DIFFERENTIAL', 'ACTIVE', true, now() - interval '10 seconds')"
     ).await;
 
     let pgt_id: i64 = db

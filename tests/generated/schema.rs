@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
 
 
     row_identity_version SMALLINT,
+
+
+
+
+    defining_search_path TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

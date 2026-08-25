@@ -81,6 +81,7 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         self_heal_success_streak: 0,
         last_error_code: None,
         last_error_retryable: None,
+        defining_search_path: "public".to_string(),
     }
 }
 

@@ -80,8 +80,8 @@ async fn test_insert_stream_table() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({}, 'test_st', 'public', 'SELECT * FROM test_source', '1m', 'FULL')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({}, 'test_st', 'public', 'SELECT * FROM test_source', 'public', '1m', 'FULL')",
         source_oid
     ))
     .await;
@@ -112,8 +112,8 @@ async fn test_unique_name_constraint() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode) \
-         VALUES ({}, 'dup_st', 'public', 'SELECT * FROM t1', 'FULL')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode) \
+         VALUES ({}, 'dup_st', 'public', 'SELECT * FROM t1', 'public', 'FULL')",
         oid1
     ))
     .await;
@@ -122,8 +122,8 @@ async fn test_unique_name_constraint() {
     let result = db
         .try_execute(&format!(
             "INSERT INTO pgtrickle.pgt_stream_tables \
-             (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode) \
-             VALUES ({}, 'dup_st', 'public', 'SELECT * FROM t2', 'FULL')",
+             (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode) \
+             VALUES ({}, 'dup_st', 'public', 'SELECT * FROM t2', 'public', 'FULL')",
             oid2
         ))
         .await;
@@ -146,8 +146,8 @@ async fn test_refresh_mode_check_constraint() {
     let result = db
         .try_execute(&format!(
             "INSERT INTO pgtrickle.pgt_stream_tables \
-             (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode) \
-             VALUES ({}, 'bad_mode', 'public', 'SELECT 1', 'INVALID_MODE')",
+             (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode) \
+             VALUES ({}, 'bad_mode', 'public', 'SELECT 1', 'public', 'INVALID_MODE')",
             oid
         ))
         .await;
@@ -170,8 +170,8 @@ async fn test_status_check_constraint() {
     let result = db
         .try_execute(&format!(
             "INSERT INTO pgtrickle.pgt_stream_tables \
-             (pgt_relid, pgt_name, pgt_schema, defining_query, status) \
-             VALUES ({}, 'bad_status', 'public', 'SELECT 1', 'RUNNING')",
+             (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, status) \
+             VALUES ({}, 'bad_status', 'public', 'SELECT 1', 'public', 'RUNNING')",
             oid
         ))
         .await;
@@ -202,8 +202,8 @@ async fn test_dependency_insertion_and_cascade_delete() {
     // Insert ST
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode) \
-         VALUES ({}, 'dep_test', 'public', 'SELECT * FROM dep_source', 'DIFFERENTIAL')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode) \
+         VALUES ({}, 'dep_test', 'public', 'SELECT * FROM dep_source', 'public', 'DIFFERENTIAL')",
         storage_oid
     ))
     .await;
@@ -241,8 +241,8 @@ async fn test_refresh_history_recording() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode) \
-         VALUES ({}, 'hist_st', 'public', 'SELECT * FROM hist_source', 'FULL')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode) \
+         VALUES ({}, 'hist_st', 'public', 'SELECT * FROM hist_source', 'public', 'FULL')",
         oid
     ))
     .await;
@@ -305,9 +305,9 @@ async fn test_stream_tables_info_view() {
     // Insert with last_refresh_at in the past — this is the staleness clock
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, last_refresh_at) \
-         VALUES ({}, 'view_st', 'public', 'SELECT * FROM view_source', \
+         VALUES ({}, 'view_st', 'public', 'SELECT * FROM view_source', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, now() - interval '10 minutes')",
         oid
     ))
@@ -340,9 +340,9 @@ async fn test_staleness_uses_last_refresh_at_not_data_timestamp() {
     // but last_refresh_at is recent (scheduler ran successfully with NO_DATA).
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, data_timestamp, last_refresh_at) \
-         VALUES ({}, 'nodata_st', 'public', 'SELECT * FROM nodata_source', \
+         VALUES ({}, 'nodata_st', 'public', 'SELECT * FROM nodata_source', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, \
                  now() - interval '2 hours', \
                  now() - interval '1 minute')",
@@ -383,9 +383,9 @@ async fn test_stale_false_when_last_refresh_at_is_recent() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, last_refresh_at) \
-         VALUES ({}, 'fresh_st', 'public', 'SELECT * FROM fresh_source', \
+         VALUES ({}, 'fresh_st', 'public', 'SELECT * FROM fresh_source', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, now() - interval '1 minute')",
         oid
     ))
@@ -412,9 +412,9 @@ async fn test_stale_null_without_schedule() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, \
           refresh_mode, status, is_populated, last_refresh_at) \
-         VALUES ({}, 'unsched_st', 'public', 'SELECT * FROM unsched_source', \
+         VALUES ({}, 'unsched_st', 'public', 'SELECT * FROM unsched_source', 'public', \
                  'FULL', 'ACTIVE', true, now() - interval '1 hour')",
         oid
     ))
@@ -446,9 +446,9 @@ async fn test_stale_null_when_last_refresh_at_is_null() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated) \
-         VALUES ({}, 'never_st', 'public', 'SELECT * FROM never_refreshed', \
+         VALUES ({}, 'never_st', 'public', 'SELECT * FROM never_refreshed', 'public', \
                  '5m', 'FULL', 'INITIALIZING', false)",
         oid
     ))
@@ -490,9 +490,9 @@ async fn test_pg_stat_stream_tables_stale_true_when_overdue() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, last_refresh_at) \
-         VALUES ({}, 'pgstat_stale_st', 'public', 'SELECT * FROM pgstat_stale_src', \
+         VALUES ({}, 'pgstat_stale_st', 'public', 'SELECT * FROM pgstat_stale_src', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, now() - interval '10 minutes')",
         oid
     ))
@@ -523,9 +523,9 @@ async fn test_pg_stat_stream_tables_nodata_not_stale() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, data_timestamp, last_refresh_at) \
-         VALUES ({}, 'pgstat_nodata_st', 'public', 'SELECT * FROM pgstat_nodata_src', \
+         VALUES ({}, 'pgstat_nodata_st', 'public', 'SELECT * FROM pgstat_nodata_src', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, \
                  now() - interval '2 hours', now() - interval '1 minute')",
         oid
@@ -570,9 +570,9 @@ async fn test_pg_stat_stream_tables_stale_null_when_never_refreshed() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated) \
-         VALUES ({}, 'pgstat_null_st', 'public', 'SELECT * FROM pgstat_null_src', \
+         VALUES ({}, 'pgstat_null_st', 'public', 'SELECT * FROM pgstat_null_src', 'public', \
                  '5m', 'FULL', 'INITIALIZING', false)",
         oid
     ))
@@ -610,9 +610,9 @@ async fn test_quick_health_stale_count_uses_last_refresh_at() {
     // Table 1: last_refresh_at is stale (10 min ago, schedule 5m) — old data too
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, data_timestamp, last_refresh_at) \
-         VALUES ({}, 'qh_stale', 'public', 'SELECT * FROM qh_src1', \
+         VALUES ({}, 'qh_stale', 'public', 'SELECT * FROM qh_src1', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, \
                  now() - interval '2 hours', now() - interval '10 minutes')",
         oid1
@@ -623,9 +623,9 @@ async fn test_quick_health_stale_count_uses_last_refresh_at() {
     // this simulates a NO_DATA refresh pass and should NOT count as stale.
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, data_timestamp, last_refresh_at) \
-         VALUES ({}, 'qh_nodata', 'public', 'SELECT * FROM qh_src2', \
+         VALUES ({}, 'qh_nodata', 'public', 'SELECT * FROM qh_src2', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, \
                  now() - interval '2 hours', now() - interval '1 minute')",
         oid2
@@ -653,9 +653,9 @@ async fn test_quick_health_status_ok_when_no_stale_tables() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, last_refresh_at) \
-         VALUES ({}, 'qh_ok_st', 'public', 'SELECT * FROM qh_ok_src', \
+         VALUES ({}, 'qh_ok_st', 'public', 'SELECT * FROM qh_ok_src', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, now() - interval '1 minute')",
         oid
     ))
@@ -681,9 +681,9 @@ async fn test_quick_health_status_warning_when_stale() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, \
           refresh_mode, status, is_populated, last_refresh_at) \
-         VALUES ({}, 'qh_warn_st', 'public', 'SELECT * FROM qh_warn_src', \
+         VALUES ({}, 'qh_warn_st', 'public', 'SELECT * FROM qh_warn_src', 'public', \
                  '5m', 'FULL', 'ACTIVE', true, now() - interval '10 minutes')",
         oid
     ))
@@ -751,8 +751,8 @@ async fn test_status_transitions() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode) \
-         VALUES ({}, 'trans_st', 'public', 'SELECT * FROM trans_src', 'FULL')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode) \
+         VALUES ({}, 'trans_st', 'public', 'SELECT * FROM trans_src', 'public', 'FULL')",
         oid
     ))
     .await;
@@ -860,10 +860,10 @@ async fn test_multiple_sts_sharing_source() {
     // Create two STs
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status) \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status) \
          VALUES \
-         ({}, 'st1', 'public', 'SELECT * FROM shared_source', '1m', 'FULL', 'ACTIVE'), \
-         ({}, 'st2', 'public', 'SELECT id FROM shared_source WHERE val > 10', '5m', 'DIFFERENTIAL', 'ACTIVE')",
+         ({}, 'st1', 'public', 'SELECT * FROM shared_source', 'public', '1m', 'FULL', 'ACTIVE'), \
+         ({}, 'st2', 'public', 'SELECT id FROM shared_source WHERE val > 10', 'public', '5m', 'DIFFERENTIAL', 'ACTIVE')",
         s1_oid, s2_oid
     ))
     .await;

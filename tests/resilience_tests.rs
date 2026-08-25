@@ -18,9 +18,9 @@ async fn test_crash_recovery_marks_running_as_failed() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_crash'::regclass::oid), 'crash_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+            ((SELECT 'src_crash'::regclass::oid), 'crash_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE')"
     ).await;
 
     let pgt_id: i64 = db
@@ -121,9 +121,9 @@ async fn test_error_escalation_to_suspension() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, consecutive_errors)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, consecutive_errors)
          VALUES
-            ((SELECT 'src_err'::regclass::oid), 'err_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE', 0)"
+            ((SELECT 'src_err'::regclass::oid), 'err_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', 0)"
     ).await;
 
     let pgt_id: i64 = db
@@ -170,9 +170,9 @@ async fn test_error_count_resets_on_success() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, consecutive_errors)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, consecutive_errors)
          VALUES
-            ((SELECT 'src_reset'::regclass::oid), 'reset_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE', 2)"
+            ((SELECT 'src_reset'::regclass::oid), 'reset_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', 2)"
     ).await;
 
     let pgt_id: i64 = db
@@ -204,9 +204,9 @@ async fn test_needs_reinit_lifecycle() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, needs_reinit)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, needs_reinit)
          VALUES
-            ((SELECT 'src_reinit'::regclass::oid), 'reinit_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE', FALSE)"
+            ((SELECT 'src_reinit'::regclass::oid), 'reinit_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', FALSE)"
     ).await;
 
     let pgt_id: i64 = db
@@ -257,9 +257,9 @@ async fn test_refresh_history_status_transitions() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_trans'::regclass::oid), 'trans_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+            ((SELECT 'src_trans'::regclass::oid), 'trans_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE')"
     ).await;
 
     let pgt_id: i64 = db
@@ -313,10 +313,10 @@ async fn test_error_handling_independent_per_st() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, consecutive_errors)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, consecutive_errors)
          VALUES
-            ((SELECT 'src_ind1'::regclass::oid), 'st_ok', 'public', 'SELECT 1', 'FULL', 'ACTIVE', 0),
-            ((SELECT 'src_ind2'::regclass::oid), 'st_bad', 'public', 'SELECT 1', 'FULL', 'ACTIVE', 3)"
+            ((SELECT 'src_ind1'::regclass::oid), 'st_ok', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', 0),
+            ((SELECT 'src_ind2'::regclass::oid), 'st_bad', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', 3)"
     ).await;
 
     // Suspend only the one with max errors
@@ -356,9 +356,9 @@ async fn test_error_escalation_exact_threshold() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, consecutive_errors)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, consecutive_errors)
          VALUES
-            ((SELECT 'src_thresh'::regclass::oid), 'thresh_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE', 0)"
+            ((SELECT 'src_thresh'::regclass::oid), 'thresh_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE', 0)"
     ).await;
 
     let pgt_id: i64 = db
@@ -426,9 +426,9 @@ async fn test_suspended_to_active_recovery() {
     // Insert an already-suspended ST
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, consecutive_errors)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, consecutive_errors)
          VALUES
-            ((SELECT 'src_recover'::regclass::oid), 'recover_st', 'public', 'SELECT 1', 'FULL', 'SUSPENDED', 3)"
+            ((SELECT 'src_recover'::regclass::oid), 'recover_st', 'public', 'SELECT 1', 'public', 'FULL', 'SUSPENDED', 3)"
     ).await;
 
     let pgt_id: i64 = db
@@ -483,9 +483,9 @@ async fn test_crash_recovery_no_stale_running_records() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_stale'::regclass::oid), 'stale_st', 'public', 'SELECT id FROM src_stale', 'FULL', 'ACTIVE')"
+            ((SELECT 'src_stale'::regclass::oid), 'stale_st', 'public', 'SELECT id FROM src_stale', 'public', 'FULL', 'ACTIVE')"
     ).await;
 
     let pgt_id: i64 = db
@@ -549,10 +549,10 @@ async fn test_crash_recovery_covers_all_stream_tables() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_crash_a'::regclass::oid), 'crash_a', 'public', 'SELECT id FROM src_crash_a', 'FULL', 'ACTIVE'),
-            ((SELECT 'src_crash_b'::regclass::oid), 'crash_b', 'public', 'SELECT id FROM src_crash_b', 'FULL', 'ACTIVE')"
+            ((SELECT 'src_crash_a'::regclass::oid), 'crash_a', 'public', 'SELECT id FROM src_crash_a', 'public', 'FULL', 'ACTIVE'),
+            ((SELECT 'src_crash_b'::regclass::oid), 'crash_b', 'public', 'SELECT id FROM src_crash_b', 'public', 'FULL', 'ACTIVE')"
     ).await;
 
     let id_a: i64 = db
@@ -603,9 +603,9 @@ async fn test_crash_recovery_does_not_suspend_stream_table() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
          VALUES
-            ((SELECT 'src_no_suspend'::regclass::oid), 'no_suspend_st', 'public', 'SELECT id FROM src_no_suspend', 'FULL', 'ACTIVE')"
+            ((SELECT 'src_no_suspend'::regclass::oid), 'no_suspend_st', 'public', 'SELECT id FROM src_no_suspend', 'public', 'FULL', 'ACTIVE')"
     ).await;
 
     let pgt_id: i64 = db

@@ -37,9 +37,9 @@ async fn test_workflow_full_refresh_lifecycle() {
     // Insert catalog entry
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
          VALUES ({}, 'enriched_orders', 'public', \
-                 'SELECT id, customer, amount FROM orders WHERE amount > 50', \
+                 'SELECT id, customer, amount FROM orders WHERE amount > 50', 'public', \
                  '1 minute', 'FULL')",
         storage_oid
     ))
@@ -221,8 +221,8 @@ async fn test_workflow_chained_sts_dependency_dag() {
     // Create ST1: SELECT * FROM base_data
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status) \
-         VALUES ({}, 'st1', 'public', 'SELECT * FROM base_data', '1m', 'FULL', 'ACTIVE')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status) \
+         VALUES ({}, 'st1', 'public', 'SELECT * FROM base_data', 'public', '1m', 'FULL', 'ACTIVE')",
         st1_oid
     ))
     .await;
@@ -230,8 +230,8 @@ async fn test_workflow_chained_sts_dependency_dag() {
     // Create ST2: SELECT SUM(val) FROM st1 (depends on ST1)
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status) \
-         VALUES ({}, 'st2', 'public', 'SELECT SUM(val) FROM st1_storage', '5m', 'FULL', 'ACTIVE')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status) \
+         VALUES ({}, 'st2', 'public', 'SELECT SUM(val) FROM st1_storage', 'public', '5m', 'FULL', 'ACTIVE')",
         st2_oid
     ))
     .await;
@@ -284,8 +284,8 @@ async fn test_workflow_error_escalation_suspends_st() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status) \
-         VALUES ({}, 'err_st', 'public', 'SELECT * FROM err_src', 'FULL', 'ACTIVE')",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status) \
+         VALUES ({}, 'err_st', 'public', 'SELECT * FROM err_src', 'public', 'FULL', 'ACTIVE')",
         oid
     ))
     .await;
@@ -357,8 +357,8 @@ async fn test_scheduler_job_lifecycle_queued_to_succeeded() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
-         VALUES ({oid}, 'sched_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
+         VALUES ({oid}, 'sched_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE')"
     ))
     .await;
 
@@ -466,8 +466,8 @@ async fn test_scheduler_job_lifecycle_retryable_failure() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
-         VALUES ({oid}, 'retry_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status)
+         VALUES ({oid}, 'retry_st', 'public', 'SELECT 1', 'public', 'FULL', 'ACTIVE')"
     ))
     .await;
 
@@ -573,8 +573,8 @@ async fn test_workflow_st_drop_cascade() {
     // Register the ST in the catalog
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, is_populated)
-         VALUES ({storage_oid}, 'drop_st', 'public', 'SELECT id, val FROM drop_src', 'FULL', 'ACTIVE', true)"
+            (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, status, is_populated)
+         VALUES ({storage_oid}, 'drop_st', 'public', 'SELECT id, val FROM drop_src', 'public', 'FULL', 'ACTIVE', true)"
     )).await;
 
     let pgt_id: i64 = db

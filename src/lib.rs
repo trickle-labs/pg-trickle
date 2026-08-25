@@ -368,6 +368,11 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     -- v0.83.0: Composite row-identity encoding version. NULL is an
     -- unclassified pre-upgrade row; fresh objects are written explicitly.
     row_identity_version SMALLINT,
+    -- v0.87.7 LSEC-3: exact search_path defining_query was resolved under
+    -- (bare $user already expanded). Set at CREATE and on any ALTER that
+    -- changes the query; preserved by configuration-only ALTERs and
+    -- ownership transfer.
+    defining_search_path TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -89,11 +89,6 @@ pub(crate) fn outer_user_id() -> pg_sys::Oid {
     }
 }
 
-/// Construct PostgreSQL's standard caller search path for a SECURITY DEFINER API.
-pub(super) fn invoker_search_path() -> Result<String, PgTrickleError> {
-    Ok(format!("{}, public", quote_identifier(&outer_user_name()?)))
-}
-
 /// Run caller-controlled SQL with a captured invoker search path, restoring
 /// the locked SECURITY DEFINER path afterwards.
 pub(super) fn with_invoker_search_path<T>(

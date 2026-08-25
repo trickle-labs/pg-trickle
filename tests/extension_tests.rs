@@ -182,8 +182,8 @@ async fn test_frontier_jsonb_column() {
     let frontier_json = r#"{"sources":{"12345":{"lsn":"0/1A2B","snapshot_ts":"2026-02-17T10:00:00Z"}},"data_timestamp":"2026-02-17T10:00:00Z"}"#;
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, frontier) \
-         VALUES ({}, 'frontier_st', 'public', 'SELECT 1', 'FULL', '{}'::jsonb)",
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, refresh_mode, frontier) \
+         VALUES ({}, 'frontier_st', 'public', 'SELECT 1', 'public', 'FULL', '{}'::jsonb)",
         oid,
         frontier_json.replace('\'', "''")
     ))
