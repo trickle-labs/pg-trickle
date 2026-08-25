@@ -160,6 +160,7 @@ mod tests {
             self_heal_success_streak: 0,
             last_error_code: None,
             last_error_retryable: None,
+            defining_search_path: "public".to_string(),
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).

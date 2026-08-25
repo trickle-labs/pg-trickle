@@ -267,6 +267,14 @@ pub struct StreamTableMeta {
     pub self_heal_success_streak: i16,
     pub last_error_code: Option<String>,
     pub last_error_retryable: Option<bool>,
+    /// LSEC-3 (v0.87.7): the exact `search_path` under which the defining
+    /// query was authored, with a bare `$user` element already expanded to
+    /// the authoring caller's quoted role name. Set at CREATE and on any
+    /// ALTER that changes the query; preserved by configuration-only ALTERs
+    /// and by storage ownership transfer. Legacy rows are backfilled from
+    /// their storage relation's owner at the current storage owner and
+    /// `public` on upgrade.
+    pub defining_search_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +431,8 @@ impl StreamTableMeta {
         storage_backend: &str,
         // HOT-1 (v0.73.0): heap fillfactor for HOT-friendly differential updates
         storage_fillfactor: Option<i32>,
+        // LSEC-3 (v0.87.7): the caller's search_path used to resolve `defining_query`
+        defining_search_path: &str,
     ) -> Result<i64, PgTrickleError> {
         // PERF-2: Compute hash of the defining query at INSERT time so that
         // the refresh engine can skip the per-refresh DefaultHasher computation.
@@ -438,9 +448,9 @@ impl StreamTableMeta {
                       requested_cdc_mode, is_append_only, pooler_compatibility_mode, \
                       st_partition_key, max_differential_joins, max_delta_fraction, \
                       temporal_mode, storage_backend, defining_query_hash, \
-                      storage_fillfactor, row_identity_version) \
+                      storage_fillfactor, row_identity_version, defining_search_path) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) \
+                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -469,6 +479,7 @@ impl StreamTableMeta {
                         query_hash.into(),
                         storage_fillfactor.into(),
                         crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
+                        defining_search_path.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -511,7 +522,7 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable \
+                     last_error_code, last_error_retryable, defining_search_path \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -558,7 +569,7 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable \
+                     last_error_code, last_error_retryable, defining_search_path \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -610,7 +621,7 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable \
+                     last_error_code, last_error_retryable, defining_search_path \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -657,7 +668,7 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable \
+                     last_error_code, last_error_retryable, defining_search_path \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -708,7 +719,7 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable \
+                     last_error_code, last_error_retryable, defining_search_path \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1556,6 +1567,10 @@ impl StreamTableMeta {
         let self_heal_success_streak = table.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
         let last_error_code = table.get::<String>(58).map_err(map_spi)?;
         let last_error_retryable = table.get::<bool>(59).map_err(map_spi)?;
+        let defining_search_path = table
+            .get::<String>(60)
+            .map_err(map_spi)?
+            .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1617,6 +1632,7 @@ impl StreamTableMeta {
             self_heal_success_streak,
             last_error_code,
             last_error_retryable,
+            defining_search_path,
         })
     }
 
@@ -1751,6 +1767,10 @@ impl StreamTableMeta {
         let self_heal_success_streak = row.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
         let last_error_code = row.get::<String>(58).map_err(map_spi)?;
         let last_error_retryable = row.get::<bool>(59).map_err(map_spi)?;
+        let defining_search_path = row
+            .get::<String>(60)
+            .map_err(map_spi)?
+            .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1812,6 +1832,7 @@ impl StreamTableMeta {
             self_heal_success_streak,
             last_error_code,
             last_error_retryable,
+            defining_search_path,
         })
     }
 }

@@ -72,6 +72,7 @@ fn create_stream_table(
         storage_backend,
         storage_fillfactor: fillfactor,
         target_freshness,
+        entry_context: None,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -131,6 +132,7 @@ fn create_stream_table_if_not_exists(
         storage_backend,
         storage_fillfactor: fillfactor,
         target_freshness,
+        entry_context: None,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -283,6 +285,7 @@ pub(crate) fn bulk_create_impl(
             storage_backend: definition.storage_backend.as_deref(),
             storage_fillfactor,
             target_freshness: None,
+            entry_context: None,
         }) {
             Ok(()) => {
                 // Look up pgt_id for the result
@@ -648,6 +651,7 @@ fn create_or_replace_stream_table_impl(
                 storage_backend, // passed through from caller
                 storage_fillfactor: None,
                 target_freshness: None,
+                entry_context: Some(security_context::EntryContext::SecurityInvoker),
             })
         }
         Err(e) => Err(e),

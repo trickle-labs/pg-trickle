@@ -44,6 +44,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("data_timestamp", "timestamp with time zone"),
         ("defining_query", "text"),
         ("defining_query_hash", "bigint"),
+        ("defining_search_path", "text"),
         ("diamond_consistency", "text"),
         ("diamond_schedule_policy", "text"),
         ("downstream_publication_name", "text"),
@@ -513,6 +514,105 @@ async fn test_upgrade_v090_catalog_additions() {
 /// Used to skip tests gracefully when image isn't built.
 fn upgrade_image_available() -> bool {
     matches!(std::env::var("PGS_UPGRADE_FROM"), Ok(v) if !v.is_empty())
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_v0877_backfills_defining_search_path() {
+    if !upgrade_image_available()
+        || std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.87.6")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        eprintln!("SKIP: requires the 0.87.6 -> 0.87.7 upgrade image");
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.87.6' CASCADE")
+        .await;
+    db.execute("CREATE ROLE lsec_upgrade_owner").await;
+    db.execute("CREATE TABLE public.lsec_upgrade_storage (id integer)")
+        .await;
+    db.execute("ALTER TABLE public.lsec_upgrade_storage OWNER TO lsec_upgrade_owner")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+         (pgt_relid, pgt_name, pgt_schema, defining_query) \
+         VALUES ('public.lsec_upgrade_storage'::regclass, \
+                 'lsec_upgrade_storage', 'public', 'SELECT id FROM public.lsec_upgrade_storage')",
+    )
+    .await;
+
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.87.7'")
+        .await;
+
+    let path: String = db
+        .query_scalar(
+            "SELECT defining_search_path \
+             FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'lsec_upgrade_storage'",
+        )
+        .await;
+    assert_eq!(path, "\"lsec_upgrade_owner\", public");
+
+    let not_null: bool = db
+        .query_scalar(
+            "SELECT is_nullable = 'NO' \
+         FROM information_schema.columns \
+         WHERE table_schema = 'pgtrickle' \
+           AND table_name = 'pgt_stream_tables' \
+           AND column_name = 'defining_search_path'",
+        )
+        .await;
+    assert!(not_null);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_v0877_missing_storage_aborts_before_catalog_mutation() {
+    if !upgrade_image_available()
+        || std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.87.6")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        eprintln!("SKIP: requires the 0.87.6 -> 0.87.7 upgrade image");
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.87.6' CASCADE")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+         (pgt_relid, pgt_name, pgt_schema, defining_query) \
+         VALUES (4000000000::oid, 'lsec_missing_storage', 'public', 'SELECT 1')",
+    )
+    .await;
+
+    let result = db
+        .try_execute("ALTER EXTENSION pg_trickle UPDATE TO '0.87.7'")
+        .await;
+    assert!(
+        result.is_err(),
+        "upgrade must reject a missing storage relation"
+    );
+
+    let ext_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+        .await;
+    assert_eq!(ext_version, "0.87.6");
+    let column_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS ( \
+         SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = 'pgtrickle' \
+           AND table_name = 'pgt_stream_tables' \
+           AND column_name = 'defining_search_path')",
+        )
+        .await;
+    assert!(
+        !column_exists,
+        "failed upgrade must leave the old catalog unchanged"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════

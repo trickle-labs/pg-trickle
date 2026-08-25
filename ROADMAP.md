@@ -443,6 +443,12 @@ exact oracle and durable test system first. The sequence hardens failure
 detection, makes cases replayable, broadens composition and state coverage,
 adds DVM contracts, and ends with a machine-enforced release gate.
 
+An August 2026 audit of the shipped correctness program found that its
+architecture landed but several roadmap claims are not yet substantiated by
+executed tests. v0.87.14, about 6-7 person-weeks, makes the mandatory cases,
+metamorphic families, semantic coverage, snapshot plan, schema oracle, and
+shrink ladder match their descriptions.
+
 The lifecycle-security review for issue #941 found another boundary that must
 land before v0.88.0. Seven releases, about 42 person-weeks in total, separate
 private extension work from caller-authored SQL, move every refresh mode to
@@ -466,13 +472,14 @@ defines the shared invariants and test matrix.
 | [v0.87.4](roadmap/v0.87.4.md) | Stateful and Metamorphic Correctness: directed boundary transitions, simultaneous multi-source histories, and equivalent query and mutation paths | "Equivalent queries and mutation histories stay equivalent." | ✅ Released | 7-8 pw | [Full details](roadmap/v0.87.4.md) |
 | [v0.87.5](roadmap/v0.87.5.md) | DVM Correctness Contracts and Semantic Coverage: typed relation schemas, structured snapshot plans, decision traces, and observed-path coverage floors | "The DVM checks and reports the assumptions behind each delta." | ✅ Released | 7-8 pw | [Full details](roadmap/v0.87.5.md) |
 | [v0.87.6](roadmap/v0.87.6.md) | Deep Fuzzing, Shrinking, and Release Gate: automatic minimization, coverage-selected corpus retention, tiered deep jobs, and active negative controls | "Known differential defect classes cannot return unnoticed." | ✅ Released | 6-8 pw | [Full details](roadmap/v0.87.6.md) |
-| [v0.87.7](roadmap/v0.87.7.md) | Security Context and Catalog Foundation: exact outer-caller identity and path capture, restricted stream-owner execution, guaranteed restoration, and defining-path catalog migration | "Lifecycle APIs never lend extension-owner privileges to defining SQL." | Planned | 6 pw | [Full details](roadmap/v0.87.7.md) |
+| [v0.87.7](roadmap/v0.87.7.md) | Security Context and Catalog Foundation: exact outer-caller identity and path capture, restricted stream-owner execution, guaranteed restoration, and defining-path catalog migration | "Lifecycle APIs never lend extension-owner privileges to defining SQL." | ✅ Released | 6 pw | [Full details](roadmap/v0.87.7.md) |
 | [v0.87.8](roadmap/v0.87.8.md) | Refresh Execution Identity: prepare, owner-execute, and finalize phases for full and differential refresh, private CDC staging, and owner execution in every refresh mode | "Every refresh evaluates defining SQL as the stream owner." | Planned | 6 pw | [Full details](roadmap/v0.87.8.md) |
 | [v0.87.9](roadmap/v0.87.9.md) | Core Lifecycle Security: canonical name resolution, hardened create-or-replace and alter, owner-preserving recreation, and fully preauthorized cascade drop | "An owner can manage a stream table without private-schema grants." | Planned | 6 pw | [Full details](roadmap/v0.87.9.md) |
 | [v0.87.10](roadmap/v0.87.10.md) | Complete Lifecycle Policy: remaining owner APIs, atomic bulk operations, exact SQL policy, static boundary checks, upgrade preflight, and least-privilege documentation | "Every lifecycle API has one enforced execution and authorization policy." | Planned | 6 pw | [Full details](roadmap/v0.87.10.md) |
 | [v0.87.11](roadmap/v0.87.11.md) | Snapshot Security: caller-checked target schemas, explicit snapshot ownership, provenance-bound restore and drop, and transfer-safe behavior | "Snapshots cannot cross ownership or schema boundaries by accident." | Planned | 6 pw | [Full details](roadmap/v0.87.11.md) |
 | [v0.87.12](roadmap/v0.87.12.md) | Publication Security: caller-equivalent database privileges, explicit publication ownership, provenance-safe bindings, and atomic catalog integration | "Publication APIs grant no authority beyond the caller's own database rights." | Planned | 6 pw | [Full details](roadmap/v0.87.12.md) |
 | [v0.87.13](roadmap/v0.87.13.md) | pg_tide Outbox Boundary: caller-context pg_tide calls, separate private bookkeeping, rollback-safe integration, and absent, denied, and authorized compatibility tests | "pg_trickle never lends its owner identity to pg_tide." | Planned | 6 pw | [Full details](roadmap/v0.87.13.md) |
+| [v0.87.14](roadmap/v0.87.14.md) | Correctness Program Completion: faithful mandatory composition shapes and histories, live metamorphic families, observed-path semantic coverage, an authoritative snapshot plan, an exact schema oracle with structured admission outcomes, the deeper shrink ladder, and admission-boundary coverage including #953 | "The correctness gate tests what the roadmap says it tests." | Planned | 6-7 pw | [Full details](roadmap/v0.87.14.md) |
 | [v0.88.0](roadmap/v0.88.0.md) | Vectorized Aggregates & Delta Planning: DiffContext decomposition into CdcContext/CacheContext/OptimizationContext first (ENG-1), a vectorized columnar path for pure-aggregate stream tables gated on an ADR that revisits the v0.76.0 Arrow dependency removal (MT-8), and cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.88.0.md) |
 | [v0.89.0](roadmap/v0.89.0.md) | Incremental Window Functions: a bounded, crash-safe auxiliary state model (LT-7a), rank-family algorithms (LT-7b), offset and boundary algorithms (LT-7c), aggregate-over-window algorithms (LT-7d), and documented fallback with reason codes and support-matrix entries for uncovered frames (LT-7e) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.89.0.md) |
 | [v0.90.0](roadmap/v0.90.0.md) | Freshness Controller & Self-Tuning: target_freshness becomes authoritative with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), continuous infeasible-SLA detection (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.90.0.md) |
@@ -495,11 +502,12 @@ stability contract for finished PG 18 work hostage to someone else's schedule
 is not a plan.
 
 > **On the version count.** The six v0.87.x correctness releases add about 42
-> person-weeks before v0.88.0. They do not add SQL features. They build the
-> oracle, generation, contracts, corpus, and release gates that must protect
-> later DVM changes. The seven lifecycle-security releases add another 42
-> person-weeks. They establish the execution boundary that later engine changes
-> must preserve.
+> person-weeks before v0.88.0, and v0.87.14 adds a further 6-7 to finish what
+> they claimed. They do not add SQL features. They build the oracle,
+> generation, contracts, corpus, and release gates that must protect later DVM
+> changes. The seven lifecycle-security releases add another 42 person-weeks.
+> They establish the execution boundary that later engine changes must
+> preserve.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
@@ -652,6 +660,8 @@ v0.87    ─── Low-impact refresh: pipelined execution (supersedes chunked M
 v0.87.1-6 ─── DVM correctness program: exact oracle, replay corpus, composition and state testing, contracts, shrinking, release gate
     │
 v0.87.7-13 ─── Lifecycle security: owner execution, refresh isolation, hardened APIs, snapshots, publications, pg_tide boundary
+    │
+v0.87.14 ─── Correctness program completion: faithful composition cases, live metamorphic families, observed-path coverage, authoritative snapshot plan, exact schema oracle, deeper shrinking
     │
 v0.88    ─── Vectorized aggregates & delta planning: DiffContext split first, columnar aggregate path behind a dependency ADR, cost-based operator scheduling
     │
@@ -1021,6 +1031,12 @@ histories, add explicit DVM schema and snapshot contracts, and enforce the
 result in CI. v0.87.7 through v0.87.13 then ensure that caller-authored SQL
 runs only as the stream owner. The sequence hardens refresh, lifecycle,
 snapshot, publication, and pg_tide boundaries with separate release gates.
+v0.87.14 closes the gap an audit found between what the correctness roadmap
+promised and what the shipped code executes: named composition cases build the
+shapes they are named for, metamorphic families run against live PostgreSQL,
+semantic coverage comes from observed DVM decisions, the snapshot plan becomes
+authoritative rather than descriptive, the schema oracle becomes exact, and the
+shrink ladder is finished.
 v0.88.0 and v0.89.0 then change engine internals: a vectorized aggregate path
 and cost-based delta planning first, followed by incremental window-function
 algorithms, with no deployment or API change.

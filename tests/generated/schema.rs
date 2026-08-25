@@ -104,7 +104,12 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
 
     row_identity_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+
+
+
+    defining_search_path TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_pgt_status ON pgtrickle.pgt_stream_tables (status);

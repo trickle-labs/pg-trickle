@@ -94,6 +94,8 @@ GRACE_UNDOCUMENTED: frozenset[str] = frozenset(
         "migrate",
         "parse_duration_seconds",
         "pgt_scc_status",
+        # Test-only SECURITY DEFINER probe, exported only with the pg_test feature.
+        "pgt_test_capture_definer_path",
         "pgtrickle_refresh_stats",
         "preflight",
         "recommend_refresh_mode",

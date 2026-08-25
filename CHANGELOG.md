@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.7 — Security Context and Catalog Foundation](#0877--security-context-and-catalog-foundation)
 - [0.87.6 — Deep Fuzzing, Shrinking, and Release Gate](#0876--deep-fuzzing-shrinking-and-release-gate)
 - [0.87.5 — DVM Correctness Contracts and Semantic Coverage](#0875--dvm-correctness-contracts-and-semantic-coverage)
 - [0.87.4 — Stateful and Metamorphic Correctness](#0874--stateful-and-metamorphic-correctness)
@@ -136,6 +137,42 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.7] — Security Context and Catalog Foundation
+
+v0.87.7 lays the foundation for the lifecycle-security reimplementation
+program (v0.87.7–v0.87.13): an audited boundary for capturing the original
+caller's identity and exact `search_path`, and the catalog column later
+releases need to run a stream table's defining SQL as its owner instead of
+the extension owner. This release changes no public lifecycle function's
+security attributes — every `create_stream_table`/`alter_stream_table` entry
+point keeps its existing behavior.
+
+- Added `CallerContext` capture: `create_stream_table` and
+  `alter_stream_table`'s query migration now record the exact `search_path`
+  the caller was using (with a bare `$user` element expanded to the caller's
+  quoted role name), replacing an ad hoc `"<user>", public` guess that
+  ignored the caller's actual configured path.
+- Added `pgtrickle.pgt_stream_tables.defining_search_path`: the exact
+  `search_path` a stream table's `defining_query` was resolved under. Set at
+  `CREATE` and on any `ALTER ... QUERY` that changes the defining query;
+  preserved by configuration-only `ALTER`s and by storage ownership
+  transfer.
+- Added restricted stream-owner execution primitives (`with_stream_owner_context`)
+  backed by PostgreSQL's untrusted-user-context mechanism, with role,
+  `search_path`, `row_security`, and GUC-nesting restoration proven on
+  success, nested calls, a Rust panic, and a PostgreSQL `ERROR`. Not yet
+  called from any production path — consumed starting in v0.87.8.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the v0.87.7 files.
+The upgrade migration backfills `defining_search_path` for existing stream
+tables from their storage relation's current owner (`"<owner>", public`),
+and aborts before making any change if a stream table's storage relation is
+missing.
 
 ---
 

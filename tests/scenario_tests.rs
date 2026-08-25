@@ -34,8 +34,8 @@ async fn test_scenario_create_and_full_refresh() {
         .await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({storage_oid}, 'product_summary', 'public', 'SELECT id, name, price FROM products', '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({storage_oid}, 'product_summary', 'public', 'SELECT id, name, price FROM products', 'public', '1m', 'FULL')"
     )).await;
 
     // Simulate full refresh: TRUNCATE + INSERT INTO ... SELECT
@@ -85,8 +85,8 @@ async fn test_scenario_refresh_after_insert() {
         .await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'order_mirror', 'public', 'SELECT id, amount FROM orders', '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'order_mirror', 'public', 'SELECT id, amount FROM orders', 'public', '1m', 'FULL')"
     )).await;
 
     // Initial full refresh
@@ -140,8 +140,8 @@ async fn test_scenario_refresh_after_update() {
         .await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'item_st', 'public', 'SELECT id, qty FROM items', '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'item_st', 'public', 'SELECT id, qty FROM items', 'public', '1m', 'FULL')"
     )).await;
 
     // Initial full refresh
@@ -194,8 +194,8 @@ async fn test_scenario_refresh_after_delete() {
         .await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'records_st', 'public', 'SELECT id, val FROM records', '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'records_st', 'public', 'SELECT id, val FROM records', 'public', '1m', 'FULL')"
     )).await;
 
     // Initial refresh
@@ -246,8 +246,8 @@ async fn test_scenario_filtered_st() {
     let defining_query = "SELECT id, region, amount FROM sales WHERE region = ''US''";
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'us_sales_st', 'public', $${defining_query}$$, '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'us_sales_st', 'public', $${defining_query}$$, 'public', '1m', 'FULL')"
     )).await;
 
     // For actual SQL execution, use the proper single-quote version
@@ -302,8 +302,8 @@ async fn test_scenario_join_st() {
         .await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'cust_purchases_st', 'public', $${defining_query}$$, '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'cust_purchases_st', 'public', $${defining_query}$$, 'public', '1m', 'FULL')"
     )).await;
 
     // Full refresh
@@ -347,8 +347,8 @@ async fn test_scenario_aggregate_st() {
         .await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'inv_summary_st', 'public', $${defining_query}$$, '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'inv_summary_st', 'public', $${defining_query}$$, 'public', '1m', 'FULL')"
     )).await;
 
     // Full refresh
@@ -399,8 +399,8 @@ async fn test_scenario_refresh_history() {
     let oid: i32 = db.query_scalar("SELECT 'src_st'::regclass::oid::int").await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'src_st', 'public', 'SELECT id, val FROM src', '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'src_st', 'public', 'SELECT id, val FROM src', 'public', '1m', 'FULL')"
     )).await;
 
     // Record first refresh in history
@@ -442,8 +442,8 @@ async fn test_scenario_st_info_view() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp, last_refresh_at) \
-         VALUES ({oid}, 'st_test', 'public', 'SELECT id FROM base', '1m', 'FULL', 'ACTIVE', now() - interval '2 minutes', now() - interval '2 minutes')"
+         (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode, status, data_timestamp, last_refresh_at) \
+         VALUES ({oid}, 'st_test', 'public', 'SELECT id FROM base', 'public', '1m', 'FULL', 'ACTIVE', now() - interval '2 minutes', now() - interval '2 minutes')"
     )).await;
 
     // Check info view shows stale flag
@@ -468,8 +468,8 @@ async fn test_scenario_no_data_refresh() {
     let oid: i32 = db.query_scalar("SELECT 'st10'::regclass::oid::int").await;
 
     db.execute(&format!(
-        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode) \
-         VALUES ({oid}, 'st10', 'public', 'SELECT id, val FROM src10', '1m', 'FULL')"
+        "INSERT INTO pgtrickle.pgt_stream_tables (pgt_relid, pgt_name, pgt_schema, defining_query, defining_search_path, schedule, refresh_mode) \
+         VALUES ({oid}, 'st10', 'public', 'SELECT id, val FROM src10', 'public', '1m', 'FULL')"
     )).await;
 
     // Record a NO_DATA refresh

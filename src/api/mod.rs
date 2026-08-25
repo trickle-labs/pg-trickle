@@ -1649,6 +1649,8 @@ fn insert_catalog_and_deps(
     storage_backend: &str,
     // HOT-1 (v0.73.0): heap fillfactor
     storage_fillfactor: Option<i32>,
+    // LSEC-3 (v0.87.7): the caller's search_path used to resolve `defining_query`
+    defining_search_path: &str,
 ) -> Result<i64, PgTrickleError> {
     let topk_limit = vq
         .topk_info
@@ -1693,6 +1695,7 @@ fn insert_catalog_and_deps(
         temporal_mode,
         storage_backend,
         storage_fillfactor,
+        defining_search_path,
     )?;
 
     // Build per-source column usage map
@@ -3216,6 +3219,13 @@ mod diagnostics;
 pub mod helpers;
 pub(crate) mod metrics_ext;
 pub(crate) mod planner;
+// LSEC-1 (v0.87.7): exact caller-identity/search_path capture, used by
+// create_stream_table and alter_stream_table's query migration below.
+// LSEC-2's owner-context execution primitives have no production caller
+// yet — consumed starting with the refresh-engine owner-context execution
+// in v0.87.8 and the lifecycle API hardening in v0.87.9+.
+#[allow(dead_code)]
+pub(crate) mod security_context;
 mod self_monitoring;
 pub(crate) mod snapshot;
 
@@ -3931,6 +3941,7 @@ mod tests {
             self_heal_success_streak: 0,
             last_error_code: None,
             last_error_retryable: None,
+            defining_search_path: "public".to_string(),
         }
     }
 

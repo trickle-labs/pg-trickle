@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**138 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**139 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -90,6 +90,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.pgt_ivm_handle_truncate()` | `pgtrickle` | `void` | Truncates the stream table (equivalent to a full refresh with empty base table for simple views). |
 | `pgtrickle.pgt_scc_status()` | `pgtrickle` | `SetOf row` | Returns one row per SCC, summarising its members, most recent fixpoint iteration count, and last convergence time. |
 | `pgtrickle.pgt_status()` | `pgtrickle` | `SetOf row` | Returns a summary row per stream table including schedule configuration, data timestamp, and computed staleness interval. |
+| `pgtrickle.pgt_test_capture_definer_path()` | `pgtrickle` | `text` | Test-only SECURITY DEFINER probe that captures the caller's original search_path exactly as a real lifecycle entry point would, so LSEC-1's GUC-stack recovery can be proven against a real backend rather than only unit-tested in isolation. |
 | `pgtrickle.pgtrickle_refresh_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.pgtrickle_refresh_stats()`. |
 | `pgtrickle.preflight()` | `pgtrickle` | `text` | Returns a JSON string with one entry per check: `pass` (bool), `check` (name), `detail` (human-readable message). |
 | `pgtrickle.preview_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT * FROM pgtrickle.preview_stream_table(     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id' ); ```. |
