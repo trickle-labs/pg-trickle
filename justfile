@@ -422,6 +422,56 @@ dvm-metamorphic: build-e2e-image
 dvm-metamorphic-unit:
     cargo test --test e2e_dvm_metamorphic_tests --features pg18
 
+# COR-19 (v0.87.6): replay the permanent DVM corpus under both the requested
+# and a forced-FULL refresh-mode strategy.
+[group: "dvm"]
+dvm-strategy: build-e2e-image
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_strategy_tests --no-capture
+
+# COR-19 (v0.87.6): strategy variants against an already-built E2E image.
+[group: "dvm"]
+dvm-strategy-fast:
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_strategy_tests --no-capture
+
+# COR-19 (v0.87.6): refresh failpoint preserves last committed result and
+# later convergence.
+[group: "dvm"]
+dvm-failpoint: build-e2e-image
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_failpoint_tests --no-capture
+
+# COR-19 (v0.87.6): failpoint test against an already-built E2E image.
+[group: "dvm"]
+dvm-failpoint-fast:
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_failpoint_tests --no-capture
+
+# COR-20 (v0.87.6): replay the active negative-control corpus; every one of
+# them must fail, or detection has silently broken.
+[group: "dvm"]
+dvm-negative-controls: build-e2e-image
+    python3 scripts/dvm_replay.py --validate-only tests/corpus/dvm_negative_controls/*.json
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_negative_control_tests --no-capture
+
+# COR-20 (v0.87.6): negative controls against an already-built E2E image.
+[group: "dvm"]
+dvm-negative-controls-fast:
+    python3 scripts/dvm_replay.py --validate-only tests/corpus/dvm_negative_controls/*.json
+    ./scripts/run_e2e_tests.sh --test e2e_dvm_negative_control_tests --no-capture
+
+# COR-17 (v0.87.6): shrink a failing DVM scenario to its minimal reproducer.
+# Usage: just dvm-shrink tests/corpus/dvm_regressions/cor939_two_leaf_snapshot.json postgres:///pgt_dev
+[group: "dvm"]
+dvm-shrink SCENARIO DATABASE OUT="":
+    python3 scripts/dvm_shrink.py "{{SCENARIO}}" --database "{{DATABASE}}" {{ if OUT != "" { "--output " + OUT } else { "" } }}
+
+# COR-20 (v0.87.6): machine-enforced release gate — coverage floors, active
+# negative controls, and no leftover fuzz-failure artifacts. Pass a database
+# to also exercise the live-database steps (corpus replay, metamorphic
+# checks, live negative-control detection); without one those steps are
+# reported SKIPPED rather than failed.
+[group: "dvm"]
+dvm-release-gate DATABASE="":
+    python3 scripts/dvm_release_gate.py {{ if DATABASE != "" { "--database " + DATABASE } else { "" } }}
+
 # ── SQLancer Fuzzing (Phase 4) ─────────────────────────────────────────────
 
 # Run SQLancer crash + equivalence oracle (rebuilds Docker image first).
@@ -561,12 +611,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.87.5": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.87.6": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.87.5": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.87.6": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

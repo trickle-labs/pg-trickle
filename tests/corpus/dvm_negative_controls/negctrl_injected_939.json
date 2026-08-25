@@ -1,0 +1,89 @@
+{
+  "scenario_id": "negctrl_injected_939",
+  "format_version": 1,
+  "generator_version": "v0.87.6-negative-control-1",
+  "seed": 939,
+  "schema": {
+    "name": "dvmf_negctrl939",
+    "setup_sql": [
+      "CREATE TABLE dvmf_negctrl939.parent (id INT PRIMARY KEY, name TEXT)",
+      "CREATE TABLE dvmf_negctrl939.left_leaf (id INT PRIMARY KEY, parent_id INT, score INT)",
+      "CREATE TABLE dvmf_negctrl939.right_leaf (id INT PRIMARY KEY, parent_id INT, rating INT)"
+    ]
+  },
+  "initial_data": [
+    "INSERT INTO dvmf_negctrl939.parent VALUES (1, 'p1'), (2, 'p2'), (3, 'padding-p3'), (4, 'padding-p4')",
+    "INSERT INTO dvmf_negctrl939.left_leaf VALUES (1, 1, 50), (2, 2, 80), (5, 3, 1), (6, 4, 1)",
+    "INSERT INTO dvmf_negctrl939.right_leaf VALUES (1, 1, 4), (2, 2, 5), (5, 3, 1), (6, 4, 1)"
+  ],
+  "query": {
+    "stream_table": "dvmf_negctrl939.two_leaf_st",
+    "defining_query": "WITH al AS (SELECT parent_id, sum(score) AS sum_s, count(*) AS cnt_l FROM dvmf_negctrl939.left_leaf GROUP BY parent_id), ar AS (SELECT parent_id, avg(rating) AS avg_r, count(*) AS cnt_r FROM dvmf_negctrl939.right_leaf GROUP BY parent_id) SELECT p.id, p.name, al.sum_s, al.cnt_l, ar.avg_r, ar.cnt_r FROM dvmf_negctrl939.parent p LEFT JOIN al ON al.parent_id = p.id LEFT JOIN ar ON ar.parent_id = p.id",
+    "columns": ["id", "name", "sum_s", "cnt_l", "avg_r", "cnt_r"]
+  },
+  "cycles": [
+    {
+      "name": "padding-warmup-one",
+      "mutations": [
+        {
+          "sql": "UPDATE dvmf_negctrl939.parent SET name = 'padding-p3-renamed' WHERE id = 3 RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    },
+    {
+      "name": "padding-warmup-two",
+      "mutations": [
+        {
+          "sql": "UPDATE dvmf_negctrl939.left_leaf SET score = 2 WHERE id = 6 RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    },
+    {
+      "name": "simultaneous-two-leaf-change",
+      "mutations": [
+        {
+          "sql": "INSERT INTO dvmf_negctrl939.left_leaf VALUES (3, 1, 25), (4, 2, 10) RETURNING 1",
+          "expected_affected_rows": 2
+        },
+        {
+          "sql": "UPDATE dvmf_negctrl939.right_leaf SET rating = 3 WHERE id = 1 RETURNING 1",
+          "expected_affected_rows": 2
+        },
+        {
+          "sql": "INSERT INTO dvmf_negctrl939.right_leaf VALUES (3, 2, 1) RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    },
+    {
+      "name": "padding-unreachable-trailing",
+      "mutations": [
+        {
+          "sql": "UPDATE dvmf_negctrl939.parent SET name = 'padding-p4-renamed' WHERE id = 4 RETURNING 1",
+          "expected_affected_rows": 1
+        }
+      ]
+    }
+  ],
+  "execution": {
+    "schedule": "1m",
+    "requested_refresh_mode": "DIFFERENTIAL"
+  },
+  "expected_capability": {
+    "differential": true,
+    "expected_mode": "DIFFERENTIAL"
+  },
+  "features": {
+    "aggregates": ["SUM", "COUNT", "AVG"],
+    "joins": ["LEFT", "LEFT"],
+    "simultaneous_source_changes": true,
+    "nullable_groups": false,
+    "duplicate_rows": false
+  },
+  "negative_control": {
+    "reason": "The UPDATE in the simultaneous-two-leaf-change cycle declares expected_affected_rows=2 for a WHERE id=1 update that can only affect 1 row. Replay must fail with GeneratorInvalid. Padding cycles/rows before and after exist so the release gate and just dvm-shrink have real reduction work to do.",
+    "expected_failure_class": "GeneratorInvalid"
+  }
+}

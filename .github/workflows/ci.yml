@@ -384,6 +384,18 @@ jobs:
       - name: Run v0.87.4 DVM metamorphic checks
         run: cargo nextest run --profile ci --test e2e_dvm_metamorphic_tests --no-capture
 
+      - name: Run v0.87.6 DVM strategy and CDC-mode variants
+        run: cargo nextest run --profile ci --test e2e_dvm_strategy_tests --no-capture
+
+      - name: Run v0.87.6 DVM refresh failpoint
+        run: cargo nextest run --profile ci --test e2e_dvm_failpoint_tests --no-capture
+
+      - name: Run v0.87.6 DVM active negative controls
+        run: cargo nextest run --profile ci --test e2e_dvm_negative_control_tests --no-capture
+
+      - name: Run v0.87.6 light typed-generator sample
+        run: cargo nextest run --profile ci --test e2e_dvm_fuzz_tests --no-capture
+
       - name: Upload v0.87.2 DVM artifacts
         if: failure()
         uses: actions/upload-artifact@v7
