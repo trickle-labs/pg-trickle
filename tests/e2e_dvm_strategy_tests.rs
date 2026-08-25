@@ -79,47 +79,63 @@ async fn test_v0876_strategy_variants_converge_for_corpus_cases() {
 async fn test_v0876_transaction_barrier_and_statement_timeout_resource_boundary() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute_seq(&[
-        "CREATE TABLE v0876_orders (id INT PRIMARY KEY, cust_id INT, amount INT)",
+        "CREATE TABLE v0876_orders_barrier (id INT PRIMARY KEY, cust_id INT, amount INT)",
+        "CREATE TABLE v0876_orders_incremental (id INT PRIMARY KEY, cust_id INT, amount INT)",
         "CREATE TABLE v0876_customers (id INT PRIMARY KEY, region TEXT)",
         "INSERT INTO v0876_customers VALUES (1, 'east'), (2, 'west')",
-        "INSERT INTO v0876_orders VALUES (1, 1, 100), (2, 2, 200)",
+        "INSERT INTO v0876_orders_barrier VALUES (1, 1, 100), (2, 2, 200)",
+        "INSERT INTO v0876_orders_incremental VALUES (1, 1, 100), (2, 2, 200)",
     ])
     .await;
 
-    let query = "SELECT c.region, SUM(o.amount) AS total \
-                 FROM v0876_orders o JOIN v0876_customers c ON c.id = o.cust_id \
+    let barrier_query = "SELECT c.region, SUM(o.amount) AS total \
+                 FROM v0876_orders_barrier o JOIN v0876_customers c ON c.id = o.cust_id \
+                 GROUP BY c.region";
+    let incremental_query = "SELECT c.region, SUM(o.amount) AS total \
+                 FROM v0876_orders_incremental o JOIN v0876_customers c ON c.id = o.cust_id \
                  GROUP BY c.region";
 
-    db.create_st("v0876_barrier", query, "1h", "DIFFERENTIAL")
+    db.create_st("v0876_barrier", barrier_query, "1h", "DIFFERENTIAL")
         .await;
-    db.create_st("v0876_incremental", query, "1h", "DIFFERENTIAL")
+    db.create_st("v0876_incremental", incremental_query, "1h", "DIFFERENTIAL")
         .await;
     db.refresh_st("v0876_barrier").await;
     db.refresh_st("v0876_incremental").await;
 
-    let mutations = [
-        "INSERT INTO v0876_orders VALUES (3, 1, 50)",
-        "UPDATE v0876_orders SET amount = amount + 10 WHERE id = 2",
-        "INSERT INTO v0876_orders VALUES (4, 2, 30)",
+    let barrier_mutations = [
+        "INSERT INTO v0876_orders_barrier VALUES (3, 1, 50)",
+        "UPDATE v0876_orders_barrier SET amount = amount + 10 WHERE id = 2",
+        "INSERT INTO v0876_orders_barrier VALUES (4, 2, 30)",
+    ];
+    let incremental_mutations = [
+        "INSERT INTO v0876_orders_incremental VALUES (3, 1, 50)",
+        "UPDATE v0876_orders_incremental SET amount = amount + 10 WHERE id = 2",
+        "INSERT INTO v0876_orders_incremental VALUES (4, 2, 30)",
     ];
 
     // Barrier: all mutations committed together in one explicit transaction,
     // refreshed once afterward.
     let mut barrier_stmts = vec!["BEGIN"];
-    barrier_stmts.extend_from_slice(&mutations);
+    barrier_stmts.extend_from_slice(&barrier_mutations);
     barrier_stmts.push("COMMIT");
     db.execute_seq(&barrier_stmts).await;
     db.refresh_st("v0876_barrier").await;
 
     // Incremental: each mutation auto-committed separately, refreshed after each.
-    for mutation in &mutations {
+    for mutation in &incremental_mutations {
         db.execute(mutation).await;
         db.refresh_st("v0876_incremental").await;
     }
 
-    e2e::oracle::assert_st_query_exact(&db, "v0876_barrier", query, "transaction barrier").await;
-    e2e::oracle::assert_st_query_exact(&db, "v0876_incremental", query, "incremental commits")
+    e2e::oracle::assert_st_query_exact(&db, "v0876_barrier", barrier_query, "transaction barrier")
         .await;
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "v0876_incremental",
+        incremental_query,
+        "incremental commits",
+    )
+    .await;
     e2e::oracle::compare_sts(&db, "v0876_barrier", "v0876_incremental")
         .await
         .expect("committed-transaction and incremental refresh histories must converge");
@@ -127,10 +143,15 @@ async fn test_v0876_transaction_barrier_and_statement_timeout_resource_boundary(
     // Resource boundary: a generous statement_timeout budget must not be
     // silently exceeded by a refresh.
     db.execute("SET statement_timeout = '30s'").await;
-    db.execute("INSERT INTO v0876_orders VALUES (5, 1, 5)")
+    db.execute("INSERT INTO v0876_orders_barrier VALUES (5, 1, 5)")
         .await;
     db.refresh_st("v0876_barrier").await;
-    e2e::oracle::assert_st_query_exact(&db, "v0876_barrier", query, "resource boundary refresh")
-        .await;
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "v0876_barrier",
+        barrier_query,
+        "resource boundary refresh",
+    )
+    .await;
     db.execute("SET statement_timeout = 0").await;
 }
