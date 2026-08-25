@@ -967,7 +967,7 @@ fn validate_and_parse_query(
     had_nested_window_rewrite: bool,
 ) -> Result<ValidatedQuery, PgTrickleError> {
     // Validate the defining query and extract output columns
-    let columns = validate_defining_query(query)?;
+    let (columns, query_volatility) = validate_defining_query(query)?;
 
     // TopK detection — must run BEFORE reject_limit_offset
     let topk_info = crate::dvm::detect_topk_pattern(query)?;
@@ -992,19 +992,17 @@ fn validate_and_parse_query(
     if topk_info.is_some()
         && (*refresh_mode == RefreshMode::Differential || *refresh_mode == RefreshMode::Immediate)
     {
-        let topk_issue = match crate::dvm::topk_query_volatility(query) {
-            Ok(volatility) if volatility < 's' => None,
-            Ok(volatility) => Some(format!(
+        let topk_issue = if query_volatility < 's' {
+            None
+        } else {
+            Some(format!(
                 "TopK ORDER BY contains {} expressions that can change between refreshes",
-                if volatility == 'v' {
+                if query_volatility == 'v' {
                     "volatile"
                 } else {
                     "stable"
                 }
-            )),
-            Err(error) => Some(format!(
-                "TopK ORDER BY could not be inspected safely: {error}"
-            )),
+            ))
         };
         if let Some(reason) = topk_issue {
             if is_auto && *refresh_mode == RefreshMode::Differential {
@@ -1215,7 +1213,11 @@ fn validate_and_parse_query(
     // One admission matrix for CREATE, ALTER, and mode changes. Known unsafe
     // forms are FULL-only; explicit incremental modes fail before mutation.
     if let Some(pr) = parsed_tree.as_ref() {
-        let admission = match crate::dvm::incremental_admission(pr, refresh_mode.is_immediate()) {
+        let admission = match crate::dvm::incremental_admission(
+            pr,
+            query_volatility,
+            refresh_mode.is_immediate(),
+        ) {
             Ok(admission) => admission,
             Err(e) if is_auto && *refresh_mode == RefreshMode::Differential => {
                 pgrx::warning!(
@@ -1391,12 +1393,14 @@ pub(crate) fn validate_incremental_mode_for_query(
     if mode == RefreshMode::Full {
         return Ok(());
     }
+    let (_, query_volatility) = validate_defining_query(defining_query)?;
     let result = crate::dvm::parse_defining_query_full(defining_query)?;
     crate::dvm::check_ivm_support_with_registry(&result)?;
     if mode.is_immediate() {
         crate::dvm::validate_immediate_mode_support(defining_query)?;
     }
-    let admission = crate::dvm::incremental_admission(&result, mode.is_immediate())?;
+    let admission =
+        crate::dvm::incremental_admission(&result, query_volatility, mode.is_immediate())?;
     crate::dvm::resolve_incremental_mode(mode, false, &admission)?;
     Ok(())
 }

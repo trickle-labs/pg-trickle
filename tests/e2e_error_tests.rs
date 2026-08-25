@@ -833,6 +833,370 @@ async fn test_stable_function_falls_back_to_full_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn test_function_volatility_resolves_exact_overload_and_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE SCHEMA volatility_safe").await;
+    db.execute("CREATE SCHEMA volatility_unsafe").await;
+    db.execute(
+        "CREATE FUNCTION volatility_safe.probe(int) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION volatility_safe.probe(text) RETURNS text \
+         LANGUAGE sql VOLATILE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION volatility_unsafe.probe(int) RETURNS int \
+         LANGUAGE sql VOLATILE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute("CREATE TABLE nd_overload_src (id INT PRIMARY KEY, label TEXT)")
+        .await;
+    db.execute("INSERT INTO nd_overload_src VALUES (1, 'one'), (2, 'two')")
+        .await;
+
+    let immutable_query = "SELECT id, volatility_safe.probe(id) AS resolved FROM nd_overload_src";
+    db.create_st(
+        "nd_overload_immutable_st",
+        immutable_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.nd_overload_immutable_st", immutable_query)
+        .await;
+
+    for query in [
+        "SELECT id, volatility_safe.probe(label) FROM nd_overload_src",
+        "SELECT id, volatility_unsafe.probe(id) FROM nd_overload_src",
+    ] {
+        let result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table(\
+                 'nd_overload_rejected_st', $$ {query} $$, '1m', 'DIFFERENTIAL')"
+            ))
+            .await;
+        assert!(
+            result.is_err(),
+            "the resolved VOLATILE overload must be rejected: {query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_function_volatility_checks_omitted_default_arguments() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_default_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO nd_default_src VALUES (1), (2)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_immutable(value int DEFAULT 7) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_stable(\
+             value timestamptz DEFAULT now()) RETURNS timestamptz \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_nested(\
+             value timestamptz DEFAULT nd_default_stable()) RETURNS timestamptz \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_probe(\
+             a int, b timestamptz DEFAULT now(), c int DEFAULT 0) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+
+    let immutable_default_query = "SELECT id, nd_default_immutable() AS value FROM nd_default_src";
+    db.create_st(
+        "nd_default_immutable_st",
+        immutable_default_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.nd_default_immutable_st", immutable_default_query)
+        .await;
+
+    let supplied_argument_query = "SELECT id, nd_default_stable(\
+        TIMESTAMPTZ '2025-01-01 00:00+00') AS value FROM nd_default_src";
+    db.create_st(
+        "nd_default_supplied_st",
+        supplied_argument_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.nd_default_supplied_st", supplied_argument_query)
+        .await;
+
+    let supplied_sibling_default_query = "SELECT id, nd_default_probe(\
+        id, b => TIMESTAMPTZ '2025-01-01 00:00+00') AS value FROM nd_default_src";
+    db.create_st(
+        "nd_default_sibling_st",
+        supplied_sibling_default_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "public.nd_default_sibling_st",
+        supplied_sibling_default_query,
+    )
+    .await;
+
+    for query in [
+        "SELECT id, nd_default_stable() FROM nd_default_src",
+        "SELECT id, nd_default_nested() FROM nd_default_src",
+        "SELECT id, nd_default_probe(id, c => 1) FROM nd_default_src",
+    ] {
+        let error = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table(\
+                 'nd_default_rejected_st', $$ {query} $$, '1m', 'DIFFERENTIAL')"
+            ))
+            .await
+            .expect_err("a STABLE omitted default must be rejected");
+        let error = error.to_string();
+        assert!(
+            error.contains("stable expressions have refresh-dependent volatility"),
+            "unexpected omitted-default rejection: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_function_volatility_checks_omitted_window_defaults() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_window_default_src (id INT PRIMARY KEY, tenant INT, value TEXT)")
+        .await;
+    db.execute("INSERT INTO nd_window_default_src VALUES (1, 1, 'one'), (2, 1, 'two')")
+        .await;
+    db.execute(
+        "CREATE FUNCTION nth_value_dynamic(\
+             value anyelement,\
+             n integer DEFAULT (1 + EXTRACT(DAY FROM CURRENT_DATE)::integer % 2)) \
+         RETURNS anyelement LANGUAGE internal WINDOW IMMUTABLE STRICT \
+         AS 'window_nth_value'",
+    )
+    .await;
+
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_window_default_st',\
+             $$ SELECT id, tenant, nth_value_dynamic(value) OVER (\
+                    PARTITION BY tenant ORDER BY id \
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) \
+                FROM nd_window_default_src $$,\
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("a STABLE omitted window-function default must be rejected")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected omitted window-default rejection: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_io_cast_checks_destination_input_volatility() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_io_cast_src (id INT PRIMARY KEY, raw TEXT)")
+        .await;
+    db.execute("INSERT INTO nd_io_cast_src VALUES (1, '2025-01-01 12:00:00')")
+        .await;
+
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_io_cast_st', \
+             $$ SELECT id, raw::timestamptz FROM nd_io_cast_src $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("timestamptz_in is STABLE and must reject differential mode")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected I/O-cast rejection: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_json_constructor_checks_hidden_conversion_volatility() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_json_src (id INT PRIMARY KEY, tsz TIMESTAMPTZ)")
+        .await;
+    db.execute("INSERT INTO nd_json_src VALUES (1, TIMESTAMPTZ '2025-01-01 12:00+00')")
+        .await;
+
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_json_st', \
+             $$ SELECT id, JSON_OBJECT('ts': tsz) AS payload FROM nd_json_src $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("timestamptz-to-JSON conversion must reject differential mode")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected JSON-constructor rejection: {error}"
+    );
+
+    db.execute(
+        r#"CREATE FUNCTION nd_json_path_default(
+             value jsonb DEFAULT JSON_QUERY(
+                 JSONB '"2025-01-01 12:00:00"', '$.timestamp()'))
+           RETURNS jsonb LANGUAGE sql IMMUTABLE AS 'SELECT $1'"#,
+    )
+    .await;
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_json_path_st', \
+             $$ SELECT id, nd_json_path_default() FROM nd_json_src $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("mutable JSON-path datetime conversion must reject differential mode")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected JSON-path rejection: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_row_comparison_checks_resolved_operator_volatility() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TYPE nd_row_rank AS ENUM ('low', 'high')")
+        .await;
+    db.execute(
+        "CREATE FUNCTION nd_row_rank_lt(nd_row_rank, nd_row_rank) RETURNS boolean \
+         LANGUAGE sql VOLATILE AS 'SELECT $1::text < $2::text'",
+    )
+    .await;
+    db.execute(
+        "CREATE OPERATOR < (\
+             LEFTARG = nd_row_rank, RIGHTARG = nd_row_rank, FUNCTION = nd_row_rank_lt)",
+    )
+    .await;
+    db.execute("CREATE OPERATOR FAMILY nd_row_rank_ops USING btree")
+        .await;
+    db.execute(
+        "ALTER OPERATOR FAMILY nd_row_rank_ops USING btree \
+         ADD OPERATOR 1 < (nd_row_rank, nd_row_rank)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nd_row_cmp_src (\
+             id INT PRIMARY KEY, left_rank nd_row_rank, right_rank nd_row_rank)",
+    )
+    .await;
+
+    let volatility: String = db
+        .query_scalar(
+            "SELECT result FROM pgtrickle.validate_query(\
+               'SELECT id, (left_rank, id) < (right_rank, id + 1) AS cmp \
+                FROM nd_row_cmp_src') \
+             WHERE check_name = 'volatility'",
+        )
+        .await;
+    assert_eq!(volatility, "volatile");
+}
+
+#[tokio::test]
+async fn test_temporal_volatility_uses_resolved_function_and_operator() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE nd_temporal_src (\
+             id INT PRIMARY KEY, event_date DATE, ts TIMESTAMP, tsz TIMESTAMPTZ)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nd_temporal_src VALUES \
+         (1, DATE '2025-01-01', TIMESTAMP '2025-01-01 10:15', TIMESTAMPTZ '2025-01-01 10:15+00'), \
+         (2, DATE '2025-01-02', TIMESTAMP '2025-01-01 10:45', TIMESTAMPTZ '2025-01-01 10:45+00')",
+    )
+    .await;
+
+    let bucket_query = "SELECT EXTRACT(YEAR FROM event_date) AS event_year, \
+                date_trunc('hour', tsz, 'UTC') AS bucket, COUNT(*) AS n \
+         FROM nd_temporal_src \
+         GROUP BY EXTRACT(YEAR FROM event_date), date_trunc('hour', tsz, 'UTC')";
+    db.create_st("nd_temporal_bucket_st", bucket_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    db.execute(
+        "INSERT INTO nd_temporal_src VALUES \
+         (3, DATE '2026-02-01', TIMESTAMP '2026-02-01 12:30', TIMESTAMPTZ '2026-02-01 12:30+00')",
+    )
+    .await;
+    db.refresh_st("nd_temporal_bucket_st").await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    db.execute("UPDATE nd_temporal_src SET tsz = tsz + INTERVAL '2 hours' WHERE id = 2")
+        .await;
+    db.refresh_st("nd_temporal_bucket_st").await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    db.execute("DELETE FROM nd_temporal_src WHERE id = 1").await;
+    db.refresh_st("nd_temporal_bucket_st").await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    let immutable_operator_query =
+        "SELECT id, ts + INTERVAL '1 day' AS shifted FROM nd_temporal_src";
+    db.create_st(
+        "nd_temporal_operator_st",
+        immutable_operator_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    for query in [
+        "SELECT id, date_trunc('hour', tsz) FROM nd_temporal_src",
+        "SELECT id, tsz + INTERVAL '1 day' FROM nd_temporal_src",
+    ] {
+        let result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table(\
+                 'nd_temporal_rejected_st', $$ {query} $$, '1m', 'DIFFERENTIAL')"
+            ))
+            .await;
+        assert!(
+            result.is_err(),
+            "the resolved STABLE temporal expression must be rejected: {query}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_nested_volatile_where_expression_rejected_in_differential_mode() {
     let db = E2eDb::new().await.with_extension().await;
 

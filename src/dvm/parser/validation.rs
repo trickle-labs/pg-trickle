@@ -63,6 +63,7 @@ pub fn resolve_incremental_mode(
 /// Classify known unproven incremental forms without mutating any state.
 pub fn incremental_admission(
     result: &ParseResult,
+    volatility: char,
     immediate: bool,
 ) -> Result<IncrementalAdmission, PgTrickleError> {
     let mut issues = Vec::new();
@@ -71,7 +72,6 @@ pub fn incremental_admission(
         collect_admission_issues(body, immediate, &mut issues);
     }
 
-    let volatility = tree_worst_volatility_with_registry(result)?;
     if volatility >= 's' {
         let (code, reason) = if volatility == 'v' {
             (
@@ -606,25 +606,6 @@ fn scan_sql_for_volatility(sql: &str, worst: &mut char) -> Result<(), PgTrickleE
         }
     }
     Ok(())
-}
-
-/// Inspect a complete TopK query before its ORDER BY/LIMIT wrapper is removed.
-///
-/// The base DVM tree intentionally excludes the ordering expression, so TopK
-/// needs this separate raw-AST pass to keep volatile or uninspectable ordering
-/// out of incremental admission.
-pub fn topk_query_volatility(sql: &str) -> Result<char, PgTrickleError> {
-    #[cfg(not(test))]
-    {
-        let mut worst = 'i';
-        scan_sql_for_volatility(sql, &mut worst)?;
-        Ok(worst)
-    }
-    #[cfg(test)]
-    {
-        let _ = sql;
-        Ok('i')
-    }
 }
 
 pub(crate) fn sql_value_function_name(op: pg_sys::SQLValueFunctionOp::Type) -> &'static str {
@@ -1859,7 +1840,7 @@ mod monotonicity_tests {
             has_recursion: false,
             warnings: vec![],
         };
-        let admission = incremental_admission(&result, false).unwrap();
+        let admission = incremental_admission(&result, 'v', false).unwrap();
         assert!(matches!(admission, IncrementalAdmission::FullOnly(_)));
         assert!(resolve_incremental_mode(RefreshMode::Differential, false, &admission).is_err());
         assert!(matches!(
@@ -1881,7 +1862,7 @@ mod monotonicity_tests {
             warnings: vec![],
         };
         assert!(matches!(
-            incremental_admission(&set_result, false).unwrap(),
+            incremental_admission(&set_result, 'i', false).unwrap(),
             IncrementalAdmission::FullOnly(_)
         ));
 
@@ -1901,7 +1882,7 @@ mod monotonicity_tests {
             warnings: vec![],
         };
         assert!(matches!(
-            incremental_admission(&lateral_result, true).unwrap(),
+            incremental_admission(&lateral_result, 'i', true).unwrap(),
             IncrementalAdmission::FullOnly(_)
         ));
     }
@@ -1939,7 +1920,7 @@ mod monotonicity_tests {
             has_recursion: false,
             warnings: vec![],
         };
-        let admission = incremental_admission(&lateral_result, false).unwrap();
+        let admission = incremental_admission(&lateral_result, 'i', false).unwrap();
         let IncrementalAdmission::FullOnly(issues) = admission else {
             panic!("unresolved LATERAL dependency must not be admitted");
         };
@@ -1971,7 +1952,7 @@ mod monotonicity_tests {
             has_recursion: false,
             warnings: vec![],
         };
-        let admission = incremental_admission(&lateral_result, false).unwrap();
+        let admission = incremental_admission(&lateral_result, 'i', false).unwrap();
         let IncrementalAdmission::FullOnly(issues) = admission else {
             panic!("complex outer identity must not be admitted");
         };

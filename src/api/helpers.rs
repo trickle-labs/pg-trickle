@@ -914,21 +914,352 @@ pub struct ColumnDef {
     pub type_oid: PgOid,
 }
 
-/// Validate a defining query and extract its output columns via parse analysis.
+#[cfg(not(test))]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AnalyzedFunctionCall {
+    oid: pg_sys::Oid,
+    supplied_arg_numbers: Vec<i32>,
+}
+
+#[cfg(not(test))]
+struct VolatilityCollector {
+    function_oids: Vec<pg_sys::Oid>,
+    function_calls: Vec<AnalyzedFunctionCall>,
+    enum_io_function_oids: Vec<pg_sys::Oid>,
+    worst: char,
+}
+
+#[cfg(not(test))]
+unsafe extern "C-unwind" {
+    #[link_name = "jspIsMutable"]
+    fn jsonpath_is_mutable(
+        path: *mut std::ffi::c_void,
+        varnames: *mut pg_sys::List,
+        varexprs: *mut pg_sys::List,
+    ) -> bool;
+}
+
+#[cfg(not(test))]
+fn max_analyzed_volatility(a: char, b: char) -> char {
+    match (a, b) {
+        ('v', _) | (_, 'v') => 'v',
+        ('s', _) | (_, 's') => 's',
+        _ => 'i',
+    }
+}
+
+/// Resolve volatility from the analyzed expression nodes.
 ///
-/// This avoids executing the query body during validation, which is important
-/// for stream-table cycles where a plain `SELECT ... LIMIT 0` can still reach
-/// change-buffer-dependent paths for upstream stream tables.
-pub(super) fn validate_defining_query(query: &str) -> Result<Vec<ColumnDef>, PgTrickleError> {
+/// Aggregate implementation functions are deliberately not included: their
+/// volatility describes the aggregate's internal state machinery, while DVM
+/// admission handles the aggregate itself. Enum output is likewise stable in
+/// `pg_proc`, but enum DDL invalidates dependent stream tables, so enum I/O is
+/// safe here.
+#[cfg(not(test))]
+fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgTrickleError> {
+    let mut collector = VolatilityCollector {
+        function_oids: Vec::new(),
+        function_calls: Vec::new(),
+        enum_io_function_oids: Vec::new(),
+        worst: 'i',
+    };
+
+    // SAFETY: query_node is a valid analyzed Query allocated by PostgreSQL's
+    // parser and remains valid for this function's duration.
+    unsafe {
+        pg_sys::query_tree_walker_impl(
+            query_node,
+            Some(collect_volatility_nodes),
+            &mut collector as *mut VolatilityCollector as *mut std::ffi::c_void,
+            pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
+        );
+    }
+
+    collect_default_argument_volatility(&mut collector)?;
+
+    collector
+        .function_oids
+        .sort_unstable_by_key(|oid| oid.to_u32());
+    collector.function_oids.dedup();
+    collector
+        .enum_io_function_oids
+        .sort_unstable_by_key(|oid| oid.to_u32());
+    collector.enum_io_function_oids.dedup();
+
+    for oid in collector.function_oids {
+        if collector
+            .enum_io_function_oids
+            .binary_search_by_key(&oid.to_u32(), |candidate| candidate.to_u32())
+            .is_ok()
+        {
+            continue;
+        }
+        let volatility = Spi::get_one_with_args::<String>(
+            "SELECT provolatile::text FROM pg_catalog.pg_proc WHERE oid = $1",
+            &[oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("volatility lookup failed: {e}")))?
+        .and_then(|value| value.chars().next())
+        .unwrap_or('v');
+        collector.worst = max_analyzed_volatility(collector.worst, volatility);
+    }
+
+    Ok(collector.worst)
+}
+
+/// Add volatility from function defaults omitted at the call site.
+///
+/// PostgreSQL leaves default expressions out of the analyzed `FuncExpr` and
+/// inserts them during planning. Analyze only the defaults absent from this
+/// call, using `NamedArgExpr.argnumber` for named and mixed notation.
+#[cfg(not(test))]
+fn collect_default_argument_volatility(
+    collector: &mut VolatilityCollector,
+) -> Result<(), PgTrickleError> {
+    let mut checked_calls = std::collections::HashSet::new();
+    let mut index = 0;
+
+    while let Some(call) = collector.function_calls.get(index).cloned() {
+        index += 1;
+        if !checked_calls.insert(call.clone()) {
+            continue;
+        }
+
+        let (pronargs, pronargdefaults, defaults_sql) =
+            Spi::get_three_with_args::<i32, i32, String>(
+                "SELECT pronargs::int, pronargdefaults::int, \
+                    CASE WHEN pronargdefaults > 0 \
+                         THEN pg_get_expr(proargdefaults, 0::oid) END \
+             FROM pg_catalog.pg_proc WHERE oid = $1",
+                &[call.oid.into()],
+            )
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "default-argument volatility lookup failed for function OID {}: {e}",
+                    call.oid
+                ))
+            })?;
+
+        let (Some(pronargs), Some(pronargdefaults), Some(defaults_sql)) =
+            (pronargs, pronargdefaults, defaults_sql)
+        else {
+            continue;
+        };
+
+        let first_default = pronargs - pronargdefaults;
+        let omitted_defaults = (first_default..pronargs)
+            .filter(|argnumber| call.supplied_arg_numbers.binary_search(argnumber).is_err())
+            .map(|argnumber| (argnumber - first_default) as usize)
+            .collect::<Vec<_>>();
+        if omitted_defaults.is_empty() {
+            continue;
+        }
+
+        let defaults_query = format!("SELECT {defaults_sql}");
+        let defaults_node = analyze_query_tree(&defaults_query)?;
+
+        // SAFETY: defaults_node is a valid analyzed Query allocated by
+        // PostgreSQL and remains valid for this function's duration. Its
+        // target list contains the defaults in declared positional order.
+        unsafe {
+            let targets = pgrx::PgList::<pg_sys::TargetEntry>::from_pg((*defaults_node).targetList);
+            for default_index in omitted_defaults {
+                let Some(target) = targets.get_ptr(default_index) else {
+                    collector.worst = 'v';
+                    continue;
+                };
+                if target.is_null() || (*target).expr.is_null() {
+                    collector.worst = 'v';
+                    continue;
+                }
+                collect_volatility_nodes(
+                    (*target).expr as *mut pg_sys::Node,
+                    collector as *mut VolatilityCollector as *mut std::ffi::c_void,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(test))]
+unsafe extern "C-unwind" fn collect_function_oid(
+    oid: pg_sys::Oid,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    // SAFETY: PostgreSQL invokes this callback synchronously with the
+    // VolatilityCollector context passed to check_functions_in_node.
+    unsafe {
+        (*(context as *mut VolatilityCollector))
+            .function_oids
+            .push(oid);
+    }
+    false
+}
+
+#[cfg(not(test))]
+fn record_function_call(
+    oid: pg_sys::Oid,
+    args: &pgrx::PgList<pg_sys::Node>,
+    collector: &mut VolatilityCollector,
+) {
+    let mut supplied_arg_numbers = args
+        .iter_ptr()
+        .enumerate()
+        .map(|(index, arg)| {
+            // SAFETY: args comes from a valid analyzed FuncExpr or WindowFunc
+            // and its nodes remain valid for the collector's duration.
+            unsafe {
+                if pgrx::is_a(arg, pg_sys::NodeTag::T_NamedArgExpr) {
+                    (*(arg as *const pg_sys::NamedArgExpr)).argnumber
+                } else {
+                    index as i32
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    supplied_arg_numbers.sort_unstable();
+    collector.function_calls.push(AnalyzedFunctionCall {
+        oid,
+        supplied_arg_numbers,
+    });
+}
+
+#[cfg(not(test))]
+unsafe extern "C-unwind" fn collect_volatility_nodes(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: PostgreSQL's walker supplies valid nodes, `context` is the
+    // VolatilityCollector passed below, and every typed access is guarded by
+    // an is_a check.
+    unsafe {
+        // QTW_EXAMINE_RTES_BEFORE passes RangeTblEntry nodes to the callback
+        // before the query walker handles their subqueries. They are not
+        // expression nodes and must not reach expression_tree_walker.
+        if pgrx::is_a(node, pg_sys::NodeTag::T_RangeTblEntry) {
+            return false;
+        }
+
+        let collector = &mut *(context as *mut VolatilityCollector);
+        if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
+            let function = &*(node as *const pg_sys::FuncExpr);
+            let args = pgrx::PgList::<pg_sys::Node>::from_pg(function.args);
+            record_function_call(function.funcid, &args, collector);
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) {
+            let window = &*(node as *const pg_sys::WindowFunc);
+            if !window.winagg {
+                let args = pgrx::PgList::<pg_sys::Node>::from_pg(window.args);
+                record_function_call(window.winfnoid, &args, collector);
+            }
+        }
+
+        if pgrx::is_a(node, pg_sys::NodeTag::T_CoerceViaIO) {
+            let cast = &*(node as *const pg_sys::CoerceViaIO);
+            if !cast.arg.is_null() {
+                let source_type = pg_sys::exprType(cast.arg as *const pg_sys::Node);
+                if pg_sys::get_typtype(source_type) as u8 == pg_sys::TYPTYPE_ENUM {
+                    let mut output = pg_sys::InvalidOid;
+                    let mut is_varlena = false;
+                    pg_sys::getTypeOutputInfo(source_type, &mut output, &mut is_varlena);
+                    collector.enum_io_function_oids.push(output);
+                }
+            }
+            if pg_sys::get_typtype(cast.resulttype) as u8 == pg_sys::TYPTYPE_ENUM {
+                let mut input = pg_sys::InvalidOid;
+                let mut io_param = pg_sys::InvalidOid;
+                pg_sys::getTypeInputInfo(cast.resulttype, &mut input, &mut io_param);
+                collector.enum_io_function_oids.push(input);
+            }
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_JsonConstructorExpr) {
+            let constructor = &*(node as *const pg_sys::JsonConstructorExpr);
+            if constructor.returning.is_null() || (*constructor.returning).format.is_null() {
+                collector.worst = 'v';
+            } else {
+                let is_jsonb = (*(*constructor.returning).format).format_type
+                    == pg_sys::JsonFormatType::JS_FORMAT_JSONB;
+                let args = pgrx::PgList::<pg_sys::Node>::from_pg(constructor.args);
+                for arg in args.iter_ptr() {
+                    let arg_type = pg_sys::exprType(arg as *const pg_sys::Node);
+                    let immutable = if is_jsonb {
+                        pg_sys::to_jsonb_is_immutable(arg_type)
+                    } else {
+                        pg_sys::to_json_is_immutable(arg_type)
+                    };
+                    if !immutable {
+                        collector.worst = max_analyzed_volatility(collector.worst, 's');
+                    }
+                }
+            }
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_JsonExpr) {
+            let json = &*(node as *const pg_sys::JsonExpr);
+            if !pgrx::is_a(json.path_spec, pg_sys::NodeTag::T_Const) {
+                collector.worst = max_analyzed_volatility(collector.worst, 's');
+            } else {
+                let path = &*(json.path_spec as *const pg_sys::Const);
+                if !path.constisnull {
+                    if path.consttype != pg_sys::JSONPATHOID {
+                        collector.worst = 'v';
+                    } else {
+                        let detoasted = pg_sys::pg_detoast_datum(
+                            path.constvalue.cast_mut_ptr::<pg_sys::varlena>(),
+                        );
+                        if jsonpath_is_mutable(
+                            detoasted as *mut std::ffi::c_void,
+                            json.passing_names,
+                            json.passing_values,
+                        ) {
+                            collector.worst = max_analyzed_volatility(collector.worst, 's');
+                        }
+                    }
+                }
+            }
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_SQLValueFunction) {
+            collector.worst = max_analyzed_volatility(collector.worst, 's');
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_NextValueExpr) {
+            collector.worst = 'v';
+        }
+
+        // Aggregate implementation volatility is intentionally excluded.
+        // PostgreSQL handles every other function-containing node, including
+        // both sides of CoerceViaIO and every RowCompareExpr operator.
+        if !pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) {
+            pg_sys::check_functions_in_node(node, Some(collect_function_oid), context);
+        }
+
+        // expression_tree_walker does not recurse into nested Query nodes.
+        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
+            pg_sys::query_tree_walker_impl(
+                node as *mut pg_sys::Query,
+                Some(collect_volatility_nodes),
+                context,
+                pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
+            )
+        } else {
+            pg_sys::expression_tree_walker_impl(node, Some(collect_volatility_nodes), context)
+        }
+    }
+}
+
+#[cfg(test)]
+fn analyzed_query_volatility(_query_node: *mut pg_sys::Query) -> Result<char, PgTrickleError> {
+    Ok('i')
+}
+
+fn analyze_query_tree(query: &str) -> Result<*mut pg_sys::Query, PgTrickleError> {
     use pgrx::PgList;
-    use std::ffi::{CStr, CString};
+    use std::ffi::CString;
 
     let c_sql = CString::new(query)
-        .map_err(|e| PgTrickleError::QueryParseError(format!("Query contains null byte: {}", e)))?;
+        .map_err(|e| PgTrickleError::QueryParseError(format!("Query contains null byte: {e}")))?;
 
-    // SAFETY: We call PostgreSQL's raw parser and analyzer with a valid query
-    // string inside a backend. The returned parse/analyze nodes remain valid
-    // for the duration of this function.
+    // SAFETY: PostgreSQL receives a valid SQL string inside a backend. The
+    // returned analyzed Query remains valid in the current memory context.
     unsafe {
         let raw_list = pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
         let stmts = PgList::<pg_sys::RawStmt>::from_pg(raw_list);
@@ -943,7 +1274,6 @@ pub(super) fn validate_defining_query(query: &str) -> Result<Vec<ColumnDef>, PgT
         let raw_stmt = stmts.get_ptr(0).ok_or_else(|| {
             PgTrickleError::QueryParseError("Query produced no parse tree nodes".into())
         })?;
-
         let query_node = pg_sys::parse_analyze_fixedparams(
             raw_stmt,
             c_sql.as_ptr(),
@@ -953,11 +1283,32 @@ pub(super) fn validate_defining_query(query: &str) -> Result<Vec<ColumnDef>, PgT
         );
 
         if query_node.is_null() {
-            return Err(PgTrickleError::QueryParseError(
+            Err(PgTrickleError::QueryParseError(
                 "Query analysis returned null".into(),
-            ));
+            ))
+        } else {
+            Ok(query_node)
         }
+    }
+}
 
+/// Validate a defining query and extract its output columns and volatility via
+/// parse analysis.
+///
+/// This avoids executing the query body during validation, which is important
+/// for stream-table cycles where a plain `SELECT ... LIMIT 0` can still reach
+/// change-buffer-dependent paths for upstream stream tables.
+pub(crate) fn validate_defining_query(
+    query: &str,
+) -> Result<(Vec<ColumnDef>, char), PgTrickleError> {
+    use pgrx::PgList;
+    use std::ffi::CStr;
+
+    let query_node = analyze_query_tree(query)?;
+
+    // SAFETY: analyze_query_tree returned a valid Query allocated in the
+    // current PostgreSQL memory context.
+    unsafe {
         let target_list = PgList::<pg_sys::TargetEntry>::from_pg((*query_node).targetList);
         let mut columns = Vec::new();
 
@@ -992,7 +1343,9 @@ pub(super) fn validate_defining_query(query: &str) -> Result<Vec<ColumnDef>, PgT
             ));
         }
 
-        Ok(columns)
+        let volatility = analyzed_query_volatility(query_node);
+
+        Ok((columns, volatility?))
     }
 }
 

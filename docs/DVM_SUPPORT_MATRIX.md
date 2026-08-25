@@ -176,7 +176,8 @@ FROM orders
 
 Only IMMUTABLE expressions are admitted to incremental maintenance by default.
 STABLE and VOLATILE expressions use FULL under AUTO and are rejected for
-explicit DIFFERENTIAL or IMMEDIATE mode.
+explicit DIFFERENTIAL or IMMEDIATE mode. PostgreSQL analysis resolves the exact
+function, operator, and cast overload before pg_trickle checks its volatility.
 
 ---
 
