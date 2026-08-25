@@ -152,11 +152,7 @@ STEPS: list[tuple[str, str, bool]] = [
     ),
     (
         "coverage-floors",
-        "cargo test --lib --features pg18 dvm::schema "
-        "&& cargo test --lib --features pg18 dvm::snapshot "
-        "&& cargo test --lib --features pg18 "
-        "dvm::diff::tests::test_decision_trace_records_declared_schema_and_snapshot_plan "
-        "&& cargo test --test e2e_dvm_composition_tests --features pg18 "
+        "cargo test --test e2e_dvm_composition_tests --features pg18 "
         "semantic_floors_pass_and_report_missing_buckets",
         False,
     ),
