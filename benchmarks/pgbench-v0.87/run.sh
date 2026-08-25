@@ -192,7 +192,7 @@ wait_for_correctness() {
     local checked_through="$history_before"
     local latest_refresh
     for _ in $(seq 1 360); do
-        latest_refresh="$(db_query "SELECT coalesce(min(max_refresh_id), $history_before) FROM (SELECT st.pgt_id, max(h.refresh_id) AS max_refresh_id FROM pgtrickle.pgt_stream_tables st JOIN pgtrickle.pgt_refresh_history h ON h.pgt_id = st.pgt_id WHERE h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at' GROUP BY st.pgt_id) ready")"
+        latest_refresh="$(db_query "SELECT CASE WHEN count(*) = 3 THEN coalesce(min(max_refresh_id), $history_before) ELSE $history_before END FROM (SELECT st.pgt_id, max(h.refresh_id) AS max_refresh_id FROM pgtrickle.pgt_stream_tables st JOIN pgtrickle.pgt_refresh_history h ON h.pgt_id = st.pgt_id WHERE h.status = 'COMPLETED' AND h.refresh_id > $history_before AND h.start_time >= '$workload_finished_at' GROUP BY st.pgt_id) ready")"
         if (( latest_refresh > checked_through )); then
             if [[ "$(correctness_check)" == t ]]; then
                 return 0
