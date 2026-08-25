@@ -16,13 +16,33 @@
 use super::helpers::{outer_user_id, outer_user_name, quote_identifier};
 use super::*;
 
-extern "C" {
+unsafe extern "C" {
     fn find_option(
         name: *const std::os::raw::c_char,
         missing_ok: bool,
         is_assign: bool,
         elevel: i32,
-    ) -> *mut pg_sys::ConfigureNameStruct;
+    ) -> *mut std::os::raw::c_void;
+}
+
+#[repr(C)]
+struct GucVariable {
+    vartype: u32,
+    stack: *mut GucStack,
+}
+
+#[repr(C)]
+struct GucStack {
+    prior: *mut GucStack,
+    val: GucValue,
+}
+
+#[repr(C)]
+union GucValue {
+    int_val: i32,
+    real_val: f64,
+    bool_val: u8,
+    string_val: *mut std::os::raw::c_char,
 }
 
 /// Which kind of public entry point captured a [`CallerContext`].
@@ -129,6 +149,7 @@ fn saved_pre_definer_search_path() -> Result<String, PgTrickleError> {
                 "security context: search_path GUC is not registered".into(),
             ));
         }
+        let guc_var = guc_var as *mut GucVariable;
         if (*guc_var).vartype != pg_sys::config_type::PGC_STRING {
             return Err(PgTrickleError::InternalError(
                 "security context: search_path GUC has an unexpected type".into(),
@@ -142,7 +163,7 @@ fn saved_pre_definer_search_path() -> Result<String, PgTrickleError> {
                     .into(),
             ));
         }
-        let ptr = (*stack).prior.val.stringval;
+        let ptr = (*(*stack).prior).val.string_val;
         if ptr.is_null() {
             return Err(PgTrickleError::InternalError(
                 "security context: saved search_path GUC stack entry has no string value".into(),
