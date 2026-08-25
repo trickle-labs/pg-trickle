@@ -911,6 +911,12 @@ async fn test_function_volatility_checks_omitted_default_arguments() {
          LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
     )
     .await;
+    db.execute(
+        "CREATE FUNCTION nd_default_probe(\
+             a int, b timestamptz DEFAULT now(), c int DEFAULT 0) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
 
     let immutable_default_query = "SELECT id, nd_default_immutable() AS value FROM nd_default_src";
     db.create_st(
@@ -935,9 +941,25 @@ async fn test_function_volatility_checks_omitted_default_arguments() {
     db.assert_st_matches_query("public.nd_default_supplied_st", supplied_argument_query)
         .await;
 
+    let supplied_sibling_default_query = "SELECT id, nd_default_probe(\
+        id, b => TIMESTAMPTZ '2025-01-01 00:00+00') AS value FROM nd_default_src";
+    db.create_st(
+        "nd_default_sibling_st",
+        supplied_sibling_default_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "public.nd_default_sibling_st",
+        supplied_sibling_default_query,
+    )
+    .await;
+
     for query in [
         "SELECT id, nd_default_stable() FROM nd_default_src",
         "SELECT id, nd_default_nested() FROM nd_default_src",
+        "SELECT id, nd_default_probe(id, c => 1) FROM nd_default_src",
     ] {
         let error = db
             .try_execute(&format!(
@@ -952,6 +974,118 @@ async fn test_function_volatility_checks_omitted_default_arguments() {
             "unexpected omitted-default rejection: {error}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_io_cast_checks_destination_input_volatility() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_io_cast_src (id INT PRIMARY KEY, raw TEXT)")
+        .await;
+    db.execute("INSERT INTO nd_io_cast_src VALUES (1, '2025-01-01 12:00:00')")
+        .await;
+
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_io_cast_st', \
+             $$ SELECT id, raw::timestamptz FROM nd_io_cast_src $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("timestamptz_in is STABLE and must reject differential mode")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected I/O-cast rejection: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_json_constructor_checks_hidden_conversion_volatility() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nd_json_src (id INT PRIMARY KEY, tsz TIMESTAMPTZ)")
+        .await;
+    db.execute("INSERT INTO nd_json_src VALUES (1, TIMESTAMPTZ '2025-01-01 12:00+00')")
+        .await;
+
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_json_st', \
+             $$ SELECT id, JSON_OBJECT('ts': tsz) AS payload FROM nd_json_src $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("timestamptz-to-JSON conversion must reject differential mode")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected JSON-constructor rejection: {error}"
+    );
+
+    db.execute(
+        r#"CREATE FUNCTION nd_json_path_default(
+             value jsonb DEFAULT JSON_QUERY(
+                 JSONB '"2025-01-01 12:00:00"', '$.timestamp()'))
+           RETURNS jsonb LANGUAGE sql IMMUTABLE AS 'SELECT $1'"#,
+    )
+    .await;
+    let error = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'nd_json_path_st', \
+             $$ SELECT id, nd_json_path_default() FROM nd_json_src $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await
+        .expect_err("mutable JSON-path datetime conversion must reject differential mode")
+        .to_string();
+    assert!(
+        error.contains("stable expressions have refresh-dependent volatility"),
+        "unexpected JSON-path rejection: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_row_comparison_checks_resolved_operator_volatility() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TYPE nd_row_rank AS ENUM ('low', 'high')")
+        .await;
+    db.execute(
+        "CREATE FUNCTION nd_row_rank_lt(nd_row_rank, nd_row_rank) RETURNS boolean \
+         LANGUAGE sql VOLATILE AS 'SELECT $1::text < $2::text'",
+    )
+    .await;
+    db.execute(
+        "CREATE OPERATOR < (\
+             LEFTARG = nd_row_rank, RIGHTARG = nd_row_rank, FUNCTION = nd_row_rank_lt)",
+    )
+    .await;
+    db.execute("CREATE OPERATOR FAMILY nd_row_rank_ops USING btree")
+        .await;
+    db.execute(
+        "ALTER OPERATOR FAMILY nd_row_rank_ops USING btree \
+         ADD OPERATOR 1 < (nd_row_rank, nd_row_rank)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE nd_row_cmp_src (\
+             id INT PRIMARY KEY, left_rank nd_row_rank, right_rank nd_row_rank)",
+    )
+    .await;
+
+    let volatility: String = db
+        .query_scalar(
+            "SELECT result FROM pgtrickle.validate_query(\
+               'SELECT id, (left_rank, id) < (right_rank, id + 1) AS cmp \
+                FROM nd_row_cmp_src') \
+             WHERE check_name = 'volatility'",
+        )
+        .await;
+    assert_eq!(volatility, "volatile");
 }
 
 #[tokio::test]

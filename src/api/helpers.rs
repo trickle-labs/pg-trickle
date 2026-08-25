@@ -920,18 +920,28 @@ pub struct ColumnDef {
 }
 
 #[cfg(not(test))]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct AnalyzedFunctionCall {
     oid: pg_sys::Oid,
-    supplied_args: i32,
+    supplied_arg_numbers: Vec<i32>,
 }
 
 #[cfg(not(test))]
 struct VolatilityCollector {
     function_oids: Vec<pg_sys::Oid>,
     function_calls: Vec<AnalyzedFunctionCall>,
-    io_cast_input_oids: Vec<pg_sys::Oid>,
+    enum_io_function_oids: Vec<pg_sys::Oid>,
     worst: char,
+}
+
+#[cfg(not(test))]
+unsafe extern "C-unwind" {
+    #[link_name = "jspIsMutable"]
+    fn jsonpath_is_mutable(
+        path: *mut std::ffi::c_void,
+        varnames: *mut pg_sys::List,
+        varexprs: *mut pg_sys::List,
+    ) -> bool;
 }
 
 #[cfg(not(test))]
@@ -955,7 +965,7 @@ fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgT
     let mut collector = VolatilityCollector {
         function_oids: Vec::new(),
         function_calls: Vec::new(),
-        io_cast_input_oids: Vec::new(),
+        enum_io_function_oids: Vec::new(),
         worst: 'i',
     };
 
@@ -977,31 +987,23 @@ fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgT
         .sort_unstable_by_key(|oid| oid.to_u32());
     collector.function_oids.dedup();
     collector
-        .io_cast_input_oids
+        .enum_io_function_oids
         .sort_unstable_by_key(|oid| oid.to_u32());
-    collector.io_cast_input_oids.dedup();
+    collector.enum_io_function_oids.dedup();
 
     for oid in collector.function_oids {
+        if collector
+            .enum_io_function_oids
+            .binary_search_by_key(&oid.to_u32(), |candidate| candidate.to_u32())
+            .is_ok()
+        {
+            continue;
+        }
         let volatility = Spi::get_one_with_args::<String>(
             "SELECT provolatile::text FROM pg_catalog.pg_proc WHERE oid = $1",
             &[oid.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(format!("volatility lookup failed: {e}")))?
-        .and_then(|value| value.chars().next())
-        .unwrap_or('v');
-        collector.worst = max_analyzed_volatility(collector.worst, volatility);
-    }
-
-    for input_oid in collector.io_cast_input_oids {
-        let volatility = Spi::get_one_with_args::<String>(
-            "SELECT CASE WHEN t.typcategory = 'E' THEN 'i'::text \
-                    ELSE p.provolatile::text END
-             FROM pg_catalog.pg_type t
-             JOIN pg_catalog.pg_proc p ON p.oid = t.typoutput
-             WHERE t.oid = $1",
-            &[input_oid.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(format!("cast volatility lookup failed: {e}")))?
         .and_then(|value| value.chars().next())
         .unwrap_or('v');
         collector.worst = max_analyzed_volatility(collector.worst, volatility);
@@ -1013,59 +1015,92 @@ fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgT
 /// Add volatility from function defaults omitted at the call site.
 ///
 /// PostgreSQL leaves default expressions out of the analyzed `FuncExpr` and
-/// inserts them during planning. Deparse and analyze all defaults for a
-/// function when any are omitted. Inspecting every default is deliberately
-/// fail-closed for named-argument calls that can omit non-trailing arguments.
+/// inserts them during planning. Analyze only the defaults absent from this
+/// call, using `NamedArgExpr.argnumber` for named and mixed notation.
 #[cfg(not(test))]
 fn collect_default_argument_volatility(
     collector: &mut VolatilityCollector,
 ) -> Result<(), PgTrickleError> {
     let mut checked_calls = std::collections::HashSet::new();
-    let mut checked_functions = std::collections::HashSet::new();
     let mut index = 0;
 
-    while let Some(call) = collector.function_calls.get(index).copied() {
+    while let Some(call) = collector.function_calls.get(index).cloned() {
         index += 1;
-        if checked_functions.contains(&call.oid) || !checked_calls.insert(call) {
+        if !checked_calls.insert(call.clone()) {
             continue;
         }
 
-        let defaults_sql = Spi::get_one_with_args::<String>(
-            "SELECT CASE \
-                    WHEN pronargdefaults > 0 AND pronargs::int > $2 \
-                    THEN pg_get_expr(proargdefaults, 0::oid) \
-                    END \
+        let (pronargs, pronargdefaults, defaults_sql) =
+            Spi::get_three_with_args::<i32, i32, String>(
+                "SELECT pronargs::int, pronargdefaults::int, \
+                    CASE WHEN pronargdefaults > 0 \
+                         THEN pg_get_expr(proargdefaults, 0::oid) END \
              FROM pg_catalog.pg_proc WHERE oid = $1",
-            &[call.oid.into(), call.supplied_args.into()],
-        )
-        .map_err(|e| {
-            PgTrickleError::SpiError(format!(
-                "default-argument volatility lookup failed for function OID {}: {e}",
-                call.oid
-            ))
-        })?;
+                &[call.oid.into()],
+            )
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "default-argument volatility lookup failed for function OID {}: {e}",
+                    call.oid
+                ))
+            })?;
 
-        let Some(defaults_sql) = defaults_sql else {
+        let (Some(pronargs), Some(pronargdefaults), Some(defaults_sql)) =
+            (pronargs, pronargdefaults, defaults_sql)
+        else {
             continue;
         };
-        checked_functions.insert(call.oid);
+
+        let first_default = pronargs - pronargdefaults;
+        let omitted_defaults = (first_default..pronargs)
+            .filter(|argnumber| call.supplied_arg_numbers.binary_search(argnumber).is_err())
+            .map(|argnumber| (argnumber - first_default) as usize)
+            .collect::<Vec<_>>();
+        if omitted_defaults.is_empty() {
+            continue;
+        }
 
         let defaults_query = format!("SELECT {defaults_sql}");
         let defaults_node = analyze_query_tree(&defaults_query)?;
 
         // SAFETY: defaults_node is a valid analyzed Query allocated by
-        // PostgreSQL and remains valid for this function's duration.
+        // PostgreSQL and remains valid for this function's duration. Its
+        // target list contains the defaults in declared positional order.
         unsafe {
-            pg_sys::query_tree_walker_impl(
-                defaults_node,
-                Some(collect_volatility_nodes),
-                collector as *mut VolatilityCollector as *mut std::ffi::c_void,
-                pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
-            );
+            let targets = pgrx::PgList::<pg_sys::TargetEntry>::from_pg((*defaults_node).targetList);
+            for default_index in omitted_defaults {
+                let Some(target) = targets.get_ptr(default_index) else {
+                    collector.worst = 'v';
+                    continue;
+                };
+                if target.is_null() || (*target).expr.is_null() {
+                    collector.worst = 'v';
+                    continue;
+                }
+                collect_volatility_nodes(
+                    (*target).expr as *mut pg_sys::Node,
+                    collector as *mut VolatilityCollector as *mut std::ffi::c_void,
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+#[cfg(not(test))]
+unsafe extern "C-unwind" fn collect_function_oid(
+    oid: pg_sys::Oid,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    // SAFETY: PostgreSQL invokes this callback synchronously with the
+    // VolatilityCollector context passed to check_functions_in_node.
+    unsafe {
+        (*(context as *mut VolatilityCollector))
+            .function_oids
+            .push(oid);
+    }
+    false
 }
 
 #[cfg(not(test))]
@@ -1091,37 +1126,96 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
         let collector = &mut *(context as *mut VolatilityCollector);
         if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
             let function = &*(node as *const pg_sys::FuncExpr);
-            collector.function_oids.push(function.funcid);
+            let args = pgrx::PgList::<pg_sys::Node>::from_pg(function.args);
+            let mut supplied_arg_numbers = args
+                .iter_ptr()
+                .enumerate()
+                .map(|(index, arg)| {
+                    if pgrx::is_a(arg, pg_sys::NodeTag::T_NamedArgExpr) {
+                        (*(arg as *const pg_sys::NamedArgExpr)).argnumber
+                    } else {
+                        index as i32
+                    }
+                })
+                .collect::<Vec<_>>();
+            supplied_arg_numbers.sort_unstable();
             collector.function_calls.push(AnalyzedFunctionCall {
                 oid: function.funcid,
-                supplied_args: pg_sys::list_length(function.args),
+                supplied_arg_numbers,
             });
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_OpExpr)
-            || pgrx::is_a(node, pg_sys::NodeTag::T_DistinctExpr)
-            || pgrx::is_a(node, pg_sys::NodeTag::T_NullIfExpr)
-        {
-            collector
-                .function_oids
-                .push((*(node as *const pg_sys::OpExpr)).opfuncid);
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_ScalarArrayOpExpr) {
-            collector
-                .function_oids
-                .push((*(node as *const pg_sys::ScalarArrayOpExpr)).opfuncid);
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_CoerceViaIO) {
+        }
+
+        if pgrx::is_a(node, pg_sys::NodeTag::T_CoerceViaIO) {
             let cast = &*(node as *const pg_sys::CoerceViaIO);
             if !cast.arg.is_null() {
-                collector
-                    .io_cast_input_oids
-                    .push(pg_sys::exprType(cast.arg as *const pg_sys::Node));
+                let source_type = pg_sys::exprType(cast.arg as *const pg_sys::Node);
+                if pg_sys::get_typtype(source_type) as u8 == pg_sys::TYPTYPE_ENUM {
+                    let mut output = pg_sys::InvalidOid;
+                    let mut is_varlena = false;
+                    pg_sys::getTypeOutputInfo(source_type, &mut output, &mut is_varlena);
+                    collector.enum_io_function_oids.push(output);
+                }
+            }
+            if pg_sys::get_typtype(cast.resulttype) as u8 == pg_sys::TYPTYPE_ENUM {
+                let mut input = pg_sys::InvalidOid;
+                let mut io_param = pg_sys::InvalidOid;
+                pg_sys::getTypeInputInfo(cast.resulttype, &mut input, &mut io_param);
+                collector.enum_io_function_oids.push(input);
+            }
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_JsonConstructorExpr) {
+            let constructor = &*(node as *const pg_sys::JsonConstructorExpr);
+            if constructor.returning.is_null() || (*constructor.returning).format.is_null() {
+                collector.worst = 'v';
+            } else {
+                let is_jsonb = (*(*constructor.returning).format).format_type
+                    == pg_sys::JsonFormatType::JS_FORMAT_JSONB;
+                let args = pgrx::PgList::<pg_sys::Node>::from_pg(constructor.args);
+                for arg in args.iter_ptr() {
+                    let arg_type = pg_sys::exprType(arg as *const pg_sys::Node);
+                    let immutable = if is_jsonb {
+                        pg_sys::to_jsonb_is_immutable(arg_type)
+                    } else {
+                        pg_sys::to_json_is_immutable(arg_type)
+                    };
+                    if !immutable {
+                        collector.worst = max_analyzed_volatility(collector.worst, 's');
+                    }
+                }
+            }
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_JsonExpr) {
+            let json = &*(node as *const pg_sys::JsonExpr);
+            if !pgrx::is_a(json.path_spec, pg_sys::NodeTag::T_Const) {
+                collector.worst = max_analyzed_volatility(collector.worst, 's');
+            } else {
+                let path = &*(json.path_spec as *const pg_sys::Const);
+                if !path.constisnull {
+                    if path.consttype != pg_sys::JSONPATHOID {
+                        collector.worst = 'v';
+                    } else {
+                        let detoasted = pg_sys::pg_detoast_datum(
+                            path.constvalue.cast_mut_ptr::<pg_sys::varlena>(),
+                        );
+                        if jsonpath_is_mutable(
+                            detoasted as *mut std::ffi::c_void,
+                            json.passing_names,
+                            json.passing_values,
+                        ) {
+                            collector.worst = max_analyzed_volatility(collector.worst, 's');
+                        }
+                    }
+                }
             }
         } else if pgrx::is_a(node, pg_sys::NodeTag::T_SQLValueFunction) {
             collector.worst = max_analyzed_volatility(collector.worst, 's');
         } else if pgrx::is_a(node, pg_sys::NodeTag::T_NextValueExpr) {
             collector.worst = 'v';
-        } else if pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) {
-            collector
-                .function_oids
-                .push((*(node as *const pg_sys::WindowFunc)).winfnoid);
+        }
+
+        // Aggregate implementation volatility is intentionally excluded.
+        // PostgreSQL handles every other function-containing node, including
+        // both sides of CoerceViaIO and every RowCompareExpr operator.
+        if !pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) {
+            pg_sys::check_functions_in_node(node, Some(collect_function_oid), context);
         }
 
         // expression_tree_walker does not recurse into nested Query nodes.
