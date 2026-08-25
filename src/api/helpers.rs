@@ -1008,12 +1008,11 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
         return false;
     }
 
-    // SAFETY: context is the VolatilityCollector passed to the walker below.
-    let collector = unsafe { &mut *(context as *mut VolatilityCollector) };
-
-    // SAFETY: PostgreSQL's walker supplies valid nodes and is_a checks the
-    // tag before each typed access.
+    // SAFETY: PostgreSQL's walker supplies valid nodes, `context` is the
+    // VolatilityCollector passed below, and every typed access is guarded by
+    // an is_a check.
     unsafe {
+        let collector = &mut *(context as *mut VolatilityCollector);
         if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
             collector
                 .function_oids
@@ -1045,24 +1044,19 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
                 .function_oids
                 .push((*(node as *const pg_sys::WindowFunc)).winfnoid);
         }
-    }
 
-    // expression_tree_walker does not recurse into nested Query nodes.
-    // SAFETY: node is a valid Query supplied by PostgreSQL's walker.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
-        // SAFETY: node tag verified as T_Query and context remains valid.
-        return unsafe {
+        // expression_tree_walker does not recurse into nested Query nodes.
+        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
             pg_sys::query_tree_walker_impl(
                 node as *mut pg_sys::Query,
                 Some(collect_volatility_nodes),
                 context,
                 pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
             )
-        };
+        } else {
+            pg_sys::expression_tree_walker_impl(node, Some(collect_volatility_nodes), context)
+        }
     }
-
-    // SAFETY: node and context are valid pointers from PostgreSQL's walker.
-    unsafe { pg_sys::expression_tree_walker_impl(node, Some(collect_volatility_nodes), context) }
 }
 
 #[cfg(test)]

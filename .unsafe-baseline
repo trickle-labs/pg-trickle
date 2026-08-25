@@ -1,4 +1,4 @@
-# pg_trickle unsafe { block baseline — generated 2026-08-20
+# pg_trickle unsafe { block baseline — generated 2026-08-25
 # Tracks `grep -c "unsafe {"` counts per source file.
 # Files with 0 unsafe blocks are omitted.
 #
@@ -6,7 +6,7 @@
 #   scripts/unsafe_inventory.sh --update
 #
 # Files and their unsafe block counts:
-src/api/helpers.rs 13
+src/api/helpers.rs 15
 src/api/mod.rs 1
 src/api/scheduler_control.rs 1
 src/api/snapshot.rs 6
