@@ -150,7 +150,7 @@ fn saved_pre_definer_search_path() -> Result<String, PgTrickleError> {
             ));
         }
         let guc_var = guc_var as *mut GucVariable;
-        if (*guc_var).vartype != pg_sys::config_type::PGC_STRING {
+        if (*guc_var).vartype != pg_sys::config_type::PGC_STRING as u32 {
             return Err(PgTrickleError::InternalError(
                 "security context: search_path GUC has an unexpected type".into(),
             ));
