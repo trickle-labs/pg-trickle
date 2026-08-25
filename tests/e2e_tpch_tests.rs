@@ -67,11 +67,10 @@ fn rf_count() -> usize {
 // signalling a DVM regression where a previously-passing query no longer
 // creates or runs correctly.
 //
-// DIFFERENTIAL: all 22 queries previously passed at SF<10. The v0.83+ fail-closed
-//               volatility admission currently makes q07/q08/q09 FULL-only, and
-//               queries with correlated scalar subqueries in WHERE clauses become
-//               quadratic in the DVM delta SQL at SF≥10. The latter are in
-//               LARGE_SCALE_DIFFERENTIAL_SKIP below and are skipped automatically.
+// DIFFERENTIAL: all 22 queries previously passed at SF<10. Queries with correlated
+//               scalar subqueries in WHERE clauses become quadratic in the DVM
+//               delta SQL at SF≥10. Those queries are listed in
+//               LARGE_SCALE_DIFFERENTIAL_SKIP and skipped automatically.
 // IMMEDIATE:    a subset cannot be created (IVM restriction). Populate by
 //               running with the guard disabled, then hardening the set.
 //
@@ -83,12 +82,6 @@ fn rf_count() -> usize {
 const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // DI-11 deep-join planner hints (disable nestloop, raise work_mem,
     // bump join_collapse_limit, temp_file_limit=-1) resolved Q05/Q09.
-    // v0.83+ fail-closed volatility admission: q07/q08/q09 use EXTRACT(YEAR
-    // FROM date), which resolves to immutable date_part(text,date), but the
-    // name-only overload check also sees the stable timestamptz overload.
-    // They remain intentionally FULL-only until overload-aware function
-    // volatility resolution is implemented.
-    "q07", "q08", "q09",
     // v0.77.0: q12 uses CASE aggregate + IN-list predicate and is currently
     // forced to FULL refresh by CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK.
     "q12",
@@ -121,9 +114,6 @@ const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &[];
 /// this list is skipped, catching silent regressions as the DVM evolves.
 #[rustfmt::skip]
 const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
-    // v0.85 fail-closed volatility admission rejects the stable expressions
-    // in q07/q08/q09 for IMMEDIATE mode. Use FULL or AUTO for these queries.
-    "q07", "q08", "q09",
 ];
 
 // ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────

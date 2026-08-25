@@ -392,7 +392,7 @@ fn explain_query_rewrite_impl(
                 }
 
                 // Volatility: 'i' = immutable, 's' = stable, 'v' = volatile.
-                if let Ok(v) = dvm::tree_worst_volatility_with_registry(&result) {
+                if let Ok((_, v)) = crate::api::helpers::validate_defining_query(&effective_q) {
                     let label = match v {
                         'i' => "immutable",
                         's' => "stable",
@@ -1093,7 +1093,7 @@ fn validate_query_impl(query: &str) -> Result<Vec<(String, String, String)>, PgT
                 }
 
                 // Volatility.
-                if let Ok(v) = dvm::tree_worst_volatility_with_registry(&result) {
+                if let Ok((_, v)) = crate::api::helpers::validate_defining_query(&effective_q) {
                     let (label, sev) = match v {
                         'i' => ("immutable", "INFO"),
                         's' => ("stable", "INFO"),
@@ -1175,19 +1175,41 @@ fn resolve_auto_refresh_mode(q: &str, rows: &mut Vec<(String, String, String)>) 
         return "FULL".to_string();
     }
 
-    // 3. DVM parse + IVM support.
+    let volatility = match crate::api::helpers::validate_defining_query(q) {
+        Ok((_, volatility)) => volatility,
+        Err(e) => {
+            rows.push((
+                "query_analysis".to_string(),
+                format!("query analysis failed: {e}"),
+                "WARNING".to_string(),
+            ));
+            return "FULL".to_string();
+        }
+    };
+
+    // 3. DVM parse + incremental admission.
     match dvm::parse_defining_query_full(q) {
-        Ok(result) => {
-            if let Err(e) = dvm::check_ivm_support_with_registry(&result) {
+        Ok(result) => match dvm::incremental_admission(&result, volatility, false) {
+            Ok(dvm::IncrementalAdmission::Proven) => "DIFFERENTIAL".to_string(),
+            Ok(dvm::IncrementalAdmission::FullOnly(issues)) => {
+                for issue in issues {
+                    rows.push((
+                        issue.code.to_string(),
+                        format!("{}: {}", issue.operator, issue.reason),
+                        "WARNING".to_string(),
+                    ));
+                }
+                "FULL".to_string()
+            }
+            Err(e) => {
                 rows.push((
-                    "ivm_support_check".to_string(),
-                    format!("DIFFERENTIAL not supported: {}", e),
+                    "incremental_admission".to_string(),
+                    format!("inspection failed: {e}"),
                     "WARNING".to_string(),
                 ));
-                return "FULL".to_string();
+                "FULL".to_string()
             }
-            "DIFFERENTIAL".to_string()
-        }
+        },
         Err(e) => {
             rows.push((
                 "ivm_support_check".to_string(),

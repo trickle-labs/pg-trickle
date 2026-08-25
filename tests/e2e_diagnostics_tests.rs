@@ -357,6 +357,59 @@ async fn test_diagnostics_validate_query_simple_agg_differential() {
     );
 }
 
+#[tokio::test]
+async fn test_diagnostics_volatility_uses_resolved_overload() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE diag_vol_src (id INT PRIMARY KEY, label TEXT)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION diag_probe(int) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION diag_probe(text) RETURNS text \
+         LANGUAGE sql VOLATILE AS 'SELECT $1'",
+    )
+    .await;
+
+    let immutable_mode: String = db
+        .query_scalar(
+            "SELECT result FROM pgtrickle.validate_query(\
+               'SELECT id, diag_probe(id) FROM diag_vol_src') \
+             WHERE check_name = 'resolved_refresh_mode'",
+        )
+        .await;
+    assert_eq!(immutable_mode, "DIFFERENTIAL");
+
+    let immutable_volatility: String = db
+        .query_scalar(
+            "SELECT result FROM pgtrickle.validate_query(\
+               'SELECT id, diag_probe(id) FROM diag_vol_src') \
+             WHERE check_name = 'volatility'",
+        )
+        .await;
+    assert_eq!(immutable_volatility, "immutable");
+
+    let volatile_mode: String = db
+        .query_scalar(
+            "SELECT result FROM pgtrickle.validate_query(\
+               'SELECT id, diag_probe(label) FROM diag_vol_src') \
+             WHERE check_name = 'resolved_refresh_mode'",
+        )
+        .await;
+    assert_eq!(volatile_mode, "FULL");
+
+    let rewrite_patterns: String = db
+        .query_scalar(
+            "SELECT sql_after FROM pgtrickle.explain_query_rewrite(\
+               'SELECT id, diag_probe(id) FROM diag_vol_src') \
+             WHERE pass_name = 'dvm_patterns'",
+        )
+        .await;
+    assert!(rewrite_patterns.contains("volatility:immutable"));
+}
+
 /// DT-4: a TopK (ORDER BY + LIMIT) query should resolve to TOPK mode.
 #[tokio::test]
 async fn test_diagnostics_validate_query_topk_mode() {

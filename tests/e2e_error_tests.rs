@@ -833,6 +833,132 @@ async fn test_stable_function_falls_back_to_full_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn test_function_volatility_resolves_exact_overload_and_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE SCHEMA volatility_safe").await;
+    db.execute("CREATE SCHEMA volatility_unsafe").await;
+    db.execute(
+        "CREATE FUNCTION volatility_safe.probe(int) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION volatility_safe.probe(text) RETURNS text \
+         LANGUAGE sql VOLATILE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION volatility_unsafe.probe(int) RETURNS int \
+         LANGUAGE sql VOLATILE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute("CREATE TABLE nd_overload_src (id INT PRIMARY KEY, label TEXT)")
+        .await;
+    db.execute("INSERT INTO nd_overload_src VALUES (1, 'one'), (2, 'two')")
+        .await;
+
+    let immutable_query = "SELECT id, volatility_safe.probe(id) AS resolved FROM nd_overload_src";
+    db.create_st(
+        "nd_overload_immutable_st",
+        immutable_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.nd_overload_immutable_st", immutable_query)
+        .await;
+
+    for query in [
+        "SELECT id, volatility_safe.probe(label) FROM nd_overload_src",
+        "SELECT id, volatility_unsafe.probe(id) FROM nd_overload_src",
+    ] {
+        let result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table(\
+                 'nd_overload_rejected_st', $$ {query} $$, '1m', 'DIFFERENTIAL')"
+            ))
+            .await;
+        assert!(
+            result.is_err(),
+            "the resolved VOLATILE overload must be rejected: {query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_temporal_volatility_uses_resolved_function_and_operator() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE nd_temporal_src (\
+             id INT PRIMARY KEY, event_date DATE, ts TIMESTAMP, tsz TIMESTAMPTZ)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nd_temporal_src VALUES \
+         (1, DATE '2025-01-01', TIMESTAMP '2025-01-01 10:15', TIMESTAMPTZ '2025-01-01 10:15+00'), \
+         (2, DATE '2025-01-02', TIMESTAMP '2025-01-01 10:45', TIMESTAMPTZ '2025-01-01 10:45+00')",
+    )
+    .await;
+
+    let bucket_query = "SELECT EXTRACT(YEAR FROM event_date) AS event_year, \
+                date_trunc('hour', tsz, 'UTC') AS bucket, COUNT(*) AS n \
+         FROM nd_temporal_src \
+         GROUP BY EXTRACT(YEAR FROM event_date), date_trunc('hour', tsz, 'UTC')";
+    db.create_st("nd_temporal_bucket_st", bucket_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    db.execute(
+        "INSERT INTO nd_temporal_src VALUES \
+         (3, DATE '2026-02-01', TIMESTAMP '2026-02-01 12:30', TIMESTAMPTZ '2026-02-01 12:30+00')",
+    )
+    .await;
+    db.refresh_st("nd_temporal_bucket_st").await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    db.execute("UPDATE nd_temporal_src SET tsz = tsz + INTERVAL '2 hours' WHERE id = 2")
+        .await;
+    db.refresh_st("nd_temporal_bucket_st").await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    db.execute("DELETE FROM nd_temporal_src WHERE id = 1").await;
+    db.refresh_st("nd_temporal_bucket_st").await;
+    db.assert_st_matches_query("public.nd_temporal_bucket_st", bucket_query)
+        .await;
+
+    let immutable_operator_query =
+        "SELECT id, ts + INTERVAL '1 day' AS shifted FROM nd_temporal_src";
+    db.create_st(
+        "nd_temporal_operator_st",
+        immutable_operator_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    for query in [
+        "SELECT id, date_trunc('hour', tsz) FROM nd_temporal_src",
+        "SELECT id, tsz + INTERVAL '1 day' FROM nd_temporal_src",
+    ] {
+        let result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table(\
+                 'nd_temporal_rejected_st', $$ {query} $$, '1m', 'DIFFERENTIAL')"
+            ))
+            .await;
+        assert!(
+            result.is_err(),
+            "the resolved STABLE temporal expression must be rejected: {query}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_nested_volatile_where_expression_rejected_in_differential_mode() {
     let db = E2eDb::new().await.with_extension().await;
 

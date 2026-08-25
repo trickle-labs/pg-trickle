@@ -2931,10 +2931,12 @@ SELECT pgtrickle.create_stream_table(
 
 ### Volatile Function Detection
 
-pg_trickle checks all functions and operators in the defining query against `pg_proc.provolatile`:
+PostgreSQL analyzes the defining query before pg_trickle checks volatility. The
+check uses the exact function, operator, and cast overload selected from the
+schema and argument types.
 
 - **VOLATILE** and **STABLE** functions (e.g., `random()`, `clock_timestamp()`, `now()`) are FULL-only in incremental admission. AUTO falls back to FULL; explicit DIFFERENTIAL and IMMEDIATE modes are rejected.
-- **VOLATILE operators** — custom operators backed by volatile functions are also detected. The check resolves the operator’s implementation function via `pg_operator.oprcode` and checks its volatility in `pg_proc`.
+- **VOLATILE operators** backed by volatile functions are also detected.
 - **IMMUTABLE** functions are always safe and produce no warnings.
 
 FULL mode accepts all volatility classes since it re-evaluates the entire query each time.

@@ -57,6 +57,52 @@ async fn test_topk_create_differential_mode() {
     assert_eq!(db.count("public.topk_diff").await, 2);
 }
 
+#[tokio::test]
+async fn test_topk_volatility_uses_resolved_overload() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE FUNCTION topk_probe(int) RETURNS int \
+         LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION topk_probe(text) RETURNS int \
+         LANGUAGE sql VOLATILE AS 'SELECT length($1)'",
+    )
+    .await;
+    db.execute("CREATE TABLE topk_vol_src (id INT PRIMARY KEY, score INT, label TEXT)")
+        .await;
+    db.execute("INSERT INTO topk_vol_src VALUES (1, 10, 'a'), (2, 30, 'bbb'), (3, 20, 'cc')")
+        .await;
+
+    let immutable_query =
+        "SELECT id, score FROM topk_vol_src ORDER BY topk_probe(score) DESC LIMIT 2";
+    db.create_st(
+        "topk_vol_immutable_st",
+        immutable_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("public.topk_vol_immutable_st", immutable_query)
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'topk_vol_rejected_st', \
+             $$ SELECT id, score FROM topk_vol_src \
+                ORDER BY topk_probe(label) DESC LIMIT 2 $$, \
+             '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "TopK must reject the resolved VOLATILE overload"
+    );
+}
+
 // ── Catalog ────────────────────────────────────────────────────────────
 
 #[tokio::test]

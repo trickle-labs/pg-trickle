@@ -67,7 +67,7 @@ pub use parser::{
     resolve_incremental_mode, rewrite_correlated_scalar_in_select, rewrite_demorgan_sublinks,
     rewrite_distinct_on, rewrite_grouping_sets, rewrite_nested_window_exprs, rewrite_rows_from,
     rewrite_scalar_subquery_in_where, rewrite_sublinks_in_or, rewrite_views_inline,
-    topk_query_volatility, tree_worst_volatility_with_registry, validate_immediate_mode_support,
+    tree_worst_volatility_with_registry, validate_immediate_mode_support,
     warn_limit_without_order_in_subqueries,
 };
 

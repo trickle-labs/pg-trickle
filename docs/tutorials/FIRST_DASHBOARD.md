@@ -105,19 +105,20 @@ ORDER BY total_revenue DESC;
 ## Step 4 — Hourly Order Counts
 
 A time-series stream table that aggregates orders into one-hour buckets.
-`date_trunc('hour', ...)` is a STABLE function, so DIFFERENTIAL mode works.
+The three-argument `date_trunc` pins the time zone to UTC and is IMMUTABLE, so
+DIFFERENTIAL mode can maintain the buckets safely.
 
 ```sql
 SELECT pgtrickle.create_stream_table(
     name     => 'hourly_order_counts',
     query    => $$
         SELECT
-            date_trunc('hour', placed_at)  AS hour,
+            date_trunc('hour', placed_at, 'UTC') AS hour,
             region,
             COUNT(*)                        AS order_count,
             SUM(amount)                     AS hourly_revenue
         FROM orders
-        GROUP BY date_trunc('hour', placed_at), region
+        GROUP BY date_trunc('hour', placed_at, 'UTC'), region
     $$,
     schedule => '10s',
     refresh_mode => 'DIFFERENTIAL'

@@ -919,12 +919,15 @@ pub struct ColumnDef {
     pub type_oid: PgOid,
 }
 
-/// Validate a defining query and extract its output columns via parse analysis.
+/// Validate a defining query and extract its output columns and volatility via
+/// parse analysis.
 ///
 /// This avoids executing the query body during validation, which is important
 /// for stream-table cycles where a plain `SELECT ... LIMIT 0` can still reach
 /// change-buffer-dependent paths for upstream stream tables.
-pub(super) fn validate_defining_query(query: &str) -> Result<Vec<ColumnDef>, PgTrickleError> {
+pub(crate) fn validate_defining_query(
+    query: &str,
+) -> Result<(Vec<ColumnDef>, char), PgTrickleError> {
     use pgrx::PgList;
     use std::ffi::{CStr, CString};
 
@@ -997,7 +1000,16 @@ pub(super) fn validate_defining_query(query: &str) -> Result<Vec<ColumnDef>, PgT
             ));
         }
 
-        Ok(columns)
+        let query_node = query_node.cast::<pg_sys::Node>();
+        let volatility = if pg_sys::contain_volatile_functions(query_node) {
+            'v'
+        } else if pg_sys::contain_mutable_functions(query_node) {
+            's'
+        } else {
+            'i'
+        };
+
+        Ok((columns, volatility))
     }
 }
 
