@@ -163,7 +163,7 @@ pub(crate) fn expand_user_placeholder(path: &str, role_name: &str) -> String {
     split_search_path_elements(path)
         .into_iter()
         .map(|element| {
-            if element == "$user" {
+            if element == "$user" || element == "\"$user\"" {
                 quoted_role.clone()
             } else {
                 element
@@ -351,11 +351,11 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_user_quoted_dollar_user_is_not_expanded() {
-        // A *quoted* "$user" is a literal schema name, not the placeholder.
+    fn test_expand_user_quoted_dollar_user() {
+        // PostgreSQL reports the default search_path placeholder quoted.
         assert_eq!(
             expand_user_placeholder("\"$user\", public", "alice"),
-            "\"$user\", public"
+            "\"alice\", public"
         );
     }
 
