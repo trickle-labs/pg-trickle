@@ -25,26 +25,6 @@ unsafe extern "C" {
     ) -> *mut std::os::raw::c_void;
 }
 
-#[repr(C)]
-struct GucVariable {
-    vartype: u32,
-    stack: *mut GucStack,
-}
-
-#[repr(C)]
-struct GucStack {
-    prior: *mut GucStack,
-    val: GucValue,
-}
-
-#[repr(C)]
-union GucValue {
-    int_val: i32,
-    real_val: f64,
-    bool_val: u8,
-    string_val: *mut std::os::raw::c_char,
-}
-
 /// Which kind of public entry point captured a [`CallerContext`].
 ///
 /// A `SecurityDefiner` entry has already had its `search_path` overwritten
@@ -149,8 +129,8 @@ fn saved_pre_definer_search_path() -> Result<String, PgTrickleError> {
                 "security context: search_path GUC is not registered".into(),
             ));
         }
-        let guc_var = guc_var as *mut GucVariable;
-        if (*guc_var).vartype != pg_sys::config_type::PGC_STRING as u32 {
+        let guc_var = guc_var as *mut pg_sys::config_generic;
+        if (*guc_var).vartype != pg_sys::config_type::PGC_STRING {
             return Err(PgTrickleError::InternalError(
                 "security context: search_path GUC has an unexpected type".into(),
             ));
@@ -163,7 +143,7 @@ fn saved_pre_definer_search_path() -> Result<String, PgTrickleError> {
                     .into(),
             ));
         }
-        let ptr = (*(*stack).prior).val.string_val;
+        let ptr = (*stack).prior.val.stringval;
         if ptr.is_null() {
             return Err(PgTrickleError::InternalError(
                 "security context: saved search_path GUC stack entry has no string value".into(),
@@ -488,6 +468,8 @@ mod pg_tests {
     fn test_with_stream_owner_context_runs_as_owner_and_restores() {
         Spi::run("CREATE ROLE lsec_probe_owner").unwrap();
         Spi::run("CREATE SCHEMA lsec_probe_owner_schema").unwrap();
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
 
         let outer_role = outer_user_name().expect("outer role must resolve");
         let owner_oid = Spi::get_one::<pg_sys::Oid>(
@@ -508,6 +490,10 @@ mod pg_tests {
             let path = Spi::get_one::<String>("SELECT current_setting('search_path')")
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap();
+            let row_security = Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap();
+            assert_eq!(row_security, "on");
             Ok((role, path))
         })
         .unwrap();
@@ -519,6 +505,18 @@ mod pg_tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored_role, outer_role);
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap(),
+            "public, pg_catalog"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
 
         Spi::run("DROP SCHEMA lsec_probe_owner_schema").unwrap();
         Spi::run("DROP ROLE lsec_probe_owner").unwrap();
@@ -527,6 +525,8 @@ mod pg_tests {
     #[pg_test]
     fn test_with_stream_owner_context_restores_after_postgres_error() {
         Spi::run("CREATE ROLE lsec_probe_owner_err").unwrap();
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
         let outer_role = outer_user_name().expect("outer role must resolve");
         let owner_oid = Spi::get_one::<pg_sys::Oid>(
             "SELECT oid FROM pg_roles WHERE rolname = 'lsec_probe_owner_err'",
@@ -548,6 +548,18 @@ mod pg_tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored_role, outer_role);
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap(),
+            "public, pg_catalog"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
 
         Spi::run("DROP ROLE lsec_probe_owner_err").unwrap();
     }
@@ -556,6 +568,8 @@ mod pg_tests {
     fn test_with_stream_owner_context_nests_without_leaking_inner_state() {
         Spi::run("CREATE ROLE lsec_probe_outer").unwrap();
         Spi::run("CREATE ROLE lsec_probe_inner").unwrap();
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
         let starting_role = outer_user_name().expect("outer role must resolve");
 
         let outer_owner = Spi::get_one::<pg_sys::Oid>(
@@ -578,26 +592,150 @@ mod pg_tests {
             search_path: "pg_temp, pg_catalog".to_string(),
         };
 
-        let observed_outer_after_inner = with_stream_owner_context(&outer_ctx, || {
-            with_stream_owner_context(&inner_ctx, || {
-                Spi::get_one::<String>("SELECT current_user")
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-            })?;
+        let (observed_inner, observed_outer_after_inner) =
+            with_stream_owner_context(&outer_ctx, || {
+                let observed_inner = with_stream_owner_context(&inner_ctx, || {
+                    let role = Spi::get_one::<String>("SELECT current_user")
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap();
+                    let path = Spi::get_one::<String>("SELECT current_setting('search_path')")
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap();
+                    let row_security =
+                        Spi::get_one::<String>("SELECT current_setting('row_security')")
+                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                            .unwrap();
+                    Ok((role, path, row_security))
+                })?;
 
-            Spi::get_one::<String>("SELECT current_user")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        })
-        .unwrap()
-        .unwrap();
+                let observed_outer = (
+                    Spi::get_one::<String>("SELECT current_user")
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap(),
+                    Spi::get_one::<String>("SELECT current_setting('search_path')")
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap(),
+                    Spi::get_one::<String>("SELECT current_setting('row_security')")
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap(),
+                );
+                Ok((observed_inner, observed_outer))
+            })
+            .unwrap();
 
-        assert_eq!(observed_outer_after_inner, "lsec_probe_outer");
+        assert_eq!(observed_inner.0, "lsec_probe_inner");
+        assert_eq!(observed_inner.1, "pg_temp, pg_catalog");
+        assert_eq!(observed_inner.2, "on");
+        assert_eq!(observed_outer_after_inner.0, "lsec_probe_outer");
+        assert_eq!(observed_outer_after_inner.1, "public, pg_catalog");
+        assert_eq!(observed_outer_after_inner.2, "on");
 
         let restored_role = Spi::get_one::<String>("SELECT current_user")
             .unwrap()
             .unwrap();
         assert_eq!(restored_role, starting_role);
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap(),
+            "public, pg_catalog"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
 
         Spi::run("DROP ROLE lsec_probe_outer").unwrap();
         Spi::run("DROP ROLE lsec_probe_inner").unwrap();
+    }
+
+    #[pg_test]
+    fn test_with_stream_owner_context_restores_after_rust_panic() {
+        Spi::run("CREATE ROLE lsec_probe_owner_panic").unwrap();
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
+
+        let outer_role = outer_user_name().expect("outer role must resolve");
+        let owner_oid = Spi::get_one::<pg_sys::Oid>(
+            "SELECT oid FROM pg_roles WHERE rolname = 'lsec_probe_owner_panic'",
+        )
+        .unwrap()
+        .unwrap();
+        let ctx = StreamExecutionContext {
+            owner_oid,
+            search_path: "pg_catalog, pg_temp".to_string(),
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_stream_owner_context(&ctx, || -> Result<(), PgTrickleError> {
+                panic!("intentional security-context test panic");
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_user")
+                .unwrap()
+                .unwrap(),
+            outer_role
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap(),
+            "public, pg_catalog"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
+
+        Spi::run("DROP ROLE lsec_probe_owner_panic").unwrap();
+    }
+
+    #[pg_test]
+    fn test_with_stream_owner_context_cannot_use_extension_owner_privileges() {
+        Spi::run("CREATE ROLE lsec_probe_unprivileged").unwrap();
+        Spi::run(
+            "CREATE TABLE pgtrickle.lsec_extension_secret (value text); \
+             INSERT INTO pgtrickle.lsec_extension_secret VALUES ('secret'); \
+             REVOKE ALL ON SCHEMA pgtrickle FROM PUBLIC; \
+             REVOKE ALL ON TABLE pgtrickle.lsec_extension_secret FROM PUBLIC",
+        )
+        .unwrap();
+
+        let owner_oid = Spi::get_one::<pg_sys::Oid>(
+            "SELECT oid FROM pg_roles WHERE rolname = 'lsec_probe_unprivileged'",
+        )
+        .unwrap()
+        .unwrap();
+        let ctx = StreamExecutionContext {
+            owner_oid,
+            search_path: "pg_catalog, pg_temp".to_string(),
+        };
+
+        with_stream_owner_context(&ctx, || {
+            let can_read = Spi::get_one::<bool>(
+                "SELECT has_table_privilege(current_user, \
+                 'pgtrickle.lsec_extension_secret', 'SELECT')",
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap();
+            let can_create = Spi::get_one::<bool>(
+                "SELECT has_schema_privilege(current_user, 'pgtrickle', 'CREATE')",
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap();
+            assert!(!can_read);
+            assert!(!can_create);
+            Ok(())
+        })
+        .unwrap();
+
+        Spi::run("DROP TABLE pgtrickle.lsec_extension_secret").unwrap();
+        Spi::run("DROP ROLE lsec_probe_unprivileged").unwrap();
     }
 }

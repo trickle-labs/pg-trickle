@@ -31,7 +31,10 @@ ALTER TABLE pgtrickle.pgt_stream_tables
     ADD COLUMN IF NOT EXISTS defining_search_path TEXT;
 
 UPDATE pgtrickle.pgt_stream_tables st
-SET defining_search_path = quote_ident(pg_catalog.pg_get_userbyid(c.relowner)) || ', public'
+SET defining_search_path = format(
+    '"%s", public',
+    replace(pg_catalog.pg_get_userbyid(c.relowner), '"', '""')
+)
 FROM pg_catalog.pg_class c
 WHERE c.oid = st.pgt_relid
   AND st.defining_search_path IS NULL;
