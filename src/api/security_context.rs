@@ -16,6 +16,15 @@
 use super::helpers::{outer_user_id, outer_user_name, quote_identifier};
 use super::*;
 
+extern "C" {
+    fn find_option(
+        name: *const std::os::raw::c_char,
+        missing_ok: bool,
+        is_assign: bool,
+        elevel: i32,
+    ) -> *mut pg_sys::ConfigureNameStruct;
+}
+
 /// Which kind of public entry point captured a [`CallerContext`].
 ///
 /// A `SecurityDefiner` entry has already had its `search_path` overwritten
@@ -114,7 +123,7 @@ fn saved_pre_definer_search_path() -> Result<String, PgTrickleError> {
     // it on the main backend thread, inside a running SQL call, and never
     // retain the pointer past this function.
     unsafe {
-        let guc_var = pg_sys::find_option(c"search_path".as_ptr(), false, true, 0);
+        let guc_var = find_option(c"search_path".as_ptr(), false, true, 0);
         if guc_var.is_null() {
             return Err(PgTrickleError::InternalError(
                 "security context: search_path GUC is not registered".into(),
