@@ -396,7 +396,8 @@ fn generate_recomputation_delta(
 
     Ok(DiffResult {
         cte_name: final_cte,
-        columns: out_cols,
+        columns: out_cols.clone(),
+        schema: crate::dvm::schema::RelationSchema::from_names(&out_cols),
         is_deduplicated: false,
         has_key_changed: false,
     })
@@ -615,6 +616,7 @@ fn generate_dred_delta(
     Ok(DiffResult {
         cte_name: combined_cte,
         columns: columns.to_vec(),
+        schema: crate::dvm::schema::RelationSchema::from_names(columns),
         is_deduplicated: false,
         has_key_changed: false,
     })
@@ -730,6 +732,7 @@ fn generate_semi_naive_ins_only(
     Ok(DiffResult {
         cte_name: ins_final_cte,
         columns: columns.to_vec(),
+        schema: crate::dvm::schema::RelationSchema::from_names(columns),
         is_deduplicated: false,
         has_key_changed: false,
     })
@@ -1251,6 +1254,7 @@ fn build_semi_naive_result(
     Ok(DiffResult {
         cte_name: final_cte_name,
         columns: columns.to_vec(),
+        schema: crate::dvm::schema::RelationSchema::from_names(columns),
         is_deduplicated: false,
         has_key_changed: false,
     })
@@ -3913,6 +3917,11 @@ mod tests {
                 "parent_id".to_string(),
                 "name".to_string(),
             ],
+            schema: crate::dvm::schema::RelationSchema::from_names(&[
+                "id".to_string(),
+                "parent_id".to_string(),
+                "name".to_string(),
+            ]),
             is_deduplicated: false,
             has_key_changed: false,
         };
@@ -4018,6 +4027,10 @@ mod tests {
         let base_delta = DiffResult {
             cte_name: base_delta_cte,
             columns: vec!["id".to_string(), "parent_id".to_string()],
+            schema: crate::dvm::schema::RelationSchema::from_names(&[
+                "id".to_string(),
+                "parent_id".to_string(),
+            ]),
             is_deduplicated: false,
             has_key_changed: false,
         };

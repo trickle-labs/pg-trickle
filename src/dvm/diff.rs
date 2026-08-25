@@ -11,6 +11,9 @@
 use crate::config::pg_trickle_change_buffer_schema;
 use crate::dvm::operators;
 use crate::dvm::parser::{CteRegistry, OpTree};
+use crate::dvm::schema::RelationSchema;
+use crate::dvm::snapshot::{SnapshotPlan, operator_name};
+use crate::dvm_trace::{DecisionTrace, trace_schema};
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
 use std::collections::{HashMap, HashSet};
@@ -56,6 +59,8 @@ pub struct DiffResult {
     pub cte_name: String,
     /// Column names in the delta (excludes __pgt_row_id and __pgt_action).
     pub columns: Vec<String>,
+    /// Typed, ordered metadata for `columns`.
+    pub schema: RelationSchema,
     /// When true, the delta output has at most one row per `__pgt_row_id`.
     /// The MERGE statement can skip the outer DISTINCT ON + ORDER BY.
     pub is_deduplicated: bool,
@@ -264,6 +269,8 @@ pub struct DiffContext {
     /// is encountered. Most queries (scans, joins, bare aggregates) never
     /// populate this map.
     pub agg_sum_coalesce_defaults: Option<HashMap<String, String>>,
+    /// Opt-in structured decisions for DVM correctness tests and diagnostics.
+    decision_trace: Option<DecisionTrace>,
 }
 
 /// A41-1: Build a collision-resistant structural fingerprint of an OpTree
@@ -593,6 +600,7 @@ impl DiffContext {
             max_diff_ctes: crate::config::pg_trickle_max_diff_ctes(),
             // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
             agg_sum_coalesce_defaults: None,
+            decision_trace: None,
         }
     }
 
@@ -638,6 +646,7 @@ impl DiffContext {
             max_diff_ctes: 1000,
             // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
             agg_sum_coalesce_defaults: None,
+            decision_trace: None,
         }
     }
 
@@ -645,6 +654,20 @@ impl DiffContext {
     pub fn with_placeholders(mut self) -> Self {
         self.use_placeholders = true;
         self
+    }
+
+    /// Enable structured DVM decision collection for a test or diagnostic run.
+    pub fn with_decision_trace(mut self) -> Self {
+        self.decision_trace = Some(DecisionTrace::new());
+        self
+    }
+
+    pub fn decision_trace(&self) -> Option<&DecisionTrace> {
+        self.decision_trace.as_ref()
+    }
+
+    pub fn take_decision_trace(&mut self) -> Option<DecisionTrace> {
+        self.decision_trace.take()
     }
 
     /// Set the delta source (change buffer vs transition tables).
@@ -783,7 +806,27 @@ impl DiffContext {
         }
         let result = self.diff_node_inner(op);
         self.diff_depth -= 1;
-        result
+        let result = result?;
+        if result.schema.names() != result.columns {
+            return Err(PgTrickleError::TypeMismatch(format!(
+                "{} at root declared columns {:?}, schema {:?}",
+                operator_name(op),
+                result.columns,
+                result.schema.names()
+            )));
+        }
+        if let Some(trace) = self.decision_trace.as_mut() {
+            let plan = SnapshotPlan::for_tree(op);
+            trace.record(
+                format!("root.{}", operator_name(op).to_ascii_lowercase()),
+                operator_name(op),
+                trace_schema(&result.schema),
+                Some(plan.kind().to_string()),
+                [format!("snapshot_reason={}", plan.kind())],
+                Some(result.cte_name.clone()),
+            );
+        }
+        Ok(result)
     }
 
     /// Inner dispatch for `diff_node()` — called after depth and CTE checks.
@@ -838,6 +881,7 @@ impl DiffContext {
                 Ok(DiffResult {
                     cte_name: empty_cte,
                     columns: columns.clone(),
+                    schema: RelationSchema::from_names(columns),
                     is_deduplicated: false,
                     has_key_changed: false,
                 })
@@ -940,6 +984,17 @@ impl DiffContext {
 
         self.snapshot_cte_cache
             .insert(cache_key, (canonical, cte_name.clone()));
+        if let Some(trace) = self.decision_trace.as_mut() {
+            let plan = SnapshotPlan::for_tree(op);
+            trace.record(
+                format!("root.{}.snapshot", operator_name(op).to_ascii_lowercase()),
+                "Snapshot",
+                Vec::new(),
+                Some(plan.kind().to_string()),
+                ["snapshot_cte_registered".to_string()],
+                Some(cte_name.clone()),
+            );
+        }
         cte_name
     }
 
@@ -1266,6 +1321,7 @@ mod tests {
         let result = DiffResult {
             cte_name: "cte_1".to_string(),
             columns: vec!["id".to_string()],
+            schema: RelationSchema::from_names(&["id".to_string()]),
             is_deduplicated: true,
             has_key_changed: false,
         };
@@ -1285,6 +1341,22 @@ mod tests {
         assert!(result.cte_name.contains("scan"));
         assert!(result.columns.contains(&"id".to_string()));
         assert!(result.columns.contains(&"amount".to_string()));
+    }
+
+    #[test]
+    fn test_decision_trace_records_declared_schema_and_snapshot_plan() {
+        let mut ctx = test_ctx().with_decision_trace();
+        let scan = scan_with_pk(1, "items", "public", "items", &["id"], &["id"]);
+        let result = ctx.diff_node(&scan).unwrap();
+        assert_eq!(result.schema.names(), result.columns);
+        let trace = ctx.decision_trace().expect("decision trace");
+        assert_eq!(trace.events.len(), 1);
+        assert_eq!(trace.events[0].operator, "Scan");
+        assert_eq!(
+            trace.events[0].snapshot_plan.as_deref(),
+            Some("exact_combined")
+        );
+        assert_eq!(trace.events[0].output_schema[0].name, "id");
     }
 
     #[test]

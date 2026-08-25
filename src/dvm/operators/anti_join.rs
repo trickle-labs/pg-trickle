@@ -216,7 +216,8 @@ WHERE EXISTS (SELECT 1 FROM {delta_right} dr WHERE {cond_part2_dr})
 
     Ok(DiffResult {
         cte_name,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema: left_result.schema,
         is_deduplicated: false,
         has_key_changed: false,
     })

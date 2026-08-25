@@ -21,6 +21,7 @@
 | [PLAN_0_86_0.md](PLAN_0_86_0.md) | PLAN | v0.86.0 Implementation Plan — Product UX and Transparency |
 | [PLAN_0_87_0.md](PLAN_0_87_0.md) | PLAN | v0.87.0 Implementation Plan — Low-Impact Refresh |
 | [PLAN_0_87_4.md](PLAN_0_87_4.md) | PLAN | v0.87.4 Implementation Plan — Stateful and Metamorphic Correctness |
+| [PLAN_0_87_5.md](PLAN_0_87_5.md) | PLAN | v0.87.5 Implementation Plan — DVM Correctness Contracts and Semantic Coverage |
 | [PLAN_0_88_0.md](PLAN_0_88_0.md) | PLAN | v0.88.0 Implementation Plan: Vectorized Aggregates and Delta Planning |
 | [PLAN_0_89_0.md](PLAN_0_89_0.md) | PLAN | v0.89.0 Implementation Plan: Incremental Window Functions |
 | [PLAN_0_90_0.md](PLAN_0_90_0.md) | PLAN | v0.90.0 Implementation Plan: Freshness Controller and Self-Tuning |

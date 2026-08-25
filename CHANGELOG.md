@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.5 — DVM Correctness Contracts and Semantic Coverage](#0875--dvm-correctness-contracts-and-semantic-coverage)
 - [0.87.4 — Stateful and Metamorphic Correctness](#0874--stateful-and-metamorphic-correctness)
 - [0.87.3 — Composition-Aware Differential Testing](#0873--composition-aware-differential-testing)
 - [0.87.2 — Deterministic Reproduction and Regression Corpus](#0872--deterministic-reproduction-and-regression-corpus)
@@ -134,6 +135,29 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.5] — DVM Correctness Contracts and Semantic Coverage
+
+v0.87.5 makes the assumptions behind differential refreshes explicit and
+verifiable.
+
+- Added typed relation schemas with column type, typmod, nullability, and
+  provenance metadata.
+- Added early set-operation contract checks for arity, aliases, types, typmods,
+  and internal columns.
+- Added structured snapshot planning and decision traces for DVM paths.
+- Added observed-path semantic coverage floors for snapshot plans, changed
+  leaves, group lifecycle transitions, and outer-join transitions.
+
+No extension catalog or SQL API changes were made in this release.
+
+## Upgrade
+
+Run ALTER EXTENSION pg_trickle UPDATE after installing the v0.87.5 files. The
+upgrade migration is intentionally empty because this release changes DVM
+correctness contracts and test tooling only.
 
 ---
 

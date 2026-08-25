@@ -70,6 +70,7 @@ pub fn diff_subquery(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
     Ok(DiffResult {
         cte_name,
         columns: column_aliases.clone(),
+        schema: child_result.schema.renamed(column_aliases),
         is_deduplicated: child_result.is_deduplicated,
         has_key_changed: child_result.has_key_changed,
     })

@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.4 -> 0.87.5 upgrade migration
+-- v0.87.5: DVM correctness contracts and semantic coverage.
+-- No catalog schema or SQL API changes in this release.

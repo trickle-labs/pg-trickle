@@ -196,6 +196,7 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     Ok(DiffResult {
         cte_name,
         columns: child_result.columns,
+        schema: child_result.schema,
         is_deduplicated: child_result.is_deduplicated,
         has_key_changed: false,
     })

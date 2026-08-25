@@ -281,7 +281,8 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
 
     Ok(DiffResult {
         cte_name,
-        columns: output_cols,
+        columns: output_cols.clone(),
+        schema: child_result.schema.renamed(&output_cols),
         is_deduplicated: child_result.is_deduplicated,
         has_key_changed: child_result.has_key_changed,
     })

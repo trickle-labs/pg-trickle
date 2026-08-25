@@ -1,12 +1,162 @@
-//! Deterministic v0.87.3 composition matrix and pairwise coverage.
+//! Deterministic composition cases and semantic coverage floors.
 
 use super::query::{
     AggregateExpr, AggregateKind, Column, CteDefinition, JoinKind, ProjectExpr, RelNode, RelQuery,
     RelationSchema, ScalarType,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MANDATORY_CASE_COUNT: usize = 18;
+
+pub const SNAPSHOT_PLANS: [&str; 4] = [
+    "exact_per_leaf",
+    "exact_combined",
+    "post_change_correction",
+    "unsupported",
+];
+pub const CHANGED_LEAF_BUCKETS: [&str; 3] = ["1", "2", "all"];
+pub const GROUP_LIFECYCLE_TRANSITIONS: [&str; 4] = [
+    "empty_to_nonempty",
+    "nonempty_to_empty",
+    "winner_change",
+    "nonempty_to_nonempty",
+];
+pub const OUTER_JOIN_TRANSITIONS: [&str; 2] = ["matched_to_unmatched", "unmatched_to_matched"];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticCoverageObservation {
+    #[serde(default)]
+    pub snapshot_plans: BTreeSet<String>,
+    #[serde(default)]
+    pub changed_leaf_buckets: BTreeSet<String>,
+    #[serde(default)]
+    pub group_lifecycle_transitions: BTreeSet<String>,
+    #[serde(default)]
+    pub outer_join_transitions: BTreeSet<String>,
+    #[serde(default)]
+    pub p0_pairwise_complete: bool,
+}
+
+impl SemanticCoverageObservation {
+    pub fn observe_snapshot_plan(&mut self, plan: impl Into<String>) {
+        self.snapshot_plans.insert(plan.into());
+    }
+
+    pub fn observe_changed_leaves(&mut self, count: usize, total: usize) {
+        let bucket = if count == 1 {
+            "1"
+        } else if count == 2 {
+            "2"
+        } else if count == total && total > 0 {
+            "all"
+        } else {
+            return;
+        };
+        self.changed_leaf_buckets.insert(bucket.to_string());
+    }
+
+    pub fn observe_group_lifecycle(&mut self, transition: impl Into<String>) {
+        self.group_lifecycle_transitions.insert(transition.into());
+    }
+
+    pub fn observe_outer_join(&mut self, transition: impl Into<String>) {
+        self.outer_join_transitions.insert(transition.into());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticCoverageRequirements {
+    #[serde(default)]
+    pub snapshot_plans: BTreeSet<String>,
+    #[serde(default)]
+    pub changed_leaf_buckets: BTreeSet<String>,
+    #[serde(default)]
+    pub group_lifecycle_transitions: BTreeSet<String>,
+    #[serde(default)]
+    pub outer_join_transitions: BTreeSet<String>,
+    #[serde(default)]
+    pub require_p0_pairwise: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticCoverageReport {
+    pub passed: bool,
+    pub missing: BTreeMap<String, Vec<String>>,
+    pub observed: SemanticCoverageObservation,
+    pub requirements: SemanticCoverageRequirements,
+}
+
+pub fn validate_semantic_coverage(
+    requirements: &SemanticCoverageRequirements,
+    observed: &SemanticCoverageObservation,
+) -> SemanticCoverageReport {
+    let missing_set = |required: &BTreeSet<String>, actual: &BTreeSet<String>| {
+        required.difference(actual).cloned().collect::<Vec<_>>()
+    };
+    let mut missing = BTreeMap::new();
+    for (name, required, actual) in [
+        (
+            "snapshot_plans",
+            &requirements.snapshot_plans,
+            &observed.snapshot_plans,
+        ),
+        (
+            "changed_leaf_buckets",
+            &requirements.changed_leaf_buckets,
+            &observed.changed_leaf_buckets,
+        ),
+        (
+            "group_lifecycle_transitions",
+            &requirements.group_lifecycle_transitions,
+            &observed.group_lifecycle_transitions,
+        ),
+        (
+            "outer_join_transitions",
+            &requirements.outer_join_transitions,
+            &observed.outer_join_transitions,
+        ),
+    ] {
+        let values = missing_set(required, actual);
+        if !values.is_empty() {
+            missing.insert(name.to_string(), values);
+        }
+    }
+    if requirements.require_p0_pairwise && !observed.p0_pairwise_complete {
+        missing.insert("p0_pairwise".to_string(), vec!["complete".to_string()]);
+    }
+    SemanticCoverageReport {
+        passed: missing.is_empty(),
+        missing,
+        observed: observed.clone(),
+        requirements: requirements.clone(),
+    }
+}
+
+impl SemanticCoverageReport {
+    pub fn render_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("coverage report is serializable")
+    }
+
+    pub fn render_markdown(&self) -> String {
+        let mut output = format!(
+            "# DVM semantic coverage\n\nStatus: **{}**\n\n",
+            if self.passed { "PASS" } else { "FAIL" }
+        );
+        output.push_str("| Bucket | Missing |\n| --- | ---: |\n");
+        for name in [
+            "snapshot_plans",
+            "changed_leaf_buckets",
+            "group_lifecycle_transitions",
+            "outer_join_transitions",
+            "p0_pairwise",
+        ] {
+            let missing = self.missing.get(name).map_or(0, Vec::len);
+            output.push_str(&format!("| {name} | {missing} |\n"));
+        }
+        output
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DimensionSpec {
@@ -425,6 +575,14 @@ fn all_assignments(dimensions: &[DimensionSpec]) -> Vec<DimensionAssignment> {
 mod tests {
     use super::*;
 
+    fn requirements() -> SemanticCoverageRequirements {
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../corpus/dvm_coverage_requirements.json"))
+                .expect("coverage requirements must be JSON");
+        serde_json::from_value(document["semantic_coverage"].clone())
+            .expect("semantic coverage requirements must be valid")
+    }
+
     #[test]
     fn mandatory_matrix_has_valid_typed_queries() {
         let cases = mandatory_cases();
@@ -445,5 +603,34 @@ mod tests {
         let report = pairwise_cover(&p0_dimensions(), &assignments);
         assert_eq!(report.uncovered_pairs, Vec::new());
         assert_eq!(report.total_pairs, report.covered_pairs);
+    }
+
+    #[test]
+    fn semantic_floors_pass_and_report_missing_buckets() {
+        let requirements = requirements();
+        let mut observed = SemanticCoverageObservation::default();
+        for plan in SNAPSHOT_PLANS {
+            observed.observe_snapshot_plan(plan);
+        }
+        for count in 1..=3 {
+            observed.observe_changed_leaves(count, 3);
+        }
+        for transition in GROUP_LIFECYCLE_TRANSITIONS {
+            observed.observe_group_lifecycle(transition);
+        }
+        for transition in OUTER_JOIN_TRANSITIONS {
+            observed.observe_outer_join(transition);
+        }
+        observed.p0_pairwise_complete = true;
+
+        let report = validate_semantic_coverage(&requirements, &observed);
+        assert!(report.passed, "{}", report.render_markdown());
+        assert!(report.render_json().contains("\"passed\": true"));
+        assert!(report.render_markdown().contains("Status: **PASS**"));
+
+        observed.outer_join_transitions.clear();
+        let report = validate_semantic_coverage(&requirements, &observed);
+        assert!(!report.passed);
+        assert_eq!(report.missing["outer_join_transitions"].len(), 2);
     }
 }

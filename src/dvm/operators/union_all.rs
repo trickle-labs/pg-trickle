@@ -7,6 +7,7 @@
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::parser::OpTree;
+use crate::dvm::schema::validate_set_operation;
 use crate::error::PgTrickleError;
 
 /// Differentiate a UnionAll node.
@@ -31,6 +32,9 @@ pub fn diff_union_all(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // Use the first child's columns as the output schema
     let output_cols = child_results[0].columns.clone();
+    for child in child_results.iter().skip(1) {
+        validate_set_operation("UNION ALL", &child_results[0].schema, &child.schema)?;
+    }
     let col_refs: Vec<String> = output_cols.iter().map(|c| quote_ident(c)).collect();
     let col_list = col_refs.join(", ");
 
@@ -62,6 +66,7 @@ pub fn diff_union_all(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     Ok(DiffResult {
         cte_name,
         columns: output_cols,
+        schema: child_results[0].schema.clone(),
         is_deduplicated: false,
         has_key_changed: false,
     })
@@ -127,5 +132,16 @@ mod tests {
         let tree = scan(1, "t", "public", "t", &["id"]);
         let result = diff_union_all(&mut ctx, &tree);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_diff_union_all_rejects_mismatched_aliases_before_union_sql() {
+        let mut ctx = test_ctx();
+        let tree = union_all(vec![
+            scan(1, "left_t", "public", "l", &["id"]),
+            scan(2, "right_t", "public", "r", &["other_id"]),
+        ]);
+        let error = diff_union_all(&mut ctx, &tree).unwrap_err();
+        assert!(error.to_string().contains("alias mismatch"));
     }
 }
