@@ -919,6 +919,157 @@ pub struct ColumnDef {
     pub type_oid: PgOid,
 }
 
+#[cfg(not(test))]
+struct VolatilityCollector {
+    function_oids: Vec<pg_sys::Oid>,
+    io_cast_input_oids: Vec<pg_sys::Oid>,
+    worst: char,
+}
+
+#[cfg(not(test))]
+fn max_analyzed_volatility(a: char, b: char) -> char {
+    match (a, b) {
+        ('v', _) | (_, 'v') => 'v',
+        ('s', _) | (_, 's') => 's',
+        _ => 'i',
+    }
+}
+
+/// Resolve volatility from the analyzed expression nodes.
+///
+/// Aggregate implementation functions are deliberately not included: their
+/// volatility describes the aggregate's internal state machinery, while DVM
+/// admission handles the aggregate itself. Enum output is likewise stable in
+/// `pg_proc`, but enum DDL invalidates dependent stream tables, so enum I/O is
+/// safe here.
+#[cfg(not(test))]
+fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgTrickleError> {
+    let mut collector = VolatilityCollector {
+        function_oids: Vec::new(),
+        io_cast_input_oids: Vec::new(),
+        worst: 'i',
+    };
+
+    // SAFETY: query_node is a valid analyzed Query allocated by PostgreSQL's
+    // parser and remains valid for this function's duration.
+    unsafe {
+        pg_sys::query_tree_walker_impl(
+            query_node,
+            Some(collect_volatility_nodes),
+            &mut collector as *mut VolatilityCollector as *mut std::ffi::c_void,
+            pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
+        );
+    }
+
+    collector
+        .function_oids
+        .sort_unstable_by_key(|oid| oid.to_u32());
+    collector.function_oids.dedup();
+    collector
+        .io_cast_input_oids
+        .sort_unstable_by_key(|oid| oid.to_u32());
+    collector.io_cast_input_oids.dedup();
+
+    for oid in collector.function_oids {
+        let volatility = Spi::get_one_with_args::<String>(
+            "SELECT provolatile::text FROM pg_catalog.pg_proc WHERE oid = $1",
+            &[oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("volatility lookup failed: {e}")))?
+        .and_then(|value| value.chars().next())
+        .unwrap_or('v');
+        collector.worst = max_analyzed_volatility(collector.worst, volatility);
+    }
+
+    for input_oid in collector.io_cast_input_oids {
+        let volatility = Spi::get_one_with_args::<String>(
+            "SELECT CASE WHEN t.typcategory = 'E' THEN 'i'::text \
+                    ELSE p.provolatile::text END
+             FROM pg_catalog.pg_type t
+             JOIN pg_catalog.pg_proc p ON p.oid = t.typoutput
+             WHERE t.oid = $1",
+            &[input_oid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("cast volatility lookup failed: {e}")))?
+        .and_then(|value| value.chars().next())
+        .unwrap_or('v');
+        collector.worst = max_analyzed_volatility(collector.worst, volatility);
+    }
+
+    Ok(collector.worst)
+}
+
+#[cfg(not(test))]
+unsafe extern "C-unwind" fn collect_volatility_nodes(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: context is the VolatilityCollector passed to the walker below.
+    let collector = unsafe { &mut *(context as *mut VolatilityCollector) };
+
+    // SAFETY: PostgreSQL's walker supplies valid nodes and is_a checks the
+    // tag before each typed access.
+    unsafe {
+        if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
+            collector
+                .function_oids
+                .push((*(node as *const pg_sys::FuncExpr)).funcid);
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_OpExpr)
+            || pgrx::is_a(node, pg_sys::NodeTag::T_DistinctExpr)
+            || pgrx::is_a(node, pg_sys::NodeTag::T_NullIfExpr)
+        {
+            collector
+                .function_oids
+                .push((*(node as *const pg_sys::OpExpr)).opfuncid);
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_ScalarArrayOpExpr) {
+            collector
+                .function_oids
+                .push((*(node as *const pg_sys::ScalarArrayOpExpr)).opfuncid);
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_CoerceViaIO) {
+            let cast = &*(node as *const pg_sys::CoerceViaIO);
+            if !cast.arg.is_null() {
+                collector
+                    .io_cast_input_oids
+                    .push(pg_sys::exprType(cast.arg as *const pg_sys::Node));
+            }
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_SQLValueFunction) {
+            collector.worst = max_analyzed_volatility(collector.worst, 's');
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_NextValueExpr) {
+            collector.worst = 'v';
+        } else if pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) {
+            collector
+                .function_oids
+                .push((*(node as *const pg_sys::WindowFunc)).winfnoid);
+        }
+    }
+
+    // expression_tree_walker does not recurse into nested Query nodes.
+    // SAFETY: node is a valid Query supplied by PostgreSQL's walker.
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
+        // SAFETY: node tag verified as T_Query and context remains valid.
+        return unsafe {
+            pg_sys::query_tree_walker_impl(
+                node as *mut pg_sys::Query,
+                Some(collect_volatility_nodes),
+                context,
+                pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
+            )
+        };
+    }
+
+    // SAFETY: node and context are valid pointers from PostgreSQL's walker.
+    unsafe { pg_sys::expression_tree_walker_impl(node, Some(collect_volatility_nodes), context) }
+}
+
+#[cfg(test)]
+fn analyzed_query_volatility(_query_node: *mut pg_sys::Query) -> Result<char, PgTrickleError> {
+    Ok('i')
+}
+
 /// Validate a defining query and extract its output columns and volatility via
 /// parse analysis.
 ///
@@ -1000,16 +1151,9 @@ pub(crate) fn validate_defining_query(
             ));
         }
 
-        let query_node = query_node.cast::<pg_sys::Node>();
-        let volatility = if pg_sys::contain_volatile_functions(query_node) {
-            'v'
-        } else if pg_sys::contain_mutable_functions(query_node) {
-            's'
-        } else {
-            'i'
-        };
+        let volatility = analyzed_query_volatility(query_node);
 
-        Ok((columns, volatility))
+        Ok((columns, volatility?))
     }
 }
 
