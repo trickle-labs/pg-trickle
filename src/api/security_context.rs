@@ -257,10 +257,10 @@ pub(crate) fn with_stream_owner_context<T>(
     // PostgreSQL's standard mechanism for temporarily executing as a
     // different role — the same one `SECURITY DEFINER` function calls and
     // extensions such as dblink/postgres_fdw use to run as a foreign-server
-    // owner. `SECURITY_LOCAL_USERID_CHANGE` prevents `SET ROLE`/`SET SESSION
-    // AUTHORIZATION` while the effective role is temporarily out of sync
-    // with PostgreSQL's GUC state, so owner-context SQL cannot escalate
-    // further. Both calls run on the main backend
+    // owner. `SECURITY_LOCAL_USERID_CHANGE` prevents another role transition
+    // while the effective role is temporarily out of sync with PostgreSQL's
+    // GUC state, so owner-context SQL cannot escalate further. Both calls run
+    // on the main backend
     // thread; identity is restored in `.finally()` below on every exit.
     unsafe {
         pg_sys::GetUserIdAndSecContext(&mut save_userid, &mut save_sec_context);

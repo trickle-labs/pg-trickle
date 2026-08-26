@@ -63,47 +63,47 @@ $$;
 -- ALTER FUNCTION preserves existing ACLs. The Rust entry points capture the
 -- outer caller and check the canonical stream-table owner before mutation.
 ALTER FUNCTION pgtrickle.bulk_alter_stream_tables(text[], json)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.bulk_alter_stream_tables(text[], json)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.bulk_drop_stream_tables(text[])
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.bulk_drop_stream_tables(text[])
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.pause_stream_table(text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.pause_stream_table(text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.refresh_stream_table(text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.refresh_stream_table(text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.repair_stream_table(text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.repair_stream_table(text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.reset_fuse(text, text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.reset_fuse(text, text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.resume_stream_table(text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.resume_stream_table(text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.set_stream_table_refresh_policy(text, text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.set_stream_table_refresh_policy(text, text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.set_stream_table_storage_policy(text, boolean, text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.set_stream_table_storage_policy(text, boolean, text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.stat_reset(bigint)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.stat_reset(bigint)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.set_stream_table_sla(text, interval)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned by the following ALTER FUNCTION.
 ALTER FUNCTION pgtrickle.set_stream_table_sla(text, interval)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 
