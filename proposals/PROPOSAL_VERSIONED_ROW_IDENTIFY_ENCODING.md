@@ -509,7 +509,19 @@ advisory locks remain held until transaction end. Tracking must be aware of
 subtransactions: keys first acquired in a savepoint must be removed from the
 budget when that savepoint rolls back, matching PostgreSQL's lock behavior.
 The default must be finite, documented, and chosen with the cluster's lock-pool
-limits in mind.
+limits in mind. The setting must use the `SUSET` context (or a stricter
+administrator-only context), so an ordinary DML role cannot raise the limit
+above the administrator's safe lock-pool budget.
+
+The in-memory tracker must retain ownership metadata for every key held by the
+top-level transaction, including the subtransaction in which that key was first
+acquired. On subtransaction commit, ownership of keys first acquired in that
+subtransaction is promoted to its parent. On subtransaction rollback, only keys
+first acquired in the aborted subtransaction are removed from the tracker and
+the available budget is restored. A key already held by the parent and reused
+by the child must remain tracked after the child rolls back. This ownership
+bookkeeping must follow PostgreSQL's resource-owner lock lifecycle; it must not
+infer ownership from a flat set of advisory-key values.
 
 The per-identity key contract is fixed by `ROW_LOCK_VERSION = 1`. The input to
 the key hash is the following exact byte sequence:
@@ -773,9 +785,11 @@ statement that would take the transaction above the limit, several individually
 valid statements whose cumulative key count exceeds the transaction limit,
 repeated use of keys across statements, cumulative keys across multiple stream
 tables, old-plus-new identity counting, collision-key deduplication, savepoint
-rollback restoring the available budget, rejection before any additional lock
-is acquired, and the absence of advisory locks from a rejected statement.
-They must also cover concurrent sessions approaching the configured budget. Make
+rollback restoring the available budget, parent-held keys surviving child
+rollback, rejection before any additional lock is acquired, and the absence of
+advisory locks from a rejected statement. They must also cover concurrent
+sessions approaching the configured budget and verify that an ordinary DML role
+cannot raise the SUSET lock limit. Make
 the waiter test deterministic: have the holder signal that it owns the advisory
 lock, verify that the waiter is blocked before the holder commits, then require
 the waiter to see the committed row after obtaining the lock through the
