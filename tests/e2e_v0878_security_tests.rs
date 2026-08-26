@@ -107,8 +107,10 @@ async fn test_v0878_refresh_paths_run_as_stream_owner() {
     }
 }
 
-/// Source RLS is evaluated as the stable stream owner on initial, full, and
-/// differential refreshes, independent of the privileged caller.
+/// Source RLS is evaluated as the stable stream owner on initial and full
+/// refreshes, independent of the privileged caller. RLS-3: DIFFERENTIAL is
+/// unsafe over an RLS-protected source, so AUTO mode is used and must
+/// downgrade to FULL instead of erroring.
 #[tokio::test]
 async fn test_v0878_source_rls_uses_stream_owner() {
     let db = E2eDb::new().await.with_extension().await;
@@ -141,7 +143,7 @@ async fn test_v0878_source_rls_uses_stream_owner() {
     db.execute("GRANT SELECT ON v878_rls_src TO v878_rls_owner")
         .await;
 
-    for (name, mode) in [("v878_rls_diff", "DIFFERENTIAL"), ("v878_rls_full", "FULL")] {
+    for (name, mode) in [("v878_rls_auto", "AUTO"), ("v878_rls_full", "FULL")] {
         let statement = format!(
             "SELECT pgtrickle.create_stream_table(\
                 '{name}', \
@@ -160,10 +162,10 @@ async fn test_v0878_source_rls_uses_stream_owner() {
          (3, 'v878_rls_owner'), (4, 'hidden')",
     )
     .await;
-    db.refresh_st("v878_rls_diff").await;
+    db.refresh_st("v878_rls_auto").await;
     db.refresh_st("v878_rls_full").await;
 
-    for table in ["v878_rls_diff", "v878_rls_full"] {
+    for table in ["v878_rls_auto", "v878_rls_full"] {
         assert_eq!(db.count(&format!("public.{table}")).await, 2);
         let wrong_identity: i64 = db
             .query_scalar(&format!(

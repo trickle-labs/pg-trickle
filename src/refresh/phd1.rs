@@ -22,7 +22,12 @@ pub fn prepare_cross_cycle_phantom_table(
     let recon_table = format!("__pgt_recon_{}", st.pgt_id);
     let recon_select =
         format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
-    crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
+    // defining_query is definition-derived: parse/analyze it under the
+    // owner's identity and stored search_path, not this privileged caller's.
+    crate::refresh::with_stream_owner(st, || {
+        crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
+    })?;
+    Ok(())
 }
 
 /// EC01-2: Reconcile the stream table against the full-query result set.

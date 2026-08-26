@@ -133,14 +133,37 @@ pub(crate) fn source_visibility_key(
     Ok((source_table, columns))
 }
 
+/// Create a `pg_temp`-qualified scratch table and return its qualified name
+/// for callers to use in later SQL.
+///
+/// `basename` is a raw, unquoted internal identifier (e.g.
+/// `"__pgt_delta_42"`) — this function is the only place that qualifies it
+/// with `pg_temp` and quotes it, so an unqualified bare name can never
+/// resolve to a same-named permanent relation on the search path (e.g. one
+/// planted in `public` ahead of a `SECURITY DEFINER` trigger call).
+///
+/// Runs under whichever identity the caller is currently running as. When
+/// `select_sql` is definition-derived (may reference owner-schema
+/// functions, operators, casts, or relations that only resolve correctly
+/// under the owner's stored `search_path`), the caller must wrap this call
+/// in [`with_stream_owner`] itself — Postgres performs full parse analysis
+/// for `WITH NO DATA` even though it skips rewrite/execution, so name
+/// resolution during the `CREATE` must match the identity that later reads
+/// the same SQL text. When `select_sql` only references the stream table's
+/// own fully-qualified storage relation (no ambiguous unqualified names),
+/// callers that need the table readable by privileged bookkeeping code
+/// afterward (e.g. downstream-diff capture) should call this un-wrapped, as
+/// before — the unconditional `GRANT` below still lets owner-context code
+/// read/write it too.
 pub(crate) fn prepare_owner_temp_table(
     st: &StreamTableMeta,
-    table: &str,
+    basename: &str,
     select_sql: &str,
-) -> Result<(), PgTrickleError> {
-    Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — callers pass quoted internal pg_temp identifiers.
+) -> Result<String, PgTrickleError> {
+    let table = format!("pg_temp.{}", crate::sql_builder::ident(basename));
+    Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — table is pg_temp-qualified and quoted by this function.
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    // nosemgrep: rust.spi.run.dynamic-format — table is a quoted pg_temp identifier and select_sql is generated internally.
+    // nosemgrep: rust.spi.run.dynamic-format — table is pg_temp-qualified and quoted by this function; select_sql is generated internally.
     Spi::run(&format!(
         "CREATE TEMP TABLE {table} ON COMMIT DROP AS {select_sql} WITH NO DATA"
     ))
@@ -150,11 +173,21 @@ pub(crate) fn prepare_owner_temp_table(
     Spi::run(&format!(
         "GRANT SELECT, INSERT, TRUNCATE ON TABLE {table} TO {owner}"
     ))
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(table)
 }
 
-pub(crate) fn drop_owner_temp_table(table: &str) {
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {table}")); // nosemgrep: rust.spi.run.dynamic-format — callers pass quoted internal pg_temp identifiers.
+/// Drop a scratch table previously created by [`prepare_owner_temp_table`].
+/// `basename` must be the same raw basename passed to that call — this
+/// function re-derives the identical `pg_temp`-qualified name and drops it
+/// under the owner's identity, since the owner is what created (and thus
+/// owns) it.
+pub(crate) fn drop_owner_temp_table(st: &StreamTableMeta, basename: &str) {
+    let table = format!("pg_temp.{}", crate::sql_builder::ident(basename));
+    let _ = with_stream_owner(st, || {
+        Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — table is pg_temp-qualified and quoted by this function.
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    });
 }
 // phd1: cross-cycle phantom cleanup (CORR-1, deferred — see merge.rs).
 

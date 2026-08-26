@@ -56,9 +56,12 @@ async fn test_rls_on_source_does_not_filter_stream_table() {
     );
 }
 
-/// R5 variant: RLS on source table with DIFFERENTIAL refresh mode.
+/// RLS-3: DIFFERENTIAL/IMMEDIATE cannot correctly represent OLD-row
+/// visibility for an RLS-protected source (the CDC window can only check
+/// *current* visibility), so explicit DIFFERENTIAL is rejected at creation
+/// and AUTO falls back to FULL instead.
 #[tokio::test]
-async fn test_rls_on_source_differential_mode() {
+async fn test_rls_on_source_rejects_explicit_differential() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute(
@@ -74,12 +77,25 @@ async fn test_rls_on_source_differential_mode() {
     db.execute("CREATE POLICY tenant_only ON rls_diff_src USING (tenant_id = 10)")
         .await;
 
-    // Create stream table with DIFFERENTIAL mode
+    // Explicit DIFFERENTIAL over an RLS-protected source must be rejected —
+    // the engine cannot prove OLD-row visibility was ever checked correctly.
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('rls_diff_st', \
+             $$SELECT id, tenant_id, val FROM rls_diff_src$$, '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "explicit DIFFERENTIAL over an RLS-protected source must be rejected"
+    );
+
+    // AUTO mode falls back to FULL automatically instead of erroring.
     db.create_st(
         "rls_diff_st",
         "SELECT id, tenant_id, val FROM rls_diff_src",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
 
@@ -88,10 +104,11 @@ async fn test_rls_on_source_differential_mode() {
     let count: i64 = db.count("public.rls_diff_st").await;
     assert_eq!(
         count, 2,
-        "superuser-owned DIFFERENTIAL stream should contain all rows"
+        "superuser-owned FULL-fallback stream should contain all rows"
     );
 
-    // Insert another row that a restricted owner would not see.
+    // Insert another row; FULL re-executes the defining query from scratch
+    // each cycle, so this is always correct under RLS.
     db.execute("INSERT INTO rls_diff_src VALUES (3, 20, 'c')")
         .await;
     db.refresh_st("rls_diff_st").await;
@@ -100,6 +117,129 @@ async fn test_rls_on_source_differential_mode() {
     assert_eq!(
         count, 3,
         "stable superuser owner should continue to see all rows"
+    );
+}
+
+/// RLS-3: the exact scenario the DIFFERENTIAL delete-compaction bug could
+/// not represent — a row transitioning hidden→visible via UPDATE, and a
+/// DELETE of a row already hidden from the owner. AUTO's FULL fallback
+/// (unlike a differential delta) always re-evaluates from scratch, so both
+/// must be reflected correctly on the very next refresh.
+#[tokio::test]
+async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE rls_transition_src (id INT PRIMARY KEY, tenant TEXT NOT NULL, val INT)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO rls_transition_src VALUES \
+         (1, 'owner_tenant', 1), (2, 'other_tenant', 2), (3, 'other_tenant', 3)",
+    )
+    .await;
+    db.execute("ALTER TABLE rls_transition_src ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute(
+        "CREATE POLICY owner_tenant_only ON rls_transition_src USING (tenant = 'owner_tenant')",
+    )
+    .await;
+
+    // AUTO downgrades to FULL because the source has RLS enabled.
+    db.create_st(
+        "rls_transition_st",
+        "SELECT id, tenant, val FROM rls_transition_src",
+        "1m",
+        "AUTO",
+    )
+    .await;
+    assert_eq!(
+        db.count("public.rls_transition_st").await,
+        1,
+        "only the owner-visible row should be materialized initially"
+    );
+
+    // Hidden -> visible: row 2 becomes owner-visible via UPDATE.
+    db.execute("UPDATE rls_transition_src SET tenant = 'owner_tenant' WHERE id = 2")
+        .await;
+    // Hidden DELETE: row 3 (never visible to the owner) is deleted.
+    db.execute("DELETE FROM rls_transition_src WHERE id = 3")
+        .await;
+    db.refresh_st("rls_transition_st").await;
+
+    let count: i64 = db.count("public.rls_transition_st").await;
+    assert_eq!(
+        count, 2,
+        "FULL fallback must reflect the hidden->visible UPDATE and not be \
+         thrown off by the hidden DELETE"
+    );
+    let bad: i64 = db
+        .query_scalar("SELECT count(*) FROM public.rls_transition_st WHERE id = 3")
+        .await;
+    assert_eq!(bad, 0, "the hidden, deleted row must not resurrect");
+}
+
+/// RLS-3: explicit IMMEDIATE over an RLS-protected source is rejected at
+/// creation, same as DIFFERENTIAL.
+#[tokio::test]
+async fn test_rls_on_source_rejects_explicit_immediate() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE rls_imm_reject_src (id INT PRIMARY KEY, tenant_id INT NOT NULL)")
+        .await;
+    db.execute("ALTER TABLE rls_imm_reject_src ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute("CREATE POLICY p ON rls_imm_reject_src USING (tenant_id = 10)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('rls_imm_reject_st', \
+             $$SELECT id, tenant_id FROM rls_imm_reject_src$$, '1m', 'IMMEDIATE')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "explicit IMMEDIATE over an RLS-protected source must be rejected"
+    );
+}
+
+/// RLS-3: if a source has RLS enabled *after* an IMMEDIATE stream table was
+/// created over it, the trigger-time apply must fail closed rather than
+/// silently mis-apply a delta it cannot prove is visibility-correct.
+#[tokio::test]
+async fn test_rls_enabled_after_immediate_creation_fails_closed() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE rls_imm_late_src (id INT PRIMARY KEY, tenant_id INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO rls_imm_late_src VALUES (1, 10)")
+        .await;
+
+    db.create_st(
+        "rls_imm_late_st",
+        "SELECT id, tenant_id FROM rls_imm_late_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    assert_eq!(db.count("public.rls_imm_late_st").await, 1);
+
+    // Enable RLS on the source after the fact — nothing at creation time
+    // could have caught this.
+    db.execute("ALTER TABLE rls_imm_late_src ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute("CREATE POLICY p ON rls_imm_late_src USING (tenant_id = 10)")
+        .await;
+
+    // The IVM trigger fires synchronously inside this INSERT and must fail
+    // closed instead of silently applying a possibly-wrong delta.
+    let result = db
+        .try_execute("INSERT INTO rls_imm_late_src VALUES (2, 20)")
+        .await;
+    assert!(
+        result.is_err(),
+        "IMMEDIATE apply must fail closed once RLS is enabled on the source"
     );
 }
 
@@ -461,7 +601,9 @@ async fn test_disable_rls_on_source_triggers_reinit() {
     db.execute("INSERT INTO rls_dis_src VALUES (1, 'x'), (2, 'y')")
         .await;
 
-    // Enable RLS first, then create the ST so the snapshot stores rls_enabled=true.
+    // Enable RLS first, then create the ST so the snapshot stores
+    // rls_enabled=true. RLS-3: explicit DIFFERENTIAL over an RLS-protected
+    // source is rejected at creation, so use AUTO — it downgrades to FULL.
     db.execute("ALTER TABLE rls_dis_src ENABLE ROW LEVEL SECURITY")
         .await;
 
@@ -469,7 +611,7 @@ async fn test_disable_rls_on_source_triggers_reinit() {
         "rls_dis_st",
         "SELECT id, val FROM rls_dis_src",
         "1m",
-        "DIFFERENTIAL",
+        "AUTO",
     )
     .await;
     db.refresh_st("rls_dis_st").await;

@@ -252,9 +252,13 @@ pub fn prepare_merge_pipeline(
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
         .ok_or_else(|| PgTrickleError::InternalError("backend PID is NULL".to_string()))?;
     let relation = relation_name(pgt_id, backend_pid);
-    let quoted_relation = format!("\"{relation}\"");
     let empty_select = format!("SELECT * FROM ({delta_sql}) __pgt_pipeline_empty LIMIT 0");
-    crate::refresh::prepare_owner_temp_table(st, &quoted_relation, &empty_select)
+    // delta_sql is definition-derived: parse/analyze it under the owner's
+    // identity and stored search_path, not this privileged caller's.
+    crate::refresh::with_stream_owner(st, || {
+        crate::refresh::prepare_owner_temp_table(st, &relation, &empty_select)
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

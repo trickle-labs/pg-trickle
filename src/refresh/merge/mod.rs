@@ -77,17 +77,17 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             st.pgt_schema.replace('"', "\"\""),
             st.pgt_name.replace('"', "\"\""),
         );
-        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_pre_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — pgt_id is a plain i64.
-        Spi::run(&format!(
-            "CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
-             SELECT __pgt_row_id, {col_list} FROM {quoted_table}",
-            pgt_id = st.pgt_id,
-        ))
-        .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-            pgt_id: st.pgt_id,
-            stage: "full-refresh downstream snapshot".to_string(),
-            reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
-        })?;
+        let pre_select = format!("SELECT __pgt_row_id, {col_list} FROM {quoted_table}");
+        // pre_select only references the ST's own fully-qualified storage
+        // relation, and this table must stay readable by the privileged
+        // downstream-diff capture call after `with_stream_owner` returns
+        // below, so this intentionally runs un-wrapped.
+        crate::refresh::prepare_owner_temp_table(st, &format!("__pgt_pre_{}", st.pgt_id), &pre_select)
+            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "full-refresh downstream snapshot".to_string(),
+                reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
+            })?;
     }
     let (rows_inserted, needs_diff_capture, user_cols) = with_stream_owner(st, || {
         let schema = &st.pgt_schema;
@@ -405,6 +405,26 @@ pub fn execute_differential_refresh_with_tuning(
 
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
+
+    // ── RLS-3: source row-level security may have been enabled after this ──
+    // stream table was created (admission only checks at CREATE/ALTER time).
+    // The differential CDC window cannot tell a delete/update image for a
+    // row whose owner-visibility changed apart from one that never did, so
+    // fall back to FULL for as long as RLS remains enabled on any source.
+    let dependency_oids: Vec<u32> = dependencies
+        .iter()
+        .map(|d| d.source_relid.to_u32())
+        .collect();
+    if let Some(rls_source) = crate::cdc::first_rls_enabled_source(&dependency_oids)? {
+        pgrx::warning!(
+            "[pg_trickle] Falling back to FULL refresh: source \"{}\" now has row-level \
+             security enabled. Differential maintenance cannot safely reconstruct \
+             owner-visible old row images under RLS.",
+            rls_source,
+        );
+        set_effective_mode("FULL");
+        return execute_full_refresh(st);
+    }
 
     // ── EC-16: Function-body change detection ────────────────────────
     // Check whether any user-defined function referenced in this ST's
@@ -2359,18 +2379,35 @@ pub fn execute_differential_refresh_with_tuning(
             .parameterized_merge_sql
             .contains("__PGS_NEW_LSN_pgt_");
     // PB2/STAB-1: Disable prepared statements when pooler compat mode is on.
-    let use_prepared = crate::config::pg_trickle_use_prepared_statements()
+    //
+    // SEC-4: `PREPARE ... AS <definition-derived MERGE SQL>` below runs
+    // while privileged (PostgreSQL forbids `PREPARE` under the
+    // `SECURITY_RESTRICTED_OPERATION` flag `with_stream_owner` sets), so its
+    // parse/analyze/rewrite resolves unqualified owner-schema names against
+    // the privileged caller's search_path, not the stream owner's stored
+    // one. Disabled unconditionally until this path can parse under the
+    // owner's identity; the un-prepared MERGE path below still runs
+    // correctly (just without the generic-plan caching benefit).
+    let use_prepared = false
+        && crate::config::pg_trickle_use_prepared_statements()
         && was_cache_hit
         && !crate::config::effective_pooler_compat(st.pooler_compatibility_mode)
         && st.st_partition_key.is_none()
         && !has_pgt_placeholders;
 
     let materializes_delta = use_delete_insert || use_agg_fast_path || use_explicit_dml;
-    let delta_table = format!("__pgt_delta_{}", st.pgt_id);
+    let delta_table_basename = format!("__pgt_delta_{}", st.pgt_id);
     let delta_select = format!("SELECT * FROM {} AS d", resolved.trigger_using_sql);
-    if materializes_delta {
-        crate::refresh::prepare_owner_temp_table(st, &delta_table, &delta_select)?;
-    }
+    let delta_table = if materializes_delta {
+        // resolved.trigger_using_sql is definition-derived: parse/analyze it
+        // under the owner's identity and stored search_path, not this
+        // privileged caller's.
+        crate::refresh::with_stream_owner(st, || {
+            crate::refresh::prepare_owner_temp_table(st, &delta_table_basename, &delta_select)
+        })?
+    } else {
+        format!("pg_temp.{}", crate::sql_builder::ident(&delta_table_basename))
+    };
     let prepared_diff_capture_cols = if use_explicit_dml && needs_downstream_capture {
         let cols = get_st_user_columns(st);
         if !cols.is_empty() {
@@ -2384,12 +2421,17 @@ pub fn execute_differential_refresh_with_tuning(
                 schema.replace('"', "\"\""),
                 name.replace('"', "\"\""),
             );
-            let pre_table = format!("__pgt_pre_{}", st.pgt_id);
+            let pre_table_basename = format!("__pgt_pre_{}", st.pgt_id);
             let pre_select = format!(
                 "SELECT __pgt_row_id, {col_list} FROM {quoted_table} \
                  WHERE __pgt_row_id IN (SELECT __pgt_row_id FROM {delta_table})"
             );
-            crate::refresh::prepare_owner_temp_table(st, &pre_table, &pre_select)?;
+            // pre_select only references the ST's own fully-qualified
+            // storage relation — no owner-schema name resolution risk —
+            // and this table must stay readable by the privileged
+            // downstream-diff capture call after `with_stream_owner`
+            // returns below, so this intentionally runs un-wrapped.
+            crate::refresh::prepare_owner_temp_table(st, &pre_table_basename, &pre_select)?;
         }
         Some(cols)
     } else {
@@ -2820,7 +2862,7 @@ pub fn execute_differential_refresh_with_tuning(
                 10_000,
             )
         });
-        crate::refresh::drop_owner_temp_table(&format!("__pgt_recon_{}", st.pgt_id));
+        crate::refresh::drop_owner_temp_table(st, &format!("__pgt_recon_{}", st.pgt_id));
         cleanup_result?
     } else {
         0

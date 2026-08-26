@@ -2137,9 +2137,50 @@ There are no Python dependencies beyond dbt-core and dbt-postgres. The package i
 ### Does RLS on source tables affect stream table content?
 
 **Yes.** Every refresh evaluates defining SQL as the stream-table owner with
-`row_security = on`. The owner's source grants and applicable policies define
-the materialized result. The manual caller, scheduler role, or DML issuer does
-not change that result.
+`row_security = on`. The owner's source grants define whether a row is
+visible at all.
+
+This does **not** make the result fully independent of the caller, though.
+Owner-context execution changes the effective *current role* used for
+privilege and policy checks, but it does not change PostgreSQL's
+`session_user`, and it does not pin any other session- or
+application-level GUC a policy might read. A policy written as:
+
+```sql
+USING (tenant_name = session_user)
+USING (tenant_id = current_setting('app.tenant_id')::int)
+```
+
+will still evaluate differently depending on who is logged in, or what
+`app.tenant_id` happens to be set to in the session that triggers the
+refresh — a manual `refresh_stream_table()` call, the scheduler background
+worker, and an IMMEDIATE-mode trigger fired by application DML can all run
+in sessions with different `session_user`/`app.*` settings, and so can
+produce different materialized results for the same defining query.
+
+Write RLS policies for stream-table sources in terms of `current_user`
+(which owner-context execution *does* pin to the stream owner) or a
+`current_setting(...)` value your deployment guarantees is set identically
+in every refresh path, and avoid `session_user`-based policies on any
+source a stream table reads from.
+
+### Can a stream table use DIFFERENTIAL or IMMEDIATE mode over an RLS-protected source?
+
+**No — those sources are FULL-only.** DIFFERENTIAL and IMMEDIATE maintenance
+work from a bounded window of change events and can only check whether a
+row is visible in the *current* state of a source table. They cannot
+reconstruct whether an old row image was ever visible to the stream owner
+before a policy-relevant change (e.g. a row that transitions from
+hidden to visible, or a DELETE of a row already hidden from the owner),
+so a delta computed that way can silently diverge from what a FULL
+recompute would produce.
+
+`AUTO` mode falls back to FULL automatically for a source with row-level
+security enabled — including if RLS is enabled on the source *after* the
+stream table was created. Explicit `DIFFERENTIAL` or `IMMEDIATE` mode is
+rejected (at creation/`ALTER`, and IMMEDIATE additionally fails closed at
+trigger time) for any source that has RLS enabled. Use `FULL` or `AUTO`
+mode for stream tables reading from RLS-protected sources.
 
 ### Can I use RLS on a stream table to filter reads per role?
 

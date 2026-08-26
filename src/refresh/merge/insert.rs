@@ -47,11 +47,14 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         schema.replace('"', "\"\""),
         name.replace('"', "\"\""),
     );
-    let pre_table = format!("__pgt_topk_state_{}", st.pgt_id);
+    let pre_table_basename = format!("__pgt_topk_state_{}", st.pgt_id);
     let pre_select = format!("SELECT * FROM {quoted_table}");
-    crate::refresh::prepare_owner_temp_table(st, &pre_table, &pre_select)?;
-    Spi::run(&format!("INSERT INTO {pre_table} {pre_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and source is a quoted storage relation.
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let pre_table =
+        crate::refresh::prepare_owner_temp_table(st, &pre_table_basename, &pre_select)?;
+    crate::refresh::with_stream_owner(st, || {
+        Spi::run(&format!("INSERT INTO {pre_table} {pre_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is quoted and source is a quoted storage relation.
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    })?;
 
     let downstream_cols = if has_downstream_st_consumers(st.pgt_id) {
         let cols = get_st_user_columns(st);
@@ -67,17 +70,17 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             .map(|col| format!("\"{}\"", col.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(", ");
-        Spi::run(&format!(
-            "DROP TABLE IF EXISTS __pgt_pre_{pgt_id}; \
-             CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
-             SELECT __pgt_row_id, {col_list} FROM {quoted_table}",
-            pgt_id = st.pgt_id,
-        ))
-        .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-            pgt_id: st.pgt_id,
-            stage: "topk downstream snapshot".to_string(),
-            reason: e.to_string(),
-        })?;
+        let pre_select = format!("SELECT __pgt_row_id, {col_list} FROM {quoted_table}");
+        // pre_select only references the ST's own fully-qualified storage
+        // relation, and this table must stay readable by the privileged
+        // downstream-diff capture call later, so this intentionally runs
+        // un-wrapped (privileged).
+        crate::refresh::prepare_owner_temp_table(st, &format!("__pgt_pre_{}", st.pgt_id), &pre_select)
+            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "topk downstream snapshot".to_string(),
+                reason: e.to_string(),
+            })?;
         Some(cols)
     } else {
         None

@@ -1210,6 +1210,45 @@ fn validate_and_parse_query(
         None
     };
 
+    // RLS-3: A source with row-level security cannot be safely diffed.
+    // The differential CDC staging window can only check whether a row is
+    // visible in the *current* state of a source, so a delete/update image
+    // for a row whose visibility changed (a hidden→visible UPDATE, a DELETE
+    // of a row hidden from the owner, etc.) cannot be told apart from one
+    // that never changed. FULL re-executes the defining query under the
+    // owner's row_security from scratch every time, so it is the only mode
+    // that is safe here.
+    if let Some(pr) = parsed_tree.as_ref() {
+        let mut source_oids = pr.tree.source_oids();
+        source_oids.extend(pr.cte_registry.source_oids());
+        source_oids.sort_unstable();
+        source_oids.dedup();
+        if let Some(rls_source) = crate::cdc::first_rls_enabled_source(&source_oids)? {
+            if is_auto && *refresh_mode == RefreshMode::Differential {
+                pgrx::warning!(
+                    "[pg_trickle] Falling back to FULL refresh: source \"{}\" has row-level \
+                     security enabled. Differential and IMMEDIATE maintenance cannot \
+                     determine whether an old row image was visible to the stream table \
+                     owner before a policy-relevant change, so only FULL refresh is \
+                     supported while row-level security is enabled on this source.",
+                    rls_source,
+                );
+                *refresh_mode = RefreshMode::Full;
+                parsed_tree = None;
+            } else {
+                return Err(PgTrickleError::UnsupportedOperator(format!(
+                    "{} mode is not supported for source \"{}\" because it has row-level \
+                     security enabled: the differential CDC window cannot determine \
+                     whether an old row image was visible to the stream table owner \
+                     before a policy-relevant change. Use 'FULL' or 'AUTO' mode for \
+                     RLS-protected sources.",
+                    refresh_mode.as_str(),
+                    rls_source,
+                )));
+            }
+        }
+    }
+
     // One admission matrix for CREATE, ALTER, and mode changes. Known unsafe
     // forms are FULL-only; explicit incremental modes fail before mutation.
     if let Some(pr) = parsed_tree.as_ref() {
