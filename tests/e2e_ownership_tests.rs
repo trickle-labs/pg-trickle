@@ -242,10 +242,15 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
         "DDL hook must retain private catalog privileges during caller-owned DDL"
     );
 
+    // LSEC-7 (v0.87.9): the unqualified target name now resolves under the
+    // caller's own search_path ("$user", public by default) instead of a
+    // hard-coded `public` default — since a schema named `sec903_author`
+    // exists and is owned by the caller, `$user` resolves to it first, so
+    // the new stream table lands in `sec903_author.sec903_stream`.
     let owner: String = db
         .query_scalar(
             "SELECT pg_get_userbyid(relowner) \
-             FROM pg_class WHERE oid = 'public.sec903_stream'::regclass",
+             FROM pg_class WHERE oid = 'sec903_author.sec903_stream'::regclass",
         )
         .await;
     assert_eq!(owner, "sec903_author");
@@ -318,4 +323,344 @@ async fn test_ownership_nonsuperuser_create_requires_source_select() {
         backend_still_usable, 1,
         "permission errors must not crash PostgreSQL"
     );
+}
+
+// ── v0.87.9 (issue #941 core APIs): create-or-replace, alter, drop ─────────
+
+/// v0.87.9: A non-superuser owner with only the documented public-API grants
+/// (no `pgtrickle_changes` grants, no private catalog SELECT, no
+/// `EXECUTE ON ALL FUNCTIONS`) can create, create-or-replace, alter — both a
+/// query-incompatible change and a partition-key change — and drop their own
+/// stream table. Also verifies the merge-gate invariant that a
+/// query-changing or partition-changing ALTER preserves the *exact* original
+/// storage owner and that data survives every step.
+#[tokio::test]
+async fn test_ownership_nonsuperuser_lifecycle_without_private_grants() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec941_owner LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("CREATE SCHEMA IF NOT EXISTS sec941_owner AUTHORIZATION sec941_owner")
+        .await;
+    db.execute("CREATE TABLE sec941_owner.src (id INT PRIMARY KEY, val TEXT, num NUMERIC)")
+        .await;
+    db.execute("INSERT INTO sec941_owner.src VALUES (1, 'a', 10), (2, 'b', 20)")
+        .await;
+    db.execute("ALTER TABLE sec941_owner.src OWNER TO sec941_owner")
+        .await;
+
+    // Exact documented public-API grants only — no pgtrickle_changes, no
+    // private catalog access, no EXECUTE ON ALL FUNCTIONS.
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO sec941_owner")
+        .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.create_or_replace_stream_table(\
+            text, text, text, text, boolean, text, text, text, boolean, boolean, \
+            text, integer, double precision, text, boolean, text) \
+         TO sec941_owner",
+    )
+    .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(\
+            text, text, text, text, text, text, text, text, boolean, boolean, text, text, \
+            bigint, integer, text, integer, double precision, text, double precision, text) \
+         TO sec941_owner",
+    )
+    .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) TO sec941_owner",
+    )
+    .await;
+
+    // Create path — SET ROLE for the whole scenario via repeated
+    // try_execute_with_role calls (one target statement per call, same
+    // pattern already used by the ownership-check tests above).
+    db.try_execute_with_role(
+        "SET ROLE sec941_owner",
+        "SELECT pgtrickle.create_or_replace_stream_table(\
+             'sec941_owner.sec941_st', \
+             'SELECT id, val FROM sec941_owner.src', \
+             '1m', 'DIFFERENTIAL')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("non-superuser create-or-replace (create path) should succeed");
+
+    let owner_after_create: String = db
+        .query_scalar(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class \
+             WHERE oid = 'sec941_owner.sec941_st'::regclass",
+        )
+        .await;
+    assert_eq!(owner_after_create, "sec941_owner");
+
+    let count_after_create = db.count("sec941_owner.sec941_st").await;
+    assert_eq!(count_after_create, 2);
+
+    // Confirm no private-infrastructure access was needed to get here.
+    let catalog_access: bool = db
+        .query_scalar(
+            "SELECT has_table_privilege('sec941_owner', \
+             'pgtrickle.pgt_stream_tables', 'SELECT')",
+        )
+        .await;
+    assert!(!catalog_access, "catalog tables must remain private");
+    let change_schema_usage: bool = db
+        .query_scalar("SELECT has_schema_privilege('sec941_owner', 'pgtrickle_changes', 'USAGE')")
+        .await;
+    assert!(
+        !change_schema_usage,
+        "authors must not receive change-buffer schema access"
+    );
+
+    // Replace path (config-only: schedule change, query unchanged) —
+    // delegates internally to alter_stream_table_impl without a second SQL-
+    // level EXECUTE grant.
+    db.try_execute_with_role(
+        "SET ROLE sec941_owner",
+        "SELECT pgtrickle.create_or_replace_stream_table(\
+             'sec941_owner.sec941_st', \
+             'SELECT id, val FROM sec941_owner.src', \
+             '5m', 'DIFFERENTIAL')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("non-superuser create-or-replace (replace path) should succeed");
+
+    let schedule_after_replace: String = db
+        .query_scalar(
+            "SELECT schedule FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'sec941_owner' AND pgt_name = 'sec941_st'",
+        )
+        .await;
+    assert_eq!(schedule_after_replace, "5m");
+
+    // Direct ALTER with an incompatible query change (TEXT -> INTEGER on the
+    // same output column) forces a full storage rebuild — the new physical
+    // table must come back owned by sec941_owner, not the extension owner.
+    let relid_before_query_alter: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'sec941_owner' AND pgt_name = 'sec941_st'",
+        )
+        .await;
+
+    db.try_execute_with_role(
+        "SET ROLE sec941_owner",
+        "SELECT pgtrickle.alter_stream_table(\
+             'sec941_owner.sec941_st', \
+             query => 'SELECT id, num::integer AS val FROM sec941_owner.src')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("non-superuser query-changing ALTER should succeed");
+
+    let relid_after_query_alter: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'sec941_owner' AND pgt_name = 'sec941_st'",
+        )
+        .await;
+    assert_ne!(
+        relid_before_query_alter, relid_after_query_alter,
+        "incompatible query change must rebuild storage (new OID)"
+    );
+
+    let owner_after_query_alter: String = db
+        .query_scalar(
+            "SELECT pg_get_userbyid(relowner) FROM pgtrickle.pgt_stream_tables st \
+             JOIN pg_class c ON c.oid = st.pgt_relid \
+             WHERE st.pgt_schema = 'sec941_owner' AND st.pgt_name = 'sec941_st'",
+        )
+        .await;
+    assert_eq!(
+        owner_after_query_alter, "sec941_owner",
+        "query-changing ALTER must preserve the exact original storage owner"
+    );
+
+    let val: i64 = db
+        .query_scalar("SELECT val::bigint FROM sec941_owner.sec941_st WHERE id = 1")
+        .await;
+    assert_eq!(val, 10, "data must survive the query-changing ALTER");
+    let count_after_query_alter = db.count("sec941_owner.sec941_st").await;
+    assert_eq!(count_after_query_alter, 2);
+
+    // Direct ALTER changing the partition key — also a full storage rebuild
+    // that must preserve the original owner.
+    let relid_before_partition_alter = relid_after_query_alter;
+
+    db.try_execute_with_role(
+        "SET ROLE sec941_owner",
+        "SELECT pgtrickle.alter_stream_table('sec941_owner.sec941_st', partition_by => 'id')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("non-superuser partition-key ALTER should succeed");
+
+    let relid_after_partition_alter: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'sec941_owner' AND pgt_name = 'sec941_st'",
+        )
+        .await;
+    assert_ne!(
+        relid_before_partition_alter, relid_after_partition_alter,
+        "partition-key change must rebuild storage (new OID)"
+    );
+
+    let owner_after_partition_alter: String = db
+        .query_scalar(
+            "SELECT pg_get_userbyid(relowner) FROM pgtrickle.pgt_stream_tables st \
+             JOIN pg_class c ON c.oid = st.pgt_relid \
+             WHERE st.pgt_schema = 'sec941_owner' AND st.pgt_name = 'sec941_st'",
+        )
+        .await;
+    assert_eq!(
+        owner_after_partition_alter, "sec941_owner",
+        "partition-key ALTER must preserve the exact original storage owner"
+    );
+
+    let count_after_partition_alter = db.count("sec941_owner.sec941_st").await;
+    assert_eq!(
+        count_after_partition_alter, 2,
+        "data must survive the partition-key ALTER"
+    );
+
+    // Drop path.
+    db.try_execute_with_role(
+        "SET ROLE sec941_owner",
+        "SELECT pgtrickle.drop_stream_table('sec941_owner.sec941_st')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("non-superuser drop should succeed");
+
+    let exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'sec941_owner' AND pgt_name = 'sec941_st')",
+        )
+        .await;
+    assert!(!exists, "stream table should be dropped");
+}
+
+/// v0.87.9 (LSEC-9): a cascade drop that would touch a stream table the
+/// caller does not own is rejected in full — every affected stream table
+/// (root and every transitively cascaded dependent) is authorized before
+/// the first mutation, so a mixed-owner cascade leaves zero mutations.
+#[tokio::test]
+async fn test_ownership_mixed_owner_cascade_drop_denied_zero_mutations() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec941_cascade_a LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE sec941_cascade_b LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO sec941_cascade_a, sec941_cascade_b")
+        .await;
+    db.execute(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) \
+         TO sec941_cascade_a, sec941_cascade_b",
+    )
+    .await;
+
+    db.execute("CREATE TABLE sec941_cascade_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO sec941_cascade_src VALUES (1, 'a'), (2, 'b')")
+        .await;
+    db.execute("GRANT ALL ON TABLE sec941_cascade_src TO sec941_cascade_a, sec941_cascade_b")
+        .await;
+
+    // Root ST, owned by sec941_cascade_a.
+    db.create_st(
+        "sec941_cascade_root",
+        "SELECT id, val FROM sec941_cascade_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("ALTER TABLE sec941_cascade_root OWNER TO sec941_cascade_a")
+        .await;
+    db.execute("GRANT SELECT ON TABLE sec941_cascade_root TO sec941_cascade_b")
+        .await;
+
+    // Downstream ST depending on the root, owned by a *different* role.
+    db.create_st(
+        "sec941_cascade_dependent",
+        "SELECT id, val FROM sec941_cascade_root",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("ALTER TABLE sec941_cascade_dependent OWNER TO sec941_cascade_b")
+        .await;
+
+    let root_relid_before: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'sec941_cascade_root'",
+        )
+        .await;
+    let dependent_relid_before: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'sec941_cascade_dependent'",
+        )
+        .await;
+
+    // sec941_cascade_a owns the root but NOT the dependent — the cascade
+    // must be rejected before anything is dropped.
+    let result = db
+        .try_execute_with_role(
+            "SET ROLE sec941_cascade_a",
+            "SELECT pgtrickle.drop_stream_table('sec941_cascade_root', cascade => true)",
+            "RESET ROLE",
+        )
+        .await;
+    assert!(result.is_err(), "mixed-owner cascade drop must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("must be owner"),
+        "error should mention ownership: {err}"
+    );
+
+    // Zero mutations: both catalog rows and both storage tables survive
+    // untouched, with the same relid as before the rejected cascade.
+    let root_relid_after: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'sec941_cascade_root'",
+        )
+        .await;
+    let dependent_relid_after: i64 = db
+        .query_scalar(
+            "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'sec941_cascade_dependent'",
+        )
+        .await;
+    assert_eq!(root_relid_before, root_relid_after);
+    assert_eq!(dependent_relid_before, dependent_relid_after);
+
+    assert!(
+        db.table_exists("public", "sec941_cascade_root").await,
+        "root storage table must survive a rejected cascade"
+    );
+    assert!(
+        db.table_exists("public", "sec941_cascade_dependent").await,
+        "dependent storage table must survive a rejected cascade"
+    );
+
+    let root_count = db.count("public.sec941_cascade_root").await;
+    assert_eq!(root_count, 2, "root data must be untouched");
+    let dependent_count = db.count("public.sec941_cascade_dependent").await;
+    assert_eq!(dependent_count, 2, "dependent data must be untouched");
 }

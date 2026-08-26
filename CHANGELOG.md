@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.9 — Core Lifecycle Security](#0879--core-lifecycle-security)
 - [0.87.8 — Refresh Execution Identity](#0878--refresh-execution-identity)
 - [0.87.7 — Security Context and Catalog Foundation](#0877--security-context-and-catalog-foundation)
 - [0.87.6 — Deep Fuzzing, Shrinking, and Release Gate](#0876--deep-fuzzing-shrinking-and-release-gate)
@@ -138,6 +139,53 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.9] — Core Lifecycle Security
+
+v0.87.9 fixes issue #941 for the three functions it names:
+`create_or_replace_stream_table`, `alter_stream_table`, and
+`drop_stream_table`. A non-superuser stream table owner with only the
+documented public API grants can now create, replace, alter (including a
+query change or a partition-key change), and drop their own stream table —
+no direct privileges on pg_trickle's private catalog or the
+`pgtrickle_changes` schema required.
+
+- `create_or_replace_stream_table`, `alter_stream_table`, and
+  `drop_stream_table` are now `SECURITY DEFINER` with a pinned
+  `search_path = pgtrickle, pg_catalog, pg_temp`, matching the model
+  `create_stream_table` has used since v0.81.1. Every caller-controlled name
+  these functions accept is resolved under the *original caller's* captured
+  `search_path` — never a hard-coded `public` default and never
+  `current_schema()` evaluated under the pinned definer path — so a caller
+  whose default schema isn't `public` gets the same unqualified-name
+  resolution they would get outside pg_trickle.
+- Fixed a cascade-drop authorization gap: dropping a stream table with
+  `cascade => true` previously checked ownership only of the named root —
+  every downstream dependent it cascaded into was dropped without an
+  ownership check. Drop now builds a complete, deterministic, child-first
+  plan up front and authorizes *every* target (root and every transitively
+  cascaded dependent) against the original caller before the first
+  mutation. A cascade that would touch a stream table the caller does not
+  own is rejected in full, with nothing dropped. The same planner now backs
+  both single-target cascading drop and bulk drop.
+- Fixed a storage-owner regression risk in `ALTER`'s full-storage-rebuild
+  paths (an incompatible schema change from `ALTER ... query =>`, and any
+  partition-key change): both capture the table's exact pre-change owner
+  and restore it on the recreated table before repopulation, so the
+  stream table's owner never silently drifts to the extension owner.
+
+See the [v0.87.9 roadmap](roadmap/v0.87.9.md) for the complete acceptance
+criteria and security release gate.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the v0.87.9 files.
+The upgrade migration only changes the security attributes of the three
+affected functions (`SECURITY DEFINER` plus the pinned `search_path`) and
+preserves every existing `GRANT`/`REVOKE` on them — no data migration is
+required.
 
 ---
 

@@ -90,12 +90,24 @@ pub(crate) fn outer_user_id() -> pg_sys::Oid {
 }
 
 /// Run caller-controlled SQL with a captured invoker search path, restoring
-/// the locked SECURITY DEFINER path afterwards.
+/// whatever `search_path` was actually active immediately before this call
+/// (not a hard-coded pinned-path guess) afterwards.
+///
+/// LSEC-7 (v0.87.9): restoring the *exact prior* value — rather than always
+/// resetting to the pinned `pgtrickle, pg_catalog, pg_temp` definer path —
+/// makes this helper safely nestable and callable more than once per
+/// function. A caller that has itself already switched the ambient path to
+/// something else (e.g. an outer `with_invoker_search_path` scoping an
+/// entire SECURITY DEFINER call) gets that value back, instead of every
+/// call silently collapsing the ambient path back to the pinned string
+/// regardless of context.
 pub(super) fn with_invoker_search_path<T>(
     invoker_search_path: &str,
     f: impl FnOnce() -> Result<T, PgTrickleError>,
 ) -> Result<T, PgTrickleError> {
     use std::panic::AssertUnwindSafe;
+
+    let prior_search_path = active_search_path_or_pinned();
 
     Spi::run_with_args(
         "SELECT pg_catalog.set_config('search_path', $1, true)",
@@ -107,20 +119,32 @@ pub(super) fn with_invoker_search_path<T>(
         // SAFETY: PgTryBuilder runs the cleanup hook on both success and
         // PostgreSQL ERROR paths while the backend is in a valid state.
         pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
-            .finally(|| {
-                pg_sys::set_config_option(
-                    c"search_path".as_ptr(),
-                    c"pgtrickle, pg_catalog, pg_temp".as_ptr(),
-                    pg_sys::GucContext::PGC_USERSET,
-                    pg_sys::GucSource::PGC_S_SESSION,
-                    pg_sys::GucAction::GUC_ACTION_LOCAL,
-                    true,
-                    pgrx::PgLogLevel::ERROR as i32,
-                    false,
-                );
+            .finally(move || {
+                if let Ok(prior_cstring) = std::ffi::CString::new(prior_search_path.clone()) {
+                    pg_sys::set_config_option(
+                        c"search_path".as_ptr(),
+                        prior_cstring.as_ptr(),
+                        pg_sys::GucContext::PGC_USERSET,
+                        pg_sys::GucSource::PGC_S_SESSION,
+                        pg_sys::GucAction::GUC_ACTION_LOCAL,
+                        true,
+                        pgrx::PgLogLevel::ERROR as i32,
+                        false,
+                    );
+                }
             })
             .execute()
     }
+}
+
+/// Read the currently active `search_path` GUC, falling back to the pinned
+/// definer path if it cannot be read for any reason (never leaves the
+/// ambient path unrestorable).
+fn active_search_path_or_pinned() -> String {
+    Spi::get_one::<String>("SELECT current_setting('search_path')")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "pgtrickle, pg_catalog, pg_temp".to_string())
 }
 
 // ── Helper functions ───────────────────────────────────────────────────────
@@ -744,6 +768,86 @@ pub fn detect_volatile_functions_pub(s: &str) -> Option<&'static str> {
 /// Parse a possibly schema-qualified name into `(schema, table)`.
 pub(super) fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> {
     QualifiedIdentifier::parse_with_default(name, "public").map(QualifiedIdentifier::into_parts)
+}
+
+/// LSEC-7: Resolve a possibly-unqualified, caller-controlled name into
+/// `(schema, table)` under the *original caller's* captured `search_path` —
+/// never a hard-coded `"public"` default and never `current_schema()`
+/// evaluated under a pinned `SECURITY DEFINER` path.
+///
+/// A name that is already schema-qualified (`"schema.table"`) is parsed
+/// as-is. An unqualified name's default schema is resolved by temporarily
+/// activating the caller's exact `search_path`
+/// ([`with_invoker_search_path`]) and asking PostgreSQL for
+/// `current_schema()` — the same resolution PostgreSQL itself would use for
+/// the caller, not a guess.
+pub(super) fn resolve_qualified_name_as_caller(
+    name: &str,
+    caller_search_path: &str,
+) -> Result<(String, String), PgTrickleError> {
+    let (schema_part, _) = split_qualified_identifier(name)?;
+    if schema_part.is_some() {
+        return parse_qualified_name(name);
+    }
+    let default_schema = with_invoker_search_path(caller_search_path, || {
+        Spi::get_one::<String>("SELECT current_schema()::text")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| {
+                PgTrickleError::InvalidArgument(
+                    "no schema in the caller's search_path is usable as a default; \
+                     qualify the name explicitly (schema.table)"
+                        .to_string(),
+                )
+            })
+    })?;
+    QualifiedIdentifier::parse_with_default(name, &default_schema)
+        .map(QualifiedIdentifier::into_parts)
+}
+
+/// Look up a relation's current owner OID. Used to capture the
+/// pre-recreation storage owner so it can be restored on the rebuilt table
+/// (LSEC-8: ALTER must preserve the exact original storage owner).
+pub(super) fn relation_owner(relid: pg_sys::Oid) -> Result<pg_sys::Oid, PgTrickleError> {
+    Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT relowner FROM pg_catalog.pg_class WHERE oid = $1",
+        &[relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::NotFound(format!("relation with OID {} not found", relid.to_u32()))
+    })
+}
+
+/// Transfer a recreated storage table back to a specific pre-recreation
+/// owner OID (as opposed to [`transfer_output_table_ownership`], which
+/// always transfers to the current outer caller — the right choice on
+/// first CREATE, but wrong for ALTER's storage-rebuild paths, which must
+/// restore the table's *original* owner even when a superuser is the one
+/// running the ALTER).
+pub(super) fn set_relation_owner(
+    schema: &str,
+    table_name: &str,
+    owner_oid: pg_sys::Oid,
+) -> Result<(), PgTrickleError> {
+    let owner_name = Spi::get_one_with_args::<String>(
+        "SELECT rolname::text FROM pg_catalog.pg_roles WHERE oid = $1",
+        &[owner_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::NotFound(format!("role with OID {} not found", owner_oid.to_u32()))
+    })?;
+    let sql = format!(
+        "ALTER TABLE {}.{} OWNER TO {}",
+        quote_identifier(schema),
+        quote_identifier(table_name),
+        quote_identifier(&owner_name),
+    );
+    Spi::run(&sql).map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "Failed to preserve original stream table owner: {e}"
+        ))
+    })
 }
 
 pub(crate) fn parse_qualified_identifier_with_current_schema(

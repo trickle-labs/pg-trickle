@@ -610,31 +610,37 @@ fn alter_stream_table_query(
     schema: &str,
     table_name: &str,
     new_query: &str,
+    caller_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // ── Phase 0: Validate & classify ──
+    //
+    // LSEC-7 (v0.87.9): the caller's exact search_path is now captured once
+    // by `alter_stream_table_impl` (correctly, whether this call arrived
+    // through a SECURITY DEFINER boundary or a still-invoker wrapper) and
+    // passed down here, instead of being re-captured under a hard-coded
+    // SecurityInvoker assumption that no longer holds once `alter_stream_table`
+    // itself became SECURITY DEFINER.
 
-    // LSEC-3 (v0.87.7): `alter_stream_table` is SECURITY INVOKER, so the
-    // active search_path already is the caller's; only `$user` needs
-    // expanding before it is persisted as the new defining_search_path.
-    let caller_search_path =
-        security_context::capture_caller_context(security_context::EntryContext::SecurityInvoker)?
-            .search_path;
-
-    // Run the full rewrite pipeline on the new query
+    // Run the full rewrite pipeline AND validate/parse the new query, both
+    // under the caller's own search_path — this resolves caller-controlled
+    // SQL (views, unqualified source names) and must not run under this
+    // function's pinned definer path. Both steps must share one
+    // search_path scope: `validate_and_parse_query` resolves the query's
+    // source relations too, so leaving it outside the wrapper would resolve
+    // sources under the wrong (pinned) path.
     let original_new_query = new_query.to_string();
-    let rw = run_query_rewrite_pipeline(new_query)?;
-    let rewritten_query = rw.query;
-
-    // Determine the effective refresh mode — use the ST's current mode
     let mut refresh_mode = st.refresh_mode;
-
-    // Validate and parse the new query
-    let vq = validate_and_parse_query(
-        &rewritten_query,
-        &mut refresh_mode,
-        false,
-        rw.had_nested_window_rewrite,
-    )?;
+    let (rw, vq) = with_invoker_search_path(caller_search_path, || {
+        let rw = run_query_rewrite_pipeline(new_query)?;
+        let vq = validate_and_parse_query(
+            &rw.query,
+            &mut refresh_mode,
+            false,
+            rw.had_nested_window_rewrite,
+        )?;
+        Ok((rw, vq))
+    })?;
+    let rewritten_query = rw.query;
 
     // Cycle detection on the new dependency set (ALTER-aware: replaces
     // the existing ST's edges rather than creating a sentinel node).
@@ -745,6 +751,12 @@ fn alter_stream_table_query(
                 reason
             );
 
+            // LSEC-8 (v0.87.9): capture the exact pre-rebuild storage owner
+            // so it can be restored on the recreated table below — the new
+            // table is created by privileged code and must not silently
+            // become owned by the extension owner.
+            let original_owner = relation_owner(st.pgt_relid)?;
+
             // Detach pgt_relid before DROP so the sql_drop event trigger
             // does not recognise the table as ST storage and delete the
             // catalog row.
@@ -767,7 +779,7 @@ fn alter_stream_table_query(
 
             // Recreate with new schema
             let storage_needs_pgt_count = vq.needs_pgt_count || vq.needs_union_dedup;
-            setup_storage_table(
+            let rebuilt_relid = setup_storage_table(
                 schema,
                 table_name,
                 &vq.columns,
@@ -783,7 +795,11 @@ fn alter_stream_table_query(
                 &vq.statistical_aux_types,
                 st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
                 st.storage_fillfactor,          // HOT-1: preserve fillfactor
-            )?
+            )?;
+
+            // LSEC-8: restore the exact original owner before repopulation.
+            set_relation_owner(schema, table_name, original_owner)?;
+            rebuilt_relid
         }
     };
 
@@ -1036,10 +1052,20 @@ fn alter_stream_table_query(
     // Re-activate the stream table
     StreamTableMeta::update_status(st.pgt_id, StStatus::Active)?;
 
-    // Pre-warm delta SQL + MERGE template cache for DIFFERENTIAL mode
+    // Pre-warm delta SQL + MERGE template cache for DIFFERENTIAL mode.
+    // LSEC-7 (v0.87.9): codegen re-parses `defining_query` (caller-authored
+    // SQL, possibly with unqualified source names) and has no search_path
+    // scoping of its own, so it must run under the caller's captured path —
+    // not this function's pinned definer path. Pre-warming is best-effort
+    // (a cache miss just costs one cold-start refresh), so a failure here —
+    // including one surfaced as a Postgres ERROR from codegen's own parsing —
+    // must not fail the ALTER itself.
     if refresh_mode == RefreshMode::Differential {
         let st = StreamTableMeta::get_by_name(schema, table_name)?;
-        refresh::prewarm_merge_cache(&st);
+        let _ = with_invoker_search_path(caller_search_path, || {
+            refresh::prewarm_merge_cache(&st);
+            Ok(())
+        });
     }
 
     // CYC-6: Recompute SCC assignments — the query change may have created
@@ -1093,6 +1119,10 @@ fn alter_stream_table_partition_key(
          The storage table will be recreated and a full refresh applied."
     );
 
+    // LSEC-8 (v0.87.9): capture the exact pre-rebuild storage owner so it
+    // can be restored on the recreated table below.
+    let original_owner = relation_owner(st.pgt_relid)?;
+
     // Detach pgt_relid so the sql_drop event trigger does not delete the
     // catalog row when we drop the old table.
     Spi::run_with_args(
@@ -1138,6 +1168,9 @@ fn alter_stream_table_partition_key(
         new_partition_key,
         st.storage_fillfactor, // HOT-1: preserve fillfactor
     )?;
+
+    // LSEC-8: restore the exact original owner before repopulation.
+    set_relation_owner(schema, table_name, original_owner)?;
 
     // Update catalog: new relid + new partition key.
     Spi::run_with_args(
@@ -1347,7 +1380,12 @@ pub(crate) fn create_stream_table_impl(
     }
 
     // Parse schema.name
-    let (schema, table_name) = parse_qualified_name(name)?;
+    // LSEC-7 (v0.87.9): resolve the caller-controlled target name under the
+    // original caller's captured search_path — this is the shared create
+    // path for every `create_stream_table*` entry point, so fixing it here
+    // fixes canonical resolution everywhere a new stream table's target
+    // name is resolved.
+    let (schema, table_name) = resolve_qualified_name_as_caller(name, &invoker_search_path)?;
     let qualified_name = format!("{schema}.{table_name}");
     validate_output_schema_create(&schema)?;
 
@@ -1780,9 +1818,15 @@ pub(crate) fn create_stream_table_impl(
 
     // Pre-warm delta SQL + MERGE template cache for DIFFERENTIAL mode,
     // so the first refresh avoids the cold-start parsing penalty.
+    // LSEC-7 (v0.87.9): must run under the caller's captured search_path —
+    // see the matching comment in `alter_stream_table_query`. Best-effort:
+    // a failure here must not fail the CREATE itself.
     if refresh_mode == RefreshMode::Differential && initialize {
         let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-        refresh::prewarm_merge_cache(&st);
+        let _ = with_invoker_search_path(&invoker_search_path, || {
+            refresh::prewarm_merge_cache(&st);
+            Ok(())
+        });
     }
 
     // Signal scheduler to rebuild DAG
@@ -1802,7 +1846,8 @@ pub(crate) fn create_stream_table_impl(
 
 /// Alter properties of an existing stream table.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn alter_stream_table(
     name: &str,
     query: default!(Option<&str>, "NULL"),
@@ -1847,6 +1892,7 @@ fn alter_stream_table(
         post_refresh_action,
         reindex_drift_threshold,
         target_freshness,
+        entry_context: Some(security_context::EntryContext::SecurityDefiner),
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -1884,6 +1930,14 @@ pub(crate) struct AlterStreamTableOptions<'a> {
     pub(crate) reindex_drift_threshold: Option<f64>,
     /// v0.86.0: declared freshness target.
     pub(crate) target_freshness: Option<&'a str>,
+    /// LSEC-8 (v0.87.9): which kind of entry point captured this call, so
+    /// the caller's exact `search_path` can be recovered correctly — from
+    /// the GUC stack for a `SECURITY DEFINER` boundary
+    /// (`alter_stream_table`, `create_or_replace_stream_table`'s replace
+    /// path), or read directly for a still-`SECURITY INVOKER` convenience
+    /// wrapper (`set_stream_table_refresh_policy`,
+    /// `bulk_alter_stream_tables`, …). Defaults to `SecurityInvoker`.
+    pub(crate) entry_context: Option<security_context::EntryContext>,
 }
 
 pub(crate) fn alter_stream_table_impl(
@@ -1910,6 +1964,7 @@ pub(crate) fn alter_stream_table_impl(
         post_refresh_action,
         reindex_drift_threshold,
         target_freshness,
+        entry_context,
     } = opts;
     if let Some(value) = max_differential_joins {
         validation::nonnegative_i32("max_differential_joins", i64::from(value))?;
@@ -1938,548 +1993,574 @@ pub(crate) fn alter_stream_table_impl(
             "reindex_drift_threshold must be finite and between 0.0 and 1.0".to_string(),
         ));
     }
-    let (schema, table_name) = parse_qualified_name(name)?;
+    // LSEC-7 (v0.87.9): resolve the caller-controlled target name under the
+    // original caller's captured search_path, not a hard-coded `public`
+    // default. `entry_context` tells us whether that path must be recovered
+    // from the GUC stack (this call arrived through a now-SECURITY DEFINER
+    // boundary) or read directly (a still-invoker convenience wrapper).
+    let caller_search_path = security_context::capture_caller_context(
+        entry_context.unwrap_or(security_context::EntryContext::SecurityInvoker),
+    )?
+    .search_path;
+    let (schema, table_name) = resolve_qualified_name_as_caller(name, &caller_search_path)?;
     let mut st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     let qualified_name = format!("{schema}.{table_name}");
 
     // SEC-1: Ownership check — only the owner (or superuser) can alter.
     check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
 
-    if let Some(raw_target) = target_freshness {
-        if schedule.is_some() {
-            return Err(PgTrickleError::InvalidArgument(
+    // LSEC-7 (v0.87.9): the rest of this function may re-parse
+    // `st.defining_query` (e.g. `validate_incremental_mode_for_query`,
+    // `validate_immediate_mode_support`) to resolve caller-controlled,
+    // possibly-unqualified source names — not just the single query-change
+    // path in `alter_stream_table_query`. Scope the *entire* remaining body
+    // under the caller's captured search_path rather than hunting down each
+    // individual re-parse call site; every catalog write below already uses
+    // fully qualified `pgtrickle.*` identifiers, so nothing here depends on
+    // search_path being the pinned definer path.
+    with_invoker_search_path(&caller_search_path, || {
+        if let Some(raw_target) = target_freshness {
+            if schedule.is_some() {
+                return Err(PgTrickleError::InvalidArgument(
                 "schedule and target_freshness cannot be changed together (HINT: choose one control)".into(),
             ));
-        }
-        let target = parse_target_freshness(Some(raw_target))?
-            .ok_or_else(|| PgTrickleError::InvalidArgument("target_freshness is missing".into()))?;
-        if target.mode == TargetFreshnessMode::OnCommit && refresh_mode.is_some() {
-            return Err(PgTrickleError::InvalidArgument(
+            }
+            let target = parse_target_freshness(Some(raw_target))?.ok_or_else(|| {
+                PgTrickleError::InvalidArgument("target_freshness is missing".into())
+            })?;
+            if target.mode == TargetFreshnessMode::OnCommit && refresh_mode.is_some() {
+                return Err(PgTrickleError::InvalidArgument(
                 "on_commit target_freshness cannot be changed together with refresh_mode (HINT: choose IMMEDIATE or target_freshness => 'on_commit')".into(),
             ));
-        }
-        if target.mode == TargetFreshnessMode::OnCommit {
-            crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
-            Spi::run_with_args(
+            }
+            if target.mode == TargetFreshnessMode::OnCommit {
+                crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
+                Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'IMMEDIATE', requested_refresh_mode = 'IMMEDIATE', updated_at = now() WHERE pgt_id = $1",
                 &[st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        }
-        apply_target_freshness(st.pgt_id, target)?;
-        st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-    }
-
-    // ── Query migration (must run first, before other parameter changes) ──
-    if let Some(new_query) = query {
-        alter_stream_table_query(&st, &schema, &table_name, new_query)?;
-        st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-    }
-
-    // ── A1-1c: Partition key migration ──────────────────────────────────
-    // partition_by => '' (empty string) removes partitioning.
-    // partition_by => 'col' or 'LIST:col' adds/changes partitioning.
-    // This requires storage table recreation + full refresh.
-    if let Some(new_pk_raw) = partition_by {
-        let new_pk = if new_pk_raw.trim().is_empty() {
-            None
-        } else {
-            Some(new_pk_raw)
-        };
-
-        // Only act when the partition key is actually changing.
-        let old_pk = st.st_partition_key.as_deref();
-        if new_pk != old_pk {
-            alter_stream_table_partition_key(&st, &schema, &table_name, new_pk)?;
+            }
+            apply_target_freshness(st.pgt_id, target)?;
             st = StreamTableMeta::get_by_name(&schema, &table_name)?;
         }
-    }
 
-    let (requested_cdc_mode_override, effective_requested_cdc_mode, cdc_mode_source) =
-        resolve_requested_cdc_mode_for_st(&st, cdc_mode)?;
-    let target_refresh_mode = match refresh_mode {
-        Some(mode_str) => RefreshMode::from_str(mode_str)?,
-        None => st.refresh_mode,
-    };
+        // ── Query migration (must run first, before other parameter changes) ──
+        if let Some(new_query) = query {
+            alter_stream_table_query(&st, &schema, &table_name, new_query, &caller_search_path)?;
+            st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+        }
 
-    enforce_cdc_refresh_mode_interaction(
-        &qualified_name,
-        target_refresh_mode,
-        &effective_requested_cdc_mode,
-        cdc_mode_source,
-    )?;
-    if !target_refresh_mode.is_immediate() {
-        validate_requested_cdc_mode_requirements(&effective_requested_cdc_mode)?;
-    }
+        // ── A1-1c: Partition key migration ──────────────────────────────────
+        // partition_by => '' (empty string) removes partitioning.
+        // partition_by => 'col' or 'LIST:col' adds/changes partitioning.
+        // This requires storage table recreation + full refresh.
+        if let Some(new_pk_raw) = partition_by {
+            let new_pk = if new_pk_raw.trim().is_empty() {
+                None
+            } else {
+                Some(new_pk_raw)
+            };
 
-    // Validate the complete incremental admission before changing CDC mode,
-    // schedule, catalog state, or trigger infrastructure.
-    if target_refresh_mode != RefreshMode::Full {
-        super::validate_incremental_mode_for_query(&st.defining_query, target_refresh_mode)?;
-    }
+            // Only act when the partition key is actually changing.
+            let old_pk = st.st_partition_key.as_deref();
+            if new_pk != old_pk {
+                alter_stream_table_partition_key(&st, &schema, &table_name, new_pk)?;
+                st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+            }
+        }
 
-    if requested_cdc_mode_override != st.requested_cdc_mode {
-        StreamTableMeta::update_requested_cdc_mode(
-            st.pgt_id,
-            requested_cdc_mode_override.as_deref(),
+        let (requested_cdc_mode_override, effective_requested_cdc_mode, cdc_mode_source) =
+            resolve_requested_cdc_mode_for_st(&st, cdc_mode)?;
+        let target_refresh_mode = match refresh_mode {
+            Some(mode_str) => RefreshMode::from_str(mode_str)?,
+            None => st.refresh_mode,
+        };
+
+        enforce_cdc_refresh_mode_interaction(
+            &qualified_name,
+            target_refresh_mode,
+            &effective_requested_cdc_mode,
+            cdc_mode_source,
         )?;
-        st.requested_cdc_mode = requested_cdc_mode_override.clone();
-    }
+        if !target_refresh_mode.is_immediate() {
+            validate_requested_cdc_mode_requirements(&effective_requested_cdc_mode)?;
+        }
 
-    if let Some(val) = schedule {
-        if val.trim().eq_ignore_ascii_case("calculated") {
-            // Switch to CALCULATED mode (NULL schedule in catalog)
-            Spi::run_with_args(
+        // Validate the complete incremental admission before changing CDC mode,
+        // schedule, catalog state, or trigger infrastructure.
+        if target_refresh_mode != RefreshMode::Full {
+            super::validate_incremental_mode_for_query(&st.defining_query, target_refresh_mode)?;
+        }
+
+        if requested_cdc_mode_override != st.requested_cdc_mode {
+            StreamTableMeta::update_requested_cdc_mode(
+                st.pgt_id,
+                requested_cdc_mode_override.as_deref(),
+            )?;
+            st.requested_cdc_mode = requested_cdc_mode_override.clone();
+        }
+
+        if let Some(val) = schedule {
+            if val.trim().eq_ignore_ascii_case("calculated") {
+                // Switch to CALCULATED mode (NULL schedule in catalog)
+                Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables SET schedule = NULL, updated_at = now() WHERE pgt_id = $1",
                 &[st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        } else {
-            let _schedule = parse_schedule(val)?;
-            let trimmed = val.trim();
-            Spi::run_with_args(
+            } else {
+                let _schedule = parse_schedule(val)?;
+                let trimmed = val.trim();
+                Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables SET schedule = $1, updated_at = now() WHERE pgt_id = $2",
                 &[trimmed.into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            }
         }
-    }
 
-    if let Some(mode_str) = refresh_mode {
-        let new_mode = target_refresh_mode;
-        let old_mode = st.refresh_mode;
+        if let Some(mode_str) = refresh_mode {
+            let new_mode = target_refresh_mode;
+            let old_mode = st.refresh_mode;
 
-        if new_mode != old_mode {
-            // ── Validate mode switch ────────────────────────────────
-            // TopK tables: check limit threshold for IMMEDIATE mode.
-            if let (true, Some(topk_limit)) = (new_mode.is_immediate(), st.topk_limit) {
-                let topk_limit = topk_limit as i64;
-                let max_limit = crate::config::PGS_IVM_TOPK_MAX_LIMIT.get() as i64;
-                if max_limit == 0 || topk_limit > max_limit {
-                    return Err(PgTrickleError::UnsupportedOperator(format!(
-                        "Cannot switch TopK stream table (LIMIT {topk_limit}) to IMMEDIATE mode. \
+            if new_mode != old_mode {
+                // ── Validate mode switch ────────────────────────────────
+                // TopK tables: check limit threshold for IMMEDIATE mode.
+                if let (true, Some(topk_limit)) = (new_mode.is_immediate(), st.topk_limit) {
+                    let topk_limit = topk_limit as i64;
+                    let max_limit = crate::config::PGS_IVM_TOPK_MAX_LIMIT.get() as i64;
+                    if max_limit == 0 || topk_limit > max_limit {
+                        return Err(PgTrickleError::UnsupportedOperator(format!(
+                            "Cannot switch TopK stream table (LIMIT {topk_limit}) to IMMEDIATE mode. \
                          Exceeds pg_trickle.ivm_topk_max_limit = {max_limit}. Raise the threshold \
                          or keep using DIFFERENTIAL/FULL mode."
-                    )));
-                }
-            }
-
-            // Validate query restrictions for IMMEDIATE mode.
-            if new_mode.is_immediate() {
-                crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
-            }
-
-            // Get dependencies for trigger migration.
-            let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
-            let change_schema = config::pg_trickle_change_buffer_schema();
-
-            // ── Tear down OLD mode's infrastructure ─────────────────
-            match old_mode {
-                RefreshMode::Immediate => {
-                    // Drop IVM triggers from source tables.
-                    for dep in &deps {
-                        if dep.source_type == "TABLE"
-                            && let Err(e) =
-                                crate::ivm::cleanup_ivm_triggers(dep.source_relid, st.pgt_id)
-                        {
-                            pgrx::warning!(
-                                "Failed to clean up IVM triggers for oid {}: {}",
-                                dep.source_relid.to_u32(),
-                                e
-                            );
-                        }
+                        )));
                     }
                 }
-                RefreshMode::Full | RefreshMode::Differential => {
-                    // Drop CDC triggers + change buffer tables from source
-                    // tables (only if switching TO IMMEDIATE; FULL↔DIFF
-                    // keeps CDC infrastructure).
-                    if new_mode.is_immediate() {
+
+                // Validate query restrictions for IMMEDIATE mode.
+                if new_mode.is_immediate() {
+                    crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
+                }
+
+                // Get dependencies for trigger migration.
+                let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+                let change_schema = config::pg_trickle_change_buffer_schema();
+
+                // ── Tear down OLD mode's infrastructure ─────────────────
+                match old_mode {
+                    RefreshMode::Immediate => {
+                        // Drop IVM triggers from source tables.
                         for dep in &deps {
                             if dep.source_type == "TABLE"
-                                && let Err(e) = cleanup_cdc_for_source(
-                                    dep.source_relid,
-                                    dep.cdc_mode,
-                                    Some(st.pgt_id),
-                                )
+                                && let Err(e) =
+                                    crate::ivm::cleanup_ivm_triggers(dep.source_relid, st.pgt_id)
                             {
                                 pgrx::warning!(
-                                    "Failed to clean up CDC for oid {}: {}",
+                                    "Failed to clean up IVM triggers for oid {}: {}",
                                     dep.source_relid.to_u32(),
                                     e
                                 );
                             }
                         }
                     }
-                }
-            }
-
-            // ── Set up NEW mode's infrastructure ────────────────────
-            match new_mode {
-                RefreshMode::Immediate => {
-                    // Install IVM triggers on source tables.
-                    let lock_mode = crate::ivm::IvmLockMode::for_query(&st.defining_query);
-                    for dep in &deps {
-                        if dep.source_type == "TABLE" {
-                            crate::ivm::setup_ivm_triggers(
-                                dep.source_relid,
-                                st.pgt_id,
-                                st.pgt_relid,
-                                lock_mode,
-                            )?;
+                    RefreshMode::Full | RefreshMode::Differential => {
+                        // Drop CDC triggers + change buffer tables from source
+                        // tables (only if switching TO IMMEDIATE; FULL↔DIFF
+                        // keeps CDC infrastructure).
+                        if new_mode.is_immediate() {
+                            for dep in &deps {
+                                if dep.source_type == "TABLE"
+                                    && let Err(e) = cleanup_cdc_for_source(
+                                        dep.source_relid,
+                                        dep.cdc_mode,
+                                        Some(st.pgt_id),
+                                    )
+                                {
+                                    pgrx::warning!(
+                                        "Failed to clean up CDC for oid {}: {}",
+                                        dep.source_relid.to_u32(),
+                                        e
+                                    );
+                                }
+                            }
                         }
                     }
-                    // Clear schedule for IMMEDIATE mode.
-                    Spi::run_with_args(
+                }
+
+                // ── Set up NEW mode's infrastructure ────────────────────
+                match new_mode {
+                    RefreshMode::Immediate => {
+                        // Install IVM triggers on source tables.
+                        let lock_mode = crate::ivm::IvmLockMode::for_query(&st.defining_query);
+                        for dep in &deps {
+                            if dep.source_type == "TABLE" {
+                                crate::ivm::setup_ivm_triggers(
+                                    dep.source_relid,
+                                    st.pgt_id,
+                                    st.pgt_relid,
+                                    lock_mode,
+                                )?;
+                            }
+                        }
+                        // Clear schedule for IMMEDIATE mode.
+                        Spi::run_with_args(
                         "UPDATE pgtrickle.pgt_stream_tables SET schedule = NULL WHERE pgt_id = $1",
                         &[st.pgt_id.into()],
                     )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                }
-                RefreshMode::Full | RefreshMode::Differential => {
-                    // If switching FROM IMMEDIATE, recreate CDC triggers.
-                    if old_mode.is_immediate() {
-                        for dep in &deps {
-                            if dep.source_type == "TABLE" {
-                                setup_cdc_for_source(dep.source_relid, st.pgt_id, &change_schema)?;
+                    }
+                    RefreshMode::Full | RefreshMode::Differential => {
+                        // If switching FROM IMMEDIATE, recreate CDC triggers.
+                        if old_mode.is_immediate() {
+                            for dep in &deps {
+                                if dep.source_type == "TABLE" {
+                                    setup_cdc_for_source(
+                                        dep.source_relid,
+                                        st.pgt_id,
+                                        &change_schema,
+                                    )?;
+                                }
                             }
-                        }
-                        // Restore a default schedule if none is set.
-                        if schedule.is_none() {
-                            Spi::run_with_args(
-                                "UPDATE pgtrickle.pgt_stream_tables \
+                            // Restore a default schedule if none is set.
+                            if schedule.is_none() {
+                                Spi::run_with_args(
+                                    "UPDATE pgtrickle.pgt_stream_tables \
                                  SET schedule = COALESCE(schedule, '1m') \
                                  WHERE pgt_id = $1",
-                                &[st.pgt_id.into()],
-                            )
-                            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                                    &[st.pgt_id.into()],
+                                )
+                                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                            }
                         }
                     }
                 }
-            }
 
-            // ── Update catalog ──────────────────────────────────────
-            Spi::run_with_args(
+                // ── Update catalog ──────────────────────────────────────
+                Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables \
                  SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
                 &[mode_str.to_uppercase().into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-            // ── Full refresh to ensure consistency ──────────────────
-            let source_oids: Vec<pg_sys::Oid> = deps
-                .iter()
-                .filter(|d| d.source_type == "TABLE")
-                .map(|d| d.source_relid)
-                .collect();
-            // Re-load ST with updated mode for the refresh dispatch.
-            let updated_st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-            execute_manual_full_refresh(&updated_st, &schema, &table_name, &source_oids)?;
+                // ── Full refresh to ensure consistency ──────────────────
+                let source_oids: Vec<pg_sys::Oid> = deps
+                    .iter()
+                    .filter(|d| d.source_type == "TABLE")
+                    .map(|d| d.source_relid)
+                    .collect();
+                // Re-load ST with updated mode for the refresh dispatch.
+                let updated_st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+                execute_manual_full_refresh(&updated_st, &schema, &table_name, &source_oids)?;
 
-            // ERG-F: warn so the client sees the implicit full refresh regardless of log_min_messages.
-            pgrx::warning!(
-                "pg_trickle: stream table {}.{} refresh mode changed from {} to {}; \
+                // ERG-F: warn so the client sees the implicit full refresh regardless of log_min_messages.
+                pgrx::warning!(
+                    "pg_trickle: stream table {}.{} refresh mode changed from {} to {}; \
                  a full refresh was applied. This may take time on large tables.",
+                    schema,
+                    table_name,
+                    old_mode.as_str(),
+                    new_mode.as_str(),
+                );
+            } else {
+                // Same mode — just update catalog (no-op but harmless).
+                Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_stream_tables \
+                 SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
+                &[mode_str.to_uppercase().into(), st.pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+                // Normalize legacy set-operation storage even when the caller
+                // explicitly reasserts FULL without requesting a refresh.
+                if new_mode == RefreshMode::Full
+                    && crate::dvm::query_needs_dual_count(&st.defining_query)
+                {
+                    crate::api::helpers::normalize_full_set_operation_storage(
+                        &schema,
+                        &table_name,
+                        st.pgt_relid,
+                        st.pgt_id,
+                    )?;
+                }
+            }
+        }
+
+        if cdc_mode.is_some() && !target_refresh_mode.is_immediate() {
+            let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+            let change_schema = config::pg_trickle_change_buffer_schema();
+            for dep in &deps {
+                if dep.source_type == "TABLE" {
+                    setup_cdc_for_source(dep.source_relid, st.pgt_id, &change_schema)?;
+                }
+            }
+            pgrx::info!(
+                "Stream table {}.{} updated requested cdc_mode to {}",
                 schema,
                 table_name,
-                old_mode.as_str(),
-                new_mode.as_str(),
+                effective_requested_cdc_mode,
             );
-        } else {
-            // Same mode — just update catalog (no-op but harmless).
-            Spi::run_with_args(
-                "UPDATE pgtrickle.pgt_stream_tables \
-                 SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
-                &[mode_str.to_uppercase().into(), st.pgt_id.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-            // Normalize legacy set-operation storage even when the caller
-            // explicitly reasserts FULL without requesting a refresh.
-            if new_mode == RefreshMode::Full
-                && crate::dvm::query_needs_dual_count(&st.defining_query)
-            {
-                crate::api::helpers::normalize_full_set_operation_storage(
-                    &schema,
-                    &table_name,
-                    st.pgt_relid,
-                    st.pgt_id,
-                )?;
-            }
         }
-    }
 
-    if cdc_mode.is_some() && !target_refresh_mode.is_immediate() {
-        let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
-        let change_schema = config::pg_trickle_change_buffer_schema();
-        for dep in &deps {
-            if dep.source_type == "TABLE" {
-                setup_cdc_for_source(dep.source_relid, st.pgt_id, &change_schema)?;
-            }
-        }
-        pgrx::info!(
-            "Stream table {}.{} updated requested cdc_mode to {}",
-            schema,
-            table_name,
-            effective_requested_cdc_mode,
-        );
-    }
-
-    if let Some(status_str) = status {
-        let new_status = StStatus::from_str(&status_str.to_uppercase())?;
-        StreamTableMeta::update_status(st.pgt_id, new_status)?;
-        if new_status == StStatus::Active {
-            // Reset errors when resuming
-            Spi::run_with_args(
+        if let Some(status_str) = status {
+            let new_status = StStatus::from_str(&status_str.to_uppercase())?;
+            StreamTableMeta::update_status(st.pgt_id, new_status)?;
+            if new_status == StStatus::Active {
+                // Reset errors when resuming
+                Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables SET consecutive_errors = 0, updated_at = now() WHERE pgt_id = $1",
                 &[st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            }
         }
-    }
 
-    if let Some(dc_str) = diamond_consistency {
-        let val = dc_str.to_lowercase();
-        match val.as_str() {
-            "none" | "atomic" => {
-                let dc = DiamondConsistency::from_sql_str(&val);
-                // G15-PV: Validate combined diamond params before persisting.
-                let effective_dsp = diamond_schedule_policy
-                    .and_then(DiamondSchedulePolicy::from_sql_str)
-                    .unwrap_or(st.diamond_schedule_policy);
-                if effective_dsp == DiamondSchedulePolicy::Slowest && dc == DiamondConsistency::None
-                {
-                    return Err(PgTrickleError::InvalidArgument(
+        if let Some(dc_str) = diamond_consistency {
+            let val = dc_str.to_lowercase();
+            match val.as_str() {
+                "none" | "atomic" => {
+                    let dc = DiamondConsistency::from_sql_str(&val);
+                    // G15-PV: Validate combined diamond params before persisting.
+                    let effective_dsp = diamond_schedule_policy
+                        .and_then(DiamondSchedulePolicy::from_sql_str)
+                        .unwrap_or(st.diamond_schedule_policy);
+                    if effective_dsp == DiamondSchedulePolicy::Slowest
+                        && dc == DiamondConsistency::None
+                    {
+                        return Err(PgTrickleError::InvalidArgument(
                         "diamond_schedule_policy = 'slowest' requires diamond_consistency = 'atomic'. \
                          The 'slowest' policy is only meaningful when atomic cross-branch reads are \
                          enabled. Set diamond_consistency = 'atomic' or use diamond_schedule_policy = 'fastest'."
                             .to_string(),
                     ));
+                    }
+                    StreamTableMeta::set_diamond_consistency(st.pgt_id, dc)?;
                 }
-                StreamTableMeta::set_diamond_consistency(st.pgt_id, dc)?;
-            }
-            other => {
-                return Err(PgTrickleError::InvalidArgument(format!(
-                    "invalid diamond_consistency value: '{}' (expected 'none' or 'atomic')",
-                    other
-                )));
+                other => {
+                    return Err(PgTrickleError::InvalidArgument(format!(
+                        "invalid diamond_consistency value: '{}' (expected 'none' or 'atomic')",
+                        other
+                    )));
+                }
             }
         }
-    }
 
-    if let Some(dsp_str) = diamond_schedule_policy {
-        match DiamondSchedulePolicy::from_sql_str(dsp_str) {
-            Some(p) => {
-                // G15-PV: Validate combined diamond params.  Only check when
-                // dc is not also being changed (handled in the dc block above).
-                if diamond_consistency.is_none() {
-                    let effective_dc = st.diamond_consistency;
-                    if p == DiamondSchedulePolicy::Slowest
-                        && effective_dc == DiamondConsistency::None
-                    {
-                        return Err(PgTrickleError::InvalidArgument(
+        if let Some(dsp_str) = diamond_schedule_policy {
+            match DiamondSchedulePolicy::from_sql_str(dsp_str) {
+                Some(p) => {
+                    // G15-PV: Validate combined diamond params.  Only check when
+                    // dc is not also being changed (handled in the dc block above).
+                    if diamond_consistency.is_none() {
+                        let effective_dc = st.diamond_consistency;
+                        if p == DiamondSchedulePolicy::Slowest
+                            && effective_dc == DiamondConsistency::None
+                        {
+                            return Err(PgTrickleError::InvalidArgument(
                             "diamond_schedule_policy = 'slowest' requires diamond_consistency = 'atomic'. \
                              The 'slowest' policy is only meaningful when atomic cross-branch reads are \
                              enabled. Set diamond_consistency = 'atomic' or use diamond_schedule_policy = 'fastest'."
                                 .to_string(),
                         ));
+                        }
                     }
+                    StreamTableMeta::set_diamond_schedule_policy(st.pgt_id, p)?;
                 }
-                StreamTableMeta::set_diamond_schedule_policy(st.pgt_id, p)?;
-            }
-            None => {
-                return Err(PgTrickleError::InvalidArgument(format!(
-                    "invalid diamond_schedule_policy value: '{}' (expected 'fastest' or 'slowest')",
-                    dsp_str
-                )));
-            }
-        }
-    }
-
-    if let Some(ao) = append_only {
-        let effective_mode = match refresh_mode {
-            Some(mode_str) => RefreshMode::from_str(mode_str)?,
-            None => st.refresh_mode,
-        };
-        if ao {
-            if effective_mode == RefreshMode::Full {
-                return Err(PgTrickleError::InvalidArgument(
-                    "append_only is not supported with FULL refresh mode.".to_string(),
-                ));
-            }
-            if effective_mode.is_immediate() {
-                return Err(PgTrickleError::InvalidArgument(
-                    "append_only is not supported with IMMEDIATE refresh mode.".to_string(),
-                ));
-            }
-            if st.has_keyless_source {
-                return Err(PgTrickleError::InvalidArgument(
-                    "append_only is not supported for stream tables with keyless sources."
-                        .to_string(),
-                ));
+                None => {
+                    return Err(PgTrickleError::InvalidArgument(format!(
+                        "invalid diamond_schedule_policy value: '{}' (expected 'fastest' or 'slowest')",
+                        dsp_str
+                    )));
+                }
             }
         }
-        StreamTableMeta::update_append_only(st.pgt_id, ao)?;
-    }
 
-    // PB2: Update pooler compatibility mode if explicitly set.
-    if let Some(pcm) = pooler_compatibility_mode {
-        StreamTableMeta::update_pooler_compatibility_mode(st.pgt_id, pcm)?;
-        if pcm {
-            // Deallocate any existing prepared MERGE statement for this ST,
-            // since it will no longer be used.
-            crate::refresh::invalidate_merge_cache(st.pgt_id);
-        }
-    }
-
-    // G-7: Update refresh tier if explicitly set.
-    if let Some(tier_str) = tier {
-        use crate::scheduler::RefreshTier;
-        if !RefreshTier::is_valid_str(tier_str) {
-            return Err(PgTrickleError::InvalidArgument(format!(
-                "invalid tier value: '{}' (expected 'hot', 'warm', 'cold', or 'frozen')",
-                tier_str
-            )));
-        }
-        let normalized = tier_str.to_lowercase();
-
-        // C-1b: Emit NOTICE when demoting from Hot to Cold or Frozen so
-        // operators are aware their configured interval will be multiplied.
-        let old_tier = RefreshTier::from_sql_str(&st.refresh_tier);
-        let new_tier = RefreshTier::from_sql_str(&normalized);
-        if old_tier == RefreshTier::Hot
-            && matches!(new_tier, RefreshTier::Cold | RefreshTier::Frozen)
-        {
-            let msg = match new_tier {
-                RefreshTier::Cold => format!(
-                    "stream table {}.{} demoted from hot to cold — effective refresh interval is now 10× the configured schedule",
-                    st.pgt_schema, st.pgt_name
-                ),
-                RefreshTier::Frozen => format!(
-                    "stream table {}.{} demoted from hot to frozen — refresh is suspended until the tier is changed back",
-                    st.pgt_schema, st.pgt_name
-                ),
-                _ => unreachable!(),
+        if let Some(ao) = append_only {
+            let effective_mode = match refresh_mode {
+                Some(mode_str) => RefreshMode::from_str(mode_str)?,
+                None => st.refresh_mode,
             };
-            pgrx::notice!("{}", msg);
-        }
-
-        StreamTableMeta::update_refresh_tier(st.pgt_id, &normalized)?;
-    }
-
-    // FUSE-2: Update fuse configuration if any fuse parameter is set.
-    if fuse.is_some() || fuse_ceiling_arg.is_some() || fuse_sensitivity_arg.is_some() {
-        let fuse_mode = match fuse {
-            Some(mode_str) => {
-                let normalized = mode_str.to_lowercase();
-                match normalized.as_str() {
-                    "off" | "on" | "auto" => normalized,
-                    _ => {
-                        return Err(PgTrickleError::InvalidArgument(format!(
-                            "invalid fuse value: '{}' (expected 'off', 'on', or 'auto')",
-                            mode_str
-                        )));
-                    }
+            if ao {
+                if effective_mode == RefreshMode::Full {
+                    return Err(PgTrickleError::InvalidArgument(
+                        "append_only is not supported with FULL refresh mode.".to_string(),
+                    ));
+                }
+                if effective_mode.is_immediate() {
+                    return Err(PgTrickleError::InvalidArgument(
+                        "append_only is not supported with IMMEDIATE refresh mode.".to_string(),
+                    ));
+                }
+                if st.has_keyless_source {
+                    return Err(PgTrickleError::InvalidArgument(
+                        "append_only is not supported for stream tables with keyless sources."
+                            .to_string(),
+                    ));
                 }
             }
-            None => st.fuse_mode.clone(),
-        };
-        let ceiling = fuse_ceiling_arg.or(st.fuse_ceiling);
-        let sensitivity = fuse_sensitivity_arg.or(st.fuse_sensitivity);
-
-        if let Some(c) = ceiling
-            && c <= 0
-        {
-            return Err(PgTrickleError::InvalidArgument(
-                "fuse_ceiling must be a positive integer".into(),
-            ));
-        }
-        if let Some(s) = sensitivity
-            && s <= 0
-        {
-            return Err(PgTrickleError::InvalidArgument(
-                "fuse_sensitivity must be a positive integer".into(),
-            ));
+            StreamTableMeta::update_append_only(st.pgt_id, ao)?;
         }
 
-        StreamTableMeta::update_fuse_config(st.pgt_id, &fuse_mode, ceiling, sensitivity)?;
-    }
-
-    // DI-7: Update max_differential_joins if explicitly set.
-    if let Some(mdj) = max_differential_joins {
-        if mdj < 0 {
-            return Err(PgTrickleError::InvalidArgument(
-                "max_differential_joins must be a non-negative integer (0 disables the limit)"
-                    .into(),
-            ));
-        }
-        let val: Option<i32> = if mdj == 0 { None } else { Some(mdj) };
-        Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_stream_tables \
-             SET max_differential_joins = $1, updated_at = now() WHERE pgt_id = $2",
-            &[val.into(), st.pgt_id.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    }
-
-    // DI-7: Update max_delta_fraction if explicitly set.
-    if let Some(mdf) = max_delta_fraction {
-        validation::finite_fraction("max_delta_fraction", mdf)?;
-        let val: Option<f64> = if mdf == 0.0 { None } else { Some(mdf) };
-        Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_stream_tables \
-             SET max_delta_fraction = $1, updated_at = now() WHERE pgt_id = $2",
-            &[val.into(), st.pgt_id.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    }
-
-    // VP-1/VP-2 (v0.47.0): Update post-refresh action and drift threshold if supplied.
-    if let Some(pra) = post_refresh_action {
-        let pra_lower = pra.to_lowercase();
-        match pra_lower.as_str() {
-            "none" | "analyze" | "reindex" | "reindex_if_drift" => {}
-            other => {
-                return Err(PgTrickleError::InvalidArgument(format!(
-                    "invalid post_refresh_action '{}': expected 'none', 'analyze', \
-                     'reindex', or 'reindex_if_drift'",
-                    other
-                )));
+        // PB2: Update pooler compatibility mode if explicitly set.
+        if let Some(pcm) = pooler_compatibility_mode {
+            StreamTableMeta::update_pooler_compatibility_mode(st.pgt_id, pcm)?;
+            if pcm {
+                // Deallocate any existing prepared MERGE statement for this ST,
+                // since it will no longer be used.
+                crate::refresh::invalidate_merge_cache(st.pgt_id);
             }
         }
-        StreamTableMeta::update_post_refresh_options(
-            st.pgt_id,
-            &pra_lower,
-            reindex_drift_threshold,
-        )?;
-    } else if let Some(_threshold) = reindex_drift_threshold {
-        // Drift threshold can be updated independently.
-        StreamTableMeta::update_post_refresh_options(
-            st.pgt_id,
-            &st.post_refresh_action,
-            reindex_drift_threshold,
-        )?;
-    }
 
-    shmem::signal_dag_invalidation(st.pgt_id);
-    // G14-SHC: Remove from catalog-backed template cache.
-    template_cache::invalidate(st.pgt_id);
-    // G8.1: Notify other backends to flush delta/MERGE template caches.
-    shmem::bump_cache_generation();
+        // G-7: Update refresh tier if explicitly set.
+        if let Some(tier_str) = tier {
+            use crate::scheduler::RefreshTier;
+            if !RefreshTier::is_valid_str(tier_str) {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "invalid tier value: '{}' (expected 'hot', 'warm', 'cold', or 'frozen')",
+                    tier_str
+                )));
+            }
+            let normalized = tier_str.to_lowercase();
 
-    // ERR-1c: Clear error state when a pipeline-regenerating alter succeeds.
-    // This lets ALTER STREAM TABLE with a fixed query reset an ERROR table.
-    if st.status == StStatus::Error {
-        let _ = StreamTableMeta::clear_error_state(st.pgt_id);
-        let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Active);
-        Spi::run_with_args(
+            // C-1b: Emit NOTICE when demoting from Hot to Cold or Frozen so
+            // operators are aware their configured interval will be multiplied.
+            let old_tier = RefreshTier::from_sql_str(&st.refresh_tier);
+            let new_tier = RefreshTier::from_sql_str(&normalized);
+            if old_tier == RefreshTier::Hot
+                && matches!(new_tier, RefreshTier::Cold | RefreshTier::Frozen)
+            {
+                let msg = match new_tier {
+                    RefreshTier::Cold => format!(
+                        "stream table {}.{} demoted from hot to cold — effective refresh interval is now 10× the configured schedule",
+                        st.pgt_schema, st.pgt_name
+                    ),
+                    RefreshTier::Frozen => format!(
+                        "stream table {}.{} demoted from hot to frozen — refresh is suspended until the tier is changed back",
+                        st.pgt_schema, st.pgt_name
+                    ),
+                    _ => unreachable!(),
+                };
+                pgrx::notice!("{}", msg);
+            }
+
+            StreamTableMeta::update_refresh_tier(st.pgt_id, &normalized)?;
+        }
+
+        // FUSE-2: Update fuse configuration if any fuse parameter is set.
+        if fuse.is_some() || fuse_ceiling_arg.is_some() || fuse_sensitivity_arg.is_some() {
+            let fuse_mode = match fuse {
+                Some(mode_str) => {
+                    let normalized = mode_str.to_lowercase();
+                    match normalized.as_str() {
+                        "off" | "on" | "auto" => normalized,
+                        _ => {
+                            return Err(PgTrickleError::InvalidArgument(format!(
+                                "invalid fuse value: '{}' (expected 'off', 'on', or 'auto')",
+                                mode_str
+                            )));
+                        }
+                    }
+                }
+                None => st.fuse_mode.clone(),
+            };
+            let ceiling = fuse_ceiling_arg.or(st.fuse_ceiling);
+            let sensitivity = fuse_sensitivity_arg.or(st.fuse_sensitivity);
+
+            if let Some(c) = ceiling
+                && c <= 0
+            {
+                return Err(PgTrickleError::InvalidArgument(
+                    "fuse_ceiling must be a positive integer".into(),
+                ));
+            }
+            if let Some(s) = sensitivity
+                && s <= 0
+            {
+                return Err(PgTrickleError::InvalidArgument(
+                    "fuse_sensitivity must be a positive integer".into(),
+                ));
+            }
+
+            StreamTableMeta::update_fuse_config(st.pgt_id, &fuse_mode, ceiling, sensitivity)?;
+        }
+
+        // DI-7: Update max_differential_joins if explicitly set.
+        if let Some(mdj) = max_differential_joins {
+            if mdj < 0 {
+                return Err(PgTrickleError::InvalidArgument(
+                    "max_differential_joins must be a non-negative integer (0 disables the limit)"
+                        .into(),
+                ));
+            }
+            let val: Option<i32> = if mdj == 0 { None } else { Some(mdj) };
+            Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_stream_tables \
+             SET max_differential_joins = $1, updated_at = now() WHERE pgt_id = $2",
+                &[val.into(), st.pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+
+        // DI-7: Update max_delta_fraction if explicitly set.
+        if let Some(mdf) = max_delta_fraction {
+            validation::finite_fraction("max_delta_fraction", mdf)?;
+            let val: Option<f64> = if mdf == 0.0 { None } else { Some(mdf) };
+            Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_stream_tables \
+             SET max_delta_fraction = $1, updated_at = now() WHERE pgt_id = $2",
+                &[val.into(), st.pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+
+        // VP-1/VP-2 (v0.47.0): Update post-refresh action and drift threshold if supplied.
+        if let Some(pra) = post_refresh_action {
+            let pra_lower = pra.to_lowercase();
+            match pra_lower.as_str() {
+                "none" | "analyze" | "reindex" | "reindex_if_drift" => {}
+                other => {
+                    return Err(PgTrickleError::InvalidArgument(format!(
+                        "invalid post_refresh_action '{}': expected 'none', 'analyze', \
+                     'reindex', or 'reindex_if_drift'",
+                        other
+                    )));
+                }
+            }
+            StreamTableMeta::update_post_refresh_options(
+                st.pgt_id,
+                &pra_lower,
+                reindex_drift_threshold,
+            )?;
+        } else if let Some(_threshold) = reindex_drift_threshold {
+            // Drift threshold can be updated independently.
+            StreamTableMeta::update_post_refresh_options(
+                st.pgt_id,
+                &st.post_refresh_action,
+                reindex_drift_threshold,
+            )?;
+        }
+
+        shmem::signal_dag_invalidation(st.pgt_id);
+        // G14-SHC: Remove from catalog-backed template cache.
+        template_cache::invalidate(st.pgt_id);
+        // G8.1: Notify other backends to flush delta/MERGE template caches.
+        shmem::bump_cache_generation();
+
+        // ERR-1c: Clear error state when a pipeline-regenerating alter succeeds.
+        // This lets ALTER STREAM TABLE with a fixed query reset an ERROR table.
+        if st.status == StStatus::Error {
+            let _ = StreamTableMeta::clear_error_state(st.pgt_id);
+            let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Active);
+            Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables SET consecutive_errors = 0, updated_at = now() WHERE pgt_id = $1",
             &[st.pgt_id.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    }
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Drop a stream table, removing the storage table and all catalog entries.
@@ -2491,7 +2572,8 @@ pub(crate) fn alter_stream_table_impl(
 ///
 /// Changed in v0.19.0 (UX-6): default flipped from `true` to `false` to
 /// prevent accidental cascading drops.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn drop_stream_table(name: &str, cascade: default!(bool, false)) {
     let result = drop_stream_table_impl(name, cascade);
     if let Err(e) = result {
@@ -2502,7 +2584,17 @@ fn drop_stream_table(name: &str, cascade: default!(bool, false)) {
 pub(crate) fn prevalidate_stream_table_target(
     name: &str,
 ) -> Result<StreamTableMeta, PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
+    prevalidate_stream_table_target_as_caller(name, "public")
+}
+
+/// LSEC-7 (v0.87.9): same as [`prevalidate_stream_table_target`], but
+/// resolves an unqualified `name` under the original caller's captured
+/// `search_path` rather than a hard-coded `public` default.
+fn prevalidate_stream_table_target_as_caller(
+    name: &str,
+    caller_search_path: &str,
+) -> Result<StreamTableMeta, PgTrickleError> {
+    let (schema, table_name) = resolve_qualified_name_as_caller(name, caller_search_path)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
     Ok(st)
@@ -2551,115 +2643,140 @@ fn order_bulk_drop_target_ids(
     Ok(ordered)
 }
 
-pub(crate) fn plan_drop_stream_tables(names: &[String]) -> Result<Vec<String>, PgTrickleError> {
-    let mut targets = Vec::with_capacity(names.len());
-    let mut requested_ids = HashSet::with_capacity(names.len());
-    let mut names_by_id = std::collections::HashMap::with_capacity(names.len());
+/// LSEC-9 (v0.87.9): a deterministic, fully pre-authorized, child-first drop
+/// plan. Building a plan never mutates anything — every target (the
+/// requested roots *and* every transitively cascaded dependent) is resolved
+/// and checked against the original caller's ownership (or superuser
+/// status) before this function returns. A cascade that would touch a
+/// stream table the caller does not own is rejected here, before the first
+/// `DROP TABLE`, so a mixed-owner cascade leaves zero mutations behind.
+///
+/// Shared by both the single-target `drop_stream_table(..., cascade)` path
+/// and the bulk-drop path — one planner, one authorization pass, one
+/// ordering algorithm.
+struct DropPlan {
+    /// Every target (roots + cascaded dependents), child-first: safe to
+    /// execute in this order without re-checking dependencies.
+    ordered_names: Vec<String>,
+    /// Targets beyond the requested roots that a non-cascading caller must
+    /// either include explicitly or authorize via `cascade => true`.
+    extra_names: Vec<String>,
+}
 
-    for name in names {
-        let st = prevalidate_stream_table_target(name)?;
-        let qualified_name = format!("{}.{}", st.pgt_schema, st.pgt_name);
-        requested_ids.insert(st.pgt_id);
-        names_by_id.insert(st.pgt_id, qualified_name.clone());
-        targets.push((st.pgt_id, st.pgt_relid, qualified_name));
+fn build_drop_plan(
+    root_names: &[String],
+    caller_search_path: &str,
+) -> Result<DropPlan, PgTrickleError> {
+    let mut by_id: std::collections::HashMap<i64, StreamTableMeta> =
+        std::collections::HashMap::with_capacity(root_names.len());
+    let mut root_ids: HashSet<i64> = HashSet::with_capacity(root_names.len());
+    let mut queue: std::collections::VecDeque<i64> = std::collections::VecDeque::new();
+
+    for name in root_names {
+        let st = prevalidate_stream_table_target_as_caller(name, caller_search_path)?;
+        if by_id.insert(st.pgt_id, st.clone()).is_none() {
+            queue.push_back(st.pgt_id);
+        }
+        root_ids.insert(st.pgt_id);
     }
 
-    let mut downstream_by_id = std::collections::HashMap::with_capacity(targets.len());
-    for (pgt_id, relid, qualified_name) in &targets {
-        let downstream_ids = StDependency::get_downstream_pgt_ids(*relid)?;
-        let mut requested_downstream = Vec::new();
-        let mut external_dependents = Vec::new();
-
-        for downstream_id in downstream_ids {
-            if requested_ids.contains(&downstream_id) {
-                requested_downstream.push(downstream_id);
-            } else if let Some(downstream_st) = StreamTableMeta::get_by_id(downstream_id)? {
-                external_dependents.push(format!(
-                    "{}.{}",
-                    downstream_st.pgt_schema, downstream_st.pgt_name
-                ));
+    // Discover the full downstream closure without mutating anything.
+    // Every newly discovered target is authorized against the original
+    // caller *as soon as it is found* — before the plan is ever returned,
+    // let alone executed.
+    while let Some(pgt_id) = queue.pop_front() {
+        let relid = by_id[&pgt_id].pgt_relid;
+        for downstream_id in StDependency::get_downstream_pgt_ids(relid)? {
+            if let std::collections::hash_map::Entry::Vacant(entry) = by_id.entry(downstream_id) {
+                let downstream_st = StreamTableMeta::get_by_id(downstream_id)?.ok_or_else(|| {
+                    PgTrickleError::InternalError(format!(
+                        "drop plan: dependency references missing stream table pgt_id={downstream_id}"
+                    ))
+                })?;
+                check_stream_table_ownership(
+                    downstream_st.pgt_relid,
+                    &downstream_st.pgt_schema,
+                    &downstream_st.pgt_name,
+                )?;
+                entry.insert(downstream_st);
+                queue.push_back(downstream_id);
             }
         }
-
-        if !external_dependents.is_empty() {
-            return Err(PgTrickleError::InvalidArgument(format!(
-                "stream table {qualified_name} has dependent stream tables not included in this bulk drop: {}. \
-                 Include them in the names array or call pgtrickle.drop_stream_table('{qualified_name}', cascade => true).",
-                external_dependents.join(", ")
-            )));
-        }
-
-        downstream_by_id.insert(*pgt_id, requested_downstream);
     }
 
+    let downstream_by_id = by_id
+        .iter()
+        .map(|(&pgt_id, st)| {
+            let downstream = StDependency::get_downstream_pgt_ids(st.pgt_relid)?
+                .into_iter()
+                .filter(|id| by_id.contains_key(id))
+                .collect();
+            Ok((pgt_id, downstream))
+        })
+        .collect::<Result<std::collections::HashMap<i64, Vec<i64>>, PgTrickleError>>()?;
+
     let ordered_ids = order_bulk_drop_target_ids(
-        &targets
-            .iter()
-            .map(|(pgt_id, _, _)| *pgt_id)
-            .collect::<Vec<_>>(),
+        &by_id.keys().copied().collect::<Vec<_>>(),
         &downstream_by_id,
     )?;
 
-    ordered_ids
-        .into_iter()
-        .map(|pgt_id| {
-            names_by_id.get(&pgt_id).cloned().ok_or_else(|| {
-                PgTrickleError::InternalError(format!(
-                    "missing bulk drop target metadata for pgt_id={pgt_id}"
-                ))
-            })
-        })
-        .collect()
+    let qualified_name_of = |pgt_id: &i64| {
+        let st = &by_id[pgt_id];
+        format!("{}.{}", st.pgt_schema, st.pgt_name)
+    };
+    let ordered_names = ordered_ids.iter().map(qualified_name_of).collect();
+    let extra_names = ordered_ids
+        .iter()
+        .filter(|id| !root_ids.contains(id))
+        .map(qualified_name_of)
+        .collect();
+
+    Ok(DropPlan {
+        ordered_names,
+        extra_names,
+    })
+}
+
+pub(crate) fn plan_drop_stream_tables(names: &[String]) -> Result<Vec<String>, PgTrickleError> {
+    let plan = build_drop_plan(names, "public")?;
+    if !plan.extra_names.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "the following stream tables have dependents not included in this bulk drop: {}. \
+             Include them in the names array or call pgtrickle.drop_stream_table(..., cascade => true).",
+            plan.extra_names.join(", ")
+        )));
+    }
+    Ok(plan.ordered_names)
 }
 
 pub(crate) fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), PgTrickleError> {
-    let mut visited_pgt_ids = HashSet::new();
-    drop_stream_table_impl_inner(name, cascade, &mut visited_pgt_ids)
-}
-
-fn drop_stream_table_impl_inner(
-    name: &str,
-    cascade: bool,
-    visited_pgt_ids: &mut HashSet<i64>,
-) -> Result<(), PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
-    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-
-    if !visited_pgt_ids.insert(st.pgt_id) {
-        return Ok(());
-    }
-
-    // SEC-1: Ownership check — only the owner (or superuser) can drop.
-    // Only enforce on the top-level call (visited_pgt_ids has exactly 1 entry);
-    // cascaded drops inherit the permission from the top-level check.
-    if visited_pgt_ids.len() == 1 {
-        check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
-    }
-
-    // CASCADE: drop all stream tables that depend on this one first.
-    // `get_downstream_pgt_ids` finds STs whose defining queries read from
-    // this ST's storage table.  We iterate by pgt_id to avoid re-querying
-    // after each recursive drop changes the catalog.
-    let downstream_ids = StDependency::get_downstream_pgt_ids(st.pgt_relid)?;
-    if !downstream_ids.is_empty() && !cascade {
-        let names: Vec<String> = downstream_ids
-            .iter()
-            .filter_map(|id| StreamTableMeta::get_by_id(*id).ok().flatten())
-            .map(|s| format!("{}.{}", s.pgt_schema, s.pgt_name))
-            .collect();
+    // LSEC-7/LSEC-9 (v0.87.9): `drop_stream_table` is SECURITY DEFINER, so
+    // resolve the caller-controlled name under the original caller's
+    // captured search_path, and pre-authorize the *entire* cascade plan
+    // (every downstream target, not just the named root) before any
+    // mutation runs.
+    let caller_search_path =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?
+            .search_path;
+    let plan = build_drop_plan(&[name.to_string()], &caller_search_path)?;
+    if !cascade && !plan.extra_names.is_empty() {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "stream table {}.{} has dependent stream tables: {}. Use cascade => true to drop them automatically.",
-            schema,
-            table_name,
-            names.join(", ")
+            "stream table {name} has dependent stream tables: {}. Use cascade => true to drop them automatically.",
+            plan.extra_names.join(", ")
         )));
     }
-    for downstream_id in downstream_ids {
-        if let Some(downstream_st) = StreamTableMeta::get_by_id(downstream_id)? {
-            let qualified = format!("{}.{}", downstream_st.pgt_schema, downstream_st.pgt_name);
-            drop_stream_table_impl_inner(&qualified, cascade, visited_pgt_ids)?;
-        }
+    for qualified_name in &plan.ordered_names {
+        execute_drop_stream_table(qualified_name)?;
     }
+    Ok(())
+}
+
+/// Execute one already-planned, already-authorized drop. No ownership check
+/// and no downstream traversal happens here — [`build_drop_plan`] already
+/// did both, for every target in the plan, before any mutation began.
+pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(qualified_name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
 
     // Get dependencies before deleting catalog entries
     let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();

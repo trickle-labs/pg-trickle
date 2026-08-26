@@ -2994,6 +2994,10 @@ fn build_bulk_alter_stream_table_options<'a>(
         post_refresh_action: params.post_refresh_action.as_deref(),
         reindex_drift_threshold: params.reindex_drift_threshold,
         target_freshness: None,
+        // `bulk_alter_stream_tables` remains SECURITY INVOKER (v0.87.10
+        // scope); `None` recovers the caller's search_path directly rather
+        // than from a SECURITY DEFINER GUC-stack entry that doesn't exist.
+        entry_context: None,
     }
 }
 
@@ -3020,7 +3024,7 @@ fn bulk_drop_stream_tables_impl(names: Vec<Option<String>>) -> Result<i32, PgTri
     let ordered_names = alter::plan_drop_stream_tables(&canonical_names)?;
 
     for name in &ordered_names {
-        alter::drop_stream_table_impl(name, false)?;
+        alter::execute_drop_stream_table(name)?;
     }
 
     Ok(ordered_names.len() as i32)
