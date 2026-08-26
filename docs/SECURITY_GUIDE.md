@@ -205,12 +205,20 @@ GRANT USAGE   ON SCHEMA pgtrickle          TO pgtrickle_admin;
 -- Example lifecycle grants:
 GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table(
     text, text, text, text, boolean, text, text, text, boolean, boolean,
-    text, integer, double precision, text, boolean, text, integer
+    text, integer, double precision, text, boolean, text, integer, text
+) TO pgtrickle_admin;
+-- v0.87.9: create_or_replace_stream_table, alter_stream_table, and
+-- drop_stream_table are SECURITY DEFINER with a pinned search_path, so
+-- these grants alone are sufficient — no pg_trickle private catalog or
+-- pgtrickle_changes access is required.
+GRANT EXECUTE ON FUNCTION pgtrickle.create_or_replace_stream_table(
+    text, text, text, text, boolean, text, text, text, boolean, boolean,
+    text, integer, double precision, text, boolean, text
 ) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(
     text, text, text, text, text, text, text, text, boolean, boolean,
     text, text, bigint, integer, text, integer, double precision, text,
-    double precision
+    double precision, text
 ) TO pgtrickle_admin;
 GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean)
     TO pgtrickle_admin;

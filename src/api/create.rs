@@ -380,7 +380,8 @@ fn default_true() -> bool {
 /// This is the declarative API for idempotent deployments (dbt, migrations,
 /// GitOps). Mirrors PostgreSQL's `CREATE OR REPLACE` convention.
 #[allow(clippy::too_many_arguments)]
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn create_or_replace_stream_table(
     name: &str,
     query: &str,
@@ -560,12 +561,26 @@ fn create_or_replace_stream_table_impl(
     // CORR-2/UX-3 (v0.36.0): columnar storage backend (used only on first creation).
     storage_backend: Option<&str>,
 ) -> Result<(), PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
+    // LSEC-7/LSEC-8 (v0.87.9): `create_or_replace_stream_table` is now
+    // SECURITY DEFINER with a pinned search_path so a non-superuser owner
+    // needs no private catalog grants (issue #941). Capture the original
+    // caller's identity and exact pre-call search_path *first*, and resolve
+    // the caller-controlled target name under that captured path — never a
+    // hard-coded `public` default and never `current_schema()` evaluated
+    // under the pinned definer path.
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+    let (schema, table_name) = resolve_qualified_name_as_caller(name, &caller.search_path)?;
 
     match StreamTableMeta::get_by_name(&schema, &table_name) {
         Ok(existing) => {
-            // Stream table exists — determine what changed.
-            let rw = run_query_rewrite_pipeline(query)?;
+            // Stream table exists — determine what changed. Query rewrite
+            // resolves caller-controlled SQL (views, unqualified names) and
+            // must run under the caller's own search_path, not the pinned
+            // definer path this function now runs under.
+            let rw = with_invoker_search_path(&caller.search_path, || {
+                run_query_rewrite_pipeline(query)
+            })?;
             let new_query_rewritten = rw.query;
 
             // TopK detection: if the new query is TopK, compare against the
@@ -617,6 +632,7 @@ fn create_or_replace_stream_table_impl(
                 pooler_compatibility_mode: config_diff.pooler_compatibility_mode,
                 max_differential_joins,
                 max_delta_fraction,
+                entry_context: Some(security_context::EntryContext::SecurityDefiner),
                 ..Default::default()
             })?;
 
@@ -651,7 +667,7 @@ fn create_or_replace_stream_table_impl(
                 storage_backend, // passed through from caller
                 storage_fillfactor: None,
                 target_freshness: None,
-                entry_context: Some(security_context::EntryContext::SecurityInvoker),
+                entry_context: Some(security_context::EntryContext::SecurityDefiner),
             })
         }
         Err(e) => Err(e),
