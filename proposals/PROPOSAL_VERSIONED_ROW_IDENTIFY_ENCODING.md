@@ -1,4 +1,4 @@
-# Proposal: Ordered, Collision-Free Row Identity V2
+# Proposal: Exact, Versioned Row Identity V2
 
 **Status:** Proposed
 **Target:** Pre-1.0 / v0.83.0 DVM semantic fidelity work
@@ -8,12 +8,13 @@
 ## 1. Executive Decision
 
 pg_trickle should replace `__pgt_row_id BIGINT` with an exact, versioned,
-memcomparable `BYTEA` encoding of the logical identity fields.
+canonical `BYTEA` encoding of the logical identity fields.
 
 V2 should not hash the canonical identity into 64 bits. The canonical bytes are
-the identity. This removes delimiter ambiguity, session-dependent `::TEXT`
-formatting, and hash collisions in one change. It also gives B-tree indexes the
-same stable ordering as the encoded key instead of deliberately randomizing it.
+the identity. This removes session-dependent `::TEXT` formatting and hash
+collisions. For types whose registry entries explicitly guarantee native-order
+preservation, it also lets B-tree probes retain source-key locality instead of
+deliberately randomizing it.
 
 The storage contract becomes:
 
@@ -46,27 +47,33 @@ without adding a capability.
 typed logical fields
         |
         v
-canonical memcomparable encoding  --->  __pgt_row_id
+exact canonical encoding          --->  __pgt_row_id
         |
         v
-bounded ordered probe             --->  __pgt_row_probe B-tree
+bounded lookup probe              --->  __pgt_row_probe B-tree
 ```
 
 ## 2. Why Replace the Hash
 
-The current row-ID path has four structural problems.
+The current row-ID path already frames composite inputs with an encoding version,
+component count, NULL/value tags, and per-value lengths. Inputs such as `(ab, c)`
+and `(a, bc)` therefore hash different framed byte sequences. V2 does not need to
+fix delimiter ambiguity.
 
-First, composite fields are converted to text and separated before hashing.
-Text output can depend on PostgreSQL settings, and a delimiter is not a rigorous
-field framing protocol.
+Four structural problems remain.
+
+First, fields are converted to `String` values rather than encoded from typed
+PostgreSQL datums. Text output can depend on PostgreSQL settings and type output
+behavior.
 
 Second, the final identity is only 64 bits. Different canonical inputs can hash
 to the same `BIGINT`. Because MERGE treats the hash as proof of identity, a
 collision can silently overwrite or delete the wrong logical row.
 
-Third, a hash destroys source-key ordering. MERGE probes become random B-tree
-accesses once the storage table is larger than `shared_buffers`, even when rows
-arrive in primary-key order.
+Third, a hash destroys potentially useful source-key ordering. MERGE probes
+become random B-tree accesses once the storage table is larger than
+`shared_buffers`, even when rows arrive in primary-key order and the source type
+has a byte encoding that can preserve its native B-tree order.
 
 Fourth, the current SQL shape pays conversion and allocation costs on every row:
 
@@ -94,9 +101,10 @@ V2 is governed by these invariants:
    unambiguous. `(1, 23)` cannot encode like `(12, 3)`.
 4. **Determinism.** Encoding is independent of `DateStyle`, `TimeZone`,
    `bytea_output`, locale formatting, process architecture, and database OIDs.
-5. **Ordering.** For a fixed identity schema and domain, lexicographic byte order
-   follows the V2 comparator for its fields. Types with binary rather than
-   locale ordering are identified explicitly in section 6.
+5. **Explicit ordering contract.** Every supported type declares whether
+   lexicographic payload order matches its PostgreSQL B-tree comparator. Native
+   ordering is a performance property, not a prerequisite for exact identity.
+   No locality claim is made for types marked non-order-preserving.
 6. **Prefix freedom.** No complete row identity is a byte prefix of another
    complete row identity.
 7. **One implementation.** Trigger CDC, WAL CDC, full refresh, differential
@@ -114,8 +122,10 @@ to text or a hash.
 ## 4. Normative Wire Format
 
 The implementation must land a short normative wire-format specification and
-golden vectors before it lands operator rewrites. Once V2 is released, its byte
-format is immutable. A semantic correction requires V3 and another rebuild.
+golden vectors before it lands operator rewrites. The format must not be frozen
+until the type contracts and probe sizing gates in sections 6, 8, and 13 pass.
+Once V2 is released, its byte format is immutable. A semantic correction requires
+V3 and another rebuild.
 
 Conceptually, an identity is:
 
@@ -144,8 +154,8 @@ The following rules are normative:
 - fixed-width payloads have a fixed byte count implied by their type tag;
 - `NULL_TAG` sorts before `VALUE_TAG`; all NULLs of one field type encode
    identically;
-- variable-width payloads use an order-preserving escape-and-terminate scheme,
-  not a length prefix;
+- variable-width payloads use an unsigned-byte-order-preserving
+   escape-and-terminate scheme, not a length prefix;
 - nested tuples are framed recursively;
 - `TUPLE_END` makes complete identities prefix-free.
 
@@ -197,7 +207,22 @@ for example `scalar_aggregate_singleton` or `lateral_inner_dummy`. Hard-coded
 
 Type support is an explicit registry keyed by PostgreSQL type OID and resolved
 to a stable V2 type tag. There is no generic `::TEXT`, output-function, or
-`typsend` fallback.
+`typsend` fallback. Every registry entry declares:
+
+```text
+equality_canonical:       required
+native_order_preserving:  true | false
+volatility:               immutable | stable
+maximum_encoded_size:     fixed | typmod-bounded | unbounded
+ddl_invalidations:        explicit list
+```
+
+`equality_canonical` means PostgreSQL equality and byte equality agree in both
+directions. A type cannot ship without that proof. `native_order_preserving`
+means the sign of lexicographic payload comparison agrees with the type's
+PostgreSQL B-tree comparator. Only entries marked `true` support source-index
+locality claims. The registry stores these properties per concrete type OID,
+even where the tables below group types with identical policies.
 
 ### 6.1 Initial scalar encoders
 
@@ -216,7 +241,7 @@ to a stable V2 type tag. There is no generic `::TEXT`, output-function, or
 | `time` | unsigned internal microseconds |
 | `timestamp`, `timestamptz` | sign-flipped internal microseconds; `timestamptz` is UTC |
 | `timetz` | sign-flipped GMT-equivalent microseconds, then sign-flipped stored zone offset in seconds west of UTC |
-| `interval` | sign-flipped `interval_cmp_value()` result as big-endian `int64` |
+| `interval` | sign-flipped `interval_cmp_value()` result as big-endian `int128` |
 | `inet`, `cidr` | family, prefix length, and canonical address bytes; `cidr` host bits are zeroed |
 | `macaddr`, `macaddr8` | network-order address bytes |
 | `bit`, `varbit` | bit length followed by escaped packed bits |
@@ -227,15 +252,37 @@ The float transform must place PostgreSQL NaN after positive infinity and map
 all NaN payloads to one quiet-NaN representation: `0x7FC00000` for `float4` and
 `0x7FF8000000000000` for `float8`, before the sortable transform. Numeric must
 encode `1.0` and `1.00` identically, and its class order is negative infinity,
-finite values, positive infinity, then NaN, matching PostgreSQL. Interval uses PostgreSQL's
-`interval_cmp_value()`, which treats one month as 30 days for comparison;
-therefore `1 month` and `30 days` encode identically. The physical
+finite values, positive infinity, then NaN, matching PostgreSQL. Interval uses
+PostgreSQL's 128-bit `interval_cmp_value()`, which treats one month as 30 days
+for comparison; therefore `1 month` and `30 days` encode identically. The
+comparison value must remain 128 bits through the sign transform and big-endian
+encoding because legal interval values can overflow `int64`. The physical
 `(months, days, microseconds)` layout is not a valid identity encoding.
 
 Enum labels are portable across dump/restore but mutable through `ALTER TYPE
 ... RENAME VALUE`. The existing ALTER TYPE DDL hook must continue to mark every
 directly and transitively dependent stream table for reinitialization before it
-can consume changes encoded with the new label. V2 tests this path explicitly.
+can consume changes encoded with the new label. The hook must also invalidate
+cached enum-label metadata. V2 tests both paths explicitly.
+
+The initial registry records these ordering and catalog dependencies:
+
+| Type family | Native order preserving | Volatility | Maximum encoded size | DDL invalidations |
+|---|---:|---|---|---|
+| `bool`, integers, `oid`, floats, `numeric` | yes | immutable | fixed or typmod-bounded; unconstrained `numeric` is unbounded | none |
+| `text`, `varchar`, `bpchar` | only under `C`/`POSIX` | immutable | typmod-bounded or unbounded | collation change |
+| `bytea`, `uuid`, date/time types, `macaddr`, `macaddr8` | yes | immutable | fixed or unbounded as defined above | none |
+| `interval` | yes, using the full 128-bit comparison value | immutable | fixed | none |
+| `inet`, `cidr` | no | immutable | fixed | none |
+| `bit`, `varbit` | no | immutable | typmod-bounded or unbounded | none |
+| enum | no; PostgreSQL orders by `enumsortorder`, not label bytes | stable | bounded by PostgreSQL's enum-label limit | enum label/order DDL |
+| domain | inherited from base type | inherited from base type | inherited from base type | domain or base-type DDL |
+
+The listed `inet`/`cidr` and bit-string payloads are exact identities but do not
+match PostgreSQL's native ordering. `inet`/`cidr` compare common network bits,
+mask length, and full address in a different sequence. Bit strings compare
+packed bits before using length as a tie-breaker. Enum label bytes likewise do
+not reflect `enumsortorder`.
 
 ### 6.2 Structural encoders
 
@@ -257,14 +304,19 @@ different identity algorithm.
 Structural encoders do not need to ship in the first implementation commit,
 but any type without its encoder remains rejected. Adding a new type tag later
 does not change existing V2 identities and therefore does not require V3.
+Each structural entry also declares the five registry properties above.
+Native-order preservation is false until comparison against PostgreSQL's B-tree
+support function has been demonstrated. Volatility, maximum size, and DDL
+invalidations propagate from nested types; composite alteration invalidates the
+resolved field metadata and all dependent stream tables.
 
 ### 6.3 Collation policy
 
 Text identity uses database-encoding bytes. For deterministic collations this
 agrees with PostgreSQL equality, although byte order may differ from a locale's
 sort order. The locality guarantee for text is therefore exact for `C`/`POSIX`
-collations and deterministic but not necessarily source-index-correlated for
-other deterministic collations.
+collations. Other deterministic collations preserve equality agreement but are
+marked non-order-preserving and receive no source-index locality claim.
 
 Non-deterministic collations are rejected in identity fields. Distinct byte
 strings can compare equal under those collations, and ICU sort keys are not a
@@ -301,10 +353,15 @@ copy only the completed varlena result into PostgreSQL-owned memory. It must not
 construct `Vec<String>`, call display output functions, or allocate once per
 field.
 
-The function is `IMMUTABLE` and `PARALLEL SAFE`; the type policy in section 6 is
-part of making those declarations truthful. Existing V1 hash functions retain
-their old behavior during migration and are removed only after no V1 trigger or
-stored expression can reference them.
+Because the initial registry supports label-based enum encoding,
+`encode_row_id_v2` is `STABLE` and `PARALLEL SAFE`. Enum output is catalog
+dependent, so declaring the encoder `IMMUTABLE` would be false even with DDL
+hooks and forced reinitialization. The generated probe expression calls only
+`row_probe_v1(bytea)`, which remains genuinely `IMMUTABLE` and
+`PARALLEL SAFE`; the row-ID encoder itself does not appear in that generated
+expression. Existing V1 hash functions retain their old behavior during
+migration and are removed only after no V1 trigger or stored expression can
+reference them.
 
 ## 8. Bounded B-Tree Probe
 
@@ -313,7 +370,9 @@ index tuple, especially for keyless rows and composite text keys. Indexing the
 full `BYTEA` directly would turn valid data growth into runtime index failures.
 V2 avoids that ceiling without giving correctness back to a hash.
 
-Let `P = 256` bytes for probe version 1:
+Probe version 1 includes a fixed prefix length `P`, but this proposal does not
+freeze its value. Benchmarks must compare at least `P = 32`, `64`, `128`, and
+`256` bytes before the probe format is frozen. For the selected value:
 
 ```text
 if row_id.length <= P:
@@ -324,11 +383,12 @@ else:
 
 Properties:
 
-- the probe is at most 272 bytes;
+- the probe is at most `P + 16` bytes;
 - ordinary integer, UUID, and short composite identities are indexed in full;
 - because complete identities are prefix-free, non-overflow probe ordering is
-   exactly full-identity ordering;
-- overflow probes sort first by their first 256 canonical bytes; identities that
+   exactly full-identity byte ordering, which matches native PostgreSQL ordering
+   only for registry entries that guarantee it;
+- overflow probes sort first by their first `P` canonical bytes; identities that
    share that complete prefix sort by digest, not by their remaining bytes;
 - the digest normally distributes identities with a large common prefix across
    distinct probe keys; this is a performance property, not a correctness claim;
@@ -339,6 +399,12 @@ Properties:
 column computed by one `IMMUTABLE` helper, so callers cannot create a probe that
 does not match its full identity. It is not part of the public contract unless a
 sink deliberately publishes internal columns.
+
+The implementation must validate the selected `P` against the running cluster's
+actual `BTMaxItemSize`, including varlena and index-tuple overhead. Extension
+installation or upgrade must reject a probe version whose worst-case index datum
+cannot fit the cluster's configured B-tree page size. A prefix length that is
+safe for the default `BLCKSZ` is not assumed safe for every supported build.
 
 The identity index should not INCLUDE the full row ID or arbitrary user columns;
 doing so would reintroduce the B-tree tuple-width failure. Covering indexes, if
@@ -379,20 +445,30 @@ Keyless semantics do not change. Identical logical rows intentionally have the
 same full identity and may occur more than once, so their probe index remains
 non-unique and counted-delete logic remains authoritative.
 
-For unique but unbounded identity schemas, exact uniqueness is maintained by
-the existing single-writer refresh serialization plus exact MERGE matching; the
-database index is intentionally non-unique because no bounded B-tree key can
-prove uniqueness of arbitrary-length values. V2 must preserve that writer
-serialization across scheduled, manual, and IMMEDIATE refresh paths.
+For unique but unbounded identity schemas, the database index is intentionally
+non-unique because no bounded B-tree key can prove uniqueness of arbitrary-length
+values. Scheduled and manual refresh retain the existing transaction advisory
+lock keyed by `pgt_id` and catalog-row serialization.
 
-Concretely, scheduled/manual refresh keeps the existing transaction advisory
-lock keyed by `pgt_id` and catalog-row serialization. At plan time, any IMMEDIATE
-stream table with a unique but unbounded identity is forced to
-`IvmLockMode::Exclusive`, whose BEFORE trigger takes the blocking
-`pg_advisory_xact_lock` on the stream-table OID. The lighter concurrent
-`RowExclusive` mode is permitted only when a database UNIQUE probe index proves
-identity uniqueness. Failing to acquire or hold the required lock aborts the
-refresh; it must never continue without database-enforced uniqueness.
+`IMMEDIATE` mode uses transaction-scoped per-identity advisory locks instead of
+a table-wide lock:
+
+1. derive a 64-bit advisory-lock key from the stream-table identifier and the
+   complete canonical identity;
+2. for primary-key updates, include both old and new identities;
+3. for multi-row statements, deduplicate and acquire all lock keys in sorted
+   order before applying changes;
+4. after acquiring the locks, perform probe-plus-full-ID matching and exact
+   uniqueness checks.
+
+An advisory-key collision may serialize unrelated identities but cannot affect
+row identity or uniqueness. The lock hash is coordination metadata, never proof
+of equality. Failing to acquire or hold every required lock aborts the statement.
+Until this path has correctness tests, deadlock tests, and a concurrency
+benchmark, `IMMEDIATE` mode must reject unique unbounded identity schemas during
+planning. It must not silently fall back to blocking every writer with
+`IvmLockMode::Exclusive`. `RowExclusive` remains valid when a database UNIQUE
+probe index proves identity uniqueness.
 
 `RowIdStrategy` and `RowIdSchema` continue to decide which logical fields form an
 identity. They do not select a storage encoding. V2 has one encoder.
@@ -442,8 +518,12 @@ explicit operational reason to transport this non-contractual index helper.
 
 ## 12. Migration and Cutover
 
-V1 and V2 state cannot coexist in one refresh graph. Migration is an explicit
-rebuild, not `ALTER COLUMN ... TYPE`, and not a rolling per-table conversion.
+V1 and V2 state cannot coexist in one refresh graph. `ALTER EXTENSION UPDATE`
+installs V2-capable code, catalog guards, and the migration command, but does not
+rebuild a graph. Migration is a separate, dry-runnable, resumable administrative
+operation, not `ALTER COLUMN ... TYPE` and not a rolling per-table conversion.
+The V2 binary understands V1 only far enough to preflight, cut over, resume, or
+fail safely; normal refresh never mixes versions.
 
 ### 12.1 Preflight
 
@@ -456,6 +536,10 @@ Before changing state, migration must:
 5. remove or replace any REPLICA IDENTITY configuration that depends on the V1
    `BIGINT` before the V2 rebuild snapshot is established;
 6. stop before making changes if any stream table cannot be encoded by V2.
+
+Dry-run executes the complete preflight and reports the planned graph, storage
+replacement, estimated space, unsupported fields, and external resnapshot work
+without changing catalog or capture state.
 
 ### 12.2 Cutover
 
@@ -513,13 +597,25 @@ Implementation requirements:
 Benchmarks must cover single integer, UUID, composite integers, short and long
 text composites, arrays/JSONB when supported, and keyless wide rows. They must
 measure encoding throughput, allocations, CDC overhead, index size, buffer hits,
-WAL volume, cached MERGE latency, and MERGE latency with indexes larger than
-`shared_buffers`.
+WAL volume, encoded-ID storage, CDC-buffer growth, cached MERGE latency, and
+MERGE latency with indexes larger than `shared_buffers`. Probe benchmarks must
+compare 32, 64, 128, and 256-byte prefixes across short keys, ordered wide keys,
+random wide keys, and long identities with common prefixes.
 
 The comparison set is V1 hash, V2 full identity, and V2 overflow probe. A
 material regression on cached common-key workloads must be investigated before
 merge. The expected V2 benefit is removal of text conversion and substantially
-better out-of-cache index locality, not merely a different microbenchmark score.
+better out-of-cache index locality where registry metadata supports that claim,
+not merely a different microbenchmark score. V2 may regress cached integer keys,
+randomly distributed deltas, wide keyless rows, and overflow identities that
+require TOAST access; the release decision must measure rather than assume those
+tradeoffs.
+
+The release gates are index size, WAL volume, encoded-ID storage size,
+CDC-buffer growth, cached integer-key latency, out-of-cache ordered-key latency,
+overflow-key latency, and concurrent `IMMEDIATE` throughput for unconstrained
+text identities. The probe prefix is frozen only after these results identify
+the best acceptable tradeoff.
 
 ## 14. Testing
 
@@ -529,17 +625,21 @@ better out-of-cache index locality, not merely a different microbenchmark score.
 - identical vectors on little- and big-endian targets where CI permits;
 - setting-independence tests for `DateStyle`, `TimeZone`, `bytea_output`, and
   locale-sensitive output;
-- equality-agreement tests such as numeric scale, signed zero, NaN payloads,
-  `bpchar` padding, timestamp zones, interval equivalents, and JSONB key order;
-- ordering property tests comparing byte order with the documented V2 comparator;
+- equality-agreement property tests for every registry entry that prove
+   `a IS NOT DISTINCT FROM b` if and only if `encode(a) = encode(b)`, including
+   numeric scale, signed zero, NaN payloads, `bpchar` padding, timestamp zones,
+   extreme and equivalent intervals, and JSONB key order;
+- for entries marked native-order-preserving, property tests comparing the sign
+   of `bytea` comparison with the sign of PostgreSQL's B-tree comparator;
 - prefix-freedom and tuple-framing property tests;
 - explicit rejection tests for unsupported types and non-deterministic collations.
 
 ### 14.2 Probe tests
 
 - inline probes equal the full identity;
-- overflow probes never exceed 272 bytes;
-- differences in the first 256 bytes retain order;
+- overflow probes never exceed `P + 16` bytes and fit the running cluster's
+   `BTMaxItemSize` with all tuple overhead included;
+- differences in the first `P` bytes retain byte order;
 - long common-prefix identities produce narrow candidate lookups;
 - a test-only probe constructor can inject equal digests for distinct full IDs,
   proving that forced probe collisions still match only the exact full row ID;
@@ -554,10 +654,14 @@ set operations, windows, and downstream stream tables.
 Tests must include primary-key updates, NULL group keys, keyless duplicates,
 deep join composition, synthetic identities, and wide TOASTed values.
 
-Concurrency tests must run two sessions against an unbounded unique identity in
-each refresh mode and prove that exactly one logical row survives. Enum tests
-must rename an in-use label and prove that the existing DDL hook marks the full
-downstream DAG for reinitialization before further refresh.
+Concurrency tests must run multiple sessions against an unbounded unique
+identity in each refresh mode and prove that exactly one logical row survives.
+They must cover old/new identities on primary-key updates, deterministically
+ordered multi-row lock acquisition, and forced advisory-key collisions. A
+throughput benchmark must verify that unconstrained text identities do not
+serialize all writers. Enum tests must rename an in-use label, invalidate cached
+label metadata, and prove that the existing DDL hook marks the full downstream
+DAG for reinitialization before further refresh.
 
 ### 14.4 Migration tests
 
@@ -575,8 +679,12 @@ equal as a multiset after all captured changes are applied.
 
 ## 15. Implementation Plan
 
-**Stage 1: Freeze the format.** Write the normative byte specification, domain
-and type-tag registries, golden vectors, type validation, and probe specification.
+**Stage 1: Resolve and freeze the contracts.** Write the normative byte
+specification, domain and type-tag registries, golden vectors, and type
+validation. Prove the 128-bit interval encoding and per-type equality/order
+contracts, specify volatility and DDL invalidation, validate per-identity lock
+semantics, benchmark candidate probe prefixes, and check `BTMaxItemSize` before
+freezing identity V2 and probe V1.
 
 **Stage 2: Implement the encoder.** Add the typed record entry point, cached
 dispatch, scalar encoders, structural encoders required by the existing test
@@ -591,8 +699,9 @@ join, aggregate, set, window, and synthetic identities to the shared encoder.
 Delete `::TEXT` row-ID construction and hard-coded numeric sentinels.
 
 **Stage 5: Add version guards and migration.** Persist identity/probe versions,
-add runtime mismatch rejection, implement preflight and resumable cutover, and
-rebuild every stream table and shared buffer.
+add runtime mismatch rejection, install a dry-run mode and resumable
+administrative cutover, and rebuild every stream table and shared buffer outside
+`ALTER EXTENSION UPDATE`.
 
 **Stage 6: Prove it.** Run the full correctness matrix, migration fault tests,
 and performance benchmarks. Update SQL reference, architecture, upgrade,
@@ -619,8 +728,8 @@ accelerator; it is never authoritative and exact matching is always preserved.
 ### Index the complete `BYTEA` directly
 
 This is correct for short keys but fails for sufficiently wide B-tree entries.
-The bounded probe retains normal-key ordering and guarantees indexability without
-making a digest authoritative.
+The bounded probe retains prefix locality where the type contract supports it
+and guarantees indexability without making a digest authoritative.
 
 ### Add a direct-integer strategy
 
@@ -650,23 +759,35 @@ following:
 - supported unequal logical identities have different full bytes;
 - all indexed matching verifies the full identity;
 - probe indexes remain bounded for arbitrary valid input size;
+- the selected probe prefix fits the running cluster's `BTMaxItemSize` and is
+   justified by the required benchmark matrix;
+- each registry entry proves equality agreement and declares native-order,
+   volatility, size, and DDL-invalidation metadata;
+- interval identities encode the complete 128-bit PostgreSQL comparison value;
+- enum label caching is invalidated by enum DDL and the encoder is not declared
+   `IMMUTABLE` while label-based enum support is enabled;
 - unsupported types and collations fail before state is created;
 - V1/V2 mismatch cannot consume or mutate persisted state;
 - migration loses or duplicates no committed change under concurrent writes;
 - interrupted migration resumes safely;
 - external compatibility breaks and resnapshot steps are documented;
+- unique unbounded `IMMEDIATE` identities use deterministic per-identity locking
+   without table-wide writer serialization;
 - out-of-cache composite-key workloads show the intended locality benefit;
-- cached common-key workloads have no unexplained material regression.
+- cached common-key workloads have no unexplained material regression;
+- all performance release gates in section 13 pass.
 
 ## 18. Recommendation
 
-Adopt ordered, canonical `BYTEA` row identities as pg_trickle's V2 identity
-format before 1.0.
+Adopt exact canonical `BYTEA` row identities plus a bounded, non-authoritative
+probe as pg_trickle's V2 architecture before 1.0. Do not freeze or implement the
+wire specification until interval encoding, enum volatility, per-type ordering,
+unbounded-identity concurrency, and probe sizing meet the gates above.
 
 This is intentionally a breaking, extension-wide rebuild. That cost buys a row
 identity the project can keep: exact rather than probabilistic, typed rather than
-formatted, ordered rather than randomized, bounded at the B-tree boundary, and
-shared consistently across CDC and DVM.
+formatted, capable of preserving native order where proven, bounded at the
+B-tree boundary, and shared consistently across CDC and DVM.
 
 The full identity is the source of truth. The bounded probe is only an index.
 That separation avoids both failure modes that otherwise force another redesign:
