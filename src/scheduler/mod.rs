@@ -1032,6 +1032,43 @@ fn try_fused_chain_refresh(
         return Ok(vec![]);
     }
 
+    // LSEC-6: one fused statement may borrow only one owner and one stored
+    // defining path. Mixed units fall back to the existing topological
+    // sequential loop, which is the safe singleton split.
+    let execution_contexts = eligible
+        .iter()
+        .map(|node| crate::api::security_context::stream_execution_context(&node.st))
+        .collect::<Result<Vec<_>, _>>()?;
+    let first_context = &execution_contexts[0];
+    if execution_contexts.iter().skip(1).any(|context| {
+        context.owner_oid != first_context.owner_oid
+            || context.search_path != first_context.search_path
+    }) {
+        return Ok(vec![]);
+    }
+
+    let _delta_stages = eligible
+        .iter()
+        .map(|node| {
+            crate::refresh::delta_stage::DeltaStage::prepare(
+                &node.st,
+                deps_map.get(&node.pgt_id).ok_or_else(|| {
+                    PgTrickleError::InternalError(format!(
+                        "fused refresh: dependencies missing for pgt_id {}",
+                        node.pgt_id
+                    ))
+                })?,
+                node.st.frontier.as_ref().ok_or_else(|| {
+                    PgTrickleError::InternalError(format!(
+                        "fused refresh: frontier missing for pgt_id {}",
+                        node.pgt_id
+                    ))
+                })?,
+                &node.new_frontier,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Phase 2: Compose the fused SQL.
     let node_specs: Vec<refresh::NodeSpec> = eligible.iter().map(|n| n.node_spec.clone()).collect();
     let fused = match refresh::fuse_diff_batch(&node_specs) {
@@ -1049,51 +1086,53 @@ fn try_fused_chain_refresh(
     );
 
     // Phase 3: Execute the fused SQL and retain exact per-node action counts.
-    let action_counts = match Spi::connect_mut(|client| {
-        let rows = client
-            .select(&fused.sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let mut counts = std::collections::HashMap::<i64, (i64, i64, i64)>::new();
-        for row in rows {
-            let pgt_id = row
-                .get::<i64>(1)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
-                    pgt_id: 0,
-                    stage: "fused merge accounting".to_string(),
-                    reason: "fused result omitted pgt_id".to_string(),
-                })?;
-            let action = row
-                .get::<String>(2)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
-                    pgt_id,
-                    stage: "fused merge accounting".to_string(),
-                    reason: "fused result omitted merge action".to_string(),
-                })?;
-            let count = row
-                .get::<i64>(3)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
-                    pgt_id,
-                    stage: "fused merge accounting".to_string(),
-                    reason: "fused result omitted action count".to_string(),
-                })?;
-            let entry = counts.entry(pgt_id).or_default();
-            match action.as_str() {
-                "INSERT" => entry.0 = entry.0.saturating_add(count),
-                "UPDATE" => entry.1 = entry.1.saturating_add(count),
-                "DELETE" => entry.2 = entry.2.saturating_add(count),
-                other => {
-                    return Err(PgTrickleError::RefreshFinalizationFailed {
+    let action_counts = match crate::refresh::with_stream_owner(&eligible[0].st, || {
+        Spi::connect_mut(|client| {
+            let rows = client
+                .select(&fused.sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let mut counts = std::collections::HashMap::<i64, (i64, i64, i64)>::new();
+            for row in rows {
+                let pgt_id = row
+                    .get::<i64>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
+                        pgt_id: 0,
+                        stage: "fused merge accounting".to_string(),
+                        reason: "fused result omitted pgt_id".to_string(),
+                    })?;
+                let action = row
+                    .get::<String>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
                         pgt_id,
                         stage: "fused merge accounting".to_string(),
-                        reason: format!("unknown MERGE action '{other}'"),
-                    });
+                        reason: "fused result omitted merge action".to_string(),
+                    })?;
+                let count = row
+                    .get::<i64>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
+                        pgt_id,
+                        stage: "fused merge accounting".to_string(),
+                        reason: "fused result omitted action count".to_string(),
+                    })?;
+                let entry = counts.entry(pgt_id).or_default();
+                match action.as_str() {
+                    "INSERT" => entry.0 = entry.0.saturating_add(count),
+                    "UPDATE" => entry.1 = entry.1.saturating_add(count),
+                    "DELETE" => entry.2 = entry.2.saturating_add(count),
+                    other => {
+                        return Err(PgTrickleError::RefreshFinalizationFailed {
+                            pgt_id,
+                            stage: "fused merge accounting".to_string(),
+                            reason: format!("unknown MERGE action '{other}'"),
+                        });
+                    }
                 }
             }
-        }
-        Ok::<_, PgTrickleError>(counts)
+            Ok::<_, PgTrickleError>(counts)
+        })
     }) {
         Ok(counts) => counts,
         Err(e) => {
@@ -3803,11 +3842,10 @@ fn execute_scheduled_refresh(
     // allow the refresh executor to modify the storage table.
     let _ = Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'");
 
-    // R3: Bypass RLS as defence-in-depth. The background worker already
-    // runs as superuser, but this ensures the defining query always
-    // materializes the full result set even if pg_trickle is installed
-    // by a non-superuser role with BYPASSRLS.
-    let _ = Spi::run("SET LOCAL row_security = off"); // nosemgrep: sql.row-security.disabled — intentional R3 bypass, mirrors REFRESH MATERIALIZED VIEW semantics.
+    // Privileged scheduling and frontier work is independent of backend RLS
+    // state. Definition-derived SQL runs through with_stream_owner(), which
+    // restores row_security = on for the stored owner.
+    let _ = Spi::run("SET LOCAL row_security = off"); // nosemgrep: sql.row-security.disabled — privileged scheduler bookkeeping only; owner execution reenables RLS.
 
     // Execute the refresh
 

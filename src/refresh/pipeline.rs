@@ -243,6 +243,30 @@ fn copy_table_rows(
 
 /// Execute an ordinary MERGE through a named SQL cursor and bounded temp batch relation.
 #[cfg(not(test))]
+pub fn prepare_merge_pipeline(
+    st: &crate::catalog::StreamTableMeta,
+    pgt_id: i64,
+    delta_sql: &str,
+) -> Result<(), PgTrickleError> {
+    let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| PgTrickleError::InternalError("backend PID is NULL".to_string()))?;
+    let relation = relation_name(pgt_id, backend_pid);
+    let quoted_relation = format!("\"{relation}\"");
+    let empty_select = format!("SELECT * FROM ({delta_sql}) __pgt_pipeline_empty LIMIT 0");
+    crate::refresh::prepare_owner_temp_table(st, &quoted_relation, &empty_select)
+}
+
+#[cfg(test)]
+pub fn prepare_merge_pipeline(
+    _st: &crate::catalog::StreamTableMeta,
+    _pgt_id: i64,
+    _delta_sql: &str,
+) -> Result<(), PgTrickleError> {
+    Ok(())
+}
+
+#[cfg(not(test))]
 pub fn execute_merge_pipeline(
     pgt_id: i64,
     delta_sql: &str,
@@ -255,10 +279,6 @@ pub fn execute_merge_pipeline(
         .ok_or_else(|| PgTrickleError::InternalError("backend PID is NULL".to_string()))?;
     let relation = relation_name(pgt_id, backend_pid);
     let quoted_relation = format!("\"{relation}\"");
-    Spi::run(&format!(
-        "DROP TABLE IF EXISTS {quoted_relation}; CREATE TEMP TABLE {quoted_relation} ON COMMIT DROP AS SELECT * FROM ({delta_sql}) __pgt_pipeline_empty LIMIT 0"
-    ))
-    .map_err(|e| PgTrickleError::SpiError(format!("pipeline batch relation: {e}")))?;
     let relation_oid = Spi::get_one_with_args::<pg_sys::Oid>(
         "SELECT $1::regclass::oid",
         &[relation.as_str().into()],

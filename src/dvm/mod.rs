@@ -568,6 +568,42 @@ pub fn generate_delta_query(
     pgt_schema: &str,
     pgt_name: &str,
 ) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        None,
+        defining_query,
+        prev_frontier,
+        new_frontier,
+        pgt_schema,
+        pgt_name,
+    )
+}
+
+pub(crate) fn generate_delta_query_staged(
+    pgt_id: i64,
+    defining_query: &str,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    pgt_schema: &str,
+    pgt_name: &str,
+) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        Some(pgt_id),
+        defining_query,
+        prev_frontier,
+        new_frontier,
+        pgt_schema,
+        pgt_name,
+    )
+}
+
+fn generate_delta_query_impl(
+    stage_pgt_id: Option<i64>,
+    defining_query: &str,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    pgt_schema: &str,
+    pgt_name: &str,
+) -> Result<DeltaQueryResult, PgTrickleError> {
     // Step 1: Parse the defining query into an operator tree + CTE registry.
     // This now handles recursive CTEs via OpTree::RecursiveCte, so no
     // early bypass is needed.
@@ -642,6 +678,20 @@ pub fn generate_delta_query(
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
     ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
+    if let Some(pgt_id) = stage_pgt_id {
+        ctx.source_stage_tables = source_oids
+            .iter()
+            .map(|oid| {
+                (
+                    *oid,
+                    format!(
+                        "pg_temp.\"{}\"",
+                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                    ),
+                )
+            })
+            .collect();
+    }
 
     // DAG-4: Apply any active bypass table mappings from fused-chain execution.
     ctx.st_bypass_tables = crate::refresh::get_st_bypass_tables();
@@ -686,7 +736,8 @@ pub fn generate_delta_query_cached(
     // has the wrong table names.  Fall back to the uncached path.
     let bypass_tables = crate::refresh::get_st_bypass_tables();
     if !bypass_tables.is_empty() {
-        return generate_delta_query(
+        return generate_delta_query_staged(
+            pgt_id,
             defining_query,
             prev_frontier,
             new_frontier,
@@ -700,7 +751,8 @@ pub fn generate_delta_query_cached(
     // path so the affected leaves emit EXCEPT ALL instead.
     let fallback_oids = crate::refresh::get_fallback_leaf_oids();
     if !fallback_oids.is_empty() {
-        return generate_delta_query(
+        return generate_delta_query_staged(
+            pgt_id,
             defining_query,
             prev_frontier,
             new_frontier,
@@ -709,7 +761,9 @@ pub fn generate_delta_query_cached(
         );
     }
 
-    let query_hash = hash_string(defining_query);
+    // Salt v0.87.8 templates so catalog-cached SQL from pre-staging releases
+    // cannot be reused under the stream-owner boundary.
+    let query_hash = hash_string(&format!("v0.87.8-stage:{defining_query}"));
 
     // G8.1: Cross-session cache invalidation — flush if the shared
     // generation counter has advanced past our local snapshot.
@@ -870,6 +924,18 @@ pub fn generate_delta_query_cached(
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
     ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
+    ctx.source_stage_tables = source_oids
+        .iter()
+        .map(|oid| {
+            (
+                *oid,
+                format!(
+                    "pg_temp.\"{}\"",
+                    crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                ),
+            )
+        })
+        .collect();
 
     let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
         ctx.differentiate_with_columns(&result.tree)?;

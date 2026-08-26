@@ -1,0 +1,6 @@
+-- pg_trickle 0.87.7 -> 0.87.8 upgrade migration
+-- v0.87.8: Refresh Execution Identity.
+--
+-- Refresh execution changes are implemented by the extension binary. This
+-- release has no catalog-only migration; retain this idempotent migration
+-- target for ALTER EXTENSION UPDATE compatibility.

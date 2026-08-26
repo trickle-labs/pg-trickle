@@ -934,7 +934,7 @@ pub(crate) fn collect_creation_warnings(
             warnings.push(CreationWarning {
                 code: "SOURCE_RLS_ENABLED",
                 message: format!("Source table {source_name} has Row Level Security enabled."),
-                hint: "Review owner and policy semantics; source RLS does not protect refreshed stream-table contents.".to_string(),
+                hint: "The defining query runs as the stream owner with row_security enabled; verify that role's policies expose the intended rows.".to_string(),
             });
         }
     }
@@ -3225,10 +3225,8 @@ pub(crate) mod metrics_ext;
 pub(crate) mod planner;
 // LSEC-1 (v0.87.7): exact caller-identity/search_path capture, used by
 // create_stream_table and alter_stream_table's query migration below.
-// LSEC-2's owner-context execution primitives have no production caller
-// yet — consumed starting with the refresh-engine owner-context execution
-// in v0.87.8 and the lifecycle API hardening in v0.87.9+.
-#[allow(dead_code)]
+// LSEC-2's owner-context primitives are used by every refresh path from
+// v0.87.8 onward and by lifecycle API hardening in v0.87.9+.
 pub(crate) mod security_context;
 mod self_monitoring;
 pub(crate) mod snapshot;

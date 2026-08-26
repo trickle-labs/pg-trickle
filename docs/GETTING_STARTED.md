@@ -65,15 +65,11 @@ This tutorial walks through a concrete org-chart example so you can see this flo
 > ```
 > All GUC defaults (`wal_level`, `shared_preload_libraries`, scheduler settings) are pre-configured. See [Installation](installation.md#4-ghcr-docker-image-recommended-for-local-dev) for tag details and volume mounting.
 
-> **Security — RLS bypass:** The pg_trickle background worker executes refresh
-> queries with `SET LOCAL row_security = off`. This mirrors the behaviour of
-> PostgreSQL's own `REFRESH MATERIALIZED VIEW`, which also bypasses Row-Level
-> Security. As a result, **stream table output is always the full, unfiltered
-> result set** regardless of any RLS policies defined on source tables.
-> Applications must not rely on RLS to restrict what data a stream table
-> exposes — use view filters, column masking, or a separate per-role view on
-> top of the stream table instead. See [PRE_DEPLOYMENT.md](PRE_DEPLOYMENT.md)
-> for the full security checklist.
+> **Security — refresh identity:** Every refresh evaluates defining SQL as the
+> stream-table owner, using the stored defining `search_path` with
+> `row_security = on`. Source RLS therefore controls what is materialized, and
+> RLS on the stream table controls who may read it. See
+> [PRE_DEPLOYMENT.md](PRE_DEPLOYMENT.md) for the full security checklist.
 
 Connect to the database you want to use and enable the extension:
 

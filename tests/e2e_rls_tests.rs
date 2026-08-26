@@ -1,7 +1,7 @@
 //! E2E tests for Row-Level Security (RLS) interaction with stream tables.
 //!
 //! Validates:
-//! - R5: RLS on source tables does not affect stream table content
+//! - R5: Source RLS is evaluated as the stream owner
 //! - R7: RLS on stream tables filters reads per role
 //! - R8: IMMEDIATE mode + RLS on stream table
 //! - R10: ENABLE/DISABLE RLS on source table triggers reinit
@@ -12,8 +12,8 @@ mod e2e;
 
 use e2e::E2eDb;
 
-/// R5: RLS enabled on a source table must not filter the stream table content.
-/// The refresh engine bypasses RLS, so the stream table always contains all rows.
+/// R5: A superuser-owned stream still sees all source rows because its stable
+/// stream owner bypasses RLS; the refresh caller no longer controls visibility.
 #[tokio::test]
 async fn test_rls_on_source_does_not_filter_stream_table() {
     let db = E2eDb::new().await.with_extension().await;
@@ -46,13 +46,13 @@ async fn test_rls_on_source_does_not_filter_stream_table() {
     )
     .await;
 
-    // Refresh the stream table — should contain ALL rows despite RLS
+    // The stream owner is postgres, so owner execution sees all rows.
     db.refresh_st("rls_src_st").await;
 
     let count: i64 = db.count("public.rls_src_st").await;
     assert_eq!(
         count, 3,
-        "stream table should contain all 3 rows despite RLS on source"
+        "superuser-owned stream table should contain all 3 rows"
     );
 }
 
@@ -88,10 +88,10 @@ async fn test_rls_on_source_differential_mode() {
     let count: i64 = db.count("public.rls_diff_st").await;
     assert_eq!(
         count, 2,
-        "DIFFERENTIAL stream table should contain all rows despite RLS"
+        "superuser-owned DIFFERENTIAL stream should contain all rows"
     );
 
-    // Insert another row (tenant_id = 20, would be filtered by RLS)
+    // Insert another row that a restricted owner would not see.
     db.execute("INSERT INTO rls_diff_src VALUES (3, 20, 'c')")
         .await;
     db.refresh_st("rls_diff_st").await;
@@ -99,7 +99,7 @@ async fn test_rls_on_source_differential_mode() {
     let count: i64 = db.count("public.rls_diff_st").await;
     assert_eq!(
         count, 3,
-        "DIFFERENTIAL refresh should see all rows including RLS-filtered ones"
+        "stable superuser owner should continue to see all rows"
     );
 }
 
@@ -228,7 +228,7 @@ async fn test_rls_on_stream_table_immediate_mode() {
     .await;
 
     // Insert a new row into the source — IVM trigger should update the stream table
-    // The trigger runs as SECURITY DEFINER so it sees all rows for delta computation
+    // Privileged trigger bookkeeping switches definition evaluation to the stream owner.
     db.execute("INSERT INTO rls_imm_src VALUES (3, 10, 'c')")
         .await;
 
@@ -440,7 +440,7 @@ async fn test_enable_rls_on_source_triggers_reinit() {
     );
 
     // Reinit (refresh) should succeed and the stream table should still
-    // contain all rows (superuser context bypasses RLS).
+    // contain all rows because this stream's stable owner is the superuser.
     db.refresh_st("rls_ddl_st").await;
 
     let count: i64 = db.count("public.rls_ddl_st").await;

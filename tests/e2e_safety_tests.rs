@@ -217,7 +217,7 @@ async fn test_scheduler_isolates_failing_st_from_healthy_st() {
 /// SAF-2b: Verify that revoking SELECT on a source table from a non-superuser
 /// role causes the ST to fail without affecting the scheduler or other STs.
 ///
-/// Since the background worker runs as a superuser it can bypass GRANT/REVOKE.
+/// The background worker is privileged, but definition evaluation uses the stream owner.
 /// This test instead creates a dedicated restricted role, runs the refresh
 /// via `SET ROLE` (simulating RLS/permission context), and verifies error
 /// isolation.

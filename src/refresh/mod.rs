@@ -29,6 +29,7 @@ use crate::error::PgTrickleError;
 use pgrx::{Spi, prelude::TimestampWithTimeZone};
 
 pub(crate) mod codegen;
+pub(crate) mod delta_stage;
 pub(crate) mod fused;
 pub(crate) mod merge;
 pub(crate) mod orchestrator;
@@ -69,6 +70,90 @@ pub use merge::{
 pub use orchestrator::{
     RefreshAction, determine_refresh_action, execute_reinitialize_refresh, validate_topk_metadata,
 };
+
+/// Run definition-derived SQL with the stream storage owner's role, stored
+/// search path, and RLS policy. Privileged callers resume their original
+/// identity before refresh metadata or private CDC state is finalized.
+pub(crate) fn with_stream_owner<T>(
+    st: &StreamTableMeta,
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    let context = crate::api::security_context::stream_execution_context(st)?;
+    crate::api::security_context::with_stream_owner_context(&context, f)
+}
+
+pub(crate) fn stream_owner_name(st: &StreamTableMeta) -> Result<String, PgTrickleError> {
+    let context = crate::api::security_context::stream_execution_context(st)?;
+    Spi::get_one_with_args::<String>(
+        "SELECT rolname::text FROM pg_catalog.pg_roles WHERE oid = $1",
+        &[context.owner_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InternalError(format!(
+            "stream owner OID {} is missing",
+            context.owner_oid.to_u32()
+        ))
+    })
+}
+
+pub(crate) fn source_visibility_key(
+    source_oid: pgrx::pg_sys::Oid,
+) -> Result<(String, Vec<String>), PgTrickleError> {
+    let source_table = Spi::get_one_with_args::<String>(
+        "SELECT format('%I.%I', n.nspname, c.relname) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::NotFound(format!("source relation with OID {}", source_oid.to_u32()))
+    })?;
+    let columns = if StreamTableMeta::pgt_id_for_relid(source_oid).is_some() {
+        crate::cdc::resolve_st_output_columns(source_oid)?
+    } else {
+        let pk_columns = crate::cdc::resolve_pk_columns(source_oid)?;
+        if pk_columns.is_empty() {
+            // Keyless trigger and polling CDC hashes every source column.
+            // Visibility checks must use the identical key, even when the
+            // stream definition references only a subset of those columns.
+            crate::cdc::resolve_source_column_defs(source_oid)?
+        } else {
+            pk_columns
+                .into_iter()
+                .map(|column| (column, String::new()))
+                .collect()
+        }
+    }
+    .into_iter()
+    .map(|(column, _)| column)
+    .collect();
+    Ok((source_table, columns))
+}
+
+pub(crate) fn prepare_owner_temp_table(
+    st: &StreamTableMeta,
+    table: &str,
+    select_sql: &str,
+) -> Result<(), PgTrickleError> {
+    Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — callers pass quoted internal pg_temp identifiers.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&format!(
+        "CREATE TEMP TABLE {table} ON COMMIT DROP AS {select_sql} WITH NO DATA"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let owner = crate::sql_builder::ident(&stream_owner_name(st)?);
+    Spi::run(&format!(
+        "GRANT SELECT, INSERT, TRUNCATE ON TABLE {table} TO {owner}"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+pub(crate) fn drop_owner_temp_table(table: &str) {
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {table}")); // nosemgrep: rust.spi.run.dynamic-format — callers pass quoted internal pg_temp identifiers.
+}
 // phd1: cross-cycle phantom cleanup (CORR-1, deferred — see merge.rs).
 
 /// Stable machine-readable causes for FULL/recomputation refreshes.

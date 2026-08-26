@@ -244,12 +244,7 @@ fn check_for_delete_changes(
 
     // ── DIFFERENTIAL mode: query change buffer tables via LSN ─────────
     for &oid in source_oids {
-        let buf_name = ctx
-            .source_buffer_names
-            .get(&oid)
-            .cloned()
-            .unwrap_or_else(|| format!("changes_{oid}"));
-        let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
+        let change_table = ctx.change_table_for_source(oid);
         let prev_lsn = ctx.prev_frontier.get_lsn(oid);
 
         let check_sql = format!(
@@ -1861,12 +1856,7 @@ fn generate_change_buffer_from(
             }
 
             // ── DIFFERENTIAL mode: read INSERT rows ─────────────────
-            let buf_name = ctx
-                .source_buffer_names
-                .get(table_oid)
-                .cloned()
-                .unwrap_or_else(|| format!("changes_{table_oid}"));
-            let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
+            let change_table = ctx.change_table_for_source(*table_oid);
             let prev_lsn = ctx.get_prev_lsn(*table_oid);
 
             // A44-10 (D+I schema): flat column names — c."col" for I-rows (new values).
@@ -1979,12 +1969,7 @@ fn generate_old_change_buffer_from(
                 ));
             }
 
-            let buf_name = ctx
-                .source_buffer_names
-                .get(table_oid)
-                .cloned()
-                .unwrap_or_else(|| format!("changes_{table_oid}"));
-            let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
+            let change_table = ctx.change_table_for_source(*table_oid);
             let prev_lsn = ctx.get_prev_lsn(*table_oid);
 
             let col_refs: Vec<String> = columns

@@ -2136,15 +2136,10 @@ There are no Python dependencies beyond dbt-core and dbt-postgres. The package i
 
 ### Does RLS on source tables affect stream table content?
 
-**No.** Stream tables always materialize the **full, unfiltered result set**,
-regardless of any RLS policies on source tables. This matches the behavior of
-PostgreSQL's built-in `REFRESH MATERIALIZED VIEW`.
-
-The scheduled refresh runs as a superuser background worker. Manual calls to
-`refresh_stream_table()` and IMMEDIATE-mode IVM triggers also bypass RLS
-internally (`SET LOCAL row_security = off` / `SECURITY DEFINER` trigger
-functions), ensuring the stream table content is always complete and
-deterministic.
+**Yes.** Every refresh evaluates defining SQL as the stream-table owner with
+`row_security = on`. The owner's source grants and applicable policies define
+the materialized result. The manual caller, scheduler role, or DML issuer does
+not change that result.
 
 ### Can I use RLS on a stream table to filter reads per role?
 
@@ -2159,8 +2154,9 @@ CREATE POLICY tenant_isolation ON pgtrickle.order_totals
     USING (tenant_id = current_setting('app.tenant_id')::INT);
 ```
 
-One stream table serves all tenants. Per-tenant filtering happens at query
-time with zero storage duplication.
+Target-table RLS can further filter reads. If source policies materialize only
+an owner-specific subset, use separate stream owners/tables for different
+source-visible subsets.
 
 ### What happens when I ENABLE or DISABLE RLS on a source table?
 
@@ -2173,12 +2169,9 @@ stream tables for reinitialisation. The same applies to `CREATE POLICY`,
 ### Why are IVM trigger functions SECURITY DEFINER?
 
 In IMMEDIATE mode, the IVM trigger fires in the DML-issuing user's context.
-If that user has restricted RLS visibility, the delta query could see only a
-subset of the base table rows, producing a corrupt stream table. Making the
-trigger function `SECURITY DEFINER` (owned by the extension installer, typically
-a superuser) ensures the delta query always has full visibility. The DML itself
-is still subject to the user's own RLS policies — only the stream table
-maintenance runs with elevated privileges.
+`SECURITY DEFINER` permits the trigger to perform private bookkeeping, while
+definition-derived delta SQL explicitly switches to the stream owner. The DML
+itself remains subject to the issuing user's policies.
 
 The trigger functions also set `search_path = pg_catalog, pgtrickle,
 pgtrickle_changes, public` to prevent search_path hijacking — a security best

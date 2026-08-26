@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.8 — Refresh Execution Identity](#0878--refresh-execution-identity)
 - [0.87.7 — Security Context and Catalog Foundation](#0877--security-context-and-catalog-foundation)
 - [0.87.6 — Deep Fuzzing, Shrinking, and Release Gate](#0876--deep-fuzzing-shrinking-and-release-gate)
 - [0.87.5 — DVM Correctness Contracts and Semantic Coverage](#0875--dvm-correctness-contracts-and-semantic-coverage)
@@ -137,6 +138,16 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.8] — Refresh Execution Identity
+
+v0.87.8 runs defining SQL as the stream owner across refresh paths, with
+private CDC staging and prepare/execute/finalize refresh phases.
+
+See the [v0.87.8 roadmap](roadmap/v0.87.8.md) for the complete acceptance
+criteria and security/correctness release gate.
 
 ---
 

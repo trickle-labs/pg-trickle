@@ -167,11 +167,10 @@ fn execute_manual_refresh(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    // R3: Bypass RLS for the refresh defining query so the stream table
-    // always materializes the full result set regardless of who called
-    // refresh_stream_table(). This mirrors REFRESH MATERIALIZED VIEW
-    // semantics and prevents the "who refreshed it?" correctness hazard.
-    Spi::run("SET LOCAL row_security = off") // nosemgrep: sql.row-security.disabled — intentional R3 bypass, mirrors REFRESH MATERIALIZED VIEW semantics.
+    // Keep privileged prepare/finalize work independent of the caller's RLS
+    // state. Definition-derived SQL runs later through with_stream_owner(),
+    // which restores row_security = on for the stored owner.
+    Spi::run("SET LOCAL row_security = off") // nosemgrep: sql.row-security.disabled — privileged refresh bookkeeping only; owner execution reenables RLS.
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     if st.refresh_mode != RefreshMode::Full && !st.needs_reinit {
@@ -356,7 +355,7 @@ pub fn reinit_rewrite_if_needed(st: &StreamTableMeta) -> Result<StreamTableMeta,
         None => return Ok(st.clone()),
     };
 
-    let rw = run_query_rewrite_pipeline(&original)?;
+    let rw = refresh::with_stream_owner(st, || run_query_rewrite_pipeline(&original))?;
     let new_defining = rw.query;
     if new_defining == st.defining_query {
         return Ok(st.clone());
@@ -417,12 +416,14 @@ pub(crate) fn execute_manual_full_refresh(
     // FULL refresh therefore materializes only defining-query columns and
     // cleans up dual-count state from legacy storage.
     if crate::dvm::query_needs_dual_count(&st.defining_query) {
-        crate::api::helpers::normalize_full_set_operation_storage(
-            schema,
-            table_name,
-            st.pgt_relid,
-            st.pgt_id,
-        )?;
+        refresh::with_stream_owner(st, || {
+            crate::api::helpers::normalize_full_set_operation_storage(
+                schema,
+                table_name,
+                st.pgt_relid,
+                st.pgt_id,
+            )
+        })?;
     }
 
     // Check for user triggers to suppress during FULL refresh.
@@ -435,8 +436,10 @@ pub(crate) fn execute_manual_full_refresh(
     // Suppress user triggers during TRUNCATE + INSERT to prevent
     // spurious trigger invocations with wrong semantics.
     if has_triggers {
-        Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        refresh::with_stream_owner(st, || {
+            Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
     }
 
     // ── Snapshot ST change buffer LSNs BEFORE TRUNCATE+INSERT ──────────
@@ -500,8 +503,10 @@ pub(crate) fn execute_manual_full_refresh(
     }
 
     let truncate_sql = format!("TRUNCATE {quoted_table}");
-    Spi::run(&truncate_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    refresh::with_stream_owner(st, || {
+        Spi::run(&truncate_sql) // nosemgrep: rust.spi.run.dynamic-format — buffer name is catalog-derived.
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    })?;
 
     // For aggregate/distinct STs in DIFFERENTIAL mode, inject COUNT(*)
     // into the defining query so __pgt_count is populated for subsequent
@@ -565,18 +570,22 @@ pub(crate) fn execute_manual_full_refresh(
     };
 
     let insert_sql = format!("INSERT INTO {quoted_table} {insert_body}");
-    let rows_inserted = Spi::connect_mut(|client| {
-        let result = client
-            .update(&insert_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<usize, PgTrickleError>(result.len())
+    let rows_inserted = refresh::with_stream_owner(st, || {
+        Spi::connect_mut(|client| {
+            let result = client
+                .update(&insert_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<usize, PgTrickleError>(result.len())
+        })
     })?;
 
     // Re-enable user triggers and emit NOTIFY so listeners know a FULL
     // refresh occurred.
     if has_triggers {
-        Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        refresh::with_stream_owner(st, || {
+            Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
 
         // PB2: Skip NOTIFY when pooler compatibility mode is enabled.
         if !st.pooler_compatibility_mode {

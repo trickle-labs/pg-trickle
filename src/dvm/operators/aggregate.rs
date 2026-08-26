@@ -1388,12 +1388,7 @@ fn generate_direct_agg_delta(
         ));
     };
 
-    let buf_name = ctx
-        .source_buffer_names
-        .get(table_oid)
-        .cloned()
-        .unwrap_or_else(|| format!("changes_{table_oid}"));
-    let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
+    let change_table = ctx.change_table_for_source(*table_oid);
     let prev_lsn = ctx.get_prev_lsn(*table_oid);
     let new_lsn = ctx.get_new_lsn(*table_oid);
 

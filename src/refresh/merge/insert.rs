@@ -48,12 +48,10 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         name.replace('"', "\"\""),
     );
     let pre_table = format!("__pgt_topk_state_{}", st.pgt_id);
-    // nosemgrep: rust.spi.run.dynamic-format — pre_table is OID-derived and quoted_table is double-quote-escaped.
-    Spi::run(&format!(
-        "DROP TABLE IF EXISTS {pre_table}; \
-         CREATE TEMP TABLE {pre_table} ON COMMIT DROP AS SELECT * FROM {quoted_table}"
-    ))
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let pre_select = format!("SELECT * FROM {quoted_table}");
+    crate::refresh::prepare_owner_temp_table(st, &pre_table, &pre_select)?;
+    Spi::run(&format!("INSERT INTO {pre_table} {pre_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and source is a quoted storage relation.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     let downstream_cols = if has_downstream_st_consumers(st.pgt_id) {
         let cols = get_st_user_columns(st);
@@ -153,11 +151,13 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         update_set = update_set.join(", "),
     );
 
-    Spi::connect_mut(|client| {
-        client
-            .update(&merge_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<(), PgTrickleError>(())
+    with_stream_owner(st, || {
+        Spi::connect_mut(|client| {
+            client
+                .update(&merge_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<(), PgTrickleError>(())
+        })
     })?;
 
     let changed_columns = col_list
@@ -173,28 +173,30 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
                                   AND ({changed_columns}))::bigint \
          FROM {quoted_table} t FULL JOIN {pre_table} p USING (__pgt_row_id)"
     );
-    let (rows_inserted, rows_deleted, rows_updated) = Spi::connect(|client| {
-        let mut rows = client
-            .select(&counts_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let row = rows
-            .next()
-            .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
-                pgt_id: st.pgt_id,
-                stage: "topk merge accounting".to_string(),
-                reason: "target change counts were not returned".to_string(),
-            })?;
-        Ok::<(i64, i64, i64), PgTrickleError>((
-            row.get::<i64>(1)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or(0),
-            row.get::<i64>(2)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or(0),
-            row.get::<i64>(3)
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or(0),
-        ))
+    let (rows_inserted, rows_deleted, rows_updated) = with_stream_owner(st, || {
+        Spi::connect(|client| {
+            let mut rows = client
+                .select(&counts_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let row = rows
+                .next()
+                .ok_or_else(|| PgTrickleError::RefreshFinalizationFailed {
+                    pgt_id: st.pgt_id,
+                    stage: "topk merge accounting".to_string(),
+                    reason: "target change counts were not returned".to_string(),
+                })?;
+            Ok::<(i64, i64, i64), PgTrickleError>((
+                row.get::<i64>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(0),
+                row.get::<i64>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(0),
+                row.get::<i64>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(0),
+            ))
+        })
     })?;
     crate::refresh::set_last_rows_updated(rows_updated);
 

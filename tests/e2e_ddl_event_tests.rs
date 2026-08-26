@@ -1070,7 +1070,7 @@ async fn test_alter_policy_triggers_invalidation() {
     .await;
 
     // Refresh — data must remain correct from the superuser perspective
-    // (pg_trickle refreshes as the extension owner, bypassing RLS)
+    // (this stream is owned by the extension superuser, which bypasses RLS)
     db.refresh_st("ddl_pol_st").await;
     db.assert_st_matches_query("ddl_pol_st", q).await;
 }

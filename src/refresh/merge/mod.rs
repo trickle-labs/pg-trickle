@@ -60,144 +60,179 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    let schema = &st.pgt_schema;
-    let name = &st.pgt_name;
-    let query = &st.defining_query;
-
-    // WP2 bounded subset: incremental INTERSECT/EXCEPT remains guarded, so
-    // FULL refreshes use direct defining-query storage rather than exposing
-    // branch multiplicity columns left by older versions.
-    if crate::dvm::query_needs_dual_count(query) {
-        crate::api::helpers::normalize_full_set_operation_storage(
-            schema,
-            name,
-            st.pgt_relid,
-            st.pgt_id,
-        )?;
-    }
-
-    let quoted_table = format!(
-        "\"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        name.replace('"', "\"\""),
-    );
-
-    // Check for user triggers to suppress during FULL refresh.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
-    let has_triggers = match user_triggers_mode {
-        crate::config::UserTriggersMode::Off => false,
-        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
-    };
-
-    // Suppress user triggers during TRUNCATE + INSERT to prevent
-    // spurious trigger invocations with wrong semantics.
-    if has_triggers {
-        Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    }
-
-    // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
-    // defining query so the auxiliary column is populated correctly.
-    let effective_query = if st.refresh_mode == crate::dag::RefreshMode::Differential
-        && crate::dvm::query_needs_pgt_count(query)
-    {
-        let mut eq = crate::api::inject_pgt_count(query);
-        // Also inject AVG auxiliary columns (SUM/COUNT of arg) for algebraic
-        // AVG maintenance.
-        let avg_aux = crate::dvm::query_avg_aux_columns(query);
-        if !avg_aux.is_empty() {
-            eq = crate::api::inject_avg_aux(&eq, &avg_aux);
-        }
-        // Also inject sum-of-squares columns for STDDEV/VAR maintenance.
-        let sum2_aux = crate::dvm::query_sum2_aux_columns(query);
-        if !sum2_aux.is_empty() {
-            let types = crate::dvm::query_statistical_aux_types(query);
-            let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
-            eq = crate::api::inject_sum2_aux_typed(&eq, &typed);
-        }
-        // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
-        let nonnull_aux = crate::dvm::query_nonnull_aux_columns(query);
-        if !nonnull_aux.is_empty() {
-            eq = crate::api::inject_nonnull_aux(&eq, &nonnull_aux);
-        }
-        eq
-    } else {
-        query.clone()
-    };
-
-    // ST-ST-3: Snapshot pre-state for diff capture when this ST has
-    // downstream ST consumers. The snapshot is compared against the
-    // post-refresh state to produce I/D pairs for the change buffer.
     let needs_diff_capture = has_downstream_st_consumers(st.pgt_id);
-    let user_cols = if needs_diff_capture {
-        let cols = get_st_user_columns(st);
-        let col_list: String = cols
+    let prepared_user_cols = if needs_diff_capture {
+        get_st_user_columns(st)
+    } else {
+        Vec::new()
+    };
+    if needs_diff_capture {
+        let col_list = prepared_user_cols
             .iter()
             .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(", ");
-
-        // Drop any leftover pre-snapshot from a previous iteration
-        // (e.g., SCC fixpoint loops where subtransaction commits don't
-        // fire ON COMMIT DROP until the outer transaction commits).
-        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_pre_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
-
-        let snapshot_sql = format!(
+        let quoted_table = format!(
+            "\"{}\".\"{}\"",
+            st.pgt_schema.replace('"', "\"\""),
+            st.pgt_name.replace('"', "\"\""),
+        );
+        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_pre_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — pgt_id is a plain i64.
+        Spi::run(&format!(
             "CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
              SELECT __pgt_row_id, {col_list} FROM {quoted_table}",
             pgt_id = st.pgt_id,
-        );
-        Spi::run(&snapshot_sql).map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+        ))
+        .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
             pgt_id: st.pgt_id,
             stage: "full-refresh downstream snapshot".to_string(),
-            reason: format!("{schema}.{name}: {e}"),
+            reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
         })?;
-        cols
-    } else {
-        Vec::new()
-    };
+    }
+    let (rows_inserted, needs_diff_capture, user_cols) = with_stream_owner(st, || {
+        let schema = &st.pgt_schema;
+        let name = &st.pgt_name;
+        let query = &st.defining_query;
 
-    // Truncate
-    Spi::run(&format!("TRUNCATE {quoted_table}")) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        // WP2 bounded subset: incremental INTERSECT/EXCEPT remains guarded, so
+        // FULL refreshes use direct defining-query storage rather than exposing
+        // branch multiplicity columns left by older versions.
+        if crate::dvm::query_needs_dual_count(query) {
+            crate::api::helpers::normalize_full_set_operation_storage(
+                schema,
+                name,
+                st.pgt_relid,
+                st.pgt_id,
+            )?;
+        }
 
-    // Compute row_id using the same hash formula as the delta query so
-    // the MERGE ON clause matches during subsequent differential refreshes.
-    // Guarded INTERSECT/EXCEPT uses the direct defining-query shape. For
-    // UNION (dedup), convert to UNION ALL and count.
-    // For UNION ALL, decompose into per-branch subqueries with
-    // child-prefixed row IDs matching diff_union_all's formula.
-    let insert_body = if crate::dvm::query_needs_dual_count(query) {
-        crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
-    } else if crate::dvm::query_needs_union_dedup_count(query) {
-        let col_names = crate::dvm::get_defining_query_columns(query)?;
-        if let Some(union_sql) = crate::dvm::try_union_dedup_refresh_sql(query, &col_names) {
-            union_sql
+        let quoted_table = format!(
+            "\"{}\".\"{}\"",
+            schema.replace('"', "\"\""),
+            name.replace('"', "\"\""),
+        );
+
+        // Check for user triggers to suppress during FULL refresh.
+        let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+        let has_triggers = match user_triggers_mode {
+            crate::config::UserTriggersMode::Off => false,
+            crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
+        };
+
+        // Suppress user triggers during TRUNCATE + INSERT to prevent
+        // spurious trigger invocations with wrong semantics.
+        if has_triggers {
+            Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+
+        // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
+        // defining query so the auxiliary column is populated correctly.
+        let effective_query = if st.refresh_mode == crate::dag::RefreshMode::Differential
+            && crate::dvm::query_needs_pgt_count(query)
+        {
+            let mut eq = crate::api::inject_pgt_count(query);
+            // Also inject AVG auxiliary columns (SUM/COUNT of arg) for algebraic
+            // AVG maintenance.
+            let avg_aux = crate::dvm::query_avg_aux_columns(query);
+            if !avg_aux.is_empty() {
+                eq = crate::api::inject_avg_aux(&eq, &avg_aux);
+            }
+            // Also inject sum-of-squares columns for STDDEV/VAR maintenance.
+            let sum2_aux = crate::dvm::query_sum2_aux_columns(query);
+            if !sum2_aux.is_empty() {
+                let types = crate::dvm::query_statistical_aux_types(query);
+                let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
+                eq = crate::api::inject_sum2_aux_typed(&eq, &typed);
+            }
+            // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
+            let nonnull_aux = crate::dvm::query_nonnull_aux_columns(query);
+            if !nonnull_aux.is_empty() {
+                eq = crate::api::inject_nonnull_aux(&eq, &nonnull_aux);
+            }
+            eq
+        } else {
+            query.clone()
+        };
+
+        // ST-ST-3: Snapshot pre-state for diff capture when this ST has
+        // downstream ST consumers. The snapshot is compared against the
+        // post-refresh state to produce I/D pairs for the change buffer.
+        let user_cols = if needs_diff_capture {
+            prepared_user_cols.clone()
+        } else {
+            Vec::new()
+        };
+
+        // Truncate
+        Spi::run(&format!("TRUNCATE {quoted_table}")) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        // Compute row_id using the same hash formula as the delta query so
+        // the MERGE ON clause matches during subsequent differential refreshes.
+        // Guarded INTERSECT/EXCEPT uses the direct defining-query shape. For
+        // UNION (dedup), convert to UNION ALL and count.
+        // For UNION ALL, decompose into per-branch subqueries with
+        // child-prefixed row IDs matching diff_union_all's formula.
+        let insert_body = if crate::dvm::query_needs_dual_count(query) {
+            crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
+        } else if crate::dvm::query_needs_union_dedup_count(query) {
+            let col_names = crate::dvm::get_defining_query_columns(query)?;
+            if let Some(union_sql) = crate::dvm::try_union_dedup_refresh_sql(query, &col_names) {
+                union_sql
+            } else {
+                let row_id_expr = crate::dvm::row_id_expr_for_query(query);
+                format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
+            }
+        } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(query) {
+            ua_sql
         } else {
             let row_id_expr = crate::dvm::row_id_expr_for_query(query);
             format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
+        };
+
+        let insert_sql = format!("INSERT INTO {quoted_table} {insert_body}");
+
+        let rows_inserted = Spi::connect_mut(|client| {
+            let result = client
+                .update(&insert_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<usize, PgTrickleError>(result.len())
+        })?;
+
+        // Re-enable user triggers and emit NOTIFY so listeners know a FULL
+        // refresh occurred.
+        if has_triggers {
+            Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+            // PB2/STAB-1: Skip NOTIFY when pooler compatibility mode is enabled.
+            if !crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
+                // Escape single quotes in the JSON payload.
+                let escaped_name = name.replace('\'', "''");
+                let escaped_schema = schema.replace('\'', "''");
+                // NOTIFY does not support parameterized payloads; single quotes are escaped above.
+                let notify_sql = format!(
+                    "NOTIFY pg_trickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
+                 \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\", \"rows\": {rows_inserted}}}'"
+                );
+                Spi::run(&notify_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            }
+
+            pgrx::info!(
+                "pg_trickle: FULL refresh of {}.{} with user triggers suppressed ({} rows). \
+             Row-level triggers do NOT fire for FULL refresh; use REFRESH MODE DIFFERENTIAL.",
+                schema,
+                name,
+                rows_inserted,
+            );
         }
-    } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(query) {
-        ua_sql
-    } else {
-        let row_id_expr = crate::dvm::row_id_expr_for_query(query);
-        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
-    };
 
-    let insert_sql = format!("INSERT INTO {quoted_table} {insert_body}");
-
-    let rows_inserted = Spi::connect_mut(|client| {
-        let result = client
-            .update(&insert_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<usize, PgTrickleError>(result.len())
+        Ok((rows_inserted as i64, needs_diff_capture, user_cols))
     })?;
 
-    // ST-ST-3: Capture the full-refresh diff into the change buffer.
-    // If diff capture fails, downstream DIFFERENTIAL STs would silently
-    // diverge because they expect delta rows in changes_pgt_{id}. To
-    // prevent that, mark all downstream STs for reinit so they do a FULL
-    // refresh next cycle and resync.
+    // The owner phase cannot access private CDC. Capture its committed-in-this-
+    // transaction result only after the role and search path are restored.
     if needs_diff_capture && !user_cols.is_empty() {
         capture_full_refresh_diff_to_st_buffer(st, &user_cols).map_err(|e| {
             PgTrickleError::RefreshFinalizationFailed {
@@ -208,34 +243,6 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         })?;
     }
 
-    // Re-enable user triggers and emit NOTIFY so listeners know a FULL
-    // refresh occurred.
-    if has_triggers {
-        Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        // PB2/STAB-1: Skip NOTIFY when pooler compatibility mode is enabled.
-        if !crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
-            // Escape single quotes in the JSON payload.
-            let escaped_name = name.replace('\'', "''");
-            let escaped_schema = schema.replace('\'', "''");
-            // NOTIFY does not support parameterized payloads; single quotes are escaped above.
-            let notify_sql = format!(
-                "NOTIFY pg_trickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
-                 \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\", \"rows\": {rows_inserted}}}'"
-            );
-            Spi::run(&notify_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        }
-
-        pgrx::info!(
-            "pg_trickle: FULL refresh of {}.{} with user triggers suppressed ({} rows). \
-             Row-level triggers do NOT fire for FULL refresh; use REFRESH MODE DIFFERENTIAL.",
-            schema,
-            name,
-            rows_inserted,
-        );
-    }
-
     if st.row_identity_version != Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION) {
         crate::catalog::StreamTableMeta::mark_row_identity_reinitialized(st.pgt_id)?;
     }
@@ -243,10 +250,10 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     // PART-WARN: After a successful FULL refresh, warn if the default
     // partition of a partitioned stream table has accumulated rows.
     if st.st_partition_key.is_some() {
-        warn_default_partition_growth(schema, name);
+        warn_default_partition_growth(&st.pgt_schema, &st.pgt_name);
     }
 
-    Ok((rows_inserted as i64, 0))
+    Ok((rows_inserted, 0))
 }
 
 /// Post-full-refresh cleanup helper (G3 + G4).
@@ -1423,6 +1430,12 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     let t_decision = t_decision_start.elapsed();
+    let _delta_stage = crate::refresh::delta_stage::DeltaStage::prepare(
+        st,
+        &dependencies,
+        prev_frontier,
+        new_frontier,
+    )?;
     let t0 = Instant::now();
 
     // ── G8.1: Cross-session cache invalidation ──────────────────────
@@ -1443,13 +1456,15 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "v0.87.8-stage".hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
             st.defining_query.as_ref() as *const str,
         ) {
             // No rewrite: use pre-computed catalog hash when available.
             if st.defining_query_hash != 0 {
-                st.defining_query_hash as u64
+                st.defining_query_hash.hash(&mut hasher);
+                hasher.finish()
             } else {
                 st.defining_query.hash(&mut hasher);
                 hasher.finish()
@@ -1553,7 +1568,8 @@ pub fn execute_differential_refresh_with_tuning(
         // ── Cache miss: full pipeline + PREPARE + cache ──────────────
         pgrx::debug1!("[pg_trickle] cache MISS for pgt_id={}", st.pgt_id);
         let delta_result = if has_recursive_cte {
-            dvm::generate_delta_query(
+            dvm::generate_delta_query_staged(
+                st.pgt_id,
                 &effective_defining_query,
                 prev_frontier,
                 new_frontier,
@@ -1733,7 +1749,10 @@ pub fn execute_differential_refresh_with_tuning(
     // the result to /tmp/delta_plans/<schema>_<name>.json.  This env var is
     // intended for E2E test diagnostics and local profiling runs.
     if std::env::var("PGS_PROFILE_DELTA").as_deref() == Ok("1") {
-        capture_delta_explain(schema, name, &resolved.resolved_delta_sql);
+        with_stream_owner(st, || {
+            capture_delta_explain(schema, name, &resolved.resolved_delta_sql);
+            Ok(())
+        })?;
     }
 
     // ── Diagnostic: detect OID mismatch between catalog and delta ────
@@ -1919,8 +1938,17 @@ pub fn execute_differential_refresh_with_tuning(
     // subquery. If the output exceeds the budget, fall back to FULL
     // refresh to prevent OOM or excessive temp-file spills.
     let max_estimate = crate::config::pg_trickle_max_delta_estimate_rows();
-    if max_estimate > 0
-        && let Some(estimate) = estimate_delta_output_rows(&resolved.merge_sql, max_estimate)
+    let delta_estimate = if max_estimate > 0 {
+        with_stream_owner(st, || {
+            Ok(estimate_delta_output_rows(
+                &resolved.merge_sql,
+                max_estimate,
+            ))
+        })?
+    } else {
+        None
+    };
+    if let Some(estimate) = delta_estimate
         && estimate > max_estimate as i64
     {
         pgrx::notice!(
@@ -2016,34 +2044,23 @@ pub fn execute_differential_refresh_with_tuning(
             );
             let ao_disable_sql = format!("ALTER TABLE {} DISABLE TRIGGER USER", ao_quoted_table);
             let ao_enable_sql = format!("ALTER TABLE {} ENABLE TRIGGER USER", ao_quoted_table);
-            if ao_suppress && let Err(e) = Spi::run(&ao_disable_sql)
-            // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
-            {
-                pgrx::debug1!(
-                    "[pg_trickle] A-3a: failed to disable triggers for {}.{}: {}",
-                    schema,
-                    name,
-                    e
-                );
-            }
-
-            let rows_inserted = Spi::connect_mut(|client| {
-                let result = client
-                    .update(&insert_sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                Ok::<i64, PgTrickleError>(result.len() as i64)
+            let rows_inserted = with_stream_owner(st, || {
+                if ao_suppress {
+                    Spi::run(&ao_disable_sql) // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                }
+                let rows_inserted = Spi::connect_mut(|client| {
+                    let result = client
+                        .update(&insert_sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                    Ok::<i64, PgTrickleError>(result.len() as i64)
+                })?;
+                if ao_suppress {
+                    Spi::run(&ao_enable_sql) // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                }
+                Ok(rows_inserted)
             })?;
-
-            if ao_suppress && let Err(e) = Spi::run(&ao_enable_sql)
-            // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
-            {
-                pgrx::debug1!(
-                    "[pg_trickle] A-3a: failed to re-enable triggers for {}.{}: {}",
-                    schema,
-                    name,
-                    e
-                );
-            }
 
             let t_insert = t_insert_start.elapsed();
             pgrx::debug1!(
@@ -2112,7 +2129,8 @@ pub fn execute_differential_refresh_with_tuning(
     // ST-ST-2: Force explicit DML when this ST has downstream ST consumers.
     // The explicit DML path materializes the delta into __pgt_delta_{pgt_id},
     // which we then capture into the ST's change buffer for downstream use.
-    let use_explicit_dml = use_explicit_dml || has_downstream_st_consumers(st.pgt_id);
+    let needs_downstream_capture = has_downstream_st_consumers(st.pgt_id);
+    let use_explicit_dml = use_explicit_dml || needs_downstream_capture;
 
     // When user_triggers = 'off' but there ARE user triggers on the ST,
     // suppress them during the MERGE to prevent spurious firing.
@@ -2124,8 +2142,10 @@ pub fn execute_differential_refresh_with_tuning(
             schema.replace('"', "\"\""),
             name.replace('"', "\"\""),
         );
-        Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        with_stream_owner(st, || {
+            Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
     }
 
     // ── B-3: Strategy selection ──────────────────────────────────────
@@ -2276,19 +2296,23 @@ pub fn execute_differential_refresh_with_tuning(
         let method = crate::api::parse_partition_method(pk);
         if method == crate::api::PartitionMethod::Hash {
             // A1-3b: Per-partition MERGE for HASH partitioned STs.
-            let count = execute_hash_partitioned_merge(
-                &resolved.merge_sql,
-                &resolved.resolved_delta_sql,
-                schema,
-                name,
-                st.pgt_relid,
-                pk,
-                st.pgt_id,
-            )?;
+            let count = with_stream_owner(st, || {
+                execute_hash_partitioned_merge(
+                    &resolved.merge_sql,
+                    &resolved.resolved_delta_sql,
+                    schema,
+                    name,
+                    st.pgt_relid,
+                    pk,
+                    st.pgt_id,
+                )
+            })?;
             Some((count, "hash_merge"))
         } else {
             // RANGE / LIST: extract bounds and inject predicate.
-            match extract_partition_bounds(&resolved.resolved_delta_sql, pk)? {
+            match with_stream_owner(st, || {
+                extract_partition_bounds(&resolved.resolved_delta_sql, pk)
+            })? {
                 None => {
                     // Delta produced no rows for the partition key — fast path.
                     pgrx::debug1!(
@@ -2341,387 +2365,55 @@ pub fn execute_differential_refresh_with_tuning(
         && st.st_partition_key.is_none()
         && !has_pgt_placeholders;
 
-    let (merge_count, strategy_label) = if let Some(result) = hash_merge_result {
-        // A1-3b: HASH per-partition MERGE already executed above.
-        result
-    } else if use_pipeline {
-        let (count, stats) = crate::refresh::pipeline::execute_merge_pipeline(
-            st.pgt_id,
-            &resolved.trigger_using_sql,
-            &resolved.merge_sql,
-            crate::config::pg_trickle_pipeline_batch_size(),
-            crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
-        )?;
-        pgrx::debug1!(
-            "[pg_trickle] v0.87 pipeline {}.{} reason={} batches={} rows={} bytes={}",
-            schema,
-            name,
-            pipeline_decision.reason.as_str(),
-            stats.batches_completed,
-            stats.rows_staged,
-            stats.bytes_staged,
-        );
-        crate::shmem::record_pipeline_metrics(
-            pipeline_decision.reason.as_str(),
-            Some((
-                stats.batches_completed,
-                stats.rows_staged,
-                stats.bytes_staged,
-                stats.largest_batch_rows,
-                stats.largest_batch_bytes,
-                stats.oversize_batches,
-            )),
-        );
-        (count, "pipeline")
-    } else if use_delete_insert {
-        // ── PH-D1: DELETE+INSERT path ───────────────────────────────
-        // For small deltas against large tables, separate DELETE + INSERT
-        // avoids the MERGE join cost. The delta is materialized into a
-        // temp table, then applied as two targeted statements.
-        let t_mat_start = Instant::now();
-
-        // Drop any stale delta table from a prior refresh in the same
-        // transaction (e.g. two refresh_stream_table calls in one batch_execute).
-        // ON COMMIT DROP normally handles cleanup, but that only fires at
-        // transaction commit, so subsequent calls within the same transaction
-        // would otherwise see "relation already exists".
-        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_delta_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
-        let materialize_sql = format!(
-            "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
-             SELECT * FROM {using_clause} AS d",
-            pgt_id = st.pgt_id,
-            using_clause = resolved.trigger_using_sql,
-        );
-        Spi::run(&materialize_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let t_mat = t_mat_start.elapsed();
-
-        // Step 1: DELETE rows touched by the delta.
-        //
-        // For keyed sources, delete ALL rows whose __pgt_row_id appears
-        // anywhere in the delta (both 'D' and 'I' actions).  This is
-        // critical for join deltas: an UPDATE on a source row produces
-        // both a 'D' (old values) and an 'I' (new values) with the same
-        // __pgt_row_id. Deleting all matching row_ids up-front guarantees
-        // the subsequent INSERT never hits a UNIQUE_VIOLATION, eliminating
-        // the fragile ON CONFLICT + pre-delete approach.
-        //
-        // For keyless sources, only delete rows matching 'D' actions
-        // (the __pgt_row_id index is non-unique, so no conflict risk).
-        let t_del_start = Instant::now();
-        let del_count = if !st.has_keyless_source {
+    let materializes_delta = use_delete_insert || use_agg_fast_path || use_explicit_dml;
+    let delta_table = format!("__pgt_delta_{}", st.pgt_id);
+    let delta_select = format!("SELECT * FROM {} AS d", resolved.trigger_using_sql);
+    if materializes_delta {
+        crate::refresh::prepare_owner_temp_table(st, &delta_table, &delta_select)?;
+    }
+    let prepared_diff_capture_cols = if use_explicit_dml && needs_downstream_capture {
+        let cols = get_st_user_columns(st);
+        if !cols.is_empty() {
+            let col_list = cols
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
             let quoted_table = format!(
                 "\"{}\".\"{}\"",
                 schema.replace('"', "\"\""),
                 name.replace('"', "\"\""),
             );
-            let unified_del_sql = format!(
-                "DELETE FROM {quoted_table} WHERE __pgt_row_id IN (\
-                     SELECT __pgt_row_id FROM __pgt_delta_{pgt_id}\
-                 )",
-                pgt_id = st.pgt_id,
+            let pre_table = format!("__pgt_pre_{}", st.pgt_id);
+            let pre_select = format!(
+                "SELECT __pgt_row_id, {col_list} FROM {quoted_table} \
+                 WHERE __pgt_row_id IN (SELECT __pgt_row_id FROM {delta_table})"
             );
-            Spi::connect_mut(|client| {
-                let result = client
-                    .update(&unified_del_sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-DELETE] {}", e)))?;
-                Ok::<usize, PgTrickleError>(result.len())
-            })?
-        } else {
-            Spi::connect_mut(|client| {
-                let result = client
-                    .update(&resolved.trigger_delete_sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-DELETE] {}", e)))?;
-                Ok::<usize, PgTrickleError>(result.len())
-            })?
-        };
-        let t_del = t_del_start.elapsed();
-
-        // Step 2: UPDATE existing rows where values changed.
-        // For keyed sources, the unified DELETE in step 1 already removed
-        // all rows matching delta row_ids (both 'D' and 'I'), so the
-        // UPDATE step is unnecessary — the INSERT will re-create them
-        // with updated values.
-        let t_upd_start = Instant::now();
-        let upd_count = if st.has_keyless_source {
-            // Keyless sources still need the UPDATE step
-            Spi::connect_mut(|client| {
-                let result = client
-                    .update(&resolved.trigger_update_sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-UPDATE] {}", e)))?;
-                Ok::<usize, PgTrickleError>(result.len())
-            })?
-        } else {
-            // Keyed sources: skip UPDATE, unified DELETE + INSERT handles it
-            0
-        };
-        let t_upd = t_upd_start.elapsed();
-
-        // Step 3: INSERT genuinely new rows.
-        // For keyed sources, all conflicting row_ids were removed in step 1,
-        // so no ON CONFLICT clause is needed. DISTINCT ON in the INSERT SQL
-        // (from build_trigger_insert_sql) handles within-delta duplicates.
-        let t_ins_start = Instant::now();
-        let ins_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_insert_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-INSERT] {}", e)))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_ins = t_ins_start.elapsed();
-
-        pgrx::info!(
-            "[PGS_PROFILE] delete_insert: materialize={:.2}ms delete={:.2}ms({}) \
-             update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
-            t_mat.as_secs_f64() * 1000.0,
-            t_del.as_secs_f64() * 1000.0,
-            del_count,
-            t_upd.as_secs_f64() * 1000.0,
-            upd_count,
-            t_ins.as_secs_f64() * 1000.0,
-            ins_count,
-            schema,
-            name,
-        );
-
-        (del_count + upd_count + ins_count, "delete_insert")
-    } else if use_agg_fast_path {
-        // ── B-1: Aggregate fast-path ────────────────────────────────
-        // For all-algebraic aggregate queries, use explicit DML
-        // (DELETE+UPDATE+INSERT) to avoid the MERGE hash-join cost.
-        let t_mat_start = Instant::now();
-
-        // Drop any stale delta table from a prior refresh in the same
-        // transaction (same-transaction multiple refresh edge case).
-        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_delta_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
-        let materialize_sql = format!(
-            "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
-             SELECT * FROM {using_clause} AS d",
-            pgt_id = st.pgt_id,
-            using_clause = resolved.trigger_using_sql,
-        );
-        Spi::run(&materialize_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let t_mat = t_mat_start.elapsed();
-
-        // Step 1: DELETE rows marked for removal
-        let t_del_start = Instant::now();
-        let del_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_delete_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_del = t_del_start.elapsed();
-
-        // Step 2: UPDATE existing rows where values changed
-        let t_upd_start = Instant::now();
-        let upd_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_update_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_upd = t_upd_start.elapsed();
-
-        // Step 3: INSERT genuinely new rows
-        let t_ins_start = Instant::now();
-        let ins_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_insert_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_ins = t_ins_start.elapsed();
-
-        pgrx::info!(
-            "[PGS_PROFILE] agg_fast_path: materialize={:.2}ms delete={:.2}ms({}) \
-             update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
-            t_mat.as_secs_f64() * 1000.0,
-            t_del.as_secs_f64() * 1000.0,
-            del_count,
-            t_upd.as_secs_f64() * 1000.0,
-            upd_count,
-            t_ins.as_secs_f64() * 1000.0,
-            ins_count,
-            schema,
-            name,
-        );
-
-        (del_count + upd_count + ins_count, "agg_fast_path")
-    } else if use_explicit_dml {
-        // ── User-trigger path: explicit DML ─────────────────────────
-        // Decompose the MERGE into DELETE + UPDATE + INSERT so that
-        // user-defined triggers fire with correct TG_OP / OLD / NEW.
-
-        // Step 1: Materialize delta into a temp table (ON COMMIT DROP).
-        // This avoids evaluating the delta query three times.
-        let t_mat_start = Instant::now();
-
-        // Drop any stale delta table from a prior refresh in the same
-        // transaction (same-transaction multiple refresh edge case).
-        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_delta_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
-        let materialize_sql = format!(
-            "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
-             SELECT * FROM {using_clause} AS d",
-            pgt_id = st.pgt_id,
-            using_clause = resolved.trigger_using_sql,
-        );
-        Spi::run(&materialize_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        let t_mat = t_mat_start.elapsed();
-
-        // ST-ST-10: When this ST has downstream ST consumers, snapshot
-        // the affected rows BEFORE applying DML.  The weight-aggregation
-        // wrapper collapses D+I pairs for the same __pgt_row_id into a
-        // single I action, which is correct for the MERGE but loses the
-        // DELETE for old column values.  The pre-snapshot lets us compute
-        // the true effective delta (including value-change DELETEs) after
-        // the DML completes.
-        let needs_diff_capture = has_downstream_st_consumers(st.pgt_id);
-        let diff_capture_cols = if needs_diff_capture {
-            let cols = get_st_user_columns(st);
-            let col_list: String = cols
-                .iter()
-                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let qt = format!(
-                "\"{}\".\"{}\"",
-                schema.replace('"', "\"\""),
-                name.replace('"', "\"\""),
-            );
-
-            let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_pre_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
-
-            let snapshot_sql = format!(
-                "CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
-                 SELECT __pgt_row_id, {col_list} FROM {qt} \
-                 WHERE __pgt_row_id IN (\
-                   SELECT __pgt_row_id FROM __pgt_delta_{pgt_id}\
-                 )",
-                pgt_id = st.pgt_id,
-            );
-            if let Err(e) = Spi::run(&snapshot_sql) {
-                pgrx::warning!(
-                    "[pg_trickle] ST-ST-10: pre-snapshot failed for {}.{}: {} — \
-                     falling back to delta-based capture",
-                    schema,
-                    name,
-                    e,
-                );
-                Vec::new()
-            } else {
-                cols
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Step 2: DELETE removed rows (AFTER DELETE triggers fire)
-        let t_del_start = Instant::now();
-        let del_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_delete_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_del = t_del_start.elapsed();
-
-        // Step 3: UPDATE changed existing rows (AFTER UPDATE triggers fire)
-        // The IS DISTINCT FROM guard (B-1) prevents no-op UPDATE triggers.
-        let t_upd_start = Instant::now();
-        let upd_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_update_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_upd = t_upd_start.elapsed();
-
-        // Step 4: INSERT genuinely new rows (AFTER INSERT triggers fire)
-        let t_ins_start = Instant::now();
-        let ins_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.trigger_insert_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        let t_ins = t_ins_start.elapsed();
-
-        pgrx::info!(
-            "[PGS_PROFILE] explicit_dml: materialize={:.2}ms delete={:.2}ms({}) update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
-            t_mat.as_secs_f64() * 1000.0,
-            t_del.as_secs_f64() * 1000.0,
-            del_count,
-            t_upd.as_secs_f64() * 1000.0,
-            upd_count,
-            t_ins.as_secs_f64() * 1000.0,
-            ins_count,
-            schema,
-            name,
-        );
-
-        // ST-ST-2/ST-ST-10: Capture effective delta to change buffer for
-        // downstream ST consumers.  When a pre-snapshot was taken
-        // (diff_capture_cols is non-empty), use the pre/post comparison
-        // to produce accurate I/D pairs that include value-change DELETEs.
-        // Otherwise, fall back to the delta-based capture.
-        if needs_diff_capture {
-            let mut diff_capture_ok = true;
-            if !diff_capture_cols.is_empty() {
-                if let Err(e) = capture_incremental_diff_to_st_buffer(st, &diff_capture_cols) {
-                    pgrx::warning!(
-                        "[pg_trickle] ST-ST-10: incremental diff capture failed for {}.{}: {} \
-                         — marking downstream STs for reinit",
-                        schema,
-                        name,
-                        e,
-                    );
-                    diff_capture_ok = false;
-                }
-            } else {
-                let user_cols = get_st_user_columns(st);
-                if let Err(e) = capture_delta_to_st_buffer(st, &user_cols) {
-                    pgrx::warning!(
-                        "[pg_trickle] ST-ST: delta capture failed for {}.{}: {} \
-                         — marking downstream STs for reinit",
-                        schema,
-                        name,
-                        e,
-                    );
-                    diff_capture_ok = false;
-                }
-            }
-            if !diff_capture_ok
-                && let Ok(downstream_ids) =
-                    crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-            {
-                for ds_id in &downstream_ids {
-                    if let Err(e2) = StreamTableMeta::mark_for_reinitialize(*ds_id) {
-                        pgrx::warning!(
-                            "[pg_trickle] ST-ST: failed to mark downstream ST {} for reinit: {}",
-                            ds_id,
-                            e2,
-                        );
-                    }
-                }
-            }
+            crate::refresh::prepare_owner_temp_table(st, &pre_table, &pre_select)?;
         }
+        Some(cols)
+    } else {
+        None
+    };
+    if use_pipeline {
+        crate::refresh::pipeline::prepare_merge_pipeline(
+            st,
+            st.pgt_id,
+            &resolved.trigger_using_sql,
+        )?;
+    }
 
-        (del_count + upd_count + ins_count, "explicit_dml")
-    } else if use_prepared {
-        // ── D-2: MERGE via prepared statement ────────────────────────
-        // After ~5 executions PostgreSQL switches from custom to generic
-        // plan, saving ~1-2ms of parse/plan overhead per refresh cycle.
+    // PREPARE is forbidden while SET ROLE is active inside a
+    // security-restricted operation. Prepare the generated statement while
+    // privileged; EXECUTE still runs below as the stream-table owner.
+    if use_prepared {
         let stmt_name = format!("__pgt_merge_{}", st.pgt_id);
-
         let already_prepared = PREPARED_MERGE_STMTS.with(|s| s.borrow().contains(&st.pgt_id));
 
         if !already_prepared {
             let type_list = build_prepare_type_list(resolved.source_oids.len());
-            // DEALLOCATE in case a stale statement exists from a prior
-            // session within this same backend.
-            // Note: DEALLOCATE does not support IF EXISTS in PostgreSQL.
-            // Check pg_prepared_statements first to avoid an error.
+            // DEALLOCATE does not support IF EXISTS. Check the catalog first
+            // in case a stale statement remains in this backend.
             // nosemgrep: rust.spi.query.dynamic-format — stmt_name is derived from numeric pgt_id
             let stale_exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM pg_prepared_statements WHERE name = '{stmt_name}')"
@@ -2742,27 +2434,356 @@ pub fn execute_differential_refresh_with_tuning(
                 s.borrow_mut().insert(st.pgt_id);
             });
         }
+    }
 
-        let params = build_execute_params(&resolved.source_oids, prev_frontier, new_frontier);
-        let execute_sql = format!("EXECUTE {stmt_name}({params})");
+    let ((merge_count, strategy_label), downstream_capture) = with_stream_owner(st, || {
+        let mut downstream_capture = None;
+        let result = if let Some(result) = hash_merge_result {
+            // A1-3b: HASH per-partition MERGE already executed above.
+            result
+        } else if use_pipeline {
+            let (count, stats) = crate::refresh::pipeline::execute_merge_pipeline(
+                st.pgt_id,
+                &resolved.trigger_using_sql,
+                &resolved.merge_sql,
+                crate::config::pg_trickle_pipeline_batch_size(),
+                crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
+            )?;
+            pgrx::debug1!(
+                "[pg_trickle] v0.87 pipeline {}.{} reason={} batches={} rows={} bytes={}",
+                schema,
+                name,
+                pipeline_decision.reason.as_str(),
+                stats.batches_completed,
+                stats.rows_staged,
+                stats.bytes_staged,
+            );
+            crate::shmem::record_pipeline_metrics(
+                pipeline_decision.reason.as_str(),
+                Some((
+                    stats.batches_completed,
+                    stats.rows_staged,
+                    stats.bytes_staged,
+                    stats.largest_batch_rows,
+                    stats.largest_batch_bytes,
+                    stats.oversize_batches,
+                )),
+            );
+            (count, "pipeline")
+        } else if use_delete_insert {
+            // ── PH-D1: DELETE+INSERT path ───────────────────────────────
+            // For small deltas against large tables, separate DELETE + INSERT
+            // avoids the MERGE join cost. The delta is materialized into a
+            // temp table, then applied as two targeted statements.
+            let t_mat_start = Instant::now();
 
-        let n = Spi::connect_mut(|client| {
-            let result = client
-                .update(&execute_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(format!("[MERGE-PREPARED] {}", e)))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        (n, "merge_prepared")
-    } else {
-        // ── MERGE path (default for small deltas) ───────────────────
-        let n = Spi::connect_mut(|client| {
-            let result = client
-                .update(&resolved.merge_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(format!("[MERGE] {}", e)))?;
-            Ok::<usize, PgTrickleError>(result.len())
-        })?;
-        (n, "merge")
-    };
+            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let t_mat = t_mat_start.elapsed();
+
+            // Step 1: DELETE rows touched by the delta.
+            //
+            // For keyed sources, delete ALL rows whose __pgt_row_id appears
+            // anywhere in the delta (both 'D' and 'I' actions).  This is
+            // critical for join deltas: an UPDATE on a source row produces
+            // both a 'D' (old values) and an 'I' (new values) with the same
+            // __pgt_row_id. Deleting all matching row_ids up-front guarantees
+            // the subsequent INSERT never hits a UNIQUE_VIOLATION, eliminating
+            // the fragile ON CONFLICT + pre-delete approach.
+            //
+            // For keyless sources, only delete rows matching 'D' actions
+            // (the __pgt_row_id index is non-unique, so no conflict risk).
+            let t_del_start = Instant::now();
+            let del_count = if !st.has_keyless_source {
+                let quoted_table = format!(
+                    "\"{}\".\"{}\"",
+                    schema.replace('"', "\"\""),
+                    name.replace('"', "\"\""),
+                );
+                let unified_del_sql = format!(
+                    "DELETE FROM {quoted_table} WHERE __pgt_row_id IN (\
+                     SELECT __pgt_row_id FROM __pgt_delta_{pgt_id}\
+                 )",
+                    pgt_id = st.pgt_id,
+                );
+                Spi::connect_mut(|client| {
+                    let result = client
+                        .update(&unified_del_sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-DELETE] {}", e)))?;
+                    Ok::<usize, PgTrickleError>(result.len())
+                })?
+            } else {
+                Spi::connect_mut(|client| {
+                    let result = client
+                        .update(&resolved.trigger_delete_sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-DELETE] {}", e)))?;
+                    Ok::<usize, PgTrickleError>(result.len())
+                })?
+            };
+            let t_del = t_del_start.elapsed();
+
+            // Step 2: UPDATE existing rows where values changed.
+            // For keyed sources, the unified DELETE in step 1 already removed
+            // all rows matching delta row_ids (both 'D' and 'I'), so the
+            // UPDATE step is unnecessary — the INSERT will re-create them
+            // with updated values.
+            let t_upd_start = Instant::now();
+            let upd_count = if st.has_keyless_source {
+                // Keyless sources still need the UPDATE step
+                Spi::connect_mut(|client| {
+                    let result = client
+                        .update(&resolved.trigger_update_sql, None, &[])
+                        .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-UPDATE] {}", e)))?;
+                    Ok::<usize, PgTrickleError>(result.len())
+                })?
+            } else {
+                // Keyed sources: skip UPDATE, unified DELETE + INSERT handles it
+                0
+            };
+            let t_upd = t_upd_start.elapsed();
+
+            // Step 3: INSERT genuinely new rows.
+            // For keyed sources, all conflicting row_ids were removed in step 1,
+            // so no ON CONFLICT clause is needed. DISTINCT ON in the INSERT SQL
+            // (from build_trigger_insert_sql) handles within-delta duplicates.
+            let t_ins_start = Instant::now();
+            let ins_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_insert_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(format!("[PH-D1-INSERT] {}", e)))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_ins = t_ins_start.elapsed();
+
+            pgrx::info!(
+                "[PGS_PROFILE] delete_insert: materialize={:.2}ms delete={:.2}ms({}) \
+             update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
+                t_mat.as_secs_f64() * 1000.0,
+                t_del.as_secs_f64() * 1000.0,
+                del_count,
+                t_upd.as_secs_f64() * 1000.0,
+                upd_count,
+                t_ins.as_secs_f64() * 1000.0,
+                ins_count,
+                schema,
+                name,
+            );
+
+            (del_count + upd_count + ins_count, "delete_insert")
+        } else if use_agg_fast_path {
+            // ── B-1: Aggregate fast-path ────────────────────────────────
+            // For all-algebraic aggregate queries, use explicit DML
+            // (DELETE+UPDATE+INSERT) to avoid the MERGE hash-join cost.
+            let t_mat_start = Instant::now();
+
+            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let t_mat = t_mat_start.elapsed();
+
+            // Step 1: DELETE rows marked for removal
+            let t_del_start = Instant::now();
+            let del_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_delete_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_del = t_del_start.elapsed();
+
+            // Step 2: UPDATE existing rows where values changed
+            let t_upd_start = Instant::now();
+            let upd_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_update_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_upd = t_upd_start.elapsed();
+
+            // Step 3: INSERT genuinely new rows
+            let t_ins_start = Instant::now();
+            let ins_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_insert_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_ins = t_ins_start.elapsed();
+
+            pgrx::info!(
+                "[PGS_PROFILE] agg_fast_path: materialize={:.2}ms delete={:.2}ms({}) \
+             update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
+                t_mat.as_secs_f64() * 1000.0,
+                t_del.as_secs_f64() * 1000.0,
+                del_count,
+                t_upd.as_secs_f64() * 1000.0,
+                upd_count,
+                t_ins.as_secs_f64() * 1000.0,
+                ins_count,
+                schema,
+                name,
+            );
+
+            (del_count + upd_count + ins_count, "agg_fast_path")
+        } else if use_explicit_dml {
+            // ── User-trigger path: explicit DML ─────────────────────────
+            // Decompose the MERGE into DELETE + UPDATE + INSERT so that
+            // user-defined triggers fire with correct TG_OP / OLD / NEW.
+
+            // Step 1: Materialize delta into a temp table (ON COMMIT DROP).
+            // This avoids evaluating the delta query three times.
+            let t_mat_start = Instant::now();
+
+            Spi::run(&format!("INSERT INTO {delta_table} {delta_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is numeric-ID-derived and delta_select is generated by the DVM engine.
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let t_mat = t_mat_start.elapsed();
+
+            // ST-ST-10: When this ST has downstream ST consumers, snapshot
+            // the affected rows BEFORE applying DML.  The weight-aggregation
+            // wrapper collapses D+I pairs for the same __pgt_row_id into a
+            // single I action, which is correct for the MERGE but loses the
+            // DELETE for old column values.  The pre-snapshot lets us compute
+            // the true effective delta (including value-change DELETEs) after
+            // the DML completes.
+            let needs_diff_capture = needs_downstream_capture;
+            let diff_capture_cols = if needs_diff_capture {
+                let cols = prepared_diff_capture_cols.clone().unwrap_or_default();
+                let col_list = cols
+                    .iter()
+                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let qt = format!(
+                    "\"{}\".\"{}\"",
+                    schema.replace('"', "\"\""),
+                    name.replace('"', "\"\""),
+                );
+                let pre_table = format!("__pgt_pre_{}", st.pgt_id);
+                let snapshot_sql = format!(
+                    "INSERT INTO {pre_table} \
+                     SELECT __pgt_row_id, {col_list} FROM {qt} \
+                     WHERE __pgt_row_id IN (SELECT __pgt_row_id FROM {delta_table})"
+                );
+                if cols.is_empty() {
+                    Vec::new()
+                } else if let Err(e) = Spi::run(&snapshot_sql) {
+                    pgrx::warning!(
+                        "[pg_trickle] ST-ST-10: pre-snapshot failed for {}.{}: {} — \
+                     falling back to delta-based capture",
+                        schema,
+                        name,
+                        e,
+                    );
+                    Vec::new()
+                } else {
+                    cols
+                }
+            } else {
+                Vec::new()
+            };
+
+            // Step 2: DELETE removed rows (AFTER DELETE triggers fire)
+            let t_del_start = Instant::now();
+            let del_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_delete_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_del = t_del_start.elapsed();
+
+            // Step 3: UPDATE changed existing rows (AFTER UPDATE triggers fire)
+            // The IS DISTINCT FROM guard (B-1) prevents no-op UPDATE triggers.
+            let t_upd_start = Instant::now();
+            let upd_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_update_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_upd = t_upd_start.elapsed();
+
+            // Step 4: INSERT genuinely new rows (AFTER INSERT triggers fire)
+            let t_ins_start = Instant::now();
+            let ins_count = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.trigger_insert_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            let t_ins = t_ins_start.elapsed();
+
+            pgrx::info!(
+                "[PGS_PROFILE] explicit_dml: materialize={:.2}ms delete={:.2}ms({}) update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
+                t_mat.as_secs_f64() * 1000.0,
+                t_del.as_secs_f64() * 1000.0,
+                del_count,
+                t_upd.as_secs_f64() * 1000.0,
+                upd_count,
+                t_ins.as_secs_f64() * 1000.0,
+                ins_count,
+                schema,
+                name,
+            );
+
+            if needs_diff_capture {
+                downstream_capture = Some(diff_capture_cols);
+            }
+
+            (del_count + upd_count + ins_count, "explicit_dml")
+        } else if use_prepared {
+            // ── D-2: MERGE via prepared statement ────────────────────────
+            // After ~5 executions PostgreSQL switches from custom to generic
+            // plan, saving ~1-2ms of parse/plan overhead per refresh cycle.
+            let stmt_name = format!("__pgt_merge_{}", st.pgt_id);
+
+            let params = build_execute_params(&resolved.source_oids, prev_frontier, new_frontier);
+            let execute_sql = format!("EXECUTE {stmt_name}({params})");
+
+            let n = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&execute_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(format!("[MERGE-PREPARED] {}", e)))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            (n, "merge_prepared")
+        } else {
+            // ── MERGE path (default for small deltas) ───────────────────
+            let n = Spi::connect_mut(|client| {
+                let result = client
+                    .update(&resolved.merge_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(format!("[MERGE] {}", e)))?;
+                Ok::<usize, PgTrickleError>(result.len())
+            })?;
+            (n, "merge")
+        };
+        Ok((result, downstream_capture))
+    })?;
+
+    // Private CDC finalization resumes only after owner SQL has completed.
+    if let Some(diff_capture_cols) = downstream_capture {
+        let capture_result = if diff_capture_cols.is_empty() {
+            capture_delta_to_st_buffer(st, &get_st_user_columns(st))
+        } else {
+            capture_incremental_diff_to_st_buffer(st, &diff_capture_cols)
+        };
+        if let Err(e) = capture_result {
+            pgrx::warning!(
+                "[pg_trickle] ST-ST: downstream delta capture failed for {}.{}: {} — \
+                 marking downstream stream tables for reinitialization",
+                schema,
+                name,
+                e,
+            );
+            if let Ok(downstream_ids) =
+                crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+            {
+                for downstream_id in downstream_ids {
+                    StreamTableMeta::mark_for_reinitialize(downstream_id)?;
+                }
+            }
+        }
+    }
 
     // EC-01 / v0.38.0: non-deduplicated join deltas can leave stale row_ids
     // from earlier refresh cycles that are not present in the current delta.
@@ -2790,12 +2811,17 @@ pub fn execute_differential_refresh_with_tuning(
             schema.replace('"', "\"\""),
             name.replace('"', "\"\""),
         );
-        super::phd1::cleanup_cross_cycle_phantoms(
-            st.pgt_id,
-            &quoted_table,
-            &effective_defining_query,
-            10_000,
-        )?
+        super::phd1::prepare_cross_cycle_phantom_table(st, &effective_defining_query)?;
+        let cleanup_result = with_stream_owner(st, || {
+            super::phd1::cleanup_cross_cycle_phantoms(
+                st.pgt_id,
+                &quoted_table,
+                &effective_defining_query,
+                10_000,
+            )
+        });
+        crate::refresh::drop_owner_temp_table(&format!("__pgt_recon_{}", st.pgt_id));
+        cleanup_result?
     } else {
         0
     };
@@ -2823,8 +2849,10 @@ pub fn execute_differential_refresh_with_tuning(
             schema.replace('"', "\"\""),
             name.replace('"', "\"\""),
         );
-        Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        with_stream_owner(st, || {
+            Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
     }
 
     let t2 = Instant::now();
