@@ -104,6 +104,15 @@ int      set_config_option(const char *name, const char *value,
 }
 uint32_t GetCurrentTransactionId(void)          { return 0; }
 uint32_t GetCurrentTransactionIdIfAny(void)     { return 0; }
+uint32_t GetUserId(void)                         { return 0; }
+void     GetUserIdAndSecContext(uint32_t *userid, int *sec_context) {
+    if (userid) *userid = 0;
+    if (sec_context) *sec_context = 0;
+}
+void     SetUserIdAndSecContext(uint32_t userid, int sec_context) {
+    (void)userid;
+    (void)sec_context;
+}
 int16_t  get_typlen(uint32_t typid)            { (void)typid; return -1; }
 _Bool    get_typbyval(uint32_t typid)          { (void)typid; return 0; }
 void     get_typlenbyval(uint32_t typid, int16_t *typlen, _Bool *typbyval) {
