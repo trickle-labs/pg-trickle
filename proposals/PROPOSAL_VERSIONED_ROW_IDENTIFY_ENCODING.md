@@ -216,7 +216,7 @@ to a stable V2 type tag. There is no generic `::TEXT`, output-function, or
 | `time` | unsigned internal microseconds |
 | `timestamp`, `timestamptz` | sign-flipped internal microseconds; `timestamptz` is UTC |
 | `timetz` | sign-flipped GMT-equivalent microseconds, then sign-flipped stored zone offset in seconds west of UTC |
-| `interval` | sign-flipped `interval_cmp_value()` result as big-endian `int64` |
+| `interval` | sign-flipped complete `interval_cmp_value()` result as big-endian `int128` |
 | `inet`, `cidr` | family, prefix length, and canonical address bytes; `cidr` host bits are zeroed |
 | `macaddr`, `macaddr8` | network-order address bytes |
 | `bit`, `varbit` | bit length followed by escaped packed bits |
@@ -235,7 +235,15 @@ therefore `1 month` and `30 days` encode identically. The physical
 Enum labels are portable across dump/restore but mutable through `ALTER TYPE
 ... RENAME VALUE`. The existing ALTER TYPE DDL hook must continue to mark every
 directly and transitively dependent stream table for reinitialization before it
-can consume changes encoded with the new label. V2 tests this path explicitly.
+can consume changes encoded with the new label.
+
+The enum-label metadata cached in `fn_extra` is backend-local. A DDL hook in one
+backend cannot clear a cache in another backend by itself. The encoder must
+register a PostgreSQL shared-invalidation callback for enum catalog changes (or
+an equivalent cross-backend generation mechanism). Each backend observes that
+invalidation, marks its local enum encoder caches stale, and rebuilds them
+before the next encoding call. The cache must never continue emitting a label
+that was renamed and committed in another backend.
 
 ### 6.2 Structural encoders
 
@@ -271,6 +279,14 @@ strings can compare equal under those collations, and ICU sort keys are not a
 stable persisted identity across library upgrades. Rejection is preferable to
 silently changing row identity after an operating-system update.
 
+Any property currently named `native_order_preserving` must be named and
+documented as `default_nonnull_btree_order_preserving`. It applies only to
+non-NULL values using PostgreSQL's default ascending B-tree operator class. It
+does not promise PostgreSQL's default NULL placement, descending index order,
+non-default operator classes, or arbitrary expression-index ordering. Primary
+key fields are normally non-NULL and use the default operator class, which is
+the locality case this property is intended to describe.
+
 ### 6.4 Validation
 
 `CREATE STREAM TABLE` and `ALTER ... SET QUERY` validate every possible identity
@@ -301,10 +317,14 @@ copy only the completed varlena result into PostgreSQL-owned memory. It must not
 construct `Vec<String>`, call display output functions, or allocate once per
 field.
 
-The function is `IMMUTABLE` and `PARALLEL SAFE`; the type policy in section 6 is
-part of making those declarations truthful. Existing V1 hash functions retain
-their old behavior during migration and are removed only after no V1 trigger or
-stored expression can reference them.
+The generated identity expression is `PARALLEL SAFE`, and its volatility must
+match the type registry: an enum-bearing encoder expression is `STABLE` because
+enum labels can be renamed, while an enum-free encoder expression may be
+`IMMUTABLE`. The generated `row_probe_v1(bytea)` helper is always `IMMUTABLE`
+because it depends only on its completed byte input. The cross-backend enum
+invalidation rule in section 6.1 is required in addition to these declarations.
+Existing V1 hash functions retain their old behavior during migration and are
+removed only after no V1 trigger or stored expression can reference them.
 
 ## 8. Bounded B-Tree Probe
 
@@ -380,19 +400,74 @@ same full identity and may occur more than once, so their probe index remains
 non-unique and counted-delete logic remains authoritative.
 
 For unique but unbounded identity schemas, exact uniqueness is maintained by
-the existing single-writer refresh serialization plus exact MERGE matching; the
-database index is intentionally non-unique because no bounded B-tree key can
-prove uniqueness of arbitrary-length values. V2 must preserve that writer
-serialization across scheduled, manual, and IMMEDIATE refresh paths.
+the lock protocol below plus exact matching; the database index is intentionally
+non-unique because no bounded B-tree key can prove uniqueness of arbitrary-length
+values. Scheduled and manual refreshes retain their existing single-writer
+transaction advisory lock and catalog-row serialization. This protocol does not
+remove that serialization from whole-table refresh paths.
 
-Concretely, scheduled/manual refresh keeps the existing transaction advisory
-lock keyed by `pgt_id` and catalog-row serialization. At plan time, any IMMEDIATE
-stream table with a unique but unbounded identity is forced to
-`IvmLockMode::Exclusive`, whose BEFORE trigger takes the blocking
-`pg_advisory_xact_lock` on the stream-table OID. The lighter concurrent
-`RowExclusive` mode is permitted only when a database UNIQUE probe index proves
-identity uniqueness. Failing to acquire or hold the required lock aborts the
-refresh; it must never continue without database-enforced uniqueness.
+The existing query-shape lock analysis remains authoritative. `Exclusive` is
+still required for aggregates, joins, `DISTINCT`, and other cross-row query
+shapes. `RowExclusive` remains available for simple scan/filter/project chains
+when database-enforced uniqueness is sufficient. Per-identity locking replaces
+only the additional table-wide serialization required by an unbounded identity
+in an otherwise-concurrent simple query; it does not make a join or aggregate
+concurrently maintainable.
+
+### 9.1 Per-identity lock protocol
+
+Per-identity maintenance runs from the existing statement-level `AFTER` trigger,
+where transition tables provide all affected old and new identities. The trigger
+deduplicates those identities, sorts them by canonical row-ID bytes, acquires
+the locks below, and only then starts delta application. A statement-level
+`BEFORE` trigger cannot collect the complete affected identity set and is not a
+valid acquisition point.
+
+The protocol has two levels:
+
+1. A stream-table gate is acquired in shared mode by per-identity maintenance.
+2. The affected per-identity advisory locks are acquired exclusively, in sorted
+   order, after the shared gate.
+
+Migration, reinitialization, manual/full refresh, mode changes, and every other
+whole-table operation acquire the same gate in exclusive mode. Operations that
+span multiple stream tables acquire exclusive gates in ascending stream-table
+OID order. Existing `pgt_id` advisory locks and catalog-row locks remain in
+place where their current paths require them.
+
+The advisory-key derivation is part of the V2 compatibility contract:
+
+```text
+ADVISORY_LOCK_VERSION = 1
+hash       = XXH3-64, seed 0
+gate input = ASCII("pg_trickle/gate/v1") || stream_table_oid:u32_be
+row input  = ASCII("pg_trickle/row/v1")  || stream_table_oid:u32_be
+             || row_id_length:u64_be || complete_row_id
+lock key   = hash output reinterpreted as signed two's-complement int64
+```
+
+The namespace strings, field widths, byte order, algorithm, seed, version, and
+signed interpretation are frozen together. Hash collisions only serialize
+unrelated identities. Different lock-key algorithms or versions in concurrently
+loaded binaries are unsafe because they would not acquire the same lock; the
+stored `row_lock_version` guard in section 10 therefore rejects a mismatch.
+
+For an unbounded unique identity, the exact probe-plus-full-row-ID check is
+performed only after all per-identity locks are held. This path is supported at
+`READ COMMITTED`, and the check must run as a new read-write command so it sees
+commits made while the advisory lock was being acquired. At `REPEATABLE READ`
+or `SERIALIZABLE`, the path raises `serialization_failure` (SQLSTATE `40001`)
+before exact DML rather than checking an old transaction snapshot; the caller
+must retry the transaction. It must never silently insert after an invisible
+conflict. Bounded identities with a database UNIQUE probe index continue to
+rely on the unique-index conflict protocol and do not need this non-unique-index
+exact-check exception.
+
+Sorted acquisition prevents cycles within one collected lock set. It cannot
+prevent every deadlock between several statements in the same transaction;
+PostgreSQL may still abort one participant, which is normal retryable behavior.
+Failure to acquire or hold a required gate or identity lock aborts the refresh;
+the operation must not continue without its promised coordination.
 
 `RowIdStrategy` and `RowIdSchema` continue to decide which logical fields form an
 identity. They do not select a storage encoding. V2 has one encoder.
@@ -407,12 +482,15 @@ Trigger CDC and WAL CDC both emit full V2 identities. A consumer derives or
 reads the V2 probe before indexed matching. No hot-path lookup of downstream
 stream-table preferences is required because no such preference exists.
 
-The V2 extension-upgrade DDL adds non-null `row_identity_version` and
-`row_probe_version` columns to `pgtrickle.pgt_change_buffers` and the corresponding
-version state for stream-table storage. Buffer registry metadata records both
-versions. Runtime readers refuse mismatches before consuming a row.
-The guard is enforced in code, not only by extension upgrade SQL, because a new
-shared library can be installed before `ALTER EXTENSION ... UPDATE` runs.
+The V2 extension-upgrade DDL adds non-null `row_identity_version`,
+`row_probe_version`, and `row_lock_version` columns to
+`pgtrickle.pgt_change_buffers` and the corresponding version state for
+stream-table storage. Buffer registry metadata records all three versions.
+Runtime readers refuse mismatches before consuming a row. The guard is enforced
+in code, not only by extension upgrade SQL, because a new shared library can be
+installed before `ALTER EXTENSION ... UPDATE` runs. All concurrently loaded V2
+backends must therefore use the same identity, probe, and advisory-lock
+algorithms.
 
 ## 11. Compatibility Contract
 
@@ -444,6 +522,29 @@ explicit operational reason to transport this non-contractual index helper.
 
 V1 and V2 state cannot coexist in one refresh graph. Migration is an explicit
 rebuild, not `ALTER COLUMN ... TYPE`, and not a rolling per-table conversion.
+
+The operational states are:
+
+```text
+V1_ACTIVE
+   V1 capture and refresh continue normally.
+   The updated binary may run V2 dry-run and preflight checks.
+
+MIGRATING_TO_V2
+   V1 refresh is disabled.
+   V2 capture is armed at the recorded frontier.
+   Rebuild and catch-up are durable and resumable.
+
+V2_ACTIVE
+   Only V2 capture and refresh are accepted.
+```
+
+Installing or updating the extension binary does not itself start migration.
+Between `ALTER EXTENSION ... UPDATE` and the explicit migration cutover,
+ordinary V1 refresh continues in `V1_ACTIVE`; the V2 binary understands V1
+only far enough to preflight, cut over, resume, or fail safely. The explicit
+cutover is the transition into `MIGRATING_TO_V2`, so there is no mixed V1/V2
+refresh graph even though installation and operational migration are separate.
 
 ### 12.1 Preflight
 
@@ -555,9 +656,20 @@ Tests must include primary-key updates, NULL group keys, keyless duplicates,
 deep join composition, synthetic identities, and wide TOASTed values.
 
 Concurrency tests must run two sessions against an unbounded unique identity in
-each refresh mode and prove that exactly one logical row survives. Enum tests
-must rename an in-use label and prove that the existing DDL hook marks the full
-downstream DAG for reinitialization before further refresh.
+each refresh mode. At `READ COMMITTED`, they must prove that exactly one
+logical row survives when one session waits for the other. At `REPEATABLE READ`
+and `SERIALIZABLE`, they must prove that the stale-snapshot path returns
+SQLSTATE `40001` and cannot create a duplicate. Tests must also verify that
+simple scan/filter/project maintenance uses the shared gate and per-identity
+locks, while joins and aggregates retain their required `Exclusive` query-shape
+lock.
+
+Enum invalidation must be a two-session test: session A warms the encoder cache,
+session B renames an in-use enum label and commits, and session A encodes again.
+Session A must observe the cross-backend invalidation and either resolve the new
+label or reject the affected stream state; it must never emit stale bytes. The
+same test must prove that the DDL hook marks the full downstream DAG for
+reinitialization before further refresh.
 
 ### 14.4 Migration tests
 
@@ -568,6 +680,8 @@ downstream DAG for reinitialization before further refresh.
 - crash after each durable migration phase and successful resume;
 - V1 binary/V2 catalog and V2 binary/V1 catalog rejection;
 - unsupported-type preflight with no partial changes;
+- extension update leaves the graph `V1_ACTIVE` until explicit cutover, and
+   each `MIGRATING_TO_V2` phase resumes with V2 capture armed;
 - logical-replication resnapshot procedure.
 
 The final oracle is a from-scratch V2 rebuild: migrated output must be exactly
@@ -590,9 +704,10 @@ are numeric or that every non-keyless identity has a unique full-width index.
 join, aggregate, set, window, and synthetic identities to the shared encoder.
 Delete `::TEXT` row-ID construction and hard-coded numeric sentinels.
 
-**Stage 5: Add version guards and migration.** Persist identity/probe versions,
-add runtime mismatch rejection, implement preflight and resumable cutover, and
-rebuild every stream table and shared buffer.
+**Stage 5: Add version guards, locking, and migration.** Persist
+identity/probe/lock versions, add runtime mismatch rejection, implement the
+query-shape lock and isolation contracts, add preflight and resumable cutover,
+and rebuild every stream table and shared buffer.
 
 **Stage 6: Prove it.** Run the full correctness matrix, migration fault tests,
 and performance benchmarks. Update SQL reference, architecture, upgrade,
@@ -652,6 +767,14 @@ following:
 - probe indexes remain bounded for arbitrary valid input size;
 - unsupported types and collations fail before state is created;
 - V1/V2 mismatch cannot consume or mutate persisted state;
+- lock-key versions and algorithms are identical across concurrently loaded
+  binaries;
+- unbounded exact checks either use a fresh `READ COMMITTED` command or return
+  retryable `serialization_failure` under transaction-snapshot isolation;
+- per-identity locks supplement, rather than replace, required query-shape
+  `Exclusive` locking;
+- enum cache invalidation is observed across backends;
+- extension update alone leaves V1 operational until explicit migration cutover;
 - migration loses or duplicates no committed change under concurrent writes;
 - interrupted migration resumes safely;
 - external compatibility breaks and resnapshot steps are documented;
