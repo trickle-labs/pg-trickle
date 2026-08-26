@@ -480,6 +480,9 @@ defines the shared invariants and test matrix.
 | [v0.87.12](roadmap/v0.87.12.md) | Publication Security: caller-equivalent database privileges, explicit publication ownership, provenance-safe bindings, and atomic catalog integration | "Publication APIs grant no authority beyond the caller's own database rights." | Planned | 6 pw | [Full details](roadmap/v0.87.12.md) |
 | [v0.87.13](roadmap/v0.87.13.md) | pg_tide Outbox Boundary: caller-context pg_tide calls, separate private bookkeeping, rollback-safe integration, and absent, denied, and authorized compatibility tests | "pg_trickle never lends its owner identity to pg_tide." | Planned | 6 pw | [Full details](roadmap/v0.87.13.md) |
 | [v0.87.14](roadmap/v0.87.14.md) | Correctness Program Completion: faithful mandatory composition shapes and histories, live metamorphic families, observed-path semantic coverage, an authoritative snapshot plan, an exact schema oracle with structured admission outcomes, the deeper shrink ladder, and admission-boundary coverage including #953 | "The correctness gate tests what the roadmap says it tests." | Planned | 6-7 pw | [Full details](roadmap/v0.87.14.md) |
+| [v0.87.15](roadmap/v0.87.15.md) | Versioned Row Identity V2 Contracts: normative canonical BYTEA wire format, identity-domain and type registry, typed datum encoder, validation, resource bounds, and independent golden vectors | "Every row identity is deterministic, exact, and portable across supported PostgreSQL environments." | Planned | 7 pw | [Full details](roadmap/v0.87.15.md) |
+| [v0.87.16](roadmap/v0.87.16.md) | Versioned Row Identity V2 Engine Integration: BYTEA storage, direct bounded and expression-probe indexes, trigger/WAL CDC, DVM producers, exact matching, version guards, and replication compatibility | "The same exact row identity drives storage, capture, refresh, and matching." | Planned | 12 pw | [Full details](roadmap/v0.87.16.md) |
+| [v0.87.17](roadmap/v0.87.17.md) | Versioned Row Identity V2 Hardening and Recreation: cross-path correctness, performance gates, non-destructive preflight, stream-table recreation, external resnapshot guidance, and privacy controls | "I can adopt exact row identities with a clear, repeatable rebuild and no silent compatibility trap." | Planned | 9 pw | [Full details](roadmap/v0.87.17.md) |
 | [v0.88.0](roadmap/v0.88.0.md) | Vectorized Aggregates & Delta Planning: DiffContext decomposition into CdcContext/CacheContext/OptimizationContext first (ENG-1), a vectorized columnar path for pure-aggregate stream tables gated on an ADR that revisits the v0.76.0 Arrow dependency removal (MT-8), and cost-based operator scheduling reordering operators within delta queries based on estimated cardinality (LT-9) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.88.0.md) |
 | [v0.89.0](roadmap/v0.89.0.md) | Incremental Window Functions: a bounded, crash-safe auxiliary state model (LT-7a), rank-family algorithms (LT-7b), offset and boundary algorithms (LT-7c), aggregate-over-window algorithms (LT-7d), and documented fallback with reason codes and support-matrix entries for uncovered frames (LT-7e) | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.89.0.md) |
 | [v0.90.0](roadmap/v0.90.0.md) | Freshness Controller & Self-Tuning: target_freshness becomes authoritative with every scheduler knob demoted to an optional override (SLA-1), a closed-loop controller choosing refresh timing, DIFFERENTIAL vs FULL, batch size, concurrency, priority and deferral from measured cost (SLA-2), adaptive worker pool sizing driven by CPU utilization, queue depth and SLA risk (SLA-3), pgtrickle.freshness() plus sla_status in pg_stat_pgtrickle, health_check() and Prometheus/OTel (SLA-4), continuous infeasible-SLA detection (SLA-5), and an audit that retires the knobs users should not need (SLA-6) | "Tell it how fresh I need data; it figures out the rest." | Planned | Large | [Full details](roadmap/v0.90.0.md) |
@@ -505,9 +508,11 @@ is not a plan.
 > person-weeks before v0.88.0, and v0.87.14 adds a further 6-7 to finish what
 > they claimed. They do not add SQL features. They build the oracle,
 > generation, contracts, corpus, and release gates that must protect later DVM
-> changes. The seven lifecycle-security releases add another 42 person-weeks.
-> They establish the execution boundary that later engine changes must
-> preserve.
+> changes. The seven lifecycle-security releases add another 42 person-weeks;
+> they establish the execution boundary that later engine changes must
+> preserve. The three row-identity releases add 28 person-weeks for the exact
+> V2 encoding, engine integration, and intentional stream-table recreation
+> workflow before vectorized DVM changes begin.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
@@ -663,6 +668,12 @@ v0.87.7-13 ─── Lifecycle security: owner execution, refresh isolation, har
     │
 v0.87.14 ─── Correctness program completion: faithful composition cases, live metamorphic families, observed-path coverage, authoritative snapshot plan, exact schema oracle, deeper shrinking
     │
+v0.87.15 ─── Versioned row identity V2 contracts: canonical BYTEA wire format, type/domain registry, typed encoder, validation, golden vectors
+
+v0.87.16 ─── Versioned row identity V2 engine integration: BYTEA storage, direct/probe indexes, CDC and DVM producers, exact matching, compatibility guards
+
+v0.87.17 ─── Versioned row identity V2 hardening and recreation: cross-path gates, benchmarks, non-destructive preflight, stream-table rebuild workflow, consumer resnapshot and privacy controls
+
 v0.88    ─── Vectorized aggregates & delta planning: DiffContext split first, columnar aggregate path behind a dependency ADR, cost-based operator scheduling
     │
 v0.89    ─── Incremental window functions: bounded auxiliary state, rank/offset/aggregate-over-window algorithms, documented fallback with reason codes
@@ -1037,9 +1048,15 @@ shapes they are named for, metamorphic families run against live PostgreSQL,
 semantic coverage comes from observed DVM decisions, the snapshot plan becomes
 authoritative rather than descriptive, the schema oracle becomes exact, and the
 shrink ladder is finished.
-v0.88.0 and v0.89.0 then change engine internals: a vectorized aggregate path
-and cost-based delta planning first, followed by incremental window-function
-algorithms, with no deployment or API change.
+The three-release row-identity V2 sequence then replaces the hashed `BIGINT`
+identity with exact canonical `BYTEA`: v0.87.15 freezes the wire and type
+contracts, v0.87.16 carries them through storage, CDC, DVM, and matching, and
+v0.87.17 closes the cross-path, performance, privacy, and recreation-based
+upgrade gates. Existing source tables remain intact, but pre-1.0 stream-table
+state is deliberately dropped and recreated; external consumers resnapshot
+against the new contract. v0.88.0 and v0.89.0 then change engine internals: a
+vectorized aggregate path and cost-based delta planning first, followed by
+incremental window-function algorithms, with no deployment or API change.
 
 v0.90.0 makes freshness authoritative: the closed-loop controller derives the
 schedule, the DIFFERENTIAL/FULL decision, batch sizes, concurrency and priority
