@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Target:** Pre-1.0 / v0.83.0 DVM semantic fidelity work
 **Decision:** Replace hashed `BIGINT` row identities with canonical `BYTEA`
-**Migration:** Rebuild every existing stream table; mixed V1/V2 operation is unsupported
+**Upgrade:** Recreate every existing stream table; in-place V1/V2 migration is unsupported
 
 ## 1. Executive Decision
 
@@ -637,184 +637,51 @@ rules:
 - dump, support-bundle, and diagnostic documentation warns that internal
    identities can retain values omitted by a downstream projection.
 
-## 12. Migration and Cutover
+## 12. Upgrade and Stream-Table Recreation
 
-V1 and V2 state cannot coexist in one refresh graph. `ALTER EXTENSION UPDATE`
-installs V2-capable code, catalog guards, and the migration command, but does not
-rebuild a graph. Ordinary V1 capture and refresh continue in the `V1_ACTIVE`
-state after the extension update. Migration is a separate, dry-runnable,
-resumable administrative operation, not `ALTER COLUMN ... TYPE` and not a
-rolling per-table conversion. The V2-capable binary understands V1 state for
-preflight and for the controlled transition, but normal refresh never mixes
-versions.
+V1 and V2 state cannot coexist in one refresh graph. Because there are no
+production V1 databases to preserve, V2 does not implement an in-place migration
+or a V1 change replay protocol. This is an intentional pre-1.0 breaking change:
+existing stream-table state is discarded and rebuilt from the unchanged source
+tables.
 
-V2 chooses a **durable base image**, not an exported-snapshot holder. PostgreSQL
-exported snapshots cease to be importable when their exporting transaction ends
-and do not survive a postmaster crash. The cutover therefore materializes logged
-staging relations in the same transaction that changes capture version. Rebuild
-can resume from those relations after a backend or postmaster crash without
-inventing a new snapshot or frontier. The cost is an explicitly long source-write
-outage while the base image is copied; reducing that outage requires a separate
-protocol and proof.
+The supported upgrade procedure is:
 
-Migration uses this state model:
+1. pause the scheduler and export each stream table's definition, query,
+   schedule, refresh mode, and dependency order;
+2. record external publication, outbox, dbt, DuckLake, and replication consumers
+   that depend on `__pgt_row_id` or stream-table storage;
+3. drop V1 stream tables in reverse dependency order using the supported SQL API;
+   source tables and their data are not dropped;
+4. remove the now-unused V1 change-buffer state through the extension's cleanup
+   path, with no attempt to replay it into V2;
+5. install the V2 extension build and restart PostgreSQL when the shared library
+   has changed, so no backend retains V1 extension code;
+6. recreate stream tables in dependency order with the recorded definitions;
+   each table receives a fresh V2 initial refresh; and
+7. recreate or resnapshot external consumers after updating them for the
+   `BYTEA` row-ID contract, then resume the scheduler.
 
-| State | Capture and refresh contract |
-|---|---|
-| `V1_ACTIVE` | V1 capture and refresh continue normally. V2 preflight and dry-run are available, but no V2 state is consumed. |
-| `MIGRATING_TO_V2` | V1 refresh is disabled. A durable V2 base image exists, V2 trigger capture is armed, and rebuild plus replay are resumable. No mixed V1/V2 graph is refreshable. |
-| `V2_ACTIVE` | Only V2 capture and refresh are accepted. |
+Source writes should be paused while the V1 graph is being removed and the V2
+graph is being recreated. If writes cannot be paused, the operator must recreate
+the graph using the normal source-capture setup before allowing writes and accept
+that the initial refresh defines the new V2 state; V2 does not promise to replay
+changes made during the recreation window.
 
-Durable migration phases under `MIGRATING_TO_V2` are `BASE_STAGED`,
-`REBUILDING`, `REPLAYING`, and `READY_TO_ACTIVATE`. Phase, staging generation,
-per-table rebuild state, and per-buffer replay progress are catalog state. The
-transition into `MIGRATING_TO_V2` is committed only by the cutover transaction
-that creates the base image and replaces capture. An extension update alone does
-not begin the operational outage.
+The V2 preflight is deliberately small and fail-safe. It validates all identity
+types, typmods, collations, source-key eligibility, operator classes, and
+PostgreSQL-major registry contracts; detects any remaining V1 stream tables or
+buffers; checks that external consumers are acknowledged for resnapshot; and
+reports unsupported identities before changing state. If V1 state remains, the
+operation fails with instructions to drop and recreate the affected stream
+tables. It never partially converts a table, changes source data, or mixes V1
+and V2 buffers in one graph.
 
-### 12.1 Binary rollout barrier
-
-PostgreSQL can keep an already-loaded extension object in a backend after files
-on disk are replaced. Before cutover, the administrator must install the bridge
-release on every server, perform a full postmaster restart, and then apply the
-extension SQL update. A session drain without a postmaster restart is not the
-documented V2 procedure. The migration command verifies that the loaded bridge
-build ID and SQL catalog version agree before preflight and again in the cutover
-transaction. This barrier ensures that a waiting source writer cannot resume
-after cutover through a backend still running V1 code.
-
-### 12.2 Preflight
-
-Before changing state, migration must:
-
-1. validate all identity types, typmods, collations, source-key eligibility,
-   operator classes, and PostgreSQL-major registry contracts;
-2. enumerate every source, shared buffer, stream table, and downstream edge;
-3. verify required privileges and estimate space for logged staging, replacement
-   storage, indexes, WAL, and the configured V2 capture reserve;
-4. report publications and external dependencies that require resnapshotting;
-5. require publications or subscriptions that depend on the V1 `BIGINT` identity
-   to be paused and marked for resnapshot;
-6. enumerate active and prepared transactions holding conflicting source locks,
-   and stop or time out without state change until they are resolved;
-7. reject foreign tables, externally mutable relations, and connectors that
-   cannot participate in the local lock-and-snapshot contract; and
-8. stop before making changes if any stream table cannot be encoded by V2.
-
-Dry-run executes the complete preflight and reports the planned graph, storage
-replacement, estimated space, unsupported fields, and external resnapshot work
-without changing catalog or capture state.
-
-Preflight inventories pg_trickle-managed and custom publications through
-`pg_publication_rel`, records known publication OIDs and storage relations, and
-requires explicit administrator acknowledgement for subscribers that cannot be
-discovered from the publisher. Cutover disables managed publications and writes
-durable `RESNAPSHOT_REQUIRED` records. V2 activation does not re-enable them.
-After V2 activation and subscriber schema preparation, an explicit administrator
-action recreates the managed publication while retaining `RESNAPSHOT_REQUIRED`;
-the subscriber then takes its fresh initial snapshot and begins streaming.
-A second explicit acknowledgement records completion and clears the requirement.
-Unmanaged publications remain a preflight blocker until the administrator
-disables and acknowledges them. The migration status view exposes every
-outstanding record.
-
-### 12.3 WAL CDC normalization
-
-Direct WAL-to-V2 cutover is not supported by this migration. While the graph is
-still `V1_ACTIVE`, every WAL source transitions to trigger CDC through the
-existing overlap protocol: arm V1 triggers before selecting the final WAL
-frontier, drain the slot through a frontier proven safe with respect to active
-and prepared transactions, deduplicate overlap, and commit `TRIGGER` mode only
-after all V1 changes are durable. Automatic transition back to WAL is disabled
-for the migration generation.
-
-Cutover cannot start until every source reports stable trigger mode and no WAL
-transition is in progress. After the graph reaches `V2_ACTIVE`, each eligible
-source may independently transition back to WAL using V2 buffers and the normal
-V2 overlap protocol. This makes trigger and WAL behavior explicit without
-equating transaction visibility with LSN order.
-
-### 12.4 Trigger cutover and durable base
-
-The cutover transaction performs these steps:
-
-1. pause scheduling, acquire the graph-wide migration gate, wait for active
-   refreshes to finish, and re-run preflight under the gate;
-2. enumerate local source parents and writable leaf partitions, then execute
-   `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` in deterministic relation-OID
-   order with an administrator-configured lock timeout;
-3. after all locks are held, take a fresh command snapshot and materialize every
-   authoritative source into logged staging relations in an extension-owned
-   migration schema, owned by the extension owner, with schema and relation
-   privileges revoked from `PUBLIC` and stream-table owners;
-4. install V2 trigger definitions and empty V2 buffers, record identity/probe
-   versions and `BASE_STAGED`, and retire V1 buffers in the same transaction;
-5. commit the base image, capture switch, and migration state atomically; then
-   release the source locks so waiting writers continue through V2 triggers.
-
-`SHARE ROW EXCLUSIVE` conflicts with `ROW EXCLUSIVE`, `SHARE UPDATE EXCLUSIVE`,
-`SHARE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, and `ACCESS EXCLUSIVE`; ordinary
-SELECT and `SELECT FOR SHARE/UPDATE` table-lock modes do not conflict. Source
-INSERT, UPDATE, DELETE, MERGE, COPY FROM, and prepared transactions that changed
-a source hold a conflicting `ROW EXCLUSIVE` lock, so cutover waits for them to
-commit or abort before taking the base snapshot. DDL is likewise excluded. Lock
-timeout aborts the cutover transaction and leaves the graph `V1_ACTIVE`.
-
-Because all source-write locks are held before the fresh snapshot, every
-transaction that changed a source either finishes before the base image or waits
-and executes after V2 capture is installed. V1 buffered changes are retired only
-in the transaction whose logged base image includes their committed effects.
-Waiting transactions that began before cutover still execute the bridge binary
-and the post-cutover V2 trigger definitions.
-
-The invariant is:
-
-> Every committed source change is represented either in the durable base image
-> or in V2 trigger CDC committed after capture switches, exactly once.
-
-### 12.5 Rebuild, replay, and capacity
-
-Rebuild reads only the immutable staging generation and writes replacement
-stream storage in dependency order. Each completed shadow table and index is
-recorded transactionally, so a crash retries only incomplete work. Staging
-relations have no user DML API; resume verifies their owner, ACL, generation,
-schema, and recorded row counts before use. They remain logged and restricted
-until activation and external resnapshot obligations complete.
-
-V2 capture rows carry the migration generation. Replay uses durable per-buffer
-progress; applying one correctness-preserving batch to shadow storage and
-advancing its progress occur in the same database transaction. A crash commits
-both or neither. Captured rows are retained until every dependent consumer has
-advanced beyond them. Activation atomically swaps all completed storage,
-persists consumer positions, marks the graph `V2_ACTIVE`, and resumes scheduling.
-Changes committed after the activation batch's visible boundary remain in the
-V2 buffer for the ordinary scheduler; there is no unarmed interval.
-
-Merely pausing rebuild at a disk watermark is forbidden because capture would
-continue to grow. Preflight creates a finite migration capture quota backed by
-reserved capacity. Every V2 trigger transaction reserves its projected buffer
-bytes under serialized quota accounting before inserting capture rows. A soft
-watermark emits status, metrics, and warnings but does not claim to stop buffer
-growth. If a transaction cannot reserve space below the hard watermark, the
-trigger raises a documented error and the entire source transaction rolls back;
-committed source data must never outrun durable capture. Filesystem exhaustion
-also aborts the source transaction through normal transactional trigger
-semantics. Operators can increase capacity or let replay release quota before
-retrying the write.
-
-### 12.6 Failure and rollback
-
-Migration phase is durable catalog state. After cutover, a crash leaves V2
-trigger capture armed, the logged base generation intact, and the graph
-non-refreshable until rebuild resumes. Re-running migration continues from the
-recorded phase and progress. It neither imports an expired snapshot nor creates
-a new frontier. If the cutover transaction itself aborts or the server crashes
-before it commits, PostgreSQL rolls back staging and capture changes together and
-the graph remains `V1_ACTIVE`.
-
-Rollback is supported only before V2 cutover. After cutover, returning to V1
-requires restoring a backup or rebuilding all stream tables and CDC state with a
-V1 binary. Older binaries must reject V2 catalog state explicitly.
+There is no `V1_ACTIVE`, `MIGRATING_TO_V2`, or crash-resumable cutover state in
+V2. A failed recreation is repaired by dropping the incomplete V2 stream-table
+graph and running the documented recreation procedure again. The initial refresh
+is the authoritative V2 baseline. Older binaries must reject V2 catalog state;
+V2 binaries must reject leftover V1 state rather than guessing how to convert it.
 
 ## 13. Performance Requirements
 
@@ -862,9 +729,9 @@ tradeoffs.
 
 The release gates are index size, WAL volume, encoded-ID storage size,
 CDC-buffer growth, cached integer-key latency, out-of-cache ordered-key latency,
-overflow-key latency, durable-base staging time, source-write outage, and replay
-throughput. The probe prefix and physical index policy are frozen only after
-these results identify the best acceptable tradeoff.
+overflow-key latency, and fresh initial-refresh throughput. The probe prefix and
+physical index policy are frozen only after these results identify the best
+acceptable tradeoff.
 
 ## 14. Testing
 
@@ -925,41 +792,27 @@ and subscribers use a regular `BYTEA` column. Unbounded and keyless tables test
 `REPLICA IDENTITY FULL`. No schema or publication contains a generated probe
 column.
 
-### 14.4 Migration tests
+### 14.4 Upgrade and recreation tests
 
-- non-empty V1 buffers at cutover;
-- source writes blocked during durable staging and captured as V2 after lock
-   release;
-- several stream tables sharing one source buffer;
-- multi-level DAG rebuild order;
-- active and prepared source writers, deterministic source-lock order, lock
-   timeout, and rollback to unchanged `V1_ACTIVE` state;
-- WAL sources normalized to trigger mode with active and prepared transactions,
-   followed by optional V2 transition back to WAL;
-- backend and postmaster crash after each durable migration phase, proving that
-   post-cutover resume uses the same logged staging generation;
-- crash before cutover commit, proving that staging and capture switch both roll
-   back;
-- replay batch failure, proving shadow mutation and cursor advancement commit or
-   roll back together;
-- soft-watermark prioritization and hard-quota rejection that rolls back the
-   source write without losing capture;
-- V1 binary/V2 catalog and V2 binary/V1 catalog rejection;
-- bridge build/catalog mismatch and missing-restart rejection;
-- unsupported-type preflight with no partial changes;
-- foreign or externally mutable source rejection;
-- staging owner/ACL tampering rejection; and
-- logical-replication resnapshot state, publication recreation, initial copy,
-  completion acknowledgement, and crash recovery between each step.
+- preflight detects V1 stream tables or buffers and makes no partial changes;
+- source tables and source data remain untouched while the V1 graph is removed;
+- V1 stream tables drop in reverse dependency order and V2 stream tables are
+  recreated in dependency order;
+- the recorded query, schedule, refresh mode, and dependency graph recreate
+  successfully;
+- source writes are paused during the recreation window, and the first V2
+  refresh produces the exact expected multiset;
+- an incomplete recreation is detected and can be repaired by dropping the
+  partial V2 graph and starting again;
+- replacing the shared library requires the documented PostgreSQL restart, and
+  old binaries reject V2 catalog state;
+- unsupported-type preflight fails before any stream-table state changes; and
+- external publications, outbox consumers, dbt models, DuckLake sinks, and
+  replication subscribers are identified and resnapshotted after the `BYTEA`
+  row-ID change.
 
-Crash tests use explicit failpoints immediately before and after each phase
-commit. Backend cases terminate the migration worker; postmaster cases kill and
-restart the disposable E2E PostgreSQL container. Each restart asserts the same
-persisted generation identifier, phase, staging OIDs, row counts, and replay
-cursors before resuming.
-
-The final oracle is a from-scratch V2 rebuild: migrated output must be exactly
-equal as a multiset after all captured changes are applied.
+The final oracle is a fresh V2 build from unchanged source tables: recreated
+output must be exactly equal as a multiset to an independent full computation.
 
 ## 15. Implementation Plan
 
@@ -983,14 +836,14 @@ that every non-keyless identity has a unique full-width index.
 join, aggregate, set, window, and synthetic identities to the shared encoder.
 Delete `::TEXT` row-ID construction and hard-coded numeric sentinels.
 
-**Stage 5: Add version guards and migration.** Persist identity/probe versions,
-add runtime mismatch rejection and the bridge restart barrier, normalize WAL
-sources to trigger capture, install dry-run and durable-base cutover, add capture
-quota/backpressure, and rebuild every stream table and shared buffer outside
-`ALTER EXTENSION UPDATE`.
+**Stage 5: Add version guards and recreation tooling.** Persist identity/probe
+versions, reject leftover V1 state, document the restart requirement, provide
+preflight output and cleanup for V1 stream tables/buffers, and document the
+reverse-drop/dependency-order recreation procedure outside `ALTER EXTENSION
+UPDATE`.
 
-**Stage 6: Prove it.** Run the full correctness matrix, migration fault tests,
-and performance benchmarks. Update SQL reference, architecture, upgrade,
+**Stage 6: Prove it.** Run the full correctness matrix, recreation tests, and
+performance benchmarks. Update SQL reference, architecture, upgrade,
 replication, DuckLake, outbox, dbt, and release documentation.
 
 Stages may be separate pull requests, but V2 must not be user-selectable until
@@ -1024,13 +877,6 @@ This duplicates ordinary short identities in the heap, increases WAL, complicate
 replica identity and publication column lists, and cannot map generated-to-
 generated in PostgreSQL 18 logical replication. An immutable expression index
 provides the same unbounded lookup key without adding a public table column.
-
-### Keep an exported snapshot alive during rebuild
-
-This can survive a worker failure only while the exporting backend remains
-alive. It cannot support postmaster-crash resume from the same snapshot. V2 pays
-the staging and write-outage cost for a logged base image whose recovery contract
-PostgreSQL can actually preserve.
 
 ### Add a direct-integer strategy
 
@@ -1077,25 +923,16 @@ following:
    the DDL;
 - unsupported types and collations fail before state is created;
 - V1/V2 mismatch cannot consume or mutate persisted state;
-- `V1_ACTIVE`, `MIGRATING_TO_V2`, and `V2_ACTIVE` enforce the stated capture and
-   refresh contract;
-- bridge binary installation and a full postmaster restart are required before
-   cutover;
-- the cutover transaction atomically commits a logged, immutable base image and
-   V2 trigger capture while source-write locks enforce the stated visibility
-   boundary;
-- WAL sources normalize to trigger CDC before cutover and may transition back
-   only after V2 activation;
-- migration loses or duplicates no committed change under concurrent writes;
-- interrupted migration resumes from the same durable staging generation, and
-   replay mutation plus cursor progress are atomic;
-- capture quota exhaustion rolls back the source transaction instead of allowing
-   committed data to outrun CDC;
-- external compatibility breaks and resnapshot steps are documented;
-- staging ownership and ACLs prevent ordinary users and stream owners from
-   reading or mutating durable base data, and resume rejects tampered metadata;
-- managed publications remain disabled and durably marked for resnapshot until
-   the explicit recreate/copy/acknowledge workflow completes;
+- V1 stream tables and buffers are detected before any partial upgrade;
+- source tables remain untouched while the old stream-table graph is removed;
+- recreated V2 stream tables use reverse dependency order for removal and forward
+   dependency order for creation;
+- source writes are paused during recreation, and a fresh initial refresh is the
+   correctness baseline;
+- replacing the shared library requires a full PostgreSQL restart, and old
+   binaries reject V2 catalog state;
+- external compatibility breaks and resnapshot steps are documented and
+   acknowledged before consumers resume;
 - bounded unique replica identity uses the direct non-null row-ID index, and
    publication schemas include every required identity column;
 - default views, grants, diagnostics, publications, and integration docs treat
