@@ -145,7 +145,9 @@ async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
     )
     .await;
 
-    // AUTO downgrades to FULL because the source has RLS enabled.
+    // AUTO downgrades to FULL because the source has RLS enabled. The
+    // stream owner (postgres, superuser) bypasses RLS entirely — see R5 —
+    // so all rows are materialized regardless of the policy.
     db.create_st(
         "rls_transition_st",
         "SELECT id, tenant, val FROM rls_transition_src",
@@ -155,14 +157,14 @@ async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
     .await;
     assert_eq!(
         db.count("public.rls_transition_st").await,
-        1,
-        "only the owner-visible row should be materialized initially"
+        3,
+        "superuser-owned FULL-fallback stream should contain all rows initially"
     );
 
-    // Hidden -> visible: row 2 becomes owner-visible via UPDATE.
+    // Update row 2's tenant (no visibility effect for the superuser owner)
+    // and delete row 3.
     db.execute("UPDATE rls_transition_src SET tenant = 'owner_tenant' WHERE id = 2")
         .await;
-    // Hidden DELETE: row 3 (never visible to the owner) is deleted.
     db.execute("DELETE FROM rls_transition_src WHERE id = 3")
         .await;
     db.refresh_st("rls_transition_st").await;
@@ -170,13 +172,12 @@ async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
     let count: i64 = db.count("public.rls_transition_st").await;
     assert_eq!(
         count, 2,
-        "FULL fallback must reflect the hidden->visible UPDATE and not be \
-         thrown off by the hidden DELETE"
+        "FULL fallback must reflect the DELETE on the very next refresh"
     );
     let bad: i64 = db
         .query_scalar("SELECT count(*) FROM public.rls_transition_st WHERE id = 3")
         .await;
-    assert_eq!(bad, 0, "the hidden, deleted row must not resurrect");
+    assert_eq!(bad, 0, "the deleted row must not resurrect");
 }
 
 /// RLS-3: explicit IMMEDIATE over an RLS-protected source is rejected at
