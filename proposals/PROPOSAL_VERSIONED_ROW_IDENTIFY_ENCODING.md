@@ -211,18 +211,21 @@ to a stable V2 type tag. There is no generic `::TEXT`, output-function, or
 
 ```text
 equality_canonical:       required
-native_order_preserving:  true | false
+default_nonnull_btree_order_preserving:  true | false
 volatility:               immutable | stable
 maximum_encoded_size:     fixed | typmod-bounded | unbounded
 ddl_invalidations:        explicit list
 ```
 
 `equality_canonical` means PostgreSQL equality and byte equality agree in both
-directions. A type cannot ship without that proof. `native_order_preserving`
-means the sign of lexicographic payload comparison agrees with the type's
-PostgreSQL B-tree comparator. Only entries marked `true` support source-index
-locality claims. The registry stores these properties per concrete type OID,
-even where the tables below group types with identical policies.
+directions. A type cannot ship without that proof.
+`default_nonnull_btree_order_preserving` means that, for non-NULL values using
+the default ascending B-tree operator class, the sign of lexicographic payload
+comparison agrees with the type's PostgreSQL B-tree comparator. It does not
+claim PostgreSQL's default NULL placement, descending-index order, non-default
+operator classes, or expression-index order. Only entries marked `true` support
+source-index locality claims. The registry stores these properties per concrete
+type OID, even where the tables below group types with identical policies.
 
 ### 6.1 Initial scalar encoders
 
@@ -262,12 +265,17 @@ encoding because legal interval values can overflow `int64`. The physical
 Enum labels are portable across dump/restore but mutable through `ALTER TYPE
 ... RENAME VALUE`. The existing ALTER TYPE DDL hook must continue to mark every
 directly and transitively dependent stream table for reinitialization before it
-can consume changes encoded with the new label. The hook must also invalidate
-cached enum-label metadata. V2 tests both paths explicitly.
+can consume changes encoded with the new label. A DDL hook in one backend does
+not clear another backend's `fn_extra`, so enum metadata caching also requires a
+PostgreSQL shared invalidation callback, or an equivalent shared generation
+mechanism observed independently by every backend. Before encoding an enum,
+each backend compares its cached generation with the current generation and
+discards stale label metadata before it can emit bytes. V2 tests both paths
+explicitly, including a two-session rename after the encoder cache is warmed.
 
 The initial registry records these ordering and catalog dependencies:
 
-| Type family | Native order preserving | Volatility | Maximum encoded size | DDL invalidations |
+| Type family | Default non-NULL B-tree order preserving | Volatility | Maximum encoded size | DDL invalidations |
 |---|---:|---|---|---|
 | `bool`, integers, `oid`, floats, `numeric` | yes | immutable | fixed or typmod-bounded; unconstrained `numeric` is unbounded | none |
 | `text`, `varchar`, `bpchar` | only under `C`/`POSIX` | immutable | typmod-bounded or unbounded | collation change |
@@ -305,8 +313,8 @@ Structural encoders do not need to ship in the first implementation commit,
 but any type without its encoder remains rejected. Adding a new type tag later
 does not change existing V2 identities and therefore does not require V3.
 Each structural entry also declares the five registry properties above.
-Native-order preservation is false until comparison against PostgreSQL's B-tree
-support function has been demonstrated. Volatility, maximum size, and DDL
+Default non-NULL B-tree order preservation is false until comparison against
+PostgreSQL's B-tree support function has been demonstrated. Volatility, maximum size, and DDL
 invalidations propagate from nested types; composite alteration invalidates the
 resolved field metadata and all dependent stream tables.
 
@@ -448,27 +456,68 @@ non-unique and counted-delete logic remains authoritative.
 For unique but unbounded identity schemas, the database index is intentionally
 non-unique because no bounded B-tree key can prove uniqueness of arbitrary-length
 values. Scheduled and manual refresh retain the existing transaction advisory
-lock keyed by `pgt_id` and catalog-row serialization.
+lock keyed by `pgt_id` and catalog-row serialization. Whole-table operations use
+that lock as a stream-table gate in exclusive mode.
 
-`IMMEDIATE` mode uses transaction-scoped per-identity advisory locks instead of
-a table-wide lock:
+Per-identity locking supplements the existing query-shape lock analysis; it does
+not replace it. The current `Exclusive` mode remains required for aggregates,
+joins, `DISTINCT`, and other cross-row query shapes. `RowExclusive` remains the
+concurrent mode for simple scan/filter/project chains. Per-identity locking
+replaces only the additional table-wide serialization for an unbounded unique
+identity in an otherwise concurrently maintainable simple query.
 
-1. derive a 64-bit advisory-lock key from the stream-table identifier and the
-   complete canonical identity;
-2. for primary-key updates, include both old and new identities;
-3. for multi-row statements, deduplicate and acquire all lock keys in sorted
-   order before applying changes;
-4. after acquiring the locks, perform probe-plus-full-ID matching and exact
-   uniqueness checks.
+The lock hierarchy is:
+
+1. Per-identity maintenance acquires the stream-table gate in shared mode.
+2. The existing statement-level `AFTER` trigger uses transition tables to
+   collect old and new identities, deduplicates them, and acquires all required
+   per-identity locks in sorted order.
+3. It performs probe-plus-full-ID matching and exact uniqueness checks before
+   applying deltas.
+4. Migration, reinitialization, manual/full refresh, mode changes, and other
+   whole-table operations acquire the same stream-table gate in exclusive mode.
+
+The statement-level `BEFORE` trigger cannot be the per-identity acquisition
+point because it does not have the complete affected identity set. Sorted
+acquisition prevents cycles within one collected lock set. Several statements
+in one transaction can still deadlock with another transaction; PostgreSQL may
+abort one participant with a retryable error, and that is normal behavior.
+
+The per-identity key contract is fixed by `ROW_LOCK_VERSION = 1`. The input to
+the key hash is the following exact byte sequence:
+
+```text
+ROW_LOCK_VERSION (u8 = 1) | ROW_LOCK_KIND (u8 = 1) |
+pgt_id (u64, big-endian) | row_id_length (u64, big-endian) | row_id bytes
+```
+
+The hash is XXH3-64 with seed `0`. Its lower 63 bits are combined with the
+reserved row-lock namespace bit (`0x8000000000000000`), then interpreted as a
+two's-complement signed `int64` for `pg_advisory_xact_lock`. The stream-table
+gate key is the non-negative `pgt_id`, so gate and per-identity namespaces are
+disjoint. `pgt_id` must remain in the non-negative signed `int64` range. The
+version, algorithm, seed, framing, byte order, and signed interpretation are
+part of the compatibility contract. A different algorithm in a concurrent
+backend is unsafe even though hash collisions only serialize unrelated rows.
+The stored `row_lock_version` guard rejects a binary or catalog state with an
+unknown version before it can maintain a V2 graph.
+
+At `READ COMMITTED`, the exact check after advisory-lock acquisition runs in a
+fresh command snapshot and can see a row committed while the backend waited for
+the lock. The unbounded unique `IMMEDIATE` path is supported only at `READ
+COMMITTED`. Under `REPEATABLE READ` or `SERIALIZABLE`, it raises
+`serialization_failure` before capture or storage mutation; the caller must
+retry in a new `READ COMMITTED` transaction. It must not use the old snapshot or
+silently fall back to table-wide serialization. Other query shapes and bounded
+unique paths retain their existing isolation and lock semantics.
 
 An advisory-key collision may serialize unrelated identities but cannot affect
 row identity or uniqueness. The lock hash is coordination metadata, never proof
 of equality. Failing to acquire or hold every required lock aborts the statement.
 Until this path has correctness tests, deadlock tests, and a concurrency
 benchmark, `IMMEDIATE` mode must reject unique unbounded identity schemas during
-planning. It must not silently fall back to blocking every writer with
-`IvmLockMode::Exclusive`. `RowExclusive` remains valid when a database UNIQUE
-probe index proves identity uniqueness.
+planning. `RowExclusive` remains valid when a database UNIQUE probe index proves
+identity uniqueness.
 
 `RowIdStrategy` and `RowIdSchema` continue to decide which logical fields form an
 identity. They do not select a storage encoding. V2 has one encoder.
@@ -483,10 +532,13 @@ Trigger CDC and WAL CDC both emit full V2 identities. A consumer derives or
 reads the V2 probe before indexed matching. No hot-path lookup of downstream
 stream-table preferences is required because no such preference exists.
 
-The V2 extension-upgrade DDL adds non-null `row_identity_version` and
-`row_probe_version` columns to `pgtrickle.pgt_change_buffers` and the corresponding
-version state for stream-table storage. Buffer registry metadata records both
-versions. Runtime readers refuse mismatches before consuming a row.
+The V2 extension-upgrade DDL adds non-null `row_identity_version`,
+`row_probe_version`, and `row_lock_version` columns to
+`pgtrickle.pgt_change_buffers` and the corresponding version state for
+stream-table storage. Buffer registry metadata records all three versions.
+Runtime readers refuse mismatches before consuming a row, and the lock-version
+guard prevents binaries with different advisory-key derivations from operating
+concurrently.
 The guard is enforced in code, not only by extension upgrade SQL, because a new
 shared library can be installed before `ALTER EXTENSION ... UPDATE` runs.
 
@@ -520,10 +572,24 @@ explicit operational reason to transport this non-contractual index helper.
 
 V1 and V2 state cannot coexist in one refresh graph. `ALTER EXTENSION UPDATE`
 installs V2-capable code, catalog guards, and the migration command, but does not
-rebuild a graph. Migration is a separate, dry-runnable, resumable administrative
-operation, not `ALTER COLUMN ... TYPE` and not a rolling per-table conversion.
-The V2 binary understands V1 only far enough to preflight, cut over, resume, or
-fail safely; normal refresh never mixes versions.
+rebuild a graph. Ordinary V1 capture and refresh continue in the `V1_ACTIVE`
+state after the extension update. Migration is a separate, dry-runnable,
+resumable administrative operation, not `ALTER COLUMN ... TYPE` and not a
+rolling per-table conversion. The V2-capable binary understands V1 state for
+preflight and for the controlled transition, but normal refresh never mixes
+versions.
+
+Migration uses this state model:
+
+| State | Capture and refresh contract |
+|---|---|
+| `V1_ACTIVE` | V1 capture and refresh continue normally. V2 preflight and dry-run are available, but no V2 state is consumed. |
+| `MIGRATING_TO_V2` | V1 refresh is disabled. V2 capture is armed at the recorded frontier, and rebuild plus catch-up are resumable. No mixed V1/V2 graph is refreshable. |
+| `V2_ACTIVE` | Only V2 capture and refresh are accepted. |
+
+The transition into `MIGRATING_TO_V2` is committed by the cutover transaction,
+which records the frontier while replacing V1 capture with V2 capture. An
+extension update alone therefore does not begin the operational outage.
 
 ### 12.1 Preflight
 
@@ -545,7 +611,8 @@ without changing catalog or capture state.
 
 The migration command should use the existing snapshot/frontier machinery:
 
-1. pause scheduling and mark the graph `MIGRATING_TO_V2`;
+1. pause scheduling, disable V1 refresh, and mark the graph
+   `MIGRATING_TO_V2`;
 2. acquire source locks in deterministic OID order for the short cutover
    transaction;
 3. establish snapshot/frontier position `P`;
@@ -629,8 +696,9 @@ the best acceptable tradeoff.
    `a IS NOT DISTINCT FROM b` if and only if `encode(a) = encode(b)`, including
    numeric scale, signed zero, NaN payloads, `bpchar` padding, timestamp zones,
    extreme and equivalent intervals, and JSONB key order;
-- for entries marked native-order-preserving, property tests comparing the sign
-   of `bytea` comparison with the sign of PostgreSQL's B-tree comparator;
+- for entries marked `default_nonnull_btree_order_preserving`, property tests
+   comparing the sign of `bytea` comparison with the sign of PostgreSQL's B-tree
+   comparator for non-NULL values under the default ascending operator class;
 - prefix-freedom and tuple-framing property tests;
 - explicit rejection tests for unsupported types and non-deterministic collations.
 
@@ -657,11 +725,18 @@ deep join composition, synthetic identities, and wide TOASTed values.
 Concurrency tests must run multiple sessions against an unbounded unique
 identity in each refresh mode and prove that exactly one logical row survives.
 They must cover old/new identities on primary-key updates, deterministically
-ordered multi-row lock acquisition, and forced advisory-key collisions. A
-throughput benchmark must verify that unconstrained text identities do not
-serialize all writers. Enum tests must rename an in-use label, invalidate cached
-label metadata, and prove that the existing DDL hook marks the full downstream
-DAG for reinitialization before further refresh.
+ordered multi-row lock acquisition, forced advisory-key collisions, and the
+stream-table gate shared/exclusive hierarchy. At `READ COMMITTED`, a waiter
+must see the committed row after obtaining the advisory lock. At `REPEATABLE
+READ` and `SERIALIZABLE`, the unbounded unique `IMMEDIATE` path must raise
+`serialization_failure` before mutation and require a retry in a new `READ
+COMMITTED` transaction. A throughput benchmark must verify that unconstrained
+text identities do not serialize all writers. Enum tests must use two sessions:
+session A warms the encoder cache, session B renames an in-use label and
+commits, and session A calls the cached expression again. Session A must either
+resolve the new label or reject the affected stream state; it must never emit
+stale bytes. The test must also prove that the existing DDL hook marks the full
+downstream DAG for reinitialization before further refresh.
 
 ### 14.4 Migration tests
 
@@ -761,18 +836,25 @@ following:
 - probe indexes remain bounded for arbitrary valid input size;
 - the selected probe prefix fits the running cluster's `BTMaxItemSize` and is
    justified by the required benchmark matrix;
-- each registry entry proves equality agreement and declares native-order,
-   volatility, size, and DDL-invalidation metadata;
+- each registry entry proves equality agreement and declares default non-NULL
+   B-tree ordering, volatility, size, and DDL-invalidation metadata;
 - interval identities encode the complete 128-bit PostgreSQL comparison value;
 - enum label caching is invalidated by enum DDL and the encoder is not declared
    `IMMUTABLE` while label-based enum support is enabled;
+- enum invalidation is observed across backends, not only in the backend that ran
+   the DDL;
 - unsupported types and collations fail before state is created;
 - V1/V2 mismatch cannot consume or mutate persisted state;
+- `V1_ACTIVE`, `MIGRATING_TO_V2`, and `V2_ACTIVE` enforce the stated capture and
+   refresh contract;
 - migration loses or duplicates no committed change under concurrent writes;
 - interrupted migration resumes safely;
 - external compatibility breaks and resnapshot steps are documented;
-- unique unbounded `IMMEDIATE` identities use deterministic per-identity locking
-   without table-wide writer serialization;
+- unique unbounded `IMMEDIATE` identities use the versioned, deterministic
+   per-identity lock protocol without table-wide writer serialization, while
+   preserving query-shape `Exclusive` locks;
+- the unbounded unique `IMMEDIATE` path rejects `REPEATABLE READ` and
+   `SERIALIZABLE` before mutation and documents the `READ COMMITTED` contract;
 - out-of-cache composite-key workloads show the intended locality benefit;
 - cached common-key workloads have no unexplained material regression;
 - all performance release gates in section 13 pass.
