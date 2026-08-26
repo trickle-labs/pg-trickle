@@ -485,20 +485,31 @@ abort one participant with a retryable error, and that is normal behavior.
 
 The complete advisory-key set must be collected and deduplicated before the
 first per-identity lock is acquired. The extension must expose a finite integer
-setting named `pg_trickle.ivm_row_lock_limit` as a hard per-statement limit on
-that set. The count includes distinct old and new identities; an update whose
-old and new identities differ therefore consumes two keys. Equal advisory keys
-caused by a forced hash collision are acquired once, while the full row ID
-continues to decide equality. A statement at the limit is allowed to proceed.
-A statement above the limit must abort before acquiring any per-identity lock,
-before mutating stream storage, and before applying a delta. The error must
-identify `pg_trickle.ivm_row_lock_limit` and hint that the caller split the
-statement, use bounded identities, or use `DIFFERENTIAL` mode. The implementation
-must not acquire a partial set and must not respond by upgrading the shared gate
-to exclusive mode or by silently falling back to table-wide writer
-serialization. Transaction-level advisory locks remain held until transaction
-end, so the default must be finite, documented, and chosen with the cluster's
-lock-pool limits in mind.
+setting named `pg_trickle.ivm_row_lock_limit` as the hard limit on the distinct
+pg_trickle row-lock keys held by the current top-level transaction. For each
+statement, it must determine which keys from the complete statement set are not
+already held by that transaction, then reject the statement before acquiring any
+new per-identity lock if the union of the already-held keys and the statement's
+keys exceeds the limit. It acquires only the new keys, in sorted order. The
+count includes distinct derived advisory keys from old and new identities; an
+update whose old and new identities differ therefore consumes two keys unless
+they derive the same advisory key. Equal advisory keys caused by a forced hash
+collision are acquired once, while the full row ID continues to decide
+equality. A transaction at the limit is allowed to proceed, including when a
+statement reuses keys already held by that transaction.
+
+A statement that would take the transaction above the limit must abort before
+acquiring any new per-identity lock, before mutating stream storage, and before
+applying a delta. The error must identify `pg_trickle.ivm_row_lock_limit` and
+hint that the caller split the transaction or statement, use bounded identities,
+or use `DIFFERENTIAL` mode. The implementation must not acquire a partial set
+and must not respond by upgrading the shared gate to exclusive mode or by
+silently falling back to table-wide writer serialization. Transaction-level
+advisory locks remain held until transaction end. Tracking must be aware of
+subtransactions: keys first acquired in a savepoint must be removed from the
+budget when that savepoint rolls back, matching PostgreSQL's lock behavior.
+The default must be finite, documented, and chosen with the cluster's lock-pool
+limits in mind.
 
 The per-identity key contract is fixed by `ROW_LOCK_VERSION = 1`. The input to
 the key hash is the following exact byte sequence:
@@ -757,19 +768,22 @@ They must cover old/new identities on primary-key updates, deterministically
 ordered multi-row lock acquisition, forced advisory-key collisions, and the
 stream-table gate shared/exclusive hierarchy. At `READ COMMITTED`, a waiter
 must see the committed row after obtaining the advisory lock. The lock-budget
-tests must cover a statement exactly at `pg_trickle.ivm_row_lock_limit`, a
-statement above the limit, old-plus-new identity counting, collision-key
-deduplication, rollback to a savepoint after lock acquisition, the absence of
-advisory locks after a rejected statement, and concurrent sessions approaching
-the configured budget. Make the waiter test deterministic: have the holder
-signal that it owns the advisory lock, verify that the waiter is blocked before
-the holder commits, then require the waiter to see the committed row after
-obtaining the lock through the separate fresh-snapshot lookup. At `REPEATABLE
-READ` and `SERIALIZABLE`, every unbounded unique `IMMEDIATE` path, including
-paths that require `Exclusive`, must raise `feature_not_supported` before
-mutation and require a retry in a new `READ COMMITTED` transaction. A
-throughput benchmark must verify that unconstrained text identities do not
-serialize all writers. Enum tests must use two sessions:
+tests must cover a transaction exactly at `pg_trickle.ivm_row_lock_limit`, a
+statement that would take the transaction above the limit, several individually
+valid statements whose cumulative key count exceeds the transaction limit,
+repeated use of keys across statements, cumulative keys across multiple stream
+tables, old-plus-new identity counting, collision-key deduplication, savepoint
+rollback restoring the available budget, rejection before any additional lock
+is acquired, and the absence of advisory locks from a rejected statement.
+They must also cover concurrent sessions approaching the configured budget. Make
+the waiter test deterministic: have the holder signal that it owns the advisory
+lock, verify that the waiter is blocked before the holder commits, then require
+the waiter to see the committed row after obtaining the lock through the
+separate fresh-snapshot lookup. At `REPEATABLE READ` and `SERIALIZABLE`, every
+unbounded unique `IMMEDIATE` path, including paths that require `Exclusive`,
+must raise `feature_not_supported` before mutation and require a retry in a new
+`READ COMMITTED` transaction. A throughput benchmark must verify that
+unconstrained text identities do not serialize all writers. Enum tests must use two sessions:
 session A warms the encoder cache, session B renames an in-use label and
 commits, and session A calls the cached expression again. Session A must either
 resolve the new label or reject the affected stream state; it must never emit
@@ -892,9 +906,11 @@ following:
    per-identity lock protocol without table-wide writer serialization, while
    preserving query-shape `Exclusive` locks;
 - the statement collects and deduplicates all old and new advisory keys before
-    acquisition, enforces the finite `pg_trickle.ivm_row_lock_limit`, rejects
-    over-limit statements before lock acquisition or storage mutation, and leaves
-    no advisory locks from a rejected statement;
+   acquisition, enforces the finite `pg_trickle.ivm_row_lock_limit` across the
+   current top-level transaction, rejects a statement before acquiring any new
+   lock or mutating storage when the transaction budget would be exceeded,
+   reuses already-held keys without charging them again, restores budget after
+   savepoint rollback, and leaves no advisory locks from a rejected statement;
 - the unbounded unique `IMMEDIATE` path rejects `REPEATABLE READ` and
    `SERIALIZABLE` with `feature_not_supported` before mutation, including
    query shapes requiring `Exclusive`, and documents the `READ COMMITTED`
