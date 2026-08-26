@@ -16,18 +16,31 @@ collisions. For types whose registry entries explicitly guarantee native-order
 preservation, it also lets B-tree probes retain source-key locality instead of
 deliberately randomizing it.
 
-The storage contract becomes:
+The heap storage contract becomes:
 
 ```text
-__pgt_row_id     BYTEA NOT NULL   -- complete canonical identity
-__pgt_row_probe  BYTEA GENERATED ALWAYS AS
-                 (pgtrickle.row_probe_v1(__pgt_row_id)) STORED
+__pgt_row_id  BYTEA NOT NULL  -- complete canonical identity
 ```
 
-Matching uses both columns:
+For an identity whose maximum encoded length is statically proven to fit a
+B-tree tuple, pg_trickle indexes the complete identity directly:
 
 ```sql
-st.__pgt_row_probe = delta.__pgt_row_probe
+CREATE [UNIQUE] INDEX ... USING btree (__pgt_row_id);
+```
+
+Only an unbounded identity uses a bounded expression index:
+
+```sql
+CREATE INDEX ... USING btree
+   (pgtrickle.row_probe_v1(__pgt_row_id));
+```
+
+Matching through that expression index always rechecks the complete identity:
+
+```sql
+pgtrickle.row_probe_v1(st.__pgt_row_id) =
+   pgtrickle.row_probe_v1(delta.__pgt_row_id)
 AND st.__pgt_row_id = delta.__pgt_row_id
 ```
 
@@ -35,7 +48,8 @@ The probe is an index accelerator, not an identity. For ordinary identities it
 is exactly the full row ID. For unusually wide identities it is an ordered
 prefix plus a 128-bit digest. The full row ID comparison remains authoritative,
 so a probe collision can only add a candidate row to an index scan; it cannot
-merge, overwrite, or delete the wrong row.
+merge, overwrite, or delete the wrong row. The probe is not stored in the heap
+or exposed as a table column.
 
 There should be one V2 encoding for the extension. No per-table encoding option,
 no simultaneous `BIGINT` and `BYTEA` strategies, and no direct-integer side path
@@ -50,7 +64,11 @@ typed logical fields
 exact canonical encoding          --->  __pgt_row_id
         |
         v
-bounded lookup probe              --->  __pgt_row_probe B-tree
+statically bounded? -- yes ------>  __pgt_row_id B-tree
+   |
+   no
+   v
+bounded lookup probe              --->  expression B-tree
 ```
 
 ## 2. Why Replace the Hash
@@ -127,6 +145,16 @@ until the type contracts and probe sizing gates in sections 6, 8, and 13 pass.
 Once V2 is released, its byte format is immutable. A semantic correction requires
 V3 and another rebuild.
 
+This proposal defines the semantic constraints, not the final byte assignments.
+The separate wire document is a hard implementation prerequisite and must assign
+every tag value and width; define byte order and signed transforms for every
+integer; define count, exponent, terminator, escape, and nested framing rules;
+specify numeric normalization and all structural resource limits; specify the
+XXH3-128 seed and output-byte order; and include independently reproducible
+identity and probe vectors. No encoder, stored expression, or operator rewrite
+may merge before those vectors pass on every supported PostgreSQL major and CPU
+endianness.
+
 Conceptually, an identity is:
 
 ```text
@@ -183,7 +211,7 @@ The initial domain registry should include at least:
 
 | Domain | Input |
 |---|---|
-| `SCAN_KEY` | source primary/unique-key fields |
+| `SCAN_KEY` | fields from an eligible source identity index |
 | `KEYLESS_ROW` | all logical output fields |
 | `GROUP_KEY` | GROUP BY fields |
 | `JOIN_KEY` | ordered child identities |
@@ -203,18 +231,53 @@ Synthetic identities use the `SYNTHETIC` domain and a registered discriminator,
 for example `scalar_aggregate_singleton` or `lateral_inner_dummy`. Hard-coded
 `BIGINT` sentinel values disappear. SQL NULL is never a valid row identity.
 
+### 5.1 Source-key eligibility
+
+"Primary or unique key" is not sufficient by itself. A `SCAN_KEY` may use only
+an index that covers every source row and whose uniqueness semantics agree with
+the encoder. The initial V2 release accepts:
+
+- a primary key; or
+- a non-partial, non-expression, immediate unique index whose key columns are
+   all catalog-marked `NOT NULL`; or
+- the same form of unique index declared `NULLS NOT DISTINCT`.
+
+A default `NULLS DISTINCT` unique index with any nullable key column is not a
+logical row identifier: PostgreSQL can store several rows whose encoded key is
+identical. Partial and expression indexes are not eligible in V2. A deferrable
+or otherwise non-immediate unique constraint is also ineligible because an
+`IMMEDIATE` maintenance path can observe duplicates that are legal until source
+transaction commit. If no eligible index exists, planning uses the existing
+keyless/multiset identity rules or rejects a mode that requires unique identity.
+
+The selected index's collation and equality operator family are part of
+validation. V2 initially accepts default operator classes whose equality
+contract is proven by the registry. A non-default operator class is rejected
+unless a registry entry explicitly proves agreement between its equality
+operator and canonical bytes. Catalog invalidation or DDL affecting any of these
+properties invalidates the resolved identity schema and requires revalidation.
+
 ## 6. Type Semantics
 
-Type support is an explicit registry keyed by PostgreSQL type OID and resolved
-to a stable V2 type tag. There is no generic `::TEXT`, output-function, or
-`typsend` fallback. Every registry entry declares:
+Type support is an explicit registry. Runtime lookup begins with PostgreSQL type
+OID, but encoder resolution is keyed by the complete semantic descriptor:
 
 ```text
+concrete type | typmod | collation | equality operator family |
+nested type metadata | PostgreSQL major version
+```
+
+There is no generic `::TEXT`, output-function, or `typsend` fallback. Every
+resolved registry entry declares:
+
+```text
+semantic_family:          stable V2 type tag
 equality_canonical:       required
 default_nonnull_btree_order_preserving:  true | false
 volatility:               immutable | stable
 maximum_encoded_size:     fixed | typmod-bounded | unbounded
 ddl_invalidations:        explicit list
+supported_pg_majors:      explicit set
 ```
 
 `equality_canonical` means PostgreSQL equality and byte equality agree in both
@@ -226,6 +289,19 @@ claim PostgreSQL's default NULL placement, descending-index order, non-default
 operator classes, or expression-index order. Only entries marked `true` support
 source-index locality claims. The registry stores these properties per concrete
 type OID, even where the tables below group types with identical policies.
+
+The stable wire `TYPE_TAG` identifies a canonical semantic family, not a
+database object. Runtime OIDs and typmods never enter persisted bytes. Domains
+intentionally use their base family's tag and erase domain identity. Enum values
+use the enum-family tag and label bytes, so two concrete enum types with the same
+label have the same field encoding; this is safe because row identities are
+relation-local and the validated identity schema supplies the concrete type
+contract. Set operations resolve a common PostgreSQL output type before
+encoding. Altering a concrete type or replacing one type with another invalidates
+that schema and requires rebuild even when the resulting bytes would coincide.
+PostgreSQL major-version upgrades revalidate every registry contract before V2
+state is consumed; an unverified major is rejected rather than assumed
+byte-compatible.
 
 ### 6.1 Initial scalar encoders
 
@@ -265,13 +341,15 @@ encoding because legal interval values can overflow `int64`. The physical
 Enum labels are portable across dump/restore but mutable through `ALTER TYPE
 ... RENAME VALUE`. The existing ALTER TYPE DDL hook must continue to mark every
 directly and transitively dependent stream table for reinitialization before it
-can consume changes encoded with the new label. A DDL hook in one backend does
-not clear another backend's `fn_extra`, so enum metadata caching also requires a
-PostgreSQL shared invalidation callback, or an equivalent shared generation
-mechanism observed independently by every backend. Before encoding an enum,
-each backend compares its cached generation with the current generation and
-discards stale label metadata before it can emit bytes. V2 tests both paths
-explicitly, including a two-session rename after the encoder cache is warmed.
+can consume changes encoded with the new label. `fn_extra` caches enum dispatch
+metadata but not enum labels. For each enum datum, the encoder resolves the value
+OID through PostgreSQL's `ENUMOID` syscache and copies the current label while
+holding the returned tuple. PostgreSQL's commit-time syscache invalidation, not
+a custom pre-commit generation counter, governs cross-backend label visibility.
+This is an in-memory syscache lookup rather than SPI or a catalog scan, and its
+cost is part of the encoder benchmark. V2 tests both DDL-state invalidation and
+syscache visibility explicitly, including a two-session rename after the
+encoder call site is warmed.
 
 The initial registry records these ordering and catalog dependencies:
 
@@ -310,13 +388,16 @@ Exceeding a resource limit raises a contextual error; it never switches to a
 different identity algorithm.
 
 Structural encoders do not need to ship in the first implementation commit,
-but any type without its encoder remains rejected. Adding a new type tag later
-does not change existing V2 identities and therefore does not require V3.
-Each structural entry also declares the five registry properties above.
-Default non-NULL B-tree order preservation is false until comparison against
-PostgreSQL's B-tree support function has been demonstrated. Volatility, maximum size, and DDL
-invalidations propagate from nested types; composite alteration invalidates the
-resolved field metadata and all dependent stream tables.
+but the initial support matrix must name which structural families ship; every
+other type remains rejected. Adding a new type tag later does not change existing
+V2 identities and therefore does not require V3. Each structural entry also
+declares the registry properties above. Default non-NULL B-tree order
+preservation is false until comparison against PostgreSQL's B-tree support
+function has been demonstrated. Nested volatility is `stable` if any component
+is stable and otherwise `immutable`; maximum size is unbounded if any component
+is unbounded; DDL invalidations are the union of all component invalidations.
+Composite alteration invalidates resolved field metadata and all dependent
+stream tables.
 
 ### 6.3 Collation policy
 
@@ -364,19 +445,21 @@ field.
 Because the initial registry supports label-based enum encoding,
 `encode_row_id_v2` is `STABLE` and `PARALLEL SAFE`. Enum output is catalog
 dependent, so declaring the encoder `IMMUTABLE` would be false even with DDL
-hooks and forced reinitialization. The generated probe expression calls only
+hooks and forced reinitialization. The probe index expression calls only
 `row_probe_v1(bytea)`, which remains genuinely `IMMUTABLE` and
 `PARALLEL SAFE`; the row-ID encoder itself does not appear in that generated
-expression. Existing V1 hash functions retain their old behavior during
+index expression. Existing V1 hash functions retain their old behavior during
 migration and are removed only after no V1 trigger or stored expression can
 reference them.
 
-## 8. Bounded B-Tree Probe
+## 8. Bounded B-Tree Indexing
 
 A full canonical identity can be wider than PostgreSQL permits in one B-tree
 index tuple, especially for keyless rows and composite text keys. Indexing the
-full `BYTEA` directly would turn valid data growth into runtime index failures.
-V2 avoids that ceiling without giving correctness back to a hash.
+full `BYTEA` without a static size proof would turn valid data growth into
+runtime index failures. V2 indexes the complete `BYTEA` directly whenever the
+identity schema is statically proven to fit. Only an unbounded schema uses the
+bounded probe expression described below.
 
 Probe version 1 includes a fixed prefix length `P`, but this proposal does not
 freeze its value. Benchmarks must compare at least `P = 32`, `64`, `128`, and
@@ -403,16 +486,21 @@ Properties:
 - digest collisions do not affect correctness because MERGE also compares the
   complete row ID.
 
-`__pgt_row_probe` is internal implementation state. It is a stored generated
-column computed by one `IMMUTABLE` helper, so callers cannot create a probe that
-does not match its full identity. It is not part of the public contract unless a
-sink deliberately publishes internal columns.
+`row_probe_v1(bytea)` is an `IMMUTABLE`, `PARALLEL SAFE` index expression, not a
+stored column or public value. The index always derives its key from the same
+`__pgt_row_id` that the executor rechecks, so callers cannot supply a mismatched
+probe.
 
-The implementation must validate the selected `P` against the running cluster's
-actual `BTMaxItemSize`, including varlena and index-tuple overhead. Extension
-installation or upgrade must reject a probe version whose worst-case index datum
-cannot fit the cluster's configured B-tree page size. A prefix length that is
-safe for the default `BLCKSZ` is not assumed safe for every supported build.
+The implementation must validate both the direct-index size proof and the
+selected `P` against the running cluster's actual `BTMaxItemSize`, including
+varlena and index-tuple overhead. The bridge binary computes V2 index readiness
+for the running `BLCKSZ`; migration preflight and every V2 create/alter operation
+reject V2 use if the probe's worst-case datum cannot fit, while existing V1 state
+continues to operate. Direct-versus-expression classification is repeated for
+each identity schema at create, alter, and migration preflight. Errors report
+the configured page size, computed maximum datum size, and selected probe
+version. A prefix length or direct bound safe for the default `BLCKSZ` is not
+assumed safe for every supported build.
 
 The identity index should not INCLUDE the full row ID or arbitrary user columns;
 doing so would reintroduce the B-tree tuple-width failure. Covering indexes, if
@@ -426,150 +514,48 @@ encoding. Fixed-width types have known bounds; bounded `varchar(n)`, `bpchar(n)`
 other unbounded field makes the whole schema unbounded. Conservative
 classification is required: uncertainty means unbounded.
 
-For identity schemas whose maximum encoded length is statically at most `P`, a
-non-keyless stream table may keep a UNIQUE probe index because `probe == row_id`.
-All keyless or unbounded schemas use a non-unique probe index and exact two-column
-matching. The implementation must not place a UNIQUE constraint on a digest.
+An identity schema whose maximum encoded index datum is statically within
+`BTMaxItemSize` uses a direct B-tree index on `__pgt_row_id`. That index is
+`UNIQUE` only when the identity semantics are unique; bounded keyless/multiset
+storage uses a non-unique direct index. Every unbounded schema uses a non-unique
+expression index on `row_probe_v1(__pgt_row_id)` plus an exact full-ID recheck.
+The implementation must not place a `UNIQUE` constraint on a probe or digest.
 
 Probe format and identity format are versioned separately. Changing prefix length
-or digest algorithm requires recomputing the probe column and index, but not
-rebuilding logical row identities from source data.
+or digest algorithm requires rebuilding expression indexes, but not rewriting
+heap rows or rebuilding logical row identities from source data.
 
 ## 9. Storage and DML Changes
 
 Every storage, delta, temporary, CDC, and cache relation that currently carries
-a `BIGINT` row identity must move to the V2 pair where indexed matching occurs.
-Relations that only transport identity may carry the full row ID and derive the
-probe at the consumer.
+a `BIGINT` row identity moves to `__pgt_row_id BYTEA NOT NULL`. Transport
+relations carry only the full identity. Consumers apply `row_probe_v1` when the
+target schema is unbounded.
 
-All UPDATE, DELETE, and MERGE predicates use probe equality plus full row-ID
-equality. For schemas proven statically bounded and unique, the existing upsert
-shape becomes `ON CONFLICT (__pgt_row_probe)`; in that case `probe == row_id`, so
-the unique probe is also the exact identity. Unbounded identities use MERGE or
-equivalent exact DML against the non-unique probe index. `ON CONFLICT
-(__pgt_row_id)` is invalid because the full `BYTEA` is deliberately not indexed.
+Bounded schemas match on full row-ID equality and use the direct B-tree. For a
+bounded unique schema, the existing upsert shape becomes `ON CONFLICT
+(__pgt_row_id)`. Bounded keyless storage uses the same full-ID predicate against
+a non-unique direct index. Unbounded identities use MERGE or equivalent exact
+DML against the non-unique expression index, with both probe-expression equality
+and full row-ID equality in every UPDATE, DELETE, and MERGE predicate.
 
 Keyless semantics do not change. Identical logical rows intentionally have the
-same full identity and may occur more than once, so their probe index remains
-non-unique and counted-delete logic remains authoritative.
+same full identity and may occur more than once, so their direct or expression
+index remains non-unique and counted-delete logic remains authoritative.
 
 For unique but unbounded identity schemas, the database index is intentionally
 non-unique because no bounded B-tree key can prove uniqueness of arbitrary-length
 values. Scheduled and manual refresh retain the existing transaction advisory
-lock keyed by `pgt_id` and catalog-row serialization. Whole-table operations use
-that lock as a stream-table gate in exclusive mode.
+lock keyed by `pgt_id` and catalog-row serialization.
 
-Per-identity locking supplements the existing query-shape lock analysis; it does
-not replace it. The current `Exclusive` mode remains required for aggregates,
-joins, `DISTINCT`, and other cross-row query shapes. `RowExclusive` remains the
-concurrent mode for simple scan/filter/project chains. Per-identity locking
-replaces only the additional table-wide serialization for an unbounded unique
-identity in an otherwise concurrently maintainable simple query.
-
-The lock hierarchy is:
-
-1. Per-identity maintenance acquires the stream-table gate in shared mode.
-2. The existing statement-level `AFTER` trigger uses transition tables to
-   collect old and new identities, derives and deduplicates their advisory
-   keys, and acquires all required per-identity locks in sorted order.
-3. It performs probe-plus-full-ID matching and exact uniqueness checks before
-   applying deltas.
-4. Migration, reinitialization, manual/full refresh, mode changes, and other
-   whole-table operations acquire the same stream-table gate in exclusive mode.
-
-The statement-level `BEFORE` trigger cannot be the per-identity acquisition
-point because it does not have the complete affected identity set. Sorted
-acquisition prevents cycles within one collected lock set. Several statements
-in one transaction can still deadlock with another transaction; PostgreSQL may
-abort one participant with a retryable error, and that is normal behavior.
-
-The complete advisory-key set must be collected and deduplicated before the
-first per-identity lock is acquired. The extension must expose a finite integer
-setting named `pg_trickle.ivm_row_lock_limit` as the hard limit on the distinct
-pg_trickle row-lock keys held by the current top-level transaction. For each
-statement, it must determine which keys from the complete statement set are not
-already held by that transaction, then reject the statement before acquiring any
-new per-identity lock if the union of the already-held keys and the statement's
-keys exceeds the limit. It acquires only the new keys, in sorted order. The
-count includes distinct derived advisory keys from old and new identities; an
-update whose old and new identities differ therefore consumes two keys unless
-they derive the same advisory key. Equal advisory keys caused by a forced hash
-collision are acquired once, while the full row ID continues to decide
-equality. A transaction at the limit is allowed to proceed, including when a
-statement reuses keys already held by that transaction.
-
-A statement that would take the transaction above the limit must abort before
-acquiring any new per-identity lock, before mutating stream storage, and before
-applying a delta. The error must identify `pg_trickle.ivm_row_lock_limit` and
-hint that the caller split the transaction or statement, use bounded identities,
-or use `DIFFERENTIAL` mode. The implementation must not acquire a partial set
-and must not respond by upgrading the shared gate to exclusive mode or by
-silently falling back to table-wide writer serialization. Transaction-level
-advisory locks remain held until transaction end. Tracking must be aware of
-subtransactions: keys first acquired in a savepoint must be removed from the
-budget when that savepoint rolls back, matching PostgreSQL's lock behavior.
-The default must be finite, documented, and chosen with the cluster's lock-pool
-limits in mind. The setting must use the `SUSET` context (or a stricter
-administrator-only context), so an ordinary DML role cannot raise the limit
-above the administrator's safe lock-pool budget.
-
-The in-memory tracker must retain ownership metadata for every key held by the
-top-level transaction, including the subtransaction in which that key was first
-acquired. On subtransaction commit, ownership of keys first acquired in that
-subtransaction is promoted to its parent. On subtransaction rollback, only keys
-first acquired in the aborted subtransaction are removed from the tracker and
-the available budget is restored. A key already held by the parent and reused
-by the child must remain tracked after the child rolls back. This ownership
-bookkeeping must follow PostgreSQL's resource-owner lock lifecycle; it must not
-infer ownership from a flat set of advisory-key values.
-
-The per-identity key contract is fixed by `ROW_LOCK_VERSION = 1`. The input to
-the key hash is the following exact byte sequence:
-
-```text
-ROW_LOCK_VERSION (u8 = 1) | ROW_LOCK_KIND (u8 = 1) |
-pgt_id (u64, big-endian) | row_id_length (u64, big-endian) | row_id bytes
-```
-
-The hash is XXH3-64 with seed `0`. Its lower 63 bits are combined with the
-reserved row-lock namespace bit (`0x8000000000000000`), then interpreted as a
-two's-complement signed `int64` for `pg_advisory_xact_lock`. The stream-table
-gate key is the non-negative `pgt_id`, so gate and per-identity namespaces are
-disjoint. `pgt_id` must remain in the non-negative signed `int64` range. The
-version, algorithm, seed, framing, byte order, and signed interpretation are
-part of the compatibility contract. A different algorithm in a concurrent
-backend is unsafe even though hash collisions only serialize unrelated rows.
-The stored `row_lock_version` guard rejects a binary or catalog state with an
-unknown version before it can maintain a V2 graph.
-
-At `READ COMMITTED`, the exact check after advisory-lock acquisition runs in a
-fresh command snapshot and can see a row committed while the backend waited for
-the lock. Lock acquisition and the subsequent exact lookup are separate SPI
-user commands. The exact lookup uses `InvalidSnapshot` with `read_only = false`
-semantics, so its `READ COMMITTED` snapshot is obtained only after the backend
-has finished waiting for the advisory lock. The implementation must not combine
-lock acquisition and the exact lookup in one SQL command or CTE, because that
-would establish the statement snapshot before the lock wait.
-
-The unbounded unique `IMMEDIATE` path is supported only at `READ COMMITTED`.
-Under `REPEATABLE READ` or `SERIALIZABLE`, every such identity, including a
-query shape that independently requires the `Exclusive` gate, raises
-`feature_not_supported` (`0A000`) before capture or storage mutation. The error
-must state that unbounded unique identities in `IMMEDIATE` mode require
-`READ COMMITTED` and hint: `Retry the operation in a new READ COMMITTED
-transaction.` Retrying at the same isolation level can never make the operation
-valid. A table-wide exclusive gate does not make an old transaction snapshot
-current, and the implementation must not silently fall back to that gate as a
-way around the restriction. Other query shapes and bounded unique paths retain
-their existing isolation and lock semantics.
-
-An advisory-key collision may serialize unrelated identities but cannot affect
-row identity or uniqueness. The lock hash is coordination metadata, never proof
-of equality. Failing to acquire or hold every required lock aborts the statement.
-Until this path has correctness tests, deadlock tests, and a concurrency
-benchmark, `IMMEDIATE` mode must reject unique unbounded identity schemas during
-planning. `RowExclusive` remains valid when a database UNIQUE probe index proves
-identity uniqueness.
+Initial V2 does not add per-identity advisory locks. `IMMEDIATE` mode rejects a
+unique unbounded identity during planning because the expression index cannot
+enforce uniqueness. A later concurrency RFC may enable that path only after it
+proves fresh-snapshot behavior, old/new-key acquisition, deadlock handling,
+subtransaction ownership, and a cluster-wide lock-pool budget across concurrent
+sessions. A per-transaction setting alone is not a sufficient capacity bound.
+Bounded unique identities remain eligible for concurrent `IMMEDIATE` maintenance
+because the direct `UNIQUE (__pgt_row_id)` index is authoritative.
 
 `RowIdStrategy` and `RowIdSchema` continue to decide which logical fields form an
 identity. They do not select a storage encoding. V2 has one encoder.
@@ -580,17 +566,14 @@ A source change buffer may feed several stream tables. V2 is therefore
 extension-wide, not a per-stream-table option. Every consumer of a source uses
 the same source identity bytes and probe rules.
 
-Trigger CDC and WAL CDC both emit full V2 identities. A consumer derives or
-reads the V2 probe before indexed matching. No hot-path lookup of downstream
+Trigger CDC and WAL CDC both emit full V2 identities. A consumer derives the V2
+probe only when matching an unbounded target. No hot-path lookup of downstream
 stream-table preferences is required because no such preference exists.
 
-The V2 extension-upgrade DDL adds non-null `row_identity_version`,
-`row_probe_version`, and `row_lock_version` columns to
-`pgtrickle.pgt_change_buffers` and the corresponding version state for
-stream-table storage. Buffer registry metadata records all three versions.
-Runtime readers refuse mismatches before consuming a row, and the lock-version
-guard prevents binaries with different advisory-key derivations from operating
-concurrently.
+The V2 extension-upgrade DDL adds non-null `row_identity_version` and
+`row_probe_version` columns to `pgtrickle.pgt_change_buffers` and the
+corresponding version state for stream-table storage. Buffer registry metadata
+records both versions. Runtime readers refuse mismatches before consuming a row.
 The guard is enforced in code, not only by extension upgrade SQL, because a new
 shared library can be installed before `ALTER EXTENSION ... UPDATE` runs.
 
@@ -615,10 +598,44 @@ External consumers must update their schema and resnapshot the replaced stream
 tables. There is no automatic cast from old numeric IDs to V2 bytes because the
 numeric value does not contain the original logical identity.
 
-After rebuild, bounded unique stream tables may use the UNIQUE probe index as
-replica identity. Unbounded or keyless stream tables use `REPLICA IDENTITY FULL`.
-Publication column lists should exclude `__pgt_row_probe` unless a sink has an
-explicit operational reason to transport this non-contractual index helper.
+After rebuild, a bounded unique stream table may use its direct `UNIQUE
+(__pgt_row_id)` index as replica identity. The column is catalog-marked `NOT
+NULL`, satisfying PostgreSQL's replica-identity index requirements. A publication
+that carries UPDATE or DELETE for that table must include `__pgt_row_id` in its
+column list. Subscribers store it in a regular `BYTEA` column; no generated
+publisher-to-generated-subscriber mapping is involved.
+
+Unbounded or keyless stream tables use `REPLICA IDENTITY FULL`, and publication
+column lists must include every column PostgreSQL requires for that identity
+mode. `row_probe_v1` is only an index expression and is never part of a
+publication schema. Operators must account for the resulting full old-row WAL,
+network, and subscriber-apply cost on UPDATE and DELETE; it is included in the
+replication benchmark matrix.
+
+### 11.1 Security and privacy
+
+"Opaque" is an API contract, not a confidentiality claim. V2 bytes contain
+reversible encodings of source keys and, for keyless identities, may contain
+every logical output field. Pass-through identity can retain an upstream key
+that a later projection no longer displays. The ordered prefix in an overflow
+probe also reveals the corresponding prefix of the canonical value. Hexadecimal
+display does not anonymize any of this data.
+
+The implementation and integration documentation must therefore enforce these
+rules:
+
+- default user-facing views and grants do not expose `__pgt_row_id`; reading the
+   internal column requires an explicit privilege or ownership;
+- logs, errors, traces, and monitoring report identity length and a short
+   diagnostic fingerprint by default, not complete bytes or reversible prefixes;
+- publication, outbox, DuckLake, and other sink configurations include the row
+   ID only when their update/delete contract requires it or an administrator opts
+   in after reviewing the data classification;
+- operators treat identity fields containing personal data, credentials,
+   tenant-private keys, or other secrets with the same controls as the source
+   columns; and
+- dump, support-bundle, and diagnostic documentation warns that internal
+   identities can retain values omitted by a downstream projection.
 
 ## 12. Migration and Cutover
 
@@ -631,67 +648,169 @@ rolling per-table conversion. The V2-capable binary understands V1 state for
 preflight and for the controlled transition, but normal refresh never mixes
 versions.
 
+V2 chooses a **durable base image**, not an exported-snapshot holder. PostgreSQL
+exported snapshots cease to be importable when their exporting transaction ends
+and do not survive a postmaster crash. The cutover therefore materializes logged
+staging relations in the same transaction that changes capture version. Rebuild
+can resume from those relations after a backend or postmaster crash without
+inventing a new snapshot or frontier. The cost is an explicitly long source-write
+outage while the base image is copied; reducing that outage requires a separate
+protocol and proof.
+
 Migration uses this state model:
 
 | State | Capture and refresh contract |
 |---|---|
 | `V1_ACTIVE` | V1 capture and refresh continue normally. V2 preflight and dry-run are available, but no V2 state is consumed. |
-| `MIGRATING_TO_V2` | V1 refresh is disabled. V2 capture is armed at the recorded frontier, and rebuild plus catch-up are resumable. No mixed V1/V2 graph is refreshable. |
+| `MIGRATING_TO_V2` | V1 refresh is disabled. A durable V2 base image exists, V2 trigger capture is armed, and rebuild plus replay are resumable. No mixed V1/V2 graph is refreshable. |
 | `V2_ACTIVE` | Only V2 capture and refresh are accepted. |
 
-The transition into `MIGRATING_TO_V2` is committed by the cutover transaction,
-which records the frontier while replacing V1 capture with V2 capture. An
-extension update alone therefore does not begin the operational outage.
+Durable migration phases under `MIGRATING_TO_V2` are `BASE_STAGED`,
+`REBUILDING`, `REPLAYING`, and `READY_TO_ACTIVATE`. Phase, staging generation,
+per-table rebuild state, and per-buffer replay progress are catalog state. The
+transition into `MIGRATING_TO_V2` is committed only by the cutover transaction
+that creates the base image and replaces capture. An extension update alone does
+not begin the operational outage.
 
-### 12.1 Preflight
+### 12.1 Binary rollout barrier
+
+PostgreSQL can keep an already-loaded extension object in a backend after files
+on disk are replaced. Before cutover, the administrator must install the bridge
+release on every server, perform a full postmaster restart, and then apply the
+extension SQL update. A session drain without a postmaster restart is not the
+documented V2 procedure. The migration command verifies that the loaded bridge
+build ID and SQL catalog version agree before preflight and again in the cutover
+transaction. This barrier ensures that a waiting source writer cannot resume
+after cutover through a backend still running V1 code.
+
+### 12.2 Preflight
 
 Before changing state, migration must:
 
-1. validate all identity types and collations;
+1. validate all identity types, typmods, collations, source-key eligibility,
+   operator classes, and PostgreSQL-major registry contracts;
 2. enumerate every source, shared buffer, stream table, and downstream edge;
-3. verify sufficient disk space and required privileges;
+3. verify required privileges and estimate space for logged staging, replacement
+   storage, indexes, WAL, and the configured V2 capture reserve;
 4. report publications and external dependencies that require resnapshotting;
-5. remove or replace any REPLICA IDENTITY configuration that depends on the V1
-   `BIGINT` before the V2 rebuild snapshot is established;
-6. stop before making changes if any stream table cannot be encoded by V2.
+5. require publications or subscriptions that depend on the V1 `BIGINT` identity
+   to be paused and marked for resnapshot;
+6. enumerate active and prepared transactions holding conflicting source locks,
+   and stop or time out without state change until they are resolved;
+7. reject foreign tables, externally mutable relations, and connectors that
+   cannot participate in the local lock-and-snapshot contract; and
+8. stop before making changes if any stream table cannot be encoded by V2.
 
 Dry-run executes the complete preflight and reports the planned graph, storage
 replacement, estimated space, unsupported fields, and external resnapshot work
 without changing catalog or capture state.
 
-### 12.2 Cutover
+Preflight inventories pg_trickle-managed and custom publications through
+`pg_publication_rel`, records known publication OIDs and storage relations, and
+requires explicit administrator acknowledgement for subscribers that cannot be
+discovered from the publisher. Cutover disables managed publications and writes
+durable `RESNAPSHOT_REQUIRED` records. V2 activation does not re-enable them.
+After V2 activation and subscriber schema preparation, an explicit administrator
+action recreates the managed publication while retaining `RESNAPSHOT_REQUIRED`;
+the subscriber then takes its fresh initial snapshot and begins streaming.
+A second explicit acknowledgement records completion and clears the requirement.
+Unmanaged publications remain a preflight blocker until the administrator
+disables and acknowledges them. The migration status view exposes every
+outstanding record.
 
-The migration command should use the existing snapshot/frontier machinery:
+### 12.3 WAL CDC normalization
 
-1. pause scheduling, disable V1 refresh, and mark the graph
-   `MIGRATING_TO_V2`;
-2. acquire source locks in deterministic OID order for the short cutover
-   transaction;
-3. establish snapshot/frontier position `P`;
-4. replace V1 capture definitions and buffers with empty V2 capture state in the
-   same transaction;
-5. release source locks; writes after `P` are captured as V2;
-6. discard and recreate all stream-table storage in dependency order from the
-   authoritative snapshot;
-7. monitor V2 buffer growth during rebuild and pause/reject further rebuild work
-   before a configurable disk watermark is crossed;
-8. apply V2 changes captured after `P` in durable, restartable batches exactly
-   once, checking available space before each batch;
-9. mark the graph V2 and resume scheduling.
+Direct WAL-to-V2 cutover is not supported by this migration. While the graph is
+still `V1_ACTIVE`, every WAL source transitions to trigger CDC through the
+existing overlap protocol: arm V1 triggers before selecting the final WAL
+frontier, drain the slot through a frontier proven safe with respect to active
+and prepared transactions, deduplicate overlap, and commit `TRIGGER` mode only
+after all V1 changes are durable. Automatic transition back to WAL is disabled
+for the migration generation.
+
+Cutover cannot start until every source reports stable trigger mode and no WAL
+transition is in progress. After the graph reaches `V2_ACTIVE`, each eligible
+source may independently transition back to WAL using V2 buffers and the normal
+V2 overlap protocol. This makes trigger and WAL behavior explicit without
+equating transaction visibility with LSN order.
+
+### 12.4 Trigger cutover and durable base
+
+The cutover transaction performs these steps:
+
+1. pause scheduling, acquire the graph-wide migration gate, wait for active
+   refreshes to finish, and re-run preflight under the gate;
+2. enumerate local source parents and writable leaf partitions, then execute
+   `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` in deterministic relation-OID
+   order with an administrator-configured lock timeout;
+3. after all locks are held, take a fresh command snapshot and materialize every
+   authoritative source into logged staging relations in an extension-owned
+   migration schema, owned by the extension owner, with schema and relation
+   privileges revoked from `PUBLIC` and stream-table owners;
+4. install V2 trigger definitions and empty V2 buffers, record identity/probe
+   versions and `BASE_STAGED`, and retire V1 buffers in the same transaction;
+5. commit the base image, capture switch, and migration state atomically; then
+   release the source locks so waiting writers continue through V2 triggers.
+
+`SHARE ROW EXCLUSIVE` conflicts with `ROW EXCLUSIVE`, `SHARE UPDATE EXCLUSIVE`,
+`SHARE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, and `ACCESS EXCLUSIVE`; ordinary
+SELECT and `SELECT FOR SHARE/UPDATE` table-lock modes do not conflict. Source
+INSERT, UPDATE, DELETE, MERGE, COPY FROM, and prepared transactions that changed
+a source hold a conflicting `ROW EXCLUSIVE` lock, so cutover waits for them to
+commit or abort before taking the base snapshot. DDL is likewise excluded. Lock
+timeout aborts the cutover transaction and leaves the graph `V1_ACTIVE`.
+
+Because all source-write locks are held before the fresh snapshot, every
+transaction that changed a source either finishes before the base image or waits
+and executes after V2 capture is installed. V1 buffered changes are retired only
+in the transaction whose logged base image includes their committed effects.
+Waiting transactions that began before cutover still execute the bridge binary
+and the post-cutover V2 trigger definitions.
 
 The invariant is:
 
-> Every committed source change is represented either in the rebuild snapshot
-> or in V2 CDC state after the snapshot frontier, exactly once.
+> Every committed source change is represented either in the durable base image
+> or in V2 trigger CDC committed after capture switches, exactly once.
 
-Capture must never be unarmed between V1 and V2. V1 buffered rows are discarded
-only after the same transaction establishes a snapshot known to include them.
+### 12.5 Rebuild, replay, and capacity
 
-### 12.3 Failure and rollback
+Rebuild reads only the immutable staging generation and writes replacement
+stream storage in dependency order. Each completed shadow table and index is
+recorded transactionally, so a crash retries only incomplete work. Staging
+relations have no user DML API; resume verifies their owner, ACL, generation,
+schema, and recorded row counts before use. They remain logged and restricted
+until activation and external resnapshot obligations complete.
+
+V2 capture rows carry the migration generation. Replay uses durable per-buffer
+progress; applying one correctness-preserving batch to shadow storage and
+advancing its progress occur in the same database transaction. A crash commits
+both or neither. Captured rows are retained until every dependent consumer has
+advanced beyond them. Activation atomically swaps all completed storage,
+persists consumer positions, marks the graph `V2_ACTIVE`, and resumes scheduling.
+Changes committed after the activation batch's visible boundary remain in the
+V2 buffer for the ordinary scheduler; there is no unarmed interval.
+
+Merely pausing rebuild at a disk watermark is forbidden because capture would
+continue to grow. Preflight creates a finite migration capture quota backed by
+reserved capacity. Every V2 trigger transaction reserves its projected buffer
+bytes under serialized quota accounting before inserting capture rows. A soft
+watermark emits status, metrics, and warnings but does not claim to stop buffer
+growth. If a transaction cannot reserve space below the hard watermark, the
+trigger raises a documented error and the entire source transaction rolls back;
+committed source data must never outrun durable capture. Filesystem exhaustion
+also aborts the source transaction through normal transactional trigger
+semantics. Operators can increase capacity or let replay release quota before
+retrying the write.
+
+### 12.6 Failure and rollback
 
 Migration phase is durable catalog state. After cutover, a crash leaves V2
-capture armed and the graph non-refreshable until rebuild resumes. Re-running the
-migration continues from the recorded phase; it does not create another frontier.
+trigger capture armed, the logged base generation intact, and the graph
+non-refreshable until rebuild resumes. Re-running migration continues from the
+recorded phase and progress. It neither imports an expired snapshot nor creates
+a new frontier. If the cutover transaction itself aborts or the server crashes
+before it commits, PostgreSQL rolls back staging and capture changes together and
+the graph remains `V1_ACTIVE`.
 
 Rollback is supported only before V2 cutover. After cutover, returning to V1
 requires restoring a backup or rebuilding all stream tables and CDC state with a
@@ -721,7 +840,18 @@ MERGE latency with indexes larger than `shared_buffers`. Probe benchmarks must
 compare 32, 64, 128, and 256-byte prefixes across short keys, ordered wide keys,
 random wide keys, and long identities with common prefixes.
 
-The comparison set is V1 hash, V2 full identity, and V2 overflow probe. A
+For every applicable bounded and unbounded workload, the physical comparison
+set includes:
+
+- direct B-tree on the complete bounded `__pgt_row_id`;
+- B-tree expression index on `row_probe_v1(__pgt_row_id)`;
+- stored generated probe plus B-tree, including heap and WAL cost; and
+- PostgreSQL's built-in hash index on the complete `__pgt_row_id`.
+
+The built-in hash index is a particularly relevant unbounded, non-unique
+baseline: it accepts wide input, stores a four-byte hash, and lets the executor
+recheck complete `BYTEA` equality, but cannot enforce uniqueness or preserve
+prefix locality. The matrix also retains V1 as an end-to-end baseline. A
 material regression on cached common-key workloads must be investigated before
 merge. The expected V2 benefit is removal of text conversion and substantially
 better out-of-cache index locality where registry metadata supports that claim,
@@ -732,9 +862,9 @@ tradeoffs.
 
 The release gates are index size, WAL volume, encoded-ID storage size,
 CDC-buffer growth, cached integer-key latency, out-of-cache ordered-key latency,
-overflow-key latency, and concurrent `IMMEDIATE` throughput for unconstrained
-text identities. The probe prefix is frozen only after these results identify
-the best acceptable tradeoff.
+overflow-key latency, durable-base staging time, source-write outage, and replay
+throughput. The probe prefix and physical index policy are frozen only after
+these results identify the best acceptable tradeoff.
 
 ## 14. Testing
 
@@ -763,6 +893,10 @@ the best acceptable tradeoff.
 - long common-prefix identities produce narrow candidate lookups;
 - a test-only probe constructor can inject equal digests for distinct full IDs,
   proving that forced probe collisions still match only the exact full row ID;
+- direct full-ID indexes are selected whenever the proven datum bound fits the
+   running cluster's `BTMaxItemSize`;
+- unbounded identities select a non-unique expression index and no stored probe
+   column; and
 - no UNIQUE index is created where overflow is possible.
 
 ### 14.3 Cross-path tests
@@ -774,46 +908,55 @@ set operations, windows, and downstream stream tables.
 Tests must include primary-key updates, NULL group keys, keyless duplicates,
 deep join composition, synthetic identities, and wide TOASTed values.
 
-Concurrency tests must run multiple sessions against an unbounded unique
-identity in each refresh mode and prove that exactly one logical row survives.
-They must cover old/new identities on primary-key updates, deterministically
-ordered multi-row lock acquisition, forced advisory-key collisions, and the
-stream-table gate shared/exclusive hierarchy. At `READ COMMITTED`, a waiter
-must see the committed row after obtaining the advisory lock. The lock-budget
-tests must cover a transaction exactly at `pg_trickle.ivm_row_lock_limit`, a
-statement that would take the transaction above the limit, several individually
-valid statements whose cumulative key count exceeds the transaction limit,
-repeated use of keys across statements, cumulative keys across multiple stream
-tables, old-plus-new identity counting, collision-key deduplication, savepoint
-rollback restoring the available budget, parent-held keys surviving child
-rollback, rejection before any additional lock is acquired, and the absence of
-advisory locks from a rejected statement. They must also cover concurrent
-sessions approaching the configured budget and verify that an ordinary DML role
-cannot raise the SUSET lock limit. Make
-the waiter test deterministic: have the holder signal that it owns the advisory
-lock, verify that the waiter is blocked before the holder commits, then require
-the waiter to see the committed row after obtaining the lock through the
-separate fresh-snapshot lookup. At `REPEATABLE READ` and `SERIALIZABLE`, every
-unbounded unique `IMMEDIATE` path, including paths that require `Exclusive`,
-must raise `feature_not_supported` before mutation and require a retry in a new
-`READ COMMITTED` transaction. A throughput benchmark must verify that
-unconstrained text identities do not serialize all writers. Enum tests must use two sessions:
-session A warms the encoder cache, session B renames an in-use label and
-commits, and session A calls the cached expression again. Session A must either
-resolve the new label or reject the affected stream state; it must never emit
-stale bytes. The test must also prove that the existing DDL hook marks the full
-downstream DAG for reinitialization before further refresh.
+Concurrency tests cover bounded unique identities under concurrent `IMMEDIATE`
+writes and unbounded identities under scheduled/manual refresh. Every unbounded
+unique `IMMEDIATE` path must raise `feature_not_supported` during planning,
+before capture, storage mutation, or advisory-lock acquisition, at every
+transaction isolation level. Enum tests use two sessions: session A warms the
+encoder cache, session B renames an in-use label and commits, and session A calls
+the cached expression again. Session A must either resolve the new label or
+reject the affected stream state; it must never emit stale bytes. The test also
+proves that the existing DDL hook marks the full downstream DAG for
+reinitialization before further refresh.
+
+Replication tests prove that bounded unique tables use the direct non-null row-ID
+index as replica identity, required publication column lists include the row ID,
+and subscribers use a regular `BYTEA` column. Unbounded and keyless tables test
+`REPLICA IDENTITY FULL`. No schema or publication contains a generated probe
+column.
 
 ### 14.4 Migration tests
 
 - non-empty V1 buffers at cutover;
-- concurrent source writes throughout migration;
+- source writes blocked during durable staging and captured as V2 after lock
+   release;
 - several stream tables sharing one source buffer;
 - multi-level DAG rebuild order;
-- crash after each durable migration phase and successful resume;
+- active and prepared source writers, deterministic source-lock order, lock
+   timeout, and rollback to unchanged `V1_ACTIVE` state;
+- WAL sources normalized to trigger mode with active and prepared transactions,
+   followed by optional V2 transition back to WAL;
+- backend and postmaster crash after each durable migration phase, proving that
+   post-cutover resume uses the same logged staging generation;
+- crash before cutover commit, proving that staging and capture switch both roll
+   back;
+- replay batch failure, proving shadow mutation and cursor advancement commit or
+   roll back together;
+- soft-watermark prioritization and hard-quota rejection that rolls back the
+   source write without losing capture;
 - V1 binary/V2 catalog and V2 binary/V1 catalog rejection;
+- bridge build/catalog mismatch and missing-restart rejection;
 - unsupported-type preflight with no partial changes;
-- logical-replication resnapshot procedure.
+- foreign or externally mutable source rejection;
+- staging owner/ACL tampering rejection; and
+- logical-replication resnapshot state, publication recreation, initial copy,
+  completion acknowledgement, and crash recovery between each step.
+
+Crash tests use explicit failpoints immediately before and after each phase
+commit. Backend cases terminate the migration worker; postmaster cases kill and
+restart the disposable E2E PostgreSQL container. Each restart asserts the same
+persisted generation identifier, phase, staging OIDs, row counts, and replay
+cursors before resuming.
 
 The final oracle is a from-scratch V2 rebuild: migrated output must be exactly
 equal as a multiset after all captured changes are applied.
@@ -823,25 +966,27 @@ equal as a multiset after all captured changes are applied.
 **Stage 1: Resolve and freeze the contracts.** Write the normative byte
 specification, domain and type-tag registries, golden vectors, and type
 validation. Prove the 128-bit interval encoding and per-type equality/order
-contracts, specify volatility and DDL invalidation, validate per-identity lock
-semantics, benchmark candidate probe prefixes, and check `BTMaxItemSize` before
+contracts, specify volatility and DDL invalidation, benchmark candidate probe
+prefixes and all four physical index forms, and check `BTMaxItemSize` before
 freezing identity V2 and probe V1.
 
 **Stage 2: Implement the encoder.** Add the typed record entry point, cached
 dispatch, scalar encoders, structural encoders required by the existing test
 surface, synthetic domains, and probe helper.
 
-**Stage 3: Change storage and matching.** Create `BYTEA` row-ID/probe columns,
-bounded probe indexes, and exact two-column DML. Remove assumptions that row IDs
-are numeric or that every non-keyless identity has a unique full-width index.
+**Stage 3: Change storage and matching.** Create one `BYTEA` row-ID column,
+direct full-ID indexes for bounded schemas, expression-probe indexes for
+unbounded schemas, and exact DML. Remove assumptions that row IDs are numeric or
+that every non-keyless identity has a unique full-width index.
 
 **Stage 4: Centralize producers.** Move trigger CDC, WAL CDC, scan, refresh,
 join, aggregate, set, window, and synthetic identities to the shared encoder.
 Delete `::TEXT` row-ID construction and hard-coded numeric sentinels.
 
 **Stage 5: Add version guards and migration.** Persist identity/probe versions,
-add runtime mismatch rejection, install a dry-run mode and resumable
-administrative cutover, and rebuild every stream table and shared buffer outside
+add runtime mismatch rejection and the bridge restart barrier, normalize WAL
+sources to trigger capture, install dry-run and durable-base cutover, add capture
+quota/backpressure, and rebuild every stream table and shared buffer outside
 `ALTER EXTENSION UPDATE`.
 
 **Stage 6: Prove it.** Run the full correctness matrix, migration fault tests,
@@ -866,11 +1011,26 @@ as row equality. Wider probability is not needed when exact canonical bytes can
 be stored. The overflow probe also contains a digest, but only as a bounded index
 accelerator; it is never authoritative and exact matching is always preserved.
 
-### Index the complete `BYTEA` directly
+### Index every complete `BYTEA` directly
 
-This is correct for short keys but fails for sufficiently wide B-tree entries.
-The bounded probe retains prefix locality where the type contract supports it
-and guarantees indexability without making a digest authoritative.
+This is the selected design for statically bounded identities. Applying it to an
+unbounded identity would fail for sufficiently wide B-tree entries. The
+expression probe is reserved for that unbounded case and guarantees indexability
+without making a digest authoritative.
+
+### Store a generated probe column
+
+This duplicates ordinary short identities in the heap, increases WAL, complicates
+replica identity and publication column lists, and cannot map generated-to-
+generated in PostgreSQL 18 logical replication. An immutable expression index
+provides the same unbounded lookup key without adding a public table column.
+
+### Keep an exported snapshot alive during rebuild
+
+This can survive a worker failure only while the exporting backend remains
+alive. It cannot support postmaster-crash resume from the same snapshot. V2 pays
+the staging and write-outage cost for a logged base image whose recovery contract
+PostgreSQL can actually preserve.
 
 ### Add a direct-integer strategy
 
@@ -899,11 +1059,17 @@ following:
 - no final row identity is a hash or numeric sentinel;
 - supported unequal logical identities have different full bytes;
 - all indexed matching verifies the full identity;
-- probe indexes remain bounded for arbitrary valid input size;
+- bounded identities use direct full-ID B-trees, while unbounded expression-probe
+   indexes remain bounded for arbitrary valid input size;
 - the selected probe prefix fits the running cluster's `BTMaxItemSize` and is
    justified by the required benchmark matrix;
+- the normative wire document defines every byte and structural limit and its
+   golden identity/probe vectors pass before implementation merges;
 - each registry entry proves equality agreement and declares default non-NULL
-   B-tree ordering, volatility, size, and DDL-invalidation metadata;
+    B-tree ordering, volatility, size, DDL-invalidation metadata, semantic
+    resolution context, and supported PostgreSQL majors;
+- nullable `NULLS DISTINCT`, deferrable, partial, expression, and unregistered
+   non-default-opclass indexes cannot become `SCAN_KEY` identities;
 - interval identities encode the complete 128-bit PostgreSQL comparison value;
 - enum label caching is invalidated by enum DDL and the encoder is not declared
    `IMMUTABLE` while label-based enum support is enabled;
@@ -913,25 +1079,29 @@ following:
 - V1/V2 mismatch cannot consume or mutate persisted state;
 - `V1_ACTIVE`, `MIGRATING_TO_V2`, and `V2_ACTIVE` enforce the stated capture and
    refresh contract;
+- bridge binary installation and a full postmaster restart are required before
+   cutover;
+- the cutover transaction atomically commits a logged, immutable base image and
+   V2 trigger capture while source-write locks enforce the stated visibility
+   boundary;
+- WAL sources normalize to trigger CDC before cutover and may transition back
+   only after V2 activation;
 - migration loses or duplicates no committed change under concurrent writes;
-- interrupted migration resumes safely;
+- interrupted migration resumes from the same durable staging generation, and
+   replay mutation plus cursor progress are atomic;
+- capture quota exhaustion rolls back the source transaction instead of allowing
+   committed data to outrun CDC;
 - external compatibility breaks and resnapshot steps are documented;
-- unique unbounded `IMMEDIATE` identities use the versioned, deterministic
-   per-identity lock protocol without table-wide writer serialization, while
-   preserving query-shape `Exclusive` locks;
-- the statement collects and deduplicates all old and new advisory keys before
-   acquisition, enforces the finite `pg_trickle.ivm_row_lock_limit` across the
-   current top-level transaction, rejects a statement before acquiring any new
-   lock or mutating storage when the transaction budget would be exceeded,
-   reuses already-held keys without charging them again, restores budget after
-   savepoint rollback, and leaves no advisory locks from a rejected statement;
-- the unbounded unique `IMMEDIATE` path rejects `REPEATABLE READ` and
-   `SERIALIZABLE` with `feature_not_supported` before mutation, including
-   query shapes requiring `Exclusive`, and documents the `READ COMMITTED`
-   contract;
-- lock acquisition and exact lookup use separate SPI user commands, with the
-   exact lookup using `InvalidSnapshot` and `read_only = false` semantics so the
-   lookup snapshot is established after the lock wait;
+- staging ownership and ACLs prevent ordinary users and stream owners from
+   reading or mutating durable base data, and resume rejects tampered metadata;
+- managed publications remain disabled and durably marked for resnapshot until
+   the explicit recreate/copy/acknowledge workflow completes;
+- bounded unique replica identity uses the direct non-null row-ID index, and
+   publication schemas include every required identity column;
+- default views, grants, diagnostics, publications, and integration docs treat
+   canonical row IDs as reversible source data rather than anonymized hashes;
+- unique unbounded `IMMEDIATE` identities are rejected before mutation until a
+   separate concurrency RFC proves correctness and cluster-wide lock capacity;
 - out-of-cache composite-key workloads show the intended locality benefit;
 - cached common-key workloads have no unexplained material regression;
 - all performance release gates in section 13 pass.
@@ -941,7 +1111,9 @@ following:
 Adopt exact canonical `BYTEA` row identities plus a bounded, non-authoritative
 probe as pg_trickle's V2 architecture before 1.0. Do not freeze or implement the
 wire specification until interval encoding, enum volatility, per-type ordering,
-unbounded-identity concurrency, and probe sizing meet the gates above.
+physical-index benchmarks, and durable migration meet the gates above. Keep
+unbounded unique `IMMEDIATE` maintenance disabled until a separate concurrency
+RFC is proven; it is not a V2 release dependency.
 
 This is intentionally a breaking, extension-wide rebuild. That cost buys a row
 identity the project can keep: exact rather than probabilistic, typed rather than
