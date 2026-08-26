@@ -470,8 +470,8 @@ The lock hierarchy is:
 
 1. Per-identity maintenance acquires the stream-table gate in shared mode.
 2. The existing statement-level `AFTER` trigger uses transition tables to
-   collect old and new identities, deduplicates them, and acquires all required
-   per-identity locks in sorted order.
+   collect old and new identities, derives and deduplicates their advisory
+   keys, and acquires all required per-identity locks in sorted order.
 3. It performs probe-plus-full-ID matching and exact uniqueness checks before
    applying deltas.
 4. Migration, reinitialization, manual/full refresh, mode changes, and other
@@ -482,6 +482,23 @@ point because it does not have the complete affected identity set. Sorted
 acquisition prevents cycles within one collected lock set. Several statements
 in one transaction can still deadlock with another transaction; PostgreSQL may
 abort one participant with a retryable error, and that is normal behavior.
+
+The complete advisory-key set must be collected and deduplicated before the
+first per-identity lock is acquired. The extension must expose a finite integer
+setting named `pg_trickle.ivm_row_lock_limit` as a hard per-statement limit on
+that set. The count includes distinct old and new identities; an update whose
+old and new identities differ therefore consumes two keys. Equal advisory keys
+caused by a forced hash collision are acquired once, while the full row ID
+continues to decide equality. A statement at the limit is allowed to proceed.
+A statement above the limit must abort before acquiring any per-identity lock,
+before mutating stream storage, and before applying a delta. The error must
+identify `pg_trickle.ivm_row_lock_limit` and hint that the caller split the
+statement, use bounded identities, or use `DIFFERENTIAL` mode. The implementation
+must not acquire a partial set and must not respond by upgrading the shared gate
+to exclusive mode or by silently falling back to table-wide writer
+serialization. Transaction-level advisory locks remain held until transaction
+end, so the default must be finite, documented, and chosen with the cluster's
+lock-pool limits in mind.
 
 The per-identity key contract is fixed by `ROW_LOCK_VERSION = 1`. The input to
 the key hash is the following exact byte sequence:
@@ -504,12 +521,24 @@ unknown version before it can maintain a V2 graph.
 
 At `READ COMMITTED`, the exact check after advisory-lock acquisition runs in a
 fresh command snapshot and can see a row committed while the backend waited for
-the lock. The unbounded unique `IMMEDIATE` path is supported only at `READ
-COMMITTED`. Under `REPEATABLE READ` or `SERIALIZABLE`, it raises
-`serialization_failure` before capture or storage mutation; the caller must
-retry in a new `READ COMMITTED` transaction. It must not use the old snapshot or
-silently fall back to table-wide serialization. Other query shapes and bounded
-unique paths retain their existing isolation and lock semantics.
+the lock. Lock acquisition and the subsequent exact lookup are separate SPI
+user commands. The exact lookup uses `InvalidSnapshot` with `read_only = false`
+semantics, so its `READ COMMITTED` snapshot is obtained only after the backend
+has finished waiting for the advisory lock. The implementation must not combine
+lock acquisition and the exact lookup in one SQL command or CTE, because that
+would establish the statement snapshot before the lock wait.
+
+The unbounded unique `IMMEDIATE` path is supported only at `READ COMMITTED`.
+Under `REPEATABLE READ` or `SERIALIZABLE`, every such identity, including a
+query shape that independently requires the `Exclusive` gate, raises
+`feature_not_supported` (`0A000`) before capture or storage mutation. The error
+must state that unbounded unique identities in `IMMEDIATE` mode require
+`READ COMMITTED` and hint: `Retry the operation in a new READ COMMITTED
+transaction.` Retrying at the same isolation level can never make the operation
+valid. A table-wide exclusive gate does not make an old transaction snapshot
+current, and the implementation must not silently fall back to that gate as a
+way around the restriction. Other query shapes and bounded unique paths retain
+their existing isolation and lock semantics.
 
 An advisory-key collision may serialize unrelated identities but cannot affect
 row identity or uniqueness. The lock hash is coordination metadata, never proof
@@ -727,11 +756,20 @@ identity in each refresh mode and prove that exactly one logical row survives.
 They must cover old/new identities on primary-key updates, deterministically
 ordered multi-row lock acquisition, forced advisory-key collisions, and the
 stream-table gate shared/exclusive hierarchy. At `READ COMMITTED`, a waiter
-must see the committed row after obtaining the advisory lock. At `REPEATABLE
-READ` and `SERIALIZABLE`, the unbounded unique `IMMEDIATE` path must raise
-`serialization_failure` before mutation and require a retry in a new `READ
-COMMITTED` transaction. A throughput benchmark must verify that unconstrained
-text identities do not serialize all writers. Enum tests must use two sessions:
+must see the committed row after obtaining the advisory lock. The lock-budget
+tests must cover a statement exactly at `pg_trickle.ivm_row_lock_limit`, a
+statement above the limit, old-plus-new identity counting, collision-key
+deduplication, rollback to a savepoint after lock acquisition, the absence of
+advisory locks after a rejected statement, and concurrent sessions approaching
+the configured budget. Make the waiter test deterministic: have the holder
+signal that it owns the advisory lock, verify that the waiter is blocked before
+the holder commits, then require the waiter to see the committed row after
+obtaining the lock through the separate fresh-snapshot lookup. At `REPEATABLE
+READ` and `SERIALIZABLE`, every unbounded unique `IMMEDIATE` path, including
+paths that require `Exclusive`, must raise `feature_not_supported` before
+mutation and require a retry in a new `READ COMMITTED` transaction. A
+throughput benchmark must verify that unconstrained text identities do not
+serialize all writers. Enum tests must use two sessions:
 session A warms the encoder cache, session B renames an in-use label and
 commits, and session A calls the cached expression again. Session A must either
 resolve the new label or reject the affected stream state; it must never emit
@@ -853,8 +891,17 @@ following:
 - unique unbounded `IMMEDIATE` identities use the versioned, deterministic
    per-identity lock protocol without table-wide writer serialization, while
    preserving query-shape `Exclusive` locks;
+- the statement collects and deduplicates all old and new advisory keys before
+    acquisition, enforces the finite `pg_trickle.ivm_row_lock_limit`, rejects
+    over-limit statements before lock acquisition or storage mutation, and leaves
+    no advisory locks from a rejected statement;
 - the unbounded unique `IMMEDIATE` path rejects `REPEATABLE READ` and
-   `SERIALIZABLE` before mutation and documents the `READ COMMITTED` contract;
+   `SERIALIZABLE` with `feature_not_supported` before mutation, including
+   query shapes requiring `Exclusive`, and documents the `READ COMMITTED`
+   contract;
+- lock acquisition and exact lookup use separate SPI user commands, with the
+   exact lookup using `InvalidSnapshot` and `read_only = false` semantics so the
+   lookup snapshot is established after the lock wait;
 - out-of-cache composite-key workloads show the intended locality benefit;
 - cached common-key workloads have no unexplained material regression;
 - all performance release gates in section 13 pass.
