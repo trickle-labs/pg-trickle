@@ -2831,6 +2831,7 @@ pub fn get_slot_positions_at_bound(
                 // lets an idle source advance normally.
                 let change_schema = crate::config::pg_trickle_change_buffer_schema();
                 let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
+                // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
                 Spi::get_one_with_args::<String>(
                     &format!(
                         "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \

@@ -723,7 +723,7 @@ fn apply_ivm_owner_delta(
             })?;
 
         let delta_count =
-            Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table_quoted}"))
+            Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table_quoted}")) // nosemgrep: rust.spi.query.dynamic-format — delta_table_quoted is a quoted pg_temp identifier.
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or(0);
 
@@ -766,6 +766,7 @@ fn prepare_ivm_owner_transition_tables(
         if copy_from_enr {
             Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — table is derived from a numeric source OID.
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            // nosemgrep: rust.spi.run.dynamic-format — table and kind are internal identifiers.
             Spi::run(&format!(
                 "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM __pgt_{kind}table"
             ))

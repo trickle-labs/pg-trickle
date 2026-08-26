@@ -140,11 +140,13 @@ pub(crate) fn prepare_owner_temp_table(
 ) -> Result<(), PgTrickleError> {
     Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — callers pass quoted internal pg_temp identifiers.
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    // nosemgrep: rust.spi.run.dynamic-format — table is a quoted pg_temp identifier and select_sql is generated internally.
     Spi::run(&format!(
         "CREATE TEMP TABLE {table} ON COMMIT DROP AS {select_sql} WITH NO DATA"
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     let owner = crate::sql_builder::ident(&stream_owner_name(st)?);
+    // nosemgrep: rust.spi.run.dynamic-format — table and owner are quoted identifiers.
     Spi::run(&format!(
         "GRANT SELECT, INSERT, TRUNCATE ON TABLE {table} TO {owner}"
     ))

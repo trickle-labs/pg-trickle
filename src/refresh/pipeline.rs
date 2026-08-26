@@ -290,6 +290,7 @@ pub fn execute_merge_pipeline(
 
     let cursor_name = format!("__pgt_pipeline_cursor_{pgt_id}_{backend_pid}");
     let quoted_cursor = format!("\"{cursor_name}\"");
+    // nosemgrep: rust.spi.run.dynamic-format — quoted_cursor is backend-generated and delta_sql is an internal generated query.
     Spi::run(&format!(
         "DECLARE {quoted_cursor} NO SCROLL CURSOR FOR {delta_sql}"
     ))
@@ -301,6 +302,7 @@ pub fn execute_merge_pipeline(
         loop {
             let fetched = Spi::connect_mut(|client| {
                 let fetch_count = FETCH_CHUNK.min(batch_size.max(1) as _);
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — fetch_count is numeric and quoted_cursor is backend-generated.
                 let table = client
                     .update(
                         &format!("FETCH FORWARD {fetch_count} FROM {quoted_cursor}"),
@@ -339,7 +341,7 @@ pub fn execute_merge_pipeline(
         }
         Ok::<(), PgTrickleError>(())
     })();
-    let _ = Spi::run(&format!("CLOSE {quoted_cursor}"));
+    let _ = Spi::run(&format!("CLOSE {quoted_cursor}")); // nosemgrep: rust.spi.run.dynamic-format — quoted_cursor is backend-generated.
     result.map(|()| (applied, stats))
 }
 

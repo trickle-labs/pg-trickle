@@ -92,6 +92,7 @@ impl DeltaStage {
         let source = quote_qualified(source_buffer)?;
         Spi::run(&format!("DROP TABLE IF EXISTS {qualified_name}")) // nosemgrep: rust.spi.run.dynamic-format — qualified_name is built from quote_ident.
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        // nosemgrep: rust.spi.run_with_args.dynamic-format — qualified_name and source are quoted identifiers; LSNs are parameters.
         Spi::run_with_args(
             &format!(
                 "CREATE TEMP TABLE {qualified_name} ON COMMIT DROP AS \
@@ -111,6 +112,7 @@ impl DeltaStage {
         } else {
             "SELECT"
         };
+        // nosemgrep: rust.spi.run.dynamic-format — privileges is fixed; qualified_name and owner are quoted identifiers.
         Spi::run(&format!(
             "GRANT {privileges} ON TABLE {qualified_name} TO {owner}"
         ))
@@ -131,6 +133,7 @@ impl DeltaStage {
             // delete in one refresh window loses only its insert image and
             // leaves an unmatched delete. This is the same first/last
             // compaction used by persistent CDC buffers.
+            // nosemgrep: rust.spi.run.dynamic-format — qualified_name is a quoted internal identifier.
             Spi::run(&format!(
                 "DELETE FROM {qualified_name} WHERE change_id IN (\
                    SELECT change_id FROM (\
@@ -163,6 +166,7 @@ impl DeltaStage {
             Ok(())
         })?;
         if rls_enabled {
+            // nosemgrep: rust.spi.run.dynamic-format — qualified_name and owner are quoted identifiers.
             Spi::run(&format!(
                 "REVOKE DELETE ON TABLE {qualified_name} FROM {owner}"
             ))

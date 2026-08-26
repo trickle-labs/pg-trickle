@@ -2403,7 +2403,7 @@ pub fn execute_differential_refresh_with_tuning(
         )?;
     }
 
-    // PREPARE is forbidden while SET ROLE is active inside a
+    // PREPARE is forbidden while a temporary owner role is active inside a
     // security-restricted operation. Prepare the generated statement while
     // privileged; EXECUTE still runs below as the stream-table owner.
     if use_prepared {
