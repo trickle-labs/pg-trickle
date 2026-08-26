@@ -2,6 +2,32 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.9 → 0.87.10
+
+Install the 0.87.10 shared library and extension files, restart PostgreSQL,
+then run the read-only privilege check as a superuser:
+
+```sql
+SELECT pgtrickle.lifecycle_preflight();
+```
+
+If the result lists missing `SELECT` or schema `USAGE` privileges, apply the
+exact statements in each `remediation` value and rerun the check. The upgrade
+migration performs the same check before changing any function attributes, so
+a failed preflight leaves the catalog unchanged.
+
+After the result is clear, run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+This release applies the owner-checked, pinned `SECURITY DEFINER` boundary to
+manual refresh, pause/resume, repair, fuse/statistics reset, refresh/storage
+policy, SLA, and bulk alter/drop APIs. Existing ACLs are preserved; the new
+`lifecycle_preflight()` function is admin-only. No legacy extension-owner query
+execution mode is introduced.
+
 ## 0.87.5 → 0.87.6
 
 v0.87.6 makes no catalog or SQL API changes. Install the new extension files

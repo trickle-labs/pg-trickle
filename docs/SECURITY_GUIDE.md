@@ -55,7 +55,17 @@ CREATE ROLE st_author NOINHERIT;
 GRANT USAGE       ON SCHEMA public TO st_author;
 GRANT SELECT      ON ALL TABLES IN SCHEMA public TO st_author;
 GRANT CREATE      ON SCHEMA public TO st_author;
-GRANT EXECUTE     ON ALL FUNCTIONS IN SCHEMA pgtrickle TO st_author;
+-- Grant only the exact lifecycle overloads required by this role.
+GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table(
+    text, text, text, text, boolean, text, text, text, boolean, boolean,
+    text, integer, double precision, text, boolean, text, integer, text
+) TO st_author;
+GRANT EXECUTE ON FUNCTION pgtrickle.alter_stream_table(
+    text, text, text, text, text, text, text, text, boolean, boolean,
+    text, text, bigint, integer, text, integer, double precision, text,
+    double precision, text
+) TO st_author;
+GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table(text, boolean) TO st_author;
 GRANT USAGE       ON SCHEMA pgtrickle TO st_author;
 
 -- Read-only consumer (your application)
@@ -146,7 +156,9 @@ You can lock change buffers down further:
 
 ```sql
 REVOKE ALL ON ALL TABLES IN SCHEMA pgtrickle_changes FROM PUBLIC;
-GRANT  SELECT ON ALL TABLES IN SCHEMA pgtrickle_changes TO st_owner;
+-- No pgtrickle_changes grant is required for a stream-table owner. The
+-- owner-checked SECURITY DEFINER lifecycle and refresh paths access buffers
+-- internally with the pinned extension boundary.
 ```
 
 ---

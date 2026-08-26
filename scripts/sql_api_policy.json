@@ -1,870 +1,1021 @@
 {
-  "policy_version": 1,
-  "generated_from": "sql/archive/pg_trickle--0.87.0.sql",
+  "policy_version": 2,
+  "generated_from": "sql/archive/pg_trickle--0.87.10.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
       "name": "_on_ddl_end",
       "identity_arguments": "",
-      "class": "trigger_entry"
+      "class": "trigger_entry",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle._on_sql_drop()": {
       "schema": "pgtrickle",
       "name": "_on_sql_drop",
       "identity_arguments": "",
-      "class": "trigger_entry"
+      "class": "trigger_entry",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle._signal_launcher_rescan()": {
       "schema": "pgtrickle",
       "name": "_signal_launcher_rescan",
       "identity_arguments": "",
-      "class": "internal"
+      "class": "internal",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.advance_watermark(text, timestamp with time zone)": {
       "schema": "pgtrickle",
       "name": "advance_watermark",
       "identity_arguments": "text, timestamp with time zone",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.alter_stream_table(text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text)": {
       "schema": "pgtrickle",
       "name": "alter_stream_table",
       "identity_arguments": "text, text, text, text, text, text, text, text, boolean, boolean, text, text, bigint, integer, text, integer, double precision, text, double precision, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.attach_embedding_outbox(text, text, integer, integer)": {
       "schema": "pgtrickle",
       "name": "attach_embedding_outbox",
       "identity_arguments": "text, text, integer, integer",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.attach_outbox(text, integer, integer)": {
       "schema": "pgtrickle",
       "name": "attach_outbox",
       "identity_arguments": "text, integer, integer",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.bootstrap_gate_status()": {
       "schema": "pgtrickle",
       "name": "bootstrap_gate_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.bulk_alter_stream_tables(text[], json)": {
       "schema": "pgtrickle",
       "name": "bulk_alter_stream_tables",
       "identity_arguments": "text[], json",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.bulk_create(jsonb)": {
       "schema": "pgtrickle",
       "name": "bulk_create",
       "identity_arguments": "jsonb",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.bulk_drop_stream_tables(text[])": {
       "schema": "pgtrickle",
       "name": "bulk_drop_stream_tables",
       "identity_arguments": "text[]",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.cache_stats()": {
       "schema": "pgtrickle",
       "name": "cache_stats",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.canary_begin(text, text)": {
       "schema": "pgtrickle",
       "name": "canary_begin",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.canary_diff(text)": {
       "schema": "pgtrickle",
       "name": "canary_diff",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.canary_promote(text)": {
       "schema": "pgtrickle",
       "name": "canary_promote",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.cdc_pause_status()": {
       "schema": "pgtrickle",
       "name": "cdc_pause_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.change_buffer_sizes()": {
       "schema": "pgtrickle",
       "name": "change_buffer_sizes",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.check_cdc_health()": {
       "schema": "pgtrickle",
       "name": "check_cdc_health",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.clear_caches()": {
       "schema": "pgtrickle",
       "name": "clear_caches",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.cluster_worker_summary()": {
       "schema": "pgtrickle",
       "name": "cluster_worker_summary",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.commit_latency_stats()": {
       "schema": "pgtrickle",
       "name": "commit_latency_stats",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.convert_buffers_to_unlogged()": {
       "schema": "pgtrickle",
       "name": "convert_buffers_to_unlogged",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.create_or_replace_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text)": {
       "schema": "pgtrickle",
       "name": "create_or_replace_stream_table",
       "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_refresh_group(text, text[], text)": {
       "schema": "pgtrickle",
       "name": "create_refresh_group",
       "identity_arguments": "text, text[], text",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text)": {
       "schema": "pgtrickle",
       "name": "create_stream_table",
       "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_stream_table_batch(text, text, text, boolean, text, integer, double precision)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_batch",
       "identity_arguments": "text, text, text, boolean, text, integer, double precision",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_stream_table_cost_optimized(text, text, text, boolean, text, integer, double precision)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_cost_optimized",
       "identity_arguments": "text, text, text, boolean, text, integer, double precision",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_stream_table_fast_append_only(text, text, text, text, text, integer, double precision)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_fast_append_only",
       "identity_arguments": "text, text, text, text, text, integer, double precision",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_if_not_exists",
       "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_stream_table_realtime(text, text, text, boolean, text, integer, double precision)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_realtime",
       "identity_arguments": "text, text, text, boolean, text, integer, double precision",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.create_watermark_group(text, text[], double precision)": {
       "schema": "pgtrickle",
       "name": "create_watermark_group",
       "identity_arguments": "text, text[], double precision",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.dedup_stats()": {
       "schema": "pgtrickle",
       "name": "dedup_stats",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.dependency_tree()": {
       "schema": "pgtrickle",
       "name": "dependency_tree",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.detach_outbox(text, boolean)": {
       "schema": "pgtrickle",
       "name": "detach_outbox",
       "identity_arguments": "text, boolean",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.diagnose_errors(text)": {
       "schema": "pgtrickle",
       "name": "diagnose_errors",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.diamond_groups()": {
       "schema": "pgtrickle",
       "name": "diamond_groups",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.drain(integer)": {
       "schema": "pgtrickle",
       "name": "drain",
       "identity_arguments": "integer",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.drop_refresh_group(text)": {
       "schema": "pgtrickle",
       "name": "drop_refresh_group",
       "identity_arguments": "text",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.drop_snapshot(text)": {
       "schema": "pgtrickle",
       "name": "drop_snapshot",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.drop_stream_table(text, boolean)": {
       "schema": "pgtrickle",
       "name": "drop_stream_table",
       "identity_arguments": "text, boolean",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.drop_stream_table_publication(text)": {
       "schema": "pgtrickle",
       "name": "drop_stream_table_publication",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.drop_watermark_group(text)": {
       "schema": "pgtrickle",
       "name": "drop_watermark_group",
       "identity_arguments": "text",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.embedding_stream_table(text, text, text, text, text, text, boolean)": {
       "schema": "pgtrickle",
       "name": "embedding_stream_table",
       "identity_arguments": "text, text, text, text, text, text, boolean",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.exec_stream_ddl(text)": {
       "schema": "pgtrickle",
       "name": "exec_stream_ddl",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.explain(text)": {
       "schema": "pgtrickle",
       "name": "explain",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_dag(text)": {
       "schema": "pgtrickle",
       "name": "explain_dag",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_delta(text, text)": {
       "schema": "pgtrickle",
       "name": "explain_delta",
       "identity_arguments": "text, text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_diff_sql(text)": {
       "schema": "pgtrickle",
       "name": "explain_diff_sql",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_json(text)": {
       "schema": "pgtrickle",
       "name": "explain_json",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_query_rewrite(text)": {
       "schema": "pgtrickle",
       "name": "explain_query_rewrite",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_refresh_mode(text)": {
       "schema": "pgtrickle",
       "name": "explain_refresh_mode",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_st(text, boolean)": {
       "schema": "pgtrickle",
       "name": "explain_st",
       "identity_arguments": "text, boolean",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "explain_stream_table",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.export_definition(text)": {
       "schema": "pgtrickle",
       "name": "export_definition",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.fuse_status()": {
       "schema": "pgtrickle",
       "name": "fuse_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.gate_source(text)": {
       "schema": "pgtrickle",
       "name": "gate_source",
       "identity_arguments": "text",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.get_refresh_history(text, integer)": {
       "schema": "pgtrickle",
       "name": "get_refresh_history",
       "identity_arguments": "text, integer",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.get_staleness(text)": {
       "schema": "pgtrickle",
       "name": "get_staleness",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.handle_vp_promoted(text)": {
       "schema": "pgtrickle",
       "name": "handle_vp_promoted",
       "identity_arguments": "text",
-      "class": "internal"
+      "class": "internal",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.health_check()": {
       "schema": "pgtrickle",
       "name": "health_check",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.health_summary()": {
       "schema": "pgtrickle",
       "name": "health_summary",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.history_prune_status()": {
       "schema": "pgtrickle",
       "name": "history_prune_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.is_drained()": {
       "schema": "pgtrickle",
       "name": "is_drained",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.lifecycle_preflight()": {
+      "schema": "pgtrickle",
+      "name": "lifecycle_preflight",
+      "identity_arguments": "",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.list_auxiliary_columns(text)": {
       "schema": "pgtrickle",
       "name": "list_auxiliary_columns",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.list_distance_subscriptions(text)": {
       "schema": "pgtrickle",
       "name": "list_distance_subscriptions",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.list_snapshots(text)": {
       "schema": "pgtrickle",
       "name": "list_snapshots",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.list_sources(text)": {
       "schema": "pgtrickle",
       "name": "list_sources",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.list_subscriptions()": {
       "schema": "pgtrickle",
       "name": "list_subscriptions",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.metrics_summary()": {
       "schema": "pgtrickle",
       "name": "metrics_summary",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.migrate()": {
       "schema": "pgtrickle",
       "name": "migrate",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.parallel_job_status(integer)": {
       "schema": "pgtrickle",
       "name": "parallel_job_status",
       "identity_arguments": "integer",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.parse_duration_seconds(text)": {
       "schema": "pgtrickle",
       "name": "parse_duration_seconds",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pause_all()": {
       "schema": "pgtrickle",
       "name": "pause_all",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pause_scheduler(text[])": {
       "schema": "pgtrickle",
       "name": "pause_scheduler",
       "identity_arguments": "text[]",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pause_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "pause_stream_table",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.pg_trickle_hash(text)": {
       "schema": "pgtrickle",
       "name": "pg_trickle_hash",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pg_trickle_hash_multi(text[])": {
       "schema": "pgtrickle",
       "name": "pg_trickle_hash_multi",
       "identity_arguments": "text[]",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pgt_ivm_apply_delta(bigint, integer, boolean, boolean)": {
       "schema": "pgtrickle",
       "name": "pgt_ivm_apply_delta",
       "identity_arguments": "bigint, integer, boolean, boolean",
-      "class": "internal"
+      "class": "internal",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pgt_ivm_apply_delta_enr(bigint, integer, boolean, boolean)": {
       "schema": "pgtrickle",
       "name": "pgt_ivm_apply_delta_enr",
       "identity_arguments": "bigint, integer, boolean, boolean",
-      "class": "internal"
+      "class": "internal",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pgt_ivm_handle_truncate(bigint)": {
       "schema": "pgtrickle",
       "name": "pgt_ivm_handle_truncate",
       "identity_arguments": "bigint",
-      "class": "internal"
+      "class": "internal",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pgt_scc_status()": {
       "schema": "pgtrickle",
       "name": "pgt_scc_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pgt_status()": {
       "schema": "pgtrickle",
       "name": "pgt_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.pgtrickle_refresh_stats()": {
       "schema": "pgtrickle",
       "name": "pgtrickle_refresh_stats",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.preflight()": {
       "schema": "pgtrickle",
       "name": "preflight",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.preview_stream_table(text, text, text, text)": {
       "schema": "pgtrickle",
       "name": "preview_stream_table",
       "identity_arguments": "text, text, text, text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.rebuild_cdc_triggers()": {
       "schema": "pgtrickle",
       "name": "rebuild_cdc_triggers",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.recommend_refresh_mode(text)": {
       "schema": "pgtrickle",
       "name": "recommend_refresh_mode",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.recommend_schedule(text)": {
       "schema": "pgtrickle",
       "name": "recommend_schedule",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.refresh_efficiency()": {
       "schema": "pgtrickle",
       "name": "refresh_efficiency",
       "identity_arguments": "",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.refresh_groups()": {
       "schema": "pgtrickle",
       "name": "refresh_groups",
       "identity_arguments": "",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.refresh_if_stale(text, interval)": {
       "schema": "pgtrickle",
       "name": "refresh_if_stale",
       "identity_arguments": "text, interval",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.refresh_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "refresh_stream_table",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.refresh_timeline(integer)": {
       "schema": "pgtrickle",
       "name": "refresh_timeline",
       "identity_arguments": "integer",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.reliability_counters()": {
       "schema": "pgtrickle",
       "name": "reliability_counters",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.repair_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "repair_stream_table",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.reset_fuse(text, text)": {
       "schema": "pgtrickle",
       "name": "reset_fuse",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.restore_from_snapshot(text, text)": {
       "schema": "pgtrickle",
       "name": "restore_from_snapshot",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.restore_stream_tables()": {
       "schema": "pgtrickle",
       "name": "restore_stream_tables",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.resume_after_drain()": {
       "schema": "pgtrickle",
       "name": "resume_after_drain",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.resume_all()": {
       "schema": "pgtrickle",
       "name": "resume_all",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.resume_scheduler(text[])": {
       "schema": "pgtrickle",
       "name": "resume_scheduler",
       "identity_arguments": "text[]",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.resume_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "resume_stream_table",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.schedule_recommendations()": {
       "schema": "pgtrickle",
       "name": "schedule_recommendations",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.scheduler_overhead()": {
       "schema": "pgtrickle",
       "name": "scheduler_overhead",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.self_monitoring_status()": {
       "schema": "pgtrickle",
       "name": "self_monitoring_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.set_stream_table_refresh_policy(text, text)": {
       "schema": "pgtrickle",
       "name": "set_stream_table_refresh_policy",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.set_stream_table_sla(text, interval)": {
       "schema": "pgtrickle",
       "name": "set_stream_table_sla",
       "identity_arguments": "text, interval",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.set_stream_table_storage_policy(text, boolean, text)": {
       "schema": "pgtrickle",
       "name": "set_stream_table_storage_policy",
       "identity_arguments": "text, boolean, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.setup_self_monitoring()": {
       "schema": "pgtrickle",
       "name": "setup_self_monitoring",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.shared_buffer_stats()": {
       "schema": "pgtrickle",
       "name": "shared_buffer_stats",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.sla_summary()": {
       "schema": "pgtrickle",
       "name": "sla_summary",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.slot_health()": {
       "schema": "pgtrickle",
       "name": "slot_health",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.snapshot_stream_table(text, text)": {
       "schema": "pgtrickle",
       "name": "snapshot_stream_table",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.source_gates()": {
       "schema": "pgtrickle",
       "name": "source_gates",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.source_stable_name(oid)": {
       "schema": "pgtrickle",
       "name": "source_stable_name",
       "identity_arguments": "oid",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.st_auto_threshold(text)": {
       "schema": "pgtrickle",
       "name": "st_auto_threshold",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.st_refresh_stats()": {
       "schema": "pgtrickle",
       "name": "st_refresh_stats",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.stat_reset(bigint)": {
       "schema": "pgtrickle",
       "name": "stat_reset",
       "identity_arguments": "bigint",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.stat_reset_all()": {
       "schema": "pgtrickle",
       "name": "stat_reset_all",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.stream_table_definition(text)": {
       "schema": "pgtrickle",
       "name": "stream_table_definition",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.stream_table_lineage(text)": {
       "schema": "pgtrickle",
       "name": "stream_table_lineage",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.stream_table_spec(oid)": {
       "schema": "pgtrickle",
       "name": "stream_table_spec",
       "identity_arguments": "oid",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.stream_table_spec(text)": {
       "schema": "pgtrickle",
       "name": "stream_table_spec",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.stream_table_to_publication(text)": {
       "schema": "pgtrickle",
       "name": "stream_table_to_publication",
       "identity_arguments": "text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
     },
     "pgtrickle.subscribe(text, text)": {
       "schema": "pgtrickle",
       "name": "subscribe",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.subscribe_distance(text, text, text, text, text, double precision)": {
       "schema": "pgtrickle",
       "name": "subscribe_distance",
       "identity_arguments": "text, text, text, text, text, double precision",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.teardown_self_monitoring()": {
       "schema": "pgtrickle",
       "name": "teardown_self_monitoring",
       "identity_arguments": "",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.trigger_inventory()": {
       "schema": "pgtrickle",
       "name": "trigger_inventory",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.tune_recommendations()": {
       "schema": "pgtrickle",
       "name": "tune_recommendations",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.ungate_source(text)": {
       "schema": "pgtrickle",
       "name": "ungate_source",
       "identity_arguments": "text",
-      "class": "admin_global"
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.unsubscribe(text, text)": {
       "schema": "pgtrickle",
       "name": "unsubscribe",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.unsubscribe_distance(text, text)": {
       "schema": "pgtrickle",
       "name": "unsubscribe_distance",
       "identity_arguments": "text, text",
-      "class": "owner_lifecycle"
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.validate_query(text)": {
       "schema": "pgtrickle",
       "name": "validate_query",
       "identity_arguments": "text",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.vector_status()": {
       "schema": "pgtrickle",
       "name": "vector_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.version()": {
       "schema": "pgtrickle",
       "name": "version",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.version_check()": {
       "schema": "pgtrickle",
       "name": "version_check",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.view_evolution_status()": {
       "schema": "pgtrickle",
       "name": "view_evolution_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.wal_source_status()": {
       "schema": "pgtrickle",
       "name": "wal_source_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.watermark_groups()": {
       "schema": "pgtrickle",
       "name": "watermark_groups",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.watermark_status()": {
       "schema": "pgtrickle",
       "name": "watermark_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.watermarks()": {
       "schema": "pgtrickle",
       "name": "watermarks",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.worker_allocation_status()": {
       "schema": "pgtrickle",
       "name": "worker_allocation_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.worker_pool_status()": {
       "schema": "pgtrickle",
       "name": "worker_pool_status",
       "identity_arguments": "",
-      "class": "public_read"
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.write_and_refresh(text, text)": {
       "schema": "pgtrickle",
       "name": "write_and_refresh",
       "identity_arguments": "text, text",
-      "class": "arbitrary_sql"
+      "class": "arbitrary_sql",
+      "execution_policy": "invoker_delegating"
     }
   }
 }

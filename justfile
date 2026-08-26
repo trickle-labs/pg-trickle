@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.80.0-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.87.10-pg18 -f Dockerfile.hub .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -58,7 +58,7 @@ clippy:
 # Check formatting and run clippy
 # CI-004: docs-lint is now the final step; all local lint checks match CI.
 [group: "lint"]
-lint: fmt-check clippy security-definer-check docs-lint check-sql-builder check-fuzz-targets
+lint: fmt-check clippy security-definer-check privilege-boundary-check docs-lint check-sql-builder check-fuzz-targets
 
 # Alias for consistency with prior documentation.
 [group: "lint"]
@@ -69,6 +69,12 @@ lint-all: lint
 [group: "lint"]
 security-definer-check:
     bash scripts/check_security_definer.sh
+
+# LSEC-12: Keep exported SECURITY DEFINER code inside the owner-checked
+# boundary and require exact SQL API policy coverage.
+[group: "lint"]
+privilege-boundary-check:
+    python3 scripts/check_privilege_boundaries.py
 
 # A42-4: Docs linter — check for stale/retired GUC names and doc drift.
 # Fails if any docs/**/*.md references deprecated GUC names as if they are
@@ -611,12 +617,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.87.9": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.87.10": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.87.9": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.87.10": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

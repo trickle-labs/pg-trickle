@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.10 — Complete Lifecycle Policy](#08710--complete-lifecycle-policy)
 - [0.87.9 — Core Lifecycle Security](#0879--core-lifecycle-security)
 - [0.87.8 — Refresh Execution Identity](#0878--refresh-execution-identity)
 - [0.87.7 — Security Context and Catalog Foundation](#0877--security-context-and-catalog-foundation)
@@ -139,6 +140,34 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.10] — Complete Lifecycle Policy
+
+v0.87.10 completes the owner boundary for the remaining lifecycle entry
+points and makes the policy enforceable in CI.
+
+- Hardened manual refresh, pause/resume, repair, fuse/statistics reset,
+  refresh/storage policy, and SLA APIs with caller-path resolution and
+  canonical stream-table owner checks.
+- Made bulk alter/drop security-definer entry points resolve, deduplicate, and
+  authorize every target before the first mutation, including child-first
+  dependency planning and quoted identifiers.
+- Added the exact per-overload execution policy field and a static privilege
+  boundary checker with focused positive and negative self-tests.
+- Added the superuser-only, read-only `pgtrickle.lifecycle_preflight()` and a
+  fail-closed 0.87.9 → 0.87.10 migration preflight with quoted remediation SQL.
+- Documented the least-privilege lifecycle model and removed the recommendation
+  to grant private change-buffer access to stream-table owners.
+
+See the [v0.87.10 roadmap](roadmap/v0.87.10.md) for the complete acceptance
+criteria and security release gate.
+
+## Upgrade
+
+Run `SELECT pgtrickle.lifecycle_preflight();` as a superuser, apply any listed
+grants, then run `ALTER EXTENSION pg_trickle UPDATE`.
 
 ---
 
