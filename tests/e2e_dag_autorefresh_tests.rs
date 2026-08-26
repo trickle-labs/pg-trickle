@@ -84,6 +84,14 @@ async fn wait_for_refresh_cycle(db: &E2eDb, pgt_name: &str, timeout: Duration) -
     }
 }
 
+/// Wait for each layer in order so initial CDC has propagated through the
+/// whole chain before a test starts measuring later refreshes.
+async fn wait_for_chain_refresh_cycles(db: &E2eDb, pgt_names: &[&str], timeout: Duration) {
+    for pgt_name in pgt_names {
+        wait_for_refresh_cycle(db, pgt_name, timeout).await;
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 4.1 — 3-layer auto-refresh cascade
 // ═══════════════════════════════════════════════════════════════════════════
@@ -131,8 +139,13 @@ async fn test_autorefresh_3_layer_cascade() {
     )
     .await;
 
-    // Wait for initial scheduler stabilization
-    wait_for_refresh_cycle(&db, "ar3_l3", Duration::from_secs(30)).await;
+    // Wait for initial scheduler stabilization at every layer.
+    wait_for_chain_refresh_cycles(
+        &db,
+        &["ar3_l1", "ar3_l2", "ar3_l3"],
+        Duration::from_secs(30),
+    )
+    .await;
 
     // Mutate base
     db.execute("INSERT INTO ar3_src VALUES (3, 30)").await;
@@ -326,8 +339,14 @@ async fn test_autorefresh_no_spurious_3_layer() {
     )
     .await;
 
-    // Wait for first scheduler cycle on L3 to consume any stale buffer entries
-    wait_for_refresh_cycle(&db, "arns_l3", Duration::from_secs(30)).await;
+    // Wait for each layer to consume any stale buffer entries before recording
+    // the no-op baseline.
+    wait_for_chain_refresh_cycles(
+        &db,
+        &["arns_l1", "arns_l2", "arns_l3"],
+        Duration::from_secs(30),
+    )
+    .await;
 
     // Record data_timestamps after first cycle
     let ts_after_first: Vec<String> = {
@@ -432,8 +451,13 @@ async fn test_autorefresh_staggered_schedules() {
     )
     .await;
 
-    // Wait for initial cycle on L3
-    wait_for_refresh_cycle(&db, "ars_l3", Duration::from_secs(30)).await;
+    // Wait for initial cycle at every layer.
+    wait_for_chain_refresh_cycles(
+        &db,
+        &["ars_l1", "ars_l2", "ars_l3"],
+        Duration::from_secs(30),
+    )
+    .await;
 
     // Now insert new data
     db.execute("INSERT INTO ars_src VALUES (2, 20)").await;
