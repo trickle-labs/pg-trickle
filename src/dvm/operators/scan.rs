@@ -202,33 +202,7 @@ fn diff_scan_change_buffer(
     pk_columns: &[String],
     alias: &str,
 ) -> Result<DiffResult, PgTrickleError> {
-    // ST-ST-4: Use `changes_pgt_{pgt_id}` for ST sources, `changes_{stable_name}` for base tables.
-    // DAG-4: When a bypass table is registered (fused-chain), read from it instead.
-    // CITUS-4: Base table buffers use the stable hash name (v0.32.0+), not the OID.
-    let _is_st_source = ctx.st_source_pgt_ids.contains_key(&table_oid);
-    let change_table = if let Some(&pgt_id) = ctx.st_source_pgt_ids.get(&table_oid) {
-        if let Some(bypass) = ctx.st_bypass_tables.get(&pgt_id) {
-            bypass.clone()
-        } else {
-            format!(
-                "{}.changes_pgt_{}",
-                quote_ident(&ctx.change_buffer_schema),
-                pgt_id,
-            )
-        }
-    } else {
-        // CITUS-4: Use stable_name (from pgt_change_tracking) so the generated delta SQL
-        // references the correct change buffer table (created as changes_{stable_name}).
-        // The name is pre-resolved by the caller (dvm/mod.rs) via SPI and stored in
-        // ctx.source_buffer_names.  In unit-test contexts (no SPI), the map is empty
-        // and we fall back to the OID-based name.
-        let buf_name = ctx
-            .source_buffer_names
-            .get(&table_oid)
-            .cloned()
-            .unwrap_or_else(|| format!("changes_{table_oid}"));
-        format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name)
-    };
+    let change_table = ctx.change_table_for_source(table_oid);
 
     let prev_lsn = ctx.get_prev_lsn(table_oid);
     let new_lsn = ctx.get_new_lsn(table_oid);

@@ -1746,7 +1746,6 @@ pub(crate) fn create_stream_table_impl(
             &vq.covar_aux_columns,
             &vq.nonnull_aux_columns,
             &vq.statistical_aux_types,
-            &invoker_search_path,
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
 

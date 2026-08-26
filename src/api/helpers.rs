@@ -2594,7 +2594,6 @@ pub(super) fn initialize_st(
     covar_aux_columns: &[(String, String)],
     nonnull_aux_columns: &[(String, String)],
     statistical_aux_types: &[(String, String)],
-    invoker_search_path: &str,
 ) -> Result<(), PgTrickleError> {
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the initialization INSERT into the storage table.
@@ -2692,7 +2691,10 @@ pub(super) fn initialize_st(
         table = quote_identifier(name),
     );
 
-    with_invoker_search_path(invoker_search_path, || {
+    let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
+        PgTrickleError::NotFound(format!("stream table metadata for pgt_id={pgt_id}"))
+    })?;
+    crate::refresh::with_stream_owner(&st, || {
         Spi::run(&insert_sql)
             .map_err(|e| PgTrickleError::SpiError(format!("Failed to initialize ST: {}", e)))
     })?;

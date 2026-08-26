@@ -29,6 +29,7 @@ use crate::error::PgTrickleError;
 use pgrx::{Spi, prelude::TimestampWithTimeZone};
 
 pub(crate) mod codegen;
+pub(crate) mod delta_stage;
 pub(crate) mod fused;
 pub(crate) mod merge;
 pub(crate) mod orchestrator;
@@ -69,6 +70,125 @@ pub use merge::{
 pub use orchestrator::{
     RefreshAction, determine_refresh_action, execute_reinitialize_refresh, validate_topk_metadata,
 };
+
+/// Run definition-derived SQL with the stream storage owner's role, stored
+/// search path, and RLS policy. Privileged callers resume their original
+/// identity before refresh metadata or private CDC state is finalized.
+pub(crate) fn with_stream_owner<T>(
+    st: &StreamTableMeta,
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    let context = crate::api::security_context::stream_execution_context(st)?;
+    crate::api::security_context::with_stream_owner_context(&context, f)
+}
+
+pub(crate) fn stream_owner_name(st: &StreamTableMeta) -> Result<String, PgTrickleError> {
+    let context = crate::api::security_context::stream_execution_context(st)?;
+    Spi::get_one_with_args::<String>(
+        "SELECT rolname::text FROM pg_catalog.pg_roles WHERE oid = $1",
+        &[context.owner_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InternalError(format!(
+            "stream owner OID {} is missing",
+            context.owner_oid.to_u32()
+        ))
+    })
+}
+
+pub(crate) fn source_visibility_key(
+    source_oid: pgrx::pg_sys::Oid,
+) -> Result<(String, Vec<String>), PgTrickleError> {
+    let source_table = Spi::get_one_with_args::<String>(
+        "SELECT format('%I.%I', n.nspname, c.relname) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::NotFound(format!("source relation with OID {}", source_oid.to_u32()))
+    })?;
+    let columns = if StreamTableMeta::pgt_id_for_relid(source_oid).is_some() {
+        crate::cdc::resolve_st_output_columns(source_oid)?
+    } else {
+        let pk_columns = crate::cdc::resolve_pk_columns(source_oid)?;
+        if pk_columns.is_empty() {
+            // Keyless trigger and polling CDC hashes every source column.
+            // Visibility checks must use the identical key, even when the
+            // stream definition references only a subset of those columns.
+            crate::cdc::resolve_source_column_defs(source_oid)?
+        } else {
+            pk_columns
+                .into_iter()
+                .map(|column| (column, String::new()))
+                .collect()
+        }
+    }
+    .into_iter()
+    .map(|(column, _)| column)
+    .collect();
+    Ok((source_table, columns))
+}
+
+/// Create a `pg_temp`-qualified scratch table and return its qualified name
+/// for callers to use in later SQL.
+///
+/// `basename` is a raw, unquoted internal identifier (e.g.
+/// `"__pgt_delta_42"`) — this function is the only place that qualifies it
+/// with `pg_temp` and quotes it, so an unqualified bare name can never
+/// resolve to a same-named permanent relation on the search path (e.g. one
+/// planted in `public` ahead of a `SECURITY DEFINER` trigger call).
+///
+/// Runs under whichever identity the caller is currently running as. When
+/// `select_sql` is definition-derived (may reference owner-schema
+/// functions, operators, casts, or relations that only resolve correctly
+/// under the owner's stored `search_path`), the caller must wrap this call
+/// in [`with_stream_owner`] itself — Postgres performs full parse analysis
+/// for `WITH NO DATA` even though it skips rewrite/execution, so name
+/// resolution during the `CREATE` must match the identity that later reads
+/// the same SQL text. When `select_sql` only references the stream table's
+/// own fully-qualified storage relation (no ambiguous unqualified names),
+/// callers that need the table readable by privileged bookkeeping code
+/// afterward (e.g. downstream-diff capture) should call this un-wrapped, as
+/// before — the unconditional `GRANT` below still lets owner-context code
+/// read/write it too.
+pub(crate) fn prepare_owner_temp_table(
+    st: &StreamTableMeta,
+    basename: &str,
+    select_sql: &str,
+) -> Result<String, PgTrickleError> {
+    let table = format!("pg_temp.{}", crate::sql_builder::ident(basename));
+    Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — table is pg_temp-qualified and quoted by this function.
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    // nosemgrep: rust.spi.run.dynamic-format — table is pg_temp-qualified and quoted by this function; select_sql is generated internally.
+    Spi::run(&format!(
+        "CREATE TEMP TABLE {table} ON COMMIT DROP AS {select_sql} WITH NO DATA"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let owner = crate::sql_builder::ident(&stream_owner_name(st)?);
+    // nosemgrep: rust.spi.run.dynamic-format — table and owner are quoted identifiers.
+    Spi::run(&format!(
+        "GRANT SELECT, INSERT, TRUNCATE ON TABLE {table} TO {owner}"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(table)
+}
+
+/// Drop a scratch table previously created by [`prepare_owner_temp_table`].
+/// `basename` must be the same raw basename passed to that call — this
+/// function re-derives the identical `pg_temp`-qualified name and drops it
+/// under the owner's identity, since the owner is what created (and thus
+/// owns) it.
+pub(crate) fn drop_owner_temp_table(st: &StreamTableMeta, basename: &str) {
+    let table = format!("pg_temp.{}", crate::sql_builder::ident(basename));
+    let _ = with_stream_owner(st, || {
+        Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — table is pg_temp-qualified and quoted by this function.
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    });
+}
 // phd1: cross-cycle phantom cleanup (CORR-1, deferred — see merge.rs).
 
 /// Stable machine-readable causes for FULL/recomputation refreshes.

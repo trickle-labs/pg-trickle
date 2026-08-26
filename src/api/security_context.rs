@@ -234,6 +234,15 @@ fn set_local_guc(name: &std::ffi::CStr, value: &str) -> Result<(), PgTrickleErro
 /// role, security flags, and GUCs on every exit path: success, a
 /// PostgreSQL `ERROR` raised inside `f`, or a Rust panic.
 ///
+/// A fresh GUC nesting level is opened for the duration and unconditionally
+/// unwound with `AtEOXact_GUC` on exit — the same mechanism PostgreSQL uses
+/// to revert a `SECURITY DEFINER` function's local `SET`s. This reverts
+/// *every* GUC owner-authored SQL touches while running, not only
+/// `search_path`/`row_security`: a bare `SET some.guc = ...` or
+/// `set_config(..., false)` inside the defining SQL is unwound exactly like
+/// a `SET LOCAL` would be, so it cannot poison a GUC (e.g.
+/// `pg_trickle.internal_refresh`) for code that runs later in this backend.
+///
 /// `f` never receives the extension owner's identity — only the canonical
 /// owner OID resolved from stream-table metadata by
 /// [`stream_execution_context`]. There is no general "run as arbitrary
@@ -244,28 +253,37 @@ pub(crate) fn with_stream_owner_context<T>(
 ) -> Result<T, PgTrickleError> {
     use std::panic::AssertUnwindSafe;
 
-    let prev_search_path = active_search_path()?;
-    let prev_row_security = Spi::get_one::<String>("SELECT current_setting('row_security')")
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or_else(|| "on".to_string());
-
     let mut save_userid = pg_sys::Oid::from(0u32);
     let mut save_sec_context: core::ffi::c_int = 0;
     // SAFETY: `GetUserIdAndSecContext`/`SetUserIdAndSecContext` are
     // PostgreSQL's standard mechanism for temporarily executing as a
     // different role — the same one `SECURITY DEFINER` function calls and
     // extensions such as dblink/postgres_fdw use to run as a foreign-server
-    // owner. `SECURITY_RESTRICTED_OPERATION` additionally disables `SET
-    // ROLE`/`SET SESSION AUTHORIZATION` for the duration, so owner-context
-    // SQL cannot escalate further. Both calls run on the main backend
+    // owner. `SECURITY_LOCAL_USERID_CHANGE` prevents `SET ROLE`/`SET SESSION
+    // AUTHORIZATION` while the effective role is temporarily out of sync
+    // with PostgreSQL's GUC state, so owner-context SQL cannot escalate
+    // further. Both calls run on the main backend
     // thread; identity is restored in `.finally()` below on every exit.
     unsafe {
         pg_sys::GetUserIdAndSecContext(&mut save_userid, &mut save_sec_context);
+    }
+
+    // SAFETY: `NewGUCNestLevel`/`AtEOXact_GUC` are PostgreSQL's standard GUC
+    // checkpoint/rollback pair — the same one `fmgr_security_definer` uses
+    // to revert a SECURITY DEFINER function's `SET` clause and PL/pgSQL uses
+    // per call. Everything set at or below this nesting level (our own
+    // search_path/row_security below, and anything owner-authored SQL sets)
+    // is unwound by `AtEOXact_GUC(false, nest_level)` in `.finally()`,
+    // regardless of whether it used `SET` or `SET LOCAL`.
+    let nest_level = unsafe { pg_sys::NewGUCNestLevel() };
+
+    // SAFETY: see above — role switch is intentionally sandboxed by
+    // SECURITY_LOCAL_USERID_CHANGE. Owner-context refreshes may create
+    // temporary staging tables, which SECURITY_RESTRICTED_OPERATION forbids.
+    unsafe {
         pg_sys::SetUserIdAndSecContext(
             ctx.owner_oid,
-            save_sec_context
-                | pg_sys::SECURITY_LOCAL_USERID_CHANGE as core::ffi::c_int
-                | pg_sys::SECURITY_RESTRICTED_OPERATION as core::ffi::c_int,
+            save_sec_context | pg_sys::SECURITY_LOCAL_USERID_CHANGE as core::ffi::c_int,
         );
     }
 
@@ -275,6 +293,7 @@ pub(crate) fn with_stream_owner_context<T>(
         // SAFETY: restore identity before propagating — the closure below
         // never ran, so nothing else needs to unwind.
         unsafe {
+            pg_sys::AtEOXact_GUC(false, nest_level);
             pg_sys::SetUserIdAndSecContext(save_userid, save_sec_context);
         }
         return Err(e);
@@ -292,30 +311,7 @@ pub(crate) fn with_stream_owner_context<T>(
     unsafe {
         pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
             .finally(move || {
-                if let Ok(cs) = std::ffi::CString::new(prev_search_path.clone()) {
-                    pg_sys::set_config_option(
-                        c"search_path".as_ptr(),
-                        cs.as_ptr(),
-                        pg_sys::GucContext::PGC_USERSET,
-                        pg_sys::GucSource::PGC_S_SESSION,
-                        pg_sys::GucAction::GUC_ACTION_LOCAL,
-                        true,
-                        pgrx::PgLogLevel::ERROR as i32,
-                        false,
-                    );
-                }
-                if let Ok(cs) = std::ffi::CString::new(prev_row_security.clone()) {
-                    pg_sys::set_config_option(
-                        c"row_security".as_ptr(),
-                        cs.as_ptr(),
-                        pg_sys::GucContext::PGC_USERSET,
-                        pg_sys::GucSource::PGC_S_SESSION,
-                        pg_sys::GucAction::GUC_ACTION_LOCAL,
-                        true,
-                        pgrx::PgLogLevel::ERROR as i32,
-                        false,
-                    );
-                }
+                pg_sys::AtEOXact_GUC(false, nest_level);
                 pg_sys::SetUserIdAndSecContext(save_userid, save_sec_context);
             })
             .execute()
@@ -737,5 +733,39 @@ mod pg_tests {
 
         Spi::run("DROP TABLE pgtrickle.lsec_extension_secret").unwrap();
         Spi::run("DROP ROLE lsec_probe_unprivileged").unwrap();
+    }
+
+    #[pg_test]
+    fn test_with_stream_owner_context_reverts_arbitrary_guc_set_by_owner_sql() {
+        Spi::run("CREATE ROLE lsec_probe_owner_guc").unwrap();
+        Spi::run("SELECT set_config('pg_trickle.internal_refresh', 'false', false)").unwrap();
+
+        let owner_oid = Spi::get_one::<pg_sys::Oid>(
+            "SELECT oid FROM pg_roles WHERE rolname = 'lsec_probe_owner_guc'",
+        )
+        .unwrap()
+        .unwrap();
+        let ctx = StreamExecutionContext {
+            owner_oid,
+            search_path: "pg_catalog, pg_temp".to_string(),
+        };
+
+        with_stream_owner_context(&ctx, || {
+            // Owner-authored SQL sets a session-scoped (non-LOCAL) GUC —
+            // this must not survive past the owner-context call.
+            Spi::run("SELECT set_config('pg_trickle.internal_refresh', 'true', false)")
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })
+        .unwrap();
+
+        let after = Spi::get_one::<String>("SELECT current_setting('pg_trickle.internal_refresh')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after, "false",
+            "owner-authored SET must not leak past with_stream_owner_context"
+        );
+
+        Spi::run("DROP ROLE lsec_probe_owner_guc").unwrap();
     }
 }

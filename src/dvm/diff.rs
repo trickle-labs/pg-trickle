@@ -255,6 +255,9 @@ pub struct DiffContext {
     /// to `changes_{oid}` (pre-v0.32.0 rows or unit-test contexts where
     /// no SPI connection is available).
     pub source_buffer_names: HashMap<u32, String>,
+    /// Owner-readable `pg_temp` stages keyed by source relation OID.
+    /// When present, generated delta SQL never names the private CDC schema.
+    pub source_stage_tables: HashMap<u32, String>,
     /// P2-2: Maps aggregate alias → COALESCE default value (e.g., "0") for
     /// SUM aggregates wrapped in `COALESCE(SUM(...), default)` at the Project
     /// level.
@@ -593,6 +596,7 @@ impl DiffContext {
             snapshot_fingerprint_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
             source_buffer_names: HashMap::new(),
+            source_stage_tables: HashMap::new(),
             // C-7 (v0.54.0): Depth tracking for diff_node() stack-overflow guard.
             diff_depth: 0,
             max_diff_depth: crate::config::pg_trickle_max_parse_depth(),
@@ -639,6 +643,7 @@ impl DiffContext {
             snapshot_fingerprint_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
             source_buffer_names: HashMap::new(),
+            source_stage_tables: HashMap::new(),
             // C-7 (v0.54.0): Depth tracking — use conservative default for unit tests.
             diff_depth: 0,
             max_diff_depth: 64,
@@ -674,6 +679,31 @@ impl DiffContext {
     pub fn with_delta_source(mut self, ds: DeltaSource) -> Self {
         self.delta_source = ds;
         self
+    }
+
+    /// Resolve the relation a delta scan may read for one source.
+    pub fn change_table_for_source(&self, source_oid: u32) -> String {
+        if let Some(stage) = self.source_stage_tables.get(&source_oid) {
+            return stage.clone();
+        }
+        if let Some(pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
+            return self
+                .st_bypass_tables
+                .get(pgt_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}.changes_pgt_{pgt_id}",
+                        quote_ident(&self.change_buffer_schema)
+                    )
+                });
+        }
+        let buffer = self
+            .source_buffer_names
+            .get(&source_oid)
+            .cloned()
+            .unwrap_or_else(|| format!("changes_{source_oid}"));
+        format!("{}.{}", quote_ident(&self.change_buffer_schema), buffer)
     }
 
     /// Get the previous LSN for a source table. In placeholder mode,
@@ -1162,6 +1192,20 @@ mod tests {
         assert!(!ctx.merge_safe_dedup);
         assert!(ctx.defining_query.is_none());
         assert!(ctx.st_user_columns.is_none());
+    }
+
+    #[test]
+    fn test_change_table_prefers_owner_stage() {
+        let mut ctx = DiffContext::new_standalone(Frontier::new(), Frontier::new());
+        ctx.source_buffer_names
+            .insert(42, "changes_private".to_string());
+        ctx.source_stage_tables
+            .insert(42, "pg_temp.\"__pgt_cdc_7_42\"".to_string());
+
+        assert_eq!(
+            ctx.change_table_for_source(42),
+            "pg_temp.\"__pgt_cdc_7_42\""
+        );
     }
 
     #[test]

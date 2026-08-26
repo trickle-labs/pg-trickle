@@ -14,6 +14,22 @@
 use crate::error::PgTrickleError;
 use pgrx::Spi;
 
+pub fn prepare_cross_cycle_phantom_table(
+    st: &crate::catalog::StreamTableMeta,
+    defining_query: &str,
+) -> Result<(), PgTrickleError> {
+    let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
+    let recon_table = format!("__pgt_recon_{}", st.pgt_id);
+    let recon_select =
+        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
+    // defining_query is definition-derived: parse/analyze it under the
+    // owner's identity and stored search_path, not this privileged caller's.
+    crate::refresh::with_stream_owner(st, || {
+        crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
+    })?;
+    Ok(())
+}
+
 /// EC01-2: Reconcile the stream table against the full-query result set.
 ///
 /// After a refresh (DIFFERENTIAL or IMMEDIATE) applies a delta, residue from
@@ -98,16 +114,13 @@ pub fn cleanup_cross_cycle_phantoms(
     let st_sig = json_fields_for("st");
     let r_sig = json_fields_for("r");
 
-    // Step 1: materialise the live full-query result into a temp table.
+    // Step 1: materialise the live full-query result into the prepared temp table.
     let recon_table = format!("__pgt_recon_{pgt_id}");
-    // Drop any leftover temp from a prior trigger fire in the same session.
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {recon_table}")); // nosemgrep: rust.spi.run.dynamic-format — recon_table is "__pgt_recon_{pgt_id}"; pgt_id is a plain i64, not user-supplied input
-    let create_sql = format!(
-        "CREATE TEMP TABLE {recon_table} ON COMMIT DROP AS \
-         SELECT {row_id_expr} AS __pgt_row_id, sub.* \
-         FROM ({defining_query}) sub"
+    let insert_recon_sql = format!(
+        "INSERT INTO {recon_table} \
+         SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub"
     );
-    Spi::run(&create_sql).map_err(|e| {
+    Spi::run(&insert_recon_sql).map_err(|e| {
         PgTrickleError::SpiError(format!("EC01-2 reconcile materialise failed: {e}"))
     })?;
 
@@ -212,8 +225,6 @@ pub fn cleanup_cross_cycle_phantoms(
     let inserted = Spi::get_one_with_args::<i64>(&insert_sql, &[batch_size.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile INSERT failed: {e}")))?
         .unwrap_or(0);
-
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {recon_table}")); // nosemgrep: rust.spi.run.dynamic-format — recon_table is "__pgt_recon_{pgt_id}"; pgt_id is a plain i64, not user-supplied input
 
     let total = deleted + inserted;
     if total > 0 {

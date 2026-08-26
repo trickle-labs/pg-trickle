@@ -243,6 +243,34 @@ fn copy_table_rows(
 
 /// Execute an ordinary MERGE through a named SQL cursor and bounded temp batch relation.
 #[cfg(not(test))]
+pub fn prepare_merge_pipeline(
+    st: &crate::catalog::StreamTableMeta,
+    pgt_id: i64,
+    delta_sql: &str,
+) -> Result<(), PgTrickleError> {
+    let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| PgTrickleError::InternalError("backend PID is NULL".to_string()))?;
+    let relation = relation_name(pgt_id, backend_pid);
+    let empty_select = format!("SELECT * FROM ({delta_sql}) __pgt_pipeline_empty LIMIT 0");
+    // delta_sql is definition-derived: parse/analyze it under the owner's
+    // identity and stored search_path, not this privileged caller's.
+    crate::refresh::with_stream_owner(st, || {
+        crate::refresh::prepare_owner_temp_table(st, &relation, &empty_select)
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn prepare_merge_pipeline(
+    _st: &crate::catalog::StreamTableMeta,
+    _pgt_id: i64,
+    _delta_sql: &str,
+) -> Result<(), PgTrickleError> {
+    Ok(())
+}
+
+#[cfg(not(test))]
 pub fn execute_merge_pipeline(
     pgt_id: i64,
     delta_sql: &str,
@@ -255,10 +283,6 @@ pub fn execute_merge_pipeline(
         .ok_or_else(|| PgTrickleError::InternalError("backend PID is NULL".to_string()))?;
     let relation = relation_name(pgt_id, backend_pid);
     let quoted_relation = format!("\"{relation}\"");
-    Spi::run(&format!(
-        "DROP TABLE IF EXISTS {quoted_relation}; CREATE TEMP TABLE {quoted_relation} ON COMMIT DROP AS SELECT * FROM ({delta_sql}) __pgt_pipeline_empty LIMIT 0"
-    ))
-    .map_err(|e| PgTrickleError::SpiError(format!("pipeline batch relation: {e}")))?;
     let relation_oid = Spi::get_one_with_args::<pg_sys::Oid>(
         "SELECT $1::regclass::oid",
         &[relation.as_str().into()],
@@ -270,6 +294,7 @@ pub fn execute_merge_pipeline(
 
     let cursor_name = format!("__pgt_pipeline_cursor_{pgt_id}_{backend_pid}");
     let quoted_cursor = format!("\"{cursor_name}\"");
+    // nosemgrep: rust.spi.run.dynamic-format — quoted_cursor is backend-generated and delta_sql is an internal generated query.
     Spi::run(&format!(
         "DECLARE {quoted_cursor} NO SCROLL CURSOR FOR {delta_sql}"
     ))
@@ -281,6 +306,7 @@ pub fn execute_merge_pipeline(
         loop {
             let fetched = Spi::connect_mut(|client| {
                 let fetch_count = FETCH_CHUNK.min(batch_size.max(1) as _);
+                // nosemgrep: rust.spi.connect_mut.dynamic-format — fetch_count is numeric and quoted_cursor is backend-generated.
                 let table = client
                     .update(
                         &format!("FETCH FORWARD {fetch_count} FROM {quoted_cursor}"),
@@ -319,7 +345,7 @@ pub fn execute_merge_pipeline(
         }
         Ok::<(), PgTrickleError>(())
     })();
-    let _ = Spi::run(&format!("CLOSE {quoted_cursor}"));
+    let _ = Spi::run(&format!("CLOSE {quoted_cursor}")); // nosemgrep: rust.spi.run.dynamic-format — quoted_cursor is backend-generated.
     result.map(|()| (applied, stats))
 }
 

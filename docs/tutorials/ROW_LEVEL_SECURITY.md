@@ -5,14 +5,13 @@ so that different database roles see only the rows they are permitted to access.
 
 ## Background
 
-Stream tables materialize the **full result set** of their defining query,
-regardless of any RLS policies on the source tables. This matches the behavior
-of PostgreSQL's built-in `MATERIALIZED VIEW` — the cache contains everything,
-and access control is enforced at read time.
+Stream tables evaluate their defining query as the stream-table owner with
+`row_security = on`. Source policies define what is materialized; stream-table
+policies define who may read the materialized rows.
 
 The recommended pattern is:
 
-1. **Source tables**: may or may not have RLS. Stream tables always see all rows.
+1. **Source tables**: grants and RLS are evaluated as the stream owner.
 2. **Stream table**: enable RLS **on the stream table** and create per-role
    policies so each role sees only its permitted rows.
 
@@ -123,14 +122,12 @@ contains all rows — the filtering happens at query time via RLS.
 
 ## How Refresh Works with RLS
 
-Both scheduled and manual refreshes run with superuser-equivalent privileges,
-so RLS on source tables is always bypassed during refresh. This ensures:
+Initial, scheduled, manual, differential, full, and IMMEDIATE refreshes use the
+same stored owner and defining path. This ensures:
 
-- The stream table always contains the **complete** result set.
-- A `refresh_stream_table()` call produces the same result regardless of who
-  calls it.
-- IMMEDIATE mode (IVM triggers) also bypasses RLS via `SECURITY DEFINER`
-  trigger functions.
+- Source policies produce the same owner-visible result on every path.
+- A `refresh_stream_table()` call produces the same result regardless of its caller.
+- IMMEDIATE trigger bookkeeping stays privileged while defining SQL runs as the owner.
 
 ## Policy Change Detection
 
@@ -144,9 +141,7 @@ pg_trickle automatically detects RLS-related DDL on source tables:
 | `ALTER TABLE ... FORCE ROW LEVEL SECURITY` | Stream table marked for reinit |
 | `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` | Stream table marked for reinit |
 
-Since the stream table always sees all rows (bypassing RLS), these reinits
-serve as a confirmation that the materialized data remains consistent after
-the security posture of the source table changed.
+These reinits recompute the result under the updated owner-visible policy.
 
 ## Tips
 

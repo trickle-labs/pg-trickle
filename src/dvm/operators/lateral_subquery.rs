@@ -609,12 +609,7 @@ fn build_inner_change_branch(
     let exists_checks: Vec<String> = unique_inner_oids
         .iter()
         .map(|oid| {
-            let buf_name = ctx
-                .source_buffer_names
-                .get(oid)
-                .cloned()
-                .unwrap_or_else(|| format!("changes_{oid}"));
-            let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
+            let change_table = ctx.change_table_for_source(*oid);
             let prev_lsn = ctx.get_prev_lsn(*oid);
             let new_lsn = ctx.get_new_lsn(*oid);
 

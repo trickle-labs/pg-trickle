@@ -2627,11 +2627,14 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // PERF-2: Use the hash pre-computed at CREATE/ALTER time and stored in the
     // catalog.  Fall back to computing it if the stored value is 0 (e.g. rows
     // that existed before the v0.59.0 upgrade and haven't been ALTERed yet).
-    let query_hash = if st.defining_query_hash != 0 {
-        st.defining_query_hash as u64
-    } else {
+    let query_hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        st.defining_query.hash(&mut hasher);
+        "v0.87.8-stage".hash(&mut hasher);
+        if st.defining_query_hash != 0 {
+            st.defining_query_hash.hash(&mut hasher);
+        } else {
+            st.defining_query.hash(&mut hasher);
+        }
         hasher.finish()
     };
 

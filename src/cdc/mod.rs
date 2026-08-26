@@ -2177,6 +2177,47 @@ pub fn resolve_pk_columns(source_oid: pg_sys::Oid) -> Result<Vec<String>, PgTric
     })
 }
 
+/// RLS-3: Return the schema-qualified name of the first relation among
+/// `oids` that has row-level security enabled, or `None` if none do.
+///
+/// Differential and IMMEDIATE maintenance can only check whether a row is
+/// visible in the *current* state of a source table — they cannot
+/// reconstruct whether an old row image was ever visible to the stream
+/// owner before a policy-relevant UPDATE/DELETE. Callers use this to keep
+/// RLS-protected sources on FULL refresh, which always re-evaluates the
+/// defining query under the owner's current row_security from scratch.
+pub(crate) fn first_rls_enabled_source(oids: &[u32]) -> Result<Option<String>, PgTrickleError> {
+    for &oid in oids {
+        let found = Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    "SELECT format('%I.%I', n.nspname, c.relname) \
+                     FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE c.oid = $1 AND c.relrowsecurity",
+                    None,
+                    &[pg_sys::Oid::from(oid).into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            rows.next()
+                .map(|row| {
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .ok_or_else(|| {
+                            PgTrickleError::InternalError(
+                                "RLS source name unexpectedly returned NULL".into(),
+                            )
+                        })
+                })
+                .transpose()
+        })?;
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    Ok(None)
+}
+
 /// Build PL/pgSQL expressions for computing `pk_hash` in a CDC trigger.
 ///
 /// Returns `(new_expr, old_expr)` — the expression using NEW record keys
@@ -2831,6 +2872,7 @@ pub fn get_slot_positions_at_bound(
                 // lets an idle source advance normally.
                 let change_schema = crate::config::pg_trickle_change_buffer_schema();
                 let buffer = buffer_qualified_name_for_oid(&change_schema, *oid);
+                // nosemgrep: rust.spi.get_one_with_args.dynamic-format — buffer is a quoted catalog-derived identifier; safe_bound is a parameter.
                 Spi::get_one_with_args::<String>(
                     &format!(
                         "SELECT COALESCE(LEAST(MAX(lsn), $1::pg_lsn), $1::pg_lsn)::text \

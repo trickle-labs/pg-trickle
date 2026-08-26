@@ -301,21 +301,21 @@ pooler configuration in Kubernetes environments.
 
 ## Row-Level Security
 
-> **Important:** pg_trickle background workers execute refresh queries with
-> `SET LOCAL row_security = off`. This is intentional and matches the semantics
-> of PostgreSQL's `REFRESH MATERIALIZED VIEW`.
+> **Important:** pg_trickle evaluates defining SQL as the stream-table owner
+> with `row_security = on`, regardless of whether a manual caller, scheduler,
+> or IMMEDIATE trigger initiated the refresh.
 
 ### Implications
 
-- Stream table output always contains the **full, unfiltered result set** regardless of RLS policies on source tables.
-- Row-Level Security policies on source tables **do not filter** what ends up in a stream table.
-- If the source table has RLS and the defining query selects `*`, all rows (including those that would be hidden by RLS for normal roles) will be included in the stream table.
+- Source-table policies filter the materialized result according to the stream owner's privileges.
+- A refresh caller's identity does not change the result.
+- Table owners normally bypass RLS unless the source uses `FORCE ROW LEVEL SECURITY`.
 
 ### Mitigations
 
-- [ ] Audit all stream table queries: ensure sensitive columns are excluded or aggregated.
-- [ ] Do not expose stream tables directly to end-user roles if the source tables are protected by RLS.
-- [ ] Use a per-role VIEW on top of the stream table to re-apply filtering: `CREATE VIEW orders_view AS SELECT * FROM order_totals_st WHERE user_id = current_user_id()`.
+- [ ] Audit the stream owner's source grants and applicable RLS policies.
+- [ ] Enable RLS on stream tables that are read by roles with different visibility.
+- [ ] Use `FORCE ROW LEVEL SECURITY` where a source-table owner must not bypass its own policies.
 - [ ] Consider column-level masking extensions (e.g., `anon`) on the stream table output view.
 - [ ] Review `pgtrickle.list_stream_tables()` output for any stream tables selecting from RLS-protected sources.
 
