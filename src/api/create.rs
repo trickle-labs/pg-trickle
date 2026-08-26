@@ -204,9 +204,9 @@ pub(crate) fn bulk_create_impl(
         defs.len(),
         crate::config::pg_trickle_max_bulk_api_items(),
     )?;
-
     let mut parsed = Vec::with_capacity(defs.len());
     let mut targets = std::collections::HashSet::with_capacity(defs.len());
+    let mut caller_search_path = None;
     for (i, def) in defs.iter().enumerate() {
         let object = def.as_object().ok_or_else(|| {
             PgTrickleError::InvalidArgument(format!(
@@ -229,12 +229,26 @@ pub(crate) fn bulk_create_impl(
                     "bulk_create() element [{i}] has an invalid schema: {e}"
                 ))
             })?;
-        let (schema, table_name) = parse_qualified_name(&definition.name).map_err(|e| {
-            PgTrickleError::InvalidArgument(format!(
-                "bulk_create() element [{i}] has invalid name {:?}: {e}",
-                definition.name
-            ))
+        if caller_search_path.is_none() {
+            caller_search_path = Some(
+                security_context::capture_caller_context(
+                    security_context::EntryContext::SecurityDefiner,
+                )?
+                .search_path,
+            );
+        }
+        let caller_search_path = caller_search_path.as_deref().ok_or_else(|| {
+            PgTrickleError::InternalError("bulk_create() caller path was not captured".into())
         })?;
+        let (schema, table_name) =
+            resolve_qualified_name_as_caller(&definition.name, caller_search_path).map_err(
+                |e| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "bulk_create() element [{i}] has invalid name {:?}: {e}",
+                        definition.name
+                    ))
+                },
+            )?;
         if !targets.insert((schema, table_name)) {
             return Err(PgTrickleError::InvalidArgument(format!(
                 "bulk_create() element [{i}] duplicates a target"
@@ -285,15 +299,22 @@ pub(crate) fn bulk_create_impl(
             storage_backend: definition.storage_backend.as_deref(),
             storage_fillfactor,
             target_freshness: None,
-            entry_context: None,
+            entry_context: Some(security_context::EntryContext::SecurityDefiner),
         }) {
             Ok(()) => {
                 // Look up pgt_id for the result
-                let (schema, table_name) = parse_qualified_name(&definition.name).map_err(|e| {
-                    PgTrickleError::InvalidArgument(format!(
-                        "bulk_create() element [{i}] has invalid name: {e}"
-                    ))
+                let caller_search_path = caller_search_path.as_deref().ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "bulk_create() caller path was not captured".into(),
+                    )
                 })?;
+                let (schema, table_name) =
+                    resolve_qualified_name_as_caller(&definition.name, caller_search_path)
+                        .map_err(|e| {
+                            PgTrickleError::InvalidArgument(format!(
+                                "bulk_create() element [{i}] has invalid name: {e}"
+                            ))
+                        })?;
                 let pgt_id = StreamTableMeta::get_by_name(&schema, &table_name)?.pgt_id;
 
                 results.push(serde_json::json!({

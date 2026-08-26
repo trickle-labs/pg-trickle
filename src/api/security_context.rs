@@ -6,12 +6,10 @@
 //! stream table's storage owner, under that stored path, with guaranteed
 //! restoration on every exit path.
 //!
-//! No public lifecycle function becomes `SECURITY DEFINER` in this release.
-//! `create_stream_table` and its presets already were before this module
-//! existed; this module only replaces the ad hoc `"$user", public` path
-//! guess those entry points used with an exact, tested capture, and adds the
-//! primitives later releases will use to execute defining SQL as the stream
-//! owner instead of the extension owner.
+//! Owner-checked lifecycle entry points use `SECURITY DEFINER` only to reach
+//! private catalogs and storage. User-defined SQL still runs through the
+//! captured caller context and stream-owner execution wrapper; it never runs
+//! as the extension owner.
 
 use super::helpers::{outer_user_id, outer_user_name, quote_identifier};
 use super::*;
@@ -304,7 +302,6 @@ pub(crate) fn with_stream_owner_context<T>(
         ctx.owner_oid,
         "security context: active role does not match the stream table owner"
     );
-
     // SAFETY: `PgTryBuilder`'s `finally` runs on both the success and the
     // PostgreSQL ERROR path while the backend remains in a valid state,
     // which is what makes restoration here unconditional.

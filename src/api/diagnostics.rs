@@ -67,6 +67,70 @@ fn latest_schema_version_audit_row() -> Option<SchemaVersionAuditRow> {
     .unwrap_or(None)
 }
 
+fn owner_privilege_preflight() -> serde_json::Value {
+    let gaps = Spi::get_one::<String>(
+        r#"
+            WITH gaps AS (
+                SELECT st.pgt_id,
+                       format('%I.%I', st.pgt_schema, st.pgt_name) AS stream_table,
+                       pg_get_userbyid(storage.relowner)::text AS owner_name,
+                       format('%I.%I', source_ns.nspname, source.relname) AS source_table,
+                       source_ns.nspname::text AS source_schema,
+                       source.relname::text AS source_name,
+                       NOT has_table_privilege(pg_get_userbyid(storage.relowner), source.oid, 'SELECT') AS missing_select,
+                       NOT has_schema_privilege(pg_get_userbyid(storage.relowner), source_ns.oid, 'USAGE') AS missing_usage
+                  FROM pgtrickle.pgt_stream_tables st
+                  JOIN pg_catalog.pg_class storage ON storage.oid = st.pgt_relid
+                  JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id
+                  JOIN pg_catalog.pg_class source ON source.oid = dep.source_relid
+                  JOIN pg_catalog.pg_namespace source_ns ON source_ns.oid = source.relnamespace
+                 WHERE dep.source_type IN ('TABLE', 'STREAM_TABLE', 'VIEW', 'FOREIGN_TABLE', 'MATVIEW')
+            )
+            SELECT COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'pgt_id', pgt_id,
+                    'stream_table', stream_table,
+                    'owner', owner_name,
+                    'source_table', source_table,
+                    'missing', ARRAY_REMOVE(ARRAY[
+                        CASE WHEN missing_select THEN 'SELECT' END,
+                        CASE WHEN missing_usage THEN 'USAGE ON SCHEMA' END
+                    ], NULL),
+                    'remediation', concat(
+                        CASE WHEN missing_select THEN format(
+                            'GRANT SELECT ON TABLE %I.%I TO %I; ',
+                            source_schema, source_name, owner_name
+                        ) ELSE '' END,
+                        CASE WHEN missing_usage THEN format(
+                            'GRANT USAGE ON SCHEMA %I TO %I;',
+                            source_schema, owner_name
+                        ) ELSE '' END
+                    )
+                ) ORDER BY stream_table, source_table
+            ) FILTER (WHERE missing_select OR missing_usage), '[]'::jsonb)::text
+              FROM gaps"#,
+    )
+    .ok()
+    .flatten()
+    .and_then(|text| serde_json::from_str(&text).ok())
+    .unwrap_or_else(|| serde_json::json!([{
+        "stream_table": "<unavailable>",
+        "missing": ["preflight query failed"],
+        "remediation": "Inspect PostgreSQL logs and rerun pgtrickle.lifecycle_preflight()"
+    }]));
+
+    let ok = gaps.as_array().is_some_and(Vec::is_empty);
+    serde_json::json!({
+        "ok": ok,
+        "missing": gaps,
+        "detail": if ok {
+            "Every stream-table owner has SELECT on each source and USAGE on each source schema."
+        } else {
+            "One or more stream-table owners are missing source privileges; apply each remediation exactly as listed."
+        }
+    })
+}
+
 fn build_migrate_report(
     runtime_version: &str,
     extension_version: Option<&str>,
@@ -829,7 +893,8 @@ pub(super) fn shared_buffer_stats_impl()
 ///
 /// Returns nothing on success; raises an ERROR if the stream table does not
 /// exist or the fuse is not blown.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub(super) fn reset_fuse(name: &str, action: default!(&str, "'apply'")) {
     let result = reset_fuse_impl(name, action);
     if let Err(e) = result {
@@ -838,9 +903,8 @@ pub(super) fn reset_fuse(name: &str, action: default!(&str, "'apply'")) {
 }
 
 pub(super) fn reset_fuse_impl(name: &str, action: &str) -> Result<(), PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
-    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+    let (schema, table_name, st) =
+        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
     if st.fuse_state != "blown" {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -1943,6 +2007,40 @@ pub(super) fn preflight() -> String {
     .to_string()
 }
 
+/// Check that every stream-table owner can read each declared source.
+///
+/// This read-only upgrade and operations preflight is intentionally
+/// superuser-only: it reports the exact missing grants without changing
+/// catalog state. The v0.87.10 migration runs the same check before applying
+/// its catalog changes.
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn lifecycle_preflight() -> String {
+    let is_superuser = Spi::get_one::<bool>(
+        "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user",
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+    if !is_superuser {
+        pgrx::error!("pgtrickle.lifecycle_preflight() requires superuser privilege");
+    }
+
+    let owner_privileges = owner_privilege_preflight();
+    let ok = owner_privileges
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    serde_json::json!({
+        "ok": ok,
+        "owner_privileges": owner_privileges,
+        "detail": if ok {
+            "All stream-table owners have the required source SELECT and schema USAGE privileges."
+        } else {
+            "Grant every listed privilege, then rerun pgtrickle.lifecycle_preflight()."
+        }
+    })
+    .to_string()
+}
+
 // ── CACHE-3 (v0.25.0): Manual cache flush ──────────────────────────────
 
 /// CACHE-3: Flush all delta-template cache levels in the current database.
@@ -2457,7 +2555,8 @@ pub(super) fn preview_stream_table(
 
 /// Reset cumulative diagnostics for one owned stream table without deleting
 /// immutable refresh history or operational error state.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub(super) fn stat_reset(pgt_id: i64) {
     let result = (|| {
         let st = StreamTableMeta::get_by_id(pgt_id)?

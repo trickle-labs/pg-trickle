@@ -6,9 +6,10 @@ use super::*;
 use crate::refresh::RefreshAction;
 
 /// Manually trigger a synchronous refresh of a stream table.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn refresh_stream_table(name: &str) {
-    let result = refresh_stream_table_impl(name);
+    let result = refresh_stream_table_impl(name, security_context::EntryContext::SecurityDefiner);
     if let Err(e) = result {
         // RefreshSkipped is a transient, non-fatal condition: another refresh
         // is already in progress on this ST. Log it at DEBUG level and emit
@@ -41,7 +42,10 @@ fn write_and_refresh(sql: &str, stream_table_name: &str) {
         pgrx::error!("write_and_refresh: user SQL failed: {}", e,);
     }
     // Refresh the stream table.
-    let result = refresh_stream_table_impl(stream_table_name);
+    let result = refresh_stream_table_impl(
+        stream_table_name,
+        security_context::EntryContext::SecurityInvoker,
+    );
     if let Err(e) = result {
         if let PgTrickleError::RefreshSkipped(ref msg) = e {
             pgrx::notice!("refresh skipped: {}", msg);
@@ -51,7 +55,10 @@ fn write_and_refresh(sql: &str, stream_table_name: &str) {
     }
 }
 
-fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
+fn refresh_stream_table_impl(
+    name: &str,
+    entry_context: security_context::EntryContext,
+) -> Result<(), PgTrickleError> {
     // F16 (G8.2): Block manual refresh on read replicas — writes are not possible.
     let is_replica = Spi::get_one::<bool>("SELECT pg_is_in_recovery()")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
@@ -65,8 +72,7 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         ));
     }
 
-    let (schema, table_name) = parse_qualified_name(name)?;
-    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let (schema, table_name, st) = resolve_owned_stream_table(name, entry_context)?;
 
     // Phase 10: Check if ST is suspended or in error — refuse manual refresh
     if st.status == StStatus::Suspended || st.status == StStatus::Error {
@@ -174,7 +180,12 @@ fn execute_manual_refresh(
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     if st.refresh_mode != RefreshMode::Full && !st.needs_reinit {
-        crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)?;
+        // Validation performs PostgreSQL parse analysis, so resolve the
+        // stored user query under the same owner identity and search_path as
+        // the refresh executor.
+        refresh::with_stream_owner(st, || {
+            crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)
+        })?;
     }
 
     // ERG-D: Determine the action label for history recording.
@@ -553,7 +564,9 @@ pub(crate) fn execute_manual_full_refresh(
     let insert_body = if crate::dvm::query_needs_dual_count(&st.defining_query) {
         crate::dvm::direct_full_refresh_insert_body(&st.defining_query, &effective_query)
     } else if crate::dvm::query_needs_union_dedup_count(&st.defining_query) {
-        let col_names = crate::dvm::get_defining_query_columns(&st.defining_query)?;
+        let col_names = refresh::with_stream_owner(st, || {
+            crate::dvm::get_defining_query_columns(&st.defining_query)
+        })?;
         if let Some(union_sql) =
             crate::dvm::try_union_dedup_refresh_sql(&st.defining_query, &col_names)
         {

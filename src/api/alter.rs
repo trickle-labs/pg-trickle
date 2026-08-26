@@ -2581,16 +2581,10 @@ fn drop_stream_table(name: &str, cascade: default!(bool, false)) {
     }
 }
 
-pub(crate) fn prevalidate_stream_table_target(
-    name: &str,
-) -> Result<StreamTableMeta, PgTrickleError> {
-    prevalidate_stream_table_target_as_caller(name, "public")
-}
-
-/// LSEC-7 (v0.87.9): same as [`prevalidate_stream_table_target`], but
-/// resolves an unqualified `name` under the original caller's captured
+/// LSEC-7 (v0.87.9): resolves an unqualified `name` under the original
+/// caller's captured
 /// `search_path` rather than a hard-coded `public` default.
-fn prevalidate_stream_table_target_as_caller(
+pub(crate) fn prevalidate_stream_table_target_as_caller(
     name: &str,
     caller_search_path: &str,
 ) -> Result<StreamTableMeta, PgTrickleError> {
@@ -2722,7 +2716,11 @@ fn build_drop_plan(
 
     let qualified_name_of = |pgt_id: &i64| {
         let st = &by_id[pgt_id];
-        format!("{}.{}", st.pgt_schema, st.pgt_name)
+        format!(
+            "{}.{}",
+            quote_identifier(&st.pgt_schema),
+            quote_identifier(&st.pgt_name)
+        )
     };
     let ordered_names = ordered_ids.iter().map(qualified_name_of).collect();
     let extra_names = ordered_ids
@@ -2737,8 +2735,11 @@ fn build_drop_plan(
     })
 }
 
-pub(crate) fn plan_drop_stream_tables(names: &[String]) -> Result<Vec<String>, PgTrickleError> {
-    let plan = build_drop_plan(names, "public")?;
+pub(crate) fn plan_drop_stream_tables(
+    names: &[String],
+    caller_search_path: &str,
+) -> Result<Vec<String>, PgTrickleError> {
+    let plan = build_drop_plan(names, caller_search_path)?;
     if !plan.extra_names.is_empty() {
         return Err(PgTrickleError::InvalidArgument(format!(
             "the following stream tables have dependents not included in this bulk drop: {}. \
@@ -2904,7 +2905,8 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
 
 /// Resume a suspended stream table, clearing its consecutive error count and
 /// re-enabling automated and manual refreshes.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn resume_stream_table(name: &str) {
     let result = resume_stream_table_impl(name);
     if let Err(e) = result {
@@ -2913,8 +2915,8 @@ fn resume_stream_table(name: &str) {
 }
 
 fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
-    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let (schema, table_name, st) =
+        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
     if st.status != StStatus::Suspended && st.status != StStatus::Error {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -2975,7 +2977,8 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
 /// 5. Rebuild any missing CDC triggers / change-buffer tables.
 /// 6. Verify that all declared source dependencies still exist.
 /// 7. Return a summary of all actions taken.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn repair_stream_table(name: &str) -> String {
     match repair_stream_table_impl(name) {
         Ok(summary) => summary,
@@ -2984,8 +2987,8 @@ fn repair_stream_table(name: &str) -> String {
 }
 
 fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
-    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let (schema, table_name, st) =
+        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
     // Step 1: Acquire a transaction-scoped advisory lock.
     let got_lock =
@@ -3160,11 +3163,13 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
 /// ```sql
 /// SELECT pgtrickle.set_stream_table_refresh_policy('my_schema.my_st', 'DIFFERENTIAL');
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn set_stream_table_refresh_policy(name: &str, refresh_mode: &str) {
     let result = alter_stream_table_impl(AlterStreamTableOptions {
         name,
         refresh_mode: Some(refresh_mode),
+        entry_context: Some(security_context::EntryContext::SecurityDefiner),
         ..Default::default()
     });
     if let Err(e) = result {
@@ -3187,7 +3192,8 @@ fn set_stream_table_refresh_policy(name: &str, refresh_mode: &str) {
 /// ```sql
 /// SELECT pgtrickle.set_stream_table_storage_policy('my_schema.my_st', true, 'hot');
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn set_stream_table_storage_policy(
     name: &str,
     append_only: default!(Option<bool>, "NULL"),
@@ -3197,6 +3203,7 @@ fn set_stream_table_storage_policy(
         name,
         append_only,
         tier,
+        entry_context: Some(security_context::EntryContext::SecurityDefiner),
         ..Default::default()
     });
     if let Err(e) = result {
@@ -3219,7 +3226,8 @@ fn set_stream_table_storage_policy(
 /// SELECT pgtrickle.pause_stream_table('my_schema.my_st');
 /// SELECT pgtrickle.resume_stream_table('my_schema.my_st');
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn pause_stream_table(name: &str) {
     let result = pause_stream_table_impl(name);
     if let Err(e) = result {
@@ -3228,8 +3236,8 @@ fn pause_stream_table(name: &str) {
 }
 
 fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
-    let (schema, table_name) = parse_qualified_name(name)?;
-    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let (schema, table_name, st) =
+        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
     if st.status != StStatus::Active {
         return Err(PgTrickleError::InvalidArgument(format!(
