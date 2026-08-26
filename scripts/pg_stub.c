@@ -104,6 +104,11 @@ int      set_config_option(const char *name, const char *value,
 }
 uint32_t GetCurrentTransactionId(void)          { return 0; }
 uint32_t GetCurrentTransactionIdIfAny(void)     { return 0; }
+int      NewGUCNestLevel(void)                  { return 1; }
+void     AtEOXact_GUC(_Bool is_commit, int nest_level) {
+    (void)is_commit;
+    (void)nest_level;
+}
 uint32_t GetUserId(void)                         { return 0; }
 void     GetUserIdAndSecContext(uint32_t *userid, int *sec_context) {
     if (userid) *userid = 0;
