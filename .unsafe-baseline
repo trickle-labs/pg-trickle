@@ -9,7 +9,7 @@
 src/api/helpers.rs 19
 src/api/mod.rs 1
 src/api/scheduler_control.rs 1
-src/api/security_context.rs 6
+src/api/security_context.rs 8
 src/api/snapshot.rs 6
 src/catalog.rs 3
 src/dvm/parser/mod.rs 20

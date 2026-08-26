@@ -82,12 +82,16 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         // relation, and this table must stay readable by the privileged
         // downstream-diff capture call after `with_stream_owner` returns
         // below, so this intentionally runs un-wrapped.
-        crate::refresh::prepare_owner_temp_table(st, &format!("__pgt_pre_{}", st.pgt_id), &pre_select)
-            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-                pgt_id: st.pgt_id,
-                stage: "full-refresh downstream snapshot".to_string(),
-                reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
-            })?;
+        crate::refresh::prepare_owner_temp_table(
+            st,
+            &format!("__pgt_pre_{}", st.pgt_id),
+            &pre_select,
+        )
+        .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: st.pgt_id,
+            stage: "full-refresh downstream snapshot".to_string(),
+            reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
+        })?;
     }
     let (rows_inserted, needs_diff_capture, user_cols) = with_stream_owner(st, || {
         let schema = &st.pgt_schema;
@@ -2406,7 +2410,10 @@ pub fn execute_differential_refresh_with_tuning(
             crate::refresh::prepare_owner_temp_table(st, &delta_table_basename, &delta_select)
         })?
     } else {
-        format!("pg_temp.{}", crate::sql_builder::ident(&delta_table_basename))
+        format!(
+            "pg_temp.{}",
+            crate::sql_builder::ident(&delta_table_basename)
+        )
     };
     let prepared_diff_capture_cols = if use_explicit_dml && needs_downstream_capture {
         let cols = get_st_user_columns(st);

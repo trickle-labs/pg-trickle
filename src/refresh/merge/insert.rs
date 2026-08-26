@@ -49,8 +49,7 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     );
     let pre_table_basename = format!("__pgt_topk_state_{}", st.pgt_id);
     let pre_select = format!("SELECT * FROM {quoted_table}");
-    let pre_table =
-        crate::refresh::prepare_owner_temp_table(st, &pre_table_basename, &pre_select)?;
+    let pre_table = crate::refresh::prepare_owner_temp_table(st, &pre_table_basename, &pre_select)?;
     crate::refresh::with_stream_owner(st, || {
         Spi::run(&format!("INSERT INTO {pre_table} {pre_select}")) // nosemgrep: rust.spi.run.dynamic-format — table is quoted and source is a quoted storage relation.
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))
@@ -75,12 +74,16 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         // relation, and this table must stay readable by the privileged
         // downstream-diff capture call later, so this intentionally runs
         // un-wrapped (privileged).
-        crate::refresh::prepare_owner_temp_table(st, &format!("__pgt_pre_{}", st.pgt_id), &pre_select)
-            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-                pgt_id: st.pgt_id,
-                stage: "topk downstream snapshot".to_string(),
-                reason: e.to_string(),
-            })?;
+        crate::refresh::prepare_owner_temp_table(
+            st,
+            &format!("__pgt_pre_{}", st.pgt_id),
+            &pre_select,
+        )
+        .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+            pgt_id: st.pgt_id,
+            stage: "topk downstream snapshot".to_string(),
+            reason: e.to_string(),
+        })?;
         Some(cols)
     } else {
         None

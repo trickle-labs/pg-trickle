@@ -259,9 +259,10 @@ pub(crate) fn with_stream_owner_context<T>(
     // PostgreSQL's standard mechanism for temporarily executing as a
     // different role — the same one `SECURITY DEFINER` function calls and
     // extensions such as dblink/postgres_fdw use to run as a foreign-server
-    // owner. `SECURITY_RESTRICTED_OPERATION` additionally disables `SET
-    // ROLE`/`SET SESSION AUTHORIZATION` for the duration, so owner-context
-    // SQL cannot escalate further. Both calls run on the main backend
+    // owner. `SECURITY_LOCAL_USERID_CHANGE` prevents `SET ROLE`/`SET SESSION
+    // AUTHORIZATION` while the effective role is temporarily out of sync
+    // with PostgreSQL's GUC state, so owner-context SQL cannot escalate
+    // further. Both calls run on the main backend
     // thread; identity is restored in `.finally()` below on every exit.
     unsafe {
         pg_sys::GetUserIdAndSecContext(&mut save_userid, &mut save_sec_context);
@@ -277,13 +278,12 @@ pub(crate) fn with_stream_owner_context<T>(
     let nest_level = unsafe { pg_sys::NewGUCNestLevel() };
 
     // SAFETY: see above — role switch is intentionally sandboxed by
-    // SECURITY_RESTRICTED_OPERATION.
+    // SECURITY_LOCAL_USERID_CHANGE. Owner-context refreshes may create
+    // temporary staging tables, which SECURITY_RESTRICTED_OPERATION forbids.
     unsafe {
         pg_sys::SetUserIdAndSecContext(
             ctx.owner_oid,
-            save_sec_context
-                | pg_sys::SECURITY_LOCAL_USERID_CHANGE as core::ffi::c_int
-                | pg_sys::SECURITY_RESTRICTED_OPERATION as core::ffi::c_int,
+            save_sec_context | pg_sys::SECURITY_LOCAL_USERID_CHANGE as core::ffi::c_int,
         );
     }
 

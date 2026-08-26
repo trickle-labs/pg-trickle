@@ -2186,18 +2186,31 @@ pub fn resolve_pk_columns(source_oid: pg_sys::Oid) -> Result<Vec<String>, PgTric
 /// owner before a policy-relevant UPDATE/DELETE. Callers use this to keep
 /// RLS-protected sources on FULL refresh, which always re-evaluates the
 /// defining query under the owner's current row_security from scratch.
-pub(crate) fn first_rls_enabled_source(
-    oids: &[u32],
-) -> Result<Option<String>, PgTrickleError> {
+pub(crate) fn first_rls_enabled_source(oids: &[u32]) -> Result<Option<String>, PgTrickleError> {
     for &oid in oids {
-        let found = Spi::get_one_with_args::<String>(
-            "SELECT format('%I.%I', n.nspname, c.relname) \
-             FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE c.oid = $1 AND c.relrowsecurity",
-            &[pg_sys::Oid::from(oid).into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let found = Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    "SELECT format('%I.%I', n.nspname, c.relname) \
+                     FROM pg_catalog.pg_class c \
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE c.oid = $1 AND c.relrowsecurity",
+                    None,
+                    &[pg_sys::Oid::from(oid).into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            rows.next()
+                .map(|row| {
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .ok_or_else(|| {
+                            PgTrickleError::InternalError(
+                                "RLS source name unexpectedly returned NULL".into(),
+                            )
+                        })
+                })
+                .transpose()
+        })?;
         if found.is_some() {
             return Ok(found);
         }
