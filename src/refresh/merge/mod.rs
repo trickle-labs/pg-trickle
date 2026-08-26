@@ -168,6 +168,26 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             Vec::new()
         };
 
+        if needs_diff_capture && !user_cols.is_empty() {
+            let col_list = user_cols
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pre_table = format!(
+                "pg_temp.{}",
+                crate::sql_builder::ident(&format!("__pgt_pre_{}", st.pgt_id))
+            );
+            Spi::run(&format!(
+                "INSERT INTO {pre_table} SELECT __pgt_row_id, {col_list} FROM {quoted_table}"
+            )) // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-derived and quote-escaped.
+            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "full-refresh downstream snapshot".to_string(),
+                reason: format!("{}.{}: {e}", st.pgt_schema, st.pgt_name),
+            })?;
+        }
+
         // Truncate
         Spi::run(&format!("TRUNCATE {quoted_table}")) // nosemgrep: rust.spi.run.dynamic-format — TRUNCATE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
