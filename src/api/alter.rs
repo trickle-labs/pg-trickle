@@ -2,6 +2,7 @@
 // Extracted from src/api/mod.rs in v0.55.0 module decomposition.
 // All shared helpers, types, and utilities are in api/mod.rs (use super::*).
 
+use super::publication;
 use super::refresh_ops::execute_manual_full_refresh;
 use super::*;
 
@@ -745,6 +746,7 @@ fn alter_stream_table_query(
             st.pgt_relid
         }
         SchemaChange::Incompatible { reason } => {
+            publication::ensure_storage_replacement_allowed(st)?;
             pgrx::warning!(
                 "pg_trickle: ALTER QUERY requires full storage rebuild: {}. \
                  The storage table OID will change.",
@@ -1106,6 +1108,8 @@ fn alter_stream_table_partition_key(
     table_name: &str,
     new_partition_key: Option<&str>,
 ) -> Result<(), PgTrickleError> {
+    publication::ensure_storage_replacement_allowed(st)?;
+
     // Get current storage columns for validation.
     let columns = get_storage_table_columns(schema, table_name)?;
 
@@ -2750,6 +2754,17 @@ pub(crate) fn plan_drop_stream_tables(
     Ok(plan.ordered_names)
 }
 
+pub(crate) fn prevalidate_publication_bindings_for_drop(
+    names: &[String],
+    caller_search_path: &str,
+) -> Result<(), PgTrickleError> {
+    let metas = names
+        .iter()
+        .map(|name| prevalidate_stream_table_target_as_caller(name, caller_search_path))
+        .collect::<Result<Vec<_>, _>>()?;
+    publication::prevalidate_publication_bindings(&metas)
+}
+
 pub(crate) fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), PgTrickleError> {
     // LSEC-7/LSEC-9 (v0.87.9): `drop_stream_table` is SECURITY DEFINER, so
     // resolve the caller-controlled name under the original caller's
@@ -2766,6 +2781,7 @@ pub(crate) fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), Pg
             plan.extra_names.join(", ")
         )));
     }
+    prevalidate_publication_bindings_for_drop(&plan.ordered_names, &caller_search_path)?;
     for qualified_name in &plan.ordered_names {
         execute_drop_stream_table(qualified_name)?;
     }
@@ -2778,6 +2794,29 @@ pub(crate) fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), Pg
 pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(qualified_name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+
+    // Serialize all pg_trickle lifecycle operations for this stream and
+    // validate the publication before dropping any public object.
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(qualified_name.to_string()))?;
+    let st = StreamTableMeta::get_by_id(st.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(qualified_name.to_string()))?;
+    if let Some(validated) =
+        publication::prepare_publication_binding(&st, pg_sys::AccessExclusiveLock as i32)?
+    {
+        publication::drop_validated_publication(&caller, &validated)?;
+    }
 
     // Get dependencies before deleting catalog entries
     let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
@@ -2792,14 +2831,6 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
         .map(|d| d.source_relid.to_u32())
         .collect();
     crate::refresh::flush_pending_cleanups_for_oids(&dep_oids);
-
-    // CDC-PUB-2: Drop downstream publication if one exists.
-    if let Some(pub_name) = &st.downstream_publication_name {
-        let _ = Spi::run(&format!(
-            "DROP PUBLICATION IF EXISTS {}",
-            quote_identifier(pub_name),
-        ));
-    }
 
     // Drop the storage table
     let drop_sql = format!(
@@ -2987,21 +3018,29 @@ fn repair_stream_table(name: &str) -> String {
 }
 
 fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
+    let caller =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
     let (schema, table_name, st) =
-        resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
+        super::helpers::resolve_owned_stream_table_with_caller(name, &caller)?;
 
     // Step 1: Acquire a transaction-scoped advisory lock.
-    let got_lock =
-        Spi::get_one_with_args::<bool>("SELECT pg_try_advisory_xact_lock($1)", &[st.pgt_id.into()])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-            .unwrap_or(false);
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("{}.{}", schema, table_name)))?;
+    let st = StreamTableMeta::get_by_id(st.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("{}.{}", schema, table_name)))?;
 
-    if !got_lock {
-        return Err(PgTrickleError::RefreshSkipped(format!(
-            "{}.{} — another operation holds the advisory lock; retry later",
-            schema, table_name,
-        )));
-    }
+    // A repair may recreate storage and therefore must never proceed against
+    // an unverified downstream publication binding.
+    publication::prepare_publication_binding(&st, pg_sys::AccessShareLock as i32)?;
 
     let mut actions: Vec<String> = Vec::new();
     let change_schema = config::pg_trickle_change_buffer_schema();
@@ -3021,6 +3060,11 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     .unwrap_or(false);
 
     if !storage_exists {
+        // Reinitialization will create a new storage relation OID. A valid
+        // downstream binding cannot be migrated implicitly, so reject this
+        // repair before changing the private state.
+        publication::ensure_storage_replacement_allowed(&st)?;
+
         // Rebuild the storage table from the catalog definition.
         // mark_for_reinitialize triggers full storage rebuild on next refresh.
         StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;

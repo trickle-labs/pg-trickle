@@ -130,6 +130,7 @@ LIGHT_E2E_TESTS=(
     e2e_v0878_security_tests
     e2e_v08710_security_tests
     e2e_v08711_snapshot_security_tests
+    e2e_v08712_publication_security_tests
 )
 
 usage() {

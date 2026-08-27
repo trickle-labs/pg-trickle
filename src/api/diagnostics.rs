@@ -2025,17 +2025,26 @@ pub(super) fn lifecycle_preflight() -> String {
     }
 
     let owner_privileges = owner_privilege_preflight();
-    let ok = owner_privileges
+    let publication_bindings = super::publication::publication_binding_preflight();
+    let owner_ok = owner_privileges
         .get("ok")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let publication_ok = publication_bindings
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let ok = owner_ok && publication_ok;
     serde_json::json!({
         "ok": ok,
         "owner_privileges": owner_privileges,
-        "detail": if ok {
-            "All stream-table owners have the required source SELECT and schema USAGE privileges."
+        "publication_bindings": publication_bindings,
+        "detail": if !owner_ok {
+            "Grant every listed source privilege, then rerun pgtrickle.lifecycle_preflight()."
+        } else if !publication_ok {
+            "Review each publication binding issue and rerun pgtrickle.lifecycle_preflight()."
         } else {
-            "Grant every listed privilege, then rerun pgtrickle.lifecycle_preflight()."
+            "All stream-table owners and downstream publication bindings passed preflight."
         }
     })
     .to_string()

@@ -1,6 +1,6 @@
 {
   "policy_version": 2,
-  "generated_from": "sql/archive/pg_trickle--0.87.11.sql",
+  "generated_from": "sql/archive/pg_trickle--0.87.12.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
@@ -287,7 +287,7 @@
       "name": "drop_stream_table_publication",
       "identity_arguments": "text",
       "class": "owner_lifecycle",
-      "execution_policy": "definer_owner_checked"
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.drop_watermark_group(text)": {
       "schema": "pgtrickle",
@@ -875,7 +875,7 @@
       "name": "stream_table_to_publication",
       "identity_arguments": "text",
       "class": "owner_lifecycle",
-      "execution_policy": "definer_owner_checked"
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.subscribe(text, text)": {
       "schema": "pgtrickle",

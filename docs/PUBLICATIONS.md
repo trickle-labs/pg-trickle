@@ -48,8 +48,34 @@ Stream table refresh (MERGE)
   (standard pgoutput protocol)
 ```
 
-The publication is named `pgt_pub_<stream_table_name>` and is owned by the
-same role that created the stream table.
+The publication is named `pgt_pub_<stream_table_name>`. The caller must own the
+stream table and have `CREATE` on the current database. PostgreSQL creates the
+publication with the caller as owner. Stream-table ownership does not grant
+database publication privileges.
+
+## Security contract
+
+Publication APIs run in caller context for public PostgreSQL DDL. They do not
+borrow the extension owner's authority. The extension keeps the private
+binding in the same transaction as the publication change.
+
+Each binding is validated against the live publication identity, owner, stream
+relation, and relation set. A renamed, replaced, transferred, or otherwise
+changed publication is rejected before the extension changes private state.
+
+The caller needs:
+
+- ownership of the stream table;
+- `USAGE` on its schema and `CREATE` on the current database;
+- `EXECUTE` on the exact publication function overload.
+
+The caller does not need access to `pgtrickle` catalog tables or
+`pgtrickle_changes`.
+
+The binding table stores database-local PostgreSQL OIDs and is intentionally
+excluded from extension configuration dumps. Detach downstream publications
+before `pg_dump`; after restore, recreate them through this API so pg_trickle
+records the new object identities.
 
 ---
 
@@ -186,6 +212,10 @@ SELECT pgtrickle.drop_stream_table('public.order_totals');
 -- Also drops pgt_pub_order_totals
 ```
 
+Automatic cleanup is fail-closed: if the recorded publication was renamed,
+recreated, transferred, or retargeted, the stream-table drop is rejected until
+the binding is reconciled.
+
 ---
 
 ## Multiple subscribers on the same publication
@@ -217,6 +247,17 @@ consistent stream regardless of partitioning scheme.
 ---
 
 ## Permissions
+
+The role that creates or drops a publication must own the stream table and
+have the database-level `CREATE` privilege:
+
+```sql
+GRANT CREATE ON DATABASE mydb TO stream_owner;
+GRANT EXECUTE ON FUNCTION pgtrickle.stream_table_to_publication(text)
+    TO stream_owner;
+GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table_publication(text)
+    TO stream_owner;
+```
 
 The role consuming the publication needs the `REPLICATION` attribute (or
 superuser):

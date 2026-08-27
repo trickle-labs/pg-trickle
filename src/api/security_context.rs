@@ -315,6 +315,58 @@ pub(crate) fn with_stream_owner_context<T>(
     }
 }
 
+/// Run `f` as the captured caller, under the caller's captured
+/// `search_path` and with row security enabled. Restore all identity and GUC
+/// state on success, PostgreSQL ERROR, or Rust unwind.
+pub(crate) fn with_caller_context<T>(
+    ctx: &CallerContext,
+    f: impl FnOnce() -> Result<T, PgTrickleError>,
+) -> Result<T, PgTrickleError> {
+    use std::panic::AssertUnwindSafe;
+
+    let mut save_userid = pg_sys::Oid::from(0u32);
+    let mut save_sec_context: core::ffi::c_int = 0;
+    // SAFETY: These PostgreSQL identity APIs run on the main backend thread;
+    // the saved values are restored by the `finally` hook below.
+    unsafe {
+        pg_sys::GetUserIdAndSecContext(&mut save_userid, &mut save_sec_context);
+    }
+    // SAFETY: This is PostgreSQL's GUC checkpoint/rollback pair. The finally
+    // hook unwinds every GUC changed by the caller-context closure.
+    let nest_level = unsafe { pg_sys::NewGUCNestLevel() };
+    // SAFETY: The local security flag prevents an additional role transition
+    // while the captured caller identity is active.
+    unsafe {
+        pg_sys::SetUserIdAndSecContext(
+            ctx.role_oid,
+            save_sec_context | pg_sys::SECURITY_LOCAL_USERID_CHANGE as core::ffi::c_int,
+        );
+    }
+
+    let setup = set_local_guc(c"search_path", &ctx.search_path)
+        .and_then(|_| set_local_guc(c"row_security", "on"));
+    if let Err(e) = setup {
+        // SAFETY: The closure has not run; restore the checkpoint and identity
+        // before returning the setup error.
+        unsafe {
+            pg_sys::AtEOXact_GUC(false, nest_level);
+            pg_sys::SetUserIdAndSecContext(save_userid, save_sec_context);
+        }
+        return Err(e);
+    }
+
+    // SAFETY: `finally` runs for both PostgreSQL ERROR and Rust unwind while
+    // PostgreSQL's backend state is still valid.
+    unsafe {
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
+            .finally(move || {
+                pg_sys::AtEOXact_GUC(false, nest_level);
+                pg_sys::SetUserIdAndSecContext(save_userid, save_sec_context);
+            })
+            .execute()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,5 +816,77 @@ mod pg_tests {
         );
 
         Spi::run("DROP ROLE lsec_probe_owner_guc").unwrap();
+    }
+
+    #[pg_test]
+    fn test_with_caller_context_restores_after_success() {
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
+        let caller = capture_caller_context(EntryContext::SecurityInvoker).unwrap();
+        let observed = with_caller_context(&caller, || {
+            let path = Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap();
+            let row_security = Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap();
+            Ok((path, row_security))
+        })
+        .unwrap();
+        assert_eq!(observed, (caller.search_path, "on".to_string()));
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap(),
+            "public, pg_catalog"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
+    }
+
+    #[pg_test]
+    fn test_with_caller_context_restores_after_postgres_error() {
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
+        let caller = capture_caller_context(EntryContext::SecurityInvoker).unwrap();
+        let result = with_caller_context(&caller, || {
+            Spi::run("SELECT 1/0").map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
+    }
+
+    #[pg_test]
+    fn test_with_caller_context_restores_after_rust_unwind() {
+        Spi::run("SET search_path = public, pg_catalog").unwrap();
+        Spi::run("SET row_security = off").unwrap();
+        let caller = capture_caller_context(EntryContext::SecurityInvoker).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_caller_context(&caller, || -> Result<(), PgTrickleError> {
+                panic!("intentional caller-context test panic");
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('search_path')")
+                .unwrap()
+                .unwrap(),
+            "public, pg_catalog"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT current_setting('row_security')")
+                .unwrap()
+                .unwrap(),
+            "off"
+        );
     }
 }

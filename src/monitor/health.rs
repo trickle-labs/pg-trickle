@@ -326,28 +326,12 @@ fn health_check() -> TableIterator<
             rows.push(("job_queue".to_string(), sev, detail));
         }
 
-        // ── DX-1 (v0.61.0): Attachment owner check ──────────────────────────
-        // Find any stream table whose downstream publication owner or whose
-        // tide outbox table owner differs from the stream table relation owner.
-        // Uses pg_catalog to infer ownership rather than a stored "attached_by"
-        // column (not part of the schema pre-v0.61.0).
+        // ── DX-1 (v0.61.0): Outbox owner check ───────────────────────────────
+        // Publication provenance is checked separately below by immutable OID;
+        // this query retains the legacy outbox ownership check.
         let owner_mismatches: Vec<String> = client
             .select(
                 "SELECT \
-                     st.pgt_schema || '.' || st.pgt_name AS st_fqn, \
-                     'publication'::text AS attachment_type, \
-                     pub_role.rolname AS attachment_owner, \
-                     st_role.rolname  AS table_owner \
-                 FROM pgtrickle.pgt_stream_tables st \
-                 JOIN pg_catalog.pg_publication pub \
-                   ON pub.pubname = st.downstream_publication_name \
-                 JOIN pg_catalog.pg_class    cls      ON cls.oid     = st.pgt_relid \
-                 JOIN pg_catalog.pg_roles    st_role  ON st_role.oid = cls.relowner \
-                 JOIN pg_catalog.pg_roles    pub_role ON pub_role.oid = pub.pubowner \
-                 WHERE st.downstream_publication_name IS NOT NULL \
-                   AND pub_role.rolname IS DISTINCT FROM st_role.rolname \
-                 UNION ALL \
-                 SELECT \
                      st.pgt_schema || '.' || st.pgt_name AS st_fqn, \
                      'outbox'::text AS attachment_type, \
                      ob_role.rolname AS attachment_owner, \
@@ -382,7 +366,7 @@ fn health_check() -> TableIterator<
         let (sev, detail) = if owner_mismatches.is_empty() {
             (
                 "OK".to_string(),
-                "No outbox/publication ownership mismatches".to_string(),
+                "No outbox ownership mismatches".to_string(),
             )
         } else {
             (
@@ -463,6 +447,11 @@ fn health_check() -> TableIterator<
         };
         rows.push(("ring_overflow_trend".to_string(), sev.to_string(), detail));
     });
+
+    if let Some((severity, detail)) = crate::api::publication::publication_binding_health_summary()
+    {
+        rows.push(("publication_bindings".to_string(), severity, detail));
+    }
 
     // v0.87: report the closest observed pg_trickle-owned memory component.
     // This is deliberately bounded and uses existing live counters; it is not
