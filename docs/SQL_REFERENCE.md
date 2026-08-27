@@ -5194,9 +5194,16 @@ pgtrickle.attach_outbox(
 ) → void
 ```
 
-The function checks stream-table ownership, verifies that `pg_tide` is
-installed, calls `tide.outbox_create(text, integer, integer)`, and records the
-mapping in `pgtrickle.pgt_outbox_config`.
+The function resolves and authorizes the stream table under the original
+caller, verifies a supported pg_tide installation, and calls
+`tide.outbox_create(text, integer, integer)` under that same caller. pg_tide
+remains responsible for its own permissions. pg_trickle then records the
+mapping and immutable pg_tide provenance in `pgtrickle.pgt_outbox_config`.
+
+The supported pg_tide version range is 0.47.0 through 0.53.0. Missing,
+unsupported, incomplete-upgrade, and denied-operation states are reported
+separately. A stale or recreated outbox never receives events through an old
+mapping.
 
 ```sql
 SELECT pgtrickle.attach_outbox(
@@ -5260,6 +5267,9 @@ with an attached outbox.
 | `stream_table_oid` | `OID` | PostgreSQL OID of the stream table (PRIMARY KEY) |
 | `stream_table_name` | `TEXT` | Qualified name (`schema.table`) of the stream table |
 | `tide_outbox_name` | `TEXT` | Name of the corresponding pg_tide outbox |
+| `pg_tide_extension_oid` | `OID` | pg_tide extension OID captured at attach time |
+| `pg_tide_version` | `TEXT` | pg_tide extension version captured at attach time |
+| `tide_outbox_created_at` | `TIMESTAMPTZ` | pg_tide outbox creation time captured at attach time |
 | `embedding_vector_column` | `TEXT` | Optional vector column used by embedding outbox events |
 | `created_at` | `TIMESTAMPTZ` | When the outbox was attached |
 

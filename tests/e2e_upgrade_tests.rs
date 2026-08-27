@@ -986,7 +986,59 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// L14 — Upgrade script schema additions verified automatically
+// L14 — v0.87.13 outbox provenance backfill
+// ══════════════════════════════════════════════════════════════════════
+
+/// Verify that the v0.87.12 outbox catalog is upgraded only after its live
+/// pg_tide object can be identified, and that the identity is persisted.
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_v08713_backfills_outbox_provenance() {
+    if !upgrade_image_available()
+        || std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.87.12")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        eprintln!("SKIP: requires the 0.87.12 -> 0.87.13 upgrade image");
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.87.12' CASCADE")
+        .await;
+    db.execute("CREATE EXTENSION pg_tide").await;
+    db.execute("CREATE TABLE upgrade_outbox_source (id integer)")
+        .await;
+    db.execute("SELECT tide.outbox_create('outbox_upgrade_outbox_st', 24, 10000)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_outbox_config \
+         (stream_table_oid, stream_table_name, tide_outbox_name) \
+         VALUES ('public.upgrade_outbox_source'::regclass, \
+                 'public.upgrade_outbox_source', 'outbox_upgrade_outbox_st')",
+    )
+    .await;
+
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.87.13'")
+        .await;
+
+    let matches: bool = db
+        .query_scalar(
+            "SELECT oc.pg_tide_extension_oid = e.oid \
+                    AND oc.pg_tide_version = e.extversion::text \
+                    AND oc.tide_outbox_created_at = tc.created_at \
+               FROM pgtrickle.pgt_outbox_config oc \
+               JOIN pg_catalog.pg_extension e \
+                 ON e.extname::text = 'pg_tide' \
+               JOIN tide.tide_outbox_config tc \
+                 ON tc.outbox_name = oc.tide_outbox_name \
+              WHERE oc.stream_table_name = 'public.upgrade_outbox_source'",
+        )
+        .await;
+    assert!(matches, "upgrade must backfill exact pg_tide provenance");
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// L15 — Upgrade script schema additions verified automatically
 // ══════════════════════════════════════════════════════════════════════
 
 /// After upgrading FROM → TO, parse each intermediate upgrade SQL script

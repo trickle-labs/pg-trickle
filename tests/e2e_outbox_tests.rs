@@ -7,8 +7,8 @@
 //! - TIDE-4: OutboxAlreadyEnabled error on duplicate attach
 //! - TIDE-5: OutboxNotEnabled error on detach without attach
 //!
-//! Each test installs a minimal SQL stub for tide.outbox_create/outbox_publish
-//! to simulate pg_tide being present (the real pg_tide extension is not required).
+//! The full E2E image includes a SQL-only pg_tide contract stub. Tests create
+//! it explicitly so absent-extension cases remain meaningful.
 
 mod e2e;
 
@@ -38,20 +38,12 @@ async fn make_outbox_st(db: &E2eDb, src: &str, st: &str) {
 /// Install a minimal pg_tide stub so attach_outbox() can call
 /// tide.outbox_create() without the real extension being installed.
 async fn install_pg_tide_stub(db: &E2eDb) {
-    db.execute_seq(&[
-        "CREATE SCHEMA IF NOT EXISTS tide",
-        "CREATE OR REPLACE FUNCTION tide.outbox_create(
-             p_name text,
-             p_retention_hours integer,
-             p_inline_threshold integer
-         ) RETURNS void LANGUAGE sql AS 'SELECT 1'",
-        "CREATE OR REPLACE FUNCTION tide.outbox_publish(
-             p_name text,
-             p_payload jsonb,
-             p_headers jsonb
-         ) RETURNS void LANGUAGE sql AS 'SELECT 1'",
-    ])
-    .await;
+    db.execute("CREATE EXTENSION pg_tide").await;
+}
+
+async fn install_pg_tide_version(db: &E2eDb, version: &str) {
+    db.execute(&format!("CREATE EXTENSION pg_tide VERSION '{version}'"))
+        .await;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -78,6 +70,127 @@ async fn test_attach_outbox_fails_without_pg_tide() {
         err.contains("pg_tide") || err.contains("tide"),
         "Error should mention pg_tide; got: {err}"
     );
+}
+
+/// LSEC-21: supported compatibility is explicit, not inferred from a callable
+/// function name alone.
+#[tokio::test]
+async fn test_attach_outbox_rejects_unsupported_older_pg_tide() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob21_old_src", "ob21_old_st").await;
+    install_pg_tide_version(&db, "0.46.0").await;
+
+    let err = db
+        .try_execute("SELECT pgtrickle.attach_outbox('ob21_old_st')")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unsupported") && err.contains("0.46.0"));
+}
+
+/// LSEC-21: newer pg_tide versions are rejected until the compatibility
+/// contract is intentionally widened.
+#[tokio::test]
+async fn test_attach_outbox_rejects_unsupported_newer_pg_tide() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob21_new_src", "ob21_new_st").await;
+    install_pg_tide_version(&db, "0.54.0").await;
+
+    let err = db
+        .try_execute("SELECT pgtrickle.attach_outbox('ob21_new_st')")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unsupported") && err.contains("0.54.0"));
+}
+
+/// LSEC-21: a supported extension with an incomplete outbox catalog is
+/// reported as an upgrade-in-progress state.
+#[tokio::test]
+async fn test_attach_outbox_rejects_incomplete_pg_tide_upgrade() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob21_upgrade_src", "ob21_upgrade_st").await;
+    install_pg_tide_stub(&db).await;
+    db.execute("ALTER EXTENSION pg_tide DROP TABLE tide.tide_outbox_config")
+        .await;
+    db.execute("DROP TABLE tide.tide_outbox_config").await;
+
+    let err = db
+        .try_execute("SELECT pgtrickle.attach_outbox('ob21_upgrade_st')")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not ready") && err.contains("tide.tide_outbox_config"));
+}
+
+/// LSEC-19: pg_tide observes the original stream owner, not pg_trickle's
+/// extension owner, during the external create call.
+#[tokio::test]
+async fn test_attach_outbox_calls_pg_tide_as_original_caller() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob19_identity_src", "ob19_identity_st").await;
+    install_pg_tide_stub(&db).await;
+    db.execute_seq(&[
+        "CREATE ROLE ob19_identity_owner LOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle, tide TO ob19_identity_owner",
+        "GRANT SELECT ON ob19_identity_src TO ob19_identity_owner",
+        "GRANT INSERT ON tide.tide_outbox_config, tide.outbox_caller_log TO ob19_identity_owner",
+        "GRANT SELECT ON tide.tide_outbox_config TO ob19_identity_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) TO ob19_identity_owner",
+        "ALTER TABLE ob19_identity_st OWNER TO ob19_identity_owner",
+    ])
+    .await;
+
+    db.try_execute_with_role(
+        "SET ROLE ob19_identity_owner",
+        "SELECT pgtrickle.attach_outbox('ob19_identity_st')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("caller-owned attach should succeed");
+
+    let observed: String = db
+        .query_scalar("SELECT caller_name FROM tide.outbox_caller_log LIMIT 1")
+        .await;
+    assert_eq!(observed, "ob19_identity_owner");
+}
+
+/// LSEC-21: pg_tide permission failures are surfaced as denied operations and
+/// do not leave a private mapping behind.
+#[tokio::test]
+async fn test_attach_outbox_surfaces_pg_tide_denial() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob21_denied_src", "ob21_denied_st").await;
+    install_pg_tide_stub(&db).await;
+    db.execute_seq(&[
+        "CREATE ROLE ob21_denied_owner LOGIN",
+        "GRANT USAGE ON SCHEMA pgtrickle, tide TO ob21_denied_owner",
+        "GRANT SELECT ON ob21_denied_src TO ob21_denied_owner",
+        "GRANT SELECT ON tide.tide_outbox_config TO ob21_denied_owner",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) TO ob21_denied_owner",
+        "REVOKE EXECUTE ON FUNCTION tide.outbox_create(text, integer, integer) FROM PUBLIC",
+        "ALTER TABLE ob21_denied_st OWNER TO ob21_denied_owner",
+    ])
+    .await;
+
+    let result = db
+        .try_execute_with_role(
+            "SET ROLE ob21_denied_owner",
+            "SELECT pgtrickle.attach_outbox('ob21_denied_st')",
+            "RESET ROLE",
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("denied") && err.contains("outbox_create"));
+    let mapped: bool = db
+        .query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pgtrickle.pgt_outbox_config \
+                WHERE stream_table_name = 'public.ob21_denied_st' \
+             )",
+        )
+        .await;
+    assert!(!mapped, "denied attach must not create a private mapping");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -126,6 +239,39 @@ async fn test_attach_outbox_stores_tide_outbox_name() {
     assert_eq!(
         outbox_name, "outbox_ob7b_st",
         "tide_outbox_name should follow the 'outbox_<st_name>' convention"
+    );
+}
+
+/// TIDE-19: attach_outbox() stores immutable pg_tide identity provenance.
+#[tokio::test]
+async fn test_attach_outbox_stores_pg_tide_provenance() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob19_src", "ob19_st").await;
+    install_pg_tide_stub(&db).await;
+
+    db.execute("SELECT pgtrickle.attach_outbox('ob19_st')")
+        .await;
+
+    let matches: bool = db
+        .query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 \
+                 FROM pgtrickle.pgt_outbox_config oc \
+                 JOIN pg_catalog.pg_extension e \
+                   ON e.oid = oc.pg_tide_extension_oid \
+                WHERE oc.stream_table_name = 'public.ob19_st' \
+                  AND e.extname::text = 'pg_tide' \
+                  AND oc.pg_tide_version = e.extversion::text \
+                  AND oc.tide_outbox_created_at = ( \
+                      SELECT created_at FROM tide.tide_outbox_config \
+                       WHERE outbox_name = oc.tide_outbox_name \
+                  ) \
+             )",
+        )
+        .await;
+    assert!(
+        matches,
+        "outbox mapping must record live pg_tide provenance"
     );
 }
 
@@ -256,24 +402,9 @@ async fn test_attach_outbox_publish_called_on_refresh() {
     make_outbox_st(&db, "ob7f_src", "ob7f_st").await;
 
     // Install a stub that counts calls.
-    db.execute_seq(&[
-        "CREATE SCHEMA IF NOT EXISTS tide",
-        "CREATE TABLE IF NOT EXISTS tide_publish_log (ts timestamptz default now())",
-        "CREATE OR REPLACE FUNCTION tide.outbox_create(
-             p_name text,
-             p_retention_hours integer,
-             p_inline_threshold integer
-         ) RETURNS void LANGUAGE sql AS 'SELECT 1'",
-        "CREATE OR REPLACE FUNCTION tide.outbox_publish(
-             p_name text,
-             p_payload jsonb,
-             p_headers jsonb
-         ) RETURNS void LANGUAGE plpgsql AS $$
-         BEGIN
-             INSERT INTO public.tide_publish_log DEFAULT VALUES;
-         END;$$",
-    ])
-    .await;
+    db.execute("CREATE EXTENSION pg_tide").await;
+    db.execute("CREATE TABLE tide_publish_log (ts timestamptz default now())")
+        .await;
 
     db.execute("SELECT pgtrickle.attach_outbox('ob7f_st')")
         .await;
@@ -293,6 +424,36 @@ async fn test_attach_outbox_publish_called_on_refresh() {
         "tide.outbox_publish() should have been called at least once during refresh; \
          got {} calls",
         publish_count
+    );
+}
+
+/// TIDE-20: a same-named replacement is rejected instead of receiving the
+/// original stream table's events.
+#[tokio::test]
+async fn test_outbox_refresh_rejects_recreated_tide_outbox() {
+    let db = E2eDb::new().await.with_extension().await;
+    make_outbox_st(&db, "ob20_src", "ob20_st").await;
+    install_pg_tide_stub(&db).await;
+    db.execute("SELECT pgtrickle.attach_outbox('ob20_st')")
+        .await;
+
+    db.execute("DELETE FROM tide.tide_outbox_config WHERE outbox_name = 'outbox_ob20_st'")
+        .await;
+    db.execute("SELECT tide.outbox_create('outbox_ob20_st', 24, 10000)")
+        .await;
+    db.execute("INSERT INTO ob20_src VALUES (4, 'd')").await;
+
+    let result = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('ob20_st')")
+        .await;
+    assert!(
+        result.is_err(),
+        "refresh must fail closed on stale outbox identity"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("stale") || err.contains("binding"),
+        "error should identify the stale binding; got: {err}"
     );
 }
 

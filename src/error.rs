@@ -337,6 +337,27 @@ pub enum PgTrickleError {
     )]
     PgTideMissing,
 
+    /// v0.87.13: The installed pg_tide version is outside the supported range.
+    #[error("pg_tide version {installed} is unsupported; supported range is {supported}")]
+    PgTideUnsupportedVersion {
+        installed: String,
+        supported: String,
+    },
+
+    /// v0.87.13: pg_tide is in the supported range but its API/catalog is
+    /// incomplete, which is expected during an extension upgrade.
+    #[error("pg_tide {installed} is not ready for outbox integration; missing: {missing}")]
+    PgTideUpgradeInProgress { installed: String, missing: String },
+
+    /// v0.87.13: pg_tide rejected an operation under the original caller.
+    #[error("pg_tide denied {operation}: {detail}")]
+    PgTideOperationDenied { operation: String, detail: String },
+
+    /// v0.87.13: the private mapping no longer identifies the same pg_tide
+    /// outbox and must never be followed silently.
+    #[error("stale pg_tide outbox binding for {outbox_name}: {detail}")]
+    PgTideBindingMismatch { outbox_name: String, detail: String },
+
     // ── A41-2: Placeholder validation errors ─────────────────────────────
     /// A41-2: A delta SQL template still contains unresolved placeholder
     /// tokens after all substitution passes have completed.
@@ -769,6 +790,10 @@ impl PgTrickleError {
             PgTrickleError::OutboxAlreadyEnabled(_)
             | PgTrickleError::OutboxNotEnabled(_)
             | PgTrickleError::PgTideMissing
+            | PgTrickleError::PgTideUnsupportedVersion { .. }
+            | PgTrickleError::PgTideUpgradeInProgress { .. }
+            | PgTrickleError::PgTideOperationDenied { .. }
+            | PgTrickleError::PgTideBindingMismatch { .. }
             | PgTrickleError::UnresolvedPlaceholder { .. } => PgTrickleErrorKind::Internal,
 
             // v0.54.0: DVM engine hardening errors.

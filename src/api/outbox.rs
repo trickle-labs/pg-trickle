@@ -16,29 +16,58 @@
 
 use pgrx::prelude::*;
 
-use super::helpers::check_stream_table_ownership;
-use crate::catalog::StreamTableMeta;
+use super::helpers::resolve_owned_stream_table_with_caller;
+use super::security_context::{
+    EntryContext, StreamExecutionContext, capture_caller_context, with_caller_context,
+    with_stream_owner_context,
+};
 use crate::error::PgTrickleError;
 
-// -- Internal helpers -------------------------------------------------------
+use pgrx::prelude::TimestampWithTimeZone;
 
-/// Parse a schema-qualified name like `"myschema.mytable"` into (schema, table).
-/// Uses `current_schema()` as the default when no schema is given.
-fn resolve_st_name(name: &str) -> Result<(String, String), PgTrickleError> {
-    let parts: Vec<&str> = name.splitn(2, '.').collect();
-    match parts.len() {
-        1 => {
-            let schema = Spi::get_one::<String>("SELECT current_schema()::text")
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-                .unwrap_or_else(|| "public".to_string());
-            Ok((schema, parts[0].to_string()))
-        }
-        2 => Ok((parts[0].to_string(), parts[1].to_string())),
-        _ => Err(PgTrickleError::InvalidArgument(format!(
-            "invalid stream table name: {name}"
-        ))),
+const PG_TIDE_MIN_VERSION: (u64, u64, u64) = (0, 47, 0);
+const PG_TIDE_MAX_VERSION: (u64, u64, u64) = (0, 53, 0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgTideVersionStatus {
+    Supported,
+    Older,
+    Newer,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutboxBinding {
+    outbox_name: String,
+    pg_tide_extension_oid: pg_sys::Oid,
+    pg_tide_version: String,
+    tide_outbox_created_at: TimestampWithTimeZone,
+}
+
+fn parse_pg_tide_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let parsed = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(parsed)
+}
+
+fn classify_pg_tide_version(version: &str) -> PgTideVersionStatus {
+    let Some(parsed) = parse_pg_tide_version(version) else {
+        return PgTideVersionStatus::Invalid;
+    };
+    if parsed < PG_TIDE_MIN_VERSION {
+        PgTideVersionStatus::Older
+    } else if parsed > PG_TIDE_MAX_VERSION {
+        PgTideVersionStatus::Newer
+    } else {
+        PgTideVersionStatus::Supported
     }
 }
+
+// -- Internal helpers -------------------------------------------------------
 
 /// Derive the tide outbox name from a stream table name.
 /// Convention: `outbox_<st_name>` truncated to 63 bytes, with hash suffix
@@ -74,19 +103,229 @@ pub(crate) fn is_outbox_enabled(pgt_id: i64) -> bool {
     .unwrap_or(false)
 }
 
-/// Return the `pg_tide` outbox name attached to the given stream table (by pgt_id).
+fn load_private_binding(pgt_id: i64) -> Result<Option<OutboxBinding>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT oc.tide_outbox_name, oc.pg_tide_extension_oid, \
+                        oc.pg_tide_version, oc.tide_outbox_created_at \
+                 FROM pgtrickle.pgt_outbox_config oc \
+                 JOIN pgtrickle.pgt_stream_tables st \
+                   ON oc.stream_table_oid = st.pgt_relid \
+                 WHERE st.pgt_id = $1",
+                None,
+                &[pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = rows.first();
+        Ok(Some(OutboxBinding {
+            outbox_name: row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL pg_tide outbox name".into()))?,
+            pg_tide_extension_oid: row
+                .get::<pg_sys::Oid>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL pg_tide extension OID".into())
+                })?,
+            pg_tide_version: row
+                .get::<String>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL pg_tide version".into()))?,
+            tide_outbox_created_at: row
+                .get::<TimestampWithTimeZone>(4)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL outbox created_at".into()))?,
+        }))
+    })
+}
+
+fn load_live_provenance(
+    outbox_name: &str,
+) -> Result<Option<(pg_sys::Oid, String, TimestampWithTimeZone)>, PgTrickleError> {
+    let config_present =
+        Spi::get_one::<bool>("SELECT to_regclass('tide.tide_outbox_config') IS NOT NULL")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+    if !config_present {
+        return Ok(None);
+    }
+
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT e.oid, e.extversion::text, c.created_at \
+                 FROM pg_catalog.pg_extension e \
+                 JOIN tide.tide_outbox_config c ON c.outbox_name = $1 \
+                 WHERE e.extname::text = 'pg_tide'",
+                None,
+                &[outbox_name.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = rows.first();
+        Ok(Some((
+            row.get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL pg_tide extension OID".into())
+                })?,
+            row.get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL pg_tide version".into()))?,
+            row.get::<TimestampWithTimeZone>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL outbox created_at".into()))?,
+        )))
+    })
+}
+
+fn validate_binding(binding: &OutboxBinding) -> Result<(), PgTrickleError> {
+    if classify_pg_tide_version(&binding.pg_tide_version) != PgTideVersionStatus::Supported {
+        return Err(PgTrickleError::PgTideUnsupportedVersion {
+            installed: binding.pg_tide_version.clone(),
+            supported: "0.47.0 through 0.53.0".into(),
+        });
+    }
+    let Some((extension_oid, version, created_at)) = load_live_provenance(&binding.outbox_name)?
+    else {
+        return Err(PgTrickleError::PgTideBindingMismatch {
+            outbox_name: binding.outbox_name.clone(),
+            detail: "the pg_tide outbox no longer exists".into(),
+        });
+    };
+    if extension_oid != binding.pg_tide_extension_oid
+        || version != binding.pg_tide_version
+        || pg_sys::TimestampTz::from(created_at)
+            != pg_sys::TimestampTz::from(binding.tide_outbox_created_at)
+    {
+        return Err(PgTrickleError::PgTideBindingMismatch {
+            outbox_name: binding.outbox_name.clone(),
+            detail: format!(
+                "live identity is extension OID {}, version {}, created_at {}; \
+                 mapping records OID {}, version {}, created_at {}",
+                extension_oid.to_u32(),
+                version,
+                pg_sys::TimestampTz::from(created_at),
+                binding.pg_tide_extension_oid.to_u32(),
+                binding.pg_tide_version,
+                pg_sys::TimestampTz::from(binding.tide_outbox_created_at),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_pg_tide_compatible() -> Result<(), PgTrickleError> {
+    let version = Spi::get_one::<String>(
+        "SELECT (SELECT extversion::text FROM pg_catalog.pg_extension \
+                 WHERE extname::text = 'pg_tide' LIMIT 1)",
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or(PgTrickleError::PgTideMissing)?;
+
+    match classify_pg_tide_version(&version) {
+        PgTideVersionStatus::Older | PgTideVersionStatus::Invalid => {
+            return Err(PgTrickleError::PgTideUnsupportedVersion {
+                installed: version,
+                supported: "0.47.0 through 0.53.0".into(),
+            });
+        }
+        PgTideVersionStatus::Newer => {
+            return Err(PgTrickleError::PgTideUnsupportedVersion {
+                installed: version,
+                supported: "0.47.0 through 0.53.0".into(),
+            });
+        }
+        PgTideVersionStatus::Supported => {}
+    }
+
+    let checks = [
+        (
+            "tide.outbox_create(text,integer,integer[,text])",
+            "SELECT to_regprocedure('tide.outbox_create(text,integer,integer)') IS NOT NULL \
+                    OR to_regprocedure('tide.outbox_create(text,integer,integer,text)') IS NOT NULL",
+        ),
+        (
+            "tide.outbox_publish(text,jsonb,jsonb)",
+            "SELECT to_regprocedure('tide.outbox_publish(text,jsonb,jsonb)') IS NOT NULL",
+        ),
+        (
+            "tide.tide_outbox_config",
+            "SELECT to_regclass('tide.tide_outbox_config') IS NOT NULL",
+        ),
+    ];
+    let mut missing = Vec::new();
+    for (name, query) in checks {
+        if !Spi::get_one::<bool>(query)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false)
+        {
+            missing.push(name);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(PgTrickleError::PgTideUpgradeInProgress {
+            installed: version,
+            missing: missing.join(", "),
+        });
+    }
+    Ok(())
+}
+
+fn load_live_provenance_as_caller(
+    caller: &super::security_context::CallerContext,
+    outbox_name: &str,
+) -> Result<OutboxBinding, PgTrickleError> {
+    let (pg_tide_extension_oid, pg_tide_version, tide_outbox_created_at) =
+        with_caller_context(caller, || {
+            load_live_provenance(outbox_name)?.ok_or_else(|| {
+                PgTrickleError::PgTideOperationDenied {
+                    operation: "tide.outbox_create".into(),
+                    detail: format!("created outbox '{outbox_name}' was not visible to the caller"),
+                }
+            })
+        })?;
+    Ok(OutboxBinding {
+        outbox_name: outbox_name.into(),
+        pg_tide_extension_oid,
+        pg_tide_version,
+        tide_outbox_created_at,
+    })
+}
+
+/// Return the validated pg_tide outbox name attached to a stream table.
 ///
-/// COR-002 (v0.72.0): joins through `pgt_stream_tables` to resolve `pgt_id` →
-/// `pgt_relid`, then looks up the outbox config by the correct relation OID.
-pub(crate) fn get_outbox_table_name(pgt_id: i64) -> Option<String> {
-    Spi::get_one_with_args::<String>(
-        "SELECT oc.tide_outbox_name \
-         FROM pgtrickle.pgt_outbox_config oc \
-         JOIN pgtrickle.pgt_stream_tables st ON oc.stream_table_oid = st.pgt_relid \
+/// The external catalog is read as the current stream-table owner. A missing
+/// or replaced row is an error: silently publishing to a same-named replacement
+/// would violate the binding's identity guarantee.
+pub(crate) fn get_outbox_table_name(pgt_id: i64) -> Result<Option<String>, PgTrickleError> {
+    let Some(binding) = load_private_binding(pgt_id)? else {
+        return Ok(None);
+    };
+    let owner_oid = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT c.relowner FROM pg_catalog.pg_class c \
+         JOIN pgtrickle.pgt_outbox_config oc ON oc.stream_table_oid = c.oid \
+         JOIN pgtrickle.pgt_stream_tables st ON st.pgt_relid = c.oid \
          WHERE st.pgt_id = $1",
         &[pgt_id.into()],
     )
-    .unwrap_or(None)
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::InternalError("stream table owner is missing".into()))?;
+    let context = StreamExecutionContext {
+        owner_oid,
+        search_path: "pg_catalog, pg_temp".into(),
+    };
+    with_stream_owner_context(&context, || {
+        validate_binding(&binding)?;
+        Ok(Some(binding.outbox_name.clone()))
+    })
 }
 
 // -- attach_outbox ----------------------------------------------------------
@@ -100,7 +339,8 @@ pub(crate) fn get_outbox_table_name(pgt_id: i64) -> Option<String> {
 ///
 /// Requires `pg_tide` to be installed. If `pg_tide` is absent the function
 /// raises an actionable error with an install hint.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn attach_outbox(
     p_name: &str,
     p_retention_hours: default!(i32, 24),
@@ -115,44 +355,44 @@ fn attach_outbox_impl(
     retention_hours: i32,
     inline_threshold_rows: i32,
 ) -> Result<(), PgTrickleError> {
-    let (schema, st_name) = resolve_st_name(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &st_name)?;
+    let caller = capture_caller_context(EntryContext::SecurityDefiner)?;
+    let (_, _, meta) = resolve_owned_stream_table_with_caller(name, &caller)?;
 
-    // SEC-1: Ownership check — same guard as alter/drop/pause/resume.
-    check_stream_table_ownership(meta.pgt_relid, &schema, &st_name)?;
-
-    // Check that pg_tide is installed.
-    // `to_regprocedure` accepts argument-type lists; `to_regproc` does not.
-    let pg_tide_present = Spi::get_one::<bool>(
-        "SELECT to_regprocedure('tide.outbox_create(text,integer,integer)') IS NOT NULL",
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[meta.pgt_id.into()],
     )
-    .unwrap_or(None)
-    .unwrap_or(false);
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    if !pg_tide_present {
-        return Err(PgTrickleError::PgTideMissing);
-    }
+    ensure_pg_tide_compatible()?;
 
-    // Check not already attached.
-    if is_outbox_enabled(meta.pgt_id) {
+    if load_private_binding(meta.pgt_id)?.is_some() {
         return Err(PgTrickleError::OutboxAlreadyEnabled(format!(
             "{}.{}",
-            schema, st_name
+            meta.pgt_schema, meta.pgt_name
         )));
     }
 
-    let outbox_name = outbox_table_name_for(&st_name);
+    let outbox_name = outbox_table_name_for(&meta.pgt_name);
 
-    // Call tide.outbox_create() to set up the outbox in pg_tide.
-    Spi::run_with_args(
-        "SELECT tide.outbox_create($1, $2, $3)",
-        &[
-            outbox_name.as_str().into(),
-            retention_hours.into(),
-            inline_threshold_rows.into(),
-        ],
-    )
-    .map_err(|e| PgTrickleError::SpiError(format!("tide.outbox_create failed: {e}")))?;
+    // The external extension owns its authorization. pg_trickle only supplies
+    // the original caller identity and never lends its owner identity.
+    with_caller_context(&caller, || {
+        Spi::run_with_args(
+            "SELECT tide.outbox_create($1, $2, $3)",
+            &[
+                outbox_name.as_str().into(),
+                retention_hours.into(),
+                inline_threshold_rows.into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::PgTideOperationDenied {
+            operation: "tide.outbox_create".into(),
+            detail: e.to_string(),
+        })
+    })?;
+
+    let binding = load_live_provenance_as_caller(&caller, &outbox_name)?;
 
     // Register in catalog.
     // COR-002 (v0.72.0): Store the real PostgreSQL relation OID (`pgt_relid`)
@@ -160,12 +400,18 @@ fn attach_outbox_impl(
     // `pgt_stream_tables.pgt_relid` as the schema documents.
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_outbox_config \
-         (stream_table_oid, stream_table_name, tide_outbox_name) \
-         VALUES ($1, $2, $3)",
+         (stream_table_oid, stream_table_name, tide_outbox_name, \
+          pg_tide_extension_oid, pg_tide_version, tide_outbox_created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6::timestamptz)",
         &[
             meta.pgt_relid.into(),
-            format!("{}.{}", schema, st_name).as_str().into(),
+            format!("{}.{}", meta.pgt_schema, meta.pgt_name)
+                .as_str()
+                .into(),
             outbox_name.as_str().into(),
+            binding.pg_tide_extension_oid.into(),
+            binding.pg_tide_version.as_str().into(),
+            binding.tide_outbox_created_at.into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(format!("register outbox config failed: {e}")))?;
@@ -173,8 +419,8 @@ fn attach_outbox_impl(
     pgrx::log!(
         "[pg_trickle] attach_outbox: attached tide outbox '{}' to '{}.{}'",
         outbox_name,
-        schema,
-        st_name
+        meta.pgt_schema,
+        meta.pgt_name
     );
 
     Ok(())
@@ -187,17 +433,19 @@ fn attach_outbox_impl(
 /// Removes the entry from `pgtrickle.pgt_outbox_config`. The `pg_tide` outbox
 /// table itself is NOT dropped -- use `tide.outbox_drop()` in `pg_tide` after
 /// detaching if you also want to remove the outbox data.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn detach_outbox(p_name: &str, p_if_exists: default!(bool, false)) {
     detach_outbox_impl(p_name, p_if_exists).unwrap_or_else(|e| pgrx::error!("{}", e))
 }
 
 fn detach_outbox_impl(name: &str, if_exists: bool) -> Result<(), PgTrickleError> {
-    let (schema, st_name) = resolve_st_name(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &st_name)?;
-
-    // SEC-1: Ownership check — same guard as alter/drop/pause/resume.
-    check_stream_table_ownership(meta.pgt_relid, &schema, &st_name)?;
+    let caller = capture_caller_context(EntryContext::SecurityDefiner)?;
+    let (_, _, meta) = resolve_owned_stream_table_with_caller(name, &caller)?;
+    let has_binding = load_private_binding(meta.pgt_id)?.is_some();
+    if has_binding {
+        let _ = get_outbox_table_name(meta.pgt_id)?;
+    }
 
     // COR-002 (v0.72.0): Delete by `pgt_relid` (the real relation OID).
     let deleted = Spi::get_one_with_args::<i64>(
@@ -212,14 +460,14 @@ fn detach_outbox_impl(name: &str, if_exists: bool) -> Result<(), PgTrickleError>
     if deleted == 0 && !if_exists {
         return Err(PgTrickleError::OutboxNotEnabled(format!(
             "{}.{}",
-            schema, st_name
+            meta.pgt_schema, meta.pgt_name
         )));
     }
 
     pgrx::log!(
         "[pg_trickle] detach_outbox: detached outbox for '{}.{}'",
-        schema,
-        st_name
+        meta.pgt_schema,
+        meta.pgt_name
     );
 
     Ok(())
@@ -245,9 +493,8 @@ pub(crate) fn write_outbox_row(
     st_schema: &str,
     st_table: &str,
 ) -> Result<(), PgTrickleError> {
-    let outbox_name = match get_outbox_table_name(pgt_id) {
-        Some(n) => n,
-        None => return Ok(()), // outbox was detached between the hot-path check and here
+    let Some(outbox_name) = get_outbox_table_name(pgt_id)? else {
+        return Ok(());
     };
 
     // Build the delta-summary JSON envelope (pg_trickle-private format).
@@ -297,7 +544,8 @@ pub(crate) fn write_outbox_row(
 /// The `vector_column` parameter documents which column carries the embedding —
 /// it is stored in the outbox headers so consumers can identify the embedding
 /// field without inspecting the payload.
-#[pgrx::pg_extern(schema = "pgtrickle")]
+#[pgrx::pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 pub fn attach_embedding_outbox(
     p_name: &str,
     p_vector_column: &str,
@@ -325,26 +573,20 @@ fn attach_embedding_outbox_impl(
     // Store the vector_column hint in the catalog so write_embedding_outbox_row
     // can retrieve it.
     // COR-002 (v0.72.0): Match on `pgt_relid` (the real relation OID).
-    let (schema, st_name) = resolve_st_name(name)?;
+    let caller = capture_caller_context(EntryContext::SecurityDefiner)?;
+    let (_, _, meta) = resolve_owned_stream_table_with_caller(name, &caller)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_outbox_config \
          SET embedding_vector_column = $1 \
-         WHERE stream_table_oid = (\
-           SELECT pgt_relid FROM pgtrickle.pgt_stream_tables \
-           WHERE pgt_schema = $2 AND pgt_name = $3 \
-         )",
-        &[
-            vector_column.into(),
-            schema.as_str().into(),
-            st_name.as_str().into(),
-        ],
+         WHERE stream_table_oid = $2",
+        &[vector_column.into(), meta.pgt_relid.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     pgrx::log!(
         "[pg_trickle] attach_embedding_outbox: attached embedding outbox for '{}.{}' (vector_column='{}')",
-        schema,
-        st_name,
+        meta.pgt_schema,
+        meta.pgt_name,
         vector_column,
     );
     Ok(())
@@ -368,9 +610,8 @@ pub(crate) fn write_embedding_outbox_row(
     st_table: &str,
     vector_column: &str,
 ) -> Result<(), PgTrickleError> {
-    let outbox_name = match get_outbox_table_name(pgt_id) {
-        Some(n) => n,
-        None => return Ok(()),
+    let Some(outbox_name) = get_outbox_table_name(pgt_id)? else {
+        return Ok(());
     };
 
     let payload = serde_json::json!({
@@ -416,15 +657,18 @@ pub(crate) fn write_embedding_outbox_row(
 ///
 /// COR-002 (v0.72.0): joins through `pgt_stream_tables` to resolve `pgt_id` →
 /// `pgt_relid` before matching `pgt_outbox_config`.
-pub(crate) fn get_embedding_vector_column(pgt_id: i64) -> Option<String> {
+pub(crate) fn get_embedding_vector_column(pgt_id: i64) -> Result<Option<String>, PgTrickleError> {
+    if get_outbox_table_name(pgt_id)?.is_none() {
+        return Ok(None);
+    }
     Spi::get_one_with_args::<String>(
-        "SELECT oc.embedding_vector_column \
-         FROM pgtrickle.pgt_outbox_config oc \
-         JOIN pgtrickle.pgt_stream_tables st ON oc.stream_table_oid = st.pgt_relid \
-         WHERE st.pgt_id = $1 AND oc.embedding_vector_column IS NOT NULL",
+        "SELECT (SELECT oc.embedding_vector_column \
+                  FROM pgtrickle.pgt_outbox_config oc \
+                  JOIN pgtrickle.pgt_stream_tables st ON oc.stream_table_oid = st.pgt_relid \
+                 WHERE st.pgt_id = $1 AND oc.embedding_vector_column IS NOT NULL LIMIT 1)",
         &[pgt_id.into()],
     )
-    .unwrap_or(None)
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
 }
 
 // -- Unit tests ------------------------------------------------------------
@@ -432,6 +676,30 @@ pub(crate) fn get_embedding_vector_column(pgt_id: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pg_tide_version_boundaries() {
+        assert_eq!(
+            classify_pg_tide_version("0.47.0"),
+            PgTideVersionStatus::Supported
+        );
+        assert_eq!(
+            classify_pg_tide_version("0.53.0"),
+            PgTideVersionStatus::Supported
+        );
+        assert_eq!(
+            classify_pg_tide_version("0.46.9"),
+            PgTideVersionStatus::Older
+        );
+        assert_eq!(
+            classify_pg_tide_version("0.53.1"),
+            PgTideVersionStatus::Newer
+        );
+        assert_eq!(
+            classify_pg_tide_version("upgrade-in-progress"),
+            PgTideVersionStatus::Invalid
+        );
+    }
 
     #[test]
     fn test_outbox_table_name_for_simple() {

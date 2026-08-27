@@ -1289,6 +1289,10 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_outbox_config (
     stream_table_oid         OID         NOT NULL PRIMARY KEY,
     stream_table_name        TEXT        NOT NULL,
     tide_outbox_name         TEXT        NOT NULL,
+    -- v0.87.13: immutable pg_tide identity used to reject stale name reuse.
+    pg_tide_extension_oid    OID         NOT NULL,
+    pg_tide_version          TEXT        NOT NULL,
+    tide_outbox_created_at   TIMESTAMPTZ NOT NULL,
     -- VA-4 (v0.48.0): optional vector column name for embedding outbox events.
     embedding_vector_column  TEXT,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -1299,7 +1303,9 @@ CREATE INDEX IF NOT EXISTS idx_pgt_outbox_config_name
 
 COMMENT ON TABLE pgtrickle.pgt_outbox_config IS
     'v0.46.0: Catalog of stream tables with a pg_tide outbox attached via attach_outbox(). '
-    'v0.48.0: embedding_vector_column set when attached via attach_embedding_outbox().';
+    'v0.48.0: embedding_vector_column set when attached via attach_embedding_outbox(). '
+    'v0.87.13: pg_tide extension OID, version, and outbox creation time are '
+    'stored to reject stale name reuse.';
 "#,
     name = "pg_trickle_outbox_catalog",
     requires = [],
@@ -1330,6 +1336,27 @@ COMMENT ON TABLE pgtrickle.pgt_distance_subscriptions IS
 "#,
     name = "pg_trickle_distance_subscriptions_catalog",
     requires = [],
+);
+
+// ── v0.87.13: pg_tide outbox boundary security attributes ──────────────
+
+extension_sql!(
+    r#"
+ALTER FUNCTION pgtrickle.attach_outbox(text, integer, integer)
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — external pg_tide calls run as the captured caller.
+ALTER FUNCTION pgtrickle.attach_outbox(text, integer, integer)
+    SET search_path = pgtrickle, pg_catalog, pg_temp;
+ALTER FUNCTION pgtrickle.detach_outbox(text, boolean)
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — private mapping cleanup is definer-only.
+ALTER FUNCTION pgtrickle.detach_outbox(text, boolean)
+    SET search_path = pgtrickle, pg_catalog, pg_temp;
+ALTER FUNCTION pgtrickle.attach_embedding_outbox(text, text, integer, integer)
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — external pg_tide calls run as the captured caller.
+ALTER FUNCTION pgtrickle.attach_embedding_outbox(text, text, integer, integer)
+    SET search_path = pgtrickle, pg_catalog, pg_temp;
+"#,
+    name = "pg_trickle_outbox_security",
+    requires = ["pg_trickle_acl_policy"],
 );
 
 // ── v0.84.0: explicit SQL ACL policy ─────────────────────────────────

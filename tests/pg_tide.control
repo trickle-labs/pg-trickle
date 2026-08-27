@@ -1,0 +1,4 @@
+comment = 'pg_tide test stub for pg_trickle E2E tests'
+default_version = '0.53.0'
+relocatable = false
+

@@ -97,6 +97,14 @@ COPY --from=builder \
     /artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/ \
     /usr/lib/postgresql/18/lib/
 
+# Install a SQL-only pg_tide contract stub for outbox boundary tests. The
+# tests create it explicitly, so the absent-extension cases remain real.
+COPY tests/pg_tide.control \
+    tests/pg_tide--0.46.0.sql \
+    tests/pg_tide--0.54.0.sql \
+    tests/pg_tide--0.53.0.sql \
+    /usr/share/postgresql/18/extension/
+
 # Configure shared_preload_libraries so background worker + shared memory work.
 # Append to postgresql.conf.sample which is the template for new clusters.
 RUN echo "" >> /usr/share/postgresql/postgresql.conf.sample && \

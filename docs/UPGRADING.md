@@ -2,6 +2,35 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.12 → 0.87.13
+
+Install the 0.87.13 shared library and extension files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+Outbox lifecycle calls now resolve and authorize the stream table under the
+original caller, invoke pg_tide under that same caller, and keep private
+bookkeeping in the pg_trickle owner phase. The extension never lends its owner
+identity to pg_tide.
+
+The supported pg_tide range is 0.47.0 through 0.53.0. The integration reports
+these states separately: pg_tide absent, unsupported older or newer version,
+supported version during an incomplete upgrade, denied operation, and
+authorized operation. The compatibility probes use extension catalogs and
+registered API identities; they do not parse error text.
+
+`pgt_outbox_config` now stores the pg_tide extension OID, extension version,
+and outbox `created_at`. Existing mappings are backfilled only when the live
+pg_tide outbox matches exactly. If provenance cannot be proven, the upgrade
+aborts; install the supported pg_tide version or detach and reattach the
+affected outbox before retrying.
+
+Stale, renamed, dropped, or recreated pg_tide outboxes fail closed during
+refresh and detach. This prevents a same-named replacement from receiving
+events intended for the original outbox.
+
 ## 0.87.11 → 0.87.12
 
 Install the 0.87.12 shared library and extension files, then run:
