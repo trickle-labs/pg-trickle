@@ -456,39 +456,55 @@ pub fn finalize_success(
     }
 
     let rows_changed = execution.rows_inserted + execution.rows_updated + execution.rows_deleted;
-    if rows_changed > 0 && crate::api::outbox::is_outbox_enabled(st.pgt_id) {
-        if let Some(vector_column) = crate::api::outbox::get_embedding_vector_column(st.pgt_id) {
-            crate::api::outbox::write_embedding_outbox_row(
-                st.pgt_id,
-                None,
-                execution.rows_inserted,
-                execution.rows_updated,
-                execution.rows_deleted,
-                schema,
-                table_name,
-                &vector_column,
-            )
-            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-                pgt_id: st.pgt_id,
-                stage: "embedding outbox".to_string(),
-                reason: e.to_string(),
+    if rows_changed > 0 {
+        let outbox_attached =
+            crate::api::outbox::get_outbox_table_name(st.pgt_id).map_err(|e| {
+                PgTrickleError::RefreshFinalizationFailed {
+                    pgt_id: st.pgt_id,
+                    stage: "outbox binding".to_string(),
+                    reason: e.to_string(),
+                }
             })?;
-        } else {
-            crate::api::outbox::write_outbox_row(
-                st.pgt_id,
-                None,
-                execution.rows_inserted,
-                execution.rows_updated,
-                execution.rows_deleted,
-                0,
-                schema,
-                table_name,
-            )
-            .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
-                pgt_id: st.pgt_id,
-                stage: "outbox".to_string(),
-                reason: e.to_string(),
-            })?;
+        if outbox_attached.is_some() {
+            let vector_column = crate::api::outbox::get_embedding_vector_column(st.pgt_id)
+                .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                    pgt_id: st.pgt_id,
+                    stage: "embedding outbox binding".to_string(),
+                    reason: e.to_string(),
+                })?;
+            if let Some(vector_column) = vector_column {
+                crate::api::outbox::write_embedding_outbox_row(
+                    st.pgt_id,
+                    None,
+                    execution.rows_inserted,
+                    execution.rows_updated,
+                    execution.rows_deleted,
+                    schema,
+                    table_name,
+                    &vector_column,
+                )
+                .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                    pgt_id: st.pgt_id,
+                    stage: "embedding outbox".to_string(),
+                    reason: e.to_string(),
+                })?;
+            } else {
+                crate::api::outbox::write_outbox_row(
+                    st.pgt_id,
+                    None,
+                    execution.rows_inserted,
+                    execution.rows_updated,
+                    execution.rows_deleted,
+                    0,
+                    schema,
+                    table_name,
+                )
+                .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
+                    pgt_id: st.pgt_id,
+                    stage: "outbox".to_string(),
+                    reason: e.to_string(),
+                })?;
+            }
         }
     }
 

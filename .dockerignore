@@ -15,7 +15,7 @@ plans/
 # Project subtrees not needed for extension build images
 dbt-pgtrickle/
 cnpg/
-tests/
+tests/*
 scripts/
 
 # Misc large/noisy files
@@ -26,4 +26,8 @@ scripts/
 
 # Keep the specific Dockerfiles used by builds
 !tests/Dockerfile.e2e
+!tests/pg_tide.control
+!tests/pg_tide--0.46.0.sql
+!tests/pg_tide--0.54.0.sql
+!tests/pg_tide--0.53.0.sql
 !cnpg/Dockerfile.ext-build

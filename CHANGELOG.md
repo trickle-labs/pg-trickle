@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.13 — pg_tide Outbox Boundary](#08713--pg_tide-outbox-boundary)
 - [0.87.12 — Publication Security](#08712--publication-security)
 - [0.87.11 — Snapshot Security](#08711--snapshot-security)
 - [0.87.10 — Complete Lifecycle Policy](#08710--complete-lifecycle-policy)
@@ -186,6 +187,28 @@ criteria and security release gate.
 ## Upgrade
 
 Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
+
+## [0.87.13] — pg_tide Outbox Boundary
+
+v0.87.13 keeps pg_tide outside pg_trickle's owner-security boundary.
+
+- Outbox attach and embedding attach resolve and authorize the canonical stream
+  table under the original caller, then invoke pg_tide in that caller context.
+- Private mappings record the pg_tide extension OID, version, and outbox
+  creation time. Recreated or upgraded outboxes fail closed instead of silently
+  publishing to a same-named object.
+- pg_tide absence, unsupported versions, incomplete upgrades, and denied calls
+  return distinct errors. External calls and private mapping changes remain
+  transactional.
+
+See the [v0.87.13 roadmap](roadmap/v0.87.13.md) for the complete acceptance
+criteria and security release gate.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.13 files.
+Existing outbox mappings are adopted only when their live pg_tide provenance
+can be proven; otherwise the upgrade aborts without changing the database.
 
 ---
 

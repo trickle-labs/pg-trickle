@@ -564,6 +564,12 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        PgTrickleError::PgTideUnsupportedVersion { .. }
+        | PgTrickleError::PgTideUpgradeInProgress { .. }
+        | PgTrickleError::PgTideOperationDenied { .. }
+        | PgTrickleError::PgTideBindingMismatch { .. } => {
+            pgrx::error!("{}", e);
+        }
         PgTrickleError::UnresolvedPlaceholder { token, context } => {
             ErrorReport::new(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,

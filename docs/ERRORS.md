@@ -50,6 +50,10 @@ the error code in your client library.
 | OutboxAlreadyEnabled | `42710` | DUPLICATE_OBJECT |
 | OutboxNotEnabled | `42704` | UNDEFINED_OBJECT |
 | PgTideMissing | `0A000` | FEATURE_NOT_SUPPORTED |
+| PgTideUnsupportedVersion | `XX000` | INTERNAL_ERROR |
+| PgTideUpgradeInProgress | `XX000` | INTERNAL_ERROR |
+| PgTideOperationDenied | `XX000` | INTERNAL_ERROR |
+| PgTideBindingMismatch | `XX000` | INTERNAL_ERROR |
 | UnresolvedPlaceholder | `XX000` | INTERNAL_ERROR |
 | DiffDepthExceeded | `54000` | PROGRAM_LIMIT_EXCEEDED |
 | DiffCteCountExceeded | `54000` | PROGRAM_LIMIT_EXCEEDED |
@@ -797,6 +801,46 @@ CREATE EXTENSION pg_tide;
 ```
 See [pg_tide on GitHub](https://github.com/trickle-labs/pg-tide) for
 installation instructions.
+
+### PgTideUnsupportedVersion
+
+**Message:** `pg_tide version <installed> is unsupported; supported range is <range>`
+
+**Description:** The installed pg_tide version is outside pg_trickle's tested
+outbox compatibility range: 0.47.0 through 0.53.0.
+
+**Suggested fix:** Install a supported pg_tide version, then retry the
+operation.
+
+### PgTideUpgradeInProgress
+
+**Message:** `pg_tide <version> is not ready for outbox integration; missing: <objects>`
+
+**Description:** pg_tide reports a supported version, but its required outbox
+API or catalog is incomplete. This normally means an extension upgrade is in
+progress or did not finish.
+
+**Suggested fix:** Complete the pg_tide upgrade and retry.
+
+### PgTideOperationDenied
+
+**Message:** `pg_tide denied <operation>: <detail>`
+
+**Description:** pg_tide rejected the operation under the original caller's
+identity. pg_trickle does not bypass or duplicate pg_tide authorization.
+
+**Suggested fix:** Grant the caller the privileges required by pg_tide, or
+run the operation as an authorized role.
+
+### PgTideBindingMismatch
+
+**Message:** `stale pg_tide outbox binding for <name>: <detail>`
+
+**Description:** The live pg_tide outbox no longer matches the extension OID,
+version, or creation timestamp recorded when it was attached.
+
+**Suggested fix:** Detach the stale pg_trickle mapping after restoring access
+to the original pg_tide catalog, then attach the intended outbox again.
 
 ---
 

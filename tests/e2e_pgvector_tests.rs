@@ -811,13 +811,7 @@ async fn test_attach_embedding_outbox_catalog_entry() {
     )
     .await;
 
-    // Install pg_tide stub (same as outbox tests).
-    db.execute_seq(&[
-        "CREATE SCHEMA IF NOT EXISTS tide",
-        "CREATE OR REPLACE FUNCTION tide.outbox_create(p_name text, p_retention_hours integer, p_inline_threshold integer) RETURNS void LANGUAGE sql AS 'SELECT 1'",
-        "CREATE OR REPLACE FUNCTION tide.outbox_publish(p_name text, p_payload jsonb, p_headers jsonb) RETURNS void LANGUAGE sql AS 'SELECT 1'",
-    ])
-    .await;
+    db.execute("CREATE EXTENSION pg_tide").await;
 
     db.execute("SELECT pgtrickle.attach_embedding_outbox('va4_emb_st', 'embedding')")
         .await;
