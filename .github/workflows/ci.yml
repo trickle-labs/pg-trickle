@@ -231,7 +231,7 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Pull PostgreSQL benchmark image
-        run: docker pull postgres:18.3
+        run: docker pull postgres:18.4-bookworm@sha256:efef99e1558f86089bc84be29208c0777a185ff717ec7fa288a652ce2d0adf
 
       - name: Pull builder image when available
         run: |
