@@ -102,6 +102,17 @@ impl MetamorphicFamily {
         }
         transformed
     }
+
+    /// Execute the family against the model and return the recorded invariant.
+    /// Keeping this here makes the inventory a runnable contract, not metadata.
+    pub fn execute(self, base: &Scenario) -> (String, bool) {
+        let transformed = self.transform(base);
+        (
+            self.name().to_string(),
+            base.final_state() == transformed.final_state()
+                && base.batched_final_state() == transformed.batched_final_state(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6,6 +6,7 @@ mod e2e;
 mod dvm_fuzz;
 
 use dvm_fuzz::coverage::{MANDATORY_CASE_COUNT, mandatory_cases, p0_dimensions, pairwise_cover};
+use dvm_fuzz::query::RelNode;
 use e2e::E2eDb;
 
 const COVERAGE_REQUIREMENTS: &str = include_str!("corpus/dvm_coverage_requirements.json");
@@ -49,7 +50,29 @@ fn test_v0873_matrix_matches_published_requirements() {
 
 #[test]
 fn test_v0873_generated_queries_have_schemas_and_render_sql() {
+    let mut shapes = std::collections::HashSet::new();
     for case in mandatory_cases() {
+        assert!(
+            shapes.insert(case.shape),
+            "duplicate named shape {}",
+            case.shape
+        );
+        assert_eq!(
+            case.query.ctes.len(),
+            2,
+            "{} must have two named CTEs",
+            case.id
+        );
+        match case.id {
+            "nested_join_subtree" => assert!(matches!(case.query.body, RelNode::Subquery { .. })),
+            "wide_source_narrow_projection" => {
+                assert!(matches!(case.query.body, RelNode::Project { .. }))
+            }
+            _ => assert!(matches!(
+                case.query.body,
+                RelNode::Subquery { .. } | RelNode::Join { .. } | RelNode::Project { .. }
+            )),
+        }
         let schema = case
             .query
             .schema()
@@ -63,6 +86,7 @@ fn test_v0873_generated_queries_have_schemas_and_render_sql() {
             .query
             .render_sql()
             .unwrap_or_else(|error| panic!("{} has invalid SQL: {error}", case.id));
+        assert!(sql.contains(case.shape), "{} lost its named shape", case.id);
         assert!(sql.starts_with("WITH "), "{} is not a CTE query", case.id);
     }
 }
@@ -92,11 +116,26 @@ async fn test_v0873_mandatory_composition_matrix() {
             .unwrap_or_else(|failure| panic!("{} did not stay differential: {failure:?}", case.id));
         e2e::oracle::assert_st_query_exact(&db, &stream_table, &query, case.id).await;
 
-        db.execute_seq(&[
-            "UPDATE composition_left SET value = value + 1 WHERE id = 1",
-            "UPDATE composition_right SET value = value + 1 WHERE id = 1",
-        ])
-        .await;
+        let id = (case
+            .id
+            .as_bytes()
+            .iter()
+            .map(|byte| *byte as usize)
+            .sum::<usize>()
+            % 3)
+            + 1;
+        let left_delta = (case.id.len() % 5 + 1) as i32;
+        let right_delta = (case.id.bytes().next().unwrap_or(1) % 5 + 1) as i32;
+        let mut mutations = vec![format!(
+            "UPDATE composition_left SET value = value + {left_delta} WHERE id = {id}"
+        )];
+        if case.changed_leaves != "one" {
+            mutations.push(format!(
+                "UPDATE composition_right SET value = value + {right_delta} WHERE id = {id}"
+            ));
+        }
+        db.execute_seq(&mutations.iter().map(String::as_str).collect::<Vec<_>>())
+            .await;
         db.refresh_st(&stream_table).await;
         e2e::oracle::assert_st_query_exact(&db, &stream_table, &query, case.id).await;
     }

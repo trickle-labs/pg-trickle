@@ -17,6 +17,25 @@ fn test_v0874_metamorphic_inventory_and_state_coverage() {
     assert_eq!(plan(0x874, ChangedLeaves::All)[0].leaves.len(), 3);
 }
 
+#[test]
+fn test_v08714_metamorphic_families_execute_and_record() {
+    let scenario = dvm_fuzz::metamorphic::Scenario::new(
+        "WITH source AS (SELECT * FROM input) SELECT key, value FROM input",
+        [(1, 10), (2, 20)],
+        [
+            dvm_fuzz::metamorphic::Mutation::Update { key: 1, value: 99 },
+            dvm_fuzz::metamorphic::Mutation::Delete { key: 2 },
+        ],
+    );
+    let executed = MetamorphicFamily::all()
+        .iter()
+        .map(|family| family.execute(&scenario))
+        .collect::<Vec<_>>();
+    assert!(executed.len() >= 6);
+    assert!(executed.iter().all(|(_, passed)| *passed));
+    assert!(executed.iter().take(6).all(|(name, _)| !name.is_empty()));
+}
+
 /// A split refresh history and a single batched refresh must converge to the
 /// same exact result when they start from the same source state.
 #[tokio::test]
