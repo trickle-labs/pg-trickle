@@ -779,7 +779,7 @@ pub fn parse_test_decoding_columns_for_fuzz(
 fn parse_pgoutput_old_columns(data: &str) -> std::collections::HashMap<String, String> {
     let mut cols = std::collections::HashMap::new();
     let old_key_start = match data.find("old-key:") {
-        Some(pos) => pos + 9,
+        Some(pos) => pos + "old-key:".len(),
         None => return cols,
     };
     let old_key_end = data[old_key_start..]
@@ -2806,6 +2806,12 @@ mod tests {
         // UPDATE without REPLICA IDENTITY FULL produces no old-key section
         let data = "table public.users: UPDATE: id[integer]:1 name[text]:'Bob'";
         let old = parse_pgoutput_old_columns(data);
+        assert!(old.is_empty());
+    }
+
+    #[test]
+    fn test_parse_old_columns_truncated_old_key_marker() {
+        let old = parse_pgoutput_old_columns("old-key:");
         assert!(old.is_empty());
     }
 
