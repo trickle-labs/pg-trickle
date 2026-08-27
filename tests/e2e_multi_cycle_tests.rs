@@ -275,7 +275,7 @@ async fn test_multi_cycle_prepared_statement_cache() {
 // Requires shared_preload_libraries for CACHE_GENERATION shared memory.
 #[cfg(not(feature = "light-e2e"))]
 #[tokio::test]
-async fn test_prepared_statements_cleared_after_cache_invalidation() {
+async fn test_cache_invalidation_refreshes_without_prepared_statements() {
     let db = E2eDb::new().await.with_extension().await;
 
     let (client, connection) =
@@ -292,10 +292,8 @@ async fn test_prepared_statements_cleared_after_cache_invalidation() {
         .batch_execute(
             "SET pg_trickle.use_prepared_statements = on;
              -- Disable the aggregate fast-path so this GROUP BY+SUM query uses the
-             -- MERGE path and actually creates __pgt_merge_* prepared statements.
-             -- The agg fast-path (added in B-1) correctly materialises a delta temp
-             -- table instead of PREPARE/EXECUTE, which would make the prepared-
-             -- statement invalidation assertions below vacuously false.
+             -- regular differential refresh path. SQL PREPARE/EXECUTE is disabled
+             -- while refresh SQL runs under the stream owner.
              SET pg_trickle.aggregate_fast_path = off;
              CREATE TABLE mc_prep_invalidate (id SERIAL PRIMARY KEY, grp TEXT, val INT);
              -- Insert multiple groups to avoid the aggregate saturation threshold
@@ -322,21 +320,7 @@ async fn test_prepared_statements_cleared_after_cache_invalidation() {
              SELECT pgtrickle.refresh_stream_table('mc_prep_invalidate_st');",
         )
         .await
-        .expect("Failed to warm prepared MERGE statement");
-
-    let prepared_count_before: i64 = client
-        .query_one(
-            "SELECT count(*) FROM pg_prepared_statements WHERE name LIKE '__pgt_merge_%'",
-            &[],
-        )
-        .await
-        .expect("Failed to inspect prepared statements before invalidation")
-        .get(0);
-    assert!(
-        prepared_count_before >= 1,
-        "Expected prepared MERGE statement before invalidation, found {}",
-        prepared_count_before
-    );
+        .expect("Failed to warm differential refresh path");
 
     client
         .batch_execute(
@@ -360,18 +344,18 @@ async fn test_prepared_statements_cleared_after_cache_invalidation() {
         "Stream table should reflect the post-invalidation refresh"
     );
 
-    let prepared_count_after: i64 = client
+    let prepared_count: i64 = client
         .query_one(
             "SELECT count(*) FROM pg_prepared_statements WHERE name LIKE '__pgt_merge_%'",
             &[],
         )
         .await
-        .expect("Failed to inspect prepared statements after invalidation")
+        .expect("Failed to inspect prepared statements")
         .get(0);
     assert_eq!(
-        prepared_count_after, 0,
-        "Prepared MERGE statements should be deallocated after cache invalidation, found {}",
-        prepared_count_after
+        prepared_count, 0,
+        "Refresh should not leave prepared MERGE statements, found {}",
+        prepared_count
     );
 
     drop(client);
