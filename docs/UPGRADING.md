@@ -2,6 +2,21 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.10 → 0.87.11
+
+Install the 0.87.11 shared library and extension files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+Snapshot functions now use a pinned `SECURITY DEFINER` boundary only for
+private pg_trickle infrastructure. Default snapshots are transferred to their
+creator; caller-selected schemas require caller `USAGE` and `CREATE`.
+Restores require destination stream ownership and snapshot `SELECT`; drops
+require snapshot ownership or superuser. Existing snapshots keep their stored
+owners, and legacy rows that cannot prove provenance remain read-only.
+
 ## 0.87.9 → 0.87.10
 
 Install the 0.87.10 shared library and extension files, restart PostgreSQL,
@@ -188,7 +203,7 @@ SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
 SELECT pgtrickle.migrate(); -- read-only diagnostic
 SELECT snapshot_id, snapshot_schema, snapshot_table
 FROM pgtrickle.pgt_snapshots
-WHERE snapshot_relid IS NULL OR provenance_token IS NULL;
+WHERE snapshot_relid IS NULL OR snapshot_provenance_token IS NULL;
 ```
 
 Unresolved legacy snapshots remain cataloged but cannot be restored or dropped
