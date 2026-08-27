@@ -116,8 +116,8 @@ runs:
       run: |
         # Remove Microsoft APT sources that intermittently return 403 on
         # GitHub-hosted ubuntu-latest runners, causing apt-get update to fail.
-        sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
-                   /etc/apt/sources.list.d/azure-cli.list
+        sudo rm -f /etc/apt/sources.list.d/microsoft-prod.* \
+                   /etc/apt/sources.list.d/azure-cli.*
         sudo apt-get update -qq
         sudo apt-get install -y -qq curl ca-certificates gnupg lsb-release >/dev/null
 
@@ -143,8 +143,8 @@ runs:
       run: |
         # Remove Microsoft APT sources that intermittently return 403 on
         # GitHub-hosted ubuntu-latest runners, causing apt-get update to fail.
-        sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
-                   /etc/apt/sources.list.d/azure-cli.list
+        sudo rm -f /etc/apt/sources.list.d/microsoft-prod.* \
+                   /etc/apt/sources.list.d/azure-cli.*
         sudo apt-get update -qq
         sudo apt-get install -y -qq \
           bison \

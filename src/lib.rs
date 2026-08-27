@@ -774,11 +774,11 @@ FROM pgtrickle.pgt_stream_tables st;
 extension_sql!(
     r#"
 ALTER FUNCTION pgtrickle.stream_table_to_publication(text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned immediately below.
 ALTER FUNCTION pgtrickle.stream_table_to_publication(text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 ALTER FUNCTION pgtrickle.drop_stream_table_publication(text)
-    SECURITY DEFINER;
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned immediately below.
 ALTER FUNCTION pgtrickle.drop_stream_table_publication(text)
     SET search_path = pgtrickle, pg_catalog, pg_temp;
 "#,
