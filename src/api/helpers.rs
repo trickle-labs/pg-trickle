@@ -736,6 +736,19 @@ pub(super) fn check_stream_table_ownership(
     Ok(())
 }
 
+/// Resolve an owner-lifecycle target under the original caller's path and
+/// authorize it before any private catalog mutation occurs.
+pub(super) fn resolve_owned_stream_table(
+    name: &str,
+    entry_context: security_context::EntryContext,
+) -> Result<(String, String, StreamTableMeta), PgTrickleError> {
+    let caller = security_context::capture_caller_context(entry_context)?;
+    let (schema, table_name) = resolve_qualified_name_as_caller(name, &caller.search_path)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+    Ok((schema, table_name, st))
+}
+
 /// Parse a possibly schema-qualified name into `(schema, table)`.
 pub(crate) fn parse_qualified_name_pub(name: &str) -> Result<(String, String), PgTrickleError> {
     parse_qualified_name(name)

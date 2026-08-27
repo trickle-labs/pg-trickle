@@ -2872,6 +2872,7 @@ impl BulkAlterStreamTableParams {
 fn canonicalize_bulk_stream_table_names(
     names: &[Option<String>],
     function_name: &str,
+    caller_search_path: &str,
 ) -> Result<Vec<String>, PgTrickleError> {
     if names.is_empty() {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -2893,8 +2894,12 @@ fn canonicalize_bulk_stream_table_names(
                 "{function_name}() names[{index}] must not be NULL"
             ))
         })?;
-        let (schema, table_name) = parse_qualified_name(name)?;
-        let canonical_name = format!("{schema}.{table_name}");
+        let (schema, table_name) = resolve_qualified_name_as_caller(name, caller_search_path)?;
+        let canonical_name = format!(
+            "{}.{}",
+            quote_identifier(&schema),
+            quote_identifier(&table_name)
+        );
         if !seen.insert(canonical_name.clone()) {
             return Err(PgTrickleError::InvalidArgument(format!(
                 "{function_name}() contains duplicate target \"{canonical_name}\""
@@ -2994,10 +2999,7 @@ fn build_bulk_alter_stream_table_options<'a>(
         post_refresh_action: params.post_refresh_action.as_deref(),
         reindex_drift_threshold: params.reindex_drift_threshold,
         target_freshness: None,
-        // `bulk_alter_stream_tables` remains SECURITY INVOKER (v0.87.10
-        // scope); `None` recovers the caller's search_path directly rather
-        // than from a SECURITY DEFINER GUC-stack entry that doesn't exist.
-        entry_context: None,
+        entry_context: Some(security_context::EntryContext::SecurityDefiner),
     }
 }
 
@@ -3005,11 +3007,18 @@ fn bulk_alter_stream_tables_impl(
     names: Vec<Option<String>>,
     params: serde_json::Value,
 ) -> Result<i32, PgTrickleError> {
-    let canonical_names = canonicalize_bulk_stream_table_names(&names, "bulk_alter_stream_tables")?;
+    let caller_search_path =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?
+            .search_path;
+    let canonical_names = canonicalize_bulk_stream_table_names(
+        &names,
+        "bulk_alter_stream_tables",
+        &caller_search_path,
+    )?;
     let params = parse_bulk_alter_stream_table_params(params)?;
 
     for name in &canonical_names {
-        alter::prevalidate_stream_table_target(name)?;
+        alter::prevalidate_stream_table_target_as_caller(name, &caller_search_path)?;
     }
 
     for name in &canonical_names {
@@ -3020,8 +3029,15 @@ fn bulk_alter_stream_tables_impl(
 }
 
 fn bulk_drop_stream_tables_impl(names: Vec<Option<String>>) -> Result<i32, PgTrickleError> {
-    let canonical_names = canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables")?;
-    let ordered_names = alter::plan_drop_stream_tables(&canonical_names)?;
+    let caller_search_path =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?
+            .search_path;
+    let canonical_names = canonicalize_bulk_stream_table_names(
+        &names,
+        "bulk_drop_stream_tables",
+        &caller_search_path,
+    )?;
+    let ordered_names = alter::plan_drop_stream_tables(&canonical_names, &caller_search_path)?;
 
     for name in &ordered_names {
         alter::execute_drop_stream_table(name)?;
@@ -3048,7 +3064,8 @@ fn bulk_drop_stream_tables_impl(names: Vec<Option<String>>) -> Result<i32, PgTri
 ///     '{"schedule": "5m", "tier": "warm"}'::jsonb
 /// );
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn bulk_alter_stream_tables(names: Vec<Option<String>>, params: pgrx::Json) -> i32 {
     match bulk_alter_stream_tables_impl(names, params.0) {
         Ok(count) => count,
@@ -3071,7 +3088,8 @@ fn bulk_alter_stream_tables(names: Vec<Option<String>>, params: pgrx::Json) -> i
 ///     ARRAY['public.orders_summary', 'public.stale_view']
 /// );
 /// ```
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn bulk_drop_stream_tables(names: Vec<Option<String>>) -> i32 {
     match bulk_drop_stream_tables_impl(names) {
         Ok(count) => count,
@@ -4638,25 +4656,31 @@ mod tests {
     #[test]
     fn test_canonicalize_bulk_stream_table_names_canonicalizes_public_schema() {
         let names = vec![
-            Some("orders".to_string()),
+            Some("public.orders".to_string()),
             Some("analytics.daily".to_string()),
         ];
         let canonical =
-            canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables").unwrap();
-        assert_eq!(canonical, vec!["public.orders", "analytics.daily"]);
+            canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables", "public")
+                .unwrap();
+        assert_eq!(
+            canonical,
+            vec!["\"public\".\"orders\"", "\"analytics\".\"daily\""]
+        );
     }
 
     #[test]
     fn test_canonicalize_bulk_stream_table_names_rejects_empty() {
-        let err = canonicalize_bulk_stream_table_names(&[], "bulk_drop_stream_tables").unwrap_err();
+        let err = canonicalize_bulk_stream_table_names(&[], "bulk_drop_stream_tables", "public")
+            .unwrap_err();
         assert!(err.to_string().contains("names array is empty"));
     }
 
     #[test]
     fn test_canonicalize_bulk_stream_table_names_rejects_null_entry() {
         let err = canonicalize_bulk_stream_table_names(
-            &[Some("orders".to_string()), None],
+            &[Some("public.orders".to_string()), None],
             "bulk_drop_stream_tables",
+            "public",
         )
         .unwrap_err();
         assert!(err.to_string().contains("must not be NULL"));
@@ -4666,10 +4690,11 @@ mod tests {
     fn test_canonicalize_bulk_stream_table_names_rejects_duplicates() {
         let err = canonicalize_bulk_stream_table_names(
             &[
-                Some("orders".to_string()),
+                Some("public.orders".to_string()),
                 Some("public.orders".to_string()),
             ],
             "bulk_drop_stream_tables",
+            "public",
         )
         .unwrap_err();
         assert!(err.to_string().contains("duplicate target"));
@@ -4678,8 +4703,8 @@ mod tests {
     #[test]
     fn test_canonicalize_bulk_stream_table_names_rejects_over_limit() {
         let names = vec![Some("orders".to_string()); 257];
-        let err =
-            canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables").unwrap_err();
+        let err = canonicalize_bulk_stream_table_names(&names, "bulk_drop_stream_tables", "public")
+            .unwrap_err();
         assert!(err.to_string().contains("configured limit"));
     }
 

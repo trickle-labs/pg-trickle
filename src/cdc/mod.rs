@@ -2656,12 +2656,14 @@ pub fn refresh_capture_body_for_source(
 /// Recompute whether a source still has an active capture consumer.
 pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTrickleError> {
     let has_active_consumer = Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (\
-             SELECT 1 FROM pgtrickle.pgt_dependencies d\
-             JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id\
-             WHERE d.source_relid = $1\
-               AND st.status IN ('ACTIVE', 'INITIALIZING')\
-         )",
+        r#"
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pgtrickle.pgt_dependencies d
+                  JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
+                 WHERE d.source_relid = $1
+                   AND st.status IN ('ACTIVE', 'INITIALIZING')
+            )"#,
         &[source_oid.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?

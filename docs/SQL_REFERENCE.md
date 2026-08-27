@@ -52,6 +52,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.parallel\_job\_status](#pgtrickleparallel_job_status)
     - [pgtrickle.fuse\_status](#pgtricklefuse_status)
     - [pgtrickle.reset\_fuse](#pgtricklereset_fuse)
+    - [pgtrickle.lifecycle\_preflight](#pgtricklelifecycle_preflight)
   - [Dependency & Inspection](#dependency--inspection)
     - [pgtrickle.dependency\_tree](#pgtrickledependency_tree)
     - [pgtrickle.diamond\_groups](#pgtricklediamond_groups)
@@ -169,6 +170,13 @@ contract; function names alone are not sufficient.
 | `arbitrary_sql` | Revoked from `PUBLIC` | Always invoker; normal SQL privileges apply |
 | `trigger_entry` | Revoked from `PUBLIC` | PostgreSQL trigger/event-trigger invocation only |
 | `internal` | Revoked from `PUBLIC` | Extension-owned callers only |
+
+Every overload also has an exact `execution_policy` in
+[`scripts/sql_api_policy.json`](../scripts/sql_api_policy.json):
+`definer_owner_checked` requires the original caller/owner boundary,
+`invoker_delegating` preserves the caller's normal SQL privileges for a pure
+delegate or arbitrary-SQL wrapper, and `capability_specific` uses the rule in
+the API class. CI rejects an exported overload without both fields.
 
 Bulk create/alter/drop inputs are closed and bounded to 1,000 items. Unknown
 keys, wrong JSON types, NULL entries, duplicate canonical targets, invalid
@@ -4441,6 +4449,7 @@ table management.
 | Function | Returns | Purpose |
 |----------|---------|---------|
 | `pgtrickle.preflight()` | `text` (JSON) | Pre-deployment health check — returns one JSON object per check with `pass`, `check`, `detail`. |
+| `pgtrickle.lifecycle_preflight()` | `text` (JSON) | Superuser-only, read-only owner-privilege preflight for upgrades; lists every missing source `SELECT` or source-schema `USAGE` grant with exact remediation SQL. |
 | `pgtrickle.validate_query(sql text)` | `SetOf row` | Validates whether a SQL query is IVM-compatible. Returns analysis results including unsupported patterns. |
 | `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
 | `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
@@ -4461,6 +4470,22 @@ table management.
 legacy `row_identity_version` on a stream table or required CDC buffer means
 incremental maintenance is not considered safe until a protected rebuild has
 completed.
+
+### pgtrickle.lifecycle_preflight
+
+Run the v0.87.10 lifecycle-upgrade privilege check without changing catalog
+state. The function must be called by a superuser and returns one JSON object.
+`owner_privileges.missing` is empty when every stream-table owner can read each
+declared source and use its schema.
+
+```sql
+SELECT pgtrickle.lifecycle_preflight();
+```
+
+The `remediation` value in each reported gap contains the exact quoted
+`GRANT SELECT ON TABLE ...` and/or `GRANT USAGE ON SCHEMA ...` statements.
+Apply those grants and rerun the preflight before `ALTER EXTENSION pg_trickle
+UPDATE`.
 
 ### pgtrickle.resume_after_drain
 

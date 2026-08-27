@@ -25,12 +25,15 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     // G12-2: TopK runtime validation — re-parse the reconstructed full query
     // and verify the detected TopK pattern matches stored catalog metadata.
     // On mismatch, fall back to FULL refresh to prevent silent correctness issues.
-    if let Err(reason) = validate_topk_metadata(
-        &st.defining_query,
-        topk_limit,
-        topk_order_by,
-        st.topk_offset,
-    ) {
+    if let Err(reason) = crate::refresh::with_stream_owner(st, || {
+        validate_topk_metadata(
+            &st.defining_query,
+            topk_limit,
+            topk_order_by,
+            st.topk_offset,
+        )
+        .map_err(PgTrickleError::InvalidArgument)
+    }) {
         pgrx::warning!(
             "pg_trickle: TopK metadata inconsistency for {}.{}: {}. \
              Falling back to FULL refresh.",
@@ -110,7 +113,9 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     let source_sql = format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub");
 
     // Get column names from the storage table (excluding __pgt_row_id).
-    let columns = crate::dvm::get_defining_query_columns(&st.defining_query)?;
+    let columns = crate::refresh::with_stream_owner(st, || {
+        crate::dvm::get_defining_query_columns(&st.defining_query)
+    })?;
 
     // Build the MERGE statement.
     let col_list: Vec<String> = columns

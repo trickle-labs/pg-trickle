@@ -3206,8 +3206,9 @@ fn refresh_single_st(
     // binary but is FULL-only under the current semantic admission matrix.
     if !st.needs_reinit
         && st.refresh_mode != RefreshMode::Full
-        && let Err(e) =
+        && let Err(e) = crate::refresh::with_stream_owner(&st, || {
             crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)
+        })
     {
         let message = format!("incremental refresh suspended after semantic revalidation: {e}");
         pgrx::warning!(

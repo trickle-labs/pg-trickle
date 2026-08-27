@@ -1319,6 +1319,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.drain(integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_refresh_group(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_watermark_group(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.gate_source(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.lifecycle_preflight() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.migrate() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_all() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_scheduler(text[]) FROM PUBLIC;

@@ -3,6 +3,7 @@
 
 use pgrx::prelude::*;
 
+use super::helpers::resolve_owned_stream_table;
 use crate::catalog::StreamTableMeta;
 use crate::error::PgTrickleError;
 
@@ -132,16 +133,16 @@ fn drop_stream_table_publication_impl(name: &str) -> Result<(), PgTrickleError> 
 ///
 /// Accepts an interval and stores it as `freshness_deadline_ms`.
 /// The scheduler uses this to auto-assign the appropriate refresh tier.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn set_stream_table_sla(name: &str, sla: Interval) {
     // ERR-2 (v0.26.0): Use typed into_pg_error() at the API boundary.
     set_stream_table_sla_impl(name, sla).unwrap_or_else(|e| e.into_pg_error());
 }
 
 fn set_stream_table_sla_impl(name: &str, sla: Interval) -> Result<(), PgTrickleError> {
-    // SEC-001 (v0.70.0): Use shared parse_qualified_name_pub.
-    let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &table)?;
+    let (_schema, _table, meta) =
+        resolve_owned_stream_table(name, super::security_context::EntryContext::SecurityDefiner)?;
 
     if sla.months() != 0 {
         return Err(PgTrickleError::InvalidArgument(

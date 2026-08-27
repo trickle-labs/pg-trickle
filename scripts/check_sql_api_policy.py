@@ -38,6 +38,12 @@ API_CLASSES = {
     "internal",
 }
 
+EXECUTION_POLICIES = {
+    "definer_owner_checked",
+    "invoker_delegating",
+    "capability_specific",
+}
+
 _TRIGGER_ENTRY_NAMES = {
     "_on_ddl_end",
     "_on_sql_drop",
@@ -65,6 +71,7 @@ _ADMIN_GLOBAL_NAMES = {
     "drop_refresh_group",
     "drop_watermark_group",
     "gate_source",
+    "lifecycle_preflight",
     "migrate",
     "pause_all",
     "pause_scheduler",
@@ -73,6 +80,7 @@ _ADMIN_GLOBAL_NAMES = {
     "resume_all",
     "resume_scheduler",
     "setup_self_monitoring",
+    "stat_reset_all",
     "teardown_self_monitoring",
     "ungate_source",
 }
@@ -98,7 +106,18 @@ _OWNER_LIFECYCLE_NAMES = {
     "embedding_stream_table",
     "exec_stream_ddl",
     "refresh_if_stale",
+    "reset_fuse",
+    "stat_reset",
     "stream_table_to_publication",
+    "subscribe",
+    "subscribe_distance",
+    "unsubscribe",
+    "unsubscribe_distance",
+}
+
+_INVOKER_DELEGATE_NAMES = {
+    "exec_stream_ddl",
+    "refresh_if_stale",
     "subscribe",
     "subscribe_distance",
     "unsubscribe",
@@ -149,6 +168,7 @@ class FunctionIdentity:
 class PolicyEntry:
     identity: FunctionIdentity
     api_class: str
+    execution_policy: str
 
 
 @dataclass(frozen=True)
@@ -719,14 +739,22 @@ def load_policy_text(text: str, source: str) -> dict[str, PolicyEntry]:
         name = value.get("name")
         identity_arguments = value.get("identity_arguments")
         api_class = value.get("class")
+        execution_policy = value.get("execution_policy")
 
-        if not all(isinstance(field, str) for field in (schema, name, identity_arguments, api_class)):
+        if not all(
+            isinstance(field, str)
+            for field in (schema, name, identity_arguments, api_class, execution_policy)
+        ):
             raise ApiPolicyError(
-                f"policy entry {key!r} in {source} must define string schema/name/identity_arguments/class fields"
+                f"policy entry {key!r} in {source} must define string schema/name/identity_arguments/class/execution_policy fields"
             )
         if api_class not in API_CLASSES:
             raise ApiPolicyError(
                 f"policy entry {key!r} in {source} uses unknown class {api_class!r}"
+            )
+        if execution_policy not in EXECUTION_POLICIES:
+            raise ApiPolicyError(
+                f"policy entry {key!r} in {source} uses unknown execution policy {execution_policy!r}"
             )
 
         identity = FunctionIdentity(schema=schema, name=name, identity_arguments=identity_arguments)
@@ -737,7 +765,11 @@ def load_policy_text(text: str, source: str) -> dict[str, PolicyEntry]:
         if key in entries:
             raise ApiPolicyError(f"duplicate policy entry for {key} in {source}")
 
-        entries[key] = PolicyEntry(identity=identity, api_class=api_class)
+        entries[key] = PolicyEntry(
+            identity=identity,
+            api_class=api_class,
+            execution_policy=execution_policy,
+        )
 
     return entries
 
@@ -763,6 +795,14 @@ def suggest_classification(identity: FunctionIdentity) -> SuggestedClassificatio
     return SuggestedClassification("public_read", "read-only diagnostics or inspection")
 
 
+def suggest_execution_policy(identity: FunctionIdentity) -> str:
+    if identity.name in _INVOKER_DELEGATE_NAMES or identity.name in _ARBITRARY_SQL_NAMES:
+        return "invoker_delegating"
+    if suggest_classification(identity).api_class == "owner_lifecycle":
+        return "definer_owner_checked"
+    return "capability_specific"
+
+
 def build_generated_policy(
     identities: Iterable[FunctionIdentity],
     source_label: str,
@@ -774,9 +814,10 @@ def build_generated_policy(
             "name": identity.name,
             "identity_arguments": identity.identity_arguments,
             "class": suggest_classification(identity).api_class,
+            "execution_policy": suggest_execution_policy(identity),
         }
     return {
-        "policy_version": 1,
+        "policy_version": 2,
         "generated_from": source_label,
         "functions": functions,
     }
@@ -896,8 +937,8 @@ CREATE FUNCTION pgtrickle."bar"() RETURNS void LANGUAGE plpgsql AS $$ BEGIN NULL
         policy = """
 {
   "functions": {
-    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "public_read"},
-    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "public_read"}
+    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "public_read", "execution_policy": "capability_specific"},
+    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "public_read", "execution_policy": "capability_specific"}
   }
 }
 """
@@ -909,7 +950,7 @@ CREATE FUNCTION pgtrickle."bar"() RETURNS void LANGUAGE plpgsql AS $$ BEGIN NULL
         policy_text = """
 {
   "functions": {
-    "pgtrickle.bar()": {"schema": "pgtrickle", "name": "bar", "identity_arguments": "", "class": "public_read"}
+    "pgtrickle.bar()": {"schema": "pgtrickle", "name": "bar", "identity_arguments": "", "class": "public_read", "execution_policy": "capability_specific"}
   }
 }
 """
@@ -917,12 +958,23 @@ CREATE FUNCTION pgtrickle."bar"() RETURNS void LANGUAGE plpgsql AS $$ BEGIN NULL
         self.assertEqual(report.missing_policy_signatures, ("pgtrickle.foo(integer)",))
         self.assertEqual(report.extra_policy_signatures, ("pgtrickle.bar()",))
 
+    def test_execution_policy_is_required(self) -> None:
+        policy_text = """
+{
+  "functions": {
+    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "owner_lifecycle"}
+  }
+}
+"""
+        with self.assertRaises(ApiPolicyError):
+            load_policy_text(policy_text, "<memory>")
+
     def test_emit_acl_sql_uses_exact_overloads(self) -> None:
         policy_text = """
 {
   "functions": {
-    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "public_read"},
-    "pgtrickle.bar(text)": {"schema": "pgtrickle", "name": "bar", "identity_arguments": "text", "class": "owner_lifecycle"}
+    "pgtrickle.foo()": {"schema": "pgtrickle", "name": "foo", "identity_arguments": "", "class": "public_read", "execution_policy": "capability_specific"},
+    "pgtrickle.bar(text)": {"schema": "pgtrickle", "name": "bar", "identity_arguments": "text", "class": "owner_lifecycle", "execution_policy": "definer_owner_checked"}
   }
 }
 """

@@ -68,10 +68,10 @@ case "$PROFILE" in
         ;;
 esac
 
-absent_image="${PGT_PGBENCH_ABSENT_IMAGE:-postgres:18.3}"
+absent_image="${PGT_PGBENCH_ABSENT_IMAGE:-postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf}"
 installed_image="${PGT_PGBENCH_INSTALLED_IMAGE:-pg_trickle_e2e:latest}"
 seed="${PGT_PGBENCH_SEED:-8700}"
-postgres_version="${PGT_PGBENCH_POSTGRES_VERSION:-18.3}"
+postgres_version="${PGT_PGBENCH_POSTGRES_VERSION:-18.4}"
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 run_root="$OUTPUT_DIR/raw"
