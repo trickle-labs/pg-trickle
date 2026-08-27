@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.11 — Snapshot Security](#08711--snapshot-security)
 - [0.87.10 — Complete Lifecycle Policy](#08710--complete-lifecycle-policy)
 - [0.87.9 — Core Lifecycle Security](#0879--core-lifecycle-security)
 - [0.87.8 — Refresh Execution Identity](#0878--refresh-execution-identity)
@@ -140,6 +141,27 @@ The cutoff exists because:
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.87.11] — Snapshot Security
+
+v0.87.11 gives snapshot tables an explicit ownership and provenance boundary.
+
+- Default snapshots remain private-infrastructure creations but are transferred
+  to the caller; custom target schemas require caller `USAGE` and `CREATE`.
+- Restore requires stream-table ownership and `SELECT` on the snapshot.
+- Drop requires snapshot ownership or superuser; transferring a stream table
+  does not transfer its historical snapshots.
+- Canonical relation identity, column layout, OID, and provenance checks reject
+  renamed, recreated, mismatched, or stale snapshot bindings.
+
+See the [v0.87.11 roadmap](roadmap/v0.87.11.md) for the complete acceptance
+criteria and security release gate.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.11 files.
 
 ---
 

@@ -59,6 +59,10 @@ SELECT pgtrickle.snapshot_stream_table(
 );
 ```
 
+The default `pgtrickle` target is created through private extension
+infrastructure and then owned by the caller. A caller-selected target schema
+must grant the caller both `USAGE` and `CREATE`.
+
 ### List snapshots
 
 ```sql
@@ -84,6 +88,9 @@ After a restore, pg_trickle reinitialises the stream table's frontier
 and validates the cataloged snapshot identity before changing storage. A
 drop/recreate lookalike, unresolved legacy row, incompatible column layout, or
 ownership mismatch is rejected before locking or truncating the stream table.
+The caller must own the destination stream table and have `SELECT` on the
+snapshot relation. Snapshot data is read under the stream-table owner context,
+with row security enabled.
 Logical cluster restore rebinding is separate: it resets restored frontiers and
 rebuilds CDC before a protected FULL baseline.
 
@@ -92,6 +99,9 @@ rebuilds CDC before a protected FULL baseline.
 ```sql
 SELECT pgtrickle.drop_snapshot('pgtrickle.snapshot_order_totals_1735689421000');
 ```
+
+Dropping requires ownership of the snapshot relation or superuser status.
+Stream-table ownership transfers do not transfer historical snapshots.
 
 ---
 

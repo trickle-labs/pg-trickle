@@ -5041,6 +5041,10 @@ convention `snapshot_<name>_<epoch_ms>` unless you supply `target`. The table
 includes three metadata columns added by pg_trickle: `__pgt_snapshot_version`,
 `__pgt_frontier`, and `__pgt_snapshotted_at`.
 
+Default snapshots are created through private extension infrastructure and then
+owned by the caller. A caller-supplied target schema requires caller `USAGE`
+and `CREATE` privileges.
+
 ```sql
 -- Auto-named snapshot
 SELECT pgtrickle.snapshot_stream_table('public.orders_agg');
@@ -5069,6 +5073,10 @@ After `restore_from_snapshot()` completes:
 1. The stream table's rows are replaced with the snapshot contents.
 2. The frontier is set to the snapshot's frontier, so the **next refresh cycle
    is DIFFERENTIAL** — only changes made after the snapshot are fetched.
+
+The caller must own the destination stream table and have `SELECT` privilege on
+the snapshot. The snapshot relation must still match its cataloged OID,
+provenance, owner, stream binding, and user-column layout.
 
 ```sql
 SELECT pgtrickle.restore_from_snapshot(
@@ -5102,6 +5110,9 @@ pgtrickle.drop_snapshot(
     snapshot_table TEXT  -- fully-qualified snapshot table
 ) → void
 ```
+
+Only the snapshot owner or a superuser can drop it. Transferring a stream table
+does not transfer historical snapshot ownership.
 
 ```sql
 SELECT pgtrickle.drop_snapshot('pgtrickle.orders_agg_replica_init');
