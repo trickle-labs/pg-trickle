@@ -270,7 +270,7 @@ async fn test_attach_outbox_publish_called_on_refresh() {
              p_headers jsonb
          ) RETURNS void LANGUAGE plpgsql AS $$
          BEGIN
-             INSERT INTO tide_publish_log DEFAULT VALUES;
+             INSERT INTO public.tide_publish_log DEFAULT VALUES;
          END;$$",
     ])
     .await;
