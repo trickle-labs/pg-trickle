@@ -423,6 +423,26 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        PgTrickleError::PublicationBindingMismatch {
+            publication_name,
+            reason,
+            detail,
+        } => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("publication binding '{}' is stale", publication_name),
+                "",
+            )
+            .set_detail(format!("reason={reason}; {detail}"))
+            .set_hint(
+                "Restore the recorded publication identity or inspect \
+                 pgtrickle.lifecycle_preflight() before retrying. Do not adopt a \
+                 same-name replacement; confirm unrelated objects before manual recovery."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
         PgTrickleError::SlaTooSmall(msg) => {
             ErrorReport::new(
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -3038,6 +3058,7 @@ fn bulk_drop_stream_tables_impl(names: Vec<Option<String>>) -> Result<i32, PgTri
         &caller_search_path,
     )?;
     let ordered_names = alter::plan_drop_stream_tables(&canonical_names, &caller_search_path)?;
+    alter::prevalidate_publication_bindings_for_drop(&ordered_names, &caller_search_path)?;
 
     for name in &ordered_names {
         alter::execute_drop_stream_table(name)?;

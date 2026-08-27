@@ -2,6 +2,33 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.11 → 0.87.12
+
+Install the 0.87.12 shared library and extension files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+Publication management now follows the caller's PostgreSQL privileges. The
+caller must own the stream table and hold `CREATE` on the current database.
+The resulting publication is owned by that caller. Publication creation and
+drop do not use the extension owner's authority for public DDL.
+
+Publication bindings use the live publication OID, owner, stream relation, and
+relation set. Rename, replacement, ownership transfer, and relation-set drift
+fail closed before private catalog mutation. Public DDL and private binding
+updates remain atomic.
+
+Existing publication bindings are checked during the upgrade. Repair or remove
+any binding that no longer identifies its live publication before retrying the
+upgrade. No grant on `pgtrickle` or `pgtrickle_changes` is required for a
+stream owner.
+
+Publication bindings contain database-local OIDs and are not portable through
+`pg_dump`/`pg_restore`. Detach downstream publications before a dump and
+recreate them through `stream_table_to_publication()` after restore.
+
 ## 0.87.10 → 0.87.11
 
 Install the 0.87.11 shared library and extension files, then run:

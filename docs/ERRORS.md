@@ -457,6 +457,29 @@ This error does **not** count toward the consecutive error suspension limit.
 
 ## Publication Errors
 
+### PublicationPrivilegeDenied
+
+**Message:** PostgreSQL's publication privilege error for `<name>`
+
+**Description:** The caller does not own the stream table or does not have
+`CREATE` on the current database.
+
+**Suggested fix:** Run the call as the stream-table owner and grant the caller
+`CREATE` on the database. Grant `EXECUTE` only on the exact publication API
+overload.
+
+### PublicationBindingMismatch
+
+**Message:** `publication binding '<publication_name>' is stale (<reason>): <details>`
+
+**Description:** The recorded publication identity, owner, stream relation, or
+relation set differs from the live object. The API rejects the operation before
+changing the private catalog.
+
+**Suggested fix:** Inspect `pg_publication` and
+`pgtrickle.pgt_stream_tables`. Run `pgtrickle.lifecycle_preflight()` and do not
+adopt a same-name replacement without confirming the object identity.
+
 ### PublicationAlreadyExists
 
 **Message:** `publication already exists for stream table: <name>`

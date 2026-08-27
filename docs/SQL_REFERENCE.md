@@ -1250,7 +1250,8 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Drops the underlying storage table with `CASCADE`.
 - Removes all catalog entries (metadata, dependencies, refresh history).
 - Cleans up CDC triggers and change buffer tables for source tables that are no longer tracked by any ST.
-- Automatically drops any downstream publication created by `stream_table_to_publication()`.
+- Automatically drops a downstream publication only when its recorded binding
+  still matches; stale bindings reject the stream-table drop for safety.
 
 ---
 
@@ -1281,6 +1282,11 @@ SELECT pgtrickle.stream_table_to_publication('order_totals');
 - The publication is named `pgt_pub_<table_name>`.
 - Only one publication per stream table is allowed.
 - The publication is automatically dropped when the stream table is dropped.
+- The caller must own the stream table and have `CREATE` on the current database.
+- The publication owner is the caller. The function does not lend the extension
+  owner's privileges to the caller.
+- The private binding records the live publication identity and is committed
+  with the public DDL.
 
 ---
 
@@ -1303,6 +1309,12 @@ pgtrickle.drop_stream_table_publication(name text) → void
 ```sql
 SELECT pgtrickle.drop_stream_table_publication('order_totals');
 ```
+
+**Notes:**
+- The caller must own the stream table.
+- The function validates the bound publication before dropping it. A renamed,
+  replaced, transferred, or relation-set-mismatched publication is rejected.
+- A failed drop leaves both the publication and the private binding unchanged.
 
 ---
 

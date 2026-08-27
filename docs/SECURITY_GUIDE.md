@@ -47,6 +47,24 @@ CDC, and storage setup. They explicitly check the caller's source `SELECT` and
 target-schema `CREATE` privileges, then transfer the completed stream table to
 the caller. Authors do not need access to `pgtrickle_changes`.
 
+### Publication privileges
+
+Publication APIs preserve the caller's PostgreSQL privilege boundary. A caller
+must own the stream table, have `USAGE` on its schema, have `CREATE` on the
+current database, and have `EXECUTE` on the exact publication function.
+
+```sql
+GRANT CREATE ON DATABASE mydb TO st_author;
+GRANT EXECUTE ON FUNCTION pgtrickle.stream_table_to_publication(text) TO st_author;
+GRANT EXECUTE ON FUNCTION pgtrickle.drop_stream_table_publication(text) TO st_author;
+```
+
+The resulting publication is owned by the caller. Publication DDL does not run
+with the extension owner's authority. The private binding is updated in the
+same transaction and validates publication identity, ownership, the stream
+relation, and the relation set before mutation. Publication callers do not
+need access to `pgtrickle` or `pgtrickle_changes` tables.
+
 ### Recommended split
 
 ```sql

@@ -178,9 +178,10 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
                 "pg_temp.{}",
                 crate::sql_builder::ident(&format!("__pgt_pre_{}", st.pgt_id))
             );
+            // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-derived and quote-escaped.
             Spi::run(&format!(
                 "INSERT INTO {pre_table} SELECT __pgt_row_id, {col_list} FROM {quoted_table}"
-            )) // nosemgrep: rust.spi.run.dynamic-format — identifiers are catalog-derived and quote-escaped.
+            ))
             .map_err(|e| PgTrickleError::RefreshFinalizationFailed {
                 pgt_id: st.pgt_id,
                 stage: "full-refresh downstream snapshot".to_string(),

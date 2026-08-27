@@ -36,6 +36,7 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.87.12 — Publication Security](#08712--publication-security)
 - [0.87.11 — Snapshot Security](#08711--snapshot-security)
 - [0.87.10 — Complete Lifecycle Policy](#08710--complete-lifecycle-policy)
 - [0.87.9 — Core Lifecycle Security](#0879--core-lifecycle-security)
@@ -162,6 +163,29 @@ criteria and security release gate.
 ## Upgrade
 
 Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.11 files.
+
+## [0.87.12] — Publication Security
+
+v0.87.12 gives downstream publication APIs an explicit caller privilege and
+object-identity boundary.
+
+- Publication creation requires stream-table ownership and database `CREATE`.
+- PostgreSQL assigns the publication to the caller. The API does not lend the
+  extension owner's authority to public DDL.
+- Publication bindings validate live identity, ownership, the stream relation,
+  and the relation set. Stale names, renames, replacements, transfers, and
+  relation-set drift fail closed.
+- Public publication DDL and private catalog bookkeeping commit or roll back
+  together.
+- E2E coverage checks caller privileges, exact publication ownership, denied
+  database `CREATE`, invoker-context execution, and clean failed setup.
+
+See the [v0.87.12 roadmap](roadmap/v0.87.12.md) for the complete acceptance
+criteria and security release gate.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ---
 

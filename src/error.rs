@@ -271,6 +271,14 @@ pub enum PgTrickleError {
     #[error("no publication found for stream table: {0}")]
     PublicationNotFound(String),
 
+    /// A downstream publication no longer matches its immutable binding.
+    #[error("publication binding '{publication_name}' is stale ({reason}): {detail}")]
+    PublicationBindingMismatch {
+        publication_name: String,
+        reason: String,
+        detail: String,
+    },
+
     // ── SLA errors ───────────────────────────────────────────────────────
     /// The SLA interval is too small for any available tier.
     #[error("SLA interval too small for available tiers: {0}")]
@@ -720,6 +728,7 @@ impl PgTrickleError {
             | PgTrickleError::WatermarkGroupAlreadyExists(_)
             | PgTrickleError::PublicationAlreadyExists(_)
             | PgTrickleError::PublicationNotFound(_)
+            | PgTrickleError::PublicationBindingMismatch { .. }
             | PgTrickleError::SlaTooSmall(_) => PgTrickleErrorKind::User,
 
             PgTrickleError::SharedStateCapacity(_) => PgTrickleErrorKind::Internal,

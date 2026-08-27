@@ -724,7 +724,16 @@ pub(super) fn check_stream_table_ownership(
     schema: &str,
     table_name: &str,
 ) -> Result<(), PgTrickleError> {
-    let is_owner_or_superuser = role_owns_relation_or_is_superuser(outer_user_id(), pgt_relid)?;
+    check_stream_table_ownership_for(outer_user_id(), pgt_relid, schema, table_name)
+}
+
+fn check_stream_table_ownership_for(
+    caller_oid: pgrx::pg_sys::Oid,
+    pgt_relid: pgrx::pg_sys::Oid,
+    schema: &str,
+    table_name: &str,
+) -> Result<(), PgTrickleError> {
+    let is_owner_or_superuser = role_owns_relation_or_is_superuser(caller_oid, pgt_relid)?;
 
     if !is_owner_or_superuser {
         return Err(PgTrickleError::PermissionDenied(format!(
@@ -743,9 +752,16 @@ pub(super) fn resolve_owned_stream_table(
     entry_context: security_context::EntryContext,
 ) -> Result<(String, String, StreamTableMeta), PgTrickleError> {
     let caller = security_context::capture_caller_context(entry_context)?;
+    resolve_owned_stream_table_with_caller(name, &caller)
+}
+
+pub(super) fn resolve_owned_stream_table_with_caller(
+    name: &str,
+    caller: &security_context::CallerContext,
+) -> Result<(String, String, StreamTableMeta), PgTrickleError> {
     let (schema, table_name) = resolve_qualified_name_as_caller(name, &caller.search_path)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
-    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+    check_stream_table_ownership_for(caller.role_oid, st.pgt_relid, &schema, &table_name)?;
     Ok((schema, table_name, st))
 }
 

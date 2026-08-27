@@ -382,6 +382,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pgt_name ON pgtrickle.pgt_stream_tables (p
 -- PERF-4: Scheduler hot‐path lookup by relation OID.
 CREATE INDEX IF NOT EXISTS idx_pgt_relid ON pgtrickle.pgt_stream_tables (pgt_relid);
 
+-- v0.87.12: Immutable provenance for downstream publications.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_publication_bindings (
+    pgt_id                  BIGINT PRIMARY KEY
+                            REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                            ON DELETE CASCADE,
+    stream_relid            OID NOT NULL,
+    publication_oid         OID NOT NULL UNIQUE,
+    publication_name        TEXT NOT NULL UNIQUE,
+    publication_owner_oid   OID NOT NULL,
+    expected_relation_oids  OID[] NOT NULL,
+    CONSTRAINT pgt_publication_binding_relations_check
+        CHECK (expected_relation_oids = ARRAY[stream_relid])
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_publication_bindings FROM PUBLIC;
+
 -- v0.83.0: Durable private state registry for set-operation state.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_set_operation_states (
     pgt_id         BIGINT NOT NULL
@@ -752,6 +767,23 @@ FROM pgtrickle.pgt_stream_tables st;
 "#,
     name = "pg_trickle_info_view",
     requires = [parse_duration_seconds],
+);
+
+// ── v0.87.12: publication API security attributes ─────────────────────
+
+extension_sql!(
+    r#"
+ALTER FUNCTION pgtrickle.stream_table_to_publication(text)
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned immediately below.
+ALTER FUNCTION pgtrickle.stream_table_to_publication(text)
+    SET search_path = pgtrickle, pg_catalog, pg_temp;
+ALTER FUNCTION pgtrickle.drop_stream_table_publication(text)
+    SECURITY DEFINER; -- nosemgrep: sql.security-definer.present — search_path is pinned immediately below.
+ALTER FUNCTION pgtrickle.drop_stream_table_publication(text)
+    SET search_path = pgtrickle, pg_catalog, pg_temp;
+"#,
+    name = "pg_trickle_publication_security",
+    requires = ["pg_trickle_acl_policy"],
 );
 
 // ── Citus observability view ───────────────────────────────────────────

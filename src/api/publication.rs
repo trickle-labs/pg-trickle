@@ -3,9 +3,765 @@
 
 use pgrx::prelude::*;
 
-use super::helpers::resolve_owned_stream_table;
+use super::helpers::{resolve_owned_stream_table, resolve_owned_stream_table_with_caller};
 use crate::catalog::StreamTableMeta;
 use crate::error::PgTrickleError;
+
+const MAX_IDENTIFIER_BYTES: usize = 63;
+const PUBLICATION_NAME_HASH_SEED: u64 = 0x7067_7472_6963_6b6c;
+
+/// Immutable provenance for a publication created by pg_trickle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicationBinding {
+    pub pgt_id: i64,
+    pub stream_relid: pg_sys::Oid,
+    pub publication_oid: pg_sys::Oid,
+    pub publication_name: String,
+    pub publication_owner_oid: pg_sys::Oid,
+    pub expected_relation_oids: Vec<pg_sys::Oid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LivePublication {
+    oid: pg_sys::Oid,
+    name: String,
+    owner_oid: pg_sys::Oid,
+    all_tables: bool,
+    relation_oids: Vec<pg_sys::Oid>,
+    namespace_oids: Vec<pg_sys::Oid>,
+}
+
+/// Stable reasons for a stale publication binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationBindingMismatchReason {
+    MissingPublication,
+    PublicationNameReused,
+    PublicationRenamed,
+    PublicationOwnerChanged,
+    StreamRelationChanged,
+    PublicationRelationsChanged,
+    PublicationScopeChanged,
+    PrivateBindingIncomplete,
+}
+
+impl PublicationBindingMismatchReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingPublication => "missing_publication",
+            Self::PublicationNameReused => "publication_name_reused",
+            Self::PublicationRenamed => "publication_renamed",
+            Self::PublicationOwnerChanged => "publication_owner_changed",
+            Self::StreamRelationChanged => "stream_relation_changed",
+            Self::PublicationRelationsChanged => "publication_relations_changed",
+            Self::PublicationScopeChanged => "publication_scope_changed",
+            Self::PrivateBindingIncomplete => "private_binding_incomplete",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedPublicationBinding {
+    pub binding: PublicationBinding,
+    pub live_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrivateBindingState {
+    has_binding: bool,
+    has_legacy_name: bool,
+    names_agree: bool,
+}
+
+fn normalize_relation_oids(mut relation_oids: Vec<pg_sys::Oid>) -> Vec<pg_sys::Oid> {
+    relation_oids.sort_by_key(|oid| oid.to_u32());
+    relation_oids.dedup_by_key(|oid| oid.to_u32());
+    relation_oids
+}
+
+/// Pure binding classifier. It is deliberately independent of SPI so every
+/// stale-object branch can be tested without PostgreSQL.
+pub(crate) fn classify_publication_binding(
+    binding: Option<&PublicationBinding>,
+    legacy_name: Option<&str>,
+    live: Option<&LivePublication>,
+    name_oid: Option<pg_sys::Oid>,
+    current_stream_relid: pg_sys::Oid,
+) -> Result<(), PublicationBindingMismatchReason> {
+    let private = PrivateBindingState {
+        has_binding: binding.is_some(),
+        has_legacy_name: legacy_name.is_some(),
+        names_agree: binding
+            .zip(legacy_name)
+            .is_none_or(|(b, legacy)| b.publication_name == legacy),
+    };
+    if (!private.has_binding && private.has_legacy_name)
+        || (private.has_binding && !private.has_legacy_name)
+        || !private.names_agree
+    {
+        return Err(PublicationBindingMismatchReason::PrivateBindingIncomplete);
+    }
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    let Some(live) = live else {
+        return Err(
+            if name_oid.is_some_and(|oid| oid != binding.publication_oid) {
+                PublicationBindingMismatchReason::PublicationNameReused
+            } else {
+                PublicationBindingMismatchReason::MissingPublication
+            },
+        );
+    };
+    if live.oid != binding.publication_oid || live.name != binding.publication_name {
+        return Err(PublicationBindingMismatchReason::PublicationRenamed);
+    }
+    if live.owner_oid != binding.publication_owner_oid {
+        return Err(PublicationBindingMismatchReason::PublicationOwnerChanged);
+    }
+    if current_stream_relid != binding.stream_relid {
+        return Err(PublicationBindingMismatchReason::StreamRelationChanged);
+    }
+    if live.all_tables || !live.namespace_oids.is_empty() {
+        return Err(PublicationBindingMismatchReason::PublicationScopeChanged);
+    }
+    if normalize_relation_oids(live.relation_oids.clone())
+        != normalize_relation_oids(binding.expected_relation_oids.clone())
+    {
+        return Err(PublicationBindingMismatchReason::PublicationRelationsChanged);
+    }
+    Ok(())
+}
+
+fn publication_name(schema: &str, table: &str) -> String {
+    let base = format!("pgt_pub_{table}");
+    if base.len() <= MAX_IDENTIFIER_BYTES {
+        return base;
+    }
+    let framed = format!("schema\0{}\0table\0{}", schema.len(), schema);
+    let framed = format!("{framed}\0{}\0{table}", table.len());
+    let hash = xxhash_rust::xxh64::xxh64(framed.as_bytes(), PUBLICATION_NAME_HASH_SEED);
+    let suffix = format!("_{hash:016x}");
+    let prefix_bytes = MAX_IDENTIFIER_BYTES - suffix.len();
+    let mut end = prefix_bytes.min(base.len());
+    while end > 0 && !base.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &base[..end], suffix)
+}
+
+fn binding_table_exists() -> bool {
+    Spi::get_one::<bool>("SELECT to_regclass('pgtrickle.pgt_publication_bindings') IS NOT NULL")
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+pub(crate) fn load_publication_binding(
+    pgt_id: i64,
+) -> Result<Option<PublicationBinding>, PgTrickleError> {
+    if !binding_table_exists() {
+        return Ok(None);
+    }
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT pgt_id, stream_relid, publication_oid, publication_name, \
+                        publication_owner_oid, expected_relation_oids \
+                 FROM pgtrickle.pgt_publication_bindings WHERE pgt_id = $1",
+                None,
+                &[pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = rows.first();
+        Ok(Some(PublicationBinding {
+            pgt_id: row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL publication pgt_id".into()))?,
+            stream_relid: row
+                .get::<pg_sys::Oid>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL publication stream_relid".into())
+                })?,
+            publication_oid: row
+                .get::<pg_sys::Oid>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL publication OID".into()))?,
+            publication_name: row
+                .get::<String>(4)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| PgTrickleError::InternalError("NULL publication name".into()))?,
+            publication_owner_oid: row
+                .get::<pg_sys::Oid>(5)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL publication owner OID".into())
+                })?,
+            expected_relation_oids: row
+                .get::<Vec<pg_sys::Oid>>(6)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL publication relations".into())
+                })?,
+        }))
+    })
+}
+
+fn load_legacy_publication_name(pgt_id: i64) -> Result<Option<String>, PgTrickleError> {
+    Spi::get_one_with_args::<String>(
+        "SELECT downstream_publication_name FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+fn load_live_publication_by_oid(
+    oid: pg_sys::Oid,
+) -> Result<Option<LivePublication>, PgTrickleError> {
+    let Some((oid, name, owner_oid, all_tables)) = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT oid, pubname::text, pubowner, puballtables \
+                 FROM pg_catalog.pg_publication WHERE oid = $1",
+                None,
+                &[oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = rows.first();
+        let oid = row
+            .get::<pg_sys::Oid>(1)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("NULL publication OID".into()))?;
+        let name = row
+            .get::<String>(2)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("NULL publication name".into()))?;
+        let owner_oid = row
+            .get::<pg_sys::Oid>(3)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("NULL publication owner OID".into()))?;
+        let all_tables = row
+            .get::<bool>(4)
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("NULL publication scope".into()))?;
+        Ok(Some((oid, name, owner_oid, all_tables)))
+    })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(LivePublication {
+        oid,
+        name,
+        owner_oid,
+        all_tables,
+        relation_oids: load_explicit_publication_relids(oid)?,
+        namespace_oids: load_publication_namespace_oids(oid)?,
+    }))
+}
+
+fn load_live_publication_oid_by_name(name: &str) -> Result<Option<pg_sys::Oid>, PgTrickleError> {
+    Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT oid FROM pg_catalog.pg_publication WHERE pubname::text = $1",
+        &[name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+fn load_explicit_publication_relids(oid: pg_sys::Oid) -> Result<Vec<pg_sys::Oid>, PgTrickleError> {
+    let relids = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT prrelid FROM pg_catalog.pg_publication_rel \
+                 WHERE prpubid = $1 ORDER BY prrelid",
+                None,
+                &[oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        rows.map(|row| {
+            row.get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL publication relation OID".into())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    })?;
+    Ok(normalize_relation_oids(relids))
+}
+
+fn load_publication_namespace_oids(oid: pg_sys::Oid) -> Result<Vec<pg_sys::Oid>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT pnnspid FROM pg_catalog.pg_publication_namespace \
+                 WHERE pnpubid = $1 ORDER BY pnnspid",
+                None,
+                &[oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        rows.map(|row| {
+            row.get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL publication namespace OID".into())
+                })
+        })
+        .collect()
+    })
+}
+
+fn lock_stream_row(pgt_id: i64) -> Result<(), PgTrickleError> {
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("stream table with pgt_id {pgt_id} not found")))
+    .map(|_| ())
+}
+
+fn reload_stream_meta(pgt_id: i64) -> Result<StreamTableMeta, PgTrickleError> {
+    StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
+        PgTrickleError::NotFound(format!("stream table with pgt_id {pgt_id} not found"))
+    })
+}
+
+fn lock_publication_object(oid: pg_sys::Oid, lockmode: i32) {
+    // SAFETY: `LockDatabaseObject` is called on PostgreSQL's backend thread
+    // with the catalog relation OID and live publication OID read from the
+    // current database. The lock is transaction-scoped by PostgreSQL.
+    unsafe { pg_sys::LockDatabaseObject(pg_sys::PublicationRelationId, oid, 0, lockmode) }
+}
+
+fn lock_relation(oid: pg_sys::Oid, lockmode: i32) {
+    // SAFETY: `LockRelationOid` accepts an OID from the current catalog and
+    // is invoked on PostgreSQL's backend thread. The lock is held to xact end.
+    unsafe { pg_sys::LockRelationOid(oid, lockmode) }
+}
+
+fn binding_mismatch(
+    binding: &PublicationBinding,
+    reason: PublicationBindingMismatchReason,
+    live: Option<&LivePublication>,
+) -> PgTrickleError {
+    PgTrickleError::PublicationBindingMismatch {
+        publication_name: binding.publication_name.clone(),
+        reason: reason.as_str().to_string(),
+        detail: format!(
+            "stored publication_oid={}, stream_relid={}, owner_oid={}, live={:?}",
+            binding.publication_oid.to_u32(),
+            binding.stream_relid.to_u32(),
+            binding.publication_owner_oid.to_u32(),
+            live.map(|p| (p.oid.to_u32(), p.name.clone(), p.owner_oid.to_u32()))
+        ),
+    }
+}
+
+/// Lock and validate the immutable publication binding for a stream.
+pub(crate) fn prepare_publication_binding(
+    meta: &StreamTableMeta,
+    lockmode: i32,
+) -> Result<Option<ValidatedPublicationBinding>, PgTrickleError> {
+    let binding = load_publication_binding(meta.pgt_id)?;
+    let legacy_name = load_legacy_publication_name(meta.pgt_id)?;
+    let Some(binding) = binding else {
+        return if legacy_name.is_some() {
+            Err(PgTrickleError::PublicationBindingMismatch {
+                publication_name: legacy_name.unwrap_or_default(),
+                reason: PublicationBindingMismatchReason::PrivateBindingIncomplete
+                    .as_str()
+                    .to_string(),
+                detail: "legacy publication name exists without a canonical binding".into(),
+            })
+        } else {
+            Ok(None)
+        };
+    };
+    lock_publication_object(binding.publication_oid, lockmode);
+    lock_relation(binding.stream_relid, pg_sys::AccessShareLock as i32);
+    let live = load_live_publication_by_oid(binding.publication_oid)?;
+    let name_oid = load_live_publication_oid_by_name(&binding.publication_name)?;
+    if let Err(reason) = classify_publication_binding(
+        Some(&binding),
+        legacy_name.as_deref(),
+        live.as_ref(),
+        name_oid,
+        meta.pgt_relid,
+    ) {
+        return Err(binding_mismatch(&binding, reason, live.as_ref()));
+    }
+    Ok(Some(ValidatedPublicationBinding {
+        live_name: live
+            .ok_or_else(|| {
+                PgTrickleError::InternalError("validated publication disappeared".into())
+            })?
+            .name,
+        binding,
+    }))
+}
+
+/// Acquire every lifecycle lock for a multi-stream drop in deterministic
+/// order, then validate all bindings before the first public or storage drop.
+pub(crate) fn prevalidate_publication_bindings(
+    metas: &[StreamTableMeta],
+) -> Result<(), PgTrickleError> {
+    let mut sorted_metas = metas.iter().collect::<Vec<_>>();
+    sorted_metas.sort_by_key(|meta| meta.pgt_id);
+    let mut entries = Vec::new();
+
+    for meta in sorted_metas {
+        Spi::run_with_args(
+            "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+            &[meta.pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        lock_stream_row(meta.pgt_id)?;
+        let binding = load_publication_binding(meta.pgt_id)?;
+        let legacy_name = load_legacy_publication_name(meta.pgt_id)?;
+        if binding.is_none() && legacy_name.is_some() {
+            return Err(PgTrickleError::PublicationBindingMismatch {
+                publication_name: legacy_name.unwrap_or_default(),
+                reason: PublicationBindingMismatchReason::PrivateBindingIncomplete
+                    .as_str()
+                    .to_string(),
+                detail: "legacy publication name exists without a canonical binding".into(),
+            });
+        }
+        if let Some(binding) = binding {
+            entries.push((reload_stream_meta(meta.pgt_id)?, binding, legacy_name));
+        }
+    }
+
+    let mut publication_oids = entries
+        .iter()
+        .map(|(_, binding, _)| binding.publication_oid)
+        .collect::<Vec<_>>();
+    publication_oids.sort_by_key(|oid| oid.to_u32());
+    publication_oids.dedup_by_key(|oid| oid.to_u32());
+    for oid in publication_oids {
+        lock_publication_object(oid, pg_sys::AccessExclusiveLock as i32);
+    }
+
+    let mut relation_oids = entries
+        .iter()
+        .map(|(_, binding, _)| binding.stream_relid)
+        .collect::<Vec<_>>();
+    relation_oids.sort_by_key(|oid| oid.to_u32());
+    relation_oids.dedup_by_key(|oid| oid.to_u32());
+    for oid in relation_oids {
+        lock_relation(oid, pg_sys::AccessShareLock as i32);
+    }
+
+    for (meta, binding, legacy_name) in entries {
+        let live = load_live_publication_by_oid(binding.publication_oid)?;
+        let name_oid = load_live_publication_oid_by_name(&binding.publication_name)?;
+        if let Err(reason) = classify_publication_binding(
+            Some(&binding),
+            legacy_name.as_deref(),
+            live.as_ref(),
+            name_oid,
+            meta.pgt_relid,
+        ) {
+            return Err(binding_mismatch(&binding, reason, live.as_ref()));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_storage_replacement_allowed(
+    meta: &StreamTableMeta,
+) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    lock_stream_row(meta.pgt_id)?;
+    let current_meta = reload_stream_meta(meta.pgt_id)?;
+    if load_publication_binding(current_meta.pgt_id)?.is_none()
+        && load_legacy_publication_name(current_meta.pgt_id)?.is_none()
+    {
+        return Ok(());
+    }
+    prepare_publication_binding(&current_meta, pg_sys::AccessShareLock as i32)?;
+    Err(PgTrickleError::InvalidArgument(format!(
+        "cannot replace storage for stream table {}.{} while downstream publication '{}' is attached; drop the publication first",
+        current_meta.pgt_schema,
+        current_meta.pgt_name,
+        current_meta
+            .downstream_publication_name
+            .as_deref()
+            .unwrap_or("<unknown>"),
+    )))
+}
+
+/// Read-only publication provenance report used by lifecycle preflight and
+/// health reporting. Before the migration exists, legacy names are checked
+/// as observed current state; they are never adopted here.
+pub(crate) fn publication_binding_preflight() -> serde_json::Value {
+    let canonical_table_present = binding_table_exists();
+    let stream_query = if canonical_table_present {
+        "SELECT pgt_id, pgt_schema::text, pgt_name::text, pgt_relid, \
+                downstream_publication_name \
+         FROM pgtrickle.pgt_stream_tables st \
+         WHERE downstream_publication_name IS NOT NULL \
+            OR EXISTS (SELECT 1 FROM pgtrickle.pgt_publication_bindings b \
+                       WHERE b.pgt_id = st.pgt_id) \
+         ORDER BY pgt_id"
+    } else {
+        "SELECT pgt_id, pgt_schema::text, pgt_name::text, pgt_relid, \
+                downstream_publication_name \
+         FROM pgtrickle.pgt_stream_tables \
+         WHERE downstream_publication_name IS NOT NULL \
+         ORDER BY pgt_id"
+    };
+    let streams = match Spi::connect(|client| {
+        let rows = client
+            .select(stream_query, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        rows.map(|row| {
+            Ok((
+                row.get::<i64>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::InternalError("NULL stream pgt_id".into()))?,
+                row.get::<String>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::InternalError("NULL stream schema".into()))?,
+                row.get::<String>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| PgTrickleError::InternalError("NULL stream name".into()))?,
+                row.get::<pg_sys::Oid>(4)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError("NULL stream relation OID".into())
+                    })?,
+                row.get::<String>(5)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+            ))
+        })
+        .collect::<Result<Vec<_>, PgTrickleError>>()
+    }) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return serde_json::json!({
+                "ok": false,
+                "canonical_table_present": canonical_table_present,
+                "issues": [{
+                    "reason": "private_binding_incomplete",
+                    "detail": error.to_string(),
+                    "remediation": "Run pgtrickle.lifecycle_preflight() and repair the private catalog before retrying."
+                }]
+            });
+        }
+    };
+
+    let mut issues = Vec::new();
+    let mut observed_state_adoptions = 0usize;
+    for (pgt_id, schema, name, stream_relid, legacy_name) in streams {
+        let binding = match load_publication_binding(pgt_id) {
+            Ok(binding) => binding,
+            Err(error) => {
+                issues.push(serde_json::json!({
+                    "stream": format!("{schema}.{name}"),
+                    "reason": "private_binding_incomplete",
+                    "detail": error.to_string(),
+                    "remediation": "Repair the private binding catalog before retrying."
+                }));
+                continue;
+            }
+        };
+        let Some(legacy_name) = legacy_name else {
+            if binding.is_some() {
+                issues.push(serde_json::json!({
+                    "stream": format!("{schema}.{name}"),
+                    "reason": "private_binding_incomplete",
+                    "detail": "canonical binding exists without its legacy publication name",
+                    "remediation": "Restore the legacy projection from the canonical binding after review."
+                }));
+            }
+            continue;
+        };
+
+        let (binding, live) = if let Some(binding) = binding {
+            let live = load_live_publication_by_oid(binding.publication_oid)
+                .ok()
+                .flatten();
+            (binding, live)
+        } else if !canonical_table_present {
+            let Some(publication_oid) = load_live_publication_oid_by_name(&legacy_name)
+                .ok()
+                .flatten()
+            else {
+                issues.push(serde_json::json!({
+                    "stream": format!("{schema}.{name}"),
+                    "stored_name": legacy_name,
+                    "reason": "missing_publication",
+                    "remediation": "Recreate the publication through pgtrickle after reviewing the missing legacy object."
+                }));
+                continue;
+            };
+            let Some(live) = load_live_publication_by_oid(publication_oid).ok().flatten() else {
+                issues.push(serde_json::json!({
+                    "stream": format!("{schema}.{name}"),
+                    "stored_name": legacy_name,
+                    "reason": "missing_publication",
+                    "remediation": "Recreate the publication through pgtrickle after reviewing the missing legacy object."
+                }));
+                continue;
+            };
+            observed_state_adoptions += 1;
+            (
+                PublicationBinding {
+                    pgt_id,
+                    stream_relid,
+                    publication_oid,
+                    publication_name: legacy_name.clone(),
+                    publication_owner_oid: live.owner_oid,
+                    expected_relation_oids: vec![stream_relid],
+                },
+                Some(live),
+            )
+        } else {
+            issues.push(serde_json::json!({
+                "stream": format!("{schema}.{name}"),
+                "stored_name": legacy_name,
+                "reason": "private_binding_incomplete",
+                "detail": "legacy publication name exists without a canonical binding",
+                "remediation": "Run the v0.87.12 upgrade only after reviewing this row."
+            }));
+            continue;
+        };
+
+        let reason = classify_publication_binding(
+            Some(&binding),
+            Some(&legacy_name),
+            live.as_ref(),
+            load_live_publication_oid_by_name(&legacy_name)
+                .ok()
+                .flatten(),
+            stream_relid,
+        )
+        .err();
+        if let Some(reason) = reason {
+            issues.push(serde_json::json!({
+                "stream": format!("{schema}.{name}"),
+                "stored_name": binding.publication_name,
+                "stored_oid": binding.publication_oid.to_u32(),
+                "live_name": live.as_ref().map(|p| p.name.clone()),
+                "live_oid": live.as_ref().map(|p| p.oid.to_u32()),
+                "reason": reason.as_str(),
+                "remediation": "Restore the recorded identity or inspect the live object before manual recovery."
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "ok": issues.is_empty(),
+        "canonical_table_present": canonical_table_present,
+        "observed_state_adoptions": observed_state_adoptions,
+        "issues": issues,
+    })
+}
+
+pub(crate) fn publication_binding_health_summary() -> Option<(String, String)> {
+    if !binding_table_exists() {
+        return None;
+    }
+    let report = publication_binding_preflight();
+    let issues = report
+        .get("issues")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(1);
+    if issues == 0 {
+        Some((
+            "OK".to_string(),
+            "All downstream publication bindings match their stored OID, owner, scope, and relation set".to_string(),
+        ))
+    } else {
+        let summary = report
+            .get("issues")
+            .and_then(serde_json::Value::as_array)
+            .map(|issues| {
+                issues
+                    .iter()
+                    .take(3)
+                    .map(|issue| {
+                        format!(
+                            "{}:{}",
+                            issue
+                                .get("stream")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("unknown"),
+                            issue
+                                .get("reason")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("unknown")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "unavailable".to_string());
+        Some((
+            "ERROR".to_string(),
+            format!(
+                "{} downstream publication binding(s) are stale or incomplete ({summary}); inspect pgtrickle.lifecycle_preflight()",
+                issues,
+            ),
+        ))
+    }
+}
+
+fn insert_binding(binding: &PublicationBinding) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "INSERT INTO pgtrickle.pgt_publication_bindings \
+         (pgt_id, stream_relid, publication_oid, publication_name, publication_owner_oid, expected_relation_oids) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            binding.pgt_id.into(),
+            binding.stream_relid.into(),
+            binding.publication_oid.into(),
+            binding.publication_name.clone().into(),
+            binding.publication_owner_oid.into(),
+            binding.expected_relation_oids.clone().into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+fn clear_binding(pgt_id: i64) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_publication_bindings WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET downstream_publication_name = NULL, updated_at = now() WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+pub(crate) fn drop_validated_publication(
+    caller: &super::security_context::CallerContext,
+    validated: &ValidatedPublicationBinding,
+) -> Result<(), PgTrickleError> {
+    let sql = format!("DROP PUBLICATION {}", quote_ident(&validated.live_name));
+    super::security_context::with_caller_context(caller, || {
+        // nosemgrep: rust.spi.run.dynamic-format — validated publication names are quoted identifiers from pg_catalog.
+        Spi::run(&sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    })?;
+    clear_binding(validated.binding.pgt_id)
+}
 
 // ── CDC-PUB-1: stream_table_to_publication() ─────────────────────────────
 
@@ -14,61 +770,102 @@ use crate::error::PgTrickleError;
 /// Creates a PostgreSQL publication exposing the named stream table so that
 /// Kafka Connect, Debezium, and other logical replication subscribers can
 /// receive change events without a separate replication slot.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn stream_table_to_publication(name: &str) {
-    // ERR-2 (v0.26.0): Use typed into_pg_error() at the API boundary.
-    stream_table_to_publication_impl(name).unwrap_or_else(|e| e.into_pg_error());
+    if let Err(error) = stream_table_to_publication_impl(name) {
+        super::raise_error_with_context(error);
+    }
 }
 
 fn stream_table_to_publication_impl(name: &str) -> Result<(), PgTrickleError> {
-    // SEC-001 (v0.70.0): Use shared parse_qualified_name_pub which respects
-    // current_schema() for unqualified names instead of hardcoding 'public'.
-    let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &table)?;
+    let caller = super::security_context::capture_caller_context(
+        super::security_context::EntryContext::SecurityDefiner,
+    )?;
+    let (_, _, meta) = resolve_owned_stream_table_with_caller(name, &caller)?;
 
-    // SEC-2: Ownership check — same guard as alter/drop/pause/resume.
-    super::helpers::check_stream_table_ownership(meta.pgt_relid, &schema, &table)?;
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    lock_stream_row(meta.pgt_id)?;
+    let meta = reload_stream_meta(meta.pgt_id)?;
 
-    if meta.downstream_publication_name.is_some() {
+    if load_publication_binding(meta.pgt_id)?.is_some()
+        || load_legacy_publication_name(meta.pgt_id)?.is_some()
+    {
         return Err(PgTrickleError::PublicationAlreadyExists(name.into()));
     }
 
-    let pub_name = format!("pgt_pub_{}", meta.pgt_name);
+    let pub_name = publication_name(&meta.pgt_schema, &meta.pgt_name);
     let qualified_table = format!("{}.{}", meta.pgt_schema, meta.pgt_name);
 
-    Spi::connect_mut(|client| {
-        // Create the publication for the stream table's storage table.
-        client
-            .update(
-                &format!(
-                    "CREATE PUBLICATION {} FOR TABLE {}",
-                    quote_ident(&pub_name),
-                    quote_ident_qualified(&meta.pgt_schema, &meta.pgt_name)
-                ),
-                None,
-                &[],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        // Store the publication name in the catalog.
-        client
-            .update(
-                "UPDATE pgtrickle.pgt_stream_tables \
-                 SET downstream_publication_name = $1, updated_at = now() \
-                 WHERE pgt_id = $2",
-                None,
-                &[pub_name.clone().into(), meta.pgt_id.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        pgrx::info!(
-            "pg_trickle: created publication '{}' for stream table '{}'",
-            pub_name,
-            qualified_table
-        );
-
-        Ok::<(), PgTrickleError>(())
+    // Native PostgreSQL publication checks must run as the original caller.
+    let create_sql = format!(
+        "CREATE PUBLICATION {} FOR TABLE {}",
+        quote_ident(&pub_name),
+        quote_ident_qualified(&meta.pgt_schema, &meta.pgt_name)
+    );
+    super::security_context::with_caller_context(&caller, || {
+        Spi::run(&create_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
     })?;
+
+    let live = load_live_publication_oid_by_name(&pub_name)?.ok_or_else(|| {
+        PgTrickleError::InternalError("created publication is not visible".into())
+    })?;
+    lock_publication_object(live, pg_sys::AccessShareLock as i32);
+    let live_publication = load_live_publication_by_oid(live)?
+        .ok_or_else(|| PgTrickleError::InternalError("created publication disappeared".into()))?;
+    if let Err(reason) = classify_publication_binding(
+        Some(&PublicationBinding {
+            pgt_id: meta.pgt_id,
+            stream_relid: meta.pgt_relid,
+            publication_oid: live_publication.oid,
+            publication_name: pub_name.clone(),
+            publication_owner_oid: caller.role_oid,
+            expected_relation_oids: vec![meta.pgt_relid],
+        }),
+        Some(&pub_name),
+        Some(&live_publication),
+        Some(live_publication.oid),
+        meta.pgt_relid,
+    ) {
+        return Err(binding_mismatch(
+            &PublicationBinding {
+                pgt_id: meta.pgt_id,
+                stream_relid: meta.pgt_relid,
+                publication_oid: live_publication.oid,
+                publication_name: pub_name,
+                publication_owner_oid: caller.role_oid,
+                expected_relation_oids: vec![meta.pgt_relid],
+            },
+            reason,
+            Some(&live_publication),
+        ));
+    }
+
+    let binding = PublicationBinding {
+        pgt_id: meta.pgt_id,
+        stream_relid: meta.pgt_relid,
+        publication_oid: live_publication.oid,
+        publication_name: live_publication.name.clone(),
+        publication_owner_oid: live_publication.owner_oid,
+        expected_relation_oids: normalize_relation_oids(live_publication.relation_oids.clone()),
+    };
+    insert_binding(&binding)?;
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET downstream_publication_name = $1, updated_at = now() WHERE pgt_id = $2",
+        &[binding.publication_name.clone().into(), meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    pgrx::info!(
+        "pg_trickle: created publication '{}' for stream table '{}'",
+        binding.publication_name,
+        qualified_table
+    );
 
     Ok(())
 }
@@ -76,53 +873,40 @@ fn stream_table_to_publication_impl(name: &str) -> Result<(), PgTrickleError> {
 // ── CDC-PUB-2: drop_stream_table_publication() ──────────────────────────
 
 /// CDC-PUB-2: Drop the logical replication publication for a stream table.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn drop_stream_table_publication(name: &str) {
-    // ERR-2 (v0.26.0): Use typed into_pg_error() at the API boundary.
-    drop_stream_table_publication_impl(name).unwrap_or_else(|e| e.into_pg_error());
+    if let Err(error) = drop_stream_table_publication_impl(name) {
+        super::raise_error_with_context(error);
+    }
 }
 
 fn drop_stream_table_publication_impl(name: &str) -> Result<(), PgTrickleError> {
-    // SEC-001 (v0.70.0): Use shared parse_qualified_name_pub.
-    let (schema, table) = super::helpers::parse_qualified_name_pub(name)?;
-    let meta = StreamTableMeta::get_by_name(&schema, &table)?;
+    let caller = super::security_context::capture_caller_context(
+        super::security_context::EntryContext::SecurityDefiner,
+    )?;
+    let (_, _, meta) = resolve_owned_stream_table_with_caller(name, &caller)?;
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[meta.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    lock_stream_row(meta.pgt_id)?;
+    let meta = reload_stream_meta(meta.pgt_id)?;
 
-    // SEC-2: Ownership check — same guard as alter/drop/pause/resume.
-    super::helpers::check_stream_table_ownership(meta.pgt_relid, &schema, &table)?;
-
-    let pub_name = match &meta.downstream_publication_name {
-        Some(p) => p.clone(),
-        None => return Err(PgTrickleError::PublicationNotFound(name.into())),
+    let Some(validated) = prepare_publication_binding(&meta, pg_sys::AccessExclusiveLock as i32)?
+    else {
+        return Err(PgTrickleError::PublicationNotFound(name.into()));
     };
+    let pub_name = validated.live_name.clone();
+    drop_validated_publication(&caller, &validated)?;
 
-    Spi::connect_mut(|client| {
-        client
-            .update(
-                &format!("DROP PUBLICATION IF EXISTS {}", quote_ident(&pub_name)),
-                None,
-                &[],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        client
-            .update(
-                "UPDATE pgtrickle.pgt_stream_tables \
-                 SET downstream_publication_name = NULL, updated_at = now() \
-                 WHERE pgt_id = $1",
-                None,
-                &[meta.pgt_id.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        pgrx::info!(
-            "pg_trickle: dropped publication '{}' for stream table '{}.{}'",
-            pub_name,
-            meta.pgt_schema,
-            meta.pgt_name
-        );
-
-        Ok::<(), PgTrickleError>(())
-    })?;
+    pgrx::info!(
+        "pg_trickle: dropped publication '{}' for stream table '{}.{}'",
+        pub_name,
+        meta.pgt_schema,
+        meta.pgt_name
+    );
 
     Ok(())
 }
@@ -617,6 +1401,7 @@ pub(crate) fn check_subscriber_lag(publication_name: &str) -> bool {
     let mut any_lagging = false;
 
     let result = Spi::connect(|client| {
+        // nosemgrep: rust.spi.select.dynamic-format — publication name is escaped for the fixed slot-name LIKE pattern.
         let rows = client.select(&sql, None, &[]).map_err(|e| {
             pgrx::warning!(
                 "[pg_trickle] PUB-1: failed to query replication slots for '{}': {}",
@@ -842,5 +1627,161 @@ mod tests {
     fn test_quote_ident_null_char() {
         // Null characters should be preserved in quoting
         assert_eq!(quote_ident("a\0b"), "\"a\0b\"");
+    }
+
+    fn oid(value: u32) -> pg_sys::Oid {
+        pg_sys::Oid::from(value)
+    }
+
+    fn binding() -> PublicationBinding {
+        PublicationBinding {
+            pgt_id: 1,
+            stream_relid: oid(10),
+            publication_oid: oid(20),
+            publication_name: "pgt_pub_orders".to_string(),
+            publication_owner_oid: oid(30),
+            expected_relation_oids: vec![oid(10)],
+        }
+    }
+
+    fn live() -> LivePublication {
+        LivePublication {
+            oid: oid(20),
+            name: "pgt_pub_orders".to_string(),
+            owner_oid: oid(30),
+            all_tables: false,
+            relation_oids: vec![oid(10)],
+            namespace_oids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_publication_binding_classifier_accepts_exact_binding() {
+        let b = binding();
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&live()),
+                Some(oid(20)),
+                oid(10)
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_publication_binding_classifier_private_completeness_and_name_reuse() {
+        let b = binding();
+        assert_eq!(
+            classify_publication_binding(Some(&b), None, Some(&live()), Some(oid(20)), oid(10)),
+            Err(PublicationBindingMismatchReason::PrivateBindingIncomplete)
+        );
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                None,
+                Some(oid(21)),
+                oid(10)
+            ),
+            Err(PublicationBindingMismatchReason::PublicationNameReused)
+        );
+        assert_eq!(
+            classify_publication_binding(Some(&b), Some(&b.publication_name), None, None, oid(10)),
+            Err(PublicationBindingMismatchReason::MissingPublication)
+        );
+    }
+
+    #[test]
+    fn test_publication_binding_classifier_has_deterministic_drift_priority() {
+        let b = binding();
+        let mut p = live();
+        p.name = "renamed".to_string();
+        p.owner_oid = oid(31);
+        p.relation_oids = vec![oid(99)];
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&p),
+                Some(oid(20)),
+                oid(99)
+            ),
+            Err(PublicationBindingMismatchReason::PublicationRenamed)
+        );
+        p.name = b.publication_name.clone();
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&p),
+                Some(oid(20)),
+                oid(99)
+            ),
+            Err(PublicationBindingMismatchReason::PublicationOwnerChanged)
+        );
+        p.owner_oid = b.publication_owner_oid;
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&p),
+                Some(oid(20)),
+                oid(99)
+            ),
+            Err(PublicationBindingMismatchReason::StreamRelationChanged)
+        );
+        p.relation_oids = vec![oid(10)];
+        p.all_tables = true;
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&p),
+                Some(oid(20)),
+                oid(10)
+            ),
+            Err(PublicationBindingMismatchReason::PublicationScopeChanged)
+        );
+    }
+
+    #[test]
+    fn test_publication_binding_classifier_compares_relations_as_sets() {
+        let b = binding();
+        let mut p = live();
+        p.relation_oids = vec![oid(10), oid(10)];
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&p),
+                Some(oid(20)),
+                oid(10)
+            ),
+            Ok(())
+        );
+        p.relation_oids = vec![oid(10), oid(11)];
+        assert_eq!(
+            classify_publication_binding(
+                Some(&b),
+                Some(&b.publication_name),
+                Some(&p),
+                Some(oid(20)),
+                oid(10)
+            ),
+            Err(PublicationBindingMismatchReason::PublicationRelationsChanged)
+        );
+    }
+
+    #[test]
+    fn test_publication_name_is_bounded_and_utf8_safe() {
+        let short = publication_name("public", "orders");
+        assert_eq!(short, "pgt_pub_orders");
+        let long = publication_name("weird.schema", &"é".repeat(80));
+        assert!(long.len() <= MAX_IDENTIFIER_BYTES);
+        assert!(long.is_char_boundary(long.len()));
+        assert_eq!(long, publication_name("weird.schema", &"é".repeat(80)));
+        assert_ne!(long, publication_name("other.schema", &"é".repeat(80)));
     }
 }
