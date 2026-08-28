@@ -2953,6 +2953,71 @@ mod tests {
     }
 
     #[test]
+    fn test_join_pk_aliases_nested_aggregate_uses_many_to_one_key() {
+        let parent = scan_with_pk("p", 1, &["id", "name"], &["id"]);
+        let aggregate_body = OpTree::Aggregate {
+            group_by: vec![col("parent_id")],
+            aggregates: vec![],
+            child: Box::new(scan_node("leaf", 2, &["parent_id"])),
+        };
+        let left_aggregate = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "al".to_string(),
+            alias: "al".to_string(),
+            columns: vec!["parent_id".to_string()],
+            cte_def_aliases: vec![],
+            column_aliases: vec![],
+            body: Some(Box::new(aggregate_body.clone())),
+        };
+        let right_aggregate = OpTree::CteScan {
+            cte_id: 1,
+            cte_name: "ar".to_string(),
+            alias: "ar".to_string(),
+            columns: vec!["parent_id".to_string()],
+            cte_def_aliases: vec![],
+            column_aliases: vec![],
+            body: Some(Box::new(aggregate_body)),
+        };
+        let nested_left = OpTree::LeftJoin {
+            condition: Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(qualified_col("p", "id")),
+                right: Box::new(qualified_col("al", "parent_id")),
+            },
+            left: Box::new(parent),
+            right: Box::new(left_aggregate),
+        };
+        let join = OpTree::LeftJoin {
+            condition: Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(qualified_col("p", "id")),
+                right: Box::new(qualified_col("ar", "parent_id")),
+            },
+            left: Box::new(nested_left.clone()),
+            right: Box::new(right_aggregate.clone()),
+        };
+        let expressions = vec![qualified_col("p", "id")];
+        let aliases = vec!["id".to_string()];
+
+        assert_eq!(
+            join_pk_aliases(&expressions, &aliases, &join),
+            Some(aliases.clone())
+        );
+        assert_eq!(join_pk_expr_indices(&expressions, &join), vec![0]);
+
+        let non_key_join = OpTree::LeftJoin {
+            condition: Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(qualified_col("p", "id")),
+                right: Box::new(qualified_col("ar", "not_a_key")),
+            },
+            left: Box::new(nested_left),
+            right: Box::new(right_aggregate),
+        };
+        assert_eq!(join_pk_aliases(&expressions, &aliases, &non_key_join), None);
+    }
+
+    #[test]
     fn test_join_pk_aliases_non_join_returns_none() {
         let scan = scan_node("t", 1, &["id"]);
         let result = join_pk_aliases(&[col("id")], &["id".to_string()], &scan);

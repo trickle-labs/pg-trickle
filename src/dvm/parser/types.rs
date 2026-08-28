@@ -3030,59 +3030,29 @@ fn collect_refs_from_agg(agg: &AggExpr, refs: &mut ColumnRefSet) -> bool {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// For a Project over InnerJoin/LeftJoin, find the output aliases that
-/// correspond to primary key columns of the join's source tables.
+/// correspond to stable key columns of the join's source tables.
 ///
 /// PK-based row-IDs are stable across value changes on the other side of
 /// the join, fixing the simultaneous-change bug where DELETE hashes are
 /// computed with current (not old) values.
 ///
-/// Returns `None` if no PK aliases can be identified (caller should
+/// Aggregate CTEs contribute their GROUP BY keys. If only one side's key is
+/// visible, it is sufficient for a many-to-one join when the other side's
+/// stable key is fully constrained by the join condition.
+///
+/// Returns `None` if no stable key aliases can be identified (caller should
 /// fall back to hashing all aliases).
 pub fn join_pk_aliases(
     expressions: &[Expr],
     aliases: &[String],
     join_child: &OpTree,
 ) -> Option<Vec<String>> {
-    let (left, right) = match join_child {
-        OpTree::InnerJoin { left, right, .. }
-        | OpTree::LeftJoin { left, right, .. }
-        | OpTree::FullJoin { left, right, .. } => (left.as_ref(), right.as_ref()),
-        _ => return None,
-    };
-
-    let left_alias = left.alias();
-    let right_alias = right.alias();
-    let left_pks = scan_pk_columns(left);
-    let right_pks = scan_pk_columns(right);
-
-    // Collect PK aliases from each side separately. We need at least
-    // one PK alias per side to uniquely identify join combinations.
-    let mut left_pk_aliases = Vec::new();
-    let mut right_pk_aliases = Vec::new();
-    for (expr, alias) in expressions.iter().zip(aliases.iter()) {
-        if let Expr::ColumnRef {
-            table_alias: Some(tbl),
-            column_name,
-        } = expr
-        {
-            if tbl == left_alias && left_pks.contains(column_name) {
-                left_pk_aliases.push(alias.clone());
-            } else if tbl == right_alias && right_pks.contains(column_name) {
-                right_pk_aliases.push(alias.clone());
-            }
-        }
-    }
-
-    // Require PKs from BOTH sides to uniquely identify each join
-    // combination. If either side's PK is missing from the output,
-    // fall back to hashing all columns (content-based).
-    if left_pk_aliases.is_empty() || right_pk_aliases.is_empty() {
-        None
-    } else {
-        let mut pk_aliases = left_pk_aliases;
-        pk_aliases.extend(right_pk_aliases);
-        Some(pk_aliases)
-    }
+    join_pk_expr_indices_for(expressions, join_child).map(|indices| {
+        indices
+            .into_iter()
+            .filter_map(|index| aliases.get(index).cloned())
+            .collect()
+    })
 }
 
 /// For a Project over InnerJoin/LeftJoin, return the indices of
@@ -3091,42 +3061,156 @@ pub fn join_pk_aliases(
 /// Used by `diff_project` to hash only PK-corresponding expressions
 /// for the delta's row-ID recomputation.
 pub fn join_pk_expr_indices(expressions: &[Expr], join_child: &OpTree) -> Vec<usize> {
+    join_pk_expr_indices_for(expressions, join_child).unwrap_or_default()
+}
+
+fn join_pk_expr_indices_for(expressions: &[Expr], join_child: &OpTree) -> Option<Vec<usize>> {
     let (left, right) = match join_child {
         OpTree::InnerJoin { left, right, .. }
         | OpTree::LeftJoin { left, right, .. }
         | OpTree::FullJoin { left, right, .. } => (left.as_ref(), right.as_ref()),
-        _ => return Vec::new(),
+        _ => return None,
     };
 
-    let left_alias = left.alias();
-    let right_alias = right.alias();
-    let left_pks = scan_pk_columns(left);
-    let right_pks = scan_pk_columns(right);
+    let left_keys = stable_join_keys(left);
+    let right_keys = stable_join_keys(right);
+    let left_indices = matching_key_indices(expressions, &left_keys);
+    let right_indices = matching_key_indices(expressions, &right_keys);
 
-    // Collect PK indices from each side separately.
-    let mut left_indices = Vec::new();
-    let mut right_indices = Vec::new();
-    for (i, expr) in expressions.iter().enumerate() {
-        if let Expr::ColumnRef {
-            table_alias: Some(tbl),
-            column_name,
-        } = expr
-        {
-            if tbl == left_alias && left_pks.contains(column_name) {
-                left_indices.push(i);
-            } else if tbl == right_alias && right_pks.contains(column_name) {
-                right_indices.push(i);
-            }
+    if !left_indices.is_empty() && !right_indices.is_empty() {
+        let mut indices = left_indices;
+        indices.extend(right_indices);
+        return Some(indices);
+    }
+
+    let condition = match join_child {
+        OpTree::InnerJoin { condition, .. }
+        | OpTree::LeftJoin { condition, .. }
+        | OpTree::FullJoin { condition, .. } => condition,
+        _ => unreachable!(),
+    };
+
+    if !left_indices.is_empty()
+        && !right_keys.is_empty()
+        && right_keys.iter().all(|(alias, key)| {
+            condition_contains_cross_side_key(condition, alias, key, &left_keys)
+        })
+    {
+        return Some(left_indices);
+    }
+    if !right_indices.is_empty()
+        && !left_keys.is_empty()
+        && left_keys.iter().all(|(alias, key)| {
+            condition_contains_cross_side_key(condition, alias, key, &right_keys)
+        })
+    {
+        return Some(right_indices);
+    }
+
+    None
+}
+
+/// Return stable `(source alias, key column)` pairs visible from a join side.
+/// GROUP BY keys are stable identities for aggregate CTEs.
+fn stable_join_keys(op: &OpTree) -> Vec<(String, String)> {
+    match op {
+        OpTree::Scan { alias, .. } | OpTree::CteScan { alias, .. } => scan_pk_columns(op)
+            .into_iter()
+            .map(|key| (alias.clone(), key))
+            .collect(),
+        OpTree::Aggregate { group_by, .. } => group_by
+            .iter()
+            .map(|expr| (op.alias().to_string(), expr.output_name()))
+            .collect(),
+        OpTree::Filter { child, .. } | OpTree::Project { child, .. } => stable_join_keys(child),
+        OpTree::Subquery {
+            alias,
+            column_aliases,
+            child,
+        } => {
+            let child_columns = child.output_columns();
+            let visible_columns = if column_aliases.is_empty() {
+                child_columns.clone()
+            } else {
+                column_aliases.clone()
+            };
+            stable_join_keys(child)
+                .into_iter()
+                .filter_map(|(_, key)| {
+                    child_columns
+                        .iter()
+                        .position(|column| column == &key)
+                        .and_then(|index| visible_columns.get(index))
+                        .map(|visible| (alias.clone(), visible.clone()))
+                })
+                .collect()
         }
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            let mut keys = stable_join_keys(left);
+            keys.extend(stable_join_keys(right));
+            keys
+        }
+        OpTree::SemiJoin { left, .. } | OpTree::AntiJoin { left, .. } => stable_join_keys(left),
+        _ => Vec::new(),
     }
+}
 
-    // Require PKs from BOTH sides.
-    if left_indices.is_empty() || right_indices.is_empty() {
-        return Vec::new();
+fn matching_key_indices(expressions: &[Expr], keys: &[(String, String)]) -> Vec<usize> {
+    expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expr)| match expr {
+            Expr::ColumnRef {
+                table_alias: Some(alias),
+                column_name,
+            } if keys
+                .iter()
+                .any(|(key_alias, key)| key_alias == alias && key == column_name) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn condition_contains_cross_side_key(
+    condition: &Expr,
+    key_alias: &str,
+    key_column: &str,
+    other_keys: &[(String, String)],
+) -> bool {
+    match condition {
+        Expr::BinaryOp { op, left, right } if op == "=" => {
+            let matches_key = |expr: &Expr, other: &Expr| {
+                matches!(
+                    expr,
+                    Expr::ColumnRef {
+                        table_alias: Some(alias),
+                        column_name,
+                    } if alias == key_alias
+                        && column_name == key_column
+                        && matches!(
+                            other,
+                            Expr::ColumnRef {
+                                table_alias: Some(other_alias),
+                                column_name: other_column,
+                            } if other_keys
+                                .iter()
+                                .any(|(alias, key)| alias == other_alias && key == other_column)
+                        )
+                )
+            };
+            matches_key(left, right) || matches_key(right, left)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            condition_contains_cross_side_key(left, key_alias, key_column, other_keys)
+                || condition_contains_cross_side_key(right, key_alias, key_column, other_keys)
+        }
+        _ => false,
     }
-    let mut indices = left_indices;
-    indices.extend(right_indices);
-    indices
 }
 
 /// Extract stable key column names from a Scan, transparent wrapper, or

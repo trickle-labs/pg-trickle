@@ -166,7 +166,12 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             .iter()
             .map(|expr| resolve_expr_to_child(expr, child_cols))
             .collect();
-        format!("{} AS __pgt_row_id", build_hash_expr(&hash_cols))
+        let row_id_hash = if hash_cols.len() == 1 {
+            format!("pgtrickle.pg_trickle_hash(({})::TEXT)", hash_cols[0])
+        } else {
+            build_hash_expr(&hash_cols)
+        };
+        format!("{row_id_hash} AS __pgt_row_id")
     } else if is_lateral_child || is_semijoin_child {
         // Hash all projected columns — matches row_id_key_columns()
         // which returns all aliases for lateral children and semi/anti-join
