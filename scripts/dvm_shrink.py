@@ -4,10 +4,8 @@
 Companion to dvm_replay.py: reuses its scenario loader/validator and psql
 runner instead of re-parsing the format. See roadmap COR-17.
 
-ponytail: only cycles, mutations, and initial_data row-tuples are shrunk.
-The full COR-17 ladder (query branches, operators, columns, aliases, types,
-constraints, execution settings) is deferred -- add the next rung here if a
-real bug report needs it.
+The reducer tries cheap SQL/schema simplifications after structural shrinking;
+each candidate is retained only when the original failure remains.
 """
 
 from __future__ import annotations
@@ -28,6 +26,7 @@ _PK_UPDATE_RE = re.compile(
     r"^\s*UPDATE\b.*\bWHERE\s+\w+\s*=\s*\d+\s*(RETURNING\b.*)?;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_SQL_LITERAL_RE = re.compile(r"'[^']*'|\b\d+\b")
 
 
 def _split_top_level_tuples(values_src: str) -> list[str]:
@@ -61,6 +60,17 @@ def _parse_values(sql: str) -> tuple[str, list[str], str] | None:
     last_tuple_end = rest.rfind(tuples[-1]) + len(tuples[-1])
     suffix = rest[last_tuple_end:]
     return prefix, tuples, suffix
+
+
+def _simplify_sql(sql: str) -> list[str]:
+    """Generate safe, local reductions for literals in SQL statements."""
+    candidates = []
+    for match in _SQL_LITERAL_RE.finditer(sql):
+        literal = match.group(0)
+        replacement = "'x'" if literal.startswith("'") else "0"
+        if literal != replacement:
+            candidates.append(sql[: match.start()] + replacement + sql[match.end() :])
+    return candidates
 
 
 def shrink_scenario(scenario: dict, still_fails: Callable[[dict], bool]) -> dict:
@@ -110,6 +120,26 @@ def shrink_scenario(scenario: dict, still_fails: Callable[[dict], bool]) -> dict
                 if still_fails(candidate):
                     scenario = candidate
                     changed = True
+
+        # (d) simplify mutation and setup literals (values, keys, aliases).
+        for section in ("setup_sql", "initial_data"):
+            statements = scenario["schema"][section] if section == "setup_sql" else scenario[section]
+            for si, stmt in enumerate(statements):
+                for reduced in _simplify_sql(stmt):
+                    candidate = copy.deepcopy(scenario)
+                    target = candidate["schema"][section] if section == "setup_sql" else candidate[section]
+                    target[si] = reduced
+                    if still_fails(candidate):
+                        scenario = candidate
+                        changed = True
+        for ci, cycle in enumerate(scenario["cycles"]):
+            for mi, mutation in enumerate(cycle["mutations"]):
+                for reduced in _simplify_sql(mutation["sql"]):
+                    candidate = copy.deepcopy(scenario)
+                    candidate["cycles"][ci]["mutations"][mi]["sql"] = reduced
+                    if still_fails(candidate):
+                        scenario = candidate
+                        changed = True
 
     return scenario
 

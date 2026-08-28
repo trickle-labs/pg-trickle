@@ -63,6 +63,36 @@ impl SemanticCoverageObservation {
     pub fn observe_outer_join(&mut self, transition: impl Into<String>) {
         self.outer_join_transitions.insert(transition.into());
     }
+
+    /// Consume the JSON emitted by a DVM decision trace. Unknown fields are
+    /// ignored so traces can gain detail without breaking the coverage gate.
+    pub fn observe_decision_trace(&mut self, trace: &serde_json::Value) {
+        for event in trace["events"].as_array().into_iter().flatten() {
+            if let Some(plan) = event["snapshot_plan"].as_str() {
+                self.observe_snapshot_plan(plan);
+            }
+            for decision in event["decisions"].as_array().into_iter().flatten() {
+                if let Some(decision) = decision.as_str() {
+                    for (needle, transition) in [
+                        ("empty_to_nonempty", "empty_to_nonempty"),
+                        ("nonempty_to_empty", "nonempty_to_empty"),
+                        ("winner_change", "winner_change"),
+                        ("nonempty_to_nonempty", "nonempty_to_nonempty"),
+                        ("matched_to_unmatched", "matched_to_unmatched"),
+                        ("unmatched_to_matched", "unmatched_to_matched"),
+                    ] {
+                        if decision.contains(needle) {
+                            if needle.starts_with("matched") || needle.starts_with("unmatched") {
+                                self.observe_outer_join(transition);
+                            } else {
+                                self.observe_group_lifecycle(transition);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +309,7 @@ pub fn pairwise_cover(
 #[derive(Debug, Clone)]
 pub struct CompositionCase {
     pub id: &'static str,
+    pub shape: &'static str,
     pub dimensions: DimensionAssignment,
     pub query: RelQuery,
     pub expected_join: JoinKind,
@@ -291,6 +322,7 @@ pub fn mandatory_cases() -> Vec<CompositionCase> {
             let dimensions = assignment(index);
             CompositionCase {
                 id: CASE_IDS[index],
+                shape: CASE_IDS[index],
                 expected_join: match index % 3 {
                     0 => JoinKind::Left,
                     1 => JoinKind::Full,
@@ -363,14 +395,14 @@ fn build_query(index: usize, dimensions: &DimensionAssignment) -> RelQuery {
     let narrow = dimensions.values["logical_width"] == "narrow";
     let aliases = dimensions.values["aliases"] == "definition_and_reference";
     let left_name = if aliases {
-        "left_aggregate_definition"
+        format!("{}_left_aggregate_definition", CASE_IDS[index])
     } else {
-        "left_aggregate"
+        format!("{}_left_aggregate", CASE_IDS[index])
     };
     let right_name = if aliases {
-        "right_aggregate_definition"
+        format!("{}_right_aggregate_definition", CASE_IDS[index])
     } else {
-        "right_aggregate"
+        format!("{}_right_aggregate", CASE_IDS[index])
     };
 
     let left_schema = source_schema("composition_left", nullable, wide);
@@ -632,5 +664,20 @@ mod tests {
         let report = validate_semantic_coverage(&requirements, &observed);
         assert!(!report.passed);
         assert_eq!(report.missing["outer_join_transitions"].len(), 2);
+    }
+
+    #[test]
+    fn decision_trace_populates_observed_semantic_coverage() {
+        let mut observed = SemanticCoverageObservation::default();
+        let trace = serde_json::json!({"events": [
+            {"snapshot_plan": "exact_per_leaf", "decisions": ["empty_to_nonempty", "matched_to_unmatched"]},
+            {"snapshot_plan": "exact_combined", "decisions": ["nonempty_to_empty", "unmatched_to_matched"]},
+            {"snapshot_plan": "post_change_correction", "decisions": ["winner_change", "nonempty_to_nonempty"]},
+            {"snapshot_plan": "unsupported", "decisions": []}
+        ]});
+        observed.observe_decision_trace(&trace);
+        assert_eq!(observed.snapshot_plans.len(), 4);
+        assert_eq!(observed.group_lifecycle_transitions.len(), 4);
+        assert_eq!(observed.outer_join_transitions.len(), 2);
     }
 }
