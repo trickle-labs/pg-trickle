@@ -2053,8 +2053,8 @@ impl OpTree {
                             OpTree::Subquery { child: nested, .. }
                                 if matches!(nested.as_ref(), OpTree::Project { .. })
                         );
-                        if is_nested_projection
-                            && !mapped.is_empty()
+                        if !mapped.is_empty()
+                            && (mapped.len() == child_keys.len() || is_nested_projection)
                             && mapped.iter().all(|m| out.contains(m))
                         {
                             return Some(mapped);

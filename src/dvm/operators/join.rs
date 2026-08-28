@@ -1207,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_inner_join_aggregate_cte_uses_exact_combined_plan() {
+    fn test_diff_inner_join_aggregate_cte_uses_exact_per_leaf_plan() {
         let cte_body = aggregate(
             vec![colref("parent_id")],
             vec![count_star("count")],
@@ -1231,7 +1231,7 @@ mod tests {
             entries: vec![("agg".into(), cte_body)],
         };
 
-        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactCombined);
+        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactPerLeaf);
         let mut ctx = test_ctx().with_cte_registry(registry);
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
