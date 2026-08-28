@@ -73,6 +73,9 @@ impl SemanticCoverageObservation {
             }
             for decision in event["decisions"].as_array().into_iter().flatten() {
                 if let Some(decision) = decision.as_str() {
+                    if let Some(bucket) = decision.strip_prefix("changed_leaf_bucket=") {
+                        self.changed_leaf_buckets.insert(bucket.to_string());
+                    }
                     for (needle, transition) in [
                         ("empty_to_nonempty", "empty_to_nonempty"),
                         ("nonempty_to_empty", "nonempty_to_empty"),
@@ -314,6 +317,8 @@ pub struct CompositionCase {
     pub query: RelQuery,
     pub expected_join: JoinKind,
     pub changed_leaves: &'static str,
+    pub aggregate_leaf_count: usize,
+    pub join_depth: usize,
 }
 
 pub fn mandatory_cases() -> Vec<CompositionCase> {
@@ -328,10 +333,23 @@ pub fn mandatory_cases() -> Vec<CompositionCase> {
                     1 => JoinKind::Full,
                     _ => JoinKind::Inner,
                 },
-                changed_leaves: match index % 3 {
-                    0 => "one",
-                    1 => "two",
-                    _ => "all",
+                changed_leaves: match index {
+                    13 | 14 => "all",
+                    _ => match index % 3 {
+                        0 => "one",
+                        1 => "two",
+                        _ => "all",
+                    },
+                },
+                aggregate_leaf_count: match index {
+                    13 => 3,
+                    14 => 4,
+                    _ => 2,
+                },
+                join_depth: match index {
+                    13 => 2,
+                    14 => 3,
+                    _ => 1,
                 },
                 query: build_query(index, &dimensions),
                 dimensions,
@@ -415,11 +433,15 @@ fn build_query(index: usize, dimensions: &DimensionAssignment) -> RelQuery {
         table: "composition_right".to_string(),
         schema: right_schema,
     };
-    let left_kind = match index % 4 {
-        0 => AggregateKind::Max,
-        1 => AggregateKind::Sum,
-        2 => AggregateKind::Avg,
-        _ => AggregateKind::StringAgg,
+    let left_kind = match index {
+        4 => AggregateKind::Min,
+        5 => AggregateKind::Max,
+        _ => match index % 4 {
+            0 => AggregateKind::Max,
+            1 => AggregateKind::Sum,
+            2 => AggregateKind::Avg,
+            _ => AggregateKind::StringAgg,
+        },
     };
     let right_kind = match index % 3 {
         0 => AggregateKind::Sum,
@@ -487,32 +509,77 @@ fn build_query(index: usize, dimensions: &DimensionAssignment) -> RelQuery {
             ),
         ]),
     };
-    let joined = RelNode::Join {
-        kind: match index % 3 {
-            0 => JoinKind::Left,
-            1 => JoinKind::Full,
-            _ => JoinKind::Inner,
+    let join_kind = match index % 3 {
+        0 => JoinKind::Left,
+        1 => JoinKind::Full,
+        _ => JoinKind::Inner,
+    };
+    let mut ctes = vec![
+        CteDefinition {
+            name: left_name.to_string(),
+            query: left_aggregate,
         },
-        left: Box::new(if index == 9 {
-            RelNode::Subquery {
-                input: Box::new(left_ref),
-                alias: "nested_left".to_string(),
-            }
-        } else {
-            left_ref
-        }),
-        right: Box::new(right_ref),
+        CteDefinition {
+            name: right_name.to_string(),
+            query: right_aggregate,
+        },
+    ];
+    let joined = |left, right| RelNode::Join {
+        kind: join_kind,
+        left: Box::new(left),
+        right: Box::new(right),
         left_column: 0,
         right_column: 0,
     };
-    let joined_schema = joined.schema().unwrap_or_else(|_| {
-        RelationSchema::new(vec![
-            Column::new("grp", ScalarType::Text, true),
-            Column::new("left_value", ScalarType::Int, true),
-            Column::new("right_grp", ScalarType::Text, true),
-            Column::new("right_value", ScalarType::Int, true),
-        ])
-    });
+    let joined = match index {
+        13 => {
+            let third_name = format!("{}_third_aggregate", CASE_IDS[index]);
+            let third_kind = AggregateKind::Min;
+            let third_query = aggregate_leaf(
+                "composition_left",
+                third_kind,
+                "third_value",
+                nullable,
+                wide,
+            );
+            ctes.push(CteDefinition {
+                name: third_name.clone(),
+                query: third_query,
+            });
+            let third_ref = aggregate_ref(&third_name, "third_value", third_kind, nullable);
+            joined(joined(left_ref, right_ref), third_ref)
+        }
+        14 => {
+            let names = [
+                format!("{}_third_aggregate", CASE_IDS[index]),
+                format!("{}_fourth_aggregate", CASE_IDS[index]),
+            ];
+            for (name, kind, alias) in [
+                (names[0].clone(), AggregateKind::Max, "third_value"),
+                (names[1].clone(), AggregateKind::Count, "fourth_value"),
+            ] {
+                ctes.push(CteDefinition {
+                    name,
+                    query: aggregate_leaf("composition_left", kind, alias, nullable, wide),
+                });
+            }
+            let third_ref = aggregate_ref(&names[0], "third_value", AggregateKind::Max, nullable);
+            let fourth_ref =
+                aggregate_ref(&names[1], "fourth_value", AggregateKind::Count, nullable);
+            joined(joined(joined(left_ref, right_ref), third_ref), fourth_ref)
+        }
+        _ => joined(
+            if index == 9 {
+                RelNode::Subquery {
+                    input: Box::new(left_ref),
+                    alias: "nested_left".to_string(),
+                }
+            } else {
+                left_ref
+            },
+            right_ref,
+        ),
+    };
     let body = if narrow {
         RelNode::Project {
             input: Box::new(joined),
@@ -527,19 +594,47 @@ fn build_query(index: usize, dimensions: &DimensionAssignment) -> RelQuery {
             alias: format!("case_{index}"),
         }
     };
-    let _ = joined_schema;
-    RelQuery {
-        ctes: vec![
-            CteDefinition {
-                name: left_name.to_string(),
-                query: left_aggregate,
+    RelQuery { ctes, body }
+}
+
+fn aggregate_leaf(
+    table: &str,
+    kind: AggregateKind,
+    alias: &str,
+    nullable: bool,
+    wide: bool,
+) -> RelNode {
+    RelNode::Aggregate {
+        input: Box::new(RelNode::Scan {
+            table: table.to_string(),
+            schema: source_schema(table, nullable, wide),
+        }),
+        group_by: vec![1],
+        aggregates: vec![AggregateExpr {
+            kind,
+            input_column: match kind {
+                AggregateKind::Count => None,
+                AggregateKind::StringAgg => Some(3),
+                _ => Some(2),
             },
-            CteDefinition {
-                name: right_name.to_string(),
-                query: right_aggregate,
-            },
-        ],
-        body,
+            alias: alias.to_string(),
+        }],
+    }
+}
+
+fn aggregate_ref(name: &str, alias: &str, kind: AggregateKind, nullable: bool) -> RelNode {
+    let data_type = match kind {
+        AggregateKind::Count | AggregateKind::Sum => ScalarType::BigInt,
+        AggregateKind::Avg => ScalarType::Numeric,
+        AggregateKind::StringAgg => ScalarType::Text,
+        AggregateKind::Min | AggregateKind::Max => ScalarType::Int,
+    };
+    RelNode::CteRef {
+        name: name.to_string(),
+        schema: RelationSchema::new(vec![
+            Column::new("grp", ScalarType::Text, nullable),
+            Column::new(alias, data_type, !matches!(kind, AggregateKind::Count)),
+        ]),
     }
 }
 
@@ -638,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_floors_pass_and_report_missing_buckets() {
+    fn semantic_coverage_report_validator_accepts_complete_observation() {
         let requirements = requirements();
         let mut observed = SemanticCoverageObservation::default();
         for plan in SNAPSHOT_PLANS {
@@ -670,13 +765,14 @@ mod tests {
     fn decision_trace_populates_observed_semantic_coverage() {
         let mut observed = SemanticCoverageObservation::default();
         let trace = serde_json::json!({"events": [
-            {"snapshot_plan": "exact_per_leaf", "decisions": ["empty_to_nonempty", "matched_to_unmatched"]},
-            {"snapshot_plan": "exact_combined", "decisions": ["nonempty_to_empty", "unmatched_to_matched"]},
-            {"snapshot_plan": "post_change_correction", "decisions": ["winner_change", "nonempty_to_nonempty"]},
+            {"snapshot_plan": "exact_per_leaf", "decisions": ["changed_leaf_bucket=1", "empty_to_nonempty", "matched_to_unmatched"]},
+            {"snapshot_plan": "exact_combined", "decisions": ["changed_leaf_bucket=2", "nonempty_to_empty", "unmatched_to_matched"]},
+            {"snapshot_plan": "post_change_correction", "decisions": ["changed_leaf_bucket=all", "winner_change", "nonempty_to_nonempty"]},
             {"snapshot_plan": "unsupported", "decisions": []}
         ]});
         observed.observe_decision_trace(&trace);
         assert_eq!(observed.snapshot_plans.len(), 4);
+        assert_eq!(observed.changed_leaf_buckets.len(), 3);
         assert_eq!(observed.group_lifecycle_transitions.len(), 4);
         assert_eq!(observed.outer_join_transitions.len(), 2);
     }

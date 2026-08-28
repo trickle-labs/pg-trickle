@@ -349,6 +349,13 @@ pub static PGS_AGG_DIFF_CARDINALITY_THRESHOLD: GucSetting<i32> = GucSetting::<i3
 /// large SQL strings to the server log.
 pub static PGS_LOG_DELTA_SQL: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// COR-23: Emit structured DVM decision traces for correctness runs.
+///
+/// When enabled, the DVM logs JSON events containing operator paths, output
+/// schemas, snapshot plans, and generated delta CTEs. This is intended for
+/// test and diagnosis sessions; it is disabled by default.
+pub static PGS_DVM_DECISION_TRACE: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// P5-1: `work_mem` override (in MB) for delta SQL execution.
 ///
 /// When non-zero, `SET LOCAL work_mem = '<N>MB'` is applied inside
@@ -898,6 +905,16 @@ pub fn register_dvm_gucs() {
         GucFlags::default(),
     );
 
+    // COR-23: Structured DVM decision tracing.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.dvm_decision_trace",
+        c"Emit structured DVM decision traces for correctness runs.",
+        c"When true, the DVM logs JSON events for operator paths, output schemas, snapshot plans, and delta CTEs. Disabled by default; enable only for test or diagnosis sessions.",
+        &PGS_DVM_DECISION_TRACE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     // P5-1: Delta work_mem override.
     GucRegistry::define_int_guc(
         c"pg_trickle.delta_work_mem",
@@ -1319,6 +1336,11 @@ pub fn effective_pooler_compat(per_st_flag: bool) -> bool {
 /// P1-2: Returns whether delta SQL logging is enabled.
 pub fn pg_trickle_log_delta_sql() -> bool {
     PGS_LOG_DELTA_SQL.get()
+}
+
+/// COR-23: Returns whether structured DVM decision tracing is enabled.
+pub fn pg_trickle_dvm_decision_trace() -> bool {
+    PGS_DVM_DECISION_TRACE.get()
 }
 
 /// P5-1: Returns the delta work_mem override in MB (0 = disabled).

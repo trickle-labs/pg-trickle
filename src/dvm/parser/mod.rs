@@ -2767,6 +2767,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_row_id_key_columns_nested_join_projection_uses_retained_key() {
+        let left = scan_with_pk("a", 1, &["id", "grp"], &["id"]);
+        let right = scan_with_pk("b", 2, &["id", "grp"], &["id"]);
+        let join = OpTree::InnerJoin {
+            condition: qualified_col("a", "grp"),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let inner = OpTree::Project {
+            expressions: vec![qualified_col("a", "grp"), qualified_col("b", "grp")],
+            aliases: vec!["grp".to_string(), "right_grp".to_string()],
+            child: Box::new(join),
+        };
+        let outer = OpTree::Project {
+            expressions: vec![col("grp")],
+            aliases: vec!["grp".to_string()],
+            child: Box::new(OpTree::Subquery {
+                alias: "projected".to_string(),
+                column_aliases: vec![],
+                child: Box::new(inner),
+            }),
+        };
+
+        assert_eq!(outer.row_id_key_columns(), Some(vec!["grp".to_string()]));
+    }
+
     // ── OpTree::node_kind tests ─────────────────────────────────────
 
     #[test]
@@ -2923,6 +2950,71 @@ mod tests {
         // "bid" is in expressions → right_pk_aliases is non-empty.
         // If both sides have PKs it returns Some.
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_join_pk_aliases_nested_aggregate_uses_many_to_one_key() {
+        let parent = scan_with_pk("p", 1, &["id", "name"], &["id"]);
+        let aggregate_body = OpTree::Aggregate {
+            group_by: vec![col("parent_id")],
+            aggregates: vec![],
+            child: Box::new(scan_node("leaf", 2, &["parent_id"])),
+        };
+        let left_aggregate = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "al".to_string(),
+            alias: "al".to_string(),
+            columns: vec!["parent_id".to_string()],
+            cte_def_aliases: vec![],
+            column_aliases: vec![],
+            body: Some(Box::new(aggregate_body.clone())),
+        };
+        let right_aggregate = OpTree::CteScan {
+            cte_id: 1,
+            cte_name: "ar".to_string(),
+            alias: "ar".to_string(),
+            columns: vec!["parent_id".to_string()],
+            cte_def_aliases: vec![],
+            column_aliases: vec![],
+            body: Some(Box::new(aggregate_body)),
+        };
+        let nested_left = OpTree::LeftJoin {
+            condition: Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(qualified_col("p", "id")),
+                right: Box::new(qualified_col("al", "parent_id")),
+            },
+            left: Box::new(parent),
+            right: Box::new(left_aggregate),
+        };
+        let join = OpTree::LeftJoin {
+            condition: Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(qualified_col("p", "id")),
+                right: Box::new(qualified_col("ar", "parent_id")),
+            },
+            left: Box::new(nested_left.clone()),
+            right: Box::new(right_aggregate.clone()),
+        };
+        let expressions = vec![qualified_col("p", "id")];
+        let aliases = vec!["id".to_string()];
+
+        assert_eq!(
+            join_pk_aliases(&expressions, &aliases, &join),
+            Some(aliases.clone())
+        );
+        assert_eq!(join_pk_expr_indices(&expressions, &join), vec![0]);
+
+        let non_key_join = OpTree::LeftJoin {
+            condition: Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(qualified_col("p", "id")),
+                right: Box::new(qualified_col("ar", "not_a_key")),
+            },
+            left: Box::new(nested_left),
+            right: Box::new(right_aggregate),
+        };
+        assert_eq!(join_pk_aliases(&expressions, &aliases, &non_key_join), None);
     }
 
     #[test]

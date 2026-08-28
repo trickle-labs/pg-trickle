@@ -36,6 +36,8 @@ The cutoff exists because:
 ## Table of Contents
 
 <!-- TOC start -->
+- [Unreleased](#unreleased)
+- [0.87.14 — Correctness Program Completion](#08714--correctness-program-completion)
 - [0.87.13 — pg_tide Outbox Boundary](#08713--pg_tide-outbox-boundary)
 - [0.87.12 — Publication Security](#08712--publication-security)
 - [0.87.11 — Snapshot Security](#08711--snapshot-security)
@@ -187,6 +189,34 @@ criteria and security release gate.
 ## Upgrade
 
 Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
+
+## [Unreleased]
+
+Future changes will be listed here.
+
+## [0.87.14] — Correctness Program Completion
+
+v0.87.14 makes the DVM correctness gate enforce the behavior it reports.
+
+- Mandatory composition cases now build their named shapes and execute their
+  own state-directed histories, including simultaneous source changes.
+- Metamorphic checks execute real equivalent histories and query rewrites, with
+  semantic coverage populated from observed DVM decisions.
+- Snapshot selection is authoritative, schema contracts include names,
+  typmods, and collations, and admission/refresh failures are classified
+  fail-closed.
+- The volatility checker resolves overloaded functions by PostgreSQL's
+  selected function identity, including the #953 admission regression.
+- Shrinking, corpus replay, and release reporting cover rows, operators,
+  strategies, and the permanent #938/#939 sensitivity cases.
+
+See the [v0.87.14 roadmap](roadmap/v0.87.14.md) for the complete acceptance
+criteria and correctness release gate.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.14 files.
+This release has no catalog changes; the migration is intentionally empty.
 
 ## [0.87.13] — pg_tide Outbox Boundary
 

@@ -727,8 +727,101 @@ pub fn build_pre_change_snapshot_sql(
                 )
             }
         }
-        // For all other node types, fall back to the current snapshot.
-        // CteScan, Aggregate, etc. don't have per-leaf delta tracking.
+        OpTree::Aggregate {
+            group_by,
+            aggregates,
+            child,
+        } => {
+            let inner = build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids);
+            let child_alias = child.alias();
+            let mut selects = Vec::new();
+            for expr in group_by {
+                selects.push(expr.to_sql());
+            }
+            for agg in aggregates {
+                selects.push(format!(
+                    "{} AS {}",
+                    agg_to_rescan_sql(agg),
+                    quote_ident(&agg.alias),
+                ));
+            }
+            let group_by_sql = if group_by.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " GROUP BY {}",
+                    group_by
+                        .iter()
+                        .map(Expr::to_sql)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!(
+                "(SELECT {} FROM {} {}{})",
+                selects.join(", "),
+                inner,
+                quote_ident(child_alias),
+                group_by_sql,
+            )
+        }
+        OpTree::CteScan {
+            alias,
+            columns,
+            cte_def_aliases,
+            column_aliases,
+            body,
+            ..
+        } => {
+            let Some(body) = body else {
+                return build_snapshot_sql(op);
+            };
+
+            // CteScan keeps a clone of its body from before the registry's
+            // column-pruning pass. Prune that clone before building its
+            // snapshot so its leaf delta CTEs expose the same columns.
+            let mut body = body.as_ref().clone();
+            body.prune_scan_columns();
+            let body_snap = build_pre_change_snapshot_sql(&body, scan_delta_ctes, fallback_oids);
+            let body_cols = body.output_columns();
+            let effective_cols: Vec<&str> = if !column_aliases.is_empty() {
+                column_aliases.iter().map(String::as_str).collect()
+            } else if !cte_def_aliases.is_empty() {
+                cte_def_aliases.iter().map(String::as_str).collect()
+            } else {
+                columns.iter().map(String::as_str).collect()
+            };
+
+            if body_cols
+                .iter()
+                .zip(effective_cols.iter())
+                .any(|(body_col, effective_col)| body_col != effective_col)
+                || body_cols.len() != effective_cols.len()
+            {
+                let selects = body_cols
+                    .iter()
+                    .zip(effective_cols.iter())
+                    .map(|(src, dst)| {
+                        if src == dst {
+                            quote_ident(src)
+                        } else {
+                            format!("{} AS {}", quote_ident(src), quote_ident(dst))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                format!(
+                    "(SELECT {} FROM {} {})",
+                    selects.join(", "),
+                    body_snap,
+                    quote_ident(alias),
+                )
+            } else {
+                body_snap
+            }
+        }
+        // Unsupported nodes still use the current snapshot. SnapshotPlan
+        // keeps them off the per-leaf path unless exact reconstruction is
+        // added here.
         _ => build_snapshot_sql(op),
     }
 }
@@ -939,15 +1032,21 @@ fn rewrite_expr_for_join(
             table_alias: Some(alias),
             column_name,
         } => {
-            if has_source_alias(left, alias) {
-                if is_simple_source(left, alias) {
-                    // Direct table access — just remap the alias
-                    Expr::ColumnRef {
-                        table_alias: Some(new_left.to_string()),
-                        column_name: column_name.clone(),
-                    }
-                } else if let Some(disambiguated) =
-                    resolve_disambiguated_column(left, alias, column_name)
+            // Prefer a direct child alias over a same-named alias nested
+            // inside the other child.  Nested joins commonly reuse `l`/`r`
+            // aliases, but SQL scope gives the outer child alias precedence.
+            if has_source_alias(right, alias) && is_simple_source(right, alias) {
+                Expr::ColumnRef {
+                    table_alias: Some(new_right.to_string()),
+                    column_name: column_name.clone(),
+                }
+            } else if has_source_alias(left, alias) && is_simple_source(left, alias) {
+                Expr::ColumnRef {
+                    table_alias: Some(new_left.to_string()),
+                    column_name: column_name.clone(),
+                }
+            } else if has_source_alias(left, alias) {
+                if let Some(disambiguated) = resolve_disambiguated_column(left, alias, column_name)
                 {
                     // Deep disambiguation: trace through nested joins
                     Expr::ColumnRef {
@@ -962,13 +1061,7 @@ fn rewrite_expr_for_join(
                     }
                 }
             } else if has_source_alias(right, alias) {
-                if is_simple_source(right, alias) {
-                    Expr::ColumnRef {
-                        table_alias: Some(new_right.to_string()),
-                        column_name: column_name.clone(),
-                    }
-                } else if let Some(disambiguated) =
-                    resolve_disambiguated_column(right, alias, column_name)
+                if let Some(disambiguated) = resolve_disambiguated_column(right, alias, column_name)
                 {
                     Expr::ColumnRef {
                         table_alias: Some(new_right.to_string()),
@@ -1533,8 +1626,7 @@ fn collect_aliased_keys(
 /// children are **not** considered join children — they can safely use the
 /// pre-change snapshot.
 ///
-/// Combined with [`contains_semijoin`] to decide whether to use the
-/// pre-change snapshot (L₀/R₀) vs post-change (L₁/R₁).
+/// Snapshot strategy selection is owned by [`crate::dvm::snapshot::SnapshotPlan`].
 pub fn is_join_child(op: &OpTree) -> bool {
     match op {
         OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. } => true,
@@ -1545,48 +1637,8 @@ pub fn is_join_child(op: &OpTree) -> bool {
     }
 }
 
-/// Returns true if the subtree rooted at `op` contains any SemiJoin or
-/// AntiJoin node.  Used to decide whether a nested join child can safely
-/// use the pre-change snapshot via EXCEPT ALL: SemiJoin-containing
-/// subtrees must use the post-change snapshot to avoid the Q21 numwait
-/// regression (R_old interaction), while pure InnerJoin/LeftJoin chains
-/// can safely use the pre-change snapshot.
-pub fn contains_semijoin(op: &OpTree) -> bool {
-    match op {
-        OpTree::SemiJoin { .. } | OpTree::AntiJoin { .. } => true,
-        OpTree::InnerJoin { left, right, .. }
-        | OpTree::LeftJoin { left, right, .. }
-        | OpTree::FullJoin { left, right, .. } => {
-            contains_semijoin(left) || contains_semijoin(right)
-        }
-        OpTree::Filter { child, .. }
-        | OpTree::Project { child, .. }
-        | OpTree::Subquery { child, .. }
-        | OpTree::Aggregate { child, .. }
-        | OpTree::Distinct { child, .. }
-        | OpTree::Window { child, .. }
-        | OpTree::LateralFunction { child, .. }
-        | OpTree::LateralSubquery { child, .. }
-        | OpTree::ScalarSubquery { child, .. } => contains_semijoin(child),
-        OpTree::UnionAll { children } => children.iter().any(contains_semijoin),
-        OpTree::Intersect { left, right, .. } | OpTree::Except { left, right, .. } => {
-            contains_semijoin(left) || contains_semijoin(right)
-        }
-        OpTree::RecursiveCte {
-            base, recursive, ..
-        } => contains_semijoin(base) || contains_semijoin(recursive),
-        OpTree::Scan { .. }
-        | OpTree::CteScan { .. }
-        | OpTree::RecursiveSelfRef { .. }
-        | OpTree::ConstantSelect { .. } => false,
-    }
-}
-
 /// Count the number of Scan (base table) nodes in a join subtree.
-/// Used to limit pre-change snapshot via EXCEPT ALL to small subtrees
-/// (≤ 2 scans).  Larger subtrees fall back to the post-change snapshot
-/// with a correction term to avoid cascading CTE materialization that
-/// can exhaust `temp_file_limit`.
+/// Used by nested-join correction terms and diagnostics.
 pub fn join_scan_count(op: &OpTree) -> usize {
     match op {
         OpTree::Scan { .. } => 1,
@@ -1673,74 +1725,15 @@ pub fn tree_contains_join(op: &OpTree) -> bool {
     }
 }
 
-/// Returns whether every leaf in a join subtree can be reconstructed from
-/// its pre-change state.
-pub(crate) fn supports_pre_change_join_snapshot(op: &OpTree) -> bool {
-    match op {
-        OpTree::Scan { .. } => true,
-        OpTree::InnerJoin { left, right, .. }
-        | OpTree::LeftJoin { left, right, .. }
-        | OpTree::FullJoin { left, right, .. } => {
-            supports_pre_change_join_snapshot(left) && supports_pre_change_join_snapshot(right)
-        }
-        OpTree::Filter { child, .. }
-        | OpTree::Project { child, .. }
-        | OpTree::Subquery { child, .. } => supports_pre_change_join_snapshot(child),
-        _ => false,
-    }
-}
-
-/// Returns true when the pre-change snapshot (via per-leaf CTE-based
-/// reconstruction) should be used for the given child node.  This is
-/// safe when:
-/// - The child is a simple Scan (cheap single-table EXCEPT ALL)
-/// - The child is NOT a join (safe for leaf EXCEPT ALL reconstruction)
-/// - Every leaf in a join can be reconstructed, without SemiJoin/AntiJoin
-///
-/// When false, the post-change snapshot should be used (with a correction
-/// term for shallow join children).
-///
-/// # EC01B-1: Per-leaf CTE-based snapshot (v0.12.0)
-///
-/// The previous `join_scan_count(child) <= 2` threshold has been
-/// **removed**.  Deep join trees (≥3 scan nodes, e.g. TPC-H Q7/Q8/Q9)
-/// now use a per-leaf CTE-based snapshot strategy: each leaf Scan's
-/// pre-change state is computed individually via `table EXCEPT ALL
-/// delta_inserts UNION ALL delta_deletes` (cheap, single-table), and
-/// the results are re-joined with the original conditions.  This avoids
-/// the full-snapshot EXCEPT ALL that spilled multi-GB temp files.
-///
-/// SemiJoin/AntiJoin-containing subtrees still fall back to L₁/R₁
-/// (post-change) to avoid the Q21-type numwait regression.
-///
-/// DI-11: Deep join children (≥ `deep_scan_threshold` scans) also fall
-/// back to L₁ + Part 3 correction — the per-leaf CTE reconstruction at
-/// that depth generates 100+ GB of temp files from cascading hash joins.
-pub fn use_pre_change_snapshot(
-    child: &OpTree,
-    inside_semijoin: bool,
-    deep_scan_threshold: usize,
-) -> bool {
-    if is_simple_child(child) || !is_join_child(child) {
-        return true;
-    }
-    if !supports_pre_change_join_snapshot(child) {
-        return false;
-    }
-    if contains_semijoin(child) || inside_semijoin {
-        return false;
-    }
-    // DI-11: For deep join children, skip L₀ reconstruction and use
-    // L₁ + Part 3 correction instead. The per-leaf CTE snapshot at
-    // this depth generates enormous temp file spills.
-    let sc = join_scan_count(child);
-    sc < deep_scan_threshold
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
+    use crate::dvm::snapshot::SnapshotPlan;
+
+    fn use_pre_change_snapshot(child: &OpTree, inside_semijoin: bool, _threshold: usize) -> bool {
+        SnapshotPlan::for_tree_in_context(child, inside_semijoin).uses_pre_change()
+    }
 
     // ── build_snapshot_sql tests ────────────────────────────────
 
@@ -1878,6 +1871,21 @@ mod tests {
         );
         // "p" is a simple Scan → plain "id"
         assert!(rewritten.contains("\"r\"."));
+    }
+
+    #[test]
+    fn test_rewrite_prefers_outer_right_alias_on_collision() {
+        let left_inner = inner_join(
+            eq_cond("l", "id", "r", "id"),
+            scan(1, "left", "public", "l", &["id", "grp"]),
+            scan(2, "right_inner", "public", "r", &["id", "grp"]),
+        );
+        let right_outer = scan(3, "right_outer", "public", "r", &["grp"]);
+
+        let rewritten =
+            rewrite_join_condition(&qcolref("r", "grp"), &left_inner, "dl", &right_outer, "dr");
+
+        assert_eq!(rewritten, "\"dr\".\"grp\"");
     }
 
     #[test]
@@ -2053,7 +2061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_change_snapshot_join_with_cte_scan_falls_back() {
+    fn test_pre_change_snapshot_join_with_missing_cte_body_falls_back() {
         let parent = scan(1, "parent", "public", "p", &["id"]);
         let aggregate_cte = cte_scan(0, "agg", "a", vec!["parent_id", "count"], vec![], vec![]);
         let child = left_join(eq_cond("p", "id", "a", "parent_id"), parent, aggregate_cte);
@@ -2134,11 +2142,10 @@ mod tests {
         );
     }
 
-    // ── DI-11: Deep join L₀ threshold tests ────────────────────────
+    // ── SnapshotPlan replaces the former depth heuristic ──────────
 
     #[test]
-    fn test_di11_deep_join_4_scans_skips_l0_at_threshold_4() {
-        // 4-scan join child with threshold=4 → skip L₀, use L₁ + Part 3
+    fn test_snapshot_plan_keeps_deep_pure_join_per_leaf() {
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
         let c = scan(3, "c", "public", "c", &["id"]);
@@ -2148,14 +2155,13 @@ mod tests {
         let abcd = inner_join(eq_cond("c", "id", "d", "id"), abc, d);
         assert_eq!(join_scan_count(&abcd), 4);
         assert!(
-            !use_pre_change_snapshot(&abcd, false, 4),
-            "4-scan join at threshold=4 should skip L₀"
+            use_pre_change_snapshot(&abcd, false, 4),
+            "SnapshotPlan selects per-leaf reconstruction for pure joins"
         );
     }
 
     #[test]
-    fn test_di11_deep_join_3_scans_keeps_l0_at_threshold_4() {
-        // 3-scan join child with threshold=4 → keep L₀
+    fn test_snapshot_plan_keeps_three_scan_join_per_leaf() {
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
         let c = scan(3, "c", "public", "c", &["id"]);
@@ -2169,8 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_di11_simple_scan_unaffected_by_threshold() {
-        // Simple scan child always uses L₀ regardless of threshold
+    fn test_snapshot_plan_keeps_scan_combined() {
         let child = scan(1, "t", "public", "t", &["id"]);
         assert!(
             use_pre_change_snapshot(&child, false, 1),

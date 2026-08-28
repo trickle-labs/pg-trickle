@@ -675,6 +675,33 @@ impl DiffContext {
         self.decision_trace.take()
     }
 
+    /// Record the source-leaf bucket reached by this concrete refresh.
+    pub fn record_changed_leaf_bucket(&mut self, source_oids: &[u32]) {
+        let changed = source_oids
+            .iter()
+            .filter(|oid| self.prev_frontier.get_lsn(**oid) != self.new_frontier.get_lsn(**oid))
+            .count();
+        let bucket = if changed == 1 {
+            Some("1")
+        } else if changed == 2 {
+            Some("2")
+        } else if changed == source_oids.len() && changed > 0 {
+            Some("all")
+        } else {
+            None
+        };
+        if let (Some(trace), Some(bucket)) = (self.decision_trace.as_mut(), bucket) {
+            trace.record(
+                "refresh",
+                "Refresh",
+                Vec::new(),
+                None,
+                [format!("changed_leaf_bucket={bucket}")],
+                None,
+            );
+        }
+    }
+
     /// Set the delta source (change buffer vs transition tables).
     pub fn with_delta_source(mut self, ds: DeltaSource) -> Self {
         self.delta_source = ds;
@@ -846,7 +873,7 @@ impl DiffContext {
             )));
         }
         if let Some(trace) = self.decision_trace.as_mut() {
-            let plan = SnapshotPlan::for_tree(op);
+            let plan = SnapshotPlan::for_tree_in_context(op, self.inside_semijoin);
             trace.record(
                 format!("root.{}", operator_name(op).to_ascii_lowercase()),
                 operator_name(op),
@@ -1015,7 +1042,7 @@ impl DiffContext {
         self.snapshot_cte_cache
             .insert(cache_key, (canonical, cte_name.clone()));
         if let Some(trace) = self.decision_trace.as_mut() {
-            let plan = SnapshotPlan::for_tree(op);
+            let plan = SnapshotPlan::for_tree_in_context(op, self.inside_semijoin);
             trace.record(
                 format!("root.{}.snapshot", operator_name(op).to_ascii_lowercase()),
                 "Snapshot",

@@ -84,6 +84,8 @@ pub struct PassReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnsupportedReason {
+    pub sqlstate: Option<String>,
+    pub reason_code: Option<String>,
     pub message: String,
 }
 
@@ -125,43 +127,88 @@ impl CaseOutcome {
 
 /// Classifies errors during stream table creation at admission.
 pub fn classify_admission_error(err_str: &str) -> CaseOutcome {
-    if is_infrastructure_error(err_str) {
-        CaseOutcome::InfrastructureFailure(InfrastructureFailure {
-            message: err_str.to_string(),
+    classify_admission_outcome(None, extract_reason_code(err_str), err_str, false)
+}
+
+/// Classifies a PostgreSQL admission error using its structured SQLSTATE and
+/// pg_trickle reason code. Message text is retained for diagnostics only.
+pub fn classify_admission_sqlx_error(error: &sqlx::Error) -> CaseOutcome {
+    let primary_message = error.to_string();
+    let detail = error
+        .as_database_error()
+        .and_then(|database_error| {
+            database_error
+                .as_error()
+                .downcast_ref::<sqlx::postgres::PgDatabaseError>()
         })
-    } else if is_known_unsupported(err_str) {
+        .and_then(sqlx::postgres::PgDatabaseError::detail);
+    let message = detail.map_or_else(
+        || primary_message.clone(),
+        |detail| format!("{primary_message}\nDETAIL: {detail}"),
+    );
+    let sqlstate = error
+        .as_database_error()
+        .and_then(|database_error| database_error.code().map(|code| code.into_owned()));
+    classify_admission_outcome(
+        sqlstate.as_deref(),
+        extract_reason_code(&message),
+        &message,
+        is_infrastructure_sqlx_error(error),
+    )
+}
+
+pub fn is_infrastructure_sqlx_error(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::WorkerCrashed
+    ) || error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|code| code.starts_with("08"))
+}
+
+fn classify_admission_outcome(
+    sqlstate: Option<&str>,
+    reason_code: Option<String>,
+    message: &str,
+    infrastructure: bool,
+) -> CaseOutcome {
+    if infrastructure || sqlstate.is_some_and(|state| state.starts_with("08")) {
+        CaseOutcome::InfrastructureFailure(InfrastructureFailure {
+            message: message.to_string(),
+        })
+    } else if matches!(sqlstate, Some("0A000")) && reason_code.is_some() {
         CaseOutcome::UnsupportedAtAdmission(UnsupportedReason {
-            message: err_str.to_string(),
+            sqlstate: sqlstate.map(str::to_string),
+            reason_code,
+            message: message.to_string(),
+        })
+    } else if matches!(
+        sqlstate,
+        Some("42601" | "42703" | "42P01" | "42804" | "42P10" | "22023")
+    ) {
+        CaseOutcome::GeneratorInvalid(GeneratorError {
+            stage: "admission".to_string(),
+            message: message.to_string(),
         })
     } else {
         CaseOutcome::ProductFailure(ProductFailure {
-            reason: format!("Admission failed unexpectedly: {err_str}"),
-            details: Some(err_str.to_string()),
+            reason: format!("Admission failed unexpectedly: {message}"),
+            details: Some(message.to_string()),
         })
     }
 }
 
-pub fn is_infrastructure_error(err_str: &str) -> bool {
-    let lower = err_str.to_lowercase();
-    lower.contains("closed the connection")
-        || lower.contains("connection refused")
-        || lower.contains("broken pipe")
-        || lower.contains("panic")
-        || lower.contains("server closed the connection")
-        || lower.contains("terminating connection")
-}
-
-pub fn is_known_unsupported(err_str: &str) -> bool {
-    let lower = err_str.to_lowercase();
-    lower.contains("not supported in differential mode")
-        || lower.contains("feature is not supported")
-        || lower.contains("unsupported query")
-        || lower.contains("circular reference")
-        || lower.contains("cannot be refreshed differentially")
-        || lower.contains("unsupported")
-        || lower.contains("not yet supported")
-        || lower.contains("does not support")
-        || lower.contains("syntax error")
+fn extract_reason_code(message: &str) -> Option<String> {
+    message
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .find(|token| token.starts_with("DVM-") || *token == "UNSUPPORTED_OPERATOR")
+        .map(str::to_string)
 }
 
 /// Extract column metadata for a stream table or table.
@@ -191,8 +238,9 @@ pub async fn fetch_relation_signature_from_table(
 
     let columns = rows
         .into_iter()
-        .map(|(ord, name, toid, tmod, coll)| ColumnSignature {
-            ordinal: ord as usize,
+        .enumerate()
+        .map(|(index, (_ord, name, toid, tmod, coll))| ColumnSignature {
+            ordinal: index + 1,
             name,
             type_oid: toid as u32,
             typmod: tmod as i32,
@@ -241,8 +289,9 @@ pub async fn fetch_relation_signature_from_query(
 
     let columns = rows
         .into_iter()
-        .map(|(ord, name, toid, tmod, coll)| ColumnSignature {
-            ordinal: ord as usize,
+        .enumerate()
+        .map(|(index, (_ord, name, toid, tmod, coll))| ColumnSignature {
+            ordinal: index + 1,
             name,
             type_oid: toid as u32,
             typmod: tmod as i32,
@@ -274,6 +323,22 @@ pub fn compare_signatures(
         .zip(expected.columns.iter())
         .enumerate()
     {
+        if act.ordinal != exp.ordinal {
+            return Err(format!(
+                "Column {} ordinal mismatch: actual={}, expected={}",
+                i + 1,
+                act.ordinal,
+                exp.ordinal
+            ));
+        }
+        if act.name != exp.name {
+            return Err(format!(
+                "Column {} name mismatch: actual='{}', expected='{}'",
+                i + 1,
+                act.name,
+                exp.name
+            ));
+        }
         if !is_type_compatible(act.type_oid, exp.type_oid) {
             return Err(format!(
                 "Column {} ('{}' vs '{}') incompatible type OID: actual={}, expected={}",
@@ -282,6 +347,26 @@ pub fn compare_signatures(
                 exp.name,
                 act.type_oid,
                 exp.type_oid
+            ));
+        }
+        // PostgreSQL uses -1 for an unconstrained typmod; it is compatible
+        // with a query result that retains a source column's constraint.
+        if act.typmod >= 0 && exp.typmod >= 0 && act.typmod != exp.typmod {
+            return Err(format!(
+                "Column {} ('{}') typmod mismatch: actual={}, expected={}",
+                i + 1,
+                act.name,
+                act.typmod,
+                exp.typmod
+            ));
+        }
+        if act.collation_oid != exp.collation_oid {
+            return Err(format!(
+                "Column {} ('{}') collation mismatch: actual={:?}, expected={:?}",
+                i + 1,
+                act.name,
+                act.collation_oid,
+                exp.collation_oid
             ));
         }
     }
@@ -672,5 +757,83 @@ pub async fn assert_effective_refresh_mode(
             reason: format!("Stream table '{pure_name}' not found in pgt_stream_tables"),
             details: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signature(name: &str, typmod: i32, collation_oid: Option<u32>) -> RelationSignature {
+        RelationSignature {
+            columns: vec![ColumnSignature {
+                ordinal: 1,
+                name: name.to_string(),
+                type_oid: 23,
+                typmod,
+                collation_oid,
+            }],
+        }
+    }
+
+    #[test]
+    fn schema_oracle_checks_names_typmods_and_collations() {
+        let expected = signature("value", 12, Some(100));
+        assert!(compare_signatures(&signature("value", -1, Some(100)), &expected).is_ok());
+        for actual in [
+            signature("other", 12, Some(100)),
+            signature("value", 13, Some(100)),
+            signature("value", 12, Some(101)),
+        ] {
+            assert!(compare_signatures(&actual, &expected).is_err());
+        }
+    }
+
+    #[test]
+    fn schema_oracle_keeps_postgres_type_family_compatibility() {
+        let actual = RelationSignature {
+            columns: vec![ColumnSignature {
+                ordinal: 1,
+                name: "value".to_string(),
+                type_oid: 23,
+                typmod: -1,
+                collation_oid: None,
+            }],
+        };
+        let expected = RelationSignature {
+            columns: vec![ColumnSignature {
+                ordinal: 1,
+                name: "value".to_string(),
+                type_oid: 20,
+                typmod: -1,
+                collation_oid: None,
+            }],
+        };
+        assert!(compare_signatures(&actual, &expected).is_ok());
+    }
+
+    #[test]
+    fn admission_classification_requires_structured_unsupported_reason() {
+        assert!(matches!(
+            classify_admission_error("ERROR: unsupported feature"),
+            CaseOutcome::ProductFailure(_)
+        ));
+        assert!(matches!(
+            classify_admission_outcome(
+                Some("0A000"),
+                Some("DVM-81-6-VOLATILE".to_string()),
+                "unsupported",
+                false,
+            ),
+            CaseOutcome::UnsupportedAtAdmission(UnsupportedReason {
+                sqlstate: Some(_),
+                reason_code: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_admission_outcome(Some("42601"), None, "syntax error", false),
+            CaseOutcome::GeneratorInvalid(_)
+        ));
     }
 }

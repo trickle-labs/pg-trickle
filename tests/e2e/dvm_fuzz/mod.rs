@@ -240,6 +240,30 @@ async fn execute(
     })
 }
 
+async fn execute_traced(
+    db: &E2eDb,
+    scenario: &Scenario,
+    sql: &str,
+    phase: impl Into<String>,
+    cycle: Option<usize>,
+    mutation: Option<usize>,
+) -> Result<(), ReplayFailure> {
+    let phase = phase.into();
+    db.try_execute_with_config(&["SET pg_trickle.dvm_decision_trace = on"], sql)
+        .await
+        .map_err(|e| {
+            failure(
+                scenario,
+                "I-05",
+                "ProductFailure",
+                phase,
+                cycle,
+                mutation,
+                format!("{e}\nSQL: {sql}"),
+            )
+        })
+}
+
 async fn compare(
     db: &E2eDb,
     scenario: &Scenario,
@@ -309,7 +333,7 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
         None,
     )
     .await?;
-    execute(
+    execute_traced(
         db,
         scenario,
         &format!(
@@ -374,7 +398,7 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
                 ));
             }
         }
-        execute(
+        execute_traced(
             db,
             scenario,
             &format!(
@@ -418,7 +442,8 @@ pub async fn replay(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailure
         ))
         .await;
     if let Err(failure) = result {
-        write_artifact(scenario, &failure);
+        let postgres_log = collect_postgres_log(db).await;
+        write_artifact(scenario, &failure, &postgres_log);
         let _ = cleanup;
         return Err(failure);
     }
@@ -432,7 +457,8 @@ pub async fn replay(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailure
             None,
             cleanup_error.to_string(),
         );
-        write_artifact(scenario, &failure);
+        let postgres_log = collect_postgres_log(db).await;
+        write_artifact(scenario, &failure, &postgres_log);
         return Err(failure);
     }
     Ok(())
@@ -474,7 +500,64 @@ pub fn render_replay_sql(scenario: &Scenario) -> String {
     sql
 }
 
-fn write_artifact(scenario: &Scenario, failure: &ReplayFailure) {
+async fn collect_postgres_log(db: &E2eDb) -> String {
+    let Ok(output) = tokio::process::Command::new("docker")
+        .args(["logs", "--tail", "1000", db.container_id()])
+        .output()
+        .await
+    else {
+        return String::new();
+    };
+    let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
+    log.push_str(&String::from_utf8_lossy(&output.stderr));
+    log
+}
+
+fn trace_artifact(log: &str) -> String {
+    let mut events = Vec::new();
+    for trace in parsed_traces(log) {
+        if let Some(trace_events) = trace.get("events").and_then(serde_json::Value::as_array) {
+            events.extend(trace_events.iter().cloned());
+        }
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "events": events,
+        "available": !events.is_empty(),
+        "source": "postgres_log"
+    }))
+    .unwrap_or_else(|_| "{\"events\":[],\"available\":false}\n".to_string())
+}
+
+fn parsed_traces(log: &str) -> Vec<serde_json::Value> {
+    log.lines()
+        .filter_map(|line| {
+            let raw = line.split_once("dvm_decision_trace=")?.1.trim();
+            serde_json::from_str(raw).ok()
+        })
+        .collect()
+}
+
+fn coverage_artifact(log: &str) -> String {
+    let mut observed = coverage::SemanticCoverageObservation::default();
+    for trace in parsed_traces(log) {
+        observed.observe_decision_trace(&trace);
+    }
+    serde_json::to_string_pretty(&observed).unwrap_or_else(|_| "{}\n".to_string())
+}
+
+fn generated_delta_artifact(log: &str) -> String {
+    log.lines()
+        .rev()
+        .find_map(|line| {
+            let raw = line
+                .split_once("dvm_generated_delta_sql=")
+                .map(|(_, value)| value.trim())?;
+            serde_json::from_str::<String>(raw).ok()
+        })
+        .unwrap_or_default()
+}
+
+fn write_artifact(scenario: &Scenario, failure: &ReplayFailure, postgres_log: &str) {
     let root = std::env::var_os("DVM_ARTIFACT_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("artifacts/dvm-fuzz"));
@@ -529,9 +612,20 @@ fn write_artifact(scenario: &Scenario, failure: &ReplayFailure) {
         diff.and_then(|value| serde_json::to_string_pretty(&value.expected_signature).ok())
             .unwrap_or_default(),
     );
-    write("dvm_trace.json", "{}\n".to_string());
-    write("generated_delta.sql", String::new());
-    write("postgres.log", failure.detail.clone());
+    write("dvm_trace.json", trace_artifact(postgres_log));
+    write("coverage.json", coverage_artifact(postgres_log));
+    write(
+        "generated_delta.sql",
+        generated_delta_artifact(postgres_log),
+    );
+    write(
+        "postgres.log",
+        if postgres_log.is_empty() {
+            failure.detail.clone()
+        } else {
+            postgres_log.to_string()
+        },
+    );
     write(
         "failure.json",
         serde_json::to_string_pretty(failure).unwrap_or_default(),

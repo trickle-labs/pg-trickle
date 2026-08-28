@@ -11,6 +11,28 @@ use e2e::E2eDb;
 
 const COVERAGE_REQUIREMENTS: &str = include_str!("corpus/dvm_coverage_requirements.json");
 
+fn aggregate_count(node: &RelNode) -> usize {
+    match node {
+        RelNode::Aggregate { input, .. } => 1 + aggregate_count(input),
+        RelNode::Join { left, right, .. } => aggregate_count(left) + aggregate_count(right),
+        RelNode::Filter { input, .. }
+        | RelNode::Project { input, .. }
+        | RelNode::Subquery { input, .. } => aggregate_count(input),
+        RelNode::Scan { .. } | RelNode::CteRef { .. } => 0,
+    }
+}
+
+fn join_depth(node: &RelNode) -> usize {
+    match node {
+        RelNode::Join { left, right, .. } => 1 + join_depth(left).max(join_depth(right)),
+        RelNode::Filter { input, .. }
+        | RelNode::Project { input, .. }
+        | RelNode::Subquery { input, .. }
+        | RelNode::Aggregate { input, .. } => join_depth(input),
+        RelNode::Scan { .. } | RelNode::CteRef { .. } => 0,
+    }
+}
+
 #[test]
 fn test_v0873_matrix_matches_published_requirements() {
     let requirements: serde_json::Value =
@@ -59,8 +81,31 @@ fn test_v0873_generated_queries_have_schemas_and_render_sql() {
         );
         assert_eq!(
             case.query.ctes.len(),
-            2,
-            "{} must have two named CTEs",
+            case.aggregate_leaf_count,
+            "{} CTEs",
+            case.id
+        );
+        assert_eq!(
+            aggregate_count(&case.query.body),
+            0,
+            "{} CTE definitions must not be duplicated in the body",
+            case.id
+        );
+        let rendered_ctes = case
+            .query
+            .ctes
+            .iter()
+            .map(|cte| aggregate_count(&cte.query))
+            .sum::<usize>();
+        assert_eq!(
+            rendered_ctes, case.aggregate_leaf_count,
+            "{} aggregate leaves",
+            case.id
+        );
+        assert_eq!(
+            join_depth(&case.query.body),
+            case.join_depth,
+            "{} join depth",
             case.id
         );
         match case.id {
@@ -103,6 +148,7 @@ async fn test_v0873_mandatory_composition_matrix() {
     create_matrix_sources(&db).await;
 
     for case in mandatory_cases() {
+        reset_matrix_sources(&db).await;
         let stream_table = format!("dvm_comp_{}", case.id);
         let query = case
             .query
@@ -116,29 +162,72 @@ async fn test_v0873_mandatory_composition_matrix() {
             .unwrap_or_else(|failure| panic!("{} did not stay differential: {failure:?}", case.id));
         e2e::oracle::assert_st_query_exact(&db, &stream_table, &query, case.id).await;
 
-        let id = (case
-            .id
-            .as_bytes()
-            .iter()
-            .map(|byte| *byte as usize)
-            .sum::<usize>()
-            % 3)
-            + 1;
-        let left_delta = (case.id.len() % 5 + 1) as i32;
-        let right_delta = (case.id.bytes().next().unwrap_or(1) % 5 + 1) as i32;
-        let mut mutations = vec![format!(
-            "UPDATE composition_left SET value = value + {left_delta} WHERE id = {id}"
-        )];
-        if case.changed_leaves != "one" {
-            mutations.push(format!(
-                "UPDATE composition_right SET value = value + {right_delta} WHERE id = {id}"
-            ));
+        for mutations in mutation_history(&case) {
+            db.execute_seq(&mutations.iter().map(String::as_str).collect::<Vec<_>>())
+                .await;
+            db.refresh_st(&stream_table).await;
+            e2e::oracle::assert_st_query_exact(&db, &stream_table, &query, case.id).await;
         }
-        db.execute_seq(&mutations.iter().map(String::as_str).collect::<Vec<_>>())
+        let _ = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.drop_stream_table('{stream_table}')"
+            ))
             .await;
-        db.refresh_st(&stream_table).await;
-        e2e::oracle::assert_st_query_exact(&db, &stream_table, &query, case.id).await;
     }
+}
+
+fn mutation_history(case: &dvm_fuzz::coverage::CompositionCase) -> Vec<Vec<String>> {
+    let id = (case.id.bytes().map(usize::from).sum::<usize>() % 3) + 1;
+    let left_delta = (case.id.len() % 5 + 1) as i32;
+    let right_delta = (case.id.bytes().next().unwrap_or(1) % 5 + 1) as i32;
+    match case.id {
+        "singleton_empty_repopulate" => vec![
+            vec!["DELETE FROM composition_left WHERE id = 3".to_string()],
+            vec!["INSERT INTO composition_left VALUES (4, 'b', 40, 'repopulated')".to_string()],
+        ],
+        "nullable_group_key_transition" => vec![
+            vec!["UPDATE composition_left SET grp = NULL WHERE id = 1".to_string()],
+            vec!["UPDATE composition_left SET grp = 'a' WHERE id = 1".to_string()],
+        ],
+        "existing_multigroup_min_winner" => vec![vec![
+            "UPDATE composition_left SET value = value - 7 WHERE id = 2".to_string(),
+        ]],
+        "existing_multigroup_max_winner" => vec![vec![
+            "UPDATE composition_left SET value = value + 70 WHERE id = 1".to_string(),
+        ]],
+        "batching_history_equivalent" => vec![
+            vec![format!(
+                "UPDATE composition_left SET value = value + {left_delta} WHERE id = {id}"
+            )],
+            vec![format!(
+                "UPDATE composition_right SET value = value + {right_delta} WHERE id = {id}"
+            )],
+        ],
+        _ => {
+            let mut cycle = vec![format!(
+                "UPDATE composition_left SET value = value + {left_delta} WHERE id = {id}"
+            )];
+            if case.changed_leaves != "one" {
+                cycle.push(format!(
+                    "UPDATE composition_right SET value = value + {right_delta} WHERE id = {id}"
+                ));
+            }
+            vec![cycle]
+        }
+    }
+}
+
+async fn reset_matrix_sources(db: &E2eDb) {
+    db.execute_seq(&[
+        "TRUNCATE composition_left, composition_right",
+        "INSERT INTO composition_left (id, grp, value, note)
+         VALUES (1, 'a', 10, 'left-a'), (2, NULL, 20, 'left-null'),
+                (3, 'b', 30, 'left-b')",
+        "INSERT INTO composition_right (id, grp, value, note)
+         VALUES (1, 'a', 100, 'right-a'), (2, NULL, 200, 'right-null'),
+                (3, 'b', 300, 'right-b')",
+    ])
+    .await;
 }
 
 async fn create_matrix_sources(db: &E2eDb) {

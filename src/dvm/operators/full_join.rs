@@ -57,11 +57,11 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_leaf_snapshot_sql, build_snapshot_sql, contains_semijoin, extract_equijoin_keys_aliased,
-    is_join_child, rewrite_join_condition, supports_pre_change_join_snapshot,
-    use_pre_change_snapshot,
+    build_leaf_snapshot_sql, build_snapshot_sql, extract_equijoin_keys_aliased,
+    rewrite_join_condition,
 };
 use crate::dvm::parser::OpTree;
+use crate::dvm::snapshot::SnapshotPlan;
 use crate::error::PgTrickleError;
 
 /// Differentiate a FullJoin node.
@@ -183,12 +183,12 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     //
     // L₀ and EC-01 R₀ are mutually exclusive: when L₀ is available,
     // Part 1 is unsplit (no EC-01), and the standard formula is exact.
-    let use_per_leaf_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
-    let use_combined_l0 = is_join_child(left)
-        && !supports_pre_change_join_snapshot(left)
-        && !contains_semijoin(left)
-        && !ctx.inside_semijoin;
-    let use_l0 = use_per_leaf_l0 || use_combined_l0;
+    let left_plan = SnapshotPlan::for_tree_in_context(left, ctx.inside_semijoin);
+    let right_plan = SnapshotPlan::for_tree_in_context(right, ctx.inside_semijoin);
+    let use_per_leaf_l0 = left_plan.uses_per_leaf();
+    let use_l0 = left_plan.uses_pre_change();
+    debug_assert_eq!(use_per_leaf_l0, left_plan.uses_per_leaf());
+    debug_assert_eq!(use_l0, left_plan.uses_pre_change());
 
     // ── EC-01: Pre-change right snapshot for Parts 1b / 3b ─────────
     //
@@ -197,11 +197,11 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let use_r0 = if use_l0 {
         false
     } else {
-        use_pre_change_snapshot(right, ctx.inside_semijoin, 4)
+        right_plan.uses_pre_change()
     };
 
     let r0_snapshot = if use_r0 {
-        if is_join_child(right) {
+        if right_plan.uses_per_leaf() {
             // DI-1: Named CTE snapshot for right pre-change state.
             let pre_change = ctx.get_or_register_snapshot_cte(right);
             mark_leaf_delta_ctes_not_materialized(right, ctx);
@@ -226,7 +226,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     // ── L₀ snapshot for Part 2 (when use_l0=true) ──────────────────
     let left_part2_source = if use_l0 {
-        if is_join_child(left) && !use_combined_l0 {
+        if use_per_leaf_l0 {
             let pre_change = ctx.get_or_register_snapshot_cte(left);
             mark_leaf_delta_ctes_not_materialized(left, ctx);
             pre_change
@@ -256,7 +256,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .filter(|c| *c != "__pgt_count")
         .cloned()
         .collect();
-    let r_old_snapshot = if is_join_child(right) && supports_pre_change_join_snapshot(right) {
+    let r_old_snapshot = if right_plan.uses_per_leaf() {
         ctx.get_or_register_snapshot_cte(right)
     } else {
         build_leaf_snapshot_sql(
@@ -275,7 +275,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .filter(|c| *c != "__pgt_count")
         .cloned()
         .collect();
-    let l_old_snapshot = if is_join_child(left) && supports_pre_change_join_snapshot(left) {
+    let l_old_snapshot = if left_plan.uses_per_leaf() {
         ctx.get_or_register_snapshot_cte(left)
     } else {
         build_leaf_snapshot_sql(

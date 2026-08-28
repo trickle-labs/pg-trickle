@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.87.13-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.87.14-pg18 -f Dockerfile.hub .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -408,15 +408,15 @@ dvm-composition: build-e2e-image
 dvm-composition-unit:
     cargo test --test e2e_dvm_composition_tests --features pg18 test_v0873_matrix_matches_published_requirements
     cargo test --test e2e_dvm_composition_tests --features pg18 test_v0873_generated_queries_have_schemas_and_render_sql
-    cargo test --test e2e_dvm_composition_tests --features pg18 semantic_floors_pass_and_report_missing_buckets
+    cargo test --test e2e_dvm_composition_tests --features pg18 semantic_coverage_report_validator_accepts_complete_observation
 
 # v0.87.5: run typed schema, snapshot plan, trace, and semantic-floor checks.
 [group: "dvm"]
 dvm-contracts-unit:
-    cargo test --lib --features pg18 dvm::schema
-    cargo test --lib --features pg18 dvm::snapshot
-    cargo test --lib --features pg18 dvm::diff::tests::test_decision_trace_records_declared_schema_and_snapshot_plan
-    cargo test --test e2e_dvm_composition_tests --features pg18 semantic_floors_pass_and_report_missing_buckets
+    ./scripts/run_unit_tests.sh pg18 dvm::schema
+    ./scripts/run_unit_tests.sh pg18 dvm::snapshot
+    ./scripts/run_unit_tests.sh pg18 dvm::diff::tests::test_decision_trace_records_declared_schema_and_snapshot_plan
+    cargo test --test e2e_dvm_composition_tests --features pg18 semantic_coverage_report_validator_accepts_complete_observation
 
 # v0.87.4: run state-directed and metamorphic correctness checks.
 [group: "dvm"]
@@ -426,7 +426,10 @@ dvm-metamorphic: build-e2e-image
 # v0.87.4: run pure planner and metamorphic model checks without Docker.
 [group: "dvm"]
 dvm-metamorphic-unit:
-    cargo test --test e2e_dvm_metamorphic_tests --features pg18
+    cargo test --test e2e_dvm_metamorphic_tests --features pg18 dvm_fuzz::
+    cargo test --test e2e_dvm_metamorphic_tests --features pg18 e2e::oracle::
+    cargo test --test e2e_dvm_metamorphic_tests --features pg18 test_v0874_state_planner_covers_changed_leaf_buckets
+    cargo test --test e2e_dvm_metamorphic_tests --features pg18 test_v08714_metamorphic_families_execute_and_record
 
 # COR-19 (v0.87.6): replay the permanent DVM corpus under both the requested
 # and a forced-FULL refresh-mode strategy.
@@ -617,12 +620,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.87.13": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.87.14": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.87.13": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.87.14": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

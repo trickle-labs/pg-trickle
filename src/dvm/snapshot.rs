@@ -55,6 +55,27 @@ impl SnapshotPlan {
             Self::ExactCombined
         }
     }
+
+    /// Select the plan used while differentiating a nested join below a
+    /// semijoin.  Such joins must stay post-change; reconstructing their old
+    /// state interacts with the semijoin's own old-state correction.  Leaf
+    /// snapshots remain exact, as they do outside that context.
+    pub fn for_tree_in_context(tree: &OpTree, inside_semijoin: bool) -> Self {
+        let plan = Self::for_tree(tree);
+        if inside_semijoin && matches!(plan, Self::ExactPerLeaf) {
+            Self::PostChangeWithCorrection
+        } else {
+            plan
+        }
+    }
+
+    pub const fn uses_pre_change(&self) -> bool {
+        matches!(self, Self::ExactPerLeaf | Self::ExactCombined)
+    }
+
+    pub const fn uses_per_leaf(&self) -> bool {
+        matches!(self, Self::ExactPerLeaf)
+    }
 }
 
 pub fn operator_name(tree: &OpTree) -> &'static str {
@@ -123,12 +144,12 @@ impl Facts {
                 self.visit(left);
                 self.visit(right);
             }
-            OpTree::Aggregate { child, .. } | OpTree::Distinct { child } => {
+            OpTree::Aggregate { child, .. } => self.visit(child),
+            OpTree::Distinct { child } => {
                 self.pure_leaf_tree = false;
                 self.visit(child);
             }
             OpTree::CteScan { body, .. } => {
-                self.pure_leaf_tree = false;
                 if let Some(body) = body {
                     self.visit(body);
                 } else {
@@ -191,6 +212,31 @@ mod tests {
             SnapshotPlan::for_tree(&tree),
             SnapshotPlan::PostChangeWithCorrection
         );
+    }
+
+    #[test]
+    fn plans_aggregate_cte_join_as_exact_per_leaf() {
+        let body = aggregate(
+            vec![colref("parent_id")],
+            vec![count_star("count")],
+            scan(2, "child", "public", "c", &["parent_id"]),
+        );
+        let aggregate_cte = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "agg".into(),
+            alias: "a".into(),
+            columns: vec!["parent_id".into(), "count".into()],
+            cte_def_aliases: Vec::new(),
+            column_aliases: Vec::new(),
+            body: Some(Box::new(body)),
+        };
+        let tree = inner_join(
+            eq_cond("p", "id", "a", "parent_id"),
+            scan(1, "parent", "public", "p", &["id"]),
+            aggregate_cte,
+        );
+
+        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactPerLeaf);
     }
 
     #[test]

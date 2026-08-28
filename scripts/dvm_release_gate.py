@@ -142,7 +142,7 @@ STEPS: list[tuple[str, str, bool]] = [
         "&& cargo test --test e2e_dvm_composition_tests --features pg18 "
         "test_v0873_generated_queries_have_schemas_and_render_sql "
         "&& cargo test --test e2e_dvm_composition_tests --features pg18 "
-        "semantic_floors_pass_and_report_missing_buckets",
+        "semantic_coverage_report_validator_accepts_complete_observation",
         False,
     ),
     (
@@ -153,7 +153,7 @@ STEPS: list[tuple[str, str, bool]] = [
     (
         "coverage-floors",
         "cargo test --test e2e_dvm_composition_tests --features pg18 "
-        "semantic_floors_pass_and_report_missing_buckets",
+        "semantic_coverage_report_validator_accepts_complete_observation",
         False,
     ),
     ("corpus-retention", "python3 scripts/dvm_corpus_retain.py", False),

@@ -64,7 +64,8 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
                 "",
             )
             .set_detail(
-                "DIFFERENTIAL mode supports SELECT, WHERE, simple JOINs (INNER/LEFT/RIGHT), \
+                "pg_trickle_reason_code=UNSUPPORTED_OPERATOR\n\
+                 DIFFERENTIAL mode supports SELECT, WHERE, simple JOINs (INNER/LEFT/RIGHT), \
                  GROUP BY, HAVING, ORDER BY, and LIMIT. CTEs (WITH …), FULL OUTER JOINs, \
                  window functions without a writable equivalent, and certain aggregate forms \
                  are not supported."

@@ -27,6 +27,89 @@ _PK_UPDATE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_LITERAL_RE = re.compile(r"'[^']*'|\b\d+\b")
+_CREATE_TABLE_RE = re.compile(
+    r"(?P<prefix>CREATE\s+TABLE\s+[^()]+\()(?P<body>.*)(?P<suffix>\))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _split_sql_items(source: str) -> list[str]:
+    """Split comma-separated SQL items while respecting quotes and nesting."""
+    items: list[str] = []
+    start = 0
+    depth = 0
+    quote = False
+    for index, char in enumerate(source):
+        if char == "'":
+            quote = not quote
+        elif not quote and char == "(":
+            depth += 1
+        elif not quote and char == ")":
+            depth -= 1
+        elif not quote and depth == 0 and char == ",":
+            items.append(source[start:index].strip())
+            start = index + 1
+    items.append(source[start:].strip())
+    return [item for item in items if item]
+
+
+def _structural_reductions(scenario: dict) -> list[dict]:
+    """Return cheap candidates for the remaining schema/query/settings ladder."""
+    candidates: list[dict] = []
+
+    # Constraints and types are local substitutions; replay decides whether the
+    # failure signature survives the reduction.
+    for index, statement in enumerate(scenario["schema"]["setup_sql"]):
+        for pattern in (r"\s+PRIMARY\s+KEY", r"\s+NOT\s+NULL", r"\s+UNIQUE"):
+            reduced = re.sub(pattern, "", statement, count=1, flags=re.IGNORECASE)
+            if reduced != statement:
+                candidate = copy.deepcopy(scenario)
+                candidate["schema"]["setup_sql"][index] = reduced
+                candidates.append(candidate)
+        for source_type, target_type in (("BIGINT", "INT"), ("NUMERIC", "INT"), ("TEXT", "VARCHAR")):
+            reduced = re.sub(rf"\b{source_type}\b", target_type, statement, count=1)
+            if reduced != statement:
+                candidate = copy.deepcopy(scenario)
+                candidate["schema"]["setup_sql"][index] = reduced
+                candidates.append(candidate)
+
+        match = _CREATE_TABLE_RE.match(statement)
+        if match:
+            columns = _split_sql_items(match.group("body"))
+            if len(columns) > 2:
+                reduced = match.group("prefix") + ", ".join(columns[:-1]) + match.group("suffix")
+                candidate = copy.deepcopy(scenario)
+                candidate["schema"]["setup_sql"][index] = reduced
+                candidates.append(candidate)
+
+    defining_query = scenario["query"].get("defining_query", "")
+    for pattern in (r"\s+SELECT\s+\*\s+FROM\s+", r"\s+AS\s+\w+"):
+        reduced = re.sub(pattern, " ", defining_query, count=1, flags=re.IGNORECASE)
+        if reduced != defining_query:
+            candidate = copy.deepcopy(scenario)
+            candidate["query"]["defining_query"] = reduced.strip()
+            candidates.append(candidate)
+
+    for pattern, replacement in (
+        (r"\bLEFT\s+JOIN\b", "JOIN"),
+        (r"\bFULL\s+JOIN\b", "JOIN"),
+        (r"\bUNION\s+ALL\b", "UNION"),
+        (r"\bDISTINCT\s+", ""),
+    ):
+        reduced = re.sub(pattern, replacement, defining_query, count=1, flags=re.IGNORECASE)
+        if reduced != defining_query:
+            candidate = copy.deepcopy(scenario)
+            candidate["query"]["defining_query"] = reduced.strip()
+            candidates.append(candidate)
+
+    execution = scenario.get("execution", {})
+    for key in list(execution):
+        if key in {"schedule", "requested_refresh_mode"}:
+            continue
+        candidate = copy.deepcopy(scenario)
+        del candidate["execution"][key]
+        candidates.append(candidate)
+    return candidates
 
 
 def _split_top_level_tuples(values_src: str) -> list[str]:
@@ -132,6 +215,15 @@ def shrink_scenario(scenario: dict, still_fails: Callable[[dict], bool]) -> dict
                     if still_fails(candidate):
                         scenario = candidate
                         changed = True
+
+        # (e) Remove schema constraints/columns, simplify types and query
+        # operators, then drop execution knobs. The failure predicate keeps
+        # only reductions preserving the original failure signature.
+        for candidate in _structural_reductions(scenario):
+            if still_fails(candidate):
+                scenario = candidate
+                changed = True
+                break
         for ci, cycle in enumerate(scenario["cycles"]):
             for mi, mutation in enumerate(cycle["mutations"]):
                 for reduced in _simplify_sql(mutation["sql"]):
@@ -162,6 +254,8 @@ def replay_still_fails(
         if expected_class is None:
             return True
         return _failure_class(error) == expected_class
+    except ValueError:
+        return False
     else:
         return False
     finally:

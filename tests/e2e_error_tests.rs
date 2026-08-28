@@ -833,23 +833,23 @@ async fn test_stable_function_falls_back_to_full_in_auto_mode() {
 }
 
 #[tokio::test]
-async fn test_function_volatility_resolves_exact_overload_and_schema() {
+async fn test_function_volatility_resolves_exact_time_bucket_like_overload() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE SCHEMA volatility_safe").await;
     db.execute("CREATE SCHEMA volatility_unsafe").await;
     db.execute(
-        "CREATE FUNCTION volatility_safe.probe(int) RETURNS int \
+        "CREATE FUNCTION volatility_safe.time_bucket_like(int) RETURNS int \
          LANGUAGE sql IMMUTABLE AS 'SELECT $1'",
     )
     .await;
     db.execute(
-        "CREATE FUNCTION volatility_safe.probe(text) RETURNS text \
+        "CREATE FUNCTION volatility_safe.time_bucket_like(text) RETURNS text \
          LANGUAGE sql VOLATILE AS 'SELECT $1'",
     )
     .await;
     db.execute(
-        "CREATE FUNCTION volatility_unsafe.probe(int) RETURNS int \
+        "CREATE FUNCTION volatility_unsafe.time_bucket_like(int) RETURNS int \
          LANGUAGE sql VOLATILE AS 'SELECT $1'",
     )
     .await;
@@ -858,7 +858,8 @@ async fn test_function_volatility_resolves_exact_overload_and_schema() {
     db.execute("INSERT INTO nd_overload_src VALUES (1, 'one'), (2, 'two')")
         .await;
 
-    let immutable_query = "SELECT id, volatility_safe.probe(id) AS resolved FROM nd_overload_src";
+    let immutable_query =
+        "SELECT id, volatility_safe.time_bucket_like(id) AS resolved FROM nd_overload_src";
     db.create_st(
         "nd_overload_immutable_st",
         immutable_query,
@@ -870,8 +871,8 @@ async fn test_function_volatility_resolves_exact_overload_and_schema() {
         .await;
 
     for query in [
-        "SELECT id, volatility_safe.probe(label) FROM nd_overload_src",
-        "SELECT id, volatility_unsafe.probe(id) FROM nd_overload_src",
+        "SELECT id, volatility_safe.time_bucket_like(label) FROM nd_overload_src",
+        "SELECT id, volatility_unsafe.time_bucket_like(id) FROM nd_overload_src",
     ] {
         let result = db
             .try_execute(&format!(
