@@ -1,0 +1,81 @@
+{
+  "wire": {
+    "identity_version": 2,
+    "probe_version": 1,
+    "domain_tags": {
+      "SCAN_KEY": "01",
+      "KEYLESS_ROW": "02",
+      "GROUP_KEY": "03",
+      "JOIN_KEY": "04",
+      "SET_KEY": "05",
+      "WINDOW_KEY": "06",
+      "SYNTHETIC": "07"
+    },
+    "type_tags": {
+      "bool": "01",
+      "int2": "02",
+      "int4": "03",
+      "int8": "04",
+      "oid": "05",
+      "float4": "06",
+      "float8": "07",
+      "numeric": "08",
+      "text": "09",
+      "varchar": "0a",
+      "bpchar": "0b",
+      "bytea": "0c",
+      "uuid": "0d",
+      "date": "0e",
+      "time": "0f",
+      "timestamp": "10",
+      "timestamptz": "11",
+      "timetz": "12",
+      "interval": "13",
+      "inet": "14",
+      "cidr": "15",
+      "macaddr": "16",
+      "macaddr8": "17",
+      "bit": "18",
+      "varbit": "19",
+      "enum": "1a"
+    },
+    "null_tag": "00",
+    "value_tag": "01",
+    "tuple_end": "ff",
+    "variable_escape": "00ff",
+    "variable_end": "0000",
+    "probe_prefix_bytes": 128,
+    "xxh3_128_seed": "9e3779b185ebca87",
+    "digest_byte_order": "low64_then_high64_big_endian"
+  },
+  "vectors": [
+    { "name": "scan_bool_false", "domain": "SCAN_KEY", "fields": [{ "type": "bool", "value": false }], "bytes": "020100000001010100ff" },
+    { "name": "scan_bool_true", "domain": "SCAN_KEY", "fields": [{ "type": "bool", "value": true }], "bytes": "020100000001010101ff" },
+    { "name": "scan_null_int4", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": null }], "bytes": "0201000000010300ff" },
+    { "name": "scan_int4_minus_one", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": -1 }], "bytes": "02010000000103017fffffff" },
+    { "name": "scan_int4_one", "domain": "SCAN_KEY", "fields": [{ "type": "int4", "value": 1 }], "bytes": "020100000001030180000001ff" },
+    { "name": "scan_int8_42", "domain": "SCAN_KEY", "fields": [{ "type": "int8", "value": 42 }], "bytes": "0201000000010401800000000000002aff" },
+    { "name": "group_float_positive_zero", "domain": "GROUP_KEY", "fields": [{ "type": "float8", "value": "+0" }], "bytes": "02030000000107018000000000000000ff" },
+    { "name": "group_float_negative_zero_canonical", "domain": "GROUP_KEY", "fields": [{ "type": "float8", "value": "-0" }], "bytes": "02030000000107018000000000000000ff" },
+    { "name": "group_float_nan_canonical", "domain": "GROUP_KEY", "fields": [{ "type": "float8", "value": "NaN" }], "bytes": "0203000000010701fff8000000000000ff" },
+    { "name": "keyless_escaped_text", "domain": "KEYLESS_ROW", "fields": [{ "type": "text", "value_hex": "610062" }], "bytes": "02020000000109016100ff620000ff" },
+    { "name": "keyless_escaped_bytes", "domain": "KEYLESS_ROW", "fields": [{ "type": "bytea", "value_hex": "0001ff" }], "bytes": "0202000000010c0100ff01ff0000ff" },
+    { "name": "scan_uuid", "domain": "SCAN_KEY", "fields": [{ "type": "uuid", "value": "00112233-4455-6677-8899-aabbccddeeff" }], "bytes": "0201000000010d0100112233445566778899aabbccddeeffff" },
+    { "name": "scan_numeric_scale_normalized", "domain": "SCAN_KEY", "fields": [{ "type": "numeric", "value": "1.00" }], "bytes": "020100000001080103800000000000000131ff" },
+    { "name": "scan_numeric_negative_normalized", "domain": "SCAN_KEY", "fields": [{ "type": "numeric", "value": "-12.30" }], "bytes": "0201000000010801017ffffffefffffffccecdccff" },
+    { "name": "window_interval_30_days", "domain": "WINDOW_KEY", "fields": [{ "type": "interval", "value": "30 days" }], "bytes": "020600000001130180000000000000000000025b7f3d4000ff" },
+    { "name": "join_adversarial_ab_c", "domain": "JOIN_KEY", "fields": [{ "type": "text", "value_hex": "6162" }, { "type": "text", "value_hex": "63" }], "bytes": "0204000000020901616200000901630000ff" },
+    { "name": "join_adversarial_a_bc", "domain": "JOIN_KEY", "fields": [{ "type": "text", "value_hex": "61" }, { "type": "text", "value_hex": "6263" }], "bytes": "0204000000020901610000090162630000ff" },
+    { "name": "set_null_and_value", "domain": "SET_KEY", "fields": [{ "type": "int4", "value": null }, { "type": "int4", "value": 1 }], "bytes": "0205000000020300030180000001ff" },
+    { "name": "window_int2_seven", "domain": "WINDOW_KEY", "fields": [{ "type": "int2", "value": 7 }], "bytes": "02060000000102018007ff" },
+    { "name": "synthetic_discriminator", "domain": "SYNTHETIC", "fields": [{ "type": "text", "value": "scalar_aggregate_singleton" }], "bytes": "02070000000109017363616c61725f6167677265676174655f73696e676c65746f6e0000ff" }
+  ],
+  "probe_vectors": [
+    { "name": "inline_probe_is_identity", "identity_hex": "020100000001030180000001ff", "probe_hex": "020100000001030180000001ff" },
+    { "name": "overflow_probe_appends_digest", "identity_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7fff", "probe_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8386924d9b620d60037e36ad6dc64c12" }
+  ],
+  "adversarial_pairs": [
+    { "left": "join_adversarial_ab_c", "right": "join_adversarial_a_bc", "must_differ": true },
+    { "left": "group_float_positive_zero", "right": "group_float_negative_zero_canonical", "must_differ": false }
+  ]
+}
