@@ -2042,9 +2042,19 @@ impl OpTree {
                             })
                             .collect();
                         let out = self.output_columns();
-                        // Only accept if ALL key columns were mapped and all
-                        // mapped names appear in the projected output.
-                        if mapped.len() == child_keys.len()
+                        // A nested narrowing projection over a prior
+                        // projection may retain only part of a composite
+                        // child key. Use the retained columns so full and
+                        // differential refreshes share the same row-id
+                        // expression; keyless storage handles any duplicate
+                        // row IDs that result.
+                        let is_nested_projection = matches!(
+                            child.as_ref(),
+                            OpTree::Subquery { child: nested, .. }
+                                if matches!(nested.as_ref(), OpTree::Project { .. })
+                        );
+                        if is_nested_projection
+                            && !mapped.is_empty()
                             && mapped.iter().all(|m| out.contains(m))
                         {
                             return Some(mapped);

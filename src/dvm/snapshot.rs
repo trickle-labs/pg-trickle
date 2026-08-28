@@ -144,12 +144,12 @@ impl Facts {
                 self.visit(left);
                 self.visit(right);
             }
-            OpTree::Aggregate { child, .. } | OpTree::Distinct { child } => {
+            OpTree::Aggregate { child, .. } => self.visit(child),
+            OpTree::Distinct { child } => {
                 self.pure_leaf_tree = false;
                 self.visit(child);
             }
             OpTree::CteScan { body, .. } => {
-                self.pure_leaf_tree = false;
                 if let Some(body) = body {
                     self.visit(body);
                 } else {
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_aggregate_cte_join_as_exact_combined() {
+    fn plans_aggregate_cte_join_as_exact_per_leaf() {
         let body = aggregate(
             vec![colref("parent_id")],
             vec![count_star("count")],
@@ -236,7 +236,7 @@ mod tests {
             aggregate_cte,
         );
 
-        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactCombined);
+        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactPerLeaf);
     }
 
     #[test]

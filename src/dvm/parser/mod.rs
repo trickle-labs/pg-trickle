@@ -2767,6 +2767,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_row_id_key_columns_nested_join_projection_uses_retained_key() {
+        let left = scan_with_pk("a", 1, &["id", "grp"], &["id"]);
+        let right = scan_with_pk("b", 2, &["id", "grp"], &["id"]);
+        let join = OpTree::InnerJoin {
+            condition: qualified_col("a", "grp"),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let inner = OpTree::Project {
+            expressions: vec![qualified_col("a", "grp"), qualified_col("b", "grp")],
+            aliases: vec!["grp".to_string(), "right_grp".to_string()],
+            child: Box::new(join),
+        };
+        let outer = OpTree::Project {
+            expressions: vec![col("grp")],
+            aliases: vec!["grp".to_string()],
+            child: Box::new(OpTree::Subquery {
+                alias: "projected".to_string(),
+                column_aliases: vec![],
+                child: Box::new(inner),
+            }),
+        };
+
+        assert_eq!(outer.row_id_key_columns(), Some(vec!["grp".to_string()]));
+    }
+
     // ── OpTree::node_kind tests ─────────────────────────────────────
 
     #[test]

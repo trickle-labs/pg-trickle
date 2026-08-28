@@ -727,8 +727,101 @@ pub fn build_pre_change_snapshot_sql(
                 )
             }
         }
-        // For all other node types, fall back to the current snapshot.
-        // CteScan, Aggregate, etc. don't have per-leaf delta tracking.
+        OpTree::Aggregate {
+            group_by,
+            aggregates,
+            child,
+        } => {
+            let inner = build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids);
+            let child_alias = child.alias();
+            let mut selects = Vec::new();
+            for expr in group_by {
+                selects.push(expr.to_sql());
+            }
+            for agg in aggregates {
+                selects.push(format!(
+                    "{} AS {}",
+                    agg_to_rescan_sql(agg),
+                    quote_ident(&agg.alias),
+                ));
+            }
+            let group_by_sql = if group_by.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " GROUP BY {}",
+                    group_by
+                        .iter()
+                        .map(Expr::to_sql)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!(
+                "(SELECT {} FROM {} {}{})",
+                selects.join(", "),
+                inner,
+                quote_ident(child_alias),
+                group_by_sql,
+            )
+        }
+        OpTree::CteScan {
+            alias,
+            columns,
+            cte_def_aliases,
+            column_aliases,
+            body,
+            ..
+        } => {
+            let Some(body) = body else {
+                return build_snapshot_sql(op);
+            };
+
+            // CteScan keeps a clone of its body from before the registry's
+            // column-pruning pass. Prune that clone before building its
+            // snapshot so its leaf delta CTEs expose the same columns.
+            let mut body = body.as_ref().clone();
+            body.prune_scan_columns();
+            let body_snap = build_pre_change_snapshot_sql(&body, scan_delta_ctes, fallback_oids);
+            let body_cols = body.output_columns();
+            let effective_cols: Vec<&str> = if !column_aliases.is_empty() {
+                column_aliases.iter().map(String::as_str).collect()
+            } else if !cte_def_aliases.is_empty() {
+                cte_def_aliases.iter().map(String::as_str).collect()
+            } else {
+                columns.iter().map(String::as_str).collect()
+            };
+
+            if body_cols
+                .iter()
+                .zip(effective_cols.iter())
+                .any(|(body_col, effective_col)| body_col != effective_col)
+                || body_cols.len() != effective_cols.len()
+            {
+                let selects = body_cols
+                    .iter()
+                    .zip(effective_cols.iter())
+                    .map(|(src, dst)| {
+                        if src == dst {
+                            quote_ident(src)
+                        } else {
+                            format!("{} AS {}", quote_ident(src), quote_ident(dst))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                format!(
+                    "(SELECT {} FROM {} {})",
+                    selects.join(", "),
+                    body_snap,
+                    quote_ident(alias),
+                )
+            } else {
+                body_snap
+            }
+        }
+        // Unsupported nodes still use the current snapshot. SnapshotPlan
+        // keeps them off the per-leaf path unless exact reconstruction is
+        // added here.
         _ => build_snapshot_sql(op),
     }
 }
@@ -939,15 +1032,21 @@ fn rewrite_expr_for_join(
             table_alias: Some(alias),
             column_name,
         } => {
-            if has_source_alias(left, alias) {
-                if is_simple_source(left, alias) {
-                    // Direct table access — just remap the alias
-                    Expr::ColumnRef {
-                        table_alias: Some(new_left.to_string()),
-                        column_name: column_name.clone(),
-                    }
-                } else if let Some(disambiguated) =
-                    resolve_disambiguated_column(left, alias, column_name)
+            // Prefer a direct child alias over a same-named alias nested
+            // inside the other child.  Nested joins commonly reuse `l`/`r`
+            // aliases, but SQL scope gives the outer child alias precedence.
+            if has_source_alias(right, alias) && is_simple_source(right, alias) {
+                Expr::ColumnRef {
+                    table_alias: Some(new_right.to_string()),
+                    column_name: column_name.clone(),
+                }
+            } else if has_source_alias(left, alias) && is_simple_source(left, alias) {
+                Expr::ColumnRef {
+                    table_alias: Some(new_left.to_string()),
+                    column_name: column_name.clone(),
+                }
+            } else if has_source_alias(left, alias) {
+                if let Some(disambiguated) = resolve_disambiguated_column(left, alias, column_name)
                 {
                     // Deep disambiguation: trace through nested joins
                     Expr::ColumnRef {
@@ -962,13 +1061,7 @@ fn rewrite_expr_for_join(
                     }
                 }
             } else if has_source_alias(right, alias) {
-                if is_simple_source(right, alias) {
-                    Expr::ColumnRef {
-                        table_alias: Some(new_right.to_string()),
-                        column_name: column_name.clone(),
-                    }
-                } else if let Some(disambiguated) =
-                    resolve_disambiguated_column(right, alias, column_name)
+                if let Some(disambiguated) = resolve_disambiguated_column(right, alias, column_name)
                 {
                     Expr::ColumnRef {
                         table_alias: Some(new_right.to_string()),
@@ -1781,6 +1874,21 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_prefers_outer_right_alias_on_collision() {
+        let left_inner = inner_join(
+            eq_cond("l", "id", "r", "id"),
+            scan(1, "left", "public", "l", &["id", "grp"]),
+            scan(2, "right_inner", "public", "r", &["id", "grp"]),
+        );
+        let right_outer = scan(3, "right_outer", "public", "r", &["grp"]);
+
+        let rewritten =
+            rewrite_join_condition(&qcolref("r", "grp"), &left_inner, "dl", &right_outer, "dr");
+
+        assert_eq!(rewritten, "\"dr\".\"grp\"");
+    }
+
+    #[test]
     fn test_rewrite_both_sides_nested() {
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
@@ -1953,7 +2061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_change_snapshot_join_with_cte_scan_falls_back() {
+    fn test_pre_change_snapshot_join_with_missing_cte_body_falls_back() {
         let parent = scan(1, "parent", "public", "p", &["id"]);
         let aggregate_cte = cte_scan(0, "agg", "a", vec!["parent_id", "count"], vec![], vec![]);
         let child = left_join(eq_cond("p", "id", "a", "parent_id"), parent, aggregate_cte);
