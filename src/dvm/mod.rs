@@ -749,7 +749,10 @@ pub fn generate_delta_query_cached(
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     // Decision traces describe a concrete differentiation, so bypass both
     // template caches while tracing is enabled.
-    if crate::config::pg_trickle_dvm_decision_trace() {
+    if crate::config::pg_trickle_dvm_decision_trace()
+        && !prev_frontier.is_empty()
+        && !new_frontier.is_empty()
+    {
         return generate_delta_query_staged(
             pgt_id,
             defining_query,

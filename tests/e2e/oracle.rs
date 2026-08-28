@@ -349,7 +349,9 @@ pub fn compare_signatures(
                 exp.type_oid
             ));
         }
-        if act.typmod != exp.typmod {
+        // PostgreSQL uses -1 for an unconstrained typmod; it is compatible
+        // with a query result that retains a source column's constraint.
+        if act.typmod >= 0 && exp.typmod >= 0 && act.typmod != exp.typmod {
             return Err(format!(
                 "Column {} ('{}') typmod mismatch: actual={}, expected={}",
                 i + 1,
@@ -777,6 +779,7 @@ mod tests {
     #[test]
     fn schema_oracle_checks_names_typmods_and_collations() {
         let expected = signature("value", 12, Some(100));
+        assert!(compare_signatures(&signature("value", -1, Some(100)), &expected).is_ok());
         for actual in [
             signature("other", 12, Some(100)),
             signature("value", 13, Some(100)),
