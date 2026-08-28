@@ -2,6 +2,19 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.13 → 0.87.14
+
+Install the 0.87.14 shared library and extension files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+v0.87.14 has no catalog or SQL API changes. The migration is intentionally
+empty; the release completes the DVM correctness gate with exact schema and
+multiset checks, live metamorphic histories, observed-path coverage, an
+authoritative snapshot plan, deeper shrinking, and the #953 admission fix.
+
 ## 0.87.12 → 0.87.13
 
 Install the 0.87.13 shared library and extension files, then run:

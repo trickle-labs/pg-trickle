@@ -84,11 +84,11 @@
 use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, contains_semijoin,
-    is_join_child, is_simple_child, join_scan_count, rewrite_join_condition,
-    supports_pre_change_join_snapshot, use_pre_change_snapshot,
+    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
+    is_simple_child, join_scan_count, rewrite_join_condition,
 };
 use crate::dvm::parser::{Expr, OpTree};
+use crate::dvm::snapshot::SnapshotPlan;
 use crate::error::PgTrickleError;
 
 // A44-1 (v0.43.0): Part 3 correction term scan count limit is now controlled
@@ -327,18 +327,14 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // Additionally, joins inside a SemiJoin/AntiJoin ancestor must use
     // L₁ to avoid Q21-type regressions where sub-join EXCEPT ALL
     // interacts with the SemiJoin's R_old computation.
-    // A44-1: Read L0 scan threshold from GUC (default 4, previously hardcoded).
-    let deep_join_l0_threshold = config::pg_trickle_deep_join_l0_scan_threshold();
-    let use_per_leaf_l0 =
-        use_pre_change_snapshot(left, ctx.inside_semijoin, deep_join_l0_threshold);
-    let use_combined_l0 = is_join_child(left)
-        && !supports_pre_change_join_snapshot(left)
-        && !contains_semijoin(left)
-        && !ctx.inside_semijoin;
-    let use_l0 = use_per_leaf_l0 || use_combined_l0;
+    let left_plan = SnapshotPlan::for_tree_in_context(left, ctx.inside_semijoin);
+    let use_per_leaf_l0 = left_plan.uses_per_leaf();
+    let use_l0 = left_plan.uses_pre_change();
+    debug_assert_eq!(use_per_leaf_l0, left_plan.uses_per_leaf());
+    debug_assert_eq!(use_l0, left_plan.uses_pre_change());
 
     let left_part2_source = if use_l0 {
-        if is_join_child(left) && !use_combined_l0 {
+        if use_per_leaf_l0 {
             // DI-1: Register per-leaf pre-change snapshot as a named CTE.
             // Subsequent references to the same subtree reuse the CTE,
             // eliminating redundant EXCEPT ALL evaluations.
@@ -446,15 +442,16 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // because in that case the standard formula has its own error term
     // (ΔL ⋈ ΔR) and the EC-01 split halves the error to ΔL_I ⋈ ΔR
     // (which Part 3 then corrects).
+    let right_plan = SnapshotPlan::for_tree_in_context(right, ctx.inside_semijoin);
     let use_r0 = if use_l0 {
         // L₀ available → standard formula is exact → no split needed.
         false
     } else {
-        use_pre_change_snapshot(right, ctx.inside_semijoin, deep_join_l0_threshold)
+        right_plan.uses_pre_change()
     };
 
     let right_part1_source = if use_r0 {
-        if is_join_child(right) {
+        if right_plan.uses_per_leaf() {
             // DI-1: Named CTE snapshot for right pre-change state.
             let pre_change = ctx.get_or_register_snapshot_cte(right);
 
@@ -1207,6 +1204,40 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         // The nested join snapshot should generate SQL with JOIN in the snapshot subquery
         assert_sql_contains(&sql, "JOIN");
+    }
+
+    #[test]
+    fn test_diff_inner_join_aggregate_cte_uses_exact_combined_plan() {
+        let cte_body = aggregate(
+            vec![colref("parent_id")],
+            vec![count_star("count")],
+            scan(2, "child", "public", "c", &["parent_id"]),
+        );
+        let aggregate_cte = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "agg".into(),
+            alias: "a".into(),
+            columns: vec!["parent_id".into(), "count".into()],
+            cte_def_aliases: Vec::new(),
+            column_aliases: Vec::new(),
+            body: Some(Box::new(cte_body.clone())),
+        };
+        let tree = inner_join(
+            eq_cond("a", "parent_id", "p", "id"),
+            aggregate_cte,
+            scan(1, "parent", "public", "p", &["id"]),
+        );
+        let registry = crate::dvm::parser::CteRegistry {
+            entries: vec![("agg".into(), cte_body)],
+        };
+
+        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactCombined);
+        let mut ctx = test_ctx().with_cte_registry(registry);
+        let result = diff_inner_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "EXCEPT ALL");
+        assert_sql_not_contains(&sql, "l0_snap");
     }
 
     // ── NATURAL JOIN diff tests ─────────────────────────────────────

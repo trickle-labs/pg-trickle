@@ -172,7 +172,32 @@ def artifact(scenario: dict, scenario_path: Path, message: str) -> Path:
         "generated_delta.sql",
     ):
         write(name, "")
-    write("dvm_trace.json", "{}\n")
+    write(
+        "coverage.json",
+        json.dumps(
+            {
+                "snapshot_plans": [],
+                "changed_leaf_buckets": [],
+                "group_lifecycle_transitions": [],
+                "outer_join_transitions": [],
+                "p0_pairwise_complete": False,
+                "available": False,
+                "note": "Decision coverage is available when replay runs against the Rust E2E harness with pg_trickle.dvm_decision_trace enabled.",
+            }
+        )
+        + "\n",
+    )
+    write(
+        "dvm_trace.json",
+        json.dumps(
+            {
+                "events": [],
+                "available": False,
+                "note": "Decision traces are emitted to the PostgreSQL log when pg_trickle.dvm_decision_trace is enabled.",
+            }
+        )
+        + "\n",
+    )
     write("postgres.log", message + "\n")
     write(
         "failure.json",

@@ -399,9 +399,9 @@ async fn run_crash_oracle(db: &E2eDb) {
                 let refresh_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_name}')");
                 let refresh_result = db.try_execute(&refresh_sql).await;
                 if let Err(e) = refresh_result {
-                    let msg = e.to_string();
-                    // Distinguish crash (connection lost) from structured error.
-                    if msg.contains("connection") && msg.contains("closed") {
+                    // Distinguish a lost backend from a structured error using
+                    // sqlx's error type and PostgreSQL SQLSTATE.
+                    if oracle::is_infrastructure_sqlx_error(&e) {
                         crashes += 1;
                         eprintln!(
                             "[sqlancer] CRASH detected (seed=0x{:016x}, case={i}): {e}\n  query: {}",
@@ -413,8 +413,7 @@ async fn run_crash_oracle(db: &E2eDb) {
                 }
             }
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("connection") && msg.contains("closed") {
+                if oracle::is_infrastructure_sqlx_error(&e) {
                     crashes += 1;
                     eprintln!(
                         "[sqlancer] CRASH on create (seed=0x{:016x}, case={i}): {e}\n  query: {}",
@@ -501,7 +500,7 @@ async fn run_equivalence_oracle(db: &E2eDb) {
 
         let outcome: CaseOutcome = async {
             if let Err(e) = db.try_execute(&create_sql).await {
-                return oracle::classify_admission_error(&e.to_string());
+                return oracle::classify_admission_sqlx_error(&e);
             }
             if let Err(e) = db.try_execute(&refresh_sql).await {
                 return CaseOutcome::ProductFailure(oracle::ProductFailure {
@@ -651,14 +650,10 @@ async fn test_sqlancer_crash_oracle_light() {
 
         let _ = db.try_execute(&create_sql).await;
         let r = db.try_execute(&refresh_sql).await;
-        if let Err(e) = &r {
-            let msg = e.to_string();
-            if msg.contains("backend closed the connection unexpectedly")
-                || msg.contains("server closed the connection unexpectedly")
-                || msg.contains("PANIC")
-            {
-                crashes += 1;
-            }
+        if let Err(e) = &r
+            && oracle::is_infrastructure_sqlx_error(e)
+        {
+            crashes += 1;
         }
 
         let _ = db
@@ -679,7 +674,7 @@ async fn test_sqlancer_crash_oracle_light() {
 }
 
 /// SQLANCER-LIGHT-2: Equivalence oracle — 50 randomly generated queries must
-/// return the same row count as the direct SELECT.
+/// match the direct SELECT as exact multisets.
 #[tokio::test]
 async fn test_sqlancer_equivalence_oracle_light() {
     let db = E2eDb::new().await.with_extension().await;
@@ -722,7 +717,7 @@ async fn test_sqlancer_equivalence_oracle_light() {
 
         let outcome: CaseOutcome = async {
             if let Err(e) = db.try_execute(&create_sql).await {
-                return oracle::classify_admission_error(&e.to_string());
+                return oracle::classify_admission_sqlx_error(&e);
             }
             if let Err(e) = db.try_execute(&refresh_sql).await {
                 return CaseOutcome::ProductFailure(oracle::ProductFailure {
@@ -854,13 +849,26 @@ fn apply_random_mutation(rng: &mut Lcg, tbl: &TestTable, next_id: &mut u64) -> S
     }
 }
 
+/// Execute a planned mutation and reject ineffective DML. A correctness run
+/// cannot continue after silently changing zero rows.
+async fn execute_effective_dml(db: &E2eDb, sql: &str) -> Result<(), String> {
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
+        .execute(&db.pool)
+        .await
+        .map_err(|error| format!("{error}\nSQL: {sql}"))?;
+    if result.rows_affected() == 0 {
+        return Err(format!("mutation affected zero rows\nSQL: {sql}"));
+    }
+    Ok(())
+}
+
 // ── SQLANCER-3: DIFFERENTIAL ≡ FULL oracle after DML ─────────────────────
 
 /// **SQLANCER-3 — Differential ≡ Full equivalence oracle after DML.**
 ///
 /// For each generated query, creates two stream tables — one DIFFERENTIAL,
 /// one FULL — applies a short random DML sequence, refreshes both, and
-/// asserts that their row counts match.  Catches semantic bugs that only
+/// asserts that their exact multisets match.  Catches semantic bugs that only
 /// surface after an UPDATE or DELETE (e.g. incorrect delta computation).
 ///
 /// Run via `just sqlancer-fast` (combines SQLANCER-1 through SQLANCER-3).
@@ -902,10 +910,13 @@ async fn run_diff_vs_full_oracle(db: &E2eDb) {
         let outcome: CaseOutcome = async {
             // Skip if DIFFERENTIAL mode is not supported for this query.
             if let Err(e) = db.try_execute(&create_diff).await {
-                return oracle::classify_admission_error(&e.to_string());
+                return oracle::classify_admission_sqlx_error(&e);
             }
             if let Err(e) = db.try_execute(&create_full).await {
-                return oracle::classify_admission_error(&e.to_string());
+                return CaseOutcome::ProductFailure(oracle::ProductFailure {
+                    reason: format!("FULL baseline admission failed: {e}"),
+                    details: Some(gq.query.clone()),
+                });
             }
 
             if let Err(e) = db.try_execute(&refresh_diff_sql).await {
@@ -926,19 +937,21 @@ async fn run_diff_vs_full_oracle(db: &E2eDb) {
             {
                 return CaseOutcome::ProductFailure(pf);
             }
+            if let Err(pf) = oracle::assert_effective_refresh_mode(db, &st_full, "FULL").await {
+                return CaseOutcome::ProductFailure(pf);
+            }
 
-            // Apply a short DML sequence (4 mutations) to the first source table.
+            // Apply a short DML sequence across every source leaf.
             let mut rng = Lcg::new(gq.seed ^ 0xabcdef1234567890);
             let mut next_id = 10_000u64 + (i as u64 * 500);
-            if let Some(tbl) = gq.tables.first() {
-                for _ in 0..4 {
-                    let sql = apply_random_mutation(&mut rng, tbl, &mut next_id);
-                    if let Err(e) = db.try_execute(&sql).await {
-                        return CaseOutcome::GeneratorInvalid(oracle::GeneratorError {
-                            stage: "DML mutation".to_string(),
-                            message: e.to_string(),
-                        });
-                    }
+            for mutation_index in 0..4 {
+                let tbl = &gq.tables[mutation_index % gq.tables.len()];
+                let sql = apply_random_mutation(&mut rng, tbl, &mut next_id);
+                if let Err(e) = execute_effective_dml(db, &sql).await {
+                    return CaseOutcome::GeneratorInvalid(oracle::GeneratorError {
+                        stage: "DML mutation".to_string(),
+                        message: e,
+                    });
                 }
             }
 
@@ -958,6 +971,9 @@ async fn run_diff_vs_full_oracle(db: &E2eDb) {
             if let Err(pf) =
                 oracle::assert_effective_refresh_mode(db, &st_diff, "DIFFERENTIAL").await
             {
+                return CaseOutcome::ProductFailure(pf);
+            }
+            if let Err(pf) = oracle::assert_effective_refresh_mode(db, &st_full, "FULL").await {
                 return CaseOutcome::ProductFailure(pf);
             }
 
@@ -1061,10 +1077,10 @@ async fn test_sqlancer_diff_vs_full_oracle() {
 ///
 /// Finds the first generated query that pg_trickle supports in DIFFERENTIAL
 /// mode, then runs `SQLANCER_MUTATIONS` (default 100, set to 10 000 for
-/// nightly) random INSERT/UPDATE/DELETE operations on the source table.
+/// nightly) random INSERT/UPDATE/DELETE operations across every source leaf.
 /// Every `SQLANCER_CHECKPOINT_INTERVAL` (50) mutations it refreshes both
 /// a DIFFERENTIAL stream table and a FULL-mode baseline and asserts that
-/// their row counts agree.  Catches state-dependent bugs that only manifest
+/// their exact multisets and direct-query result agree. Catches state-dependent bugs that only manifest
 /// after specific mutation histories.
 ///
 /// Run via `just sqlancer-stateful-fast` or in the `weekly-sqlancer-stateful`
@@ -1082,44 +1098,47 @@ async fn run_stateful_dml_fuzzing() {
     // ── Find a query supported by DIFFERENTIAL mode ───────────────────
     let probe_queries = generate_queries(seed, 50);
     let db = E2eDb::new().await.with_extension().await;
-    let mut chosen: Option<(GeneratedQuery, TestTable)> = None;
+    let mut chosen: Option<GeneratedQuery> = None;
 
     for (i, gq) in probe_queries.iter().enumerate() {
-        let Some(tbl) = gq.tables.first().cloned() else {
-            continue;
-        };
-
-        db.execute(&tbl.ddl()).await;
         let mut rng = Lcg::new(gq.seed ^ (i as u64).wrapping_mul(0x1234567890abcdef));
-        db.execute(&tbl.insert_dml(&mut rng)).await;
+        for tbl in &gq.tables {
+            db.execute(&tbl.ddl()).await;
+            db.execute(&tbl.insert_dml(&mut rng)).await;
+        }
 
         let create_sql = format!(
             "SELECT pgtrickle.create_stream_table('soak_probe', $SQL${}$SQL$, '1m', 'DIFFERENTIAL')",
             gq.query
         );
 
-        if db.try_execute(&create_sql).await.is_ok()
+        let differential_supported = db.try_execute(&create_sql).await.is_ok()
             && db
                 .try_execute("SELECT pgtrickle.refresh_stream_table('soak_probe')")
                 .await
                 .is_ok()
-        {
+            && oracle::assert_effective_refresh_mode(&db, "soak_probe", "DIFFERENTIAL")
+                .await
+                .is_ok();
+        if differential_supported {
             let _ = db
                 .try_execute("SELECT pgtrickle.drop_stream_table('soak_probe')")
                 .await;
-            chosen = Some((gq.clone(), tbl));
+            chosen = Some(gq.clone());
             break;
         }
 
         let _ = db
             .try_execute("SELECT pgtrickle.drop_stream_table('soak_probe')")
             .await;
-        let _ = db
-            .try_execute(&format!("DROP TABLE IF EXISTS {}", tbl.name))
-            .await;
+        for tbl in &gq.tables {
+            let _ = db
+                .try_execute(&format!("DROP TABLE IF EXISTS {}", tbl.name))
+                .await;
+        }
     }
 
-    let Some((gq, source_tbl)) = chosen else {
+    let Some(gq) = chosen else {
         println!("[sqlancer-4] SKIP: no DIFFERENTIAL-supported query found in probe corpus");
         return;
     };
@@ -1136,22 +1155,26 @@ async fn run_stateful_dml_fuzzing() {
     ))
     .await;
 
-    let _ = db
-        .try_execute(&format!(
-            "SELECT pgtrickle.create_stream_table('{st_full}', $SQL${}$SQL$, '1m', 'FULL')",
-            gq.query
-        ))
-        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('{st_full}', $SQL${}$SQL$, '1m', 'FULL')",
+        gq.query
+    ))
+    .await;
 
     db.execute(&format!(
         "SELECT pgtrickle.refresh_stream_table('{st_diff}')"
     ))
     .await;
-    let _ = db
-        .try_execute(&format!(
-            "SELECT pgtrickle.refresh_stream_table('{st_full}')"
-        ))
-        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.refresh_stream_table('{st_full}')"
+    ))
+    .await;
+    oracle::assert_effective_refresh_mode(&db, st_diff, "DIFFERENTIAL")
+        .await
+        .unwrap_or_else(|failure| panic!("[sqlancer-4] {failure:?}"));
+    oracle::assert_effective_refresh_mode(&db, st_full, "FULL")
+        .await
+        .unwrap_or_else(|failure| panic!("[sqlancer-4] {failure:?}"));
 
     // ── Mutation loop ─────────────────────────────────────────────────
     let mut rng = Lcg::new(seed ^ 0xfeedfacecafebeef);
@@ -1160,10 +1183,15 @@ async fn run_stateful_dml_fuzzing() {
     let mut mismatches: Vec<(usize, String)> = Vec::new();
 
     for m in 0..mutations {
-        let sql = apply_random_mutation(&mut rng, &source_tbl, &mut next_id);
-        if db.try_execute(&sql).await.is_ok() {
-            applied += 1;
+        let source_tbl = &gq.tables[m % gq.tables.len()];
+        let sql = apply_random_mutation(&mut rng, source_tbl, &mut next_id);
+        if let Err(error) = execute_effective_dml(&db, &sql).await {
+            panic!(
+                "[sqlancer-4] Generator failure at mutation {m}: {error}\nquery: {}",
+                gq.query
+            );
         }
+        applied += 1;
 
         if (m + 1) % CHECKPOINT_INTERVAL == 0 {
             if let Err(e) = db
@@ -1177,13 +1205,22 @@ async fn run_stateful_dml_fuzzing() {
                     gq.query
                 );
             }
-            let _ = db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.refresh_stream_table('{st_full}')"
-                ))
-                .await;
+            db.execute(&format!(
+                "SELECT pgtrickle.refresh_stream_table('{st_full}')"
+            ))
+            .await;
 
-            if let Err(diff) = oracle::compare_st_to_query(&db, st_diff, &gq.query).await {
+            oracle::assert_effective_refresh_mode(&db, st_diff, "DIFFERENTIAL")
+                .await
+                .unwrap_or_else(|failure| panic!("[sqlancer-4] {failure:?}"));
+            oracle::assert_effective_refresh_mode(&db, st_full, "FULL")
+                .await
+                .unwrap_or_else(|failure| panic!("[sqlancer-4] {failure:?}"));
+
+            if let Err(diff) = oracle::compare_sts(&db, st_diff, st_full).await {
+                mismatches.push((m + 1, format!("DIFF vs FULL mismatch:\n{diff}")));
+                eprintln!("[sqlancer-4] MISMATCH at mutation {}:\n{diff}", m + 1);
+            } else if let Err(diff) = oracle::compare_st_to_query(&db, st_diff, &gq.query).await {
                 mismatches.push((m + 1, format!("DIFF vs Query mismatch:\n{diff}")));
                 eprintln!("[sqlancer-4] MISMATCH at mutation {}:\n{diff}", m + 1);
             } else {

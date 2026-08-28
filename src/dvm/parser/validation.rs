@@ -284,7 +284,7 @@ pub fn max_volatility(a: char, b: char) -> char {
 // P-2: Thread-local caches for function and operator volatility lookups.
 //
 // Each backend calls `lookup_function_volatility()` once per unique
-// function name encountered during DVM parsing.  Without caching, a
+// unresolved function name encountered during simplified DVM parsing.  Without caching, a
 // query with 50 function calls would issue 50 SPI round-trips to
 // `pg_proc` (~1ms each = 50ms overhead per parse).  With the
 // thread-local cache, each name is resolved at most once per session.
@@ -313,16 +313,15 @@ pub fn flush_volatility_cache() {}
 /// Look up the volatility category of a PostgreSQL function by name.
 ///
 /// Returns `'i'` (immutable), `'s'` (stable), or `'v'` (volatile).
-/// Returns `'v'` (volatile) if the function cannot be found (safe default).
+/// Simplified parser expressions do not retain PostgreSQL's resolved function
+/// OID, so an unresolved name is deliberately treated as volatile. The SQL
+/// admission path uses `analyzed_query_volatility`, which reads `provolatile`
+/// by the resolved OID and therefore handles overloads exactly.
 ///
-/// For overloaded functions (multiple `pg_proc` rows with the same `proname`),
-/// returns the worst volatility across all overloads.
-///
-/// P-2: Results are cached in a thread-local `HashMap` so each function
-/// name is looked up via SPI at most once per backend session.
+/// P-2: Conservative results remain cached so repeated unresolved names do
+/// not add work to the parser path.
 #[cfg(not(test))]
 pub fn lookup_function_volatility(func_name: &str) -> Result<char, PgTrickleError> {
-    // Strip schema qualification if present (e.g., "pg_catalog.lower" → "lower").
     let bare_name = func_name.rsplit('.').next().unwrap_or(func_name);
 
     // P-2: Check thread-local cache before issuing an SPI round-trip.
@@ -330,35 +329,9 @@ pub fn lookup_function_volatility(func_name: &str) -> Result<char, PgTrickleErro
         return Ok(cached);
     }
 
-    let result = Spi::connect(|client| {
-        let result = client.select(
-            "SELECT provolatile::text FROM pg_catalog.pg_proc \
-             WHERE proname = $1",
-            None,
-            &[bare_name.into()],
-        )?;
-
-        let mut worst = 'i';
-        let mut found = false;
-        for row in result {
-            found = true;
-            let vol: String = row
-                .get_by_name::<String, _>("provolatile")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "v".to_string());
-            let ch = vol.chars().next().unwrap_or('v');
-            worst = max_volatility(worst, ch);
-        }
-        if !found {
-            // Unknown function → assume volatile (safe default).
-            return Ok('v');
-        }
-        Ok(worst)
-    })
-    .map_err(|e: pgrx::spi::SpiError| {
-        PgTrickleError::SpiError(format!("volatility lookup failed: {e}"))
-    })?;
+    // Do not query pg_proc by proname: overloads can have different
+    // volatility, and this representation has no resolved argument types.
+    let result = 'v';
 
     // P-2: Cache the result for future lookups in this session.
     FUNCTION_VOLATILITY_CACHE.with(|c| c.borrow_mut().insert(bare_name.to_string(), result));

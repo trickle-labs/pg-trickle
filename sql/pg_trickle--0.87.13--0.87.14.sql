@@ -1,0 +1,3 @@
+-- pg_trickle 0.87.13 -> 0.87.14
+-- No catalog or SQL API changes. This release completes the DVM correctness
+-- program in Rust and the test harness; the migration is intentionally empty.

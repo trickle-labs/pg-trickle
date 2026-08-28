@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "release": "0.87.6",
+  "release": "0.87.14",
   "required_mandatory_cases": 18,
   "pairwise_dimensions": {
     "physical_width": ["minimal", "wide"],

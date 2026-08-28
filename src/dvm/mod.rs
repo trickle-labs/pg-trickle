@@ -640,6 +640,9 @@ fn generate_delta_query_impl(
         .with_pgt_name(pgt_schema, pgt_name)
         .with_cte_registry(result.cte_registry)
         .with_defining_query(defining_query);
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        ctx = ctx.with_decision_trace();
+    }
     ctx.st_user_columns = Some(st_user_cols);
     ctx.merge_safe_dedup = is_scan_chain;
     ctx.st_has_pgt_count = has_pgt_count;
@@ -702,6 +705,18 @@ fn generate_delta_query_impl(
 
     let (delta_sql, output_columns, diff_dedup, diff_has_key_changed) =
         ctx.differentiate_with_columns(&result.tree)?;
+    ctx.record_changed_leaf_bucket(&source_oids);
+
+    if let Some(trace) = ctx.take_decision_trace()
+        && let Ok(json) = serde_json::to_string(&trace)
+    {
+        pgrx::log!("[pg_trickle] dvm_decision_trace={json}");
+    }
+    if crate::config::pg_trickle_dvm_decision_trace()
+        && let Ok(json) = serde_json::to_string(&delta_sql)
+    {
+        pgrx::log!("[pg_trickle] dvm_generated_delta_sql={json}");
+    }
 
     Ok(DeltaQueryResult {
         delta_sql,
@@ -732,6 +747,19 @@ pub fn generate_delta_query_cached(
     pgt_schema: &str,
     pgt_name: &str,
 ) -> Result<DeltaQueryResult, PgTrickleError> {
+    // Decision traces describe a concrete differentiation, so bypass both
+    // template caches while tracing is enabled.
+    if crate::config::pg_trickle_dvm_decision_trace() {
+        return generate_delta_query_staged(
+            pgt_id,
+            defining_query,
+            prev_frontier,
+            new_frontier,
+            pgt_schema,
+            pgt_name,
+        );
+    }
+
     // DAG-4: When bypass tables are active, the cached SQL template
     // has the wrong table names.  Fall back to the uncached path.
     let bypass_tables = crate::refresh::get_st_bypass_tables();
