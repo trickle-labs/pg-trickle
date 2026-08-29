@@ -64,6 +64,8 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.convert\_buffers\_to\_unlogged](#pgtrickleconvert_buffers_to_unlogged)
     - [pgtrickle.pg\_trickle\_hash](#pgtricklepg_trickle_hash)
     - [pgtrickle.pg\_trickle\_hash\_multi](#pgtricklepg_trickle_hash_multi)
+    - [pgtrickle.encode\_row\_id\_v2](#pgtrickleencode_row_id_v2)
+    - [pgtrickle.row\_probe\_v1](#pgtricklerow_probe_v1)
   - [Diagnostics](#diagnostics)
     - [pgtrickle.recommend\_refresh\_mode](#pgtricklerecommend_refresh_mode)
     - [pgtrickle.refresh\_efficiency](#pgtricklerefresh_efficiency)
@@ -2655,6 +2657,35 @@ NULLs, empty values, and separator-like values unambiguous. The single-value
 ```sql
 SELECT pgtrickle.pg_trickle_hash_multi(ARRAY['key1', 'key2']);
 ```
+
+### pgtrickle.encode_row_id_v2
+
+Encode a PostgreSQL record using the exact, typed Version 2 row-identity
+contract. The `domain` must be one of `SCAN_KEY`, `KEYLESS_ROW`, `GROUP_KEY`,
+`JOIN_KEY`, `SET_KEY`, `WINDOW_KEY`, or `SYNTHETIC`.
+
+```sql
+pgtrickle.encode_row_id_v2(domain text, record anyelement) → bytea
+```
+
+The result is opaque canonical bytes. Unsupported types, non-deterministic
+collations, malformed metadata, and values above the published resource limits
+raise an error; the function never falls back to text formatting or hashing.
+See [ROW_IDENTITY_V2.md](ROW_IDENTITY_V2.md) for the complete wire contract.
+
+### pgtrickle.row_probe_v1
+
+Produce the bounded, non-unique index probe for a complete V2 row identity.
+Inputs up to 128 bytes are returned unchanged. Longer inputs retain the first
+128 bytes and append the fixed-seed XXH3-128 digest. The full identity remains
+the authoritative equality value.
+
+```sql
+pgtrickle.row_probe_v1(input bytea) → bytea
+```
+
+Marked `IMMUTABLE, PARALLEL SAFE`; the probe is an accelerator, not a row
+identity and must not be used as a unique key.
 
 ---
 

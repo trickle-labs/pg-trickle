@@ -2,6 +2,23 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.14 → 0.87.15
+
+Install the 0.87.15 shared library and extension files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+The migration installs the V2 row-identity encoder and immutable probe helper.
+It does not change V1 stream-table storage, CDC buffers, or DVM refresh paths.
+Do not mix V1 and V2 identity state. Later V2 storage releases will require
+dropping and recreating stream tables from unchanged source tables.
+
+Read the [V2 wire-format contract](ROW_IDENTITY_V2.md) before building
+integration code around the encoder. The canonical bytes are opaque and may
+contain reversible source values.
+
 ## 0.87.13 → 0.87.14
 
 Install the 0.87.14 shared library and extension files, then run:

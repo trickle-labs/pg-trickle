@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.87.15 — Versioned Row Identity V2 Contracts](#08715--versioned-row-identity-v2-contracts)
 - [0.87.14 — Correctness Program Completion](#08714--correctness-program-completion)
 - [0.87.13 — pg_tide Outbox Boundary](#08713--pg_tide-outbox-boundary)
 - [0.87.12 — Publication Security](#08712--publication-security)
@@ -194,6 +195,29 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 Future changes will be listed here.
 
+## [0.87.15] — Versioned Row Identity V2 Contracts
+
+v0.87.15 freezes the exact row-identity contract that later releases will use
+for BYTEA storage and matching.
+
+- Added the normative V2 wire format, identity domains, scalar type tags,
+  resource limits, and probe V1 definition.
+- Added typed PostgreSQL datum encoding for the supported scalar registry and
+  explicit rejection for unsupported structural types and unsafe contracts.
+- Added independent golden vectors for framing, canonical scalar values,
+  prefix freedom, and probe behavior.
+- Kept V1 storage, CDC, and DVM production paths unchanged. V2 storage adoption
+  remains a later release that requires stream-table recreation.
+
+See the [v0.87.15 roadmap](roadmap/v0.87.15.md) and the [V2 wire-format
+contract](docs/ROW_IDENTITY_V2.md) for the complete scope.
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.15 files.
+This migration only installs the V2 encoder and probe functions. Existing V1
+stream tables remain unchanged and are not compatible with V2 state.
+
 ## [0.87.14] — Correctness Program Completion
 
 v0.87.14 makes the DVM correctness gate enforce the behavior it reports.
@@ -212,11 +236,6 @@ v0.87.14 makes the DVM correctness gate enforce the behavior it reports.
 
 See the [v0.87.14 roadmap](roadmap/v0.87.14.md) for the complete acceptance
 criteria and correctness release gate.
-
-## Upgrade
-
-Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.14 files.
-This release has no catalog changes; the migration is intentionally empty.
 
 ## [0.87.13] — pg_tide Outbox Boundary
 

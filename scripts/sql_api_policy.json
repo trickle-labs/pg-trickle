@@ -1,6 +1,6 @@
 {
   "policy_version": 2,
-  "generated_from": "sql/archive/pg_trickle--0.87.14.sql",
+  "generated_from": "sql/archive/pg_trickle--0.87.15.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
@@ -309,6 +309,13 @@
       "identity_arguments": "text",
       "class": "owner_lifecycle",
       "execution_policy": "invoker_delegating"
+    },
+    "pgtrickle.encode_row_id_v2(text, anyelement)": {
+      "schema": "pgtrickle",
+      "name": "encode_row_id_v2",
+      "identity_arguments": "text, anyelement",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.explain(text)": {
       "schema": "pgtrickle",
@@ -664,6 +671,13 @@
       "schema": "pgtrickle",
       "name": "reliability_counters",
       "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_probe_v1(bytea)": {
+      "schema": "pgtrickle",
+      "name": "row_probe_v1",
+      "identity_arguments": "bytea",
       "class": "public_read",
       "execution_policy": "capability_specific"
     },

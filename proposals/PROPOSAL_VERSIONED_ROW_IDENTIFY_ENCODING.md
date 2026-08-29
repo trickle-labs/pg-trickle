@@ -145,15 +145,10 @@ until the type contracts and probe sizing gates in sections 6, 8, and 13 pass.
 Once V2 is released, its byte format is immutable. A semantic correction requires
 V3 and another rebuild.
 
-This proposal defines the semantic constraints, not the final byte assignments.
-The separate wire document is a hard implementation prerequisite and must assign
-every tag value and width; define byte order and signed transforms for every
-integer; define count, exponent, terminator, escape, and nested framing rules;
-specify numeric normalization and all structural resource limits; specify the
-XXH3-128 seed and output-byte order; and include independently reproducible
-identity and probe vectors. No encoder, stored expression, or operator rewrite
-may merge before those vectors pass on every supported PostgreSQL major and CPU
-endianness.
+The normative byte assignments, transforms, limits, support matrix, and
+independent vectors are defined in [Row identity V2 wire format](../docs/ROW_IDENTITY_V2.md).
+No encoder, stored expression, or operator rewrite may merge before those
+vectors pass on every supported PostgreSQL major and CPU endianness.
 
 Conceptually, an identity is:
 
