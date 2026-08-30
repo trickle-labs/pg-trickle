@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.87.16 — Versioned Row Identity V2 Engine Integration](#08716--versioned-row-identity-v2-engine-integration)
 - [0.87.15 — Versioned Row Identity V2 Contracts](#08715--versioned-row-identity-v2-contracts)
 - [0.87.14 — Correctness Program Completion](#08714--correctness-program-completion)
 - [0.87.13 — pg_tide Outbox Boundary](#08713--pg_tide-outbox-boundary)
@@ -194,6 +195,31 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.87.16] — Versioned Row Identity V2 Engine Integration
+
+v0.87.16 carries the exact V2 row identity through storage, capture, refresh,
+and matching.
+
+- Stream-table storage and all change buffers now use `__pgt_row_id BYTEA NOT NULL`.
+- New and rebuilt objects record row-identity version 2 and probe version 1.
+- Bounded identities use a direct full-ID index; unbounded identities use the
+  non-unique `row_probe_v1(__pgt_row_id)` accelerator with exact full-ID rechecks.
+- Trigger CDC, WAL CDC, full refresh, differential DVM operators, IMMEDIATE
+  mode, and ST-to-ST propagation use the same typed V2 encoder and semantic domains.
+- Bounded unique storage can use the full identity as replica identity;
+  unbounded and keyless storage uses `REPLICA IDENTITY FULL`.
+- V1 physical state is rejected fail-closed. This breaking pre-1.0 release does
+  not convert existing V1 relations in place; recreation is the v0.87.17 workflow.
+
+See the [v0.87.16 roadmap](roadmap/v0.87.16.md), [V2 wire-format
+contract](docs/ROW_IDENTITY_V2.md), and [upgrade guide](docs/UPGRADING.md).
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.16 files.
+The migration adds probe-version metadata and marks existing identity state
+unknown so old V1 relations cannot be consumed by the V2 engine.
 
 ## [0.87.15] — Versioned Row Identity V2 Contracts
 

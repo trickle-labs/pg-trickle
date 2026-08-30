@@ -84,11 +84,11 @@ fn make_ctx() -> DiffContext {
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 fn employees_scan() -> OpTree {
@@ -176,24 +176,19 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id    BIGSERIAL PRIMARY KEY,
     lsn          PG_LSN NOT NULL,
     action       CHAR(1) NOT NULL,
-    pk_hash      BIGINT,
-    new_id       INT,
-    new_dept_id  INT,
-    new_name     TEXT,
-    old_id       INT,
-    old_dept_id  INT,
-    old_name     TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id       INT,
+    dept_id  INT,
+    name     TEXT
 );
 
 CREATE TABLE pgtrickle_changes.changes_2 (
     change_id    BIGSERIAL PRIMARY KEY,
     lsn          PG_LSN NOT NULL,
     action       CHAR(1) NOT NULL,
-    pk_hash      BIGINT,
-    new_dept_id  INT,
-    new_label    TEXT,
-    old_dept_id  INT,
-    old_label    TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    dept_id  INT,
+    label    TEXT
 );
 "#,
     )
@@ -321,8 +316,8 @@ async fn test_diff_natural_inner_join_employee_insert_matches_department() {
     // INSERT employee (3, dept_id=10, "Alice").
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_dept_id, new_name) \
-         VALUES ('0/1', 'I', 3, 3, 10, 'Alice')",
+         (lsn, action, __pgt_row_id, id, dept_id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 10, 'Alice')",
     )
     .await;
 
@@ -362,8 +357,8 @@ async fn test_diff_natural_inner_join_employee_delete_emits_d_row() {
     // DELETE employee (3, dept_id=10, "Alice").
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_dept_id, old_name) \
-         VALUES ('0/1', 'D', 3, 3, 10, 'Alice')",
+         (lsn, action, __pgt_row_id, id, dept_id, name) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(3), 3, 10, 'Alice')",
     )
     .await;
 
@@ -401,8 +396,8 @@ async fn test_diff_natural_inner_join_department_delete_fans_out() {
     // DELETE department (dept_id=10, "Engineering").
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, old_dept_id, old_label) \
-         VALUES ('0/1', 'D', 10, 10, 'Engineering')",
+         (lsn, action, __pgt_row_id, dept_id, label) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(10), 10, 'Engineering')",
     )
     .await;
 
@@ -453,8 +448,8 @@ async fn test_diff_natural_left_join_employee_insert_with_no_department() {
     // INSERT employee (5, dept_id=99, "Dave") — no matching department.
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_dept_id, new_name) \
-         VALUES ('0/1', 'I', 5, 5, 99, 'Dave')",
+         (lsn, action, __pgt_row_id, id, dept_id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(5), 5, 99, 'Dave')",
     )
     .await;
 
@@ -488,8 +483,8 @@ async fn test_diff_natural_full_join_department_insert_with_no_employees() {
     // INSERT department (dept_id=50, "Marketing") — no employees reference it.
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, new_dept_id, new_label) \
-         VALUES ('0/1', 'I', 50, 50, 'Marketing')",
+         (lsn, action, __pgt_row_id, dept_id, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(50), 50, 'Marketing')",
     )
     .await;
 

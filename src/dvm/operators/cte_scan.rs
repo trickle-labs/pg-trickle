@@ -75,7 +75,7 @@ pub fn diff_cte_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
         &base_result
             .columns
             .iter()
-            .map(|col| format!("{}::TEXT", quote_ident(col)))
+            .map(|col| quote_ident(col))
             .collect::<Vec<_>>(),
     );
 
@@ -169,7 +169,8 @@ mod tests {
         // Columns should be renamed
         assert_eq!(result.columns, vec!["a", "b"]);
         let sql = ctx.build_with_query(&result.cte_name);
-        assert_sql_contains(&sql, "ARRAY[(\"id\"::TEXT)::TEXT, (\"name\"::TEXT)::TEXT]");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SCAN_KEY'");
+        assert_sql_contains(&sql, "ROW((\"id\"), (\"name\"))");
         assert_sql_contains(&sql, "\"id\" AS \"a\"");
         assert_sql_contains(&sql, "\"name\" AS \"b\"");
     }

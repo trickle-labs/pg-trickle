@@ -100,7 +100,7 @@ pub static PGS_BUFFER_ALERT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(
 /// When a source table's pending change buffer exceeds this many rows,
 /// compaction is triggered before the next refresh cycle. Compaction
 /// eliminates net-zero INSERT+DELETE pairs and collapses multi-change
-/// groups to first+last rows per pk_hash.
+/// groups to first+last rows per complete row identity.
 ///
 /// Set to 0 to disable compaction. Typical values: 10_000–1_000_000.
 pub static PGS_COMPACT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(100_000);

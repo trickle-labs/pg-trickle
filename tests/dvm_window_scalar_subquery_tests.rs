@@ -63,10 +63,10 @@ fn make_window_ctx(st_name: &str) -> DiffContext {
     let mut prev_frontier = Frontier::new();
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier).with_pgt_name("public", st_name)
+    DiffContext::new_standalone(prev_frontier, frontier).with_pgt_name("public", st_name)
 }
 
 fn make_scalar_ctx() -> DiffContext {
@@ -74,11 +74,11 @@ fn make_scalar_ctx() -> DiffContext {
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 fn make_shared_source_ctx() -> DiffContext {
@@ -88,10 +88,10 @@ fn make_shared_source_ctx() -> DiffContext {
     let mut prev_frontier = Frontier::new();
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 fn build_row_number_window_tree() -> OpTree {
@@ -280,15 +280,15 @@ CREATE TABLE public.orders (
 );
 
 CREATE TABLE public.window_unpartitioned_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     id INT NOT NULL,
     region TEXT NOT NULL,
     amount INT NOT NULL,
-    rn BIGINT NOT NULL
+    global_rn BIGINT NOT NULL
 );
 
 CREATE TABLE public.window_over_agg_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     sum_amount BIGINT NOT NULL,
     __pgt_count BIGINT NOT NULL,
@@ -296,7 +296,7 @@ CREATE TABLE public.window_over_agg_st (
 );
 
 CREATE TABLE public.window_row_number_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     id INT NOT NULL,
     region TEXT NOT NULL,
     amount INT NOT NULL,
@@ -304,7 +304,7 @@ CREATE TABLE public.window_row_number_st (
 );
 
 CREATE TABLE public.window_running_sum_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     id INT NOT NULL,
     region TEXT NOT NULL,
     amount INT NOT NULL,
@@ -312,7 +312,7 @@ CREATE TABLE public.window_running_sum_st (
 );
 
 CREATE TABLE public.window_multi_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     id INT NOT NULL,
     region TEXT NOT NULL,
     amount INT NOT NULL,
@@ -324,13 +324,10 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
     action CHAR(1) NOT NULL,
-    pk_hash BIGINT,
-    new_id INT,
-    new_region TEXT,
-    new_amount INT,
-    old_id INT,
-    old_region TEXT,
-    old_amount INT
+    __pgt_row_id BYTEA NOT NULL,
+    id INT,
+    region TEXT,
+    amount INT
 );
 "#,
     )
@@ -379,22 +376,18 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
     action CHAR(1) NOT NULL,
-    pk_hash BIGINT,
-    new_id INT,
-    new_amount INT,
-    old_id INT,
-    old_amount INT
+    __pgt_row_id BYTEA NOT NULL,
+    id INT,
+    amount INT
 );
 
 CREATE TABLE pgtrickle_changes.changes_2 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
     action CHAR(1) NOT NULL,
-    pk_hash BIGINT,
-    new_id INT,
-    new_tax_rate INT,
-    old_id INT,
-    old_tax_rate INT
+    __pgt_row_id BYTEA NOT NULL,
+    id INT,
+    tax_rate INT
 );
 "#,
     )
@@ -471,15 +464,15 @@ async fn test_diff_window_executes_partition_local_row_number_recompute() {
     .await;
     db.execute(
         "INSERT INTO public.window_row_number_st VALUES \
-         (1, 1, 'east', 10, 1), \
-         (2, 2, 'east', 20, 2), \
-         (3, 3, 'west', 15, 1)",
+         (pgtrickle.test_int_to_row_id(1), 1, 'east', 10, 1), \
+         (pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 2), \
+         (pgtrickle.test_int_to_row_id(3), 3, 'west', 15, 1)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 4, 4, 'east', 15)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(4), 4, 'east', 15)",
     )
     .await;
 
@@ -517,15 +510,15 @@ async fn test_diff_window_executes_frame_sensitive_running_sum_recompute() {
     .await;
     db.execute(
         "INSERT INTO public.window_running_sum_st VALUES \
-         (1, 1, 'east', 10, 10), \
-         (3, 3, 'west', 15, 15), \
-         (5, 5, 'west', 30, 45)",
+         (pgtrickle.test_int_to_row_id(1), 1, 'east', 10, 10), \
+         (pgtrickle.test_int_to_row_id(3), 3, 'west', 15, 15), \
+         (pgtrickle.test_int_to_row_id(5), 5, 'west', 30, 45)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 6, 6, 'west', 25)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(6), 6, 'west', 25)",
     )
     .await;
 
@@ -557,8 +550,9 @@ async fn test_diff_scalar_subquery_executes_inner_change_recompute() {
     db.execute("INSERT INTO public.config VALUES (1, 20)").await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, new_id, new_tax_rate, old_id, old_tax_rate) \
-         VALUES ('0/1', 'U', 1, 1, 20, 1, 10)",
+         (lsn, action, __pgt_row_id, id, tax_rate) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(1), 1, 10), \
+                ('0/2', 'I', pgtrickle.test_int_to_row_id(1), 1, 20)",
     )
     .await;
 
@@ -589,8 +583,8 @@ async fn test_diff_scalar_subquery_executes_outer_insert_with_current_scalar() {
     db.execute("INSERT INTO public.config VALUES (1, 10)").await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 300)",
+         (lsn, action, __pgt_row_id, id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 300)",
     )
     .await;
 
@@ -624,17 +618,18 @@ async fn test_diff_window_executes_partition_move_recomputes_both_partitions() {
     // Storage table reflects the pre-update window state.
     db.execute(
         "INSERT INTO public.window_row_number_st VALUES \
-         (1, 1, 'east', 10, 1), \
-         (2, 2, 'east', 20, 2), \
-         (3, 3, 'west', 15, 1)",
+         (pgtrickle.test_int_to_row_id(1), 1, 'east', 10, 1), \
+         (pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 2), \
+         (pgtrickle.test_int_to_row_id(3), 3, 'west', 15, 1)",
     )
     .await;
 
     // UPDATE: order 2 moves from 'east' to 'west' (amount unchanged).
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, old_id, old_region, old_amount) \
-         VALUES ('0/1', 'U', 2, 2, 'west', 20, 2, 'east', 20)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(2), 2, 'east', 20), \
+                ('0/2', 'I', pgtrickle.test_int_to_row_id(2), 2, 'west', 20)",
     )
     .await;
 
@@ -677,16 +672,16 @@ async fn test_diff_window_executes_multi_window_expression_recompute() {
     // Storage reflects pre-insert window state for east: two rows.
     db.execute(
         "INSERT INTO public.window_multi_st VALUES \
-         (1, 1, 'east', 10, 1, 10), \
-         (2, 2, 'east', 20, 2, 30)",
+         (pgtrickle.test_int_to_row_id(1), 1, 'east', 10, 1, 10), \
+         (pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 2, 30)",
     )
     .await;
 
     // INSERT order 3 into east partition (new current state already seeded above).
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 'east', 15)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 'east', 15)",
     )
     .await;
 
@@ -728,16 +723,17 @@ async fn test_diff_scalar_subquery_executes_simultaneous_outer_and_inner_change(
     // Outer change: INSERT order (3, 300).
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 300)",
+         (lsn, action, __pgt_row_id, id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 300)",
     )
     .await;
 
     // Inner change: UPDATE config tax_rate from 10 → 20.
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, new_id, new_tax_rate, old_id, old_tax_rate) \
-         VALUES ('0/2', 'U', 1, 1, 20, 1, 10)",
+         (lsn, action, __pgt_row_id, id, tax_rate) \
+         VALUES ('0/2', 'D', pgtrickle.test_int_to_row_id(1), 1, 10), \
+                ('0/3', 'I', pgtrickle.test_int_to_row_id(1), 1, 20)",
     )
     .await;
 
@@ -785,8 +781,8 @@ async fn test_diff_scalar_subquery_executes_shared_source_outer_insert_stable_sc
     // Outer change only: INSERT order (3, 999).
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 999)",
+         (lsn, action, __pgt_row_id, id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 999)",
     )
     .await;
 
@@ -850,21 +846,21 @@ async fn test_diff_window_executes_unpartitioned_global_recompute() {
     .await;
     db.execute(
         "INSERT INTO public.window_unpartitioned_st VALUES \
-         (1, 1, 'east', 10, 1), \
-         (3, 3, 'west', 15, 2), \
-         (2, 2, 'east', 20, 3), \
-         (4, 4, 'east', 40, 4)",
+         (pgtrickle.test_int_to_row_id(1), 1, 'east', 10, 1), \
+         (pgtrickle.test_int_to_row_id(3), 3, 'west', 15, 2), \
+         (pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 3), \
+         (pgtrickle.test_int_to_row_id(4), 4, 'east', 40, 4)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 5, 5, 'north', 5)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(5), 5, 'north', 5)",
     )
     .await;
 
     // A change to amount=5 should bump everything down by 1 in row_number!
-    // The query returns (action, id, region, amount, new_rn).
+    // The query returns (action, id, region, amount, rn).
     assert_eq!(
         query_window_rows(&db, &sql, "global_rn").await,
         vec![

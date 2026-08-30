@@ -263,10 +263,10 @@ fn make_aggregate_ctx(st_name: &str, st_user_columns: &[&str]) -> DiffContext {
     let mut prev_frontier = Frontier::new();
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    let mut ctx = DiffContext::new_standalone(prev_frontier, new_frontier)
+    let mut ctx = DiffContext::new_standalone(prev_frontier, frontier)
         .with_pgt_name("public", st_name)
         .with_defining_query("SELECT region, amount, label FROM public.orders");
     ctx.st_user_columns = Some(st_user_columns.iter().map(|c| (*c).to_string()).collect());
@@ -306,119 +306,119 @@ CREATE TABLE public.orders (
 );
 
 CREATE TABLE public.agg_count_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     order_count BIGINT NOT NULL
 );
 
 CREATE TABLE public.agg_sum_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
-    total_amount BIGINT NOT NULL
+    total_amount BIGINT NOT NULL,
+    __pgt_aux_nonnull_total_amount BIGINT NOT NULL
 );
 
 CREATE TABLE public.agg_avg_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
-    avg_amount NUMERIC NOT NULL
+    avg_amount NUMERIC NOT NULL,
+    __pgt_aux_sum_avg_amount NUMERIC NOT NULL,
+    __pgt_aux_count_avg_amount BIGINT NOT NULL
 );
 
 CREATE TABLE public.agg_min_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     min_amount INT NOT NULL
 );
 
 CREATE TABLE public.agg_max_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     max_amount INT NOT NULL
 );
 
 CREATE TABLE public.agg_string_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     member_labels TEXT NOT NULL
 );
 
 CREATE TABLE public.agg_mode_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     mode_amount INT NOT NULL
 );
 
 CREATE TABLE public.agg_json_object_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     amount_map JSON NOT NULL
 );
 
 CREATE TABLE public.agg_jsonb_object_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     amount_map JSONB NOT NULL
 );
 
 CREATE TABLE public.agg_percentile_cont_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     median_amount NUMERIC NOT NULL
 );
 
 CREATE TABLE public.agg_percentile_disc_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     median_disc_amount INT NOT NULL
 );
 
 CREATE TABLE public.agg_filtered_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     high_value_count BIGINT NOT NULL
 );
 
 CREATE TABLE public.agg_jsonb_arr_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     amount_arr JSONB NOT NULL
 );
 
 CREATE TABLE public.agg_multi_st (
-    __pgt_row_id BIGINT PRIMARY KEY,
+    __pgt_row_id BYTEA PRIMARY KEY,
     region TEXT NOT NULL,
     label TEXT NOT NULL,
     __pgt_count BIGINT NOT NULL,
     cnt BIGINT NOT NULL,
     total_amt BIGINT NOT NULL,
-    max_amt INT NOT NULL
+    max_amt INT NOT NULL,
+    __pgt_aux_nonnull_total_amt BIGINT NOT NULL
 );
 
 CREATE TABLE pgtrickle_changes.changes_1 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
     action CHAR(1) NOT NULL,
-    pk_hash BIGINT,
-    new_id INT,
-    new_region TEXT,
-    new_amount INT,
-    new_label TEXT,
-    old_id INT,
-    old_region TEXT,
-    old_amount INT,
-    old_label TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id INT,
+    region TEXT,
+    amount INT,
+    label TEXT
 );
 "#,
     )
@@ -526,20 +526,20 @@ async fn test_diff_aggregate_executes_count_star_gain_and_loss() {
     .await;
     db.execute(
         "INSERT INTO public.agg_count_st VALUES \
-         (100, 'east', 2, 2), \
-         (200, 'west', 1, 1)",
+         (pgtrickle.test_int_to_row_id(100), 'east', 2, 2), \
+         (pgtrickle.test_int_to_row_id(200), 'west', 1, 1)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 4, 4, 'east', 40)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(4), 4, 'east', 40)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_region, old_amount) \
-         VALUES ('0/2', 'D', 3, 3, 'west', 30)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/2', 'D', pgtrickle.test_int_to_row_id(3), 3, 'west', 30)",
     )
     .await;
 
@@ -566,18 +566,20 @@ async fn test_diff_aggregate_executes_sum_update_with_balanced_delta() {
          (3, 'east', 15)",
     )
     .await;
-    db.execute("INSERT INTO public.agg_sum_st VALUES (100, 'east', 2, 30)")
-        .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 'east', 15)",
+        "INSERT INTO public.agg_sum_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 2, 30, 2)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_region, old_amount) \
-         VALUES ('0/2', 'D', 2, 2, 'east', 20)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 'east', 15)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/2', 'D', pgtrickle.test_int_to_row_id(2), 2, 'east', 20)",
     )
     .await;
 
@@ -602,12 +604,12 @@ async fn test_diff_aggregate_executes_avg_rescan_update() {
          (3, 'east', 30)",
     )
     .await;
-    db.execute("INSERT INTO public.agg_avg_st VALUES (100, 'east', 2, 15.00)")
+    db.execute("INSERT INTO public.agg_avg_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 2, 15.00, 30.00, 2)")
         .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 'east', 30)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 'east', 30)",
     )
     .await;
 
@@ -636,12 +638,13 @@ async fn test_diff_aggregate_executes_filtered_count_update() {
          (2, 'east', 20)",
     )
     .await;
-    db.execute("INSERT INTO public.agg_filtered_st VALUES (100, 'east', 2, 1)")
+    db.execute("INSERT INTO public.agg_filtered_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 2, 1)")
         .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, old_id, old_region, old_amount) \
-         VALUES ('0/1', 'U', 1, 1, 'east', 25, 1, 'east', 10)",
+         (lsn, action, __pgt_row_id, id, region, amount) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(1), 1, 'east', 10), \
+                ('0/2', 'I', pgtrickle.test_int_to_row_id(1), 1, 'east', 25)",
     )
     .await;
 
@@ -665,12 +668,14 @@ async fn test_diff_aggregate_executes_min_rescan_on_deleted_extremum() {
          (3, 'east', 30, 'c')",
     )
     .await;
-    db.execute("INSERT INTO public.agg_min_st VALUES (100, 'east', 3, 10)")
-        .await;
+    db.execute(
+        "INSERT INTO public.agg_min_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 3, 10)",
+    )
+    .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_region, old_amount, old_label) \
-         VALUES ('0/1', 'D', 1, 1, 'east', 10, 'a')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(1), 1, 'east', 10, 'a')",
     )
     .await;
 
@@ -694,12 +699,14 @@ async fn test_diff_aggregate_executes_max_rescan_on_deleted_extremum() {
          (2, 'east', 20, 'b')",
     )
     .await;
-    db.execute("INSERT INTO public.agg_max_st VALUES (100, 'east', 3, 30)")
-        .await;
+    db.execute(
+        "INSERT INTO public.agg_max_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 3, 30)",
+    )
+    .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_region, old_amount, old_label) \
-         VALUES ('0/1', 'D', 3, 3, 'east', 30, 'c')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(3), 3, 'east', 30, 'c')",
     )
     .await;
 
@@ -724,12 +731,12 @@ async fn test_diff_aggregate_executes_string_agg_rescan_update() {
          (3, 'east', 20, 'c')",
     )
     .await;
-    db.execute("INSERT INTO public.agg_string_st VALUES (100, 'east', 2, 'a, c')")
+    db.execute("INSERT INTO public.agg_string_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 2, 'a, c')")
         .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
-         VALUES ('0/1', 'I', 2, 2, 'east', 15, 'b')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(2), 2, 'east', 15, 'b')",
     )
     .await;
 
@@ -761,14 +768,16 @@ async fn test_diff_aggregate_executes_mode_rescan_update() {
          (5, 'east', 20, 'e')",
     )
     .await;
-    db.execute("INSERT INTO public.agg_mode_st VALUES (100, 'east', 3, 10)")
-        .await;
+    db.execute(
+        "INSERT INTO public.agg_mode_st VALUES (pgtrickle.test_int_to_row_id(100), 'east', 3, 10)",
+    )
+    .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
          VALUES \
-         ('0/1', 'I', 4, 4, 'east', 20, 'd'), \
-         ('0/2', 'I', 5, 5, 'east', 20, 'e')",
+         ('0/1', 'I', pgtrickle.test_int_to_row_id(4), 4, 'east', 20, 'd'), \
+         ('0/2', 'I', pgtrickle.test_int_to_row_id(5), 5, 'east', 20, 'e')",
     )
     .await;
 
@@ -799,13 +808,13 @@ async fn test_diff_aggregate_executes_json_object_agg_rescan_update() {
     .await;
     db.execute(
         "INSERT INTO public.agg_json_object_st VALUES \
-         (100, 'east', 2, '{\"a\":10,\"c\":30}')",
+         (pgtrickle.test_int_to_row_id(100), 'east', 2, '{\"a\":10,\"c\":30}')",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
-         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 'b')",
     )
     .await;
 
@@ -841,13 +850,13 @@ async fn test_diff_aggregate_executes_jsonb_object_agg_rescan_update() {
     .await;
     db.execute(
         "INSERT INTO public.agg_jsonb_object_st VALUES \
-         (100, 'east', 2, '{\"a\":10,\"c\":30}')",
+         (pgtrickle.test_int_to_row_id(100), 'east', 2, '{\"a\":10,\"c\":30}')",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
-         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 'b')",
     )
     .await;
 
@@ -883,13 +892,13 @@ async fn test_diff_aggregate_executes_percentile_cont_rescan_update() {
     .await;
     db.execute(
         "INSERT INTO public.agg_percentile_cont_st VALUES \
-         (100, 'east', 2, 25.00)",
+         (pgtrickle.test_int_to_row_id(100), 'east', 2, 25.00)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
-         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 'b')",
     )
     .await;
 
@@ -920,13 +929,13 @@ async fn test_diff_aggregate_executes_percentile_disc_rescan_update() {
     .await;
     db.execute(
         "INSERT INTO public.agg_percentile_disc_st VALUES \
-         (100, 'east', 2, 10)",
+         (pgtrickle.test_int_to_row_id(100), 'east', 2, 10)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
-         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 'b')",
     )
     .await;
 
@@ -966,13 +975,13 @@ async fn test_diff_aggregate_executes_jsonb_agg_rescan_update() {
     .await;
     db.execute(
         "INSERT INTO public.agg_jsonb_arr_st VALUES \
-         (100, 'east', 2, '[10, 30]')",
+         (pgtrickle.test_int_to_row_id(100), 'east', 2, '[10, 30]')",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
-         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(2), 2, 'east', 20, 'b')",
     )
     .await;
 
@@ -1012,10 +1021,10 @@ async fn test_diff_aggregate_executes_multi_group_mixed_family() {
     .await;
     db.execute(
         "INSERT INTO public.agg_multi_st \
-         (__pgt_row_id, region, label, __pgt_count, cnt, total_amt, max_amt) VALUES \
-         (1, 'east', 'A', 1, 1, 10, 10), \
-         (2, 'east', 'B', 1, 1, 20, 20), \
-         (3, 'west', 'A', 1, 1, 15, 15)",
+         (__pgt_row_id, region, label, __pgt_count, cnt, total_amt, max_amt, __pgt_aux_nonnull_total_amt) VALUES \
+         (pgtrickle.test_int_to_row_id(1), 'east', 'A', 1, 1, 10, 10, 1), \
+         (pgtrickle.test_int_to_row_id(2), 'east', 'B', 1, 1, 20, 20, 1), \
+         (pgtrickle.test_int_to_row_id(3), 'west', 'A', 1, 1, 15, 15, 1)",
     )
     .await;
 
@@ -1024,9 +1033,9 @@ async fn test_diff_aggregate_executes_multi_group_mixed_family() {
         .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) VALUES \
-         ('0/1', 'I', 4, 4, 'east', 40, 'A'), \
-         ('0/2', 'I', 5, 5, 'west', 40, 'A')",
+         (lsn, action, __pgt_row_id, id, region, amount, label) VALUES \
+         ('0/1', 'I', pgtrickle.test_int_to_row_id(4), 4, 'east', 40, 'A'), \
+         ('0/2', 'I', pgtrickle.test_int_to_row_id(5), 5, 'west', 40, 'A')",
     )
     .await;
 

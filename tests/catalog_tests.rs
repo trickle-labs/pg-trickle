@@ -807,23 +807,22 @@ async fn test_status_transitions() {
 async fn test_change_buffer_table_schema() {
     let db = TestDb::with_catalog().await;
 
-    // Simulate creating a change buffer table like cdc.rs does (typed columns)
+    // Simulate creating a change buffer table like cdc.rs does (flat typed columns).
     db.execute(
         "CREATE TABLE pgtrickle_changes.changes_12345 (\
          change_id   BIGSERIAL,\
          lsn         PG_LSN NOT NULL,\
          action      CHAR(1) NOT NULL,\
-         pk_hash     BIGINT,\
-         \"new_id\" INT, \"new_name\" TEXT,\
-         \"old_id\" INT, \"old_name\" TEXT\
+         __pgt_row_id BYTEA NOT NULL,\
+         \"id\" INT, \"name\" TEXT
         )",
     )
     .await;
 
     // Insert a sample change
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_12345 (lsn, action, \"new_id\", \"new_name\") \
-         VALUES ('0/1234', 'I', 1, 'Alice')",
+        "INSERT INTO pgtrickle_changes.changes_12345 (lsn, action, __pgt_row_id, \"id\", \"name\") \
+         VALUES ('0/1234', 'I', pgtrickle.test_int_to_row_id(1), 1, 'Alice')",
     )
     .await;
 

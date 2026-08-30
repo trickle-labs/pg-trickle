@@ -234,7 +234,7 @@ A **frontier** is a per-source map of `{source_oid → LSN}` that records exactl
 
 ### What is the `__pgt_row_id` column and why does it appear in my stream tables?
 
-Every stream table has a `__pgt_row_id BIGINT PRIMARY KEY` column. It stores a 64-bit xxHash of the row's group-by key (for aggregate queries) or all output columns (for non-aggregate queries). The refresh engine uses it to match incoming deltas against existing rows during the `MERGE` operation.
+Every stream table has a `__pgt_row_id BYTEA NOT NULL` column containing the complete typed V2 row identity. The refresh engine may use `row_probe_v1(__pgt_row_id)` to find candidates, but always rechecks the complete identity during `MERGE` and other DML.
 
 **You should ignore this column in your queries.** It is an implementation detail. If it bothers you, exclude it explicitly:
 
@@ -1188,23 +1188,23 @@ its limitations with duplicate rows.
 
 **No, but it is strongly recommended.** When a source table has a primary key, pg_trickle uses it to generate a deterministic `__pgt_row_id` for each row — this is the most reliable way to track row identity across refreshes.
 
-Without a primary key, pg_trickle falls back to **content-based hashing** — an xxHash of all column values. This works correctly for tables where every row is unique, but has known issues with exact duplicate rows. See [What are the risks of using tables without primary keys?](#what-are-the-risks-of-using-tables-without-primary-keys) for details.
+Without a primary key, pg_trickle falls back to a **typed V2 content identity** over all column values. This works correctly for tables where every row is unique, while exact duplicate rows remain independently counted through the non-unique maintenance path. See [What are the risks of using tables without primary keys?](#what-are-the-risks-of-using-tables-without-primary-keys) for details.
 
 ### What are the risks of using tables without primary keys?
 
 Content-based row identity has known limitations with **exact duplicate rows** (rows where every column value is identical):
 
-1. **INSERT as no-op:** If a row identical to an existing one is inserted, both have the same `__pgt_row_id` hash, so the MERGE treats it as a no-op (the row already exists).
-2. **DELETE removes all copies:** Deleting one of N identical rows generates a DELETE delta, but the MERGE removes all rows with that `__pgt_row_id`.
-3. **Aggregate drift:** Over time, these mismatches can cause aggregate values to drift from the true result.
+1. **Shared identity:** If a row is identical to an existing one, both have the same `__pgt_row_id` by design.
+2. **Non-unique maintenance:** Keyless stream tables use counted, non-unique maintenance so one INSERT or DELETE changes one copy rather than treating the identity as unique.
+3. **Operational trade-off:** Exact duplicates still cannot be distinguished by value alone; a primary key is preferable when row-level identity matters to consumers.
 
 **Recommendation:** Add a primary key or unique constraint to source tables, or use FULL mode for tables with frequent exact-duplicate rows.
 
 ### How does content-based row identity work for duplicate rows?
 
-For tables without a primary key, `__pgt_row_id` is computed as `pg_trickle_hash_multi(ARRAY[col1::text, col2::text, ...])` — an xxHash of all column values. Rows with identical content produce identical hashes.
+For tables without a primary key, `__pgt_row_id` is computed by the typed V2 encoder over all column values. Rows with identical content produce identical identities, and the non-unique counted path preserves their multiplicity.
 
-The hash uses `\x1E` (record separator) between values and `\x00NULL\x00` for NULL values, minimizing collision risk for rows with different content. However, truly identical rows (same values in every column) will always hash to the same value — this is inherent to content-based identity.
+The typed V2 encoder preserves type tags, NULLs, lengths, and domain separation, minimizing ambiguity for rows with different content. Truly identical rows (same values in every column) will always share an identity — this is inherent to content-based identity.
 
 ---
 
@@ -1376,7 +1376,7 @@ When an operator later enables `wal_level = logical` (e.g., for other replicatio
 **When to use `trigger` instead:** Set `pg_trickle.cdc_mode = 'trigger'` if you want fully deterministic trigger-only behaviour, need to minimize any replication slot management, or are on a restricted managed PostgreSQL that caps replication slots. This reverts to the legacy trigger-only default.
 
 **Caveats to be aware of in `auto` mode:**
-- Keyless tables (no PRIMARY KEY) stay on triggers permanently — WAL mode requires a PK for `pk_hash` computation.
+- Keyless tables (no PRIMARY KEY) stay on triggers permanently — WAL mode requires a stable primary-key identity or `REPLICA IDENTITY FULL`.
 - Replication slots prevent WAL recycling: if the decoder falls behind, WAL accumulates. pg_trickle now warns at `pg_trickle.slot_lag_warning_threshold_mb` (default 100 MB) and marks per-source CDC health unhealthy at `pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB).
 - The `TRANSITIONING` phase runs both trigger and WAL decoder simultaneously; LSN-based deduplication handles correctness. If anything goes wrong, the system rolls back to triggers.
 
@@ -1743,7 +1743,7 @@ SELECT * FROM pgtrickle.get_refresh_history('order_totals', 10);
 
 ### What is `__pgt_row_id`?
 
-Every stream table has a `__pgt_row_id BIGINT PRIMARY KEY` column that stores a 64-bit xxHash of the row's identity key. The refresh engine uses it to match incoming deltas against existing rows during `MERGE` operations.
+Every stream table has a `__pgt_row_id BYTEA NOT NULL` column that stores the complete typed V2 row identity. A bounded direct index or a non-unique probe index accelerates lookup, but full identity equality is always required.
 
 For a detailed explanation of how this column is computed and why it exists, see [What is the `__pgt_row_id` column and why does it appear in my stream tables?](#what-is-the-__pgt_row_id-column-and-why-does-it-appear-in-my-stream-tables) in the General section.
 
@@ -1902,7 +1902,7 @@ CREATE PUBLICATION my_pub FOR TABLE pgtrickle.order_totals;
 ```
 
 **Important caveats:**
-- The `__pgt_row_id` column is replicated (it is the primary key)
+- The `__pgt_row_id` column is replicated. Bounded unique stream tables may use it as the replica identity; unbounded and keyless tables use `REPLICA IDENTITY FULL`.
 - Subscribers receive materialized data, not the defining query
 - Do **not** install pg_trickle on the subscriber and attempt to refresh the replicated table — it will have no CDC triggers or catalog entries
 - Internal change buffer tables are not published by default
@@ -3097,7 +3097,7 @@ unsupported on stream tables, and what to do instead.
 
 Stream table contents are the **output** of the refresh engine — they represent the materialized result of the defining query at a specific point in time. Direct DML would corrupt this contract in several ways:
 
-1. **Row ID integrity.** Every row has a `__pgt_row_id` (a 64-bit xxHash of the group-by key or all columns). The refresh engine uses this for delta `MERGE` — matching incoming deltas against existing rows. A manually inserted row with an incorrect or duplicate `__pgt_row_id` would cause the next differential refresh to produce wrong results (double-counting, missed deletes, or merge conflicts).
+1. **Row ID integrity.** Every row has a complete typed-V2 `__pgt_row_id` (`BYTEA`). The refresh engine uses it for exact delta matching, with a probe only as an accelerator. A manually inserted row with an incorrect or duplicate identity would cause the next differential refresh to produce wrong results (double-counting, missed deletes, or merge conflicts).
 
 2. **Frontier inconsistency.** Each refresh records a *frontier* — a set of per-source LSN positions that represent "data up to this point has been materialized." A manual DML change is not tracked by any frontier. The next differential refresh would either overwrite the change (if the delta touches the same row) or leave the stream table in a state that doesn't match any consistent point-in-time snapshot of the source data.
 

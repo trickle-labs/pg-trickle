@@ -135,6 +135,8 @@ struct CachedIvmDelta {
     delta_sql: String,
     /// User-facing column names from the delta result.
     user_columns: Vec<String>,
+    /// Whether the delta emits at most one row per row identity.
+    is_deduplicated: bool,
     /// STAB-2 (v0.30.0): Insertion order counter for clock-style eviction.
     last_used: u64,
 }
@@ -706,6 +708,7 @@ fn apply_ivm_owner_delta(
     delta_sql: &str,
     user_columns: &[String],
     delta_table: &str,
+    is_deduplicated: bool,
 ) -> Result<i64, PgTrickleError> {
     let st_qualified = format!(
         "\"{}\".\"{}\"",
@@ -736,13 +739,28 @@ fn apply_ivm_owner_delta(
                 st.has_keyless_source,
             ))
             .map_err(|e| PgTrickleError::SpiError(format!("IVM delta DELETE failed: {e}")))?;
-            Spi::run(&build_ivm_insert_sql(
-                &st_qualified,
-                delta_table,
-                user_columns,
-                st.has_keyless_source,
-            ))
-            .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+            if st.has_keyless_source && is_deduplicated {
+                Spi::run(&build_ivm_update_sql(
+                    &st_qualified,
+                    delta_table,
+                    user_columns,
+                ))
+                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta UPDATE failed: {e}")))?;
+                Spi::run(&build_ivm_insert_sql_no_conflict(
+                    &st_qualified,
+                    delta_table,
+                    user_columns,
+                ))
+                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+            } else {
+                Spi::run(&build_ivm_insert_sql(
+                    &st_qualified,
+                    delta_table,
+                    user_columns,
+                    st.has_keyless_source,
+                ))
+                .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
+            }
         }
 
         Ok(delta_count)
@@ -880,7 +898,7 @@ fn pgt_ivm_apply_delta(
     prepare_ivm_owner_transition_tables(&st, source_oid_u32, has_new, has_old, false)?;
 
     // Try to get cached delta SQL template.
-    let (delta_sql, user_columns) =
+    let (delta_sql, user_columns, is_deduplicated) =
         get_or_compute_ivm_delta(pgt_id, source_oid_u32, has_new, has_old, &st, false)?;
 
     let st_qualified = format!(
@@ -890,7 +908,13 @@ fn pgt_ivm_apply_delta(
     );
 
     let delta_table = format!("__pgt_ivm_delta_{pgt_id}");
-    let delta_count = apply_ivm_owner_delta(&st, &delta_sql, &user_columns, &delta_table)?;
+    let delta_count = apply_ivm_owner_delta(
+        &st,
+        &delta_sql,
+        &user_columns,
+        &delta_table,
+        is_deduplicated,
+    )?;
 
     // EC-01b: reconcile cross-cycle phantom rows in IMMEDIATE mode.
     // Mirrors the post-DML cleanup in `execute_differential_refresh`.
@@ -965,7 +989,7 @@ fn pgt_ivm_apply_delta_enr(
     prepare_ivm_owner_transition_tables(&st, source_oid_u32, has_new, has_old, true)?;
 
     // Owner execution uses the filtered OID-suffixed copies staged above.
-    let (delta_sql, user_columns) =
+    let (delta_sql, user_columns, is_deduplicated) =
         get_or_compute_ivm_delta(pgt_id, source_oid_u32, has_new, has_old, &st, false)?;
 
     let st_qualified = format!(
@@ -975,7 +999,13 @@ fn pgt_ivm_apply_delta_enr(
     );
 
     let delta_table = format!("__pgt_ivm_delta_enr_{pgt_id}");
-    let delta_count = apply_ivm_owner_delta(&st, &delta_sql, &user_columns, &delta_table)?;
+    let delta_count = apply_ivm_owner_delta(
+        &st,
+        &delta_sql,
+        &user_columns,
+        &delta_table,
+        is_deduplicated,
+    )?;
     drop_ivm_transition_copies(source_oid_u32, has_new, has_old);
 
     // EC-01b: reconcile cross-cycle phantom rows in IMMEDIATE mode (ENR path).
@@ -1055,7 +1085,9 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
         let delete_sql = format!(
             "DELETE FROM {st_qualified} AS t \
          WHERE NOT EXISTS (\
-             SELECT 1 FROM {new_topk} AS n WHERE n.__pgt_row_id = t.__pgt_row_id\
+             SELECT 1 FROM {new_topk} AS n \
+             WHERE pgtrickle.row_probe_v1(n.__pgt_row_id) = pgtrickle.row_probe_v1(t.__pgt_row_id) \
+               AND n.__pgt_row_id = t.__pgt_row_id\
          )"
         );
         Spi::run(&delete_sql).map_err(|e| {
@@ -1073,26 +1105,66 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
             .map(|c| format!("n.\"{}\"", c.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(", ");
-        let update_set = columns
-            .iter()
-            .map(|c| {
-                let q = format!("\"{}\"", c.replace('"', "\"\""));
-                format!("{q} = EXCLUDED.{q}")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
         // INSERT new rows that entered the top-K (or update changed rows).
-        let insert_sql = format!(
-            "INSERT INTO {st_qualified} (__pgt_row_id, {col_list}) \
-         SELECT n.__pgt_row_id, {n_col_list} \
-         FROM {new_topk} n \
-         ON CONFLICT (__pgt_row_id) DO UPDATE SET {update_set}"
-        );
-        Spi::run(&insert_sql) // nosemgrep: rust.spi.run.dynamic-format — SQL contains validated internal relation identifiers.
-            .map_err(|e| {
+        if st.has_keyless_source {
+            let update_set = columns
+                .iter()
+                .map(|c| {
+                    let q = format!("\"{}\"", c.replace('"', "\"\""));
+                    format!("{q} = n.{q}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let distinct = columns
+                .iter()
+                .map(|c| {
+                    let q = format!("\"{}\"", c.replace('"', "\"\""));
+                    format!("t.{q} IS DISTINCT FROM n.{q}")
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let row_id_match =
+                crate::refresh::codegen::build_row_id_match("t.__pgt_row_id", "n.__pgt_row_id");
+            let update_sql = format!(
+                "UPDATE {st_qualified} AS t SET {update_set} \
+                 FROM {new_topk} AS n \
+                 WHERE {row_id_match} AND ({distinct})"
+            );
+            Spi::run(&update_sql).map_err(|e| {
+                PgTrickleError::SpiError(format!("TopK micro-refresh UPDATE failed: {e}"))
+            })?;
+
+            let insert_sql = format!(
+                "INSERT INTO {st_qualified} (__pgt_row_id, {col_list}) \
+                 SELECT n.__pgt_row_id, {n_col_list} \
+                 FROM {new_topk} AS n \
+                 WHERE NOT EXISTS (\
+                     SELECT 1 FROM {st_qualified} AS t \
+                     WHERE {row_id_match} \
+                 )"
+            );
+            Spi::run(&insert_sql).map_err(|e| {
                 PgTrickleError::SpiError(format!("TopK micro-refresh INSERT failed: {e}"))
             })?;
+        } else {
+            let update_set = columns
+                .iter()
+                .map(|c| {
+                    let q = format!("\"{}\"", c.replace('"', "\"\""));
+                    format!("{q} = EXCLUDED.{q}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_sql = format!(
+                "INSERT INTO {st_qualified} (__pgt_row_id, {col_list}) \
+                 SELECT n.__pgt_row_id, {n_col_list} \
+                 FROM {new_topk} n \
+                 ON CONFLICT (__pgt_row_id) DO UPDATE SET {update_set}"
+            );
+            Spi::run(&insert_sql).map_err(|e| {
+                PgTrickleError::SpiError(format!("TopK micro-refresh INSERT failed: {e}"))
+            })?;
+        }
 
         Ok(())
     });
@@ -1124,7 +1196,7 @@ fn get_or_compute_ivm_delta(
     has_old: bool,
     st: &crate::catalog::StreamTableMeta,
     use_enr: bool,
-) -> Result<(String, Vec<String>), PgTrickleError> {
+) -> Result<(String, Vec<String>, bool), PgTrickleError> {
     use crate::dvm::diff::{DeltaSource, DiffContext, TransitionTableNames};
     use crate::dvm::parser::parse_defining_query_full;
     use crate::version::Frontier;
@@ -1159,7 +1231,7 @@ fn get_or_compute_ivm_delta(
     });
 
     if let Some(entry) = cached {
-        return Ok((entry.delta_sql, entry.user_columns));
+        return Ok((entry.delta_sql, entry.user_columns, entry.is_deduplicated));
     }
 
     // Cache miss — parse, differentiate, and cache.
@@ -1209,7 +1281,7 @@ fn get_or_compute_ivm_delta(
     ctx.st_has_pgt_count = has_pgt_count;
 
     // Differentiate the operator tree to get delta SQL.
-    let (delta_sql, user_columns, _is_dedup, _has_key_changed) =
+    let (delta_sql, user_columns, is_deduplicated, _has_key_changed) =
         ctx.differentiate_with_columns(&op_tree)?;
 
     // Store in cache.
@@ -1238,12 +1310,13 @@ fn get_or_compute_ivm_delta(
                 defining_query_hash: query_hash,
                 delta_sql: delta_sql.clone(),
                 user_columns: user_columns.clone(),
+                is_deduplicated,
                 last_used: clock,
             },
         );
     });
 
-    Ok((delta_sql, user_columns))
+    Ok((delta_sql, user_columns, is_deduplicated))
 }
 
 /// SQL-callable function: handle TRUNCATE on a base table for an
@@ -1310,13 +1383,16 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
                 // Re-populate: INSERT with hash-based row_id.
                 let hash_cols: Vec<String> = col_info
                     .iter()
-                    .map(|c| format!("(\"{}\")::TEXT", c.replace('"', "\"\"")))
+                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
                     .collect();
 
                 let row_id_expr = if hash_cols.len() == 1 {
-                    format!("pgtrickle.pg_trickle_hash({})", hash_cols[0])
+                    format!(
+                        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW({}))",
+                        hash_cols[0]
+                    )
                 } else {
-                    crate::hash::build_composite_hash_expr(&hash_cols)
+                    crate::hash::build_row_identity_expr("KEYLESS_ROW", &hash_cols)
                 };
 
                 let repopulate_sql = format!(
@@ -1355,10 +1431,14 @@ fn build_ivm_delete_sql(st_qualified: &str, delta_table: &str, has_keyless_sourc
                           PARTITION BY st2.__pgt_row_id ORDER BY st2.ctid\
                         ) AS st_rn \
                  FROM {st_qualified} st2 \
-                 WHERE st2.__pgt_row_id IN (\
-                   SELECT DISTINCT __pgt_row_id \
-                   FROM {delta_table} \
-                   WHERE __pgt_action = 'D'\
+                 WHERE EXISTS (\
+                   SELECT 1 FROM (\
+                     SELECT DISTINCT __pgt_row_id \
+                     FROM {delta_table} \
+                     WHERE __pgt_action = 'D'\
+                   ) d \
+                   WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+                     AND st2.__pgt_row_id = d.__pgt_row_id\
                  )\
                ) numbered_st \
                JOIN (\
@@ -1367,7 +1447,8 @@ fn build_ivm_delete_sql(st_qualified: &str, delta_table: &str, has_keyless_sourc
                  FROM {delta_table} \
                  WHERE __pgt_action = 'D' \
                  GROUP BY __pgt_row_id\
-               ) dc ON numbered_st.__pgt_row_id = dc.__pgt_row_id \
+               ) dc ON pgtrickle.row_probe_v1(numbered_st.__pgt_row_id) = pgtrickle.row_probe_v1(dc.__pgt_row_id) \
+                         AND numbered_st.__pgt_row_id = dc.__pgt_row_id \
                WHERE numbered_st.st_rn <= dc.del_count\
              )"
         )
@@ -1376,6 +1457,7 @@ fn build_ivm_delete_sql(st_qualified: &str, delta_table: &str, has_keyless_sourc
             "DELETE FROM {st_qualified} AS t
                  USING {delta_table} AS d
                  WHERE d.__pgt_action = 'D'
+                   AND pgtrickle.row_probe_v1(t.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id)
                    AND t.__pgt_row_id = d.__pgt_row_id"
         )
     }
@@ -1428,6 +1510,68 @@ fn build_ivm_insert_sql(
                  ON CONFLICT (__pgt_row_id) DO UPDATE SET {update_set}"
         )
     }
+}
+
+/// Update an existing row for a deduplicated delta when the row-id index is
+/// non-unique. This is the non-`ON CONFLICT` counterpart used by unbounded
+/// identities backed by the probe index.
+fn build_ivm_update_sql(st_qualified: &str, delta_table: &str, user_columns: &[String]) -> String {
+    let update_set = user_columns
+        .iter()
+        .map(|column| {
+            let quoted = format!("\"{}\"", column.replace('"', "\"\""));
+            format!("{quoted} = d.{quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let distinct = user_columns
+        .iter()
+        .map(|column| {
+            let quoted = format!("\"{}\"", column.replace('"', "\"\""));
+            format!("st.{quoted} IS DISTINCT FROM d.{quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!(
+        "UPDATE {st_qualified} AS st SET {update_set} \
+         FROM {delta_table} AS d \
+         WHERE {row_id_match} \
+           AND d.__pgt_action = 'I' \
+           AND ({distinct})",
+        row_id_match =
+            crate::refresh::codegen::build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
+}
+
+/// Insert a deduplicated row only when the exact identity is absent. This
+/// avoids requiring a unique constraint on an unbounded identity index.
+fn build_ivm_insert_sql_no_conflict(
+    st_qualified: &str,
+    delta_table: &str,
+    user_columns: &[String],
+) -> String {
+    let col_list = user_columns
+        .iter()
+        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let d_col_list = user_columns
+        .iter()
+        .map(|column| format!("d.\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {st_qualified} (__pgt_row_id, {col_list}) \
+         SELECT d.__pgt_row_id, {d_col_list} \
+         FROM {delta_table} AS d \
+         WHERE d.__pgt_action = 'I' \
+           AND NOT EXISTS (\
+             SELECT 1 FROM {st_qualified} AS st \
+             WHERE {row_id_match}\
+           )",
+        row_id_match =
+            crate::refresh::codegen::build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
 }
 
 /// Build the three column-list fragments used in IVM delta application:

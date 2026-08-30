@@ -1466,6 +1466,23 @@ pub fn extract_group_by_columns(defining_query: &str) -> Option<Vec<String>> {
         .and_then(|tree| tree.group_by_columns())
 }
 
+pub(crate) fn row_identity_domain(tree: &parser::OpTree) -> &'static str {
+    match tree {
+        parser::OpTree::Scan { pk_columns, .. } if pk_columns.is_empty() => "KEYLESS_ROW",
+        parser::OpTree::Aggregate { .. } => "GROUP_KEY",
+        parser::OpTree::Distinct { .. }
+        | parser::OpTree::Intersect { .. }
+        | parser::OpTree::Except { .. } => "SET_KEY",
+        parser::OpTree::InnerJoin { .. }
+        | parser::OpTree::LeftJoin { .. }
+        | parser::OpTree::FullJoin { .. } => "JOIN_KEY",
+        parser::OpTree::Filter { child, .. }
+        | parser::OpTree::Project { child, .. }
+        | parser::OpTree::Subquery { child, .. } => row_identity_domain(child),
+        _ => "SCAN_KEY",
+    }
+}
+
 /// Generate a SQL expression for computing `__pgt_row_id` from a subquery
 /// aliased as `sub`, matching the hash formula used by the delta query.
 ///
@@ -1477,20 +1494,21 @@ pub fn extract_group_by_columns(defining_query: &str) -> Option<Vec<String>> {
 pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let tree = parse_defining_query(defining_query).ok();
     let key_cols = tree.as_ref().and_then(|t| t.row_id_key_columns());
+    let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
 
     match key_cols {
         Some(cols) if cols.len() == 1 => {
             format!(
-                "pgtrickle.pg_trickle_hash(sub.{}::text)",
+                "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
                 diff::quote_ident(&cols[0]),
             )
         }
         Some(cols) if cols.len() > 1 => {
             let array_items: Vec<String> = cols
                 .iter()
-                .map(|c| format!("sub.{}::TEXT", diff::quote_ident(c)))
+                .map(|c| format!("sub.{}", diff::quote_ident(c)))
                 .collect();
-            crate::hash::build_composite_hash_expr(&array_items)
+            crate::hash::build_row_identity_expr(domain, &array_items)
         }
         _ => {
             // Scalar aggregate (no GROUP BY): use singleton sentinel hash
@@ -1499,14 +1517,13 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
             // while DIFF uses '__singleton_group', causing __pgt_row_id
             // mismatch and phantom row insertion.
             if tree.as_ref().is_some_and(is_scalar_aggregate_root) {
-                "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
-            } else {
-                // Fallback for complex queries (joins, union all, etc.)
-                // Include row_number() to disambiguate duplicate-content rows
-                // (e.g., recursive CTEs with UNION ALL that reach the same
-                // values via different derivation paths).
-                "pgtrickle.pg_trickle_hash(row_to_json(sub)::text || '/' || row_number() OVER ()::text)"
+                "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))"
                     .to_string()
+            } else {
+                // Fallback for complex queries (joins, union all, etc.).
+                // Preserve the complete visible row as the identity; duplicate
+                // rows are handled by the non-unique/counting path.
+                "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(row_to_json(sub)::text))".to_string()
             }
         }
     }
@@ -1574,22 +1591,20 @@ pub fn try_union_all_refresh_sql(defining_query: &str) -> Option<String> {
         // Build the child hash expression (same formula as the scan diff).
         let child_hash = if key_cols.len() == 1 {
             format!(
-                "pgtrickle.pg_trickle_hash(sub.{}::text)",
+                "pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(sub.{}))",
                 diff::quote_ident(&key_cols[0]),
             )
         } else {
             let items: Vec<String> = key_cols
                 .iter()
-                .map(|c| format!("sub.{}::TEXT", diff::quote_ident(c)))
+                .map(|c| format!("sub.{}", diff::quote_ident(c)))
                 .collect();
-            crate::hash::build_composite_hash_expr(&items)
+            crate::hash::build_row_identity_expr("SCAN_KEY", &items)
         };
 
         // Wrap with branch prefix (matching diff_union_all's idx = i + 1).
-        let row_id_expr = crate::hash::build_composite_hash_expr(&[
-            format!("'{idx}'::TEXT"),
-            format!("({child_hash})::TEXT"),
-        ]);
+        let row_id_expr =
+            crate::hash::build_row_identity_expr("SET_KEY", &[format!("{idx}::int4"), child_hash]);
 
         parts.push(format!(
             "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({branch_sql}) sub",
@@ -1791,14 +1806,14 @@ pub fn try_union_dedup_refresh_sql(
     let group_list = sub_cols.join(", ");
 
     // Hash expression for __pgt_row_id (references outer sub2)
-    let hash_items: Vec<String> = quoted_cols
-        .iter()
-        .map(|c| format!("sub2.{c}::TEXT"))
-        .collect();
+    let hash_items: Vec<String> = quoted_cols.iter().map(|c| format!("sub2.{c}")).collect();
     let hash_expr = if hash_items.len() == 1 {
-        format!("pgtrickle.pg_trickle_hash({})", hash_items[0])
+        format!(
+            "pgtrickle.encode_row_id_v2('SET_KEY', ROW({}))",
+            hash_items[0]
+        )
     } else {
-        crate::hash::build_composite_hash_expr(&hash_items)
+        crate::hash::build_row_identity_expr("SET_KEY", &hash_items)
     };
 
     let outer_cols: Vec<String> = quoted_cols.iter().map(|c| format!("sub2.{c}")).collect();
@@ -1981,15 +1996,18 @@ pub fn try_set_op_refresh_sql(defining_query: &str, column_names: &[String]) -> 
             .collect();
         let hash_items_c: Vec<String> = canonical_cols
             .iter()
-            .map(|c| format!("COALESCE(l.{c}, r.{c})::TEXT"))
+            .map(|c| format!("COALESCE(l.{c}, r.{c})"))
             .collect();
         (coalesced.join(",\n       "), hash_items_c)
     };
 
     let hash_expr_final = if hash_items_final.len() == 1 {
-        format!("pgtrickle.pg_trickle_hash({})", hash_items_final[0])
+        format!(
+            "pgtrickle.encode_row_id_v2('SET_KEY', ROW({}))",
+            hash_items_final[0]
+        )
     } else {
-        crate::hash::build_composite_hash_expr(&hash_items_final)
+        crate::hash::build_row_identity_expr("SET_KEY", &hash_items_final)
     };
 
     let sql = format!(
@@ -2619,7 +2637,7 @@ mod tests {
     #[test]
     fn test_direct_full_refresh_insert_body_has_no_set_state_columns() {
         let sql = direct_full_refresh_insert_body_with_row_id(
-            "pgtrickle.pg_trickle_hash(sub.value::text)",
+            "pgtrickle.encode_row_id_v2('SET_KEY', ROW(sub.value))",
             "SELECT value FROM left_t INTERSECT SELECT value FROM right_t",
         );
 

@@ -322,7 +322,7 @@ fn sync_change_buffer_columns(
         "change_id",
         "lsn",
         "action",
-        "pk_hash",
+        "__pgt_row_id",
         "changed_cols",
         "__pgt_trace_context",
     ]

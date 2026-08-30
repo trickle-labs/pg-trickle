@@ -130,13 +130,13 @@ pub fn poll_foreign_table_changes(
         .map(|(name, _)| format!("\"{}\"", name.replace('"', "\"\"")))
         .collect();
 
-    // Build pk_hash expression for delta rows.
+    // Build __pgt_row_id expression for delta rows.
     let hash_cols: Vec<String> = if pk_columns.is_empty() {
         col_defs.iter().map(|(n, _)| n.clone()).collect()
     } else {
         pk_columns.clone()
     };
-    let pk_hash_expr = build_pk_hash_expr(&hash_cols);
+    let pk_hash_expr = build_pk_hash_expr(&hash_cols, pk_columns.is_empty());
 
     let cb_col_list = cb_col_names.join(", ");
     let src_col_list = src_col_names.join(", ");
@@ -148,7 +148,7 @@ pub fn poll_foreign_table_changes(
     // INSERT target uses cb_col_list (change-buffer names); SELECT uses src_col_list
     // (original source names). Values are matched positionally.
     let deleted_sql = format!(
-        "INSERT INTO {change_table} (lsn, action, pk_hash, {cb_col_list}) \
+        "INSERT INTO {change_table} (lsn, action, __pgt_row_id, {cb_col_list}) \
          SELECT pg_current_wal_insert_lsn(), 'D', {pk_hash_expr}, {src_col_list} \
          FROM (\
            SELECT {src_col_list} FROM {snapshot_table} \
@@ -161,7 +161,7 @@ pub fn poll_foreign_table_changes(
     // ── Inserted rows: in current foreign table but not in snapshot ──
     // These appear as 'I' (insert) rows in the change buffer.
     let inserted_sql = format!(
-        "INSERT INTO {change_table} (lsn, action, pk_hash, {cb_col_list}) \
+        "INSERT INTO {change_table} (lsn, action, __pgt_row_id, {cb_col_list}) \
          SELECT pg_current_wal_insert_lsn(), 'I', {pk_hash_expr}, {src_col_list} \
          FROM (\
            SELECT {src_col_list} FROM {source_table} \
@@ -266,23 +266,24 @@ pub fn poll_matview_changes(
     poll_foreign_table_changes(source_oid, change_schema)
 }
 
-/// Build a `pk_hash` SQL expression for the given list of column names.
+/// Build a `__pgt_row_id` SQL expression for the given list of column names.
 ///
 /// Single-column: `pgtrickle.pg_trickle_hash("col"::text)`
 /// Multi-column:  `pgtrickle.pg_trickle_hash_multi(ARRAY["c1"::text, "c2"::text])`
 ///
 /// This is a pure-Rust helper extracted from `poll_foreign_table_changes` and
 /// `setup_foreign_table_polling` to enable unit testing.
-pub(crate) fn build_pk_hash_expr(hash_cols: &[String]) -> String {
+pub(crate) fn build_pk_hash_expr(hash_cols: &[String], keyless: bool) -> String {
+    let domain = if keyless { "KEYLESS_ROW" } else { "SCAN_KEY" };
     if hash_cols.len() == 1 {
         let c = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.pg_trickle_hash({c}::text)")
+        format!("pgtrickle.encode_row_id_v2('{domain}', ROW({c}))")
     } else {
         let items: Vec<String> = hash_cols
             .iter()
-            .map(|c| format!("\"{}\"::text", c.replace('"', "\"\"")))
+            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
             .collect();
-        crate::hash::build_composite_hash_expr(&items)
+        crate::hash::build_row_identity_expr(domain, &items)
     }
 }
 
@@ -293,23 +294,23 @@ mod tests {
 
     #[test]
     fn test_pk_hash_single_column() {
-        let expr = build_pk_hash_expr(&["id".to_string()]);
-        assert_eq!(expr, r#"pgtrickle.pg_trickle_hash("id"::text)"#);
+        let expr = build_pk_hash_expr(&["id".to_string()], false);
+        assert_eq!(expr, r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id"))"#);
     }
 
     #[test]
     fn test_pk_hash_multi_column() {
-        let expr = build_pk_hash_expr(&["tenant_id".to_string(), "order_id".to_string()]);
+        let expr = build_pk_hash_expr(&["tenant_id".to_string(), "order_id".to_string()], false);
         assert_eq!(
             expr,
-            r#"pgtrickle.pg_trickle_hash_multi(ARRAY["tenant_id"::text, "order_id"::text])"#
+            r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("tenant_id", "order_id"))"#
         );
     }
 
     #[test]
     fn test_pk_hash_column_with_double_quotes() {
         // Column names that contain double-quotes must be escaped.
-        let expr = build_pk_hash_expr(&["my\"col".to_string()]);
+        let expr = build_pk_hash_expr(&["my\"col".to_string()], false);
         assert!(
             expr.contains("\"\""),
             "embedded double-quote must be doubled: {expr}"
@@ -318,10 +319,10 @@ mod tests {
 
     #[test]
     fn test_pk_hash_three_columns() {
-        let expr = build_pk_hash_expr(&["a".to_string(), "b".to_string(), "c".to_string()]);
-        assert!(expr.starts_with("pgtrickle.pg_trickle_hash_multi(ARRAY["));
-        assert!(expr.contains(r#""a"::text"#));
-        assert!(expr.contains(r#""b"::text"#));
-        assert!(expr.contains(r#""c"::text"#));
+        let expr = build_pk_hash_expr(&["a".to_string(), "b".to_string(), "c".to_string()], false);
+        assert!(expr.starts_with("pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("));
+        assert!(expr.contains(r#""a""#));
+        assert!(expr.contains(r#""b""#));
+        assert!(expr.contains(r#""c""#));
     }
 }

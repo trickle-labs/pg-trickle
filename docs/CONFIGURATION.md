@@ -1169,7 +1169,7 @@ When a source table's pending change buffer exceeds this many rows,
 compaction is triggered before the next refresh cycle. Compaction eliminates
 net-zero INSERT+DELETE pairs (rows inserted then deleted within the same
 refresh window) and collapses multi-change groups to first+last rows per
-`pk_hash`, reducing delta scan overhead by 50–90% for high-churn tables.
+`__pgt_row_id`, reducing delta scan overhead by 50–90% for high-churn tables.
 
 Set to `0` to disable compaction.
 

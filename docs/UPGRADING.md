@@ -2,6 +2,29 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.15 → 0.87.16
+
+Install the 0.87.16 shared library and extension files, then run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE;
+```
+
+This is a breaking pre-1.0 storage release. New and rebuilt stream tables and
+change buffers carry the complete V2 identity as `__pgt_row_id BYTEA NOT NULL`
+and record `row_identity_version = 2` plus `row_probe_version = 1`.
+
+The migration deliberately marks existing identity metadata unknown and does
+not rewrite V1 relations in place. The V2 runtime rejects those relations
+before consuming or mutating state. Recreate affected stream tables and their
+buffers using the v0.87.17 recreation workflow after it is available; keep a
+backup before upgrading.
+
+Bounded identities use a direct full-ID index. Unbounded and keyless identities
+use a non-unique `row_probe_v1(__pgt_row_id)` index and exact full-ID equality.
+Only bounded unique identities are used for replica identity; other tables use
+`REPLICA IDENTITY FULL`. The expression probe is never published as a column.
+
 ## 0.87.14 → 0.87.15
 
 Install the 0.87.15 shared library and extension files, then run:

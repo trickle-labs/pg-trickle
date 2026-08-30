@@ -262,6 +262,9 @@ pub struct StreamTableMeta {
     /// NULL is treated as an unknown pre-upgrade value and fails closed on
     /// incremental paths.
     pub row_identity_version: Option<i16>,
+    /// v0.87.16: bounded identity probe encoding version.
+    /// NULL is treated as unknown and fails closed on incremental paths.
+    pub row_probe_version: Option<i16>,
     pub self_heal_work_mem_percent: i16,
     pub self_heal_lock_backoff_exponent: i16,
     pub self_heal_success_streak: i16,
@@ -448,9 +451,9 @@ impl StreamTableMeta {
                       requested_cdc_mode, is_append_only, pooler_compatibility_mode, \
                       st_partition_key, max_differential_joins, max_delta_fraction, \
                       temporal_mode, storage_backend, defining_query_hash, \
-                      storage_fillfactor, row_identity_version, defining_search_path) \
+                      storage_fillfactor, row_identity_version, row_probe_version, defining_search_path) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) \
+                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -479,6 +482,7 @@ impl StreamTableMeta {
                         query_hash.into(),
                         storage_fillfactor.into(),
                         crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
+                        (crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16).into(),
                         defining_search_path.into(),
                     ],
                 )
@@ -519,11 +523,12 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
+                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path \
-                     FROM pgtrickle.pgt_stream_tables \
+                     FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
                     &[schema.into(), name.into()],
@@ -566,11 +571,12 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
+                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path \
-                     FROM pgtrickle.pgt_stream_tables \
+                     FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_relid = $1",
                     None,
                     &[relid.into()],
@@ -618,11 +624,12 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
+                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path \
-                     FROM pgtrickle.pgt_stream_tables \
+                     FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_id = $1",
                     None,
                     &[pgt_id.into()],
@@ -665,11 +672,12 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
+                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path \
-                     FROM pgtrickle.pgt_stream_tables",
+                     FROM pgtrickle.pgt_stream_tables st",
                     None,
                     &[],
                 )
@@ -716,11 +724,12 @@ impl StreamTableMeta {
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
                      storage_fillfactor, \
                      query_complexity_class, row_identity_version, \
+                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path \
-                     FROM pgtrickle.pgt_stream_tables \
+                     FROM pgtrickle.pgt_stream_tables st \
                      WHERE status = 'ACTIVE'",
                     None,
                     &[],
@@ -1110,10 +1119,11 @@ impl StreamTableMeta {
     pub fn mark_row_identity_reinitialized(pgt_id: i64) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_stream_tables \
-             SET row_identity_version = $1, updated_at = now() \
-             WHERE pgt_id = $2",
+             SET row_identity_version = $1, row_probe_version = $2, updated_at = now() \
+             WHERE pgt_id = $3",
             &[
                 crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
+                (crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16).into(),
                 pgt_id.into(),
             ],
         )
@@ -1562,13 +1572,14 @@ impl StreamTableMeta {
         let storage_fillfactor = table.get::<i32>(52).map_err(map_spi)?;
         let query_complexity_class = table.get::<String>(53).map_err(map_spi)?;
         let row_identity_version = table.get::<i16>(54).map_err(map_spi)?;
-        let self_heal_work_mem_percent = table.get::<i16>(55).map_err(map_spi)?.unwrap_or(100);
-        let self_heal_lock_backoff_exponent = table.get::<i16>(56).map_err(map_spi)?.unwrap_or(0);
-        let self_heal_success_streak = table.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
-        let last_error_code = table.get::<String>(58).map_err(map_spi)?;
-        let last_error_retryable = table.get::<bool>(59).map_err(map_spi)?;
+        let row_probe_version = table.get::<i16>(55).map_err(map_spi)?;
+        let self_heal_work_mem_percent = table.get::<i16>(56).map_err(map_spi)?.unwrap_or(100);
+        let self_heal_lock_backoff_exponent = table.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
+        let self_heal_success_streak = table.get::<i16>(58).map_err(map_spi)?.unwrap_or(0);
+        let last_error_code = table.get::<String>(59).map_err(map_spi)?;
+        let last_error_retryable = table.get::<bool>(60).map_err(map_spi)?;
         let defining_search_path = table
-            .get::<String>(60)
+            .get::<String>(61)
             .map_err(map_spi)?
             .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
 
@@ -1627,6 +1638,7 @@ impl StreamTableMeta {
             storage_fillfactor,
             query_complexity_class,
             row_identity_version,
+            row_probe_version,
             self_heal_work_mem_percent,
             self_heal_lock_backoff_exponent,
             self_heal_success_streak,
@@ -1762,13 +1774,14 @@ impl StreamTableMeta {
         let storage_fillfactor = row.get::<i32>(52).map_err(map_spi)?;
         let query_complexity_class = row.get::<String>(53).map_err(map_spi)?;
         let row_identity_version = row.get::<i16>(54).map_err(map_spi)?;
-        let self_heal_work_mem_percent = row.get::<i16>(55).map_err(map_spi)?.unwrap_or(100);
-        let self_heal_lock_backoff_exponent = row.get::<i16>(56).map_err(map_spi)?.unwrap_or(0);
-        let self_heal_success_streak = row.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
-        let last_error_code = row.get::<String>(58).map_err(map_spi)?;
-        let last_error_retryable = row.get::<bool>(59).map_err(map_spi)?;
+        let row_probe_version = row.get::<i16>(55).map_err(map_spi)?;
+        let self_heal_work_mem_percent = row.get::<i16>(56).map_err(map_spi)?.unwrap_or(100);
+        let self_heal_lock_backoff_exponent = row.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
+        let self_heal_success_streak = row.get::<i16>(58).map_err(map_spi)?.unwrap_or(0);
+        let last_error_code = row.get::<String>(59).map_err(map_spi)?;
+        let last_error_retryable = row.get::<bool>(60).map_err(map_spi)?;
         let defining_search_path = row
-            .get::<String>(60)
+            .get::<String>(61)
             .map_err(map_spi)?
             .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
 
@@ -1827,6 +1840,7 @@ impl StreamTableMeta {
             storage_fillfactor,
             query_complexity_class,
             row_identity_version,
+            row_probe_version,
             self_heal_work_mem_percent,
             self_heal_lock_backoff_exponent,
             self_heal_success_streak,

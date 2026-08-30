@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
 use crate::dvm::parser::{Expr, OpTree, join_pk_expr_indices, unwrap_transparent};
+use crate::dvm::row_identity_domain;
 use crate::error::PgTrickleError;
 
 /// Differentiate a Project node.
@@ -167,9 +167,12 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             .map(|expr| resolve_expr_to_child(expr, child_cols))
             .collect();
         let row_id_hash = if hash_cols.len() == 1 {
-            format!("pgtrickle.pg_trickle_hash(({})::TEXT)", hash_cols[0])
+            format!(
+                "pgtrickle.encode_row_id_v2('JOIN_KEY', ROW({}))",
+                hash_cols[0]
+            )
         } else {
-            build_hash_expr(&hash_cols)
+            crate::dvm::operators::scan::build_hash_expr_for_domain("JOIN_KEY", &hash_cols)
         };
         format!("{row_id_hash} AS __pgt_row_id")
     } else if is_lateral_child || is_semijoin_child {
@@ -182,14 +185,20 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             .iter()
             .map(|expr| resolve_expr_to_child(expr, child_cols))
             .collect();
-        format!("{} AS __pgt_row_id", build_hash_expr(&hash_cols))
+        format!(
+            "{} AS __pgt_row_id",
+            crate::dvm::operators::scan::build_hash_expr_for_domain(
+                row_identity_domain(unwrapped),
+                &hash_cols,
+            )
+        )
     } else {
         // Recompute __pgt_row_id from the projected key columns to ensure
         // consistency with the FULL refresh hash formula.
         //
         // For regular table sources with PK, this produces the same value
-        // as the change buffer's pk_hash (both hash the same PK columns).
-        // For ST sources without PK, the change buffer's pk_hash is the
+        // as the change buffer's row identity (both encode the same PK columns).
+        // For ST sources without PK, the change buffer's row identity is the
         // upstream ST's row_id (a different formula), so recomputing here
         // ensures the MERGE ON clause can match rows correctly.
         match op.row_id_key_columns() {
@@ -206,17 +215,13 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
                 if hash_cols.is_empty() || hash_cols.len() != key_cols.len() {
                     // Not all key columns could be resolved — fall back
                     "__pgt_row_id".to_string()
-                } else if hash_cols.len() == 1 {
-                    format!(
-                        "pgtrickle.pg_trickle_hash({}::TEXT) AS __pgt_row_id",
-                        hash_cols[0]
-                    )
                 } else {
-                    let items: Vec<String> =
-                        hash_cols.iter().map(|e| format!("({e})::TEXT")).collect();
                     format!(
                         "{} AS __pgt_row_id",
-                        crate::hash::build_composite_hash_expr(&items)
+                        crate::dvm::operators::scan::build_hash_expr_for_domain(
+                            row_identity_domain(op),
+                            &hash_cols,
+                        )
                     )
                 }
             }

@@ -1,5 +1,7 @@
 # What Happens When You UPDATE a Row?
 
+> **v0.87.16 note:** The diagrams below use simplified legacy change-buffer labels to explain the lifecycle. Current buffers use flat typed columns and a complete `__pgt_row_id BYTEA` from the V2 encoder; `row_probe_v1` is only an index accelerator, never the identity.
+
 This tutorial traces what happens when an `UPDATE` statement hits a base table that is referenced by a stream table. It covers the trigger capture, the scan-level decomposition into DELETE + INSERT, and how each DVM operator propagates the change — including cases where the group key changes, where JOINs are involved, and where multiple UPDATEs happen within a single refresh window.
 
 > **Prerequisite:** Read [WHAT_HAPPENS_ON_INSERT.md](WHAT_HAPPENS_ON_INSERT.md) first — it introduces the full 7-phase lifecycle. This tutorial focuses on how UPDATE differs.

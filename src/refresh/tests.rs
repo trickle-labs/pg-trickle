@@ -76,6 +76,7 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         storage_fillfactor: None,
         query_complexity_class: None,
         row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
+        row_probe_version: Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16),
         self_heal_work_mem_percent: 100,
         self_heal_lock_backoff_exponent: 0,
         self_heal_success_streak: 0,
@@ -781,12 +782,15 @@ fn test_should_warn_low_threshold() {
     assert!(should_warn_amplification(2, 10, 2.0));
 }
 
-// ── ST-ST-9: Content hash for ST change buffer pk_hash ──────────
+// ── ST-ST-9: Content identity for ST change buffers ─────────────
 
 #[test]
 fn test_build_content_hash_expr_single_col() {
     let expr = build_content_hash_expr("d.", &["id".to_string()]);
-    assert_eq!(expr, "pgtrickle.pg_trickle_hash(d.\"id\"::TEXT)");
+    assert_eq!(
+        expr,
+        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(d.\"id\"))"
+    );
 }
 
 #[test]
@@ -794,20 +798,26 @@ fn test_build_content_hash_expr_multi_col() {
     let expr = build_content_hash_expr("d.", &["id".to_string(), "val".to_string()]);
     assert_eq!(
         expr,
-        "pgtrickle.pg_trickle_hash_multi(ARRAY[d.\"id\"::TEXT, d.\"val\"::TEXT])"
+        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(d.\"id\", d.\"val\"))"
     );
 }
 
 #[test]
 fn test_build_content_hash_expr_quoted_col() {
     let expr = build_content_hash_expr("pre.", &["col\"name".to_string()]);
-    assert_eq!(expr, "pgtrickle.pg_trickle_hash(pre.\"col\"\"name\"::TEXT)");
+    assert_eq!(
+        expr,
+        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(pre.\"col\"\"name\"))"
+    );
 }
 
 #[test]
 fn test_build_content_hash_expr_empty_cols_fallback() {
     let expr = build_content_hash_expr("d.", &[]);
-    assert_eq!(expr, "d.__pgt_row_id");
+    assert_eq!(
+        expr,
+        "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+    );
 }
 
 #[test]
@@ -821,9 +831,8 @@ fn test_bypass_capture_uses_content_hash() {
         "pg_temp.__pgt_bypass_42",
         None,
     );
-    // ST-ST-9: pk_hash should be content hash, not d.__pgt_row_id
-    assert!(sql.contains("pg_trickle_hash_multi(ARRAY[d.\"id\"::TEXT, d.\"name\"::TEXT])"));
-    assert!(!sql.contains("d.__pgt_row_id"));
+    // The bypass forwards the already-encoded complete identity.
+    assert!(sql.contains("d.__pgt_row_id"));
 }
 
 // ── Phase 6 (TESTING_GAPS_2): determine_refresh_action unit tests ────────
@@ -937,7 +946,10 @@ fn test_build_merge_sql_single_column() {
     let sql = build_merge_sql("\"public\".\"totals\"", "(delta_query)", &cols, false);
     assert!(sql.starts_with("MERGE INTO \"public\".\"totals\" AS st"));
     assert!(sql.contains("USING (delta_query) AS d"));
-    assert!(sql.contains("ON st.__pgt_row_id = d.__pgt_row_id"));
+    assert!(sql.contains(
+        "ON pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id)"
+    ));
+    assert!(sql.contains("AND st.__pgt_row_id = d.__pgt_row_id"));
     assert!(sql.contains("WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE"));
     assert!(sql.contains("UPDATE SET \"amount\" = d.\"amount\""));
     assert!(sql.contains("INSERT (__pgt_row_id, \"amount\")"));
@@ -965,7 +977,10 @@ fn test_build_merge_sql_multiple_columns() {
 fn test_build_merge_sql_with_partition_key() {
     let cols = vec!["val".to_string()];
     let sql = build_merge_sql("\"public\".\"partitioned\"", "(delta)", &cols, true);
-    assert!(sql.contains("ON st.__pgt_row_id = d.__pgt_row_id __PGT_PART_PRED__"));
+    assert!(sql.contains(
+        "ON pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+AND st.__pgt_row_id = d.__pgt_row_id __PGT_PART_PRED__"
+    ));
 }
 
 #[test]
@@ -1786,7 +1801,7 @@ fn test_build_bypass_capture_sql_column_defs() {
     // A44-10: flat D+I schema — no new_/old_ prefix
     assert!(sql.contains("lsn pg_lsn"));
     assert!(sql.contains("action \"char\""));
-    assert!(sql.contains("pk_hash bigint"));
+    assert!(sql.contains("__pgt_row_id bytea NOT NULL"));
     assert!(sql.contains("\"a\" bigint"));
     assert!(sql.contains("\"b\" text"));
     assert!(!sql.contains("\"new_a\""));

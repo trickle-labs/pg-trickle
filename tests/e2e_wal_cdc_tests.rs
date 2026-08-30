@@ -620,7 +620,7 @@ async fn test_wal_cleanup_on_drop() {
     assert!(pub_gone, "Publication should be dropped on ST drop");
 }
 
-/// Keyless tables should stay on triggers (WAL mode requires PK for pk_hash).
+/// Keyless tables should stay on triggers (WAL mode requires PK identity keys).
 #[tokio::test]
 async fn test_wal_keyless_table_stays_on_triggers() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;

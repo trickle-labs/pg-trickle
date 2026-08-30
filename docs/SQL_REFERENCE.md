@@ -3122,7 +3122,7 @@ The following are **rejected with clear error messages** rather than producing b
 
 ## Restrictions & Interoperability
 
-Stream tables are standard PostgreSQL heap tables stored in the `pgtrickle` schema with an additional `__pgt_row_id BIGINT PRIMARY KEY` column managed by the refresh engine. This section describes what you can and cannot do with them.
+Stream tables are standard PostgreSQL heap tables stored in the `pgtrickle` schema with an additional `__pgt_row_id BYTEA NOT NULL` column managed by the refresh engine. Depending on the identity schema, pg_trickle uses either a direct full-ID index or a non-unique `row_probe_v1(__pgt_row_id)` accelerator; full `BYTEA` equality remains authoritative. This section describes what you can and cannot do with them.
 
 ### Referencing Other Stream Tables
 
@@ -3388,7 +3388,7 @@ Stream tables may contain additional hidden columns whose names begin with `__pg
 
 #### `__pgt_row_id` — Row identity (always present)
 
-Every stream table has a `BIGINT PRIMARY KEY` column named `__pgt_row_id`. It is a content hash of all output columns (xxHash3-128 with Fibonacci-mixing of multiple column hashes), updated by the refresh engine on every MERGE. It is used as the MERGE join key to detect inserts/updates/deletes.
+Every stream table has a `BYTEA NOT NULL` column named `__pgt_row_id`. It stores the complete canonical V2 identity, updated by the refresh engine on every refresh. A bounded identity uses a direct B-tree; an unbounded identity uses a `row_probe_v1(__pgt_row_id)` accelerator plus exact full-identity equality for inserts, updates, and deletes.
 
 #### `__pgt_count` — Group multiplicity (aggregates & DISTINCT)
 
@@ -5357,7 +5357,7 @@ and produce incorrect query results.**
 | Prefix | Purpose | Example |
 |--------|---------|---------|
 | `__pgt_count` | Weight column for aggregate deduplication (DIFF mode) | `__pgt_count` |
-| `__pgt_row_id` | Content-based row identity hash for tables without primary keys | `__pgt_row_id` |
+| `__pgt_row_id` | Complete typed-V2 row identity (`BYTEA NOT NULL`) | `__pgt_row_id` |
 | `__pgt_wf_N` | Synthetic window-function lifting columns (rewrite pass #7) | `__pgt_wf_1`, `__pgt_wf_2` |
 | `__pgt_in_sub_*` | Derived-table alias for multi-column IN → SemiJoin rewrite (M-5) | `__pgt_in_sub_t` |
 | `__pgt_src_N` | Source partition aliases in generated delta CTEs | `__pgt_src_0` |

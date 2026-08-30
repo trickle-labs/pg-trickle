@@ -1,4 +1,4 @@
-//! PostgreSQL-backed checks for the v0.87.15 row-identity V2 API.
+//! PostgreSQL-backed checks for the v0.87.16 row-identity V2 integration.
 
 mod e2e;
 

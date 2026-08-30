@@ -10,7 +10,7 @@
 //! INSERT or DELETE actions.
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
+use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::OpTree;
 use crate::dvm::schema::validate_set_operation;
 use crate::error::PgTrickleError;
@@ -36,11 +36,8 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let col_list = col_refs.join(", ");
 
     // Hash all columns for the row_id
-    let hash_exprs: Vec<String> = cols
-        .iter()
-        .map(|c| format!("{}::TEXT", quote_ident(c)))
-        .collect();
-    let row_id_expr = build_hash_expr(&hash_exprs);
+    let hash_exprs: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
+    let row_id_expr = build_hash_expr_for_domain("SET_KEY", &hash_exprs);
 
     let st_table = ctx
         .st_qualified_name
@@ -85,7 +82,8 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
          COALESCE(st.__pgt_count_l, 0) AS old_count_l,\n\
          COALESCE(st.__pgt_count_r, 0) AS old_count_r\n\
          FROM {delta_cte} d\n\
-         LEFT JOIN {st_table} st ON st.__pgt_row_id = d.__pgt_row_id\n\
+         LEFT JOIN {st_table} st ON pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id)\n\
+             AND st.__pgt_row_id = d.__pgt_row_id\n\
          GROUP BY d.__pgt_row_id, {d_cols}, st.__pgt_count_l, st.__pgt_count_r",
     );
     ctx.add_cte(merge_cte.clone(), merge_sql);
@@ -253,7 +251,7 @@ mod tests {
         let result = diff_intersect(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        assert_sql_contains(&sql, "pgtrickle.pg_trickle_hash");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SET_KEY'");
     }
 
     #[test]

@@ -371,6 +371,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
                 &left_result.cte_name,
                 left_cols,
                 &ctx.fallback_leaf_oids,
+                &ctx.st_source_pgt_ids,
             );
             // Apply semi-join filter to L₀ if equi-keys are available
             if equi_keys.is_empty() {
@@ -484,6 +485,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
                 &right_result.cte_name,
                 right_cols,
                 &ctx.fallback_leaf_oids,
+                &ctx.st_source_pgt_ids,
             );
             // Apply semi-join filter to R₀
             if equi_keys.is_empty() {
@@ -1045,8 +1047,8 @@ mod tests {
     fn test_build_base_table_key_exprs_non_nullable() {
         let node = scan_not_null(1, "orders", "public", "o", &["id", "name"]);
         let exprs = build_base_table_key_exprs(&node, "r");
-        assert!(exprs.iter().any(|e| e.contains("r.\"id\"::TEXT")));
-        assert!(exprs.iter().any(|e| e.contains("r.\"name\"::TEXT")));
+        assert!(exprs.iter().any(|e| e.contains("r.\"id\"")));
+        assert!(exprs.iter().any(|e| e.contains("r.\"name\"")));
     }
 
     #[test]

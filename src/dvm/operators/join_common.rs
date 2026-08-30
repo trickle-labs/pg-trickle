@@ -457,8 +457,7 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
 /// Build the pk_hash expression for a Scan node matching the CDC trigger's
 /// hash computation.
 ///
-/// For single-column PKs: `pgtrickle.pg_trickle_hash(alias.col::text)`
-/// For multi-column PKs: `pgtrickle.pg_trickle_hash_multi(ARRAY[alias.col1::text, ...])`
+/// For single- and multi-column keys, emits the typed V2 `SCAN_KEY` identity.
 /// For keyless tables: uses all columns as hash input.
 fn build_pk_hash_expr(
     alias: &str,
@@ -472,13 +471,16 @@ fn build_pk_hash_expr(
     };
     let hash_args: Vec<String> = hash_cols
         .iter()
-        .map(|c| format!("{}.{}::text", quote_ident(alias), quote_ident(c)))
+        .map(|c| format!("{}.{}", quote_ident(alias), quote_ident(c)))
         .collect();
-    if hash_args.len() == 1 {
-        format!("pgtrickle.pg_trickle_hash({})", hash_args[0])
-    } else {
-        crate::hash::build_composite_hash_expr(&hash_args)
-    }
+    crate::hash::build_row_identity_expr(
+        if pk_columns.is_empty() {
+            "KEYLESS_ROW"
+        } else {
+            "SCAN_KEY"
+        },
+        &hash_args,
+    )
 }
 
 /// DI-2: Build a pre-change snapshot for any non-join child operator.
@@ -500,6 +502,7 @@ pub fn build_leaf_snapshot_sql(
     delta_cte: &str,
     data_cols: &[String],
     fallback_oids: &HashSet<u32>,
+    st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
     let col_list: String = data_cols
         .iter()
@@ -530,12 +533,17 @@ pub fn build_leaf_snapshot_sql(
                     alias_q = quote_ident(alias),
                 )
             } else {
-                let pk_hash_expr = build_pk_hash_expr(alias, columns, pk_columns);
+                let pk_hash_expr = if st_source_pgt_ids.contains_key(table_oid) {
+                    format!("{}.{}", quote_ident(alias), quote_ident("__pgt_row_id"))
+                } else {
+                    build_pk_hash_expr(alias, columns, pk_columns)
+                };
                 format!(
                     "(SELECT {col_list} FROM \"{schema}\".\"{table_name}\" {alias_q} \
                      WHERE NOT EXISTS (\
                        SELECT 1 FROM {delta_cte} __pgt_d \
-                       WHERE __pgt_d.__pgt_row_id = {pk_hash_expr}\
+                       WHERE pgtrickle.row_probe_v1(__pgt_d.__pgt_row_id) = pgtrickle.row_probe_v1({pk_hash_expr}) \
+                         AND __pgt_d.__pgt_row_id = {pk_hash_expr}\
                      ) \
                      UNION ALL \
                      SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
@@ -593,6 +601,7 @@ pub fn build_pre_change_snapshot_sql(
     op: &OpTree,
     scan_delta_ctes: &HashMap<String, String>,
     fallback_oids: &HashSet<u32>,
+    st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
     match op {
         OpTree::Scan { alias, columns, .. } => {
@@ -600,7 +609,7 @@ pub fn build_pre_change_snapshot_sql(
                 // DI-2: Delegate to build_leaf_snapshot_sql which uses
                 // NOT EXISTS for Scan nodes.
                 let data_cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-                build_leaf_snapshot_sql(op, delta_cte, &data_cols, fallback_oids)
+                build_leaf_snapshot_sql(op, delta_cte, &data_cols, fallback_oids, st_source_pgt_ids)
             } else {
                 // No delta for this scan — fall back to current state
                 build_snapshot_sql(op)
@@ -617,6 +626,7 @@ pub fn build_pre_change_snapshot_sql(
             right,
             scan_delta_ctes,
             fallback_oids,
+            st_source_pgt_ids,
         ),
         OpTree::LeftJoin {
             condition,
@@ -629,6 +639,7 @@ pub fn build_pre_change_snapshot_sql(
             right,
             scan_delta_ctes,
             fallback_oids,
+            st_source_pgt_ids,
         ),
         OpTree::FullJoin {
             condition,
@@ -641,9 +652,15 @@ pub fn build_pre_change_snapshot_sql(
             right,
             scan_delta_ctes,
             fallback_oids,
+            st_source_pgt_ids,
         ),
         OpTree::Filter { child, predicate } => {
-            let child_snap = build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids);
+            let child_snap = build_pre_change_snapshot_sql(
+                child,
+                scan_delta_ctes,
+                fallback_oids,
+                st_source_pgt_ids,
+            );
             if matches!(child.as_ref(), OpTree::Scan { .. }) {
                 let alias = child.alias();
                 format!(
@@ -679,12 +696,20 @@ pub fn build_pre_change_snapshot_sql(
                     }
                 })
                 .collect();
-            if let Some(from_clause) =
-                build_pre_change_inline_from_for_join(child, scan_delta_ctes, fallback_oids)
-            {
+            if let Some(from_clause) = build_pre_change_inline_from_for_join(
+                child,
+                scan_delta_ctes,
+                fallback_oids,
+                st_source_pgt_ids,
+            ) {
                 format!("(SELECT {} FROM {})", selects.join(", "), from_clause)
             } else {
-                let inner = build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids);
+                let inner = build_pre_change_snapshot_sql(
+                    child,
+                    scan_delta_ctes,
+                    fallback_oids,
+                    st_source_pgt_ids,
+                );
                 let child_alias = child.alias();
                 format!(
                     "(SELECT {} FROM {} {})",
@@ -700,12 +725,22 @@ pub fn build_pre_change_snapshot_sql(
             ..
         } => {
             if column_aliases.is_empty() {
-                build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids)
+                build_pre_change_snapshot_sql(
+                    child,
+                    scan_delta_ctes,
+                    fallback_oids,
+                    st_source_pgt_ids,
+                )
             } else {
                 // Mirror the ordinal-renaming logic from build_snapshot_sql:
                 // wrap the child in a SELECT that renames columns positionally
                 // to match the subquery's column aliases.
-                let inner = build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids);
+                let inner = build_pre_change_snapshot_sql(
+                    child,
+                    scan_delta_ctes,
+                    fallback_oids,
+                    st_source_pgt_ids,
+                );
                 let child_alias = child.alias();
                 let child_cols = child.output_columns();
                 let inner_selects: Vec<String> = child_cols
@@ -732,7 +767,12 @@ pub fn build_pre_change_snapshot_sql(
             aggregates,
             child,
         } => {
-            let inner = build_pre_change_snapshot_sql(child, scan_delta_ctes, fallback_oids);
+            let inner = build_pre_change_snapshot_sql(
+                child,
+                scan_delta_ctes,
+                fallback_oids,
+                st_source_pgt_ids,
+            );
             let child_alias = child.alias();
             let mut selects = Vec::new();
             for expr in group_by {
@@ -782,7 +822,12 @@ pub fn build_pre_change_snapshot_sql(
             // snapshot so its leaf delta CTEs expose the same columns.
             let mut body = body.as_ref().clone();
             body.prune_scan_columns();
-            let body_snap = build_pre_change_snapshot_sql(&body, scan_delta_ctes, fallback_oids);
+            let body_snap = build_pre_change_snapshot_sql(
+                &body,
+                scan_delta_ctes,
+                fallback_oids,
+                st_source_pgt_ids,
+            );
             let body_cols = body.output_columns();
             let effective_cols: Vec<&str> = if !column_aliases.is_empty() {
                 column_aliases.iter().map(String::as_str).collect()
@@ -837,11 +882,14 @@ fn build_pre_change_inline_join_from(
     right: &OpTree,
     scan_delta_ctes: &HashMap<String, String>,
     fallback_oids: &HashSet<u32>,
+    st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
     let left_alias = left.alias();
     let right_alias = right.alias();
-    let left_snap = build_pre_change_snapshot_sql(left, scan_delta_ctes, fallback_oids);
-    let right_snap = build_pre_change_snapshot_sql(right, scan_delta_ctes, fallback_oids);
+    let left_snap =
+        build_pre_change_snapshot_sql(left, scan_delta_ctes, fallback_oids, st_source_pgt_ids);
+    let right_snap =
+        build_pre_change_snapshot_sql(right, scan_delta_ctes, fallback_oids, st_source_pgt_ids);
     let cond_sql = rewrite_join_condition(condition, left, left_alias, right, right_alias);
     format!(
         "{} {} {} {} {} ON {}",
@@ -859,6 +907,7 @@ fn build_pre_change_inline_from_for_join(
     op: &OpTree,
     scan_delta_ctes: &HashMap<String, String>,
     fallback_oids: &HashSet<u32>,
+    st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> Option<String> {
     match op {
         OpTree::InnerJoin {
@@ -872,6 +921,7 @@ fn build_pre_change_inline_from_for_join(
             right,
             scan_delta_ctes,
             fallback_oids,
+            st_source_pgt_ids,
         )),
         OpTree::LeftJoin {
             condition,
@@ -884,6 +934,7 @@ fn build_pre_change_inline_from_for_join(
             right,
             scan_delta_ctes,
             fallback_oids,
+            st_source_pgt_ids,
         )),
         OpTree::FullJoin {
             condition,
@@ -896,6 +947,7 @@ fn build_pre_change_inline_from_for_join(
             right,
             scan_delta_ctes,
             fallback_oids,
+            st_source_pgt_ids,
         )),
         _ => None,
     }
@@ -912,9 +964,12 @@ fn build_pre_change_join_snapshot(
     right: &OpTree,
     scan_delta_ctes: &HashMap<String, String>,
     fallback_oids: &HashSet<u32>,
+    st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
-    let left_snap = build_pre_change_snapshot_sql(left, scan_delta_ctes, fallback_oids);
-    let right_snap = build_pre_change_snapshot_sql(right, scan_delta_ctes, fallback_oids);
+    let left_snap =
+        build_pre_change_snapshot_sql(left, scan_delta_ctes, fallback_oids, st_source_pgt_ids);
+    let right_snap =
+        build_pre_change_snapshot_sql(right, scan_delta_ctes, fallback_oids, st_source_pgt_ids);
     let left_alias = left.alias();
     let right_alias = right.alias();
 
@@ -1552,7 +1607,7 @@ pub fn build_base_table_key_exprs(op: &OpTree, alias: &str) -> Vec<String> {
 
             key_cols
                 .iter()
-                .map(|c| format!("{alias}.{}::TEXT", quote_ident(c)))
+                .map(|c| format!("{alias}.{}", quote_ident(c)))
                 .collect()
         }
         _ => {
@@ -1937,7 +1992,7 @@ mod tests {
     fn test_key_exprs_scan_non_nullable() {
         let node = scan_not_null(1, "orders", "public", "o", &["id", "name"]);
         let exprs = build_base_table_key_exprs(&node, "r");
-        assert!(exprs.iter().any(|e| e.contains("r.\"id\"::TEXT")));
+        assert!(exprs.iter().any(|e| e.contains("r.\"id\"")));
     }
 
     #[test]
@@ -2190,15 +2245,20 @@ mod tests {
         // DI-2: Scan with single-column PK uses NOT EXISTS + pg_trickle_hash.
         let op = scan_with_pk(1, "orders", "public", "o", &["id", "amount"], &["id"]);
         let no_fallback = HashSet::new();
-        let sql =
-            build_leaf_snapshot_sql(&op, "scan_o", &["id".into(), "amount".into()], &no_fallback);
+        let sql = build_leaf_snapshot_sql(
+            &op,
+            "scan_o",
+            &["id".into(), "amount".into()],
+            &no_fallback,
+            &HashMap::new(),
+        );
         assert!(
             sql.contains("NOT EXISTS"),
             "DI-2: single-PK Scan should use NOT EXISTS\n{sql}"
         );
         assert!(
-            sql.contains("pgtrickle.pg_trickle_hash("),
-            "DI-2: single-PK should use pg_trickle_hash\n{sql}"
+            sql.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"),
+            "DI-2: single-PK should use V2 identity\n{sql}"
         );
         assert!(
             sql.contains("__pgt_action = 'D'"),
@@ -2221,14 +2281,15 @@ mod tests {
             "scan_t",
             &["a".into(), "b".into(), "val".into()],
             &no_fallback,
+            &HashMap::new(),
         );
         assert!(
-            sql.contains("pgtrickle.pg_trickle_hash_multi(ARRAY["),
-            "DI-2: multi-PK should use pg_trickle_hash_multi\n{sql}"
+            sql.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"),
+            "DI-2: multi-PK should use V2 identity\n{sql}"
         );
         assert!(
-            sql.contains(r#""t"."a"::text"#) && sql.contains(r#""t"."b"::text"#),
-            "DI-2: hash should reference both PK columns\n{sql}"
+            sql.contains(r#""t"."a""#) && sql.contains(r#""t"."b""#),
+            "DI-2: identity should reference both PK columns\n{sql}"
         );
     }
 
@@ -2237,14 +2298,20 @@ mod tests {
         // DI-2: Keyless Scan uses all columns for hash.
         let op = scan(1, "t", "public", "t", &["x", "y"]);
         let no_fallback = HashSet::new();
-        let sql = build_leaf_snapshot_sql(&op, "scan_t", &["x".into(), "y".into()], &no_fallback);
+        let sql = build_leaf_snapshot_sql(
+            &op,
+            "scan_t",
+            &["x".into(), "y".into()],
+            &no_fallback,
+            &HashMap::new(),
+        );
         assert!(
             sql.contains("NOT EXISTS"),
             "DI-2: keyless Scan should still use NOT EXISTS\n{sql}"
         );
         assert!(
-            sql.contains(r#""t"."x"::text"#) && sql.contains(r#""t"."y"::text"#),
-            "DI-2: keyless hash should include all columns\n{sql}"
+            sql.contains(r#""t"."x""#) && sql.contains(r#""t"."y""#),
+            "DI-2: keyless identity should include all columns\n{sql}"
         );
     }
 
@@ -2262,6 +2329,7 @@ mod tests {
             "agg_delta",
             &["region".into(), "cnt".into()],
             &no_fallback,
+            &HashMap::new(),
         );
         assert!(
             sql.contains("EXCEPT ALL"),
@@ -2280,8 +2348,13 @@ mod tests {
         let op = scan_with_pk(42, "orders", "public", "o", &["id", "amount"], &["id"]);
         let mut fallback = HashSet::new();
         fallback.insert(42u32);
-        let sql =
-            build_leaf_snapshot_sql(&op, "scan_o", &["id".into(), "amount".into()], &fallback);
+        let sql = build_leaf_snapshot_sql(
+            &op,
+            "scan_o",
+            &["id".into(), "amount".into()],
+            &fallback,
+            &HashMap::new(),
+        );
         assert!(
             sql.contains("EXCEPT ALL"),
             "DI-2 fallback: Scan with OID in fallback set should use EXCEPT ALL\n{sql}"
@@ -2303,8 +2376,13 @@ mod tests {
         let op = scan_with_pk(42, "orders", "public", "o", &["id", "amount"], &["id"]);
         let mut fallback = HashSet::new();
         fallback.insert(99u32); // different OID
-        let sql =
-            build_leaf_snapshot_sql(&op, "scan_o", &["id".into(), "amount".into()], &fallback);
+        let sql = build_leaf_snapshot_sql(
+            &op,
+            "scan_o",
+            &["id".into(), "amount".into()],
+            &fallback,
+            &HashMap::new(),
+        );
         assert!(
             sql.contains("NOT EXISTS"),
             "DI-2: Scan with different OID should keep NOT EXISTS\n{sql}"

@@ -311,6 +311,7 @@ fn rebuild_row_id_index(
     schema: &str,
     table_name: &str,
     new_columns: &[ColumnDef],
+    parsed_tree: Option<&crate::dvm::ParseResult>,
     has_keyless_source: bool,
     is_partitioned: bool,
 ) -> Result<(), PgTrickleError> {
@@ -320,18 +321,38 @@ fn rebuild_row_id_index(
         quote_identifier(table_name),
     );
 
-    // Drop any existing index on __pgt_row_id (may already be gone).
-    let existing: Option<String> = Spi::get_one_with_args(
-        "SELECT indexrelid::regclass::text FROM pg_index \
-         JOIN pg_attribute ON attrelid = indrelid AND attnum = ANY(indkey) \
-         WHERE indrelid = $1::regclass AND attname = '__pgt_row_id' \
-         LIMIT 1",
-        &[quoted_table.clone().into()],
-    )
-    .unwrap_or(None);
+    let identity_columns = crate::api::helpers::row_identity_columns(new_columns, parsed_tree);
+    let identity_bounded = crate::api::helpers::row_identity_is_bounded(&identity_columns);
 
-    if let Some(idx_name) = existing {
-        Spi::run(&format!("DROP INDEX IF EXISTS {idx_name}")) // nosemgrep: rust.spi.run.dynamic-format — DROP INDEX DDL cannot be parameterized; idx_name is obtained from pg_index via ::regclass::text.
+    // Drop every prior row-id index, including unnamed legacy and expression-
+    // probe indexes. A fixed-name lookup would leave a pre-v0.87.16
+    // auto-named index behind when ALTER changes the index strategy.
+    let existing = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT i.indexrelid::regclass::text \
+                 FROM pg_index i \
+                 WHERE i.indrelid = $1::regclass \
+                   AND pg_get_indexdef(i.indexrelid) LIKE '%__pgt_row_id%'",
+                None,
+                &[quoted_table.clone().into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(
+                row.get::<String>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::SpiError("row-id index name is NULL".to_string())
+                    })?,
+            );
+        }
+        Ok::<_, PgTrickleError>(names)
+    })?;
+
+    for idx_name in existing {
+        Spi::run(&format!("DROP INDEX IF EXISTS {idx_name}")) // nosemgrep: rust.spi.run.dynamic-format — index name comes from pg_catalog::regclass.
             .map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to drop old row_id index: {e}"))
             })?;
@@ -353,12 +374,47 @@ fn rebuild_row_id_index(
         };
 
     let index_sql = if has_keyless_source || is_partitioned {
-        format!("CREATE INDEX ON {quoted_table} (__pgt_row_id){include_clause}",)
+        let key = if identity_bounded {
+            "__pgt_row_id"
+        } else {
+            "pgtrickle.row_probe_v1(__pgt_row_id)"
+        };
+        format!(
+            "CREATE INDEX {} ON {quoted_table} ({key}){include_clause}",
+            crate::dvm::diff::quote_ident(&format!("{table_name}_row_id_idx")),
+        )
     } else {
-        format!("CREATE UNIQUE INDEX ON {quoted_table} (__pgt_row_id){include_clause}",)
+        let key = if identity_bounded {
+            "__pgt_row_id"
+        } else {
+            "pgtrickle.row_probe_v1(__pgt_row_id)"
+        };
+        if key == "__pgt_row_id" {
+            format!(
+                "CREATE UNIQUE INDEX {} ON {quoted_table} ({key}){include_clause}",
+                crate::dvm::diff::quote_ident(&format!("{table_name}_row_id_idx")),
+            )
+        } else {
+            format!(
+                "CREATE INDEX {} ON {quoted_table} ({key}){include_clause}",
+                crate::dvm::diff::quote_ident(&format!("{table_name}_row_id_idx")),
+            )
+        }
     };
     Spi::run(&index_sql)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to recreate row_id index: {e}")))?;
+
+    let replica_sql = if !has_keyless_source && !is_partitioned && identity_bounded {
+        format!(
+            "ALTER TABLE {quoted_table} REPLICA IDENTITY USING INDEX {}",
+            crate::dvm::diff::quote_ident(&format!("{table_name}_row_id_idx")),
+        )
+    } else {
+        format!("ALTER TABLE {quoted_table} REPLICA IDENTITY FULL")
+    };
+    Spi::run(&replica_sql).map_err(|e| {
+        PgTrickleError::SpiError(format!("Failed to configure row identity replication: {e}"))
+    })?;
 
     Ok(())
 }
@@ -722,6 +778,7 @@ fn alter_stream_table_query(
                     schema,
                     table_name,
                     &vq.columns,
+                    vq.parsed_tree.as_ref(),
                     vq.has_keyless_source,
                     st.st_partition_key.is_some(),
                 )?;
@@ -739,6 +796,7 @@ fn alter_stream_table_query(
                     schema,
                     table_name,
                     &vq.columns,
+                    vq.parsed_tree.as_ref(),
                     vq.has_keyless_source,
                     st.st_partition_key.is_some(),
                 )?;
@@ -1503,7 +1561,7 @@ pub(crate) fn create_stream_table_impl(
                     .to_string(),
             ));
         }
-        if vq.has_keyless_source {
+        if vq.has_keyless_input_source {
             return Err(PgTrickleError::InvalidArgument(
                 "append_only is not supported for stream tables with keyless sources. \
                  Add a PRIMARY KEY to all source tables first."

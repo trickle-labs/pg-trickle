@@ -1,5 +1,7 @@
 # What Happens When You TRUNCATE a Table?
 
+> **v0.87.16 note:** The diagrams below use simplified legacy change-buffer labels to explain the lifecycle. Current buffers use flat typed columns and a complete `__pgt_row_id BYTEA` from the V2 encoder; `row_probe_v1` is only an index accelerator, never the identity.
+
 This tutorial explains what happens when a `TRUNCATE` statement hits a base table that is referenced by a stream table. PostgreSQL does not provide per-row OLD records for TRUNCATE, so pg_trickle captures it with a statement-level marker and refreshes affected stream tables with a full recomputation.
 
 > **Prerequisite:** Read [WHAT_HAPPENS_ON_INSERT.md](WHAT_HAPPENS_ON_INSERT.md) first — it introduces the 7-phase lifecycle. This tutorial explains why TRUNCATE takes a different path through that lifecycle.

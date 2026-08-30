@@ -1031,6 +1031,7 @@ impl DiffContext {
             op,
             &self.scan_delta_ctes,
             &self.fallback_leaf_oids,
+            &self.st_source_pgt_ids,
         );
 
         let cte_name = self.next_cte_name("l0_snap");

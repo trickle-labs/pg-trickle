@@ -322,7 +322,8 @@ pub(crate) fn rename_ctes(sql: &str, remap: &HashMap<String, String>) -> String 
 /// the delta CTE that should be used as the MERGE source.
 fn build_fused_merge(node: &NodeSpec, using_cte: &str) -> String {
     use super::codegen::{
-        build_is_distinct_clause, format_col_list, format_prefixed_col_list, format_update_set,
+        build_is_distinct_clause, build_row_id_match, format_col_list, format_prefixed_col_list,
+        format_update_set,
     };
     let user_col_list = format_col_list(&node.user_cols);
     let d_user_col_list = format_prefixed_col_list("d", &node.user_cols);
@@ -333,7 +334,7 @@ fn build_fused_merge(node: &NodeSpec, using_cte: &str) -> String {
     format!(
         "MERGE INTO {qt} AS st \
          USING {using_cte} AS d \
-         ON st.__pgt_row_id = d.__pgt_row_id \
+         ON {row_id_match} \
          WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
          WHEN MATCHED AND d.__pgt_action = 'I' AND ({is_distinct}) THEN \
            UPDATE SET {update_set} \
@@ -341,6 +342,7 @@ fn build_fused_merge(node: &NodeSpec, using_cte: &str) -> String {
            INSERT (__pgt_row_id, {user_col_list}) \
            VALUES (d.__pgt_row_id, {d_user_col_list})",
         qt = node.quoted_table,
+        row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
 

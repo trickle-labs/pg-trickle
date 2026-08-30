@@ -45,10 +45,10 @@ pub fn diff_union_all(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .iter()
         .enumerate()
         .map(|(i, result)| {
-            let row_id_expr = crate::hash::build_composite_hash_expr(&[
-                format!("'{}'::TEXT", i + 1),
-                "__pgt_row_id::TEXT".to_string(),
-            ]);
+            let row_id_expr = crate::hash::build_row_identity_expr(
+                "SET_KEY",
+                &[format!("{}::int4", i + 1), "__pgt_row_id".to_string()],
+            );
             format!(
                 "SELECT {row_id_expr} \
                  AS __pgt_row_id,\n\
@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(result.columns, vec!["id", "val"]);
         assert_sql_contains(&sql, "UNION ALL");
         // Each child gets a prefixed row_id
-        assert_sql_contains(&sql, "pgtrickle.pg_trickle_hash_multi");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SET_KEY'");
     }
 
     #[test]

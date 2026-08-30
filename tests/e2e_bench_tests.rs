@@ -1130,7 +1130,7 @@ async fn bench_no_data_refresh_latency() {
 // F50 / G7.3 — Covering index overhead benchmark
 //
 // Compares change buffer query performance with and without the INCLUDE
-// (action) clause on the (lsn, pk_hash, change_id) index.
+// (action) clause on the (lsn, row_probe_v1(__pgt_row_id), change_id) index.
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -1176,10 +1176,10 @@ async fn bench_covering_index_overhead() {
 
     // Typical change buffer query pattern (mirrors what refresh does):
     let bench_query = format!(
-        "SELECT pk_hash, action, change_id \
+        "SELECT __pgt_row_id, action, change_id \
          FROM {buf_table} \
          WHERE lsn > '0/0' \
-         ORDER BY pk_hash, change_id"
+         ORDER BY pgtrickle.row_probe_v1(__pgt_row_id), change_id"
     );
 
     // ── Phase 1: WITH covering index (default) ───────────────────
@@ -1207,7 +1207,7 @@ async fn bench_covering_index_overhead() {
     ))
     .await;
     db.execute(&format!(
-        "CREATE INDEX {idx_name}_plain ON {buf_table} (lsn, pk_hash, change_id)"
+        "CREATE INDEX {idx_name}_plain ON {buf_table} (lsn, pgtrickle.row_probe_v1(__pgt_row_id), change_id)"
     ))
     .await;
     db.execute("ANALYZE").await;

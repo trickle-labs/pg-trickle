@@ -314,9 +314,12 @@ fn register_change_buffer(
     let token = source_id;
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_change_buffers \
-             (buffer_key, source_kind, source_id, durability, sentinel_token, row_identity_version) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         ON CONFLICT (source_kind, source_id) DO NOTHING",
+             (buffer_key, source_kind, source_id, durability, sentinel_token, row_identity_version, row_probe_version) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (source_kind, source_id) DO UPDATE
+         SET durability = EXCLUDED.durability,
+             row_identity_version = EXCLUDED.row_identity_version,
+             row_probe_version = EXCLUDED.row_probe_version",
         &[
             buffer_name.into(),
             source_kind.into(),
@@ -324,6 +327,7 @@ fn register_change_buffer(
             durability.as_str().into(),
             token.into(),
             crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
+            (crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16).into(),
         ],
     )
     .map_err(|e| PgTrickleError::CdcStateInvalid {
@@ -338,10 +342,10 @@ fn register_change_buffer(
     })?;
 
     let sql = format!(
-        "INSERT INTO {change_schema}.{buffer_name} (lsn, action, pk_hash) \
-         SELECT '0/0'::pg_lsn, 'S', $1 \
+        "INSERT INTO {change_schema}.{buffer_name} (lsn, action, __pgt_row_id) \
+         SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)) \
          WHERE NOT EXISTS (SELECT 1 FROM {change_schema}.{buffer_name} \
-                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND pk_hash = $1)",
+                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND __pgt_row_id = pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)))",
     );
     Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
         pgt_id: if source_kind == "STREAM_TABLE" {
@@ -379,10 +383,10 @@ pub(crate) fn restore_registered_sentinel(
         reason: "registry row missing after cleanup".to_string(),
     })?;
     let sql = format!(
-        "INSERT INTO {change_schema}.{buffer_name} (lsn, action, pk_hash) \
-         SELECT '0/0'::pg_lsn, 'S', $1 \
+        "INSERT INTO {change_schema}.{buffer_name} (lsn, action, __pgt_row_id) \
+         SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)) \
          WHERE NOT EXISTS (SELECT 1 FROM {change_schema}.{buffer_name} \
-                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND pk_hash = $1)"
+                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND __pgt_row_id = pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)))"
     );
     Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
         pgt_id: source_id,
@@ -401,6 +405,7 @@ pub struct ResolvedChangeBuffer {
     pub durability: config::ChangeBufferDurability,
     pub sentinel_token: i64,
     pub row_identity_version: i16,
+    pub row_probe_version: i16,
 }
 
 pub(crate) fn validate_st_change_buffer(
@@ -414,6 +419,7 @@ pub(crate) fn validate_st_change_buffer(
         pgt_id,
         &format!("changes_pgt_{pgt_id}"),
         change_schema.trim_matches('"'),
+        false,
     )
 }
 
@@ -424,6 +430,7 @@ fn validate_one_change_buffer(
     source_id: i64,
     buffer_name: &str,
     change_schema: &str,
+    allow_uninitialized: bool,
 ) -> Result<ResolvedChangeBuffer, PgTrickleError> {
     let invalid = |reason: String| PgTrickleError::CdcStateInvalid {
         pgt_id,
@@ -435,8 +442,9 @@ fn validate_one_change_buffer(
         let rows = client
             .select(
                 "SELECT buffer_key::text, durability::text, sentinel_token::text, \
-                        row_identity_version \
-                 FROM pgtrickle.pgt_change_buffers \
+                        row_identity_version, \
+                        NULLIF(to_jsonb(cb)->>'row_probe_version', '')::smallint AS row_probe_version \
+                 FROM pgtrickle.pgt_change_buffers cb \
                  WHERE source_kind = $1 AND source_id = $2",
                 None,
                 &[source_kind.into(), source_id.into()],
@@ -462,9 +470,17 @@ fn validate_one_change_buffer(
             .map_err(|e| invalid(format!("registry sentinel token malformed: {e}")))?;
         let row_identity_version = row
             .get::<i16>(4)
-            .map_err(|e| invalid(format!("registry row identity version unreadable: {e}")))?
-            .ok_or_else(|| invalid("registry row identity version is NULL".into()))?;
-        Ok::<_, PgTrickleError>((key, durability, token, row_identity_version))
+            .map_err(|e| invalid(format!("registry row identity version unreadable: {e}")))?;
+        let row_probe_version = row
+            .get::<i16>(5)
+            .map_err(|e| invalid(format!("registry row probe version unreadable: {e}")))?;
+        Ok::<_, PgTrickleError>((
+            key,
+            durability,
+            token,
+            row_identity_version,
+            row_probe_version,
+        ))
     })?;
     if registry.0 != buffer_name {
         return Err(invalid(format!(
@@ -472,12 +488,28 @@ fn validate_one_change_buffer(
             registry.0
         )));
     }
-    if registry.3 != crate::hash::CURRENT_ROW_IDENTITY_VERSION {
+    if let Some(version) = registry.3
+        && version != crate::hash::CURRENT_ROW_IDENTITY_VERSION
+    {
         return Err(invalid(format!(
             "row identity version {} does not match binary version {}",
-            registry.3,
+            version,
             crate::hash::CURRENT_ROW_IDENTITY_VERSION
         )));
+    }
+    if let Some(version) = registry.4
+        && version != crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16
+    {
+        return Err(invalid(format!(
+            "row probe version {} does not match binary version {}",
+            version,
+            crate::dvm::row_id_v2::PROBE_VERSION_V1
+        )));
+    }
+    if !allow_uninitialized && (registry.3.is_none() || registry.4.is_none()) {
+        return Err(invalid(
+            "row identity or probe version is unknown; FULL reinitialization is required".into(),
+        ));
     }
     let durability = normalize_change_buffer_durability(Some(registry.1.clone()));
     if !matches!(registry.1.as_str(), "logged" | "unlogged" | "sync") {
@@ -510,11 +542,13 @@ fn validate_one_change_buffer(
                     ('change_id', 'int8'::regtype),\
                     ('lsn', 'pg_lsn'::regtype),\
                     ('action', 'bpchar'::regtype),\
-                    ('pk_hash', 'int8'::regtype))) = 4 FROM pg_attribute a \
+                    ('__pgt_row_id', 'bytea'::regtype))) = 4 \
+           AND COALESCE(BOOL_AND(a.attname <> '__pgt_row_id' OR a.attnotnull), false) \
+           FROM pg_attribute a \
          JOIN pg_class c ON c.oid = a.attrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 \
-           AND NOT a.attisdropped AND a.attname::text IN ('change_id', 'lsn', 'action', 'pk_hash')",
+           AND NOT a.attisdropped AND a.attname::text IN ('change_id', 'lsn', 'action', '__pgt_row_id')",
         &[change_schema.into(), buffer_name.into()],
     )
     .map_err(|e| invalid(format!("buffer schema lookup failed: {e}")))?
@@ -525,7 +559,9 @@ fn validate_one_change_buffer(
     // nosemgrep: rust.spi.get_one_with_args.dynamic-format — change_schema is quote-escaped config and buffer_name is OID-derived.
     let sentinel_ok = Spi::get_one_with_args::<bool>(
         &format!(
-            "SELECT COUNT(*) = 1 AND MIN(pk_hash) = $1 FROM {change_schema}.{buffer_name} \
+            "SELECT COUNT(*) = 1 AND BOOL_AND(__pgt_row_id = \
+                    pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint))) \
+             FROM {change_schema}.{buffer_name} \
              WHERE lsn = '0/0'::pg_lsn AND action = 'S'"
         ),
         &[registry.2.into()],
@@ -541,7 +577,12 @@ fn validate_one_change_buffer(
         buffer_name: buffer_name.to_string(),
         durability,
         sentinel_token: registry.2,
-        row_identity_version: registry.3,
+        row_identity_version: registry
+            .3
+            .unwrap_or(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
+        row_probe_version: registry
+            .4
+            .unwrap_or(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16),
     })
 }
 
@@ -549,6 +590,14 @@ fn validate_one_change_buffer(
 pub fn validate_required_change_buffers(
     st: &crate::catalog::StreamTableMeta,
     dependencies: &[crate::catalog::StDependency],
+) -> Result<Vec<ResolvedChangeBuffer>, PgTrickleError> {
+    validate_required_change_buffers_inner(st, dependencies, false)
+}
+
+fn validate_required_change_buffers_inner(
+    st: &crate::catalog::StreamTableMeta,
+    dependencies: &[crate::catalog::StDependency],
+    allow_uninitialized_buffers: bool,
 ) -> Result<Vec<ResolvedChangeBuffer>, PgTrickleError> {
     let expected_identity_version = crate::hash::CURRENT_ROW_IDENTITY_VERSION;
     match st.row_identity_version {
@@ -570,6 +619,30 @@ pub fn validate_required_change_buffers(
                 source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
                 buffer: "pgt_stream_tables".to_string(),
                 reason: "row identity version is unknown; FULL reinitialization is required"
+                    .to_string(),
+            });
+        }
+    }
+    match st.row_probe_version {
+        Some(version) if version == crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16 => {}
+        Some(version) => {
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id: st.pgt_id,
+                source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
+                buffer: "pgt_stream_tables".to_string(),
+                reason: format!(
+                    "row probe version {} does not match binary version {}",
+                    version,
+                    crate::dvm::row_id_v2::PROBE_VERSION_V1
+                ),
+            });
+        }
+        None => {
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id: st.pgt_id,
+                source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
+                buffer: "pgt_stream_tables".to_string(),
+                reason: "row probe version is unknown; FULL reinitialization is required"
                     .to_string(),
             });
         }
@@ -613,7 +686,15 @@ pub fn validate_required_change_buffers(
         })
         .map(|descriptor| {
             let (source, kind, id, name) = descriptor?;
-            validate_one_change_buffer(st.pgt_id, &source, kind, id, &name, change_schema)
+            validate_one_change_buffer(
+                st.pgt_id,
+                &source,
+                kind,
+                id,
+                &name,
+                change_schema,
+                allow_uninitialized_buffers,
+            )
         })
         .collect()
 }
@@ -628,13 +709,47 @@ pub fn validate_required_change_buffers_for_full(
     st: &crate::catalog::StreamTableMeta,
     dependencies: &[crate::catalog::StDependency],
 ) -> Result<Vec<ResolvedChangeBuffer>, PgTrickleError> {
-    if st.row_identity_version == Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION) {
+    if st.row_identity_version == Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION)
+        && st.row_probe_version == Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16)
+    {
         return validate_required_change_buffers(st, dependencies);
     }
 
     let mut reinitializing = st.clone();
     reinitializing.row_identity_version = Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION);
-    validate_required_change_buffers(&reinitializing, dependencies)
+    reinitializing.row_probe_version = Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16);
+    validate_required_change_buffers_inner(&reinitializing, dependencies, true)
+}
+
+/// Reject a V1 stream-table relation before a refresh can mutate it.
+pub(crate) fn validate_stream_table_row_identity(
+    st: &crate::catalog::StreamTableMeta,
+) -> Result<(), PgTrickleError> {
+    let valid = Spi::get_one_with_args::<bool>(
+        "SELECT a.atttypid = 'bytea'::regtype AND a.attnotnull \
+           FROM pg_attribute a \
+          WHERE a.attrelid = $1 AND a.attname = '__pgt_row_id' \
+            AND a.attnum > 0 AND NOT a.attisdropped",
+        &[st.pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::CdcStateInvalid {
+        pgt_id: st.pgt_id,
+        source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
+        buffer: "stream-table storage".to_string(),
+        reason: format!("could not inspect __pgt_row_id: {e}"),
+    })?
+    .unwrap_or(false);
+
+    if valid {
+        Ok(())
+    } else {
+        Err(PgTrickleError::CdcStateInvalid {
+            pgt_id: st.pgt_id,
+            source_name: format!("{}.{}", st.pgt_schema, st.pgt_name),
+            buffer: "stream-table storage".to_string(),
+            reason: "__pgt_row_id must be BYTEA NOT NULL; V1 storage must be recreated".to_string(),
+        })
+    }
 }
 
 /// Create a CDC trigger on a source table.
@@ -647,7 +762,7 @@ pub fn validate_required_change_buffers_for_full(
 /// of mode, so `CREATE OR REPLACE FUNCTION` can switch bodies without touching
 /// the trigger DDL.
 ///
-/// `pk_columns` drives the `pk_hash` computation and (for statement mode) the
+/// `pk_columns` drives the `__pgt_row_id` computation and (for statement mode) the
 /// UPDATE JOIN key.  `columns` contains `(name, sql_type)` pairs for the typed
 /// change-buffer columns.
 pub fn create_change_trigger(
@@ -800,8 +915,9 @@ pub fn create_change_trigger(
                  RETURN NULL;
              END IF;
              INSERT INTO {change_schema}.changes_{name}
-                 (lsn, action)
-             VALUES (pg_current_wal_insert_lsn(), 'T');
+                 (lsn, action, __pgt_row_id)
+             VALUES (pg_current_wal_insert_lsn(), 'T',
+                     pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)));
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
@@ -906,9 +1022,9 @@ pub fn drop_change_trigger(
 /// Uses **typed columns** (`new_col TYPE`, `old_col TYPE`) instead of
 /// JSONB blobs, eliminating `to_jsonb()`/`jsonb_populate_record()` overhead.
 ///
-/// The buffer always includes a `pk_hash BIGINT` column. When the source has
-/// a primary key, pk_hash is the PK hash; for keyless tables (S10), it is
-/// an all-column content hash computed by the CDC trigger.
+/// The buffer always includes a complete V2 `BYTEA` identity. When the source
+/// has a primary key it encodes the typed key; keyless sources encode all
+/// referenced columns.
 ///
 /// `columns` contains the source table column definitions as
 /// `(column_name, sql_type_name)` pairs from `resolve_source_column_defs()`.
@@ -1017,7 +1133,7 @@ pub fn rebuild_publication_for_partitioned_source(
 /// rewrites that don't change the detoasted value but do change the on-disk
 /// representation.
 ///
-/// Returns an enhanced pk_hash expression that includes TOAST column sizes
+/// Returns an enhanced __pgt_row_id expression that includes TOAST column sizes
 /// for affected columns.
 pub fn build_toast_aware_hash_expr(
     pk_columns: &[String],
@@ -1029,19 +1145,19 @@ pub fn build_toast_aware_hash_expr(
     // Primary key columns in the hash
     for col in pk_columns {
         let qcol = col.replace('"', "\"\"");
-        parts.push(format!("NEW.\"{qcol}\"::text"));
+        parts.push(format!("NEW.\"{qcol}\""));
     }
 
     // Add pg_column_size for TOAST-eligible columns
     for col in toast_columns {
         let qcol = col.replace('"', "\"\"");
-        parts.push(format!("pg_column_size(NEW.\"{qcol}\")::text"));
+        parts.push(format!("pg_column_size(NEW.\"{qcol}\")"));
     }
 
     if parts.len() == 1 {
-        format!("pgtrickle.pg_trickle_hash({})", parts[0])
+        format!("pgtrickle.encode_row_id_v2('SCAN_KEY', ROW({}))", parts[0])
     } else {
-        crate::hash::build_composite_hash_expr(&parts)
+        crate::hash::build_row_identity_expr("SCAN_KEY", &parts)
     }
 }
 
@@ -1110,10 +1226,10 @@ pub fn create_change_buffer_table(
     columns: &[(String, String)],
     stable_name: &str,
 ) -> Result<(), PgTrickleError> {
-    // pk_hash is always present (PK hash or all-column content hash).
+    // __pgt_row_id is always present as the complete V2 identity.
     // changed_cols is a VARBIT bitmask for UPDATE rows — bit i (leftmost=0)
     // is B'1' when column i changed. NULL for INSERT/DELETE rows.
-    let pk_col = ",pk_hash BIGINT,changed_cols VARBIT";
+    let pk_col = ",__pgt_row_id BYTEA NOT NULL,changed_cols VARBIT";
 
     // Build typed column definitions: "new_col" TYPE, "old_col" TYPE
     let typed_col_defs = build_typed_col_defs(columns);
@@ -1217,11 +1333,12 @@ pub fn create_change_buffer_table(
         durability,
     )?;
 
-    // AA1: Single covering index (lsn, pk_hash, change_id) INCLUDE (action).
+    // AA1: Probe-accelerated covering index; full identity equality remains
+    // mandatory in every consumer predicate.
     // CITUS-4: Index name uses stable_name.
     let idx_sql = format!(
         "CREATE INDEX IF NOT EXISTS idx_changes_{name}_lsn_pk_cid \
-         ON {schema}.changes_{name} (lsn, pk_hash, change_id) INCLUDE (action)",
+         ON {schema}.changes_{name} (lsn, pgtrickle.row_probe_v1(__pgt_row_id), change_id) INCLUDE (action)",
         schema = change_schema,
         name = stable_name,
     );
@@ -1267,7 +1384,7 @@ pub fn create_st_change_buffer_table(
             change_id             BIGSERIAL,\
             lsn                   PG_LSN NOT NULL,\
             action                CHAR(1) NOT NULL,\
-            pk_hash               BIGINT\
+            __pgt_row_id               BYTEA NOT NULL\
             {typed_col_defs},\
             __pgt_trace_context   TEXT\
         )",
@@ -1300,7 +1417,7 @@ pub fn create_st_change_buffer_table(
     // Covering index matching base-table buffer pattern
     let idx_sql = format!(
         "CREATE INDEX IF NOT EXISTS idx_changes_pgt_{id}_lsn_pk_cid \
-         ON {schema}.changes_pgt_{id} (lsn, pk_hash, change_id) INCLUDE (action)",
+         ON {schema}.changes_pgt_{id} (lsn, pgtrickle.row_probe_v1(__pgt_row_id), change_id) INCLUDE (action)",
         schema = change_schema,
         id = pgt_id,
     );
@@ -1423,9 +1540,9 @@ pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
 // QUAL-3: CompactionResult moved to src/cdc/compact.rs.
 pub use compact::CompactionResult;
 
-/// C-4: Compact a change buffer by eliminating net-zero pk_hash groups
+/// C-4: Compact a change buffer by eliminating net-zero __pgt_row_id groups
 /// (INSERT followed by DELETE that cancel out) and collapsing multi-change
-/// groups to retain only the first and last entries per pk_hash.
+/// groups to retain only the first and last entries per __pgt_row_id.
 ///
 /// COR-4: Returns [`CompactionResult`] instead of `Result<i64>` so callers
 /// can distinguish "contended" from "nothing to compact".
@@ -1490,7 +1607,7 @@ pub fn compact_change_buffer(
 
     // Compact: remove net-zero groups (INSERT→DELETE) and intermediate rows.
     //
-    // For each pk_hash in the pending LSN range:
+    // For each __pgt_row_id in the pending LSN range:
     // - If first_action='I' and last_action='D' → all rows are net no-op
     // - For remaining groups, keep only first (rn_asc=1) and last (rn_desc=1)
     //   rows, removing intermediates.
@@ -1502,13 +1619,13 @@ pub fn compact_change_buffer(
          WHERE change_id IN (\
            SELECT change_id FROM (\
              SELECT change_id, \
-                    ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id) AS rn_asc, \
-                    ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id DESC) AS rn_desc, \
+                    ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id) AS rn_asc, \
+                    ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id DESC) AS rn_desc, \
                     FIRST_VALUE(action) OVER (\
-                      PARTITION BY pk_hash ORDER BY change_id\
+                      PARTITION BY __pgt_row_id ORDER BY change_id\
                     ) AS first_act, \
                     LAST_VALUE(action) OVER (\
-                      PARTITION BY pk_hash ORDER BY change_id \
+                      PARTITION BY __pgt_row_id ORDER BY change_id \
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
                     ) AS last_act \
              FROM \"{schema}\".{buf} \
@@ -1546,12 +1663,12 @@ pub fn compact_change_buffer(
 ///
 /// Applies the same net-effect computation as [`compact_change_buffer`] to
 /// ST-to-ST change buffers. During rapid-fire upstream refreshes, multiple
-/// rounds of I/D pairs for the same `pk_hash` accumulate between downstream
+/// rounds of I/D pairs for the same `__pgt_row_id` accumulate between downstream
 /// reads. This function:
 ///
-/// 1. Removes net-zero groups (INSERT followed by DELETE for the same `pk_hash`).
+/// 1. Removes net-zero groups (INSERT followed by DELETE for the same `__pgt_row_id`).
 /// 2. Removes intermediate rows in multi-change groups, keeping only the first
-///    and last rows per `pk_hash`.
+///    and last rows per `__pgt_row_id`.
 ///
 /// Called from `execute_refresh()` before the downstream reads its ST sources'
 /// change buffers. Uses the same compaction threshold as base-table compaction.
@@ -1628,21 +1745,21 @@ pub fn compact_st_change_buffer(
 /// DAG-5: Build the compaction SQL for an ST change buffer.
 ///
 /// Pure function for unit-testability. Generates a DELETE that removes:
-/// - Net-zero groups: first_action='I' and last_action='D' for the same pk_hash.
-/// - Intermediate rows: all rows except the first and last per pk_hash group.
+/// - Net-zero groups: first_action='I' and last_action='D' for the same __pgt_row_id.
+/// - Intermediate rows: all rows except the first and last per __pgt_row_id group.
 fn build_st_compact_sql(change_schema: &str, pgt_id: i64, prev_lsn: &str, new_lsn: &str) -> String {
     format!(
         "DELETE FROM \"{schema}\".changes_pgt_{id} \
          WHERE change_id IN (\
            SELECT change_id FROM (\
              SELECT change_id, \
-                    ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id) AS rn_asc, \
-                    ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id DESC) AS rn_desc, \
+                    ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id) AS rn_asc, \
+                    ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id DESC) AS rn_desc, \
                     FIRST_VALUE(action) OVER (\
-                      PARTITION BY pk_hash ORDER BY change_id\
+                      PARTITION BY __pgt_row_id ORDER BY change_id\
                     ) AS first_act, \
                     LAST_VALUE(action) OVER (\
-                      PARTITION BY pk_hash ORDER BY change_id \
+                      PARTITION BY __pgt_row_id ORDER BY change_id \
                       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
                     ) AS last_act \
              FROM \"{schema}\".changes_pgt_{id} \
@@ -2074,7 +2191,7 @@ pub fn resolve_source_column_defs(
 ///    ST that lists `source_oid` as a base-table dependency.
 /// 2. If any ST has `columns_used = NULL` (meaning "all columns", e.g. `SELECT *`),
 ///    fall back to the full column list to avoid silently dropping needed columns.
-/// 3. Always include PK columns (required for `pk_hash` computation and row
+/// 3. Always include PK columns (required for `__pgt_row_id` computation and row
 ///    identity in the change buffer — dropping them would break CDC correctness).
 /// 4. Filter `resolve_source_column_defs` to the union ∪ PK set and return only
 ///    those (column_name, type) pairs in original table ordinal order.
@@ -2218,24 +2335,25 @@ pub(crate) fn first_rls_enabled_source(oids: &[u32]) -> Result<Option<String>, P
     Ok(None)
 }
 
-/// Build PL/pgSQL expressions for computing `pk_hash` in a CDC trigger.
+/// Build PL/pgSQL expressions for computing `__pgt_row_id` in a CDC trigger.
 ///
 /// Returns `(new_expr, old_expr)` — the expression using NEW record keys
 /// and the expression using OLD record keys respectively.
 ///
-/// For a single-column PK `id`:
-///   `pgtrickle.pg_trickle_hash(NEW."id"::text)`, `pgtrickle.pg_trickle_hash(OLD."id"::text)`
-///
-/// For a composite PK `(a, b)`:
-///   `pgtrickle.pg_trickle_hash_multi(ARRAY[NEW."a"::text, NEW."b"::text])`, ...
+/// For a single-column PK `id`, emits a typed `SCAN_KEY` record identity.
 ///
 /// **S10 — Keyless tables:** When `pk_columns` is empty, computes an
 /// all-column content hash from `all_columns` so that every row gets a
-/// meaningful `pk_hash` even without a primary key.
+/// meaningful `__pgt_row_id` even without a primary key.
 fn build_pk_hash_trigger_exprs(
     pk_columns: &[String],
     all_columns: &[(String, String)],
 ) -> (String, String) {
+    let domain = if pk_columns.is_empty() {
+        "KEYLESS_ROW"
+    } else {
+        "SCAN_KEY"
+    };
     // Determine effective hash columns: PK if available, otherwise all columns.
     let hash_cols: Vec<String> = if pk_columns.is_empty() {
         all_columns.iter().map(|(name, _)| name.clone()).collect()
@@ -2245,27 +2363,30 @@ fn build_pk_hash_trigger_exprs(
 
     if hash_cols.is_empty() {
         // Degenerate case: table with zero columns (shouldn't happen).
-        return ("0".to_string(), "0".to_string());
+        return (
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
+        );
     }
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
         (
-            format!("pgtrickle.pg_trickle_hash(NEW.{col}::text)"),
-            format!("pgtrickle.pg_trickle_hash(OLD.{col}::text)"),
+            format!("pgtrickle.encode_row_id_v2('{domain}', ROW(NEW.{col}))"),
+            format!("pgtrickle.encode_row_id_v2('{domain}', ROW(OLD.{col}))"),
         )
     } else {
         let new_items: Vec<String> = hash_cols
             .iter()
-            .map(|c| format!("NEW.\"{}\"::text", c.replace('"', "\"\"")))
+            .map(|c| format!("NEW.\"{}\"", c.replace('"', "\"\"")))
             .collect();
         let old_items: Vec<String> = hash_cols
             .iter()
-            .map(|c| format!("OLD.\"{}\"::text", c.replace('"', "\"\"")))
+            .map(|c| format!("OLD.\"{}\"", c.replace('"', "\"\"")))
             .collect();
         (
-            crate::hash::build_composite_hash_expr(&new_items),
-            crate::hash::build_composite_hash_expr(&old_items),
+            crate::hash::build_row_identity_expr(domain, &new_items),
+            crate::hash::build_row_identity_expr(domain, &old_items),
         )
     }
 }
@@ -2352,7 +2473,7 @@ fn build_row_trigger_fn_sql(
              END IF;
              IF TG_OP = 'INSERT' THEN
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                     (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{nv},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
@@ -2363,13 +2484,13 @@ fn build_row_trigger_fn_sql(
                  -- changed_cols IS NULL for INSERT/DELETE rows.
                  -- D-row (OLD values):
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{uccd}{cn}, __pgt_trace_context)
+                     (lsn, action, __pgt_row_id{uccd}{cn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'D'
                          {dp}{ucv}{ov},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
                  -- I-row (NEW values):
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{uccd}{cn}, __pgt_trace_context)
+                     (lsn, action, __pgt_row_id{uccd}{cn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{ucv}{nv},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
@@ -2377,7 +2498,7 @@ fn build_row_trigger_fn_sql(
                  RETURN NEW;
              ELSIF TG_OP = 'DELETE' THEN
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                     (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'D'
                          {dp}{ov},
                          NULLIF(current_setting('pg_trickle.trace_id', true), ''));
@@ -2460,7 +2581,7 @@ fn build_stmt_trigger_fn_sql(
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n;
@@ -2490,13 +2611,13 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              -- D-row (OLD values) — must be emitted before I-row.
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_old o;
              -- I-row (NEW values).
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n;
@@ -2540,7 +2661,7 @@ fn build_stmt_trigger_fn_sql(
              -- D+I pair for keyed UPDATE (UNION ALL — one heap open, two rows).
              -- D-row must be first row in the UNION ALL (change_id ordering invariant).
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{uccd}{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{uccd}{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ucv}{ocr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n JOIN __pgt_old o ON {join}
@@ -2550,14 +2671,14 @@ fn build_stmt_trigger_fn_sql(
              FROM __pgt_new n JOIN __pgt_old o ON {join};
              -- PK-changing UPDATE: old PK not in new set → genuine DELETE.
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_old o
              WHERE NOT EXISTS (SELECT 1 FROM __pgt_new n WHERE {not_exists_join});
              -- PK-changing UPDATE: new PK not in old set → genuine INSERT.
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n
@@ -2585,7 +2706,7 @@ fn build_stmt_trigger_fn_sql(
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{cn}, __pgt_trace_context)
+                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
                     NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_old o;
@@ -2671,7 +2792,7 @@ pub fn sync_capture_body_for_source(source_oid: pg_sys::Oid) -> Result<(), PgTri
     refresh_capture_body_for_source(source_oid, has_active_consumer)
 }
 
-/// Build a `pk_hash` expression for statement-level triggers using a table alias.
+/// Build a `__pgt_row_id` expression for statement-level triggers using a table alias.
 ///
 /// Echoes `build_pk_hash_trigger_exprs` but generates `{prefix}."col"` instead
 /// of `NEW."col"` / `OLD."col"`.
@@ -2680,6 +2801,11 @@ fn build_pk_hash_stmt_expr(
     pk_columns: &[String],
     all_columns: &[(String, String)],
 ) -> String {
+    let domain = if pk_columns.is_empty() {
+        "KEYLESS_ROW"
+    } else {
+        "SCAN_KEY"
+    };
     let hash_cols: Vec<String> = if pk_columns.is_empty() {
         all_columns.iter().map(|(n, _)| n.clone()).collect()
     } else {
@@ -2687,18 +2813,18 @@ fn build_pk_hash_stmt_expr(
     };
 
     if hash_cols.is_empty() {
-        return "0".to_string();
+        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string();
     }
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.pg_trickle_hash({prefix}.{col}::text)")
+        format!("pgtrickle.encode_row_id_v2('{domain}', ROW({prefix}.{col}))")
     } else {
         let items: Vec<String> = hash_cols
             .iter()
-            .map(|c| format!("{prefix}.\"{}\"::text", c.replace('"', "\"\"")))
+            .map(|c| format!("{prefix}.\"{}\"", c.replace('"', "\"\"")))
             .collect();
-        crate::hash::build_composite_hash_expr(&items)
+        crate::hash::build_row_identity_expr(domain, &items)
     }
 }
 
@@ -3060,6 +3186,9 @@ pub fn convert_buffer_to_partitioned(
             if name == "action" {
                 return format!("\"{qname}\" {sql_type} NOT NULL");
             }
+            if name == "__pgt_row_id" {
+                return format!("\"{qname}\" BYTEA NOT NULL");
+            }
             format!("\"{qname}\" {sql_type}")
         })
         .collect::<Vec<_>>()
@@ -3118,7 +3247,7 @@ pub fn convert_buffer_to_partitioned(
     // Step 5: Recreate the covering index.
     let idx_sql = format!(
         "CREATE INDEX IF NOT EXISTS \"idx_{table}_lsn_pk_cid\" \
-         ON \"{schema}\".\"{table}\" (lsn, pk_hash, change_id) INCLUDE (action)",
+         ON \"{schema}\".\"{table}\" (lsn, pgtrickle.row_probe_v1(__pgt_row_id), change_id) INCLUDE (action)",
         schema = change_schema,
         table = table_name,
     );
@@ -3593,8 +3722,14 @@ mod tests {
         let pk = vec!["id".to_string()];
         let all = vec![("id".to_string(), "integer".to_string())];
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
-        assert_eq!(new_expr, r#"pgtrickle.pg_trickle_hash(NEW."id"::text)"#);
-        assert_eq!(old_expr, r#"pgtrickle.pg_trickle_hash(OLD."id"::text)"#);
+        assert_eq!(
+            new_expr,
+            r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(NEW."id"))"#
+        );
+        assert_eq!(
+            old_expr,
+            r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(OLD."id"))"#
+        );
     }
 
     #[test]
@@ -3605,11 +3740,11 @@ mod tests {
             ("b".to_string(), "text".to_string()),
         ];
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
-        assert!(new_expr.contains("pgtrickle.pg_trickle_hash_multi"));
-        assert!(new_expr.contains(r#"NEW."a"::text"#));
-        assert!(new_expr.contains(r#"NEW."b"::text"#));
-        assert!(old_expr.contains(r#"OLD."a"::text"#));
-        assert!(old_expr.contains(r#"OLD."b"::text"#));
+        assert!(new_expr.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
+        assert!(new_expr.contains(r#"NEW."a""#));
+        assert!(new_expr.contains(r#"NEW."b""#));
+        assert!(old_expr.contains(r#"OLD."a""#));
+        assert!(old_expr.contains(r#"OLD."b""#));
     }
 
     #[test]
@@ -3622,23 +3757,29 @@ mod tests {
         ];
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
         assert!(
-            new_expr.contains("pgtrickle.pg_trickle_hash_multi"),
+            new_expr.contains("pgtrickle.encode_row_id_v2('KEYLESS_ROW'"),
             "Got: {new_expr}",
         );
-        assert!(new_expr.contains(r#"NEW."name"::text"#), "Got: {new_expr}");
-        assert!(new_expr.contains(r#"NEW."value"::text"#), "Got: {new_expr}",);
-        assert!(old_expr.contains(r#"OLD."name"::text"#), "Got: {old_expr}");
-        assert!(old_expr.contains(r#"OLD."value"::text"#), "Got: {old_expr}",);
+        assert!(new_expr.contains(r#"NEW."name""#), "Got: {new_expr}");
+        assert!(new_expr.contains(r#"NEW."value""#), "Got: {new_expr}",);
+        assert!(old_expr.contains(r#"OLD."name""#), "Got: {old_expr}");
+        assert!(old_expr.contains(r#"OLD."value""#), "Got: {old_expr}",);
     }
 
     #[test]
     fn test_build_pk_hash_empty_pk_single_all_column() {
-        // Keyless table with a single column — uses hash() not hash_multi().
+        // Keyless table with a single column uses the keyless identity domain.
         let pk: Vec<String> = vec![];
         let all = vec![("val".to_string(), "text".to_string())];
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
-        assert_eq!(new_expr, r#"pgtrickle.pg_trickle_hash(NEW."val"::text)"#);
-        assert_eq!(old_expr, r#"pgtrickle.pg_trickle_hash(OLD."val"::text)"#);
+        assert_eq!(
+            new_expr,
+            r#"pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(NEW."val"))"#
+        );
+        assert_eq!(
+            old_expr,
+            r#"pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(OLD."val"))"#
+        );
     }
 
     #[test]
@@ -3848,7 +3989,7 @@ mod tests {
     fn test_cb_col_name_reserved_names() {
         assert_eq!(cb_col_name("action"), "__usr_action");
         assert_eq!(cb_col_name("lsn"), "__usr_lsn");
-        assert_eq!(cb_col_name("pk_hash"), "__usr_pk_hash");
+        assert_eq!(cb_col_name("__pgt_row_id"), "__usr___pgt_row_id");
         assert_eq!(cb_col_name("changed_cols"), "__usr_changed_cols");
         assert_eq!(cb_col_name("change_id"), "__usr_change_id");
         // Non-reserved names pass through unchanged.
@@ -4085,8 +4226,8 @@ mod tests {
     fn test_build_st_compact_sql_partitions_by_pk_hash() {
         let sql = build_st_compact_sql("pgtrickle_changes", 1, "0/0", "0/FFFF");
         assert!(
-            sql.contains("PARTITION BY pk_hash"),
-            "Should partition by pk_hash, got: {sql}"
+            sql.contains("PARTITION BY __pgt_row_id"),
+            "Should partition by __pgt_row_id, got: {sql}"
         );
     }
 

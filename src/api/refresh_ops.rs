@@ -402,6 +402,7 @@ pub(crate) fn execute_manual_full_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
+    crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
         crate::cdc::validate_required_change_buffers_for_full(st, &dependencies)?;
@@ -690,7 +691,9 @@ pub(crate) fn execute_manual_full_refresh(
         );
     }
 
-    if st.row_identity_version != Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION) {
+    if st.row_identity_version != Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION)
+        || st.row_probe_version != Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16)
+    {
         crate::catalog::StreamTableMeta::mark_row_identity_reinitialized(st.pgt_id)?;
     }
 
