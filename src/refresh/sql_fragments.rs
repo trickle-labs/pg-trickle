@@ -63,27 +63,26 @@ pub(crate) fn build_merge_join_condition(key_cols: &[&str]) -> String {
 
 /// Build the MD5 content-hash column expression for deduplication.
 ///
-/// Produces an expression that hashes all `data_cols` using
-/// `pgtrickle.pg_trickle_hash_multi` (or `pg_trickle_hash` for a single
-/// column), using the given `prefix` (e.g. `"source."` or `"d."`).
+/// Produces a canonical V2 identity expression using the given `prefix`
+/// (e.g. `"source."` or `"d."`).
 ///
 /// When `data_cols` is empty, falls back to `__pgt_row_id` for keyless tables.
 pub(crate) fn build_content_hash_column(prefix: &str, data_cols: &[&str]) -> String {
     match data_cols.len() {
-        0 => format!("{prefix}__pgt_row_id"),
+        0 => "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
         1 => {
             let escaped = data_cols[0].replace('"', "\"\"");
-            format!("pgtrickle.pg_trickle_hash({prefix}\"{escaped}\"::TEXT)")
+            format!("pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW({prefix}\"{escaped}\"))")
         }
         _ => {
             let args: Vec<String> = data_cols
                 .iter()
                 .map(|c| {
                     let escaped = c.replace('"', "\"\"");
-                    format!("{prefix}\"{escaped}\"::TEXT")
+                    format!("{prefix}\"{escaped}\"")
                 })
                 .collect();
-            crate::hash::build_composite_hash_expr(&args)
+            crate::hash::build_row_identity_expr("KEYLESS_ROW", &args)
         }
     }
 }
@@ -189,13 +188,19 @@ mod tests {
     #[test]
     fn test_build_content_hash_column_empty() {
         let result = build_content_hash_column("d.", &[]);
-        assert_eq!(result, "d.__pgt_row_id");
+        assert_eq!(
+            result,
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+        );
     }
 
     #[test]
     fn test_build_content_hash_column_single_col() {
         let result = build_content_hash_column("d.", &["amount"]);
-        assert_eq!(result, "pgtrickle.pg_trickle_hash(d.\"amount\"::TEXT)");
+        assert_eq!(
+            result,
+            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(d.\"amount\"))"
+        );
     }
 
     #[test]
@@ -203,14 +208,17 @@ mod tests {
         let result = build_content_hash_column("source.", &["name", "value"]);
         assert_eq!(
             result,
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[source.\"name\"::TEXT, source.\"value\"::TEXT])"
+            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(source.\"name\", source.\"value\"))"
         );
     }
 
     #[test]
     fn test_build_content_hash_column_different_prefix() {
         let result = build_content_hash_column("ins.", &["price"]);
-        assert_eq!(result, "pgtrickle.pg_trickle_hash(ins.\"price\"::TEXT)");
+        assert_eq!(
+            result,
+            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(ins.\"price\"))"
+        );
     }
 
     // ── build_delta_target_list ───────────────────────────────────────────

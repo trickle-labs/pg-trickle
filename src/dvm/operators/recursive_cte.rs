@@ -339,7 +339,7 @@ fn generate_recomputation_delta(
     // against the ST correctly identifies unchanged rows.
     let hash_exprs: Vec<String> = out_cols
         .iter()
-        .map(|c| format!("sub.{}::TEXT", quote_ident(c)))
+        .map(|c| format!("sub.{}", quote_ident(c)))
         .collect();
     let row_id_hash = crate::dvm::operators::scan::build_hash_expr(&hash_exprs);
 
@@ -355,7 +355,8 @@ fn generate_recomputation_delta(
     let ins_sql = format!(
         "SELECT n.__pgt_row_id, 'I'::text AS __pgt_action, {n_cols}\n\
          FROM {recomp_cte} n\n\
-         LEFT JOIN {st_table} s ON s.__pgt_row_id = n.__pgt_row_id\n\
+         LEFT JOIN {st_table} s ON pgtrickle.row_probe_v1(s.__pgt_row_id) = pgtrickle.row_probe_v1(n.__pgt_row_id)\n\
+             AND s.__pgt_row_id = n.__pgt_row_id\n\
          WHERE s.__pgt_row_id IS NULL",
         n_cols = out_cols
             .iter()
@@ -370,7 +371,8 @@ fn generate_recomputation_delta(
     let del_sql = format!(
         "SELECT s.__pgt_row_id, 'D'::text AS __pgt_action, {s_cols}\n\
          FROM {st_table} s\n\
-         LEFT JOIN {recomp_cte} n ON n.__pgt_row_id = s.__pgt_row_id\n\
+         LEFT JOIN {recomp_cte} n ON pgtrickle.row_probe_v1(n.__pgt_row_id) = pgtrickle.row_probe_v1(s.__pgt_row_id)\n\
+             AND n.__pgt_row_id = s.__pgt_row_id\n\
          WHERE n.__pgt_row_id IS NULL",
         s_cols = out_cols
             .iter()
@@ -711,7 +713,7 @@ fn generate_semi_naive_ins_only(
     // Use content-hash of output columns matching the initial populate.
     let dred_hash_exprs: Vec<String> = columns
         .iter()
-        .map(|c| format!("sub.{}::TEXT", quote_ident(c)))
+        .map(|c| format!("sub.{}", quote_ident(c)))
         .collect();
     let dred_row_id_hash = crate::dvm::operators::scan::build_hash_expr(&dred_hash_exprs);
 
@@ -1233,7 +1235,7 @@ fn build_semi_naive_result(
     // Use content-hash of output columns matching the initial populate.
     let sn_hash_exprs: Vec<String> = columns
         .iter()
-        .map(|c| format!("sub.{}::TEXT", quote_ident(c)))
+        .map(|c| format!("sub.{}", quote_ident(c)))
         .collect();
     let sn_row_id_hash = crate::dvm::operators::scan::build_hash_expr(&sn_hash_exprs);
 
@@ -3891,7 +3893,7 @@ mod tests {
         let base_delta_cte = "__pgt_cte_base_delta".to_string();
         ctx.add_cte(
             base_delta_cte.clone(),
-            "SELECT NULL::bigint AS __pgt_row_id, NULL::text AS __pgt_action, \
+            "SELECT NULL::bytea AS __pgt_row_id, NULL::text AS __pgt_action, \
              NULL::int AS id, NULL::int AS parent_id, NULL::text AS name WHERE false"
                 .to_string(),
         );
@@ -4005,7 +4007,7 @@ mod tests {
         let base_delta_cte = "__pgt_cte_base_del".to_string();
         ctx.add_cte(
             base_delta_cte.clone(),
-            "SELECT NULL::bigint AS __pgt_row_id, NULL::text AS __pgt_action, \
+            "SELECT NULL::bytea AS __pgt_row_id, NULL::text AS __pgt_action, \
              NULL::int AS id, NULL::int AS parent_id WHERE false"
                 .to_string(),
         );

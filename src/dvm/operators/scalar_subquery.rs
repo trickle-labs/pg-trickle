@@ -35,7 +35,7 @@
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::build_snapshot_sql;
-use crate::dvm::operators::scan::build_hash_expr;
+use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
 
@@ -134,17 +134,17 @@ pub fn diff_scalar_subquery(
     let hash_child = {
         let key_exprs: Vec<String> = child_cols
             .iter()
-            .map(|c| format!("cs.{}::TEXT", quote_ident(c)))
+            .map(|c| format!("cs.{}", quote_ident(c)))
             .collect();
-        build_hash_expr(&key_exprs)
+        build_hash_expr_for_domain("SCAN_KEY", &key_exprs)
     };
 
     let hash_delta_child = {
         let key_exprs: Vec<String> = child_cols
             .iter()
-            .map(|c| format!("dc.{}::TEXT", quote_ident(c)))
+            .map(|c| format!("dc.{}", quote_ident(c)))
             .collect();
-        build_hash_expr(&key_exprs)
+        build_hash_expr_for_domain("SCAN_KEY", &key_exprs)
     };
 
     // ── Pre-change outer child snapshot (C₀) for Part 2 ────────────
@@ -284,6 +284,8 @@ mod tests {
             !sql.contains("LIMIT 1"),
             "scalar snapshots must preserve PostgreSQL cardinality errors"
         );
+        assert!(sql.contains("encode_row_id_v2('SCAN_KEY'"));
+        assert!(!sql.contains("encode_row_id_v2('JOIN_KEY'"));
     }
 
     #[test]

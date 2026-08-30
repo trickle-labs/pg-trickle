@@ -25,7 +25,7 @@ async fn test_workflow_full_refresh_lifecycle() {
     // Simulate create_stream_table: create storage table
     db.execute(
         "CREATE TABLE public.enriched_orders (\
-         __pgt_row_id BIGINT, id INT, customer TEXT, amount NUMERIC\
+         __pgt_row_id BYTEA NOT NULL, id INT, customer TEXT, amount NUMERIC\
         )",
     )
     .await;
@@ -56,7 +56,7 @@ async fn test_workflow_full_refresh_lifecycle() {
     // Simulate full refresh: populate storage table
     db.execute(
         "INSERT INTO public.enriched_orders (__pgt_row_id, id, customer, amount) \
-         SELECT hashtext(row_to_json(sub)::text)::bigint, sub.* \
+         SELECT pgtrickle.test_int_to_row_id(sub.id), sub.* \
          FROM (SELECT id, customer, amount FROM orders WHERE amount > 50) sub",
     )
     .await;
@@ -121,15 +121,14 @@ async fn test_workflow_cdc_changes_tracked_in_buffer() {
         .query_scalar("SELECT 'products'::regclass::oid::int")
         .await;
 
-    // Create change buffer table (typed columns matching source schema)
+    // Create change buffer table (flat typed columns matching source schema)
     db.execute(&format!(
         "CREATE TABLE pgtrickle_changes.changes_{} (\
          change_id   BIGSERIAL PRIMARY KEY,\
          lsn         PG_LSN NOT NULL,\
          action      CHAR(1) NOT NULL,\
-         pk_hash     BIGINT,\
-         \"new_id\" INT, \"new_price\" NUMERIC,\
-         \"old_id\" INT, \"old_price\" NUMERIC\
+         __pgt_row_id BYTEA NOT NULL,\
+         \"id\" INT, \"price\" NUMERIC\
         )",
         src_oid
     ))
@@ -137,25 +136,25 @@ async fn test_workflow_cdc_changes_tracked_in_buffer() {
 
     // Simulate CDC: record an INSERT change
     db.execute(&format!(
-        "INSERT INTO pgtrickle_changes.changes_{} (lsn, action, \"new_id\", \"new_price\") \
-         VALUES ('0/ABCD', 'I', 3, 30.00)",
+        "INSERT INTO pgtrickle_changes.changes_{} (lsn, action, __pgt_row_id, \"id\", \"price\") \
+         VALUES ('0/ABCD', 'I', pgtrickle.test_int_to_row_id(3), 3, 30.00)",
         src_oid
     ))
     .await;
 
-    // Simulate CDC: record an UPDATE change
+    // Simulate CDC: record an UPDATE as D+I rows
     db.execute(&format!(
-        "INSERT INTO pgtrickle_changes.changes_{} (lsn, action, \
-         \"new_id\", \"new_price\", \"old_id\", \"old_price\") \
-         VALUES ('0/ABCE', 'U', 1, 15.00, 1, 10.00)",
+        "INSERT INTO pgtrickle_changes.changes_{} (lsn, action, __pgt_row_id, \"id\", \"price\") \
+         VALUES ('0/ABCE', 'D', pgtrickle.test_int_to_row_id(1), 1, 10.00), \
+                ('0/ABCE', 'I', pgtrickle.test_int_to_row_id(1), 1, 15.00)",
         src_oid
     ))
     .await;
 
     // Simulate CDC: record a DELETE change
     db.execute(&format!(
-        "INSERT INTO pgtrickle_changes.changes_{} (lsn, action, \"old_id\", \"old_price\") \
-         VALUES ('0/ABCF', 'D', 2, 20.00)",
+        "INSERT INTO pgtrickle_changes.changes_{} (lsn, action, __pgt_row_id, \"id\", \"price\") \
+         VALUES ('0/ABCF', 'D', pgtrickle.test_int_to_row_id(2), 2, 20.00)",
         src_oid
     ))
     .await;
@@ -166,7 +165,7 @@ async fn test_workflow_cdc_changes_tracked_in_buffer() {
             src_oid
         ))
         .await;
-    assert_eq!(change_count, 3);
+    assert_eq!(change_count, 4);
 
     // Verify changes are ordered by LSN
     let lsns: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
@@ -176,7 +175,7 @@ async fn test_workflow_cdc_changes_tracked_in_buffer() {
     .fetch_all(&db.pool)
     .await
     .unwrap();
-    assert_eq!(lsns.len(), 3);
+    assert_eq!(lsns.len(), 4);
 
     // After processing, delete consumed changes
     db.execute(&format!(

@@ -206,6 +206,11 @@ pub fn diff_lateral_subquery(
         .map(|c| format!("{}.{}", quote_ident(&outer_alias), quote_ident(c)))
         .collect();
     let child_col_refs_str = child_col_refs.join(", ");
+    let outer_identity_refs = outer_identity
+        .iter()
+        .map(|c| format!("{}.{}", quote_ident(&outer_alias), quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // Build hash expression for the row ID: hash all output columns.
     // Do NOT use COALESCE for NULL — pg_trickle_hash_multi handles NULL
@@ -213,11 +218,11 @@ pub fn diff_lateral_subquery(
     // consistent with the initial-load hash in row_id_expr_for_query.
     let hash_exprs: Vec<String> = child_cols
         .iter()
-        .map(|c| format!("{}.{}::TEXT", quote_ident(&outer_alias), quote_ident(c)))
+        .map(|c| format!("{}.{}", quote_ident(&outer_alias), quote_ident(c)))
         .chain(
             sub_cols
                 .iter()
-                .map(|c| format!("{}.{}::TEXT", quote_ident(alias), quote_ident(c))),
+                .map(|c| format!("{}.{}", quote_ident(alias), quote_ident(c))),
         )
         .collect();
     let row_id_expr = build_hash_expr(&hash_exprs);
@@ -326,19 +331,19 @@ pub fn diff_lateral_subquery(
         // Rebuild hash_exprs using the pre-computed sub-column references
         let hash_exprs_precomp: Vec<String> = child_cols
             .iter()
-            .map(|c| format!("{outer_alias_q}.{}::TEXT", quote_ident(c)))
+            .map(|c| format!("{outer_alias_q}.{}", quote_ident(c)))
             .chain(
                 sub_cols
                     .iter()
-                    .map(|c| format!("{pc_alias}.{}::TEXT", quote_ident(c))),
+                    .map(|c| format!("{pc_alias}.{}", quote_ident(c))),
             )
             .collect();
         let row_id_expr_precomp = build_hash_expr(&hash_exprs_precomp);
 
         let expand_sql = format!(
-            "SELECT {row_id_expr_precomp} AS \"__pgt_row_id\",\n\
+            "SELECT DISTINCT ON ({outer_identity_refs}) {row_id_expr_precomp} AS \"__pgt_row_id\",\n\
                     {child_col_refs_str},\n\
-                    {pc_sub_refs_str}\n\
+             {pc_sub_refs_str}\n\
              FROM {changed_sources_cte} AS {outer_alias_q}\n\
              {join_type} {precomp_cte} AS {pc_alias}\n\
                ON {corr_join_cond_str}\n\
@@ -376,9 +381,9 @@ pub fn diff_lateral_subquery(
         };
 
         let expand_sql = format!(
-            "SELECT {row_id_expr} AS \"__pgt_row_id\",\n\
+            "SELECT DISTINCT ON ({outer_identity_refs}) {row_id_expr} AS \"__pgt_row_id\",\n\
                     {child_col_refs_str},\n\
-                    {sub_col_refs_str}\n\
+             {sub_col_refs_str}\n\
              {lateral_clause}\n\
              WHERE {action_filter_prefix}",
         );
@@ -668,7 +673,7 @@ fn build_inner_change_branch(
 
     Ok(Some(format!(
         "-- Outer rows affected by inner subquery source changes\n\
-         SELECT {LATERAL_INNER_DUMMY_ROW_ID}::BIGINT AS \"__pgt_row_id\",\n\
+         SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW({LATERAL_INNER_DUMMY_ROW_ID}::int8)) AS \"__pgt_row_id\",\n\
                 'I'::TEXT AS \"__pgt_action\",\n\
                 {col_refs_str}\n\
          FROM {outer_snap} {outer_alias_q}\n\
@@ -862,7 +867,7 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Row ID hash should include both child and subquery columns
-        assert_sql_contains(&sql, "pg_trickle_hash");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
     }
 
     #[test]
@@ -946,7 +951,8 @@ mod tests {
         // handles NULLs via \x00NULL\x00 sentinel). No COALESCE needed.
         assert_sql_contains(&sql, "LEFT JOIN LATERAL");
         // Hash expression uses sub.val::TEXT without COALESCE
-        assert_sql_contains(&sql, "\"sub\".\"val\"::TEXT");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
+        assert_sql_contains(&sql, "\"sub\".\"val\"");
     }
 
     #[test]
@@ -1199,7 +1205,7 @@ mod tests {
     // ── SF-8: Inner-change dummy row_id sentinel ────────────────────
 
     #[test]
-    fn test_inner_change_branch_uses_min_bigint_sentinel() {
+    fn test_inner_change_branch_uses_synthetic_sentinel() {
         let mut ctx = test_ctx_with_st("public", "st");
         let child = scan(1, "orders", "public", "o", &["id"]);
         let tree = lateral_subquery(
@@ -1217,9 +1223,12 @@ mod tests {
         // The inner-change branch should use i64::MIN+1 sentinel, not 0 or i64::MIN.
         // i64::MIN (-9223372036854775808) cannot be written as a PostgreSQL bigint
         // literal without overflow, so i64::MIN+1 (-9223372036854775807) is used.
-        assert_sql_contains(&sql, "-9223372036854775807::BIGINT");
+        assert_sql_contains(
+            &sql,
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(-9223372036854775807::int8))",
+        );
         assert!(
-            !sql.contains("SELECT 0::BIGINT AS \"__pgt_row_id\""),
+            !sql.contains("SELECT 0::BYTEA AS \"__pgt_row_id\""),
             "Should not use 0 as dummy row_id"
         );
         assert!(

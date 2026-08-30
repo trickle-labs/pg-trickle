@@ -368,6 +368,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     -- v0.83.0: Composite row-identity encoding version. NULL is an
     -- unclassified pre-upgrade row; fresh objects are written explicitly.
     row_identity_version SMALLINT,
+    -- v0.87.16: bounded identity probe encoding version.
+    row_probe_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- v0.87.7 LSEC-3: exact search_path defining_query was resolved under
@@ -593,6 +595,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_buffers (
     sentinel_token   BIGINT NOT NULL,
     -- v0.83.0: Composite row-identity encoding used by buffer writers.
     row_identity_version SMALLINT,
+    -- v0.87.16: bounded identity probe encoding version.
+    row_probe_version    SMALLINT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (source_kind, source_id)
 );
@@ -1483,6 +1487,8 @@ GRANT EXECUTE ON FUNCTION pgtrickle.list_subscriptions() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.metrics_summary() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.parallel_job_status(integer) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.parse_duration_seconds(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.encode_row_id_v2(text, anyelement) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.row_probe_v1(bytea) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pg_trickle_hash(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pg_trickle_hash_multi(text[]) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pgt_scc_status() TO PUBLIC;

@@ -7,7 +7,7 @@
 //! Changes that don't cross 0 are suppressed.
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
+use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
 
@@ -29,11 +29,8 @@ pub fn diff_distinct(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
     let col_list = col_refs.join(", ");
 
     // Hash all columns for the row_id
-    let hash_exprs: Vec<String> = cols
-        .iter()
-        .map(|c| format!("{}::TEXT", quote_ident(c)))
-        .collect();
-    let row_id_expr = build_hash_expr(&hash_exprs);
+    let hash_exprs: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
+    let row_id_expr = build_hash_expr_for_domain("SET_KEY", &hash_exprs);
 
     let st_table = ctx
         .st_qualified_name
@@ -66,9 +63,11 @@ pub fn diff_distinct(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
          {d_cols},\n\
          d.__net_count,\n\
          COALESCE((SELECT st.__pgt_count FROM {st_table} st \
-         WHERE st.__pgt_row_id = d.__pgt_row_id), 0) AS old_count,\n\
+         WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id)\
+           AND st.__pgt_row_id = d.__pgt_row_id), 0) AS old_count,\n\
          COALESCE((SELECT st.__pgt_count FROM {st_table} st \
-         WHERE st.__pgt_row_id = d.__pgt_row_id), 0) + d.__net_count AS new_count\n\
+         WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id)\
+           AND st.__pgt_row_id = d.__pgt_row_id), 0) + d.__net_count AS new_count\n\
          FROM {delta_cte} d",
         d_cols = cols
             .iter()
@@ -156,7 +155,7 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Row ID is hash of all columns
-        assert_sql_contains(&sql, "pgtrickle.pg_trickle_hash");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SET_KEY'");
     }
 
     #[test]

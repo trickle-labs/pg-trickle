@@ -155,6 +155,7 @@ mod tests {
             storage_fillfactor: None,
             query_complexity_class: None,
             row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
+            row_probe_version: Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16),
             self_heal_work_mem_percent: 100,
             self_heal_lock_backoff_exponent: 0,
             self_heal_success_streak: 0,

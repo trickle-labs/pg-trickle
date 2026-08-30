@@ -724,6 +724,10 @@ struct ValidatedQuery {
     needs_union_dedup: bool,
     /// Whether any source table lacks a PRIMARY KEY (EC-06).
     has_keyless_source: bool,
+    /// Whether any input source lacks a PRIMARY KEY. Kept separate from
+    /// output-identity fallback flags so append-only validation remains about
+    /// source mutability, not the width of the generated row identity.
+    has_keyless_input_source: bool,
     /// Source relation OIDs and types extracted from the query.
     source_relids: Vec<(pg_sys::Oid, String)>,
     /// AVG auxiliary columns: `(sum_col_name, count_col_name, arg_sql)` tuples
@@ -1313,6 +1317,35 @@ fn validate_and_parse_query(
         }
     }
 
+    // V2 identity encoding is deliberately conservative for structural
+    // datums (for example JSONB). AUTO must choose the existing FULL path
+    // before any differential SQL can call encode_row_id_v2 on such a field.
+    if let Some(pr) = parsed_tree.as_ref() {
+        let identity_columns = crate::api::helpers::row_identity_columns(&columns, Some(pr));
+        let registry = crate::dvm::row_id_v2::TypeRegistry::new();
+        if let Some(error) = identity_columns.iter().find_map(|column| {
+            registry
+                .validate_type(
+                    &column.name,
+                    column.type_oid.value().to_u32(),
+                    crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
+                )
+                .err()
+        }) {
+            if is_auto && *refresh_mode == RefreshMode::Differential {
+                pgrx::warning!(
+                    "[pg_trickle] Falling back to FULL refresh: row identity V2 cannot encode one or more identity fields ({error})."
+                );
+                *refresh_mode = RefreshMode::Full;
+                parsed_tree = None;
+            } else {
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "row identity V2 cannot encode the selected identity fields: {error}"
+                )));
+            }
+        }
+    }
+
     // G12-AGG: Warn when DIFFERENTIAL mode is used with group-rescan aggregates.
     // These aggregates (STRING_AGG, ARRAY_AGG, JSON_AGG, etc.) require full
     // re-aggregation of affected groups on every refresh, which is correct but
@@ -1389,8 +1422,12 @@ fn validate_and_parse_query(
     }
 
     // EC-06: Detect keyless sources
-    let has_keyless_source = source_relids.iter().any(|(oid, source_type)| {
-        if source_type != "TABLE" && source_type != "FOREIGN_TABLE" && source_type != "MATVIEW" {
+    let has_keyless_input_source = source_relids.iter().any(|(oid, source_type)| {
+        if source_type != "TABLE"
+            && source_type != "STREAM_TABLE"
+            && source_type != "FOREIGN_TABLE"
+            && source_type != "MATVIEW"
+        {
             return false;
         }
         cdc::resolve_pk_columns(*oid)
@@ -1402,11 +1439,45 @@ fn validate_and_parse_query(
     // both sides cannot produce unique __pgt_row_id hashes. Treat them
     // as keyless so the storage table gets a non-unique index and the
     // refresh uses CTID-based deletion.
-    let has_keyless_source = has_keyless_source
+    let identity_columns =
+        crate::api::helpers::row_identity_columns(&columns, parsed_tree.as_ref());
+    let identity_bounded = crate::api::helpers::row_identity_is_bounded(&identity_columns);
+    let identity_is_proven_unique = !crate::dvm::query_has_recursive_cte(query).unwrap_or(false)
+        && parsed_tree.as_ref().is_some_and(|pr| {
+            !crate::dvm::operators::join_common::tree_contains_join(&pr.tree)
+                && pr.tree.row_id_key_columns().is_some()
+                    // GROUP_KEY rows are unique by SQL grouping, but their
+                    // key may require the non-unique probe index. JOIN_KEY
+                    // identities are derived from join cardinality and must
+                    // use the existing join completeness checks instead.
+                    && !matches!(
+                        crate::dvm::row_identity_domain(&pr.tree),
+                        "GROUP_KEY" | "JOIN_KEY"
+                    )
+        });
+    let identity_requires_uniqueness = identity_is_proven_unique
+        && !has_keyless_input_source
+        && !crate::dvm::query_has_incomplete_join_pk(query)
+        && !crate::dvm::query_needs_dual_count(query);
+    if refresh_mode.is_immediate() && !identity_bounded && identity_requires_uniqueness {
+        return Err(PgTrickleError::InvalidArgument(
+            "IMMEDIATE refresh requires a bounded row identity; use DIFFERENTIAL or FULL for unbounded identity columns"
+                .to_string(),
+        ));
+    }
+
+    let has_keyless_source = has_keyless_input_source
         || crate::dvm::query_has_incomplete_join_pk(query)
+        // Nested-window rewrites can collapse distinct input rows to the same
+        // visible value (for example two partitions both yielding row_number=1).
+        // Keep their complete-row identities on the non-unique path.
+        || had_nested_window_rewrite
         // INTERSECT/EXCEPT ALL can legitimately materialize duplicate rows;
         // use the keyless/non-unique storage path for all guarded variants.
-        || crate::dvm::query_needs_dual_count(query);
+        || crate::dvm::query_needs_dual_count(query)
+        // An unbounded identity cannot have a direct unique B-tree index;
+        // use counted-delete semantics with the probe accelerator instead.
+        || !identity_bounded;
 
     let avg_aux_columns = parsed_tree
         .as_ref()
@@ -1441,6 +1512,7 @@ fn validate_and_parse_query(
         needs_dual_count,
         needs_union_dedup,
         has_keyless_source,
+        has_keyless_input_source,
         source_relids,
         avg_aux_columns,
         sum2_aux_columns,
@@ -1623,21 +1695,49 @@ fn setup_storage_table(
             String::new()
         };
     let is_partitioned = partition_key.is_some();
-    let index_sql = if has_keyless_source || is_partitioned {
+    let identity_columns = crate::api::helpers::row_identity_columns(columns, parsed_tree);
+    let identity_bounded = crate::api::helpers::row_identity_is_bounded(&identity_columns);
+    let index_key = if identity_bounded {
+        "__pgt_row_id".to_string()
+    } else {
+        "pgtrickle.row_probe_v1(__pgt_row_id)".to_string()
+    };
+    let row_id_index_name = format!("{}_row_id_idx", table_name);
+    let index_sql = if has_keyless_source || is_partitioned || !identity_bounded {
         format!(
-            "CREATE INDEX ON {}.{} (__pgt_row_id){include_clause}",
+            "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({index_key}){include_clause}",
+            quote_identifier(&row_id_index_name),
             quote_identifier(schema),
             quote_identifier(table_name),
         )
     } else {
         format!(
-            "CREATE UNIQUE INDEX ON {}.{} (__pgt_row_id){include_clause}",
+            "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}.{} ({index_key}){include_clause}",
+            quote_identifier(&row_id_index_name),
             quote_identifier(schema),
             quote_identifier(table_name),
         )
     };
     Spi::run(&index_sql)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to create row_id index: {}", e)))?;
+
+    let replica_identity_sql = if identity_bounded && !has_keyless_source && !is_partitioned {
+        format!(
+            "ALTER TABLE {}.{} REPLICA IDENTITY USING INDEX {}",
+            quote_identifier(schema),
+            quote_identifier(table_name),
+            quote_identifier(&row_id_index_name),
+        )
+    } else {
+        format!(
+            "ALTER TABLE {}.{} REPLICA IDENTITY FULL",
+            quote_identifier(schema),
+            quote_identifier(table_name),
+        )
+    };
+    Spi::run(&replica_identity_sql).map_err(|e| {
+        PgTrickleError::SpiError(format!("Failed to configure row identity replication: {e}"))
+    })?;
 
     // DML guard trigger
     install_dml_guard_trigger(schema, table_name)?;
@@ -4027,6 +4127,7 @@ mod tests {
             storage_fillfactor: None,
             query_complexity_class: None,
             row_identity_version: Some(crate::hash::CURRENT_ROW_IDENTITY_VERSION),
+            row_probe_version: Some(crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16),
             self_heal_work_mem_percent: 100,
             self_heal_lock_backoff_exponent: 0,
             self_heal_success_streak: 0,

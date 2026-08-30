@@ -479,8 +479,8 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     };
 
     let recomputed_sql = format!(
-        "SELECT pgtrickle.pg_trickle_hash(\
-               row_to_json(w)::text || '/' || row_number() OVER ()::text\
+        "SELECT pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW(\
+               row_to_json(w)::text, row_number() OVER ())\
          ) AS \"__pgt_row_id\",\n\
                {all_cols_w}{aux_w}\n\
          FROM (\n\

@@ -43,6 +43,44 @@ impl TestDb {
             .await
             .expect("Failed to connect to test database");
 
+        // Standalone DVM tests execute generated SQL without loading the
+        // extension shared library. Keep the test identity contract typed so
+        // those fixtures exercise BYTEA transport and exact probe matching.
+        sqlx::raw_sql(
+            r#"
+CREATE SCHEMA IF NOT EXISTS pgtrickle;
+CREATE OR REPLACE FUNCTION pgtrickle.encode_row_id_v2(domain TEXT, value ANYELEMENT)
+RETURNS BYTEA
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
+AS $$ SELECT decode(md5(domain || ':' || value::text), 'hex') $$;
+CREATE OR REPLACE FUNCTION pgtrickle.row_probe_v1(value BYTEA)
+RETURNS BYTEA
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
+AS $$ SELECT substring(value FROM 1 FOR 128) $$;
+CREATE OR REPLACE FUNCTION pgtrickle.test_int_to_row_id(value INTEGER)
+RETURNS BYTEA
+LANGUAGE SQL IMMUTABLE STRICT
+AS $$ SELECT decode(md5('SCAN_KEY:(' || value::text || ')'), 'hex') $$;
+CREATE OR REPLACE FUNCTION pgtrickle.test_bigint_to_row_id(value BIGINT)
+RETURNS BYTEA
+LANGUAGE SQL IMMUTABLE STRICT
+AS $$ SELECT decode(md5('SCAN_KEY:(' || value::text || ')'), 'hex') $$;
+DO $$ BEGIN
+    CREATE CAST (INTEGER AS BYTEA)
+        WITH FUNCTION pgtrickle.test_int_to_row_id(INTEGER) AS IMPLICIT;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    CREATE CAST (BIGINT AS BYTEA)
+        WITH FUNCTION pgtrickle.test_bigint_to_row_id(BIGINT) AS IMPLICIT;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create standalone test identity helpers");
+
         TestDb {
             pool,
             _container: container,

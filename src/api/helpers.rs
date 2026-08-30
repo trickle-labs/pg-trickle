@@ -227,7 +227,7 @@ pub(super) fn install_dml_guard_trigger(
 /// that captures INSERT/UPDATE/DELETE changes directly into the buffer.
 ///
 /// PK columns are resolved from `pg_constraint` and used to pre-compute
-/// `pk_hash` in the trigger, avoiding expensive JSONB PK extraction during
+/// the typed row identity in the trigger, avoiding expensive JSONB PK extraction during
 /// scan delta window-function partitioning.
 pub(super) fn setup_cdc_for_source(
     source_oid: pg_sys::Oid,
@@ -250,7 +250,7 @@ pub(super) fn setup_cdc_for_source(
     }
 
     if !already_tracked {
-        // Resolve PK columns for trigger pk_hash computation
+        // Resolve PK columns for typed identity computation.
         let pk_columns = cdc::resolve_pk_columns(source_oid)?;
 
         // EC-19: If CDC mode is "wal" or "auto" and the source table has no
@@ -287,7 +287,7 @@ pub(super) fn setup_cdc_for_source(
         // CITUS-4: Compute stable_name for this source.
         let src_id = crate::citus::SourceIdentifier::from_oid(source_oid)?;
 
-        // Create the change buffer table (with typed columns + pk_hash always)
+        // Create the change buffer table (with typed columns + complete identity).
         cdc::create_change_buffer_table(source_oid, change_schema, &col_defs, &src_id.stable_name)?;
 
         // Create the CDC trigger on the source table (typed per-column INSERTs)
@@ -1045,6 +1045,51 @@ pub(crate) fn strip_partition_mode_prefix(partition_key: &str) -> &str {
 pub struct ColumnDef {
     pub name: String,
     pub type_oid: PgOid,
+}
+
+/// Return whether a complete V2 identity is safe as a direct B-tree key.
+/// Unknown, typmod-dependent, and unbounded fields deliberately choose the
+/// probe index; false is the safe answer because PostgreSQL's index tuple
+/// limit is fixed by BLCKSZ.
+pub(crate) fn row_identity_is_bounded(columns: &[ColumnDef]) -> bool {
+    let block_size = Spi::get_one::<i32>("SELECT current_setting('block_size', true)::int")
+        .ok()
+        .flatten()
+        .filter(|size| *size > 0)
+        .map_or(8192usize, |size| size as usize);
+    // BTMaxItemSize is roughly one third of a page. Leave a conservative
+    // margin for page and index-tuple headers; unknown page sizes are never
+    // allowed to make a direct identity index look safe.
+    let btree_item_limit = (block_size / 3).saturating_sub(64);
+    let payload = columns.iter().try_fold(32usize, |size, column| {
+        let descriptor = crate::dvm::row_id_v2::TypeRegistry::new()
+            .descriptor(column.type_oid.value().to_u32())
+            .ok()?
+            .maximum_encoded_size;
+        let width = match descriptor {
+            crate::dvm::row_id_v2::EncodedSize::Fixed(width) => width,
+            crate::dvm::row_id_v2::EncodedSize::Unbounded => return None,
+        };
+        Some(size.saturating_add(width.saturating_add(12)))
+    });
+    payload.is_some_and(|size| size <= btree_item_limit)
+}
+
+pub(crate) fn row_identity_columns(
+    columns: &[ColumnDef],
+    parsed_tree: Option<&crate::dvm::ParseResult>,
+) -> Vec<ColumnDef> {
+    parsed_tree
+        .and_then(|pr| pr.tree.row_id_key_columns())
+        .and_then(|keys| {
+            let selected: Vec<ColumnDef> = keys
+                .iter()
+                .filter_map(|key| columns.iter().find(|column| &column.name == key).cloned())
+                .collect();
+            (selected.len() == keys.len()).then_some(selected)
+        })
+        .filter(|keys: &Vec<ColumnDef>| !keys.is_empty())
+        .unwrap_or_else(|| columns.to_vec())
 }
 
 #[cfg(not(test))]
@@ -2574,7 +2619,7 @@ pub(super) fn build_create_table_sql(
         .unwrap_or_default();
 
     format!(
-        "CREATE TABLE {}.{} (\n    __pgt_row_id BIGINT,\n{}{}{}{}{}{}\n){}{}",
+        "CREATE TABLE {}.{} (\n    __pgt_row_id BYTEA NOT NULL,\n{}{}{}{}{}{}\n){}{}",
         quote_identifier(schema),
         quote_identifier(name),
         col_defs.join(",\n"),
@@ -2634,10 +2679,8 @@ pub(crate) fn normalize_full_set_operation_storage(
             .select(
                 "SELECT i.indexrelid::regclass::text, i.indisunique \
                  FROM pg_index i \
-                 JOIN pg_attribute a \
-                   ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
                  WHERE i.indrelid = $1 \
-                   AND a.attname = '__pgt_row_id'",
+                   AND pg_get_indexdef(i.indexrelid) LIKE '%__pgt_row_id%'",
                 None,
                 &[pgt_relid.into()],
             )
@@ -2677,6 +2720,20 @@ pub(crate) fn normalize_full_set_operation_storage(
 
     if rebuild_index {
         let user_columns = crate::cdc::resolve_st_output_columns(pgt_relid)?;
+        let identity_bounded = user_columns.iter().all(|(column, type_name)| {
+            Spi::get_one_with_args::<pg_sys::Oid>(
+                "SELECT $1::regtype::oid",
+                &[type_name.as_str().into()],
+            )
+            .ok()
+            .flatten()
+            .is_some_and(|type_oid| {
+                row_identity_is_bounded(&[ColumnDef {
+                    name: column.clone(),
+                    type_oid: type_oid.into(),
+                }])
+            })
+        });
         let include_clause = if crate::config::pg_trickle_auto_index()
             && !user_columns.is_empty()
             && user_columns.len() <= 8
@@ -2691,8 +2748,13 @@ pub(crate) fn normalize_full_set_operation_storage(
             String::new()
         };
         // nosemgrep: rust.spi.run.dynamic-format — table and column names are quote_identifier()-escaped catalog identifiers.
+        let index_key = if identity_bounded {
+            "__pgt_row_id"
+        } else {
+            "pgtrickle.row_probe_v1(__pgt_row_id)"
+        };
         Spi::run(&format!(
-            "CREATE INDEX ON {quoted_table} (__pgt_row_id){include_clause}"
+            "CREATE INDEX ON {quoted_table} ({index_key}){include_clause}"
         ))
         .map_err(|e| {
             PgTrickleError::SpiError(format!("Failed to create non-unique row-id index: {e}"))
@@ -2733,8 +2795,12 @@ pub(super) fn initialize_st(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-    let source_oids: Vec<pg_sys::Oid> = StDependency::get_for_st(pgt_id)?
-        .into_iter()
+    let dependencies = StDependency::get_for_st(pgt_id)?;
+    let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
+        PgTrickleError::NotFound(format!("stream table metadata for pgt_id={pgt_id}"))
+    })?;
+    let source_oids: Vec<pg_sys::Oid> = dependencies
+        .iter()
         .filter(|dep| {
             matches!(
                 dep.source_type.as_str(),
@@ -2744,7 +2810,58 @@ pub(super) fn initialize_st(
         .map(|dep| dep.source_relid)
         .collect();
     cdc::lock_source_relations(&source_oids)?;
+    cdc::lock_stream_table_sources(pgt_id, &dependencies)?;
     let safe_bound = cdc::get_current_wal_lsn()?;
+
+    // Seed ST-source frontier entries too. Without them, the first
+    // scheduled downstream refresh sees an empty frontier, rebuilds FULL,
+    // then replays the same upstream buffer DIFFERENTIALLY.
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let mut st_source_lsn_snapshot = Vec::new();
+    for dep in dependencies
+        .iter()
+        .filter(|dep| dep.source_type == "STREAM_TABLE" && !st.refresh_mode.is_immediate())
+    {
+        let upstream_pgt_id =
+            StreamTableMeta::pgt_id_for_relid(dep.source_relid).ok_or_else(|| {
+                PgTrickleError::CdcStateInvalid {
+                    pgt_id,
+                    source_name: format!("OID {}", dep.source_relid.to_u32()),
+                    buffer: "stream-table dependency".to_string(),
+                    reason: "upstream stream table metadata is missing".to_string(),
+                }
+            })?;
+        if !cdc::has_st_change_buffer(upstream_pgt_id, &change_schema) {
+            return Err(PgTrickleError::CdcStateInvalid {
+                pgt_id,
+                source_name: format!("pgt_id {upstream_pgt_id}"),
+                buffer: format!("{change_schema}.changes_pgt_{upstream_pgt_id}"),
+                reason: "required stream-table change buffer is missing".to_string(),
+            });
+        }
+        let lsn = Spi::get_one_with_args::<String>(
+            &format!(
+                "SELECT LEAST(COALESCE(MAX(lsn), '0/0'::pg_lsn), $1::pg_lsn)::text \
+                 FROM \"{schema}\".changes_pgt_{id}",
+                schema = change_schema,
+                id = upstream_pgt_id,
+            ),
+            &[safe_bound.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::CdcStateInvalid {
+            pgt_id,
+            source_name: format!("pgt_id {upstream_pgt_id}"),
+            buffer: format!("{change_schema}.changes_pgt_{upstream_pgt_id}"),
+            reason: format!("could not read bounded upstream position: {e}"),
+        })?
+        .ok_or_else(|| PgTrickleError::CdcStateInvalid {
+            pgt_id,
+            source_name: format!("pgt_id {upstream_pgt_id}"),
+            buffer: format!("{change_schema}.changes_pgt_{upstream_pgt_id}"),
+            reason: "bounded upstream position was NULL".to_string(),
+        })?;
+        st_source_lsn_snapshot.push((upstream_pgt_id, lsn));
+    }
 
     // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
     // defining query so the auxiliary column is populated correctly.
@@ -2824,9 +2941,6 @@ pub(super) fn initialize_st(
         table = quote_identifier(name),
     );
 
-    let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
-        PgTrickleError::NotFound(format!("stream table metadata for pgt_id={pgt_id}"))
-    })?;
     crate::refresh::with_stream_owner(&st, || {
         Spi::run(&insert_sql)
             .map_err(|e| PgTrickleError::SpiError(format!("Failed to initialize ST: {}", e)))
@@ -2845,7 +2959,10 @@ pub(super) fn initialize_st(
     // a valid lower bound from which to compare polled change-buffer rows.
     let slot_positions = cdc::get_slot_positions_at_bound(&source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
-    let frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
+    let mut frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
+    for (upstream_pgt_id, lsn) in st_source_lsn_snapshot {
+        frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
+    }
     StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0)?;
 
     // Record the initial population in pgt_refresh_history so that monitoring

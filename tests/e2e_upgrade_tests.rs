@@ -83,6 +83,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("refresh_reason", "text"),
         ("refresh_reason_detail", "text"),
         ("row_identity_version", "smallint"),
+        ("row_probe_version", "smallint"),
         ("scc_id", "integer"),
         ("schedule", "text"),
         ("self_heal_lock_backoff_exponent", "smallint"),

@@ -19,10 +19,19 @@ pub(crate) const CURRENT_ROW_IDENTITY_VERSION: i16 = COMPOSITE_ENCODING_VERSION 
 const NULL_TAG: u8 = 0;
 const VALUE_TAG: u8 = 1;
 
-/// Build the canonical SQL call used for every composite hash.
+/// Build the canonical SQL call used for every composite row identity.
+///
+/// The legacy function name is retained because it is used throughout the
+/// SQL generator, but it now returns the complete V2 identity rather than a
+/// lossy 64-bit digest.
 pub(crate) fn build_composite_hash_expr(expressions: &[String]) -> String {
+    build_row_identity_expr("SCAN_KEY", expressions)
+}
+
+/// Build a typed V2 identity expression for a named semantic domain.
+pub(crate) fn build_row_identity_expr(domain: &str, expressions: &[String]) -> String {
     format!(
-        "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
+        "pgtrickle.encode_row_id_v2('{domain}', ROW({}))",
         expressions.join(", ")
     )
 }

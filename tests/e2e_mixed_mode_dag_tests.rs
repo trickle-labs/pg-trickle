@@ -396,6 +396,31 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+#[cfg(not(feature = "light-e2e"))]
+async fn wait_for_scheduler_refresh(
+    db: &E2eDb,
+    pgt_name: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let initial = db
+        .query_scalar_opt::<String>(&format!(
+            "SELECT last_refresh_at::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = '{pgt_name}'"
+        ))
+        .await;
+    db.wait_for_condition(
+        "scheduler refresh",
+        &format!(
+            "SELECT last_refresh_at IS NOT NULL AND last_refresh_at::text <> '{}' \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{pgt_name}'",
+            initial.unwrap_or_default()
+        ),
+        timeout,
+        std::time::Duration::from_millis(300),
+    )
+    .await
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 2.6 — CALCULATED DIFFERENTIAL leaf auto-cascades from FULL upstream
 // ═══════════════════════════════════════════════════════════════════════════
@@ -456,9 +481,8 @@ async fn test_calculated_diff_leaf_auto_cascades_from_full_upstream() {
     // Wait for the scheduler to auto-populate both STs.
     // L1 fires on its 1s schedule; L2 fires via the last_refresh_at
     // fallback when L1's last_refresh_at is newer than L2's.
-    let refreshed = db
-        .wait_for_auto_refresh("ns8_l2", std::time::Duration::from_secs(60))
-        .await;
+    let refreshed =
+        wait_for_scheduler_refresh(&db, "ns8_l2", std::time::Duration::from_secs(60)).await;
     assert!(
         refreshed,
         "ns8_l2 (DIFFERENTIAL/CALCULATED from FULL upstream) never received \

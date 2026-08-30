@@ -5,19 +5,18 @@
 //! The change buffer table `pgtrickle_changes.changes_<stable_name>` contains:
 //! - change_id BIGSERIAL — insertion ordering (CACHE 1 invariant, see cdc.rs)
 //! - lsn PG_LSN
-//! - action CHAR(1) — 'I', 'U', 'D'
-//! - pk_hash BIGINT — pre-computed PK hash (optional)
-//! - new_{col} TYPE — NEW row values (INSERT/UPDATE)
-//! - old_{col} TYPE — OLD row values (UPDATE/DELETE)
+//! - action CHAR(1) — 'I' or 'D'
+//! - __pgt_row_id BYTEA — complete typed-V2 row identity
+//! - {col} TYPE — flat typed row values for the action
 //!
 //! For UPDATEs, we split into DELETE (old values) + INSERT (new values).
-//! Row IDs are computed as hash of the primary key columns.
+//! Row IDs are computed by the shared typed V2 encoder.
 //!
 //! ## Single-pass design
 //!
 //! The change buffer is scanned **once** using typed columns rather than
-//! JSONB deserialization. Columns are referenced directly as
-//! `c."new_{col}"` / `c."old_{col}"` with proper PostgreSQL types,
+//! JSONB deserialization. Columns are referenced directly as `c."{col}"`
+//! with proper PostgreSQL types,
 //! eliminating `jsonb_populate_record` overhead.
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
@@ -101,18 +100,22 @@ fn diff_scan_transition(
 
     // Build the row_id hash expression from PK columns (or all columns
     // for keyless tables). Unlike the change buffer path, there is no
-    // pre-computed pk_hash — we compute it from the actual column values.
+    // pre-computed identity — we compute it from the actual column values.
     let hash_cols: Vec<&str> = if pk_columns.is_empty() {
         columns.iter().map(|c| c.name.as_str()).collect()
     } else {
         pk_columns.iter().map(|s| s.as_str()).collect()
     };
 
-    let hash_args: Vec<String> = hash_cols
-        .iter()
-        .map(|c| format!("{}::TEXT", quote_ident(c)))
-        .collect();
-    let row_id_expr = build_hash_expr(&hash_args);
+    let hash_args: Vec<String> = hash_cols.iter().map(|c| quote_ident(c)).collect();
+    let row_id_expr = crate::hash::build_row_identity_expr(
+        if pk_columns.is_empty() {
+            "KEYLESS_ROW"
+        } else {
+            "SCAN_KEY"
+        },
+        &hash_args,
+    );
 
     // Column list for SELECT
     let col_refs: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
@@ -163,7 +166,7 @@ FROM {new_table}",
             .join(", ");
         let qualified_table = format!("{}.{}", quote_ident(schema), quote_ident(table_name),);
         let sql = format!(
-            "SELECT NULL::BIGINT AS __pgt_row_id, NULL::TEXT AS __pgt_action, \
+            "SELECT NULL::BYTEA AS __pgt_row_id, NULL::TEXT AS __pgt_action, \
              {col_refs_str} FROM {qualified_table} WHERE false",
         );
         ctx.add_cte(cte_name.clone(), sql);
@@ -239,21 +242,22 @@ fn diff_scan_change_buffer(
     // so operators can choose to add a primary key.
     let is_keyless = pk_columns.is_empty();
 
-    // pk_hash is always pre-computed in the change buffer (from PK columns
+    // The complete row identity is always pre-computed in the change buffer (from PK columns
     // or all-column content hash for keyless tables — S10).
-    // Always use the pre-computed pk_hash from the trigger (G-J1 optimization).
-    let pk_hash_expr = "c.pk_hash".to_string();
+    // Always use the pre-computed identity from the trigger (G-J1 optimization).
+    let pk_hash_expr = "c.__pgt_row_id".to_string();
 
-    // A44-10 (D+I schema): In the D+I schema, both D-rows and I-rows have the
-    // same pre-computed pk_hash (OLD pk_hash for D-rows, NEW pk_hash for I-rows).
+    // A44-10 (D+I schema): In the D+I schema, both D-rows and I-rows carry a
+    // complete identity (OLD identity for D-rows, NEW identity for I-rows).
     // The __pgt_row_id for a D-row must match the existing ST row (computed from
-    // OLD column values). The trigger/WAL-decoder sets pk_hash appropriately:
-    //   - D-row from UPDATE: pk_hash from OLD values
-    //   - I-row from UPDATE: pk_hash from NEW values
-    //   - Genuine INSERT: pk_hash from NEW values
-    //   - Genuine DELETE: pk_hash from OLD values
-    // For D-rows, c.pk_hash IS the old pk_hash — no separate old_pk_hash_expr needed.
-    let old_pk_hash_expr = "c.pk_hash".to_string();
+    // OLD column values). The trigger/WAL-decoder sets the identity from the
+    // appropriate row image:
+    //   - D-row from UPDATE: identity from OLD values
+    //   - I-row from UPDATE: identity from NEW values
+    //   - Genuine INSERT: identity from NEW values
+    //   - Genuine DELETE: identity from OLD values
+    // For D-rows, c.__pgt_row_id is already the old identity.
+    let old_pk_hash_expr = "c.__pgt_row_id".to_string();
 
     // A44-10 (D+I schema): Flat column references — no new_/old_ prefix.
     // D-rows carry old values in c."col"; I-rows carry new values.
@@ -425,15 +429,27 @@ fn diff_scan_change_buffer(
             .iter()
             .map(|c| format!("sub.{}", quote_ident(&c.name)))
             .collect();
+        let payload_identity_expr = crate::hash::build_row_identity_expr(
+            "KEYLESS_ROW",
+            &columns
+                .iter()
+                .map(|c| format!("c.{}", quote_ident(&crate::cdc::cb_col_name(&c.name))))
+                .collect::<Vec<_>>(),
+        );
 
-        // CTE: Decompose all events into atomic +1/-1 per content hash.
+        // CTE: Decompose all events into atomic +1/-1 per content image.
+        // An upstream stream table can keep a stable group/key identity while
+        // its values change, so grouping only by content_hash would cancel a
+        // real DELETE+INSERT update.  The payload identity preserves that
+        // update while still cancelling identical INSERT+DELETE pairs.
         // A44-10 (D+I schema): No UPDATE UNION ALL branches needed —
         // UPDATEs arrive as D-row + I-row pairs from the trigger/WAL decoder.
         let decomp_cte = ctx.next_cte_name(&format!("kl_decomp_{alias}"));
         let decomp_sql = format!(
             "\
 -- INSERT events: +1 per content hash
-SELECT {pk_hash_expr} AS content_hash, 1 AS delta_sign,
+SELECT {pk_hash_expr} AS content_hash, {payload_identity_expr} AS payload_identity,
+       1 AS delta_sign,
        {col_refs}
 FROM {change_table} c
 WHERE {lsn_filter} AND c.action = 'I'
@@ -441,7 +457,8 @@ WHERE {lsn_filter} AND c.action = 'I'
 UNION ALL
 
 -- DELETE events: -1 per content hash
-SELECT {pk_hash_expr} AS content_hash, -1 AS delta_sign,
+SELECT {pk_hash_expr} AS content_hash, {payload_identity_expr} AS payload_identity,
+       -1 AS delta_sign,
        {col_refs}
 FROM {change_table} c
 WHERE {lsn_filter} AND c.action = 'D'",
@@ -462,7 +479,7 @@ FROM (
            {max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
-    GROUP BY content_hash
+    GROUP BY content_hash, payload_identity
     HAVING SUM(delta_sign) > 0
 ) sub
 CROSS JOIN generate_series(1, sub.net_count) gs
@@ -478,7 +495,7 @@ FROM (
            {max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
-    GROUP BY content_hash
+    GROUP BY content_hash, payload_identity
     HAVING SUM(delta_sign) < 0
 ) sub
 CROSS JOIN generate_series(1, -sub.net_count) gs",
@@ -875,15 +892,16 @@ pub fn rewrite_predicate_for_scan(expr: &Expr, prefix: &str) -> String {
 
 /// Build a hash expression from a list of SQL expressions.
 pub fn build_hash_expr(exprs: &[String]) -> String {
+    build_hash_expr_for_domain("SCAN_KEY", exprs)
+}
+
+/// Build a V2 identity expression for an operator-specific domain.
+pub fn build_hash_expr_for_domain(domain: &str, exprs: &[String]) -> String {
     if exprs.len() == 1 {
-        format!("pgtrickle.pg_trickle_hash({})", exprs[0])
+        format!("pgtrickle.encode_row_id_v2('{domain}', ROW({}))", exprs[0])
     } else {
-        // Wrap each expression in parentheses to ensure ::TEXT cast binds
-        // to the whole expression, not just the last operand. Without
-        // parens, `a * (1 - b)::TEXT` would cast only `b` to TEXT due to
-        // SQL precedence of :: over arithmetic operators.
-        let array_items: Vec<String> = exprs.iter().map(|e| format!("({e})::TEXT")).collect();
-        crate::hash::build_composite_hash_expr(&array_items)
+        let array_items: Vec<String> = exprs.iter().map(|e| format!("({e})")).collect();
+        crate::hash::build_row_identity_expr(domain, &array_items)
     }
 }
 
@@ -945,20 +963,18 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // With PK columns, should use pre-computed pk_hash
-        assert_sql_contains(&sql, "c.pk_hash");
+        assert_sql_contains(&sql, "c.__pgt_row_id");
     }
 
     #[test]
     fn test_diff_scan_without_pk_fallback() {
         let mut ctx = test_ctx();
-        // S10: Even tables without PK now use c.pk_hash (the CDC trigger computes
-        // an all-column content hash, stored in the change buffer's pk_hash column).
+        // Keyless tables also use the pre-computed complete identity.
         let tree = scan_not_null(100, "orders", "public", "o", &["id", "amount"]);
         let result = diff_scan(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // Should always use pre-computed c.pk_hash (keyless or not).
-        assert_sql_contains(&sql, "c.pk_hash");
+        assert_sql_contains(&sql, "c.__pgt_row_id");
     }
 
     #[test]
@@ -1071,15 +1087,14 @@ mod tests {
     #[test]
     fn test_build_hash_expr_single() {
         let result = build_hash_expr(&["x".to_string()]);
-        assert_eq!(result, "pgtrickle.pg_trickle_hash(x)");
+        assert_eq!(result, "pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(x))");
     }
 
     #[test]
     fn test_build_hash_expr_multiple() {
         let result = build_hash_expr(&["a".to_string(), "b".to_string()]);
-        assert!(result.contains("pgtrickle.pg_trickle_hash_multi"));
-        assert!(result.contains("(a)::TEXT"));
-        assert!(result.contains("(b)::TEXT"));
+        assert!(result.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
+        assert!(result.contains("ROW((a), (b))"));
     }
 
     #[test]
@@ -1091,8 +1106,7 @@ mod tests {
             "l_extendedprice * (1 - l_discount)".to_string(),
             "volume".to_string(),
         ]);
-        assert!(result.contains("(l_extendedprice * (1 - l_discount))::TEXT"));
-        assert!(result.contains("(volume)::TEXT"));
+        assert!(result.contains("ROW((l_extendedprice * (1 - l_discount)), (volume))"));
     }
 
     // ── Transition table scan tests (IMMEDIATE mode) ────────────────
@@ -1187,15 +1201,15 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_scan_transition_uses_pk_hash() {
+    fn test_diff_scan_transition_uses_row_identity() {
         let mut ctx = transition_ctx(100, None, Some("__pgt_newtable_100"));
         let tree = scan_with_pk(100, "orders", "public", "o", &["id", "amount"], &["id"]);
         let result = diff_scan(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Should compute row_id from PK column
-        assert_sql_contains(&sql, "pgtrickle.pg_trickle_hash");
-        assert_sql_contains(&sql, "\"id\"::TEXT");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SCAN_KEY'");
+        assert_sql_contains(&sql, "\"id\"");
     }
 
     #[test]

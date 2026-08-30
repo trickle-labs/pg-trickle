@@ -174,7 +174,7 @@ pg_trickle uses a **hybrid CDC** architecture that starts with triggers and opti
 #### Trigger Mode (initial path in `cdc_mode = 'auto'`)
 
 1. **Trigger Management** — Creates statement-level `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` triggers with transition tables on each tracked source table by default (`pg_trickle.cdc_trigger_mode = 'statement'`). Legacy row-level triggers are available with `pg_trickle.cdc_trigger_mode = 'row'`. Each trigger fires a PL/pgSQL function (`pg_trickle_cdc_fn_<stable_name>()`) that writes typed changes to the buffer table.
-2. **Change Buffering** — Decoded changes are written to per-source change buffer tables in the `pgtrickle_changes` schema. Each row captures the LSN (`pg_current_wal_lsn()`), transaction ID, action type (I/U/D), and the new/old row data as typed columns (`new_<col> TYPE`, `old_<col> TYPE`) — native PostgreSQL types, not JSONB.
+2. **Change Buffering** — Decoded changes are written to per-source change buffer tables in the `pgtrickle_changes` schema. Each row captures the LSN (`pg_current_wal_lsn()`), transaction ID, action type (I/D), the complete typed-V2 `__pgt_row_id BYTEA`, and flat typed user columns — native PostgreSQL types, not JSONB. UPDATEs are represented as D+I pairs.
 3. **Cleanup** — Consumed changes are deleted after each successful refresh via `delete_consumed_changes()`, bounded by the upper LSN to prevent unbounded scans.
 4. **Lifecycle** — Triggers and trigger functions are automatically created when a source table is first tracked and dropped when the last stream table referencing a source is removed.
 
@@ -213,7 +213,7 @@ When a stream table's defining query references another stream table (rather tha
   Stream Table B  reads from    changes_pgt_<pgt_id>  (B depends on A)
 ```
 
-**Buffer schema.** ST change buffers are named `pgtrickle_changes.changes_pgt_<pgt_id>` (using the internal `pgt_id` rather than the OID). Unlike base-table buffers, they store only `new_*` columns — no `old_*` columns — because ST deltas are expressed as INSERT/DELETE pairs, not UPDATE rows.
+**Buffer schema.** ST change buffers are named `pgtrickle_changes.changes_pgt_<pgt_id>` (using the internal `pgt_id` rather than the OID). They use the same flat D+I schema as base-table buffers: complete `__pgt_row_id BYTEA` plus typed user columns. UPDATEs are represented as INSERT/DELETE pairs, so there are no `new_*`/`old_*` column pairs.
 
 **Delta capture — DIFFERENTIAL path.** When an upstream stream table refreshes in DIFFERENTIAL mode and has downstream consumers, the refresh engine captures the computed delta (the INSERT and DELETE rows applied to the upstream ST) into the ST change buffer via explicit DML. Downstream stream tables then read from this buffer exactly as they would read from a base-table change buffer.
 
@@ -633,21 +633,18 @@ Operational events are broadcast via PostgreSQL `NOTIFY` on the `pg_trickle_aler
 | `refresh_completed` | Refresh completed successfully |
 | `refresh_failed` | Refresh failed with an error |
 
-### 12. Row ID Hashing (`src/hash.rs`)
+### 12. Row Identity (`src/dvm/row_id_v2.rs`)
 
-Provides deterministic 64-bit row identifiers using **xxHash (xxh64)** with a fixed seed. Two SQL functions are exposed:
+Provides deterministic, typed, versioned row identities as canonical `BYTEA` values. The legacy hash helpers remain available as compatibility utilities, but are not used as persisted stream-table identities.
 
-- **`pgtrickle.pg_trickle_hash(text)`** — Hash a single text value; used for simple single-column row IDs.
-- **`pgtrickle.pg_trickle_hash_multi(text[])`** — Hash multiple values using
-  version-2 length-delimited framing, including explicit NULL tags, for
-  composite keys (join row IDs, GROUP BY keys). Single-value hashing remains
-  byte-for-byte compatible.
+- **`pgtrickle.pg_trickle_hash(text)`** — Legacy 64-bit compatibility utility.
+- **`pgtrickle.pg_trickle_hash_multi(text[])`** — Legacy text-array compatibility utility.
 
-Row IDs are written into every stream table's storage as an internal `__pgt_row_id BIGINT` column and are used by the delta application phase to match `DELETE` candidates precisely.
+Row IDs are written into every stream table's storage as an internal `__pgt_row_id BYTEA NOT NULL` column and are used by the delta application phase to match `DELETE` candidates precisely. A bounded direct index or non-unique `row_probe_v1` expression index accelerates lookup; complete identity equality is the correctness check.
 The `pgt_stream_tables.row_identity_version` and
 `pgt_change_buffers.row_identity_version` catalog fields record the framing
 version. Unknown or legacy values fail closed for incremental maintenance;
-the hash is only an accelerator, not a substitute for value equality.
+the probe is only an accelerator, not a substitute for complete identity equality.
 
 ### 13. Diamond Dependency Consistency (`src/dag.rs`)
 
@@ -790,7 +787,7 @@ Runtime behavior is controlled by a growing set of GUC (Grand Unified Configurat
  Change Buffer Table
    Base tables:   pgtrickle_changes.changes_<oid>
    ST sources:    pgtrickle_changes.changes_pgt_<pgt_id>
-   Columns: change_id, lsn, action (I/U/D), pk_hash, new_<col>, old_<col> (typed)
+   Columns: change_id, lsn, action (I/U/D), __pgt_row_id BYTEA, typed output columns
            │
            ▼
  DVM Engine: generate delta SQL from operator tree

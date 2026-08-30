@@ -151,7 +151,8 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
                AND __pgt_action = 'I'\n\
                AND EXISTS (\n\
                    SELECT 1 FROM {st_table} st\n\
-                   WHERE st.__pgt_row_id = {child_cte}.__pgt_row_id\n\
+                   WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1({child_cte}.__pgt_row_id)\n\
+                     AND st.__pgt_row_id = {child_cte}.__pgt_row_id\n\
                )",
             cols = col_refs.join(", "),
             child_cte = child_result.cte_name,

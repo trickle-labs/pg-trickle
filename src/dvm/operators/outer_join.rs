@@ -169,6 +169,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 .map(|c| (*c).clone())
                 .collect::<Vec<_>>(),
             &ctx.fallback_leaf_oids,
+            &ctx.st_source_pgt_ids,
         )
     };
 
@@ -217,6 +218,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 &right_result.cte_name,
                 right_cols,
                 &ctx.fallback_leaf_oids,
+                &ctx.st_source_pgt_ids,
             );
             Some(r0)
         }
@@ -253,6 +255,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             &left_result.cte_name,
             left_cols,
             &ctx.fallback_leaf_oids,
+            &ctx.st_source_pgt_ids,
         )
     } else {
         left_table.clone()
@@ -277,18 +280,24 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // use_l0 is true.
     let correction_cols = [dl_cols.as_slice(), dr_cols.as_slice()].concat().join(", ");
     let join_cond_correction = rewrite_join_condition(condition, left, "dl", right, "dr");
-    let hash_correction = crate::hash::build_composite_hash_expr(&[
-        "dl.__pgt_row_id::TEXT".to_string(),
-        "dr.__pgt_row_id::TEXT".to_string(),
-    ]);
-    let hash_dl_r = crate::hash::build_composite_hash_expr(&[
-        "dl.__pgt_row_id::TEXT".to_string(),
-        "pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT".to_string(),
-    ]);
-    let hash_l_dr = crate::hash::build_composite_hash_expr(&[
-        "pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT".to_string(),
-        "dr.__pgt_row_id::TEXT".to_string(),
-    ]);
+    let hash_correction = crate::hash::build_row_identity_expr(
+        "JOIN_KEY",
+        &["dl.__pgt_row_id".to_string(), "dr.__pgt_row_id".to_string()],
+    );
+    let hash_dl_r = crate::hash::build_row_identity_expr(
+        "JOIN_KEY",
+        &[
+            "dl.__pgt_row_id".to_string(),
+            "row_to_json(r)::text".to_string(),
+        ],
+    );
+    let hash_l_dr = crate::hash::build_row_identity_expr(
+        "JOIN_KEY",
+        &[
+            "row_to_json(l)::text".to_string(),
+            "dr.__pgt_row_id".to_string(),
+        ],
+    );
 
     let correction_sql = if !use_exact_l0 && is_join_child(left) && !is_simple_child(left) {
         // Part 2 uses L₁: correction for (L₁ − L₀) ⋈ ΔR error.
@@ -413,7 +422,7 @@ UNION ALL
 -- before. Without this check, left rows that ALREADY had matches would get
 -- spurious D(NULL-padded) rows that corrupt intermediate aggregate old-state
 -- reconstruction via EXCEPT ALL/UNION ALL.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_part2} l
@@ -433,7 +442,7 @@ UNION ALL
 -- reverts to NULL-padded. Check current right (post-changes) to verify no
 -- remaining matches exist, AND check R_old to confirm the left row previously
 -- HAD matches (otherwise it was already NULL-padded — no change needed).
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l
@@ -489,7 +498,7 @@ UNION ALL
 
 -- Part 4: Delete stale NULL-padded rows when a left row gains its FIRST right match.
 -- Use L₀ so simultaneous left changes delete the row that actually existed.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_part2} l
@@ -505,7 +514,7 @@ WHERE (SELECT has_ins FROM {flags_cte})
 UNION ALL
 
 -- Part 5: Insert NULL-padded rows when a left row loses ALL right matches.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l

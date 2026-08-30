@@ -165,8 +165,8 @@ WHERE xid >= <last_consumed_xid>
 
 **Notes:**
 - Each source table has a dedicated change buffer table created by the CDC module.
-- Row data is stored as JSONB with column names as keys.
-- The `__pgt_row_id` column (xxHash of primary key) is included for deduplication.
+- Row data is stored in flat typed columns.
+- The complete typed-V2 `__pgt_row_id` column is included for exact deduplication matching.
 
 ---
 
@@ -465,7 +465,7 @@ Maintains a hidden `__pgt_dup_count` column in the storage table to track how ma
 
 **Notes:**
 - The duplicate count is not visible in user queries against the storage table (projected away by the view layer).
-- Duplicate counting uses `__pgt_row_id` (xxHash) for efficient lookups.
+- Duplicate counting uses the complete typed-V2 `__pgt_row_id` for exact identity matching; any row probe is only an accelerator.
 
 ---
 
@@ -721,7 +721,7 @@ The cost is proportional to the full result set size.
 
 **Notes:**
 - Non-linear recursion (multiple self-references in the recursive term) is rejected — PostgreSQL restricts the recursive term to reference the CTE at most once.
-- The `__pgt_row_id` column (xxHash of the JSON-serialized row) is used for row identity.
+- The complete typed-V2 `__pgt_row_id` column is used for row identity; JSON serialization is not part of the identity contract.
 - For write-heavy workloads on very large recursive result sets with frequent mixed changes, `refresh_mode = 'FULL'` may still be more efficient than DRed.
 
 ---

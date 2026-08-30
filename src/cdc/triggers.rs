@@ -10,7 +10,7 @@
 /// table.  A source table column with any of these names would collide with the
 /// metadata column in a flat (A44-10 D+I) change-buffer schema.
 pub(super) const RESERVED_CB_COLS: &[&str] =
-    &["change_id", "lsn", "action", "pk_hash", "changed_cols"];
+    &["change_id", "lsn", "action", "__pgt_row_id", "changed_cols"];
 
 /// Map a *source* column name to its change-buffer storage name.
 ///
@@ -92,7 +92,7 @@ mod tests {
         // All RESERVED_CB_COLS must be prefixed with __usr_
         assert_eq!(cb_col_name("action"), "__usr_action");
         assert_eq!(cb_col_name("lsn"), "__usr_lsn");
-        assert_eq!(cb_col_name("pk_hash"), "__usr_pk_hash");
+        assert_eq!(cb_col_name("__pgt_row_id"), "__usr___pgt_row_id");
         assert_eq!(cb_col_name("changed_cols"), "__usr_changed_cols");
         assert_eq!(cb_col_name("change_id"), "__usr_change_id");
     }

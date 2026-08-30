@@ -73,12 +73,12 @@ fn make_ctx_3() -> DiffContext {
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(3, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 /// (employees e LEFT JOIN departments d ON e.dept_id = d.dept_id)
@@ -164,37 +164,29 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id   BIGSERIAL PRIMARY KEY,
     lsn         PG_LSN NOT NULL,
     action      CHAR(1) NOT NULL,
-    pk_hash     BIGINT,
-    new_id      INT,
-    new_dept_id INT,
-    new_name    TEXT,
-    old_id      INT,
-    old_dept_id INT,
-    old_name    TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id      INT,
+    dept_id INT,
+    name    TEXT
 );
 
 CREATE TABLE pgtrickle_changes.changes_2 (
     change_id   BIGSERIAL PRIMARY KEY,
     lsn         PG_LSN NOT NULL,
     action      CHAR(1) NOT NULL,
-    pk_hash     BIGINT,
-    new_dept_id INT,
-    new_mgr_id  INT,
-    new_label   TEXT,
-    old_dept_id INT,
-    old_mgr_id  INT,
-    old_label   TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    dept_id INT,
+    mgr_id  INT,
+    label   TEXT
 );
 
 CREATE TABLE pgtrickle_changes.changes_3 (
     change_id    BIGSERIAL PRIMARY KEY,
     lsn          PG_LSN NOT NULL,
     action       CHAR(1) NOT NULL,
-    pk_hash      BIGINT,
-    new_id       INT,
-    new_mgr_name TEXT,
-    old_id       INT,
-    old_mgr_name TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id       INT,
+    mgr_name TEXT
 );
 "#,
     )
@@ -276,8 +268,8 @@ async fn test_diff_nested_left_join_innermost_insert_fully_matched() {
 
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_dept_id, new_name) \
-         VALUES ('0/1', 'I', 1, 1, 10, 'Bob')",
+         (lsn, action, __pgt_row_id, id, dept_id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(1), 1, 10, 'Bob')",
     )
     .await;
 
@@ -313,8 +305,8 @@ async fn test_diff_nested_left_join_insert_with_no_dept() {
     // dept_id=20 has no matching department row; insert only the employee.
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_dept_id, new_name) \
-         VALUES ('0/1', 'I', 1, 1, 20, 'Bob')",
+         (lsn, action, __pgt_row_id, id, dept_id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(1), 1, 20, 'Bob')",
     )
     .await;
 
@@ -355,8 +347,8 @@ async fn test_diff_nested_left_join_outermost_delete() {
 
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_3 \
-         (lsn, action, pk_hash, old_id, old_mgr_name) \
-         VALUES ('0/1', 'D', 99, 99, 'Alice')",
+         (lsn, action, __pgt_row_id, id, mgr_name) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(99), 99, 'Alice')",
     )
     .await;
 

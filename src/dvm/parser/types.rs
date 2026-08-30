@@ -1933,12 +1933,12 @@ impl OpTree {
                 pk_columns,
                 ..
             } => {
-                // Use PK columns if available (matches CDC trigger pk_hash).
+                // Use PK columns if available (matches the CDC trigger identity).
                 if !pk_columns.is_empty() {
                     return Some(pk_columns.clone());
                 }
                 // Keyless table (S10): use all columns as content hash key,
-                // matching the all-column pk_hash computed by the CDC trigger.
+                // matching the all-column identity computed by the CDC trigger.
                 Some(columns.iter().map(|c| c.name.clone()).collect())
             }
             OpTree::Filter { child, .. } => child.row_id_key_columns(),
@@ -1965,16 +1965,11 @@ impl OpTree {
                     let pk_aliases = join_pk_aliases(expressions, aliases, unwrapped);
                     return Some(pk_aliases.unwrap_or_else(|| aliases.clone()));
                 }
-                // For lateral function/subquery children, use all projected
-                // columns as the row_id key. SRF expansions have no natural PK,
-                // so we hash all output columns. This ensures both FULL refresh
-                // (which hashes the projected output) and DIFFERENTIAL refresh
-                // (which recomputes row_id in the Project operator) produce the
-                // same row_ids.
-                if matches!(
-                    unwrapped,
-                    OpTree::LateralFunction { .. } | OpTree::LateralSubquery { .. }
-                ) {
+                // Lateral subqueries have a complete content identity. SRF
+                // bodies are FULL-only when their result cannot be inspected;
+                // returning no key here makes FULL refresh use its generic
+                // row_to_json identity instead of trying to encode JSONB.
+                if matches!(unwrapped, OpTree::LateralSubquery { .. }) {
                     return Some(aliases.clone());
                 }
                 // For semi-join/anti-join children (EXISTS / NOT EXISTS / IN),
@@ -2117,8 +2112,8 @@ impl OpTree {
                 None
             }
             OpTree::LateralFunction { .. } => {
-                // SRF expansions have no natural primary key.
-                // Row IDs are content-hash based, computed by the diff operator.
+                // SRF expansions have no natural primary key. Let callers
+                // use the generic complete-row identity path.
                 None
             }
             OpTree::LateralSubquery { .. } => {

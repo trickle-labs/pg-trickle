@@ -838,7 +838,7 @@ pub(super) fn shared_buffer_stats_impl()
                      WHERE table_schema = '{change_schema}' \
                        AND table_name = '{buf_base}' \
                        AND column_name NOT IN (\
-                         'change_id','lsn','action','pk_hash','changed_cols',\
+                         'change_id','lsn','action','__pgt_row_id','changed_cols',\
                          '__pgt_trace_context')",
                 ))
                 .unwrap_or(None)
@@ -1863,13 +1863,18 @@ pub(super) fn preflight() -> String {
     let expected_identity_version = crate::hash::CURRENT_ROW_IDENTITY_VERSION;
     let row_identity_check = match Spi::get_one_with_args::<bool>(
         "SELECT NOT EXISTS (\
-             SELECT 1 FROM pgtrickle.pgt_stream_tables \
-             WHERE row_identity_version IS DISTINCT FROM $1\
+             SELECT 1 FROM pgtrickle.pgt_stream_tables st \
+             WHERE st.row_identity_version IS DISTINCT FROM $1 OR \
+                   NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint IS DISTINCT FROM $2\
          ) AND NOT EXISTS (\
-             SELECT 1 FROM pgtrickle.pgt_change_buffers \
-             WHERE row_identity_version IS DISTINCT FROM $1\
+             SELECT 1 FROM pgtrickle.pgt_change_buffers cb \
+             WHERE cb.row_identity_version IS DISTINCT FROM $1 OR \
+                   NULLIF(to_jsonb(cb)->>'row_probe_version', '')::smallint IS DISTINCT FROM $2\
          )",
-        &[expected_identity_version.into()],
+        &[
+            expected_identity_version.into(),
+            (crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16).into(),
+        ],
     ) {
         Ok(Some(true)) => serde_json::json!({
             "ok": true,

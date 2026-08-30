@@ -10,7 +10,7 @@
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
+use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree};
 use crate::error::PgTrickleError;
 
@@ -668,55 +668,26 @@ fn build_intermediate_agg_delta(
 
         let final_cte = ctx.next_cte_name("agg_final");
 
-        // Row ID: hash ALL output columns (group + aggregates) so the
-        // row_id matches the initial load's content hash.  This is
-        // necessary for CTE-wrapped aggregates where the intermediate
-        // aggregate's row_id flows directly to the MERGE.
-        //
-        // For D events, the aggregate values are the OLD (pre-change)
-        // values computed algebraically;  for I events, they are the
-        // NEW values from the rescan CTE.  A value change thus produces
-        // different row_ids for D and I, which is correct: the D event
-        // deletes the old ST row (matched by old content hash), and the
-        // I event inserts a new ST row (with new content hash).
-        let old_agg_hash_exprs: Vec<String> = aggregates
-            .iter()
-            .map(|agg| {
-                let alias = &agg.alias;
-                let ins_col = format!("__ins_{alias}");
-                let del_col = format!("__del_{alias}");
-                format!(
-                    "(COALESCE(n.{a}, 0) - COALESCE(d.{i}, 0) + COALESCE(d.{d}, 0))::TEXT",
-                    a = quote_ident(alias),
-                    i = quote_ident(&ins_col),
-                    d = quote_ident(&del_col),
-                )
-            })
-            .collect();
-        let new_agg_hash_exprs: Vec<String> = aggregates
-            .iter()
-            .map(|a| format!("n.{}::TEXT", quote_ident(&a.alias)))
-            .collect();
-
+        // The GROUP BY key is the row identity. Aggregate values may change
+        // while the logical group remains the same, so including them would
+        // make the DELETE half of a D+I update miss the stored row.
         let group_hash_d: Vec<String> = group_output
             .iter()
-            .map(|c| format!("d.{}::TEXT", quote_ident(c)))
-            .chain(old_agg_hash_exprs)
+            .map(|c| format!("d.{}", quote_ident(c)))
             .collect();
         let group_hash_n: Vec<String> = group_output
             .iter()
-            .map(|c| format!("n.{}::TEXT", quote_ident(c)))
-            .chain(new_agg_hash_exprs)
+            .map(|c| format!("n.{}", quote_ident(c)))
             .collect();
         let row_id_d = if group_hash_d.is_empty() {
-            "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
+            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
-            build_hash_expr(&group_hash_d)
+            build_hash_expr_for_domain("GROUP_KEY", &group_hash_d)
         };
         let row_id_n = if group_hash_n.is_empty() {
-            "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
+            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
-            build_hash_expr(&group_hash_n)
+            build_hash_expr_for_domain("GROUP_KEY", &group_hash_n)
         };
 
         // D event group columns from delta_cte
@@ -866,21 +837,21 @@ FROM {new_rescan_cte} n",
 
         let group_hash_n: Vec<String> = group_output
             .iter()
-            .map(|c| format!("n.{}::TEXT", quote_ident(c)))
+            .map(|c| format!("n.{}", quote_ident(c)))
             .collect();
         let group_hash_o: Vec<String> = group_output
             .iter()
-            .map(|c| format!("o.{}::TEXT", quote_ident(c)))
+            .map(|c| format!("o.{}", quote_ident(c)))
             .collect();
         let row_id_new = if group_hash_n.is_empty() {
-            "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
+            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
-            build_hash_expr(&group_hash_n)
+            build_hash_expr_for_domain("GROUP_KEY", &group_hash_n)
         };
         let row_id_old = if group_hash_o.is_empty() {
-            "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
+            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
-            build_hash_expr(&group_hash_o)
+            build_hash_expr_for_domain("GROUP_KEY", &group_hash_o)
         };
 
         let new_group_refs = group_output
@@ -1878,12 +1849,12 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Row ID from group-by columns (using output names)
     let group_hash_exprs: Vec<String> = group_output
         .iter()
-        .map(|c| format!("d.{}::TEXT", quote_ident(c)))
+        .map(|c| format!("d.{}", quote_ident(c)))
         .collect();
     let row_id_expr = if group_hash_exprs.is_empty() {
-        "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
+        "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
     } else {
-        build_hash_expr(&group_hash_exprs)
+        build_hash_expr_for_domain("GROUP_KEY", &group_hash_exprs)
     };
 
     let mut merge_selects = Vec::new();

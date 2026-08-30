@@ -1,5 +1,7 @@
 # What Happens When You DELETE a Row?
 
+> **v0.87.16 note:** The diagrams below use simplified legacy change-buffer labels to explain the lifecycle. Current buffers use flat typed columns and a complete `__pgt_row_id BYTEA` from the V2 encoder; `row_probe_v1` is only an index accelerator, never the identity.
+
 This tutorial traces what happens when a `DELETE` statement hits a base table that is referenced by a stream table. It covers the trigger capture, how the scan delta emits a single DELETE event, and how each DVM operator propagates the removal — including group deletion, partial group reduction, JOINs, cascading deletes within a single refresh window, and the important edge case where a DELETE cancels a prior INSERT.
 
 > **Prerequisite:** Read [WHAT_HAPPENS_ON_INSERT.md](WHAT_HAPPENS_ON_INSERT.md) first — it introduces the full 7-phase lifecycle (trigger → scheduler → frontier → change detection → DVM delta → MERGE → cleanup). This tutorial focuses on how DELETE differs.

@@ -836,6 +836,12 @@ fn write_decoded_change(
     };
 
     let has_pk = !pk_columns.is_empty();
+    let identity_columns: Vec<String> = if has_pk {
+        pk_columns.to_vec()
+    } else {
+        columns.iter().map(|(name, _)| name.clone()).collect()
+    };
+    let identity_domain = if has_pk { "SCAN_KEY" } else { "KEYLESS_ROW" };
 
     // A42-13: Build a fully parameterized INSERT.
     // All data values are passed as SPI text parameters ($1, $2, ...)
@@ -851,7 +857,7 @@ fn write_decoded_change(
     let mut param_values: Vec<Option<String>> = Vec::new();
     // col_names:  the quoted column identifiers for the INSERT list.
     let mut col_names: Vec<String> = Vec::new();
-    // placeholder:  the corresponding $N expressions (or sub-expressions for pk_hash).
+    // placeholder:  the corresponding $N expressions (or sub-expressions for __pgt_row_id).
     let mut placeholders: Vec<String> = Vec::new();
 
     // $1: lsn (text cast to pg_lsn)
@@ -866,10 +872,16 @@ fn write_decoded_change(
     let action_idx = param_values.len();
     placeholders.push(format!("${}", action_idx));
 
-    // pk_hash column (uses subsequent $N params for PK column values)
-    if has_pk {
-        col_names.push("pk_hash".to_string());
-        let pk_hash_expr = build_pk_hash_parameterized(pk_columns, &parsed, &mut param_values);
+    // __pgt_row_id column (uses subsequent $N params for PK column values)
+    {
+        col_names.push("__pgt_row_id".to_string());
+        let pk_hash_expr = build_pk_hash_parameterized(
+            &identity_columns,
+            identity_domain,
+            columns,
+            &parsed,
+            &mut param_values,
+        );
         placeholders.push(pk_hash_expr);
     }
 
@@ -895,11 +907,13 @@ fn write_decoded_change(
         assert_valid_identifier(&buf_name, "change buffer name")?;
         assert_valid_identifier(change_schema, "change schema")?;
 
-        let d_pk_hash_expr = build_pk_hash_from_values(pk_columns, &old_parsed);
-        let i_pk_hash_expr = build_pk_hash_from_values(pk_columns, &parsed);
+        let d_pk_hash_expr =
+            build_identity_from_values(&identity_columns, identity_domain, columns, &old_parsed);
+        let i_pk_hash_expr =
+            build_identity_from_values(&identity_columns, identity_domain, columns, &parsed);
 
         let num_columns = columns.len();
-        let pk_extra = if has_pk { 1 } else { 0 };
+        let pk_extra = 1;
 
         // PERF-5: Pre-allocate all column/value Vecs with known capacity to
         // eliminate incremental heap reallocation per column.
@@ -908,9 +922,7 @@ fn write_decoded_change(
         let mut col_names_u: Vec<String> = Vec::with_capacity(2 + pk_extra + num_columns);
         col_names_u.push("lsn".to_string());
         col_names_u.push("action".to_string());
-        if has_pk {
-            col_names_u.push("pk_hash".to_string());
-        }
+        col_names_u.push("__pgt_row_id".to_string());
         for (col_name, _) in columns {
             let cb_name = crate::cdc::cb_col_name(col_name);
             col_names_u.push(format!("\"{}\"", cb_name.replace('"', "\"\"")));
@@ -923,9 +935,7 @@ fn write_decoded_change(
         let mut d_vals: Vec<String> = Vec::with_capacity(2 + pk_extra + num_columns);
         d_vals.push("$1::pg_lsn".to_string());
         d_vals.push("'D'".to_string());
-        if has_pk {
-            d_vals.push(d_pk_hash_expr);
-        }
+        d_vals.push(d_pk_hash_expr);
         for (col_name, col_type) in columns {
             d_all_params.push(old_parsed.get(col_name).cloned());
             d_vals.push(format!("${}::{}", d_all_params.len(), col_type));
@@ -938,9 +948,7 @@ fn write_decoded_change(
         let mut i_vals: Vec<String> = Vec::with_capacity(2 + pk_extra + num_columns);
         i_vals.push("$1::pg_lsn".to_string());
         i_vals.push("'I'".to_string());
-        if has_pk {
-            i_vals.push(i_pk_hash_expr);
-        }
+        i_vals.push(i_pk_hash_expr);
         for (col_name, col_type) in columns {
             i_all_params.push(parsed.get(col_name).cloned());
             i_vals.push(format!("${}::{}", d_len + i_all_params.len(), col_type));
@@ -1048,45 +1056,42 @@ fn assert_valid_identifier(s: &str, context: &str) -> Result<(), PgTrickleError>
     }
 }
 
-/// A42-13: Build a parameterized pk_hash sub-expression.
+/// A42-13: Build a parameterized __pgt_row_id sub-expression.
 ///
 /// Instead of embedding the PK values as SQL string literals (old approach),
 /// we add each PK value to `param_values` and reference them via `$N`
 /// placeholders in the generated expression. NULL pk-column values produce
 /// a 0 hash (matching the trigger behaviour).
 fn build_pk_hash_parameterized(
-    pk_columns: &[String],
+    identity_columns: &[String],
+    domain: &str,
+    columns: &[(String, String)],
     parsed: &std::collections::HashMap<String, String>,
     param_values: &mut Vec<Option<String>>,
 ) -> String {
-    if pk_columns.is_empty() {
-        return "0".to_string();
+    if identity_columns.is_empty() {
+        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string();
     }
 
-    if pk_columns.len() == 1 {
-        let val = parsed.get(&pk_columns[0]).cloned();
+    let type_for = |column: &str| {
+        columns
+            .iter()
+            .find(|(name, _)| name == column)
+            .map(|(_, ty)| ty.as_str())
+            .unwrap_or("text")
+    };
+    let mut items = Vec::with_capacity(identity_columns.len());
+    for col in identity_columns {
+        let val = parsed.get(col).cloned();
         param_values.push(val.clone());
         let idx = param_values.len();
-        if val.is_some() {
-            format!("pgtrickle.pg_trickle_hash(${})", idx)
+        items.push(if val.is_some() {
+            format!("${idx}::{}", type_for(col))
         } else {
-            // NULL pk → 0 hash (matches trigger)
-            "0".to_string()
-        }
-    } else {
-        let mut array_items: Vec<String> = Vec::new();
-        for col in pk_columns {
-            let val = parsed.get(col).cloned();
-            param_values.push(val.clone());
-            let idx = param_values.len();
-            if val.is_some() {
-                array_items.push(format!("${}", idx));
-            } else {
-                array_items.push("NULL".to_string());
-            }
-        }
-        crate::hash::build_composite_hash_expr(&array_items)
+            format!("NULL::{}", type_for(col))
+        });
     }
+    crate::hash::build_row_identity_expr(domain, &items)
 }
 
 #[doc(hidden)]
@@ -1095,42 +1100,48 @@ pub fn build_test_decoding_parameter_plan_for_fuzz(
     parsed: &std::collections::HashMap<String, String>,
 ) -> (String, Vec<Option<String>>) {
     let mut params = Vec::new();
-    let expression = build_pk_hash_parameterized(pk_columns, parsed, &mut params);
+    let expression = build_pk_hash_parameterized(pk_columns, "SCAN_KEY", &[], parsed, &mut params);
     (expression, params)
 }
 
-/// Build a pk_hash expression from parsed column values (legacy — kept for
+/// Build a __pgt_row_id expression from parsed column values (legacy — kept for
 /// any callers outside the parameterized path).
 ///
 /// Uses the same hash computation as the trigger-based CDC to ensure
-/// pk_hash values match between trigger and WAL decoder outputs.
-fn build_pk_hash_from_values(
-    pk_columns: &[String],
+/// __pgt_row_id values match between trigger and WAL decoder outputs.
+fn build_identity_from_values(
+    identity_columns: &[String],
+    domain: &str,
+    columns: &[(String, String)],
     parsed: &std::collections::HashMap<String, String>,
 ) -> String {
-    if pk_columns.is_empty() {
-        return "0".to_string();
+    if identity_columns.is_empty() {
+        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string();
     }
 
-    if pk_columns.len() == 1 {
-        if let Some(val) = parsed.get(&pk_columns[0]) {
-            format!("pgtrickle.pg_trickle_hash('{}')", val.replace('\'', "''"))
-        } else {
-            "0".to_string()
-        }
-    } else {
-        let array_items: Vec<String> = pk_columns
-            .iter()
-            .map(|col| {
-                if let Some(val) = parsed.get(col) {
-                    format!("'{}'", val.replace('\'', "''"))
-                } else {
-                    "NULL".to_string()
-                }
-            })
-            .collect();
-        crate::hash::build_composite_hash_expr(&array_items)
-    }
+    let items: Vec<String> = identity_columns
+        .iter()
+        .map(|col| {
+            let ty = columns
+                .iter()
+                .find(|(name, _)| name == col)
+                .map(|(_, ty)| ty.as_str())
+                .unwrap_or("text");
+            match parsed.get(col) {
+                Some(val) => format!("'{}'::{}", val.replace('\'', "''"), ty),
+                None => format!("NULL::{ty}"),
+            }
+        })
+        .collect();
+    crate::hash::build_row_identity_expr(domain, &items)
+}
+
+/// Compatibility helper for unit callers that only provide textual values.
+fn build_pk_hash_from_values(
+    identity_columns: &[String],
+    parsed: &std::collections::HashMap<String, String>,
+) -> String {
+    build_identity_from_values(identity_columns, "SCAN_KEY", &[], parsed)
 }
 
 /// Mark all downstream stream tables for reinitialization.
@@ -2621,7 +2632,10 @@ mod tests {
     fn test_build_pk_hash_empty() {
         let pk: Vec<String> = vec![];
         let parsed = std::collections::HashMap::new();
-        assert_eq!(build_pk_hash_from_values(&pk, &parsed), "0");
+        assert_eq!(
+            build_pk_hash_from_values(&pk, &parsed),
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+        );
     }
 
     #[test]
@@ -2630,7 +2644,7 @@ mod tests {
         let mut parsed = std::collections::HashMap::new();
         parsed.insert("id".to_string(), "42".to_string());
         let result = build_pk_hash_from_values(&pk, &parsed);
-        assert!(result.contains("pg_trickle_hash"));
+        assert!(result.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
         assert!(result.contains("42"));
     }
 
@@ -2641,7 +2655,7 @@ mod tests {
         parsed.insert("a".to_string(), "1".to_string());
         parsed.insert("b".to_string(), "2".to_string());
         let result = build_pk_hash_from_values(&pk, &parsed);
-        assert!(result.contains("pg_trickle_hash_multi"));
+        assert!(result.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
         assert!(result.contains("'1'"));
         assert!(result.contains("'2'"));
     }
@@ -2650,7 +2664,10 @@ mod tests {
     fn test_build_pk_hash_missing_key() {
         let pk = vec!["id".to_string()];
         let parsed = std::collections::HashMap::new(); // no "id" key
-        assert_eq!(build_pk_hash_from_values(&pk, &parsed), "0");
+        assert_eq!(
+            build_pk_hash_from_values(&pk, &parsed),
+            "pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(NULL::text))"
+        );
     }
 
     #[test]
@@ -2750,18 +2767,18 @@ mod tests {
         assert!(old.is_empty(), "INSERT should have no old columns");
     }
 
-    /// TEST-3c: pk_hash for keyless table (empty PK) returns "0".
+    /// TEST-3c: keyless tables use the deterministic synthetic identity.
     #[test]
     fn test_pk_hash_keyless_table_returns_zero() {
-        // Keyless tables have no PK columns, so pk_hash must be "0"
+        // Keyless tables have no PK columns, so use the synthetic identity.
         let pk_cols: Vec<String> = vec![];
         let mut parsed = std::collections::HashMap::new();
         parsed.insert("val".to_string(), "hello".to_string());
         parsed.insert("num".to_string(), "42".to_string());
         assert_eq!(
             build_pk_hash_from_values(&pk_cols, &parsed),
-            "0",
-            "Keyless table pk_hash must be 0"
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))",
+            "Keyless table __pgt_row_id must use the synthetic identity"
         );
     }
 
@@ -2778,7 +2795,7 @@ mod tests {
         assert_eq!(parse_pgoutput_action(data2), Some('D'));
     }
 
-    /// TEST-3e: pk_hash with special characters in PK values are properly
+    /// TEST-3e: __pgt_row_id with special characters in PK values are properly
     /// escaped to prevent SQL injection in generated expressions.
     #[test]
     fn test_pk_hash_special_chars_escaped() {
@@ -2878,7 +2895,10 @@ mod tests {
         ) {
             let pk_cols: Vec<String> = vec![];
             let result = build_pk_hash_from_values(&pk_cols, &values);
-            prop_assert_eq!(result, "0".to_string());
+            prop_assert_eq!(
+                result,
+                "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string()
+            );
         }
 
         #[test]

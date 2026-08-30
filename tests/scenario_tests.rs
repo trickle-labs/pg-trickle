@@ -26,7 +26,7 @@ async fn test_scenario_create_and_full_refresh() {
         .await;
 
     // Create ST storage table matching the defining query shape
-    db.execute("CREATE TABLE public.product_summary (__pgt_row_id BIGINT, id INT, name TEXT, price NUMERIC)")
+    db.execute("CREATE TABLE public.product_summary (__pgt_row_id BYTEA NOT NULL, id INT, name TEXT, price NUMERIC)")
         .await;
 
     let storage_oid: i32 = db
@@ -42,7 +42,7 @@ async fn test_scenario_create_and_full_refresh() {
     db.execute("TRUNCATE product_summary").await;
     db.execute(
         "INSERT INTO product_summary (__pgt_row_id, id, name, price) \
-                SELECT 0, id, name, price FROM products",
+                SELECT pgtrickle.test_int_to_row_id(id), id, name, price FROM products",
     )
     .await;
 
@@ -78,8 +78,10 @@ async fn test_scenario_refresh_after_insert() {
     db.execute("INSERT INTO orders VALUES (1, 100), (2, 200)")
         .await;
 
-    db.execute("CREATE TABLE public.order_mirror (__pgt_row_id BIGINT, id INT, amount NUMERIC)")
-        .await;
+    db.execute(
+        "CREATE TABLE public.order_mirror (__pgt_row_id BYTEA NOT NULL, id INT, amount NUMERIC)",
+    )
+    .await;
     let oid: i32 = db
         .query_scalar("SELECT 'order_mirror'::regclass::oid::int")
         .await;
@@ -91,7 +93,7 @@ async fn test_scenario_refresh_after_insert() {
 
     // Initial full refresh
     db.execute(
-        "INSERT INTO order_mirror (__pgt_row_id, id, amount) SELECT 0, id, amount FROM orders",
+        "INSERT INTO order_mirror (__pgt_row_id, id, amount) SELECT pgtrickle.test_int_to_row_id(id), id, amount FROM orders",
     )
     .await;
     assert_eq!(db.count("order_mirror").await, 2);
@@ -103,7 +105,7 @@ async fn test_scenario_refresh_after_insert() {
     // Re-refresh (full)
     db.execute("TRUNCATE order_mirror").await;
     db.execute(
-        "INSERT INTO order_mirror (__pgt_row_id, id, amount) SELECT 0, id, amount FROM orders",
+        "INSERT INTO order_mirror (__pgt_row_id, id, amount) SELECT pgtrickle.test_int_to_row_id(id), id, amount FROM orders",
     )
     .await;
 
@@ -133,7 +135,7 @@ async fn test_scenario_refresh_after_update() {
     db.execute("INSERT INTO items VALUES (1, 10), (2, 20), (3, 30)")
         .await;
 
-    db.execute("CREATE TABLE public.item_st (__pgt_row_id BIGINT, id INT, qty INT)")
+    db.execute("CREATE TABLE public.item_st (__pgt_row_id BYTEA NOT NULL, id INT, qty INT)")
         .await;
     let oid: i32 = db
         .query_scalar("SELECT 'item_st'::regclass::oid::int")
@@ -146,7 +148,7 @@ async fn test_scenario_refresh_after_update() {
 
     // Initial full refresh
     db.execute("TRUNCATE item_st").await;
-    db.execute("INSERT INTO item_st (__pgt_row_id, id, qty) SELECT 0, id, qty FROM items")
+    db.execute("INSERT INTO item_st (__pgt_row_id, id, qty) SELECT pgtrickle.test_int_to_row_id(id), id, qty FROM items")
         .await;
 
     // Update source
@@ -154,7 +156,7 @@ async fn test_scenario_refresh_after_update() {
 
     // Re-refresh
     db.execute("TRUNCATE item_st").await;
-    db.execute("INSERT INTO item_st (__pgt_row_id, id, qty) SELECT 0, id, qty FROM items")
+    db.execute("INSERT INTO item_st (__pgt_row_id, id, qty) SELECT pgtrickle.test_int_to_row_id(id), id, qty FROM items")
         .await;
 
     // Verify updated value is reflected
@@ -187,7 +189,7 @@ async fn test_scenario_refresh_after_delete() {
     db.execute("INSERT INTO records VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')")
         .await;
 
-    db.execute("CREATE TABLE public.records_st (__pgt_row_id BIGINT, id INT, val TEXT)")
+    db.execute("CREATE TABLE public.records_st (__pgt_row_id BYTEA NOT NULL, id INT, val TEXT)")
         .await;
     let oid: i32 = db
         .query_scalar("SELECT 'records_st'::regclass::oid::int")
@@ -199,7 +201,7 @@ async fn test_scenario_refresh_after_delete() {
     )).await;
 
     // Initial refresh
-    db.execute("INSERT INTO records_st (__pgt_row_id, id, val) SELECT 0, id, val FROM records")
+    db.execute("INSERT INTO records_st (__pgt_row_id, id, val) SELECT pgtrickle.test_int_to_row_id(id), id, val FROM records")
         .await;
     assert_eq!(db.count("records_st").await, 4);
 
@@ -208,7 +210,7 @@ async fn test_scenario_refresh_after_delete() {
 
     // Re-refresh
     db.execute("TRUNCATE records_st").await;
-    db.execute("INSERT INTO records_st (__pgt_row_id, id, val) SELECT 0, id, val FROM records")
+    db.execute("INSERT INTO records_st (__pgt_row_id, id, val) SELECT pgtrickle.test_int_to_row_id(id), id, val FROM records")
         .await;
     assert_eq!(db.count("records_st").await, 2);
 
@@ -237,7 +239,7 @@ async fn test_scenario_filtered_st() {
     )
     .await;
 
-    db.execute("CREATE TABLE public.us_sales_st (__pgt_row_id BIGINT, id INT, region TEXT, amount NUMERIC)")
+    db.execute("CREATE TABLE public.us_sales_st (__pgt_row_id BYTEA NOT NULL, id INT, region TEXT, amount NUMERIC)")
         .await;
     let oid: i32 = db
         .query_scalar("SELECT 'us_sales_st'::regclass::oid::int")
@@ -255,7 +257,7 @@ async fn test_scenario_filtered_st() {
 
     // Full refresh with filter
     db.execute(&format!(
-        "INSERT INTO us_sales_st (__pgt_row_id, id, region, amount) SELECT 0, id, region, amount FROM ({exec_query}) sub"
+        "INSERT INTO us_sales_st (__pgt_row_id, id, region, amount) SELECT pgtrickle.test_int_to_row_id(id), id, region, amount FROM ({exec_query}) sub"
     )).await;
 
     // Only US rows
@@ -295,8 +297,10 @@ async fn test_scenario_join_st() {
     let defining_query =
         "SELECT c.name, p.item FROM customers c JOIN purchases p ON c.id = p.cust_id";
 
-    db.execute("CREATE TABLE public.cust_purchases_st (__pgt_row_id BIGINT, name TEXT, item TEXT)")
-        .await;
+    db.execute(
+        "CREATE TABLE public.cust_purchases_st (__pgt_row_id BYTEA NOT NULL, name TEXT, item TEXT)",
+    )
+    .await;
     let oid: i32 = db
         .query_scalar("SELECT 'cust_purchases_st'::regclass::oid::int")
         .await;
@@ -309,7 +313,7 @@ async fn test_scenario_join_st() {
     // Full refresh
     db.execute(&format!(
         "INSERT INTO cust_purchases_st (__pgt_row_id, name, item) \
-         SELECT 0, sub.name, sub.item FROM ({defining_query}) sub"
+         SELECT decode(md5(row_to_json(sub)::text), 'hex'), sub.name, sub.item FROM ({defining_query}) sub"
     ))
     .await;
 
@@ -340,7 +344,7 @@ async fn test_scenario_aggregate_st() {
 
     let defining_query = "SELECT category, SUM(qty) AS total_qty, COUNT(*) AS item_count FROM inventory GROUP BY category";
 
-    db.execute("CREATE TABLE public.inv_summary_st (__pgt_row_id BIGINT, category TEXT, total_qty BIGINT, item_count BIGINT)")
+    db.execute("CREATE TABLE public.inv_summary_st (__pgt_row_id BYTEA NOT NULL, category TEXT, total_qty BIGINT, item_count BIGINT)")
         .await;
     let oid: i32 = db
         .query_scalar("SELECT 'inv_summary_st'::regclass::oid::int")
@@ -354,7 +358,7 @@ async fn test_scenario_aggregate_st() {
     // Full refresh
     db.execute(&format!(
         "INSERT INTO inv_summary_st (__pgt_row_id, category, total_qty, item_count) \
-         SELECT 0, sub.category, sub.total_qty, sub.item_count FROM ({defining_query}) sub"
+         SELECT decode(md5(row_to_json(sub)::text), 'hex'), sub.category, sub.total_qty, sub.item_count FROM ({defining_query}) sub"
     ))
     .await;
 
@@ -394,7 +398,7 @@ async fn test_scenario_refresh_history() {
         .await;
     db.execute("INSERT INTO src VALUES (1, 10)").await;
 
-    db.execute("CREATE TABLE public.src_st (__pgt_row_id BIGINT, id INT, val INT)")
+    db.execute("CREATE TABLE public.src_st (__pgt_row_id BYTEA NOT NULL, id INT, val INT)")
         .await;
     let oid: i32 = db.query_scalar("SELECT 'src_st'::regclass::oid::int").await;
 
@@ -434,7 +438,7 @@ async fn test_scenario_st_info_view() {
     let db = TestDb::with_catalog().await;
 
     db.execute("CREATE TABLE base (id INT PRIMARY KEY)").await;
-    db.execute("CREATE TABLE public.st_test (__pgt_row_id BIGINT, id INT)")
+    db.execute("CREATE TABLE public.st_test (__pgt_row_id BYTEA NOT NULL, id INT)")
         .await;
     let oid: i32 = db
         .query_scalar("SELECT 'st_test'::regclass::oid::int")
@@ -463,7 +467,7 @@ async fn test_scenario_no_data_refresh() {
         .await;
     db.execute("INSERT INTO src10 VALUES (1, 'hello')").await;
 
-    db.execute("CREATE TABLE public.st10 (__pgt_row_id BIGINT, id INT, val TEXT)")
+    db.execute("CREATE TABLE public.st10 (__pgt_row_id BYTEA NOT NULL, id INT, val TEXT)")
         .await;
     let oid: i32 = db.query_scalar("SELECT 'st10'::regclass::oid::int").await;
 

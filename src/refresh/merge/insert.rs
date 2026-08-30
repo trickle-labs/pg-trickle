@@ -152,7 +152,8 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     let merge_sql = format!(
         "MERGE INTO {quoted_table} \
          USING ({source_sql}) AS __pgt_topk_src \
-         ON {quoted_table}.__pgt_row_id = __pgt_topk_src.__pgt_row_id \
+         ON pgtrickle.row_probe_v1({quoted_table}.__pgt_row_id) = pgtrickle.row_probe_v1(__pgt_topk_src.__pgt_row_id) \
+            AND {quoted_table}.__pgt_row_id = __pgt_topk_src.__pgt_row_id \
          WHEN MATCHED AND ({is_distinct_check}) THEN \
            UPDATE SET {update_set} \
          WHEN NOT MATCHED THEN \

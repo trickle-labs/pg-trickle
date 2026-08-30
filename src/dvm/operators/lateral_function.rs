@@ -93,11 +93,11 @@ pub fn diff_lateral_function(
     // Build hash expression for the row ID: hash all output columns.
     let hash_exprs: Vec<String> = child_cols
         .iter()
-        .map(|c| format!("{outer_alias_q}.{}::TEXT", quote_ident(c)))
+        .map(|c| format!("{outer_alias_q}.{}", quote_ident(c)))
         .chain(
             srf_cols_with_ord
                 .iter()
-                .map(|c| format!("{}.{}::TEXT", quote_ident(alias), quote_ident(c)))
+                .map(|c| format!("{}.{}", quote_ident(alias), quote_ident(c)))
                 .collect::<Vec<_>>(),
         )
         .collect();
@@ -396,7 +396,7 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Row ID hash should include both child and SRF columns
-        assert_sql_contains(&sql, "pg_trickle_hash");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
     }
 
     #[test]

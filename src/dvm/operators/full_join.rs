@@ -213,6 +213,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 &right_result.cte_name,
                 right_cols,
                 &ctx.fallback_leaf_oids,
+                &ctx.st_source_pgt_ids,
             );
             Some(r0)
         }
@@ -236,6 +237,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 &left_result.cte_name,
                 left_cols,
                 &ctx.fallback_leaf_oids,
+                &ctx.st_source_pgt_ids,
             )
         }
     } else {
@@ -264,6 +266,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             &right_result.cte_name,
             &right_user_cols,
             &ctx.fallback_leaf_oids,
+            &ctx.st_source_pgt_ids,
         )
     };
 
@@ -283,6 +286,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             &left_result.cte_name,
             &left_user_cols,
             &ctx.fallback_leaf_oids,
+            &ctx.st_source_pgt_ids,
         )
     };
 
@@ -377,14 +381,20 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     );
 
     let cte_name = ctx.next_cte_name("full_join");
-    let hash_dl_r = crate::hash::build_composite_hash_expr(&[
-        "dl.__pgt_row_id::TEXT".to_string(),
-        "pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT".to_string(),
-    ]);
-    let hash_l_dr = crate::hash::build_composite_hash_expr(&[
-        "pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT".to_string(),
-        "dr.__pgt_row_id::TEXT".to_string(),
-    ]);
+    let hash_dl_r = crate::hash::build_row_identity_expr(
+        "JOIN_KEY",
+        &[
+            "dl.__pgt_row_id".to_string(),
+            "row_to_json(r)::text".to_string(),
+        ],
+    );
+    let hash_l_dr = crate::hash::build_row_identity_expr(
+        "JOIN_KEY",
+        &[
+            "row_to_json(l)::text".to_string(),
+            "dr.__pgt_row_id".to_string(),
+        ],
+    );
 
     let sql = if use_l0 {
         // ── L₀ path: standard DBSP formula with comprehensive guards ─
@@ -449,7 +459,7 @@ UNION ALL
 -- Guard NOT EXISTS ΔL same-key: prevents duplication with Part 3b when L is also
 --   being changed (UPDATE or INSERT) in the same cycle — those parts already handle the
 --   null-padded removal; Part 4 must only fire for pre-existing, unchanging left rows.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_part2} l
@@ -472,7 +482,7 @@ UNION ALL
 -- Guard AND NOT EXISTS ΔL_I same-key: prevents duplicate with Part 3a when a
 -- left INSERT (from UPDATE) and a right DELETE happen for the same key in the
 -- same cycle — Part 3a handles new left rows; Part 5 handles pre-existing ones.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
@@ -523,7 +533,7 @@ UNION ALL
 -- Part 7a: Delete stale NULL-padded right rows when a right row gains its FIRST left match.
 -- Uses R_old (pre-change right) to find right rows that existed before the left INSERT.
 -- Guard NOT EXISTS L_old: fires only when right was previously unmatched (null-padded).
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {r_old_snapshot} r
@@ -543,7 +553,7 @@ UNION ALL
 -- Guard AND NOT EXISTS ΔR_I same-key: prevents duplicate with Part 6a when a
 -- right INSERT (from UPDATE) and a left DELETE happen for the same key in the
 -- same cycle — Part 6a handles new right rows; Part 7b handles pre-existing ones.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
@@ -628,7 +638,7 @@ UNION ALL
 
 -- Part 4: Delete stale NULL-padded left rows when new right matches appear
 -- Guard NOT EXISTS R_old: left was previously unmatched.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
@@ -648,7 +658,7 @@ UNION ALL
 
 -- Part 5: Insert NULL-padded left rows when left row loses all right matches
 -- Guards: NOT EXISTS R₁, AND EXISTS R_old, AND NOT EXISTS ΔL_I same-key.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
@@ -696,7 +706,7 @@ UNION ALL
 -- Part 7a: Delete stale NULL-padded right rows when new left matches appear
 -- Uses r0_snapshot (pre-change right) to find right rows deleted in same cycle.
 -- Guard NOT EXISTS L_old: right was previously unmatched.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {r0_snapshot} r
@@ -713,7 +723,7 @@ UNION ALL
 
 -- Part 7b: Insert NULL-padded right rows when right row loses all left matches
 -- Guards: NOT EXISTS L₁, AND EXISTS L_old, AND NOT EXISTS ΔR_I same-key.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
@@ -777,7 +787,7 @@ UNION ALL
 -- Guard NOT EXISTS R_old: left was previously unmatched.
 -- Guard NOT EXISTS ΔL same-key: prevents spurious fire when L is also changing
 --   (INSERT or UPDATE) — Part 3b handles those transitions.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
@@ -797,7 +807,7 @@ UNION ALL
 
 -- Part 5: Insert NULL-padded left rows when left row loses all right matches
 -- Guards: NOT EXISTS R₁, AND EXISTS R_old, AND NOT EXISTS ΔL_I same-key.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_right_padded}
 FROM {left_table} l
@@ -831,7 +841,7 @@ UNION ALL
 
 -- Part 7a: Delete stale NULL-padded right rows when new left matches appear
 -- Guard NOT EXISTS L_old: right was previously unmatched.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r
@@ -848,7 +858,7 @@ UNION ALL
 
 -- Part 7b: Insert NULL-padded right rows when right row loses all left matches
 -- Guards: NOT EXISTS L₁, AND EXISTS L_old, AND NOT EXISTS ΔR_I same-key.
-SELECT 0::BIGINT AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {null_left_r_padded}
 FROM {right_table} r

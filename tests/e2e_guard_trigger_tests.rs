@@ -26,7 +26,7 @@ async fn test_guard_trigger_blocks_direct_insert() {
 
     // Direct INSERT should be rejected
     let result = db
-        .try_execute("INSERT INTO guard_ins_st (__pgt_row_id, id, val) VALUES (999, 99, 'bad')")
+        .try_execute("INSERT INTO guard_ins_st (__pgt_row_id, id, val) VALUES (pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(99::int)), 99, 'bad')")
         .await;
     assert!(
         result.is_err(),

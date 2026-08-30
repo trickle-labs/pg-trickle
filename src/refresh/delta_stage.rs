@@ -120,11 +120,23 @@ impl DeltaStage {
 
         let (source_table, hash_columns) =
             crate::refresh::source_visibility_key(dependency.source_relid)?;
-        let visible_hash = crate::refresh::codegen::build_content_hash_expr("s.", &hash_columns);
+        let identity_domain = if crate::cdc::resolve_pk_columns(dependency.source_relid)?.is_empty()
+        {
+            "KEYLESS_ROW"
+        } else {
+            "SCAN_KEY"
+        };
+        let visible_hash = crate::refresh::codegen::build_content_hash_expr_for_domain(
+            "s.",
+            &hash_columns,
+            identity_domain,
+        );
         let filter_sql = format!(
             "DELETE FROM {qualified_name} c \
              WHERE c.action <> 'D' AND NOT EXISTS (\
-               SELECT 1 FROM {source_table} s WHERE {visible_hash} = c.pk_hash\
+               SELECT 1 FROM {source_table} s \
+               WHERE pgtrickle.row_probe_v1({visible_hash}) = pgtrickle.row_probe_v1(c.__pgt_row_id) \
+                 AND {visible_hash} = c.__pgt_row_id\
              )"
         );
         if rls_enabled {
@@ -138,13 +150,13 @@ impl DeltaStage {
                 "DELETE FROM {qualified_name} WHERE change_id IN (\
                    SELECT change_id FROM (\
                      SELECT change_id, \
-                            ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id) AS rn_asc, \
-                            ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id DESC) AS rn_desc, \
+                            ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id) AS rn_asc, \
+                            ROW_NUMBER() OVER (PARTITION BY __pgt_row_id ORDER BY change_id DESC) AS rn_desc, \
                             FIRST_VALUE(action) OVER (\
-                              PARTITION BY pk_hash ORDER BY change_id\
+                              PARTITION BY __pgt_row_id ORDER BY change_id\
                             ) AS first_act, \
                             LAST_VALUE(action) OVER (\
-                              PARTITION BY pk_hash ORDER BY change_id \
+                              PARTITION BY __pgt_row_id ORDER BY change_id \
                               ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
                             ) AS last_act \
                      FROM {qualified_name} WHERE action IN ('I', 'D')\

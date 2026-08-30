@@ -87,9 +87,9 @@ pub fn diff_semi_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let hash_part2 = {
         let key_exprs: Vec<String> = left_cols
             .iter()
-            .map(|c| format!("l.{}::TEXT", quote_ident(c)))
+            .map(|c| format!("l.{}", quote_ident(c)))
             .collect();
-        crate::hash::build_composite_hash_expr(&key_exprs)
+        crate::dvm::operators::scan::build_hash_expr_for_domain("SCAN_KEY", &key_exprs)
     };
 
     // Build R_old snapshot: the right table state before the current delta.
@@ -189,8 +189,25 @@ pub fn diff_semi_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .filter(|(lk, rk)| lk.contains("__pgt_pre") && rk.starts_with("dr."))
         .collect();
     let left_snapshot_raw = build_snapshot_sql(left);
+    let left_user_cols: Vec<&String> = left_cols.iter().filter(|c| *c != "__pgt_count").collect();
+    let left_col_list: String = left_user_cols
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Part 2 must inspect the pre-change left state. The live snapshot also
+    // contains left INSERTs, which would otherwise be emitted a second time
+    // when the same mutation changes the right-side match status.
+    let left_old_snapshot = format!(
+        "(SELECT {left_col_list} FROM {left_snapshot_raw} __left_current \
+         EXCEPT ALL \
+         SELECT {left_col_list} FROM {delta_left} WHERE __pgt_action = 'I' \
+         UNION ALL \
+         SELECT {left_col_list} FROM {delta_left} WHERE __pgt_action = 'D')",
+        delta_left = left_result.cte_name,
+    );
     let left_snapshot_filtered = if equi_keys.is_empty() {
-        left_snapshot_raw
+        left_old_snapshot
     } else {
         let filters: Vec<String> = equi_keys
             .iter()
@@ -202,7 +219,7 @@ pub fn diff_semi_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             })
             .collect();
         format!(
-            "(SELECT * FROM {left_snapshot_raw} \"__pgt_pre\" WHERE {filters})",
+            "(SELECT * FROM {left_old_snapshot} \"__pgt_pre\" WHERE {filters})",
             filters = filters.join(" AND "),
         )
     };

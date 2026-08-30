@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
 
 
     row_identity_version SMALLINT,
+
+    row_probe_version SMALLINT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 

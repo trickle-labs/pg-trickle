@@ -63,11 +63,11 @@ fn make_ctx() -> DiffContext {
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 fn build_semi_join_tree() -> OpTree {
@@ -155,24 +155,19 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
     action CHAR(1) NOT NULL,
-    pk_hash BIGINT,
-    new_id INT,
-    new_cust_id INT,
-    new_amount INT,
-    old_id INT,
-    old_cust_id INT,
-    old_amount INT
+    __pgt_row_id BYTEA NOT NULL,
+    id INT,
+    cust_id INT,
+    amount INT
 );
 
 CREATE TABLE pgtrickle_changes.changes_2 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
     action CHAR(1) NOT NULL,
-    pk_hash BIGINT,
-    new_id INT,
-    new_name TEXT,
-    old_id INT,
-    old_name TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id INT,
+    name TEXT
 );
 "#,
     )
@@ -218,8 +213,8 @@ async fn test_diff_semi_join_executes_match_gain_and_loss() {
     db.execute("INSERT INTO public.customers VALUES (10, 'Alice'), (20, 'Bob')")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, new_id, new_name) \
-         VALUES ('0/1', 'I', 10, 10, 'Alice')",
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(10), 10, 'Alice')",
     )
     .await;
 
@@ -232,8 +227,8 @@ async fn test_diff_semi_join_executes_match_gain_and_loss() {
     db.execute("INSERT INTO public.customers VALUES (20, 'Bob')")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, old_id, old_name) \
-         VALUES ('0/1', 'D', 10, 10, 'Alice')",
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(10), 10, 'Alice')",
     )
     .await;
 
@@ -254,8 +249,8 @@ async fn test_diff_anti_join_executes_match_gain_and_loss() {
     db.execute("INSERT INTO public.customers VALUES (10, 'Alice'), (20, 'Bob')")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, new_id, new_name) \
-         VALUES ('0/1', 'I', 10, 10, 'Alice')",
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(10), 10, 'Alice')",
     )
     .await;
 
@@ -268,8 +263,8 @@ async fn test_diff_anti_join_executes_match_gain_and_loss() {
     db.execute("INSERT INTO public.customers VALUES (20, 'Bob')")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, old_id, old_name) \
-         VALUES ('0/1', 'D', 10, 10, 'Alice')",
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(10), 10, 'Alice')",
     )
     .await;
 
@@ -292,15 +287,15 @@ async fn test_diff_semi_join_executes_simultaneous_left_and_right_deltas() {
     db.execute("INSERT INTO public.customers VALUES (10, 'Alice')")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 10, 300)",
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, __pgt_row_id, id, cust_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 10, 300)",
     )
     .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, new_id, new_name, old_id, old_name) \
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, __pgt_row_id, id, name) \
          VALUES \
-         ('0/2', 'I', 10, 10, 'Alice', NULL, NULL), \
-         ('0/3', 'D', 20, NULL, NULL, 20, 'Bob')",
+         ('0/2', 'I', pgtrickle.test_int_to_row_id(10), 10, 'Alice'), \
+         ('0/3', 'D', pgtrickle.test_int_to_row_id(20), 20, 'Bob')",
     )
     .await;
 
@@ -327,15 +322,15 @@ async fn test_diff_anti_join_executes_simultaneous_left_and_right_deltas() {
     db.execute("INSERT INTO public.customers VALUES (10, 'Alice')")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 10, 300)",
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, __pgt_row_id, id, cust_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 10, 300)",
     )
     .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, new_id, new_name, old_id, old_name) \
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, __pgt_row_id, id, name) \
          VALUES \
-         ('0/2', 'I', 10, 10, 'Alice', NULL, NULL), \
-         ('0/3', 'D', 20, NULL, NULL, 20, 'Bob')",
+         ('0/2', 'I', pgtrickle.test_int_to_row_id(10), 10, 'Alice'), \
+         ('0/3', 'D', pgtrickle.test_int_to_row_id(20), 20, 'Bob')",
     )
     .await;
 
@@ -356,8 +351,8 @@ async fn test_diff_semi_join_ignores_unmatched_left_insert() {
     db.execute("INSERT INTO public.orders VALUES (3, 30, 300)")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 30, 300)",
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, __pgt_row_id, id, cust_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 30, 300)",
     )
     .await;
 
@@ -375,8 +370,8 @@ async fn test_diff_anti_join_emits_unmatched_left_insert() {
     db.execute("INSERT INTO public.orders VALUES (3, 30, 300)")
         .await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 30, 300)",
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, __pgt_row_id, id, cust_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 30, 300)",
     )
     .await;
 
@@ -392,12 +387,12 @@ fn make_nested_ctx() -> DiffContext {
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(3, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 fn build_nested_semi_join_tree() -> OpTree {
@@ -533,9 +528,8 @@ async fn test_diff_semi_join_executes_nested() {
             change_id BIGSERIAL PRIMARY KEY,
             lsn PG_LSN NOT NULL,
             action CHAR(1) NOT NULL,
-            pk_hash BIGINT,
-            new_customer_id INT,
-            old_customer_id INT
+            __pgt_row_id BYTEA NOT NULL,
+            customer_id INT
         )",
     )
     .await;
@@ -555,7 +549,7 @@ async fn test_diff_semi_join_executes_nested() {
     // insert VIP 20 AND log change into changes_3 simultaneously
     db.execute("INSERT INTO public.vips VALUES (20)").await;
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_3 (lsn, action, pk_hash, new_customer_id)          VALUES ('0/1', 'I', pgtrickle.pg_trickle_hash(20::text), 20);"
+        "INSERT INTO pgtrickle_changes.changes_3 (lsn, action, __pgt_row_id, customer_id)          VALUES ('0/1', 'I', pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(20::int)), 20);"
     ).await;
 
     assert_eq!(
@@ -584,9 +578,8 @@ async fn test_diff_anti_join_executes_nested() {
             change_id BIGSERIAL PRIMARY KEY,
             lsn PG_LSN NOT NULL,
             action CHAR(1) NOT NULL,
-            pk_hash BIGINT,
-            new_customer_id INT,
-            old_customer_id INT
+            __pgt_row_id BYTEA NOT NULL,
+            customer_id INT
         )",
     )
     .await;
@@ -606,7 +599,7 @@ async fn test_diff_anti_join_executes_nested() {
         .await;
 
     db.execute(
-        "INSERT INTO pgtrickle_changes.changes_3 (lsn, action, pk_hash, old_customer_id)          VALUES ('0/1', 'D', pgtrickle.pg_trickle_hash(20::text), 20);"
+        "INSERT INTO pgtrickle_changes.changes_3 (lsn, action, __pgt_row_id, customer_id)          VALUES ('0/1', 'D', pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(20::int)), 20);"
     ).await;
 
     assert_eq!(
@@ -637,8 +630,8 @@ async fn test_diff_anti_join_null_absence() {
     db.execute("DELETE FROM public.orders WHERE id = 1").await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_cust_id, old_amount) \
-         VALUES ('0/1', 'D', 1, 1, 10, 100)",
+         (lsn, action, __pgt_row_id, id, cust_id, amount) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(1), 1, 10, 100)",
     )
     .await;
 

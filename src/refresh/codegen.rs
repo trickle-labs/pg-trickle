@@ -1041,27 +1041,36 @@ pub(crate) fn apply_fixed_join_strategy(
 ///
 /// Downstream stream tables always see an upstream ST as keyless (no PK
 /// constraint), so they compute `__pgt_row_id` from ALL user columns via
-/// `row_id_key_columns()`.  The `pk_hash` stored in the ST change buffer
+/// `row_id_key_columns()`.  The `__pgt_row_id` stored in the ST change buffer
 /// **must** match that all-column content hash — otherwise the downstream
 /// MERGE will never find the existing row to DELETE.
 ///
 /// This is a pure-logic helper for unit testing.
 pub fn build_content_hash_expr(prefix: &str, user_cols: &[String]) -> String {
+    build_content_hash_expr_for_domain(prefix, user_cols, "KEYLESS_ROW")
+}
+
+/// Build a typed V2 identity for the supplied semantic domain.
+pub fn build_content_hash_expr_for_domain(
+    prefix: &str,
+    user_cols: &[String],
+    domain: &str,
+) -> String {
     match user_cols.len() {
-        0 => format!("{prefix}__pgt_row_id"),
+        0 => "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
         1 => {
             let c = user_cols[0].replace('"', "\"\"");
-            format!("pgtrickle.pg_trickle_hash({prefix}\"{c}\"::TEXT)")
+            format!("pgtrickle.encode_row_id_v2('{domain}', ROW({prefix}\"{c}\"))")
         }
         _ => {
             let args: Vec<String> = user_cols
                 .iter()
                 .map(|c| {
                     let escaped = c.replace('"', "\"\"");
-                    format!("{prefix}\"{escaped}\"::TEXT")
+                    format!("{prefix}\"{escaped}\"")
                 })
                 .collect();
-            crate::hash::build_composite_hash_expr(&args)
+            crate::hash::build_row_identity_expr(domain, &args)
         }
     }
 }
@@ -1099,13 +1108,6 @@ pub(crate) fn capture_delta_to_st_buffer(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // ST-ST-9: Use a content hash of ALL user columns as pk_hash.
-    // Downstream STs always treat upstream STs as keyless (no PK
-    // constraint), so their __pgt_row_id = hash(all columns).  The
-    // pk_hash in the buffer must match this content hash for MERGE
-    // matching to work during differential refresh.
-    let pk_hash_expr = build_content_hash_expr("d.", user_cols);
-
     // UX-7: When diff_output_format = 'merged', recombine DELETE+INSERT
     // pairs with the same __pgt_row_id back into a single 'U' row for
     // backward compatibility with consumers expecting UPDATE operations.
@@ -1114,23 +1116,22 @@ pub(crate) fn capture_delta_to_st_buffer(
     {
         format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, pk_hash, {flat_col_list}) \
+             (lsn, action, __pgt_row_id, {flat_col_list}) \
              SELECT pg_current_wal_lsn(), \
                     CASE WHEN ins.__pgt_row_id IS NOT NULL \
                               AND del.__pgt_row_id IS NOT NULL \
                          THEN 'U' ELSE COALESCE(ins.__pgt_action, del.__pgt_action) \
                     END, \
-                    COALESCE({pk_ins}, {pk_del}), \
+                    COALESCE(ins.__pgt_row_id, del.__pgt_row_id), \
                     {coal_cols} \
              FROM (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'I') ins \
              FULL OUTER JOIN \
                   (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'D') del \
-             ON ins.__pgt_row_id = del.__pgt_row_id",
+             ON {row_match}",
             change_schema = change_schema,
             pgt_id = pgt_id,
             flat_col_list = flat_col_list,
-            pk_ins = build_content_hash_expr("ins.", user_cols),
-            pk_del = build_content_hash_expr("del.", user_cols),
+            row_match = build_row_id_match("ins.__pgt_row_id", "del.__pgt_row_id"),
             coal_cols = user_cols
                 .iter()
                 .map(|c| {
@@ -1143,8 +1144,8 @@ pub(crate) fn capture_delta_to_st_buffer(
     } else {
         format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, pk_hash, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), d.__pgt_action, {pk_hash_expr}, \
+             (lsn, action, __pgt_row_id, {flat_col_list}) \
+             SELECT pg_current_wal_lsn(), d.__pgt_action, d.__pgt_row_id, \
                     {d_col_list} \
              FROM __pgt_delta_{pgt_id} d \
              WHERE d.__pgt_action IN ('I', 'D')"
@@ -1243,7 +1244,7 @@ pub fn capture_delta_to_bypass_table(
         // A44-10: Bypass tables use flat D+I schema (no new_/old_ prefix).
         let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
             .chain(std::iter::once("action \"char\"".to_string()))
-            .chain(std::iter::once("pk_hash bigint".to_string()))
+            .chain(std::iter::once("__pgt_row_id bytea NOT NULL".to_string()))
             .chain(
                 user_cols_typed
                     .iter()
@@ -1291,7 +1292,7 @@ pub fn capture_delta_to_bypass_table(
 /// `capture_incremental_diff_to_st_buffer` (persistent buffer path).
 ///
 /// `target_table` must already exist with the appropriate schema
-/// (`lsn, action, pk_hash, col1, col2, ...` — flat D+I schema, A44-10).
+/// (`lsn, action, __pgt_row_id, col1, col2, ...` — flat D+I schema, A44-10).
 /// Reads the pre-snapshot from `__pgt_pre_{pgt_id}` and compares with the
 /// current state of the ST backing table.
 ///
@@ -1343,8 +1344,10 @@ pub(crate) fn capture_diff_to_table(
         .collect::<Vec<_>>()
         .join(" OR ");
 
-    let pre_pk_hash = build_content_hash_expr("pre.", user_cols);
-    let post_pk_hash = build_content_hash_expr("post.", user_cols);
+    let pre_pk_hash = "pre.__pgt_row_id";
+    let post_pk_hash = "post.__pgt_row_id";
+    let pre_post_match = build_row_id_match("pre.__pgt_row_id", "post.__pgt_row_id");
+    let delta_post_match = build_row_id_match("delta.__pgt_row_id", "post.__pgt_row_id");
 
     // DAG-4: When an LSN override is provided (bypass tables), use the
     // literal value so the rows fall within the downstream frontier range.
@@ -1357,10 +1360,10 @@ pub(crate) fn capture_diff_to_table(
 
     // Deleted rows: in pre but no longer in the table.
     let del_sql = format!(
-        "INSERT INTO {target_table} (lsn, action, pk_hash, {flat_col_list}) \
+        "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
          SELECT {lsn_expr}, 'D', {pre_pk_hash}, {pre_col_refs} \
          FROM __pgt_pre_{pgt_id} pre \
-         LEFT JOIN {quoted_table} post ON pre.__pgt_row_id = post.__pgt_row_id \
+         LEFT JOIN {quoted_table} post ON {pre_post_match} \
          WHERE post.__pgt_row_id IS NULL"
     );
     total += Spi::connect_mut(|c| {
@@ -1373,12 +1376,12 @@ pub(crate) fn capture_diff_to_table(
 
     // Inserted rows: in table (scoped to delta row_ids) but not in pre.
     let ins_sql = format!(
-        "INSERT INTO {target_table} (lsn, action, pk_hash, {flat_col_list}) \
+        "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
          SELECT {lsn_expr}, 'I', {post_pk_hash}, {post_col_refs} \
          FROM {quoted_table} post \
          JOIN (SELECT DISTINCT __pgt_row_id FROM __pgt_delta_{pgt_id}) delta \
-           ON delta.__pgt_row_id = post.__pgt_row_id \
-         LEFT JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+           ON {delta_post_match} \
+         LEFT JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
          WHERE pre.__pgt_row_id IS NULL"
     );
     total += Spi::connect_mut(|c| {
@@ -1392,10 +1395,10 @@ pub(crate) fn capture_diff_to_table(
     // Changed rows: same row_id, different column values.
     if !is_distinct_pairs.is_empty() {
         let chg_del_sql = format!(
-            "INSERT INTO {target_table} (lsn, action, pk_hash, {flat_col_list}) \
+            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
              SELECT {lsn_expr}, 'D', {pre_pk_hash}, {pre_col_refs} \
              FROM __pgt_pre_{pgt_id} pre \
-             JOIN {quoted_table} post ON post.__pgt_row_id = pre.__pgt_row_id \
+             JOIN {quoted_table} post ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
         );
         total += Spi::connect_mut(|c| {
@@ -1407,10 +1410,10 @@ pub(crate) fn capture_diff_to_table(
         })?;
 
         let chg_ins_sql = format!(
-            "INSERT INTO {target_table} (lsn, action, pk_hash, {flat_col_list}) \
+            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
              SELECT {lsn_expr}, 'I', {post_pk_hash}, {post_col_refs} \
              FROM {quoted_table} post \
-             JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+             JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
         );
         total += Spi::connect_mut(|c| {
@@ -1437,7 +1440,7 @@ pub fn build_bypass_capture_sql(
     // A44-10: Bypass tables use flat D+I schema (no new_/old_ prefix).
     let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
         .chain(std::iter::once("action \"char\"".to_string()))
-        .chain(std::iter::once("pk_hash bigint".to_string()))
+        .chain(std::iter::once("__pgt_row_id bytea NOT NULL".to_string()))
         .chain(
             user_cols_typed
                 .iter()
@@ -1458,11 +1461,6 @@ pub fn build_bypass_capture_sql(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // ST-ST-9: Use content hash of all user columns (see
-    // build_content_hash_expr doc comment for rationale).
-    let col_names: Vec<String> = user_cols_typed.iter().map(|(n, _)| n.clone()).collect();
-    let pk_hash_expr = build_content_hash_expr("d.", &col_names);
-
     // DAG-4: Use the persistent buffer's LSN when available so the bypass
     // rows fall within the downstream scan's frontier range.
     let lsn_expr = match lsn_override {
@@ -1472,8 +1470,8 @@ pub fn build_bypass_capture_sql(
 
     format!(
         "CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP;\n\
-         INSERT INTO {bypass_table} (lsn, action, pk_hash, {flat_col_list}) \
-         SELECT {lsn_expr}, d.__pgt_action, {pk_hash_expr}, {d_col_list} \
+         INSERT INTO {bypass_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
+         SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, {d_col_list} \
          FROM __pgt_delta_{pgt_id} d \
          WHERE d.__pgt_action IN ('I', 'D')"
     )
@@ -1564,18 +1562,19 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
 
     let mut total_count: i64 = 0;
 
-    // ST-ST-9: Use content hash of all user columns for pk_hash (see
+    // ST-ST-9: Use content hash of all user columns for __pgt_row_id (see
     // build_content_hash_expr doc comment for rationale).
-    let pre_pk_hash = build_content_hash_expr("pre.", user_cols);
-    let post_pk_hash = build_content_hash_expr("post.", user_cols);
+    let pre_pk_hash = "pre.__pgt_row_id";
+    let post_pk_hash = "post.__pgt_row_id";
+    let pre_post_match = build_row_id_match("pre.__pgt_row_id", "post.__pgt_row_id");
 
     // Deleted rows: in pre but not in post
     let deleted_sql = format!(
         "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, pk_hash, {flat_col_list}) \
+         (lsn, action, __pgt_row_id, {flat_col_list}) \
          SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
          FROM __pgt_pre_{pgt_id} pre \
-         LEFT JOIN {quoted_table} post ON pre.__pgt_row_id = post.__pgt_row_id \
+         LEFT JOIN {quoted_table} post ON {pre_post_match} \
          WHERE post.__pgt_row_id IS NULL"
     );
     let del_count = Spi::connect_mut(|client| {
@@ -1589,10 +1588,10 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
     // Inserted rows: in post but not in pre
     let inserted_sql = format!(
         "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, pk_hash, {flat_col_list}) \
+         (lsn, action, __pgt_row_id, {flat_col_list}) \
          SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
          FROM {quoted_table} post \
-         LEFT JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+         LEFT JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
          WHERE pre.__pgt_row_id IS NULL"
     );
     let ins_count = Spi::connect_mut(|client| {
@@ -1605,8 +1604,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
 
     // Changed rows: same row_id but different content.
     //
-    // ST-ST-9: With content-hash pk_hash, the old D and new I have
-    // DIFFERENT pk_hash values (content changed), so the downstream
+    // ST-ST-9: With content-hash __pgt_row_id, the old D and new I have
+    // DIFFERENT __pgt_row_id values (content changed), so the downstream
     // keyless decomposition correctly sees them as independent events
     // (no accidental cancellation).  Emit both D (old values) and
     // I (new values) so the downstream can delete the old row and
@@ -1615,10 +1614,10 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         // D event: old content hash + old column values
         let changed_del_sql = format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, pk_hash, {flat_col_list}) \
+             (lsn, action, __pgt_row_id, {flat_col_list}) \
              SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
              FROM __pgt_pre_{pgt_id} pre \
-             JOIN {quoted_table} post ON post.__pgt_row_id = pre.__pgt_row_id \
+             JOIN {quoted_table} post ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
         );
         let chg_del_count = Spi::connect_mut(|client| {
@@ -1632,10 +1631,10 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         // I event: new content hash + new column values
         let changed_ins_sql = format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, pk_hash, {flat_col_list}) \
+             (lsn, action, __pgt_row_id, {flat_col_list}) \
              SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
              FROM {quoted_table} post \
-             JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+             JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
         );
         let chg_ins_count = Spi::connect_mut(|client| {
@@ -2164,6 +2163,13 @@ pub(crate) fn build_weight_agg_using(delta_sql: &str, user_col_list: &str) -> St
 /// `DISTINCT ON (__pgt_row_id)` because keyless tables intentionally allow
 /// multiple rows with the same `__pgt_row_id` but different column values.
 pub(crate) fn build_keyless_weight_agg(delta_sql: &str, user_col_list: &str) -> String {
+    // `__pgt_count` is already the logical multiplicity state for aggregate
+    // and DISTINCT rows; expanding it would create duplicate physical rows.
+    let expansion = if user_col_list.contains("\"__pgt_count\"") {
+        ""
+    } else {
+        ", LATERAL generate_series(1, __w.__pgt_cnt) __gs"
+    };
     format!(
         "(SELECT \"__pgt_row_id\", \"__pgt_action\", {user_col_list} \
          FROM (\
@@ -2175,8 +2181,7 @@ pub(crate) fn build_keyless_weight_agg(delta_sql: &str, user_col_list: &str) -> 
              FROM ({delta_sql}) __raw \
              GROUP BY __pgt_row_id, {user_col_list} \
              HAVING SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) <> 0\
-         ) __w, \
-         LATERAL generate_series(1, __w.__pgt_cnt) __gs)"
+         ) __w{expansion})"
     )
 }
 
@@ -2199,10 +2204,14 @@ pub(crate) fn build_keyless_delete_template(quoted_table: &str, pgt_id: i64) -> 
                       PARTITION BY st2.__pgt_row_id ORDER BY st2.ctid\
                     ) AS st_rn \
              FROM {quoted_table} st2 \
-             WHERE st2.__pgt_row_id IN (\
-               SELECT DISTINCT __pgt_row_id \
-               FROM __pgt_delta_{pgt_id} \
-               WHERE __pgt_action = 'D'\
+             WHERE EXISTS (\
+               SELECT 1 FROM (\
+                 SELECT DISTINCT __pgt_row_id \
+                 FROM __pgt_delta_{pgt_id} \
+                 WHERE __pgt_action = 'D'\
+               ) d \
+               WHERE pgtrickle.row_probe_v1(st2.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+                 AND st2.__pgt_row_id = d.__pgt_row_id\
              )\
            ) numbered_st \
            JOIN (\
@@ -2211,7 +2220,8 @@ pub(crate) fn build_keyless_delete_template(quoted_table: &str, pgt_id: i64) -> 
              FROM __pgt_delta_{pgt_id} \
              WHERE __pgt_action = 'D' \
              GROUP BY __pgt_row_id\
-           ) dc ON numbered_st.__pgt_row_id = dc.__pgt_row_id \
+           ) dc ON pgtrickle.row_probe_v1(numbered_st.__pgt_row_id) = pgtrickle.row_probe_v1(dc.__pgt_row_id) \
+                         AND numbered_st.__pgt_row_id = dc.__pgt_row_id \
            WHERE numbered_st.st_rn <= dc.del_count\
          )",
         pgt_id = pgt_id,
@@ -2379,6 +2389,13 @@ pub(crate) fn format_update_set(user_cols: &[String]) -> String {
         .join(", ")
 }
 
+/// Match candidates with the bounded probe first, then verify complete BYTEA
+/// equality. The second comparison is the correctness condition; the probe is
+/// only an accelerator and is never treated as an identity.
+pub(crate) fn build_row_id_match(left: &str, right: &str) -> String {
+    format!("pgtrickle.row_probe_v1({left}) = pgtrickle.row_probe_v1({right}) AND {left} = {right}")
+}
+
 /// Build the core MERGE SQL template for differential refresh.
 ///
 /// This is the primary delta-application statement: it merges incoming
@@ -2396,11 +2413,12 @@ pub(crate) fn build_merge_sql(
     let d_user_col_list = format_prefixed_col_list("d", user_cols);
     let update_set_clause = format_update_set(user_cols);
     let is_distinct_clause = build_is_distinct_clause(user_cols);
+    let row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id");
 
     format!(
         "MERGE INTO {quoted_table} AS st \
          USING {using_clause} AS d \
-         ON st.__pgt_row_id = d.__pgt_row_id{part} \
+         ON {row_id_match}{part} \
          WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
          WHEN MATCHED AND d.__pgt_action = 'I' AND ({is_distinct_clause}) THEN \
            UPDATE SET {update_set_clause} \
@@ -2431,8 +2449,9 @@ pub(crate) fn build_trigger_delete_sql(
         format!(
             "DELETE FROM {quoted_table} AS st \
              USING __pgt_delta_{pgt_id} AS d \
-             WHERE st.__pgt_row_id = d.__pgt_row_id \
+             WHERE {row_id_match} \
                AND d.__pgt_action = 'D'",
+            row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
         )
     }
 }
@@ -2452,9 +2471,10 @@ pub(crate) fn build_trigger_update_sql(
         "UPDATE {quoted_table} AS st \
          SET {update_set_clause} \
          FROM __pgt_delta_{pgt_id} AS d \
-         WHERE st.__pgt_row_id = d.__pgt_row_id \
+         WHERE {row_id_match} \
            AND d.__pgt_action = 'I' \
            AND ({is_distinct_clause})",
+        row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
     )
 }
 
@@ -2481,7 +2501,9 @@ pub(crate) fn build_trigger_insert_sql(
 ) -> String {
     let user_col_list = format_col_list(user_cols);
     let d_user_col_list = format_prefixed_col_list("d", user_cols);
-    if use_keyless {
+    if use_keyless && user_cols.iter().any(|column| column == "__pgt_count") {
+        build_trigger_insert_sql_no_conflict(quoted_table, pgt_id, user_cols)
+    } else if use_keyless {
         format!(
             "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
              SELECT d.__pgt_row_id, {d_user_col_list} \
@@ -2502,6 +2524,31 @@ pub(crate) fn build_trigger_insert_sql(
              ON CONFLICT (__pgt_row_id) DO NOTHING",
         )
     }
+}
+
+/// Build an INSERT for a deduplicated delta when the target row-id index is
+/// non-unique. The preceding UPDATE handles an existing row; this exact
+/// `NOT EXISTS` guard prevents the INSERT from duplicating it without relying
+/// on `ON CONFLICT (__pgt_row_id)`.
+pub(crate) fn build_trigger_insert_sql_no_conflict(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+) -> String {
+    let user_col_list = format_col_list(user_cols);
+    let d_user_col_list = format_prefixed_col_list("d", user_cols);
+    format!(
+        "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
+         SELECT DISTINCT ON (d.__pgt_row_id) d.__pgt_row_id, {d_user_col_list} \
+         FROM __pgt_delta_{pgt_id} AS d \
+         WHERE d.__pgt_action = 'I' \
+           AND NOT EXISTS (\
+             SELECT 1 FROM {quoted_table} AS st \
+             WHERE {row_id_match}\
+           ) \
+         ORDER BY d.__pgt_row_id",
+        row_id_match = build_row_id_match("st.__pgt_row_id", "d.__pgt_row_id"),
+    )
 }
 
 /// Pre-warm the delta SQL + MERGE template caches for a stream table.
@@ -2659,8 +2706,13 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // cases correctly.
     let trigger_update_template = build_trigger_update_sql(&quoted_table, st.pgt_id, user_cols);
 
-    let trigger_insert_template =
-        build_trigger_insert_sql(&quoted_table, st.pgt_id, user_cols, st.has_keyless_source);
+    let trigger_insert_template = if st.has_keyless_source
+        && (delta_result.is_deduplicated || user_cols.iter().any(|column| column == "__pgt_count"))
+    {
+        build_trigger_insert_sql_no_conflict(&quoted_table, st.pgt_id, user_cols)
+    } else {
+        build_trigger_insert_sql(&quoted_table, st.pgt_id, user_cols, st.has_keyless_source)
+    };
 
     // Cache the MERGE template with LSN placeholder tokens.
     // Each refresh resolves the tokens to concrete LSN values
@@ -2710,19 +2762,28 @@ mod tests {
     #[test]
     fn test_build_content_hash_expr_zero_cols_returns_row_id() {
         let result = build_content_hash_expr("t.", &[]);
-        assert_eq!(result, "t.__pgt_row_id");
+        assert_eq!(
+            result,
+            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+        );
     }
 
     #[test]
     fn test_build_content_hash_expr_single_col() {
         let result = build_content_hash_expr("t.", &["name".to_string()]);
-        assert_eq!(result, "pgtrickle.pg_trickle_hash(t.\"name\"::TEXT)");
+        assert_eq!(
+            result,
+            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(t.\"name\"))"
+        );
     }
 
     #[test]
     fn test_build_content_hash_expr_single_col_with_prefix() {
         let result = build_content_hash_expr("old.", &["val".to_string()]);
-        assert_eq!(result, "pgtrickle.pg_trickle_hash(old.\"val\"::TEXT)");
+        assert_eq!(
+            result,
+            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(old.\"val\"))"
+        );
     }
 
     #[test]
@@ -2731,7 +2792,7 @@ mod tests {
         let result = build_content_hash_expr("t.", &cols);
         assert_eq!(
             result,
-            "pgtrickle.pg_trickle_hash_multi(ARRAY[t.\"a\"::TEXT, t.\"b\"::TEXT, t.\"c\"::TEXT])"
+            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(t.\"a\", t.\"b\", t.\"c\"))"
         );
     }
 

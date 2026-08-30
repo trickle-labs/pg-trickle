@@ -73,12 +73,12 @@ fn make_ctx_3() -> DiffContext {
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(3, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 /// (orders o FULL JOIN products p ON o.prod_id = p.id)
@@ -164,37 +164,29 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id   BIGSERIAL PRIMARY KEY,
     lsn         PG_LSN NOT NULL,
     action      CHAR(1) NOT NULL,
-    pk_hash     BIGINT,
-    new_id      INT,
-    new_prod_id INT,
-    new_amount  INT,
-    old_id      INT,
-    old_prod_id INT,
-    old_amount  INT
+    __pgt_row_id BYTEA NOT NULL,
+    id      INT,
+    prod_id INT,
+    amount  INT
 );
 
 CREATE TABLE pgtrickle_changes.changes_2 (
     change_id  BIGSERIAL PRIMARY KEY,
     lsn        PG_LSN NOT NULL,
     action     CHAR(1) NOT NULL,
-    pk_hash    BIGINT,
-    new_id     INT,
-    new_cat_id INT,
-    new_name   TEXT,
-    old_id     INT,
-    old_cat_id INT,
-    old_name   TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id     INT,
+    cat_id INT,
+    name   TEXT
 );
 
 CREATE TABLE pgtrickle_changes.changes_3 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn       PG_LSN NOT NULL,
     action    CHAR(1) NOT NULL,
-    pk_hash   BIGINT,
-    new_id    INT,
-    new_label TEXT,
-    old_id    INT,
-    old_label TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id    INT,
+    label TEXT
 );
 "#,
     )
@@ -278,8 +270,8 @@ async fn test_diff_nested_full_join_innermost_insert_fully_matched() {
     // INSERT order (1, 10, 100)
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_prod_id, new_amount) \
-         VALUES ('0/1', 'I', 1, 1, 10, 100)",
+         (lsn, action, __pgt_row_id, id, prod_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(1), 1, 10, 100)",
     )
     .await;
 
@@ -323,8 +315,8 @@ async fn test_diff_nested_full_join_outermost_right_insert_unmatched() {
     // INSERT category (99, "Rare") — no products reference cat_id=99
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_3 \
-         (lsn, action, pk_hash, new_id, new_label) \
-         VALUES ('0/1', 'I', 99, 99, 'Rare')",
+         (lsn, action, __pgt_row_id, id, label) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(99), 99, 'Rare')",
     )
     .await;
 

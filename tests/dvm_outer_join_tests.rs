@@ -73,11 +73,11 @@ fn make_ctx() -> DiffContext {
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
     prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
 
-    let mut new_frontier = Frontier::new();
-    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
-    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
 
-    DiffContext::new_standalone(prev_frontier, new_frontier)
+    DiffContext::new_standalone(prev_frontier, frontier)
 }
 
 fn build_left_join_tree() -> OpTree {
@@ -144,24 +144,19 @@ CREATE TABLE pgtrickle_changes.changes_1 (
     change_id   BIGSERIAL PRIMARY KEY,
     lsn         PG_LSN NOT NULL,
     action      CHAR(1) NOT NULL,
-    pk_hash     BIGINT,
-    new_id      INT,
-    new_prod_id INT,
-    new_amount  INT,
-    old_id      INT,
-    old_prod_id INT,
-    old_amount  INT
+    __pgt_row_id BYTEA NOT NULL,
+    id      INT,
+    prod_id INT,
+    amount  INT
 );
 
 CREATE TABLE pgtrickle_changes.changes_2 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn       PG_LSN NOT NULL,
     action    CHAR(1) NOT NULL,
-    pk_hash   BIGINT,
-    new_id    INT,
-    new_name  TEXT,
-    old_id    INT,
-    old_name  TEXT
+    __pgt_row_id BYTEA NOT NULL,
+    id    INT,
+    name  TEXT
 );
 "#,
     )
@@ -227,8 +222,8 @@ async fn test_diff_left_join_executes_left_insert_with_matching_right() {
     // INSERT order (3, 10, 300)
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_prod_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 10, 300)",
+         (lsn, action, __pgt_row_id, id, prod_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 10, 300)",
     )
     .await;
 
@@ -262,8 +257,8 @@ async fn test_diff_left_join_executes_left_insert_with_no_matching_right() {
 
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, new_id, new_prod_id, new_amount) \
-         VALUES ('0/1', 'I', 3, 3, 99, 300)",
+         (lsn, action, __pgt_row_id, id, prod_id, amount) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(3), 3, 99, 300)",
     )
     .await;
 
@@ -292,8 +287,8 @@ async fn test_diff_left_join_executes_left_delete_matched_row() {
 
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_prod_id, old_amount) \
-         VALUES ('0/1', 'D', 3, 3, 10, 300)",
+         (lsn, action, __pgt_row_id, id, prod_id, amount) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(3), 3, 10, 300)",
     )
     .await;
 
@@ -329,8 +324,8 @@ async fn test_diff_left_join_executes_left_delete_unmatched_row() {
     // DELETE order (3, 99, 300): was NULL-padded
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_prod_id, old_amount) \
-         VALUES ('0/1', 'D', 3, 3, 99, 300)",
+         (lsn, action, __pgt_row_id, id, prod_id, amount) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(3), 3, 99, 300)",
     )
     .await;
 
@@ -362,8 +357,8 @@ async fn test_diff_left_join_right_insert_gains_first_match() {
     // INSERT product (20, "NewProd")
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, new_id, new_name) \
-         VALUES ('0/1', 'I', 20, 20, 'NewProd')",
+         (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(20), 20, 'NewProd')",
     )
     .await;
 
@@ -412,8 +407,8 @@ async fn test_diff_left_join_right_delete_loses_last_match() {
     // DELETE product (10, "Widget")
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, old_id, old_name) \
-         VALUES ('0/1', 'D', 10, 10, 'Widget')",
+         (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(10), 10, 'Widget')",
     )
     .await;
 
@@ -466,14 +461,14 @@ async fn test_diff_left_join_ec01_left_delete_with_concurrent_right_delete() {
     // Simultaneous: DELETE order (1, 10, 100) and DELETE product (10, "Widget")
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
-         (lsn, action, pk_hash, old_id, old_prod_id, old_amount) \
-         VALUES ('0/1', 'D', 1, 1, 10, 100)",
+         (lsn, action, __pgt_row_id, id, prod_id, amount) \
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(1), 1, 10, 100)",
     )
     .await;
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_2 \
-         (lsn, action, pk_hash, old_id, old_name) \
-         VALUES ('0/2', 'D', 10, 10, 'Widget')",
+         (lsn, action, __pgt_row_id, id, name) \
+         VALUES ('0/2', 'D', pgtrickle.test_int_to_row_id(10), 10, 'Widget')",
     )
     .await;
 
