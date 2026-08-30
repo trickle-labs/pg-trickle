@@ -518,6 +518,11 @@ diagnostics, and a support-matrix entry.
 
 ### Toward v1.0
 
+The mandatory lifecycle path is v0.87.17 → v0.88.0 → v0.91.0 → v0.92.0
+→ v0.93.0 → v0.94.0 → v0.95.x → release candidate → v1.0.0.
+v0.89.0 and v0.90.0 form a parallel performance and product track after
+v0.88.0. Their research and unproven automation do not block lifecycle work.
+
 After v0.94.0 the project stops adding features. v0.95.x is a stabilization-only
 series for bugs, benchmarks, compatibility, upgrades, documentation, real-world
 workloads, and simplification. Unproven optimizer or controller behavior is
@@ -701,25 +706,28 @@ v0.87.16 ─── Versioned row identity V2 engine integration: BYTEA storage, 
 v0.87.17 ─── Versioned row identity V2 hardening and recreation: cross-path gates, benchmarks, non-destructive preflight, stream-table rebuild workflow, consumer resnapshot and privacy controls
 
 v0.88    ─── Safe engine optimization: DiffContext split, narrow vector path, planner instrumentation, shadow planning, evidence-gated reordering
+    ├── Lifecycle critical path
+    │   │
+    │   v0.91    ─── Schema & query evolution: conservative compatibility proof, shadow rebuild, deterministic DDL outcomes
+    │   │
+    │   v0.92    ─── Recovery & upgrades: backup/restore/promotion, clone isolation, upgrade preflight and bounded matrix, proof-based CDC repair
+    │   │
+    │   v0.93    ─── Defaults, bounds & diagnosis: resource-based defaults, honest enforcement classes, progress, stable errors, roles
+    │   │
+    │   v0.94    ─── Monitoring, assurance & packaging: Grafana/OTel, same-commit soak and upgrade matrix, longevity, package smoke tests, feature freeze
+    │   │
+    │   v0.95.x  ─── Stabilization: blockers, compatibility, tests, docs, packaging, and removal or narrowing of unproven behavior
+    │   │
+    │   v1.0-rc  ─── Release candidates: blockers only, no new features
+    │   │
+    │   v1.0.0   ─── Stability contract: no known correctness issues, boring upgrades, package registries, signed artifacts, SBOMs
     │
-v0.89    ─── Incremental windows, proven subset: bounded crash-safe state, per-algorithm admission, visible recomputation fallback
-    │
-v0.90    ─── Freshness controller: authoritative measurement, advisory decisions, layered resource/SLA/execution control, evidence-gated automation
-    │
-v0.91    ─── Schema & query evolution: conservative compatibility proof, shadow rebuild, deterministic DDL outcomes
-    │
-v0.92    ─── Recovery & upgrades: backup/restore/promotion, clone isolation, upgrade preflight and matrix, proof-based CDC repair
-    │
-v0.93    ─── Defaults, bounds & diagnosis: resource-based defaults, honest enforcement classes, progress, stable errors, roles
-    │
-v0.94    ─── Monitoring, assurance & packaging: Grafana/OTel, same-commit soak and upgrade matrix, longevity, package smoke tests, feature freeze
-    │
-v0.95.x  ─── Stabilization: blockers, compatibility, tests, docs, packaging, and removal or narrowing of unproven behavior
-    │
-v1.0-rc  ─── Release candidates: blockers only, no new features
-    │
-v1.0.0   ─── Stability contract: no known correctness issues, boring upgrades, package registries, signed artifacts, SBOMs
-    │
+    └── Parallel performance and product track that does not gate lifecycle work
+        │
+        v0.89    ─── Incremental windows, proven subset: bounded crash-safe state, per-algorithm admission, visible recomputation fallback
+        │
+        v0.90    ─── Freshness controller: authoritative measurement, advisory decisions, layered resource/SLA/execution control, evidence-gated automation
+
 v1.6+    ─── Beyond 1.0 (optional/speculative): automatic query acceleration, decoupled compute, distributed deltas + Kubernetes, federation
 ```
 
@@ -1089,14 +1097,15 @@ validates delta-plan alternatives before enabling them. v0.89.0 establishes
 bounded window state, then admits only algorithms that match PostgreSQL and
 beat partition recomputation. Window breadth does not block v1.0.
 
-v0.90.0 makes freshness measurement authoritative and starts the controller in
-advisory mode. Each automatic decision earns authority separately. v0.91.0
-handles defining-query and source-schema evolution. v0.92.0 covers backup,
-restore, cloning, upgrades, and CDC recovery as a separate mandatory gate.
-v0.93.0 defines defaults, resource guarantees, progress, diagnostics, and
-roles. v0.94.0 closes monitoring, soak, compatibility, regression, and package
-gates on one candidate commit, then freezes features. v0.95.x removes risk
-before the release-candidate series.
+On the parallel product track, v0.90.0 makes freshness measurement authoritative
+and starts the controller in advisory mode. Each automatic decision earns
+authority separately. On the lifecycle critical path, v0.91.0 handles
+defining-query and source-schema evolution. v0.92.0 covers backup, restore,
+cloning, upgrades, and CDC recovery as a separate mandatory gate. v0.93.0
+defines defaults, resource guarantees, progress, diagnostics, and roles.
+v0.94.0 closes monitoring, soak, compatibility, regression, and package gates
+on one candidate commit, then freezes features. v0.95.x removes risk before the
+release-candidate series.
 
 **The distributed work has moved past 1.0.** External workers, external CDC
 consumers, Kubernetes operators, distributed delta computation, cross-cluster
