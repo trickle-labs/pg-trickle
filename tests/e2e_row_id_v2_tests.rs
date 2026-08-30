@@ -93,3 +93,80 @@ async fn test_row_id_v2_sql_entry_point_accepts_supported_scalar_families() {
         .await;
     assert!(!enum_identity.is_empty());
 }
+
+#[tokio::test]
+async fn test_row_id_v2_recreation_preflight_is_read_only_and_requires_ack() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE preflight_source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO preflight_source VALUES (1, 'a')")
+        .await;
+    db.create_st(
+        "preflight_stream",
+        "SELECT id, val FROM preflight_source",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let stream_tables_before: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_stream_tables")
+        .await;
+    let buffers_before: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_change_buffers")
+        .await;
+
+    db.execute("SELECT pgtrickle.row_identity_v2_record_inventory('e2e preflight inventory')")
+        .await;
+    let consumer_id: i64 = db
+        .query_scalar(
+            "SELECT pgtrickle.row_identity_v2_register_consumer(\
+             'e2e-consumer', 'postgres', ARRAY['public.preflight_stream'],\
+             true, true, 'Change the downstream identity to BYTEA and resnapshot')",
+        )
+        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.row_identity_v2_acknowledge_consumer({consumer_id}, 'PENDING')"
+    ))
+    .await;
+    let report: String = db
+        .query_scalar("SELECT pgtrickle.row_identity_v2_recreation_preflight()::text")
+        .await;
+    assert!(report.contains("EXTERNAL_CONSUMER_INVENTORY"));
+    assert!(report.contains("SCHEDULER_PAUSED"));
+    let inventory_ok: bool = db
+        .query_scalar(
+            "SELECT (SELECT (check_item ->> 'ok')::boolean \
+             FROM jsonb_array_elements( \
+                 pgtrickle.row_identity_v2_recreation_preflight() -> 'checks' \
+             ) AS checks(check_item) \
+             WHERE check_item ->> 'check' = 'EXTERNAL_CONSUMER_INVENTORY')",
+        )
+        .await;
+    assert!(!inventory_ok);
+
+    db.execute("SELECT pgtrickle.row_identity_v2_acknowledge_inventory()")
+        .await;
+    let acknowledged_report: String = db
+        .query_scalar("SELECT pgtrickle.row_identity_v2_recreation_preflight()::text")
+        .await;
+    assert!(acknowledged_report.contains("EXTERNAL_CONSUMER_INVENTORY"));
+    let inventory_ok_after_ack: bool = db
+        .query_scalar(
+            "SELECT (SELECT (check_item ->> 'ok')::boolean \
+             FROM jsonb_array_elements( \
+                 pgtrickle.row_identity_v2_recreation_preflight() -> 'checks' \
+             ) AS checks(check_item) \
+             WHERE check_item ->> 'check' = 'EXTERNAL_CONSUMER_INVENTORY')",
+        )
+        .await;
+    assert!(inventory_ok_after_ack);
+
+    let stream_tables_after: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_stream_tables")
+        .await;
+    let buffers_after: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_change_buffers")
+        .await;
+    assert_eq!(stream_tables_before, stream_tables_after);
+    assert_eq!(buffers_before, buffers_after);
+}

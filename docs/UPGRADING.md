@@ -2,6 +2,75 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.87.16 → 0.87.17
+
+This is the breaking V1-to-V2 storage transition. The migration is
+non-destructive: it adds a read-only preflight and private consumer inventory,
+but never rewrites stream-table rows, buffers, source tables, grants, or
+external objects in place.
+
+1. Record every consumer that reads `__pgt_row_id`, depends on the current
+   storage layout, or republishes stream-table rows. Include logical
+   replication/publications, outbox, DuckLake, dbt, and user SQL consumers.
+
+   ```sql
+   SELECT pgtrickle.row_identity_v2_record_inventory(
+       'Inventory ticket, owners, and approved recreation window'
+   );
+   -- Repeat once per consumer. Names must be schema-qualified existing STs.
+   SELECT pgtrickle.row_identity_v2_register_consumer(
+       'consumer-name', 'owner-name',
+       ARRAY['public.stream_table'],
+       true, true,
+       'Change the downstream identity column to BYTEA and resnapshot'
+   );
+   SELECT pgtrickle.row_identity_v2_acknowledge_consumer(1, 'PENDING');
+   SELECT pgtrickle.row_identity_v2_acknowledge_inventory();
+   ```
+
+   Acknowledgment means the owner accepts the required schema change and
+   resnapshot. `PENDING` is valid before teardown; mark it `COMPLETE` only
+   after the fresh V2 stream table has been resnapshotted downstream.
+
+2. Pause scheduling, drain in-flight refreshes, and verify the read-only
+   preflight. The global setting is used because the scheduler is a separate
+   backend; do not rely on a session-local `SET`.
+
+   ```sql
+   ALTER SYSTEM SET pg_trickle.enabled = 'off';
+   SELECT pg_reload_conf();
+   SELECT pgtrickle.row_identity_v2_recreation_preflight();
+   ```
+
+   Do not continue while `ok` is false. Export definitions and metadata with
+   `pg_dump --schema-only` and the dependency/definition APIs before teardown.
+
+3. Drop V1 stream tables in reverse dependency order and clean only unused V1
+   change buffers. This is the only destructive step, and it affects stream
+   state—not source data. If it fails, remove the incomplete graph and restart
+   from the export; never partially convert a relation or replay old IDs.
+
+4. Install the 0.87.17 shared library and extension files, restart PostgreSQL,
+   then run:
+
+   ```sql
+   ALTER EXTENSION pg_trickle UPDATE;
+   ```
+
+5. Recreate stream tables in dependency order and perform fresh initial
+   refreshes. Update external consumers to `BYTEA`; old numeric IDs cannot be
+   cast to V2 identities. Resnapshot after each affected stream table is
+   fresh, then record `COMPLETE` (or `SKIPPED` when the consumer was removed).
+
+6. Resume writes only after all required resnapshots. Writes made during the
+   recreation window are not replayed by V2. Re-enable the scheduler and rerun
+   the preflight or inspect the consumer inventory before closing the change.
+
+The preflight is read-only and does not disclose complete identity bytes.
+Diagnostics should use lengths and short fingerprints only. Pass-through and
+keyless identities may still contain reversible source values, so apply the
+same permissions and dump/log handling as for those source columns.
+
 ## 0.87.15 → 0.87.16
 
 Install the 0.87.16 shared library and extension files, then run:

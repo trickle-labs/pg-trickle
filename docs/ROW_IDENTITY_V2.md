@@ -1,6 +1,6 @@
 # Row identity V2 wire format
 
-This document is the normative wire-format contract for v0.87.15. A change to
+This document is the normative wire-format contract carried by v0.87.17. A change to
 any assigned byte, width, limit, or algorithm requires a new identity version.
 The row identity is opaque. v0.87.15 does not change V1 storage or make V1 and
 V2 state interoperable.
@@ -66,6 +66,21 @@ different domains do not produce the same identity.
 
 No other domain tag is assigned. Pass-through operators retain the child
 identity. Derived operators place child identities in explicitly framed fields.
+
+## Privacy and operational handling
+
+Opaque means “do not interpret as a key,” not “secret.” Canonical bytes can
+contain reversible source values, especially for pass-through and keyless
+identities. Keep `__pgt_row_id` out of default views, grants, logs, traces,
+support bundles, and exported diagnostics unless an explicit owner-controlled
+workflow requires it. Report identity length and a short diagnostic fingerprint
+instead of complete bytes or reversible prefixes. External consumers must use
+`BYTEA`; an old numeric identity cannot be cast into a V2 identity.
+
+The v0.87.17 recreation preflight is read-only and does not return identity
+bytes. Record external consumers and acknowledge their schema-change and
+resnapshot plan before dropping V1 state. Writes during the recreation window
+are not replayed.
 
 ### Type registry
 

@@ -44,7 +44,7 @@ use std::sync::{
 };
 #[cfg(not(feature = "light-e2e"))]
 use testcontainers::{
-    ContainerAsync, GenericImage, ImageExt,
+    ContainerAsync, ContainerRequest, GenericImage, ImageExt,
     core::{IntoContainerPort, Mount, WaitFor},
     runners::AsyncRunner,
 };
@@ -159,6 +159,16 @@ async fn assert_docker_image_exists(name: &str, tag: &str) {
              • E2E tests:     just build-e2e-image\n\
              • Upgrade tests: just build-upgrade-image"
         );
+    }
+}
+
+#[cfg(not(feature = "light-e2e"))]
+async fn start_e2e_image(
+    image: ContainerRequest<GenericImage>,
+) -> testcontainers::core::error::Result<ContainerAsync<GenericImage>> {
+    match std::env::var("PGS_E2E_PLATFORM") {
+        Ok(platform) if !platform.is_empty() => image.with_platform(platform).start().await,
+        _ => image.start().await,
     }
 }
 
@@ -365,7 +375,7 @@ async fn shared_container() -> &'static SharedContainer {
                 image = image.with_mount(mount);
             }
 
-            let container = image.start().await.expect(
+            let container = start_e2e_image(image).await.expect(
                 "Failed to start shared pg_trickle E2E container. \
                  Did you run ./tests/build_e2e_image.sh first?",
             );
@@ -624,7 +634,7 @@ impl E2eDb {
             image = image.with_mount(mount);
         }
 
-        let container = image.start().await.expect(
+        let container = start_e2e_image(image).await.expect(
             "Failed to start pg_trickle E2E container. \
                      Did you run ./tests/build_e2e_image.sh first?",
         );
@@ -679,7 +689,7 @@ impl E2eDb {
             image = image.with_mount(mount);
         }
 
-        let container = image.start().await.expect(
+        let container = start_e2e_image(image).await.expect(
             "Failed to start bench container. \
              Did you run ./tests/build_e2e_image.sh first?",
         );

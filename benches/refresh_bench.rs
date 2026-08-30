@@ -11,6 +11,7 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use pg_trickle::dag::{DagNode, NodeId, StDag, StStatus};
 use pg_trickle::dvm::diff::{col_list, prefixed_col_list, quote_ident};
 use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree};
+use pg_trickle::dvm::row_id_v2::{encode_interval_value, row_probe_v1};
 use pg_trickle::version::{Frontier, lsn_gt, select_canonical_period_secs};
 use std::time::Duration;
 
@@ -460,6 +461,26 @@ fn bench_xxh64(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_row_id_v2(c: &mut Criterion) {
+    let mut group = c.benchmark_group("row_id_v2");
+    for size in [64, 128, 1024, 16 * 1024] {
+        let data = vec![b'x'; size];
+        group.bench_with_input(BenchmarkId::new("probe", size), &data, |b, data| {
+            b.iter(|| row_probe_v1(black_box(data.clone())));
+        });
+    }
+    group.bench_function("interval_128_bit", |b| {
+        b.iter(|| {
+            encode_interval_value(
+                black_box(2_147_483_647),
+                black_box(-2_147_483_648),
+                black_box(i64::MAX),
+            )
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_quote_ident,
@@ -476,6 +497,7 @@ criterion_group!(
     bench_xxh64,
     bench_a44_6_write_amplification,
     bench_a44_11_di_delta_scan,
+    bench_row_id_v2,
 );
 criterion_main!(benches);
 

@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.87.17 — Versioned Row Identity V2 Hardening and Recreation](#08717--versioned-row-identity-v2-hardening-and-recreation)
 - [0.87.16 — Versioned Row Identity V2 Engine Integration](#08716--versioned-row-identity-v2-engine-integration)
 - [0.87.15 — Versioned Row Identity V2 Contracts](#08715--versioned-row-identity-v2-contracts)
 - [0.87.14 — Correctness Program Completion](#08714--correctness-program-completion)
@@ -195,6 +196,30 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.87.17] — Versioned Row Identity V2 Hardening and Recreation
+
+v0.87.17 makes the breaking V2 storage upgrade operationally explicit.
+
+- Added a read-only recreation preflight for version markers, physical storage,
+  source contracts, collations, indexes, PostgreSQL major, scheduler state, and
+  external-consumer acknowledgment.
+- Added private inventory catalogs and owner/superuser APIs for recording
+  external consumers and their required `BYTEA` schema changes and resnapshots.
+- Added the pause, export, reverse-drop, install, dependency-order recreate,
+  fresh-refresh, and resnapshot runbook. Writes during recreation are not
+  replayed.
+- Added row-ID/probe benchmark coverage and a release gate for vectors, support
+  contracts, package/migration artifacts, privacy wording, and upgrade guards.
+
+See the [v0.87.17 roadmap](roadmap/v0.87.17.md), [V2 wire-format
+contract](docs/ROW_IDENTITY_V2.md), and [upgrade guide](docs/UPGRADING.md).
+
+## Upgrade
+
+Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.17 files.
+The migration adds the read-only preflight and consumer inventory. It does not
+convert V1 stream-table state; complete the documented recreation workflow.
 
 ## [0.87.16] — Versioned Row Identity V2 Engine Integration
 

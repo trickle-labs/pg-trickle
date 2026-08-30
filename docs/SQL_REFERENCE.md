@@ -70,6 +70,8 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.recommend\_refresh\_mode](#pgtricklerecommend_refresh_mode)
     - [pgtrickle.refresh\_efficiency](#pgtricklerefresh_efficiency)
     - [pgtrickle.export\_definition](#pgtrickleexport_definition)
+    - [pgtrickle.row\_identity\_v2\_recreation\_preflight](#pgtricklerow_identity_v2_recreation_preflight)
+    - [pgtrickle.row\_identity\_v2\_consumer\_inventory](#pgtricklerow_identity_v2_consumer_inventory)
 - [Expression Support](#expression-support)
   - [Conditional Expressions](#conditional-expressions)
   - [Comparison Operators](#comparison-operators)
@@ -4493,6 +4495,8 @@ table management.
 |----------|---------|---------|
 | `pgtrickle.preflight()` | `text` (JSON) | Pre-deployment health check — returns one JSON object per check with `pass`, `check`, `detail`. |
 | `pgtrickle.lifecycle_preflight()` | `text` (JSON) | Superuser-only, read-only owner-privilege preflight for upgrades; lists every missing source `SELECT` or source-schema `USAGE` grant with exact remediation SQL. |
+| `pgtrickle.row_identity_v2_recreation_preflight()` | `jsonb` | Owner/superuser-only, read-only V2 recreation gate. Checks storage, markers, source contracts, indexes, PostgreSQL major, scheduler quiescence, and consumer acknowledgments without returning identity bytes. |
+| `pgtrickle.row_identity_v2_consumer_inventory()` | `SETOF record` | Owner/superuser-only inventory of external consumers and their `BYTEA` schema/resnapshot plans. |
 | `pgtrickle.validate_query(sql text)` | `SetOf row` | Validates whether a SQL query is IVM-compatible. Returns analysis results including unsupported patterns. |
 | `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
 | `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
@@ -4529,6 +4533,44 @@ The `remediation` value in each reported gap contains the exact quoted
 `GRANT SELECT ON TABLE ...` and/or `GRANT USAGE ON SCHEMA ...` statements.
 Apply those grants and rerun the preflight before `ALTER EXTENSION pg_trickle
 UPDATE`.
+
+### pgtrickle.row_identity_v2_recreation_preflight
+
+Run the v0.87.17 recreation gate as the extension owner or a superuser. It is
+read-only and returns `jsonb` with `ok`, named checks, and the ordered
+recreation instructions. It fails until the scheduler is quiesced and every
+recorded external consumer has acknowledged its `BYTEA` schema change and
+resnapshot plan.
+
+```sql
+ALTER SYSTEM SET pg_trickle.enabled = 'off';
+SELECT pg_reload_conf();
+SELECT pgtrickle.row_identity_v2_recreation_preflight();
+```
+
+The report contains no complete row identities. It reports only operational
+metadata such as counts and the largest managed row-ID index size.
+
+### pgtrickle.row_identity_v2_consumer_inventory
+
+Record the inventory before acknowledging the preflight. Consumer names,
+owners, affected stream tables, required schema changes, and resnapshot status
+are private to the extension owner and superusers.
+
+```sql
+SELECT pgtrickle.row_identity_v2_record_inventory('change ticket and window');
+SELECT pgtrickle.row_identity_v2_register_consumer(
+    'warehouse', 'analytics_owner', ARRAY['public.orders_st'],
+    true, true, 'Change the identity column to BYTEA and resnapshot'
+);
+SELECT * FROM pgtrickle.row_identity_v2_consumer_inventory();
+SELECT pgtrickle.row_identity_v2_acknowledge_consumer(1, 'PENDING');
+SELECT pgtrickle.row_identity_v2_acknowledge_inventory();
+```
+
+Use `COMPLETE` after the downstream resnapshot or `SKIPPED` when the consumer
+was removed. `PENDING` and `IN_PROGRESS` acknowledge ownership of the plan
+before teardown; they do not claim that resnapshot is complete.
 
 ### pgtrickle.resume_after_drain
 
