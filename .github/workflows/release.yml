@@ -51,6 +51,9 @@ jobs:
         # deep-tier gates before this tag was pushed.
         run: python3 scripts/dvm_release_gate.py
 
+      - name: ROWID-17 machine-enforced V2 release gate
+        run: python3 scripts/row_id_v2_release_gate.py
+
   # ── Build release artifacts for each platform ───────────────────────────
   build-release:
     name: Build (${{ matrix.artifact_suffix }})

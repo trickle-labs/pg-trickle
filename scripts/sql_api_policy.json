@@ -1,6 +1,6 @@
 {
   "policy_version": 2,
-  "generated_from": "sql/archive/pg_trickle--0.87.16.sql",
+  "generated_from": "sql/archive/pg_trickle--0.87.17.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
@@ -14,6 +14,13 @@
       "name": "_on_sql_drop",
       "identity_arguments": "",
       "class": "trigger_entry",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._row_identity_v2_admin()": {
+      "schema": "pgtrickle",
+      "name": "_row_identity_v2_admin",
+      "identity_arguments": "",
+      "class": "internal",
       "execution_policy": "capability_specific"
     },
     "pgtrickle._signal_launcher_rescan()": {
@@ -303,19 +310,19 @@
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
-    "pgtrickle.exec_stream_ddl(text)": {
-      "schema": "pgtrickle",
-      "name": "exec_stream_ddl",
-      "identity_arguments": "text",
-      "class": "owner_lifecycle",
-      "execution_policy": "invoker_delegating"
-    },
     "pgtrickle.encode_row_id_v2(text, anyelement)": {
       "schema": "pgtrickle",
       "name": "encode_row_id_v2",
       "identity_arguments": "text, anyelement",
       "class": "public_read",
       "execution_policy": "capability_specific"
+    },
+    "pgtrickle.exec_stream_ddl(text)": {
+      "schema": "pgtrickle",
+      "name": "exec_stream_ddl",
+      "identity_arguments": "text",
+      "class": "owner_lifecycle",
+      "execution_policy": "invoker_delegating"
     },
     "pgtrickle.explain(text)": {
       "schema": "pgtrickle",
@@ -674,13 +681,6 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
-    "pgtrickle.row_probe_v1(bytea)": {
-      "schema": "pgtrickle",
-      "name": "row_probe_v1",
-      "identity_arguments": "bytea",
-      "class": "public_read",
-      "execution_policy": "capability_specific"
-    },
     "pgtrickle.repair_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "repair_stream_table",
@@ -736,6 +736,55 @@
       "identity_arguments": "text",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.row_identity_v2_acknowledge_consumer(bigint, text)": {
+      "schema": "pgtrickle",
+      "name": "row_identity_v2_acknowledge_consumer",
+      "identity_arguments": "bigint, text",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_identity_v2_acknowledge_inventory()": {
+      "schema": "pgtrickle",
+      "name": "row_identity_v2_acknowledge_inventory",
+      "identity_arguments": "",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_identity_v2_consumer_inventory()": {
+      "schema": "pgtrickle",
+      "name": "row_identity_v2_consumer_inventory",
+      "identity_arguments": "",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_identity_v2_record_inventory(text)": {
+      "schema": "pgtrickle",
+      "name": "row_identity_v2_record_inventory",
+      "identity_arguments": "text",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_identity_v2_recreation_preflight()": {
+      "schema": "pgtrickle",
+      "name": "row_identity_v2_recreation_preflight",
+      "identity_arguments": "",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_identity_v2_register_consumer(text, text, text[], boolean, boolean, text)": {
+      "schema": "pgtrickle",
+      "name": "row_identity_v2_register_consumer",
+      "identity_arguments": "text, text, text[], boolean, boolean, text",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.row_probe_v1(bytea)": {
+      "schema": "pgtrickle",
+      "name": "row_probe_v1",
+      "identity_arguments": "bytea",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.schedule_recommendations()": {
       "schema": "pgtrickle",
