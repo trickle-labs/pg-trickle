@@ -1,0 +1,94 @@
+{
+  "format_version": 1,
+  "extension_version": "0.88.0",
+  "extension_commit": "e78d65d2479a2da92abde08d4eb975f0479fee7e-dirty",
+  "image_id": "sha256:9e1d08fc60407ff60f533cf1a5504e727b36c94d7caf596c332c8d8132e0b4d9",
+  "host": {
+    "cpu": "Apple M1 Pro, 10 cores",
+    "memory_bytes": 34359738368,
+    "architecture": "arm64",
+    "macos": "26.6.2",
+    "rust": "1.98.0"
+  },
+  "source_rows": 1000000,
+  "changed_rows": 100000,
+  "measured_refreshes": 5,
+  "refresh_ms": [
+    776.955917,
+    784.3439169999999,
+    794.573708,
+    841.09375,
+    845.0125
+  ],
+  "median_ms": 794.573708,
+  "p95_ms": 844.22875,
+  "median_changed_rows_per_second": 125853.64830621856,
+  "exact_checks": [true, true, true, true, true, true],
+  "exact_multiset_validated": true,
+  "merge_strategy": "vector_agg",
+  "vector_profiles": [
+    {
+      "apply_ms": 139.407,
+      "bytes": 2720000,
+      "groups": 10000,
+      "max_page_bytes": 16384,
+      "pages": 167,
+      "read_ms": 96.129,
+      "reduce_ms": 52.443,
+      "rescan_ms": 0.0,
+      "rescans": 0,
+      "rows": 170000
+    },
+    {
+      "apply_ms": 151.029,
+      "bytes": 2720000,
+      "groups": 10000,
+      "max_page_bytes": 16384,
+      "pages": 167,
+      "read_ms": 100.463,
+      "reduce_ms": 60.762,
+      "rescan_ms": 0.0,
+      "rescans": 0,
+      "rows": 170000
+    },
+    {
+      "apply_ms": 140.272,
+      "bytes": 2720000,
+      "groups": 10000,
+      "max_page_bytes": 16384,
+      "pages": 167,
+      "read_ms": 99.559,
+      "reduce_ms": 59.931,
+      "rescan_ms": 0.0,
+      "rescans": 0,
+      "rows": 170000
+    },
+    {
+      "apply_ms": 154.875,
+      "bytes": 2720000,
+      "groups": 10000,
+      "max_page_bytes": 16384,
+      "pages": 167,
+      "read_ms": 104.033,
+      "reduce_ms": 60.164,
+      "rescan_ms": 0.0,
+      "rescans": 0,
+      "rows": 170000
+    },
+    {
+      "apply_ms": 144.852,
+      "bytes": 2720000,
+      "groups": 10000,
+      "max_page_bytes": 16384,
+      "pages": 167,
+      "read_ms": 98.414,
+      "reduce_ms": 58.891,
+      "rescan_ms": 0.0,
+      "rescans": 0,
+      "rows": 170000
+    }
+  ],
+  "temp_bytes": 0,
+  "memory_peak_bytes": 849170432,
+  "throughput_ratio_vs_baseline": 9.225850249250884
+}

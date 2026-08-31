@@ -32,6 +32,10 @@ use std::sync::Arc;
 pub(crate) struct CachedMergeTemplate {
     /// Hash of the defining query — invalidation key.
     pub(crate) defining_query_hash: u64,
+    /// Source-statistics epoch that selected this physical template.
+    pub(crate) statistics_epoch: String,
+    /// Planner format version used to build this template.
+    pub(crate) planning_version: u16,
     /// MERGE SQL template with `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
     /// placeholder tokens. Resolved to concrete LSN values before each execution.
     /// PERF-3: stored as Arc<str> so cache-hit clones are O(1) ref-count increments.
@@ -1932,6 +1936,7 @@ fn estimate_cached_merge_template_bytes(entry: &CachedMergeTemplate) -> usize {
         + entry.trigger_insert_template.len()
         + entry.trigger_using_template.len()
         + entry.delta_sql_template.len()
+        + entry.statistics_epoch.len()
         + entry
             .source_oids
             .len()
@@ -1978,19 +1983,28 @@ pub(crate) fn get_fused_refresh_template(
     pgt_id: i64,
     defining_query_hash: u64,
 ) -> Option<(String, Vec<u32>, bool)> {
-    MERGE_TEMPLATE_CACHE.with(|cache| {
+    let cached = MERGE_TEMPLATE_CACHE.with(|cache| {
         cache
             .borrow()
             .peek(&pgt_id)
-            .filter(|entry| entry.defining_query_hash == defining_query_hash)
-            .map(|entry| {
-                (
-                    entry.delta_sql_template.as_ref().to_owned(),
-                    entry.source_oids.clone(),
-                    entry.is_deduplicated,
-                )
+            .filter(|entry| {
+                entry.defining_query_hash == defining_query_hash
+                    && entry.planning_version == crate::dvm::planner::FORMAT_VERSION
             })
-    })
+            .cloned()
+    });
+    cached
+        .filter(|entry| {
+            entry.statistics_epoch
+                == crate::dvm::planner::statistics_epoch_for_sources(&entry.source_oids)
+        })
+        .map(|entry| {
+            (
+                entry.delta_sql_template.as_ref().to_owned(),
+                entry.source_oids,
+                entry.is_deduplicated,
+            )
+        })
 }
 
 pub fn invalidate_merge_cache(pgt_id: i64) {
@@ -2721,6 +2735,8 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     maybe_evict_lru_cache_entry();
     let new_entry = CachedMergeTemplate {
         defining_query_hash: query_hash,
+        statistics_epoch: crate::dvm::planner::statistics_epoch_for_sources(source_oids),
+        planning_version: crate::dvm::planner::FORMAT_VERSION,
         // PERF-3: convert to Arc<str> so cache-hit clones are O(1).
         merge_sql_template: merge_template.into(),
         parameterized_merge_sql: parameterized_merge_sql.into(),

@@ -287,6 +287,25 @@ The parser produces an `OpTree` — a tree of operator nodes. CTE handling follo
 2. **Tier 2 (Shared Delta)** — Non-recursive CTEs referenced multiple times produce `CteScan` nodes that share a single delta computation via a CTE registry and delta cache.
 3. **Tier 3a/3b/3c (Recursive)** — Recursive CTEs (`WITH RECURSIVE`) are detected via `query_has_recursive_cte()`. In FULL mode, the query executes as-is. In DIFFERENTIAL mode, the strategy is auto-selected: semi-naive evaluation for INSERT-only changes, Delete-and-Rederive (DRed) for mixed changes, or recomputation fallback when CTE columns don't match ST storage or when the recursive term contains non-monotone operators (EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, INTERSECT SET). In IMMEDIATE mode, the same semi-naive / DRed machinery runs against statement transition tables and is bounded by `pg_trickle.ivm_recursive_max_depth` to guard against unbounded recursion.
 
+#### Delta execution contexts and planning
+
+`DiffContext` remains the value passed through differentiation. It delegates
+frontiers and CDC metadata to `CdcContext`, reusable query state to
+`CacheContext`, and CTE emission and limits to `OptimizationContext`.
+
+The v0.88 planner collects one owned statistics snapshot in a short SPI block.
+It records current-plan estimates, observations, semantic barriers, and shadow
+candidates. PostgreSQL still chooses physical join algorithms and build sides.
+An unvalidated rewrite stays in shadow mode and does not change generated SQL.
+
+For an eligible top-level aggregate over one scan, the vector producer copies
+at most 1,024 change rows into concrete owned columns and reduces them with
+checked Rust loops. Page results combine in a memory-budgeted hash table; when
+that table reaches its budget, it spills consolidated groups to a PostgreSQL
+temporary relation. Its output uses the same delta relation and apply path as
+the SQL producer. Unsupported functions, types, collations, and target layouts
+keep the SQL path.
+
 #### § Recursive CTE Strategy Selection
 
 The DVM engine selects among five strategies for `WITH RECURSIVE` queries. The

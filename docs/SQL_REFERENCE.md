@@ -124,6 +124,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 - [Advanced and Diagnostic Functions](#advanced-and-diagnostic-functions)
 - [Delta SQL Profiling](#delta-sql-profiling-v0130)
   - [pgtrickle.explain\_delta](#pgtrickleexplain_delta)
+  - [pgtrickle.explain\_delta\_plan](#pgtrickleexplain_delta_plan)
   - [pgtrickle.dedup\_stats](#pgtricklededup_stats)
   - [pgtrickle.shared\_buffer\_stats](#pgtrickleshared_buffer_stats)
 - [dbt Integration](#dbt-integration-v0130)
@@ -4638,6 +4639,32 @@ DIFFERENTIAL refresh automatically captures `EXPLAIN (ANALYZE, BUFFERS, FORMAT J
 for the resolved delta SQL and writes the plan to
 `/tmp/delta_plans/<schema>_<table>.json`. This is intended for E2E test
 diagnostics and local profiling sessions.
+
+---
+
+### `pgtrickle.explain_delta_plan(pgt_id bigint)`
+
+Return pg_trickle's engine-planning evidence as `jsonb`. The function parses
+and plans the defining query but does not execute it, consume change rows,
+advance a frontier, or populate execution caches.
+
+The document has `format_version = 1`. It reports the statistics epoch,
+statistics completeness, available observations, the current operator order,
+the shadow candidate, the chosen order, rule decisions, skipped rules, and
+planning time. Observed intermediate rows are the final delta cardinality from
+the latest completed differential refresh; per-node and candidate runtime stay
+absent until a benchmark executes that plan. A shadow rule has
+`selected = false`; PostgreSQL still plans the generated relational SQL.
+
+Only the stream-table owner or a superuser can inspect the plan.
+
+```sql
+SELECT jsonb_pretty(pgtrickle.explain_delta_plan(42));
+```
+
+Use `explain_delta_plan` to inspect pg_trickle's decision. Use
+`pgtrickle.explain_delta` next when you need PostgreSQL's plan for the generated
+delta SQL.
 
 ---
 

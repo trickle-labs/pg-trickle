@@ -9,9 +9,147 @@ mod e2e;
 
 use e2e::E2eDb;
 
+async fn latest_merge_strategy(db: &E2eDb, stream_table: &str) -> String {
+    db.query_scalar(&format!(
+        "SELECT COALESCE(h.merge_strategy_used, '') \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = '{stream_table}' \
+         ORDER BY h.refresh_id DESC LIMIT 1"
+    ))
+    .await
+}
+
+async fn refresh_vector_st(db: &E2eDb, stream_table: &str) {
+    let refresh = format!("SELECT pgtrickle.refresh_stream_table('{stream_table}')");
+    db.execute_seq(&[
+        "SET pg_trickle.aggregate_fast_path = on",
+        "SET pg_trickle.validate_delta_invariants = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        &refresh,
+    ])
+    .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Basic aggregates: SUM, AVG, COUNT, MIN, MAX
 // ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_vector_aggregate_selected_for_bounded_mixed_pages_and_text_key_falls_back() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE vector_page_source (id INT PRIMARY KEY, grp INT NOT NULL, val INT)")
+        .await;
+    db.execute(
+        "INSERT INTO vector_page_source SELECT i, i % 37, i % 101 FROM generate_series(1, 3000) i",
+    )
+    .await;
+    let query = "SELECT grp, SUM(val) AS total, COUNT(*) AS rows, AVG(val) AS mean \
+                 FROM vector_page_source GROUP BY grp";
+    db.create_st("vector_page_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute(
+        "UPDATE vector_page_source SET grp = CASE WHEN id <= 100 THEN (grp + 1) % 37 ELSE grp END, \
+         val = val + 7 WHERE id <= 900",
+    )
+    .await;
+    db.execute("DELETE FROM vector_page_source WHERE id BETWEEN 901 AND 1200")
+        .await;
+    db.execute(
+        "INSERT INTO vector_page_source SELECT i, i % 37, i % 101 FROM generate_series(4001, 4400) i",
+    )
+    .await;
+    refresh_vector_st(&db, "vector_page_st").await;
+    db.assert_st_matches_query("vector_page_st", query).await;
+    let has_fractional_avg: bool = db
+        .query_scalar("SELECT EXISTS (SELECT 1 FROM vector_page_st WHERE mean <> trunc(mean))")
+        .await;
+    assert!(has_fractional_avg, "AVG must retain its numeric fraction");
+    let vector_evidence: String = db
+        .query_scalar(
+            "SELECT (pgtrickle.explain_delta_plan(pgt_id) -> 'vector_path')::text \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'vector_page_st'",
+        )
+        .await;
+    assert_eq!(
+        latest_merge_strategy(&db, "vector_page_st").await,
+        "vector_agg",
+        "vector evidence: {vector_evidence}"
+    );
+
+    db.execute("CREATE TABLE vector_fallback_source (id INT PRIMARY KEY, grp TEXT, val INT)")
+        .await;
+    db.execute("INSERT INTO vector_fallback_source VALUES (1, 'a', 1), (2, 'a', 2)")
+        .await;
+    let fallback_query = "SELECT grp, SUM(val) AS total FROM vector_fallback_source GROUP BY grp";
+    db.create_st("vector_fallback_st", fallback_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute("INSERT INTO vector_fallback_source VALUES (3, 'a', 3)")
+        .await;
+    refresh_vector_st(&db, "vector_fallback_st").await;
+    db.assert_st_matches_query("vector_fallback_st", fallback_query)
+        .await;
+    assert_ne!(
+        latest_merge_strategy(&db, "vector_fallback_st").await,
+        "vector_agg"
+    );
+
+    db.execute("CREATE TABLE vector_extreme_source (id INT PRIMARY KEY, grp INT, val INT)")
+        .await;
+    db.execute("INSERT INTO vector_extreme_source VALUES (1, 1, 10), (2, 1, 20)")
+        .await;
+    let extreme_query = "SELECT grp, MIN(val) AS low, MAX(val) AS high \
+                         FROM vector_extreme_source GROUP BY grp";
+    db.create_st("vector_extreme_st", extreme_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute("INSERT INTO vector_extreme_source VALUES (3, 1, 5), (4, 2, 40)")
+        .await;
+    refresh_vector_st(&db, "vector_extreme_st").await;
+    db.assert_st_matches_query("vector_extreme_st", extreme_query)
+        .await;
+    assert_eq!(
+        latest_merge_strategy(&db, "vector_extreme_st").await,
+        "vector_agg"
+    );
+    db.execute("DELETE FROM vector_extreme_source WHERE id IN (3, 4)")
+        .await;
+    refresh_vector_st(&db, "vector_extreme_st").await;
+    db.assert_st_matches_query("vector_extreme_st", extreme_query)
+        .await;
+    assert_eq!(
+        latest_merge_strategy(&db, "vector_extreme_st").await,
+        "vector_agg"
+    );
+
+    db.execute("CREATE TABLE vector_global_source (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO vector_global_source VALUES (1, NULL), (2, 10), (3, 30)")
+        .await;
+    let global_query = "SELECT COUNT(val) AS present, SUM(val) AS total, AVG(val) AS mean, \
+                        MIN(val) AS low, MAX(val) AS high FROM vector_global_source";
+    db.create_st("vector_global_st", global_query, "1m", "DIFFERENTIAL")
+        .await;
+    db.execute_seq(&[
+        "UPDATE vector_global_source SET val = CASE id WHEN 1 THEN 20 WHEN 2 THEN NULL ELSE val END",
+        "DELETE FROM vector_global_source WHERE id = 3",
+        "INSERT INTO vector_global_source VALUES (4, 40)",
+    ])
+    .await;
+    refresh_vector_st(&db, "vector_global_st").await;
+    db.assert_st_matches_query("vector_global_st", global_query)
+        .await;
+    let global_evidence: String = db
+        .query_scalar(
+            "SELECT (pgtrickle.explain_delta_plan(pgt_id) -> 'vector_path')::text \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'vector_global_st'",
+        )
+        .await;
+    assert_eq!(
+        latest_merge_strategy(&db, "vector_global_st").await,
+        "vector_agg",
+        "vector evidence: {global_evidence}"
+    );
+}
 
 #[tokio::test]
 async fn test_agg_sum_differential() {

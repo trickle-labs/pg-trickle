@@ -565,7 +565,7 @@ fn build_intermediate_agg_delta(
     aggregates: &[AggExpr],
     delta_cte: &str,
 ) -> Result<DiffResult, PgTrickleError> {
-    let source_from = child_to_from_sql(child, &ctx.cte_registry, true);
+    let source_from = child_to_from_sql(child, ctx.cte_registry(), true);
 
     // We need the child's source SQL for rescanning. If we can't reconstruct
     // it, fall back to the defining query approach.
@@ -968,7 +968,7 @@ fn build_rescan_cte(
     }
 
     let rescan_cte = ctx.next_cte_name("agg_rescan");
-    let source_from = child_to_from_sql(child, &ctx.cte_registry, false);
+    let source_from = child_to_from_sql(child, ctx.cte_registry(), false);
     let can_rescan_sum_nonnull = source_from.is_some();
 
     // Build SELECT list: group columns + rescan aggregate calls
@@ -1182,7 +1182,7 @@ fn is_direct_agg_eligible(
         OpTree::Scan { table_oid, .. } => *table_oid,
         _ => return false,
     };
-    if ctx.st_source_pgt_ids.contains_key(&table_oid) {
+    if ctx.st_source_pgt_ids().contains_key(&table_oid) {
         return false;
     }
     for agg in aggregates {
@@ -1216,7 +1216,7 @@ fn is_direct_agg_eligible(
                     // to generate_direct_agg_delta, so an empty-column fallback
                     // never produces invalid SQL.
                     let cdc_cols = match child {
-                        OpTree::Scan { table_oid, .. } => ctx.source_cdc_columns.get(table_oid),
+                        OpTree::Scan { table_oid, .. } => ctx.source_cdc_columns().get(table_oid),
                         _ => return false,
                     };
                     if let Some(cols) = cdc_cols {
@@ -1368,7 +1368,7 @@ fn generate_direct_agg_delta(
 
     // A44-2 (v0.43.0): Gather CDC columns for DI-2 CASE-expression rewrite.
     let cdc_cols_for_case = ctx
-        .source_cdc_columns
+        .source_cdc_columns()
         .get(table_oid)
         .cloned()
         .unwrap_or_default();
@@ -1642,7 +1642,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // only applicable for ChangeBuffer delta sources. For TransitionTable
     // (IMMEDIATE mode), we always use the standard path which correctly
     // reads from the trigger transition temp tables via diff_scan.
-    let use_p5 = matches!(ctx.delta_source, DeltaSource::ChangeBuffer)
+    let use_p5 = matches!(ctx.delta_source(), DeltaSource::ChangeBuffer)
         && is_direct_agg_eligible(child, group_by, aggregates, ctx);
     let (delta_cte, group_output) = if use_p5 {
         generate_direct_agg_delta(ctx, child, group_by, aggregates)?
@@ -5774,8 +5774,9 @@ mod tests {
             crate::version::Frontier::default(),
             crate::version::Frontier::default(),
         );
-        ctx.source_key_columns.insert(1, vec!["region".to_string()]);
-        ctx.source_cdc_columns.insert(
+        ctx.source_key_columns_mut()
+            .insert(1, vec!["region".to_string()]);
+        ctx.source_cdc_columns_mut().insert(
             1,
             vec!["id".to_string(), "region".to_string(), "amount".to_string()],
         );
@@ -5830,9 +5831,9 @@ mod tests {
             crate::version::Frontier::default(),
             crate::version::Frontier::default(),
         );
-        ctx.source_key_columns
+        ctx.source_key_columns_mut()
             .insert(1, vec!["id".to_string(), "region".to_string()]);
-        ctx.source_cdc_columns
+        ctx.source_cdc_columns_mut()
             .insert(1, vec!["id".to_string(), "region".to_string()]);
         let result = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs);
         assert!(result.is_ok());
@@ -5922,7 +5923,7 @@ mod tests {
             crate::version::Frontier::default(),
             crate::version::Frontier::default(),
         );
-        ctx.source_cdc_columns.insert(
+        ctx.source_cdc_columns_mut().insert(
             1,
             vec![
                 "id".to_string(),
@@ -5985,7 +5986,7 @@ mod tests {
             crate::version::Frontier::default(),
             crate::version::Frontier::default(),
         );
-        ctx.source_cdc_columns.insert(
+        ctx.source_cdc_columns_mut().insert(
             1,
             vec![
                 "id".to_string(),
@@ -5995,7 +5996,8 @@ mod tests {
             ],
         );
         // Key columns set to trigger potential V-row (but should be disabled for CASE).
-        ctx.source_key_columns.insert(1, vec!["id".to_string()]);
+        ctx.source_key_columns_mut()
+            .insert(1, vec!["id".to_string()]);
 
         let result = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs);
         assert!(

@@ -139,4 +139,5 @@ pub mod subquery;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 pub mod union_all;
+pub mod vectorized_agg;
 pub mod window;

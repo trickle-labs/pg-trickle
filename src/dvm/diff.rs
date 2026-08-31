@@ -10,7 +10,7 @@
 
 use crate::config::pg_trickle_change_buffer_schema;
 use crate::dvm::operators;
-use crate::dvm::parser::{CteRegistry, OpTree};
+use crate::dvm::parser::{CteRegistry, Expr, OpTree};
 use crate::dvm::schema::RelationSchema;
 use crate::dvm::snapshot::{SnapshotPlan, operator_name};
 use crate::dvm_trace::{DecisionTrace, trace_schema};
@@ -72,55 +72,49 @@ pub struct DiffResult {
     pub has_key_changed: bool,
 }
 
+/// Change-data-capture state used while generating a delta query.
+pub struct CdcContext {
+    prev_frontier: Frontier,
+    new_frontier: Frontier,
+    change_buffer_schema: String,
+    use_placeholders: bool,
+    delta_source: DeltaSource,
+    source_cdc_columns: HashMap<u32, Vec<String>>,
+    source_key_columns: HashMap<u32, Vec<String>>,
+    st_source_pgt_ids: HashMap<u32, i64>,
+    source_buffer_names: HashMap<u32, String>,
+    source_stage_tables: HashMap<u32, String>,
+}
+
+/// Reusable differentiation state and snapshot caches.
+pub struct CacheContext {
+    cte_registry: CteRegistry,
+    cte_delta_cache: HashMap<usize, DiffResult>,
+    scan_pushed_predicate: Option<Expr>,
+    st_bypass_tables: HashMap<i64, String>,
+    scan_delta_ctes: HashMap<String, String>,
+    snapshot_cte_cache: HashMap<String, (String, String)>,
+    snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
+    fallback_leaf_oids: HashSet<u32>,
+}
+
+/// CTE emission and differentiation limit state.
+pub struct OptimizationContext {
+    cte_counter: usize,
+    ctes: Vec<(String, String, bool, bool)>,
+    not_materialized_ctes: HashSet<String>,
+    diff_depth: usize,
+    max_diff_depth: usize,
+    max_diff_ctes: usize,
+}
+
 /// Context for delta query generation.
 pub struct DiffContext {
-    /// Frontier at the start of the change interval.
-    pub prev_frontier: Frontier,
-    /// Frontier at the end of the change interval.
-    pub new_frontier: Frontier,
-    /// Counter for generating unique CTE names.
-    cte_counter: usize,
-    /// Accumulated CTE definitions: `(name, sql, is_recursive, is_materialized)`.
-    ctes: Vec<(String, String, bool, bool)>,
-    /// CTEs that should emit `AS NOT MATERIALIZED (...)` to prevent
-    /// PostgreSQL from auto-materializing them when referenced >= 2 times.
-    /// Used when Part 3 correction adds a second reference to a child
-    /// join delta CTE — without this, PG materializes the CTE into temp
-    /// files, exhausting `temp_file_limit`.
-    not_materialized_ctes: HashSet<String>,
-    /// Schema for change buffer tables.
-    pub change_buffer_schema: String,
+    cdc: CdcContext,
+    cache: CacheContext,
+    optimization: OptimizationContext,
     /// The target stream table's schema.qualified name (for aggregate merge).
     pub st_qualified_name: Option<String>,
-    /// Registry of parsed CTE bodies (populated by the parser).
-    pub cte_registry: CteRegistry,
-    /// Cache of already-differentiated CTE deltas, keyed by `cte_id`.
-    /// When a CTE is referenced multiple times via [`OpTree::CteScan`],
-    /// the first encounter differentiates the body and stores the result
-    /// here; subsequent encounters reuse it.
-    cte_delta_cache: HashMap<usize, DiffResult>,
-    /// C-7 (v0.54.0): Current recursion depth of `diff_node()`.
-    ///
-    /// Incremented on entry to `diff_node()` and decremented on exit.
-    /// Returns `PgTrickleError::DiffDepthExceeded` when the depth
-    /// exceeds `pg_trickle.max_parse_depth`, preventing stack overflows
-    /// on pathologically deep operator trees.
-    diff_depth: usize,
-    /// C-7 / R-7 (v0.54.0): Maximum allowed `diff_node()` depth and CTE count.
-    ///
-    /// Loaded from `pg_trickle.max_parse_depth` at construction time.
-    /// Unit tests use `DiffContext::new_standalone()` which sets this to 64.
-    max_diff_depth: usize,
-    /// R-7 (v0.54.0): Maximum allowed CTE count per differentiation.
-    ///
-    /// Loaded from `pg_trickle.max_diff_ctes` at construction time.
-    /// Guards against unbounded memory growth from pathological queries.
-    max_diff_ctes: usize,
-    /// When true, emit `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
-    /// placeholder tokens instead of literal LSN values. This allows the
-    /// generated SQL to be cached and re-used across refreshes by
-    /// substituting actual LSN values at execution time.
-    pub use_placeholders: bool,
     /// The original defining query text, used by recursive CTE
     /// recomputation to re-execute the query directly instead of
     /// reconstructing SQL from the OpTree.
@@ -147,9 +141,6 @@ pub struct DiffContext {
     /// (e.g., aggregates inside CTE bodies) whose output columns match
     /// the ST but whose `__pgt_count` is not stored.
     pub st_has_pgt_count: bool,
-    /// Source of delta data: change buffer tables (deferred) or transition
-    /// tables (immediate). Determines how the Scan operator generates SQL.
-    pub delta_source: DeltaSource,
     /// Maps child column names to their corresponding ST column names.
     ///
     /// Populated by `diff_project` when a Project renames columns
@@ -163,101 +154,6 @@ pub struct DiffContext {
     /// HAVING threshold (absent from the ST) and are now crossing it upward.
     /// Reset to `false` after the child diff returns.
     pub having_filter: bool,
-    /// P2-5: CDC column names per source table, ordered by `attnum`.
-    ///
-    /// Maps `table_oid` → ordered CDC column names (from
-    /// `resolve_referenced_column_defs`). The index in this Vec corresponds
-    /// to the bit position in the `changed_cols` bitmask stored by the CDC
-    /// trigger. Used by `diff_scan_change_buffer` to build a bitmask filter
-    /// that skips UPDATE rows where none of the referenced columns changed.
-    pub source_cdc_columns: HashMap<u32, Vec<String>>,
-    /// A-2: Key column names per source table.
-    ///
-    /// Maps `table_oid` → column names that appear in key positions
-    /// (GROUP BY, JOIN ON, WHERE). Used by the scan operator to compute
-    /// a key-column-only bitmask. UPDATE rows where `changed_cols & key_mask
-    /// = 0` are "value-only" changes — the row stays in its group/join
-    /// bucket — enabling downstream optimization.
-    pub source_key_columns: HashMap<u32, Vec<String>>,
-    /// P2-7: Predicate pushed down from a Filter node into the Scan.
-    ///
-    /// When a Filter sits directly above a Scan and the predicate only
-    /// references columns from that Scan, `diff_filter` stores the
-    /// predicate here instead of generating a separate filter CTE.
-    /// `diff_scan_change_buffer` consumes it by injecting rewritten
-    /// `WHERE c."old_col" ...` / `c."new_col" ...` clauses into the
-    /// final scan CTE's DELETE/INSERT branches.
-    pub scan_pushed_predicate: Option<crate::dvm::parser::Expr>,
-    /// ST-ST-4: Maps storage-table OIDs to upstream pgt_ids for ST sources.
-    ///
-    /// When a source OID is a stream table (not a base table), the scan
-    /// operator reads from `changes_pgt_{pgt_id}` instead of `changes_{oid}`
-    /// and uses `pgt_`-prefixed LSN placeholder tokens.
-    pub st_source_pgt_ids: HashMap<u32, i64>,
-    /// DAG-4: Maps upstream pgt_id → temp bypass table name.
-    ///
-    /// When set (by fused-chain execution), `diff_scan_change_buffer` reads
-    /// from the bypass temp table instead of the persistent change buffer.
-    pub st_bypass_tables: HashMap<i64, String>,
-    /// EC01B-1: Maps Scan alias → delta CTE name.
-    ///
-    /// Populated by `diff_scan` for each leaf Scan node during diff
-    /// traversal. Used by `build_pre_change_snapshot_sql` to construct
-    /// per-leaf pre-change snapshots for deep join trees (≥3 scan nodes),
-    /// avoiding the expensive full-snapshot EXCEPT ALL that spills temp
-    /// files. Each leaf's EXCEPT ALL operates on a single table (cheap),
-    /// and the join is reconstructed from pre-change leaves.
-    pub scan_delta_ctes: HashMap<String, String>,
-    /// DI-1: Cache of pre-change snapshot CTEs, keyed by OpTree alias.
-    ///
-    /// When `get_or_register_snapshot_cte()` is called for a subtree,
-    /// the inline snapshot SQL is registered as a named CTE and the name
-    /// is cached here. Subsequent calls for the same subtree return the
-    /// cached CTE name, eliminating redundant inline evaluations.
-    /// For a 6-table join, this deduplicates 3–10× redundant EXCEPT ALL
-    /// evaluations per leaf.
-    ///
-    /// COR-8 (v0.61.0): The value is `(canonical_fingerprint, cte_name)`.
-    /// On a hash hit, the canonical fingerprint is compared for equality;
-    /// a mismatch indicates a DefaultHasher collision and causes eviction.
-    snapshot_cte_cache: HashMap<String, (String, String)>,
-    /// P-4 (v0.54.0): Cache of structural fingerprints for OpTree nodes.
-    ///
-    /// `snapshot_cache_key()` traverses the full OpTree recursively to
-    /// compute a fingerprint. For queries with deeply shared subtrees,
-    /// the same subtree may be passed to `get_or_register_snapshot_cte()`
-    /// multiple times. This cache maps raw pointer address (as `usize`)
-    /// to the computed `(hash_hex, canonical_string)` pair, so the O(tree-size)
-    /// traversal only happens once per unique subtree per differentiation call.
-    ///
-    /// COR-8 (v0.61.0): Also stores the canonical string for secondary equality
-    /// check in `get_or_register_snapshot_cte()`.
-    ///
-    /// Safety: The cache is valid for the lifetime of the DiffContext
-    /// (a single differentiation call). OpTree is borrowed immutably and
-    /// never reallocated during differentiation.
-    snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
-    /// DI-2: Source table OIDs whose delta fraction exceeds
-    /// `max_delta_fraction` for the current refresh cycle.
-    ///
-    /// When a Scan's `table_oid` is in this set,
-    /// `build_leaf_snapshot_sql` emits `EXCEPT ALL` instead of the
-    /// `NOT EXISTS` anti-join. NOT EXISTS with an index scan is optimal
-    /// for small deltas; EXCEPT ALL (hash-based) is more efficient when
-    /// the delta approaches a significant fraction of the base table.
-    pub fallback_leaf_oids: HashSet<u32>,
-    /// CITUS-4: Pre-resolved change buffer base names per source OID.
-    ///
-    /// Maps `table_oid` → base name of the change buffer table (e.g.
-    /// `changes_a3f7b2c1...` for v0.32.0+ stable naming).  Populated by
-    /// `dvm/mod.rs` using a SPI lookup before calling `differentiate()`.
-    /// When absent for a given OID, `diff_scan_change_buffer` falls back
-    /// to `changes_{oid}` (pre-v0.32.0 rows or unit-test contexts where
-    /// no SPI connection is available).
-    pub source_buffer_names: HashMap<u32, String>,
-    /// Owner-readable `pg_temp` stages keyed by source relation OID.
-    /// When present, generated delta SQL never names the private CDC schema.
-    pub source_stage_tables: HashMap<u32, String>,
     /// P2-2: Maps aggregate alias → COALESCE default value (e.g., "0") for
     /// SUM aggregates wrapped in `COALESCE(SUM(...), default)` at the Project
     /// level.
@@ -563,49 +459,201 @@ fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> (String, String) {
     (format!("{:016x}", hasher.finish()), buf)
 }
 
+impl CdcContext {
+    fn change_table_for_source(
+        &self,
+        source_oid: u32,
+        st_bypass_tables: &HashMap<i64, String>,
+    ) -> String {
+        if let Some(stage) = self.source_stage_tables.get(&source_oid) {
+            return stage.clone();
+        }
+        if let Some(pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
+            return st_bypass_tables.get(pgt_id).cloned().unwrap_or_else(|| {
+                format!(
+                    "{}.changes_pgt_{pgt_id}",
+                    quote_ident(&self.change_buffer_schema)
+                )
+            });
+        }
+        let buffer = self
+            .source_buffer_names
+            .get(&source_oid)
+            .cloned()
+            .unwrap_or_else(|| format!("changes_{source_oid}"));
+        format!("{}.{}", quote_ident(&self.change_buffer_schema), buffer)
+    }
+
+    fn prev_lsn(&self, source_oid: u32) -> String {
+        if self.use_placeholders {
+            if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
+                format!("__PGS_PREV_LSN_pgt_{pgt_id}__")
+            } else {
+                format!("__PGS_PREV_LSN_{source_oid}__")
+            }
+        } else if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
+            self.prev_frontier
+                .sources
+                .get(&format!("pgt_{pgt_id}"))
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string())
+        } else {
+            self.prev_frontier.get_lsn(source_oid)
+        }
+    }
+
+    fn new_lsn(&self, source_oid: u32) -> String {
+        if self.use_placeholders {
+            if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
+                format!("__PGS_NEW_LSN_pgt_{pgt_id}__")
+            } else {
+                format!("__PGS_NEW_LSN_{source_oid}__")
+            }
+        } else if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
+            self.new_frontier
+                .sources
+                .get(&format!("pgt_{pgt_id}"))
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string())
+        } else {
+            self.new_frontier.get_lsn(source_oid)
+        }
+    }
+}
+
+impl CacheContext {
+    fn get_cte_delta(&self, cte_id: usize) -> Option<&DiffResult> {
+        self.cte_delta_cache.get(&cte_id)
+    }
+
+    fn set_cte_delta(&mut self, cte_id: usize, result: DiffResult) {
+        self.cte_delta_cache.insert(cte_id, result);
+    }
+}
+
+impl OptimizationContext {
+    fn enter_diff(&mut self) -> Result<(), PgTrickleError> {
+        self.diff_depth += 1;
+        if self.diff_depth > self.max_diff_depth {
+            self.diff_depth -= 1;
+            return Err(PgTrickleError::DiffDepthExceeded(self.max_diff_depth));
+        }
+        if self.ctes.len() >= self.max_diff_ctes {
+            self.diff_depth -= 1;
+            return Err(PgTrickleError::DiffCteCountExceeded(self.max_diff_ctes));
+        }
+        Ok(())
+    }
+
+    fn exit_diff(&mut self) {
+        self.diff_depth -= 1;
+    }
+
+    fn next_cte_name(&mut self, prefix: &str) -> String {
+        self.cte_counter += 1;
+        format!("__pgt_cte_{}_{}", prefix, self.cte_counter)
+    }
+
+    fn add_cte(&mut self, name: String, sql: String, is_recursive: bool, is_materialized: bool) {
+        self.ctes.push((name, sql, is_recursive, is_materialized));
+    }
+
+    fn mark_cte_not_materialized(&mut self, name: &str) {
+        self.not_materialized_ctes.insert(name.to_string());
+    }
+
+    fn build_with_query(&self, final_cte: &str) -> String {
+        if self.ctes.is_empty() {
+            return format!("SELECT * FROM {final_cte}");
+        }
+
+        let with_keyword = if self.ctes.iter().any(|(_, _, is_rec, _)| *is_rec) {
+            "WITH RECURSIVE"
+        } else {
+            "WITH"
+        };
+        let cte_defs = self
+            .ctes
+            .iter()
+            .map(|(name, sql, _, is_mat)| {
+                if *is_mat {
+                    format!("{name} AS MATERIALIZED (\n{sql}\n)")
+                } else if self.not_materialized_ctes.contains(name.as_str()) {
+                    format!("{name} AS NOT MATERIALIZED (\n{sql}\n)")
+                } else {
+                    format!("{name} AS (\n{sql}\n)")
+                }
+            })
+            .collect::<Vec<_>>();
+
+        format!(
+            "{with_keyword} {}\nSELECT * FROM {final_cte}",
+            cte_defs.join(",\n"),
+        )
+    }
+}
+
 impl DiffContext {
-    /// Create a new differentiation context.
-    pub fn new(prev_frontier: Frontier, new_frontier: Frontier) -> Self {
-        DiffContext {
-            prev_frontier,
-            new_frontier,
-            cte_counter: 0,
-            ctes: Vec::new(),
-            not_materialized_ctes: HashSet::new(),
-            change_buffer_schema: pg_trickle_change_buffer_schema(),
+    fn with_limits(
+        prev_frontier: Frontier,
+        new_frontier: Frontier,
+        change_buffer_schema: String,
+        max_diff_depth: usize,
+        max_diff_ctes: usize,
+    ) -> Self {
+        Self {
+            cdc: CdcContext {
+                prev_frontier,
+                new_frontier,
+                change_buffer_schema,
+                use_placeholders: false,
+                delta_source: DeltaSource::ChangeBuffer,
+                source_cdc_columns: HashMap::new(),
+                source_key_columns: HashMap::new(),
+                st_source_pgt_ids: HashMap::new(),
+                source_buffer_names: HashMap::new(),
+                source_stage_tables: HashMap::new(),
+            },
+            cache: CacheContext {
+                cte_registry: CteRegistry::default(),
+                cte_delta_cache: HashMap::new(),
+                scan_pushed_predicate: None,
+                st_bypass_tables: HashMap::new(),
+                scan_delta_ctes: HashMap::new(),
+                snapshot_cte_cache: HashMap::new(),
+                snapshot_fingerprint_cache: HashMap::new(),
+                fallback_leaf_oids: HashSet::new(),
+            },
+            optimization: OptimizationContext {
+                cte_counter: 0,
+                ctes: Vec::new(),
+                not_materialized_ctes: HashSet::new(),
+                diff_depth: 0,
+                max_diff_depth,
+                max_diff_ctes,
+            },
             st_qualified_name: None,
-            cte_registry: CteRegistry::default(),
-            cte_delta_cache: HashMap::new(),
-            use_placeholders: false,
             defining_query: None,
             st_user_columns: None,
             merge_safe_dedup: false,
             inside_semijoin: false,
             st_has_pgt_count: false,
-            delta_source: DeltaSource::ChangeBuffer,
             st_column_alias_map: None,
             having_filter: false,
-            source_cdc_columns: HashMap::new(),
-            source_key_columns: HashMap::new(),
-            scan_pushed_predicate: None,
-            st_source_pgt_ids: HashMap::new(),
-            st_bypass_tables: HashMap::new(),
-            scan_delta_ctes: HashMap::new(),
-            snapshot_cte_cache: HashMap::new(),
-            // P-4 (v0.54.0): Fingerprint cache, empty at start of each diff call.
-            snapshot_fingerprint_cache: HashMap::new(),
-            fallback_leaf_oids: HashSet::new(),
-            source_buffer_names: HashMap::new(),
-            source_stage_tables: HashMap::new(),
-            // C-7 (v0.54.0): Depth tracking for diff_node() stack-overflow guard.
-            diff_depth: 0,
-            max_diff_depth: crate::config::pg_trickle_max_parse_depth(),
-            // R-7 (v0.54.0): CTE count guard — loaded from GUC.
-            max_diff_ctes: crate::config::pg_trickle_max_diff_ctes(),
-            // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
             agg_sum_coalesce_defaults: None,
             decision_trace: None,
         }
+    }
+
+    /// Create a new differentiation context.
+    pub fn new(prev_frontier: Frontier, new_frontier: Frontier) -> Self {
+        Self::with_limits(
+            prev_frontier,
+            new_frontier,
+            pg_trickle_change_buffer_schema(),
+            crate::config::pg_trickle_max_parse_depth(),
+            crate::config::pg_trickle_max_diff_ctes(),
+        )
     }
 
     /// Create a DiffContext without accessing PostgreSQL GUCs.
@@ -613,52 +661,104 @@ impl DiffContext {
     /// Used by unit tests and benchmarks that run outside of PostgreSQL.
     /// The `change_buffer_schema` defaults to `"pgtrickle_changes"`.
     pub fn new_standalone(prev_frontier: Frontier, new_frontier: Frontier) -> Self {
-        DiffContext {
+        Self::with_limits(
             prev_frontier,
             new_frontier,
-            cte_counter: 0,
-            ctes: Vec::new(),
-            not_materialized_ctes: HashSet::new(),
-            change_buffer_schema: "pgtrickle_changes".to_string(),
-            st_qualified_name: None,
-            cte_registry: CteRegistry::default(),
-            cte_delta_cache: HashMap::new(),
-            use_placeholders: false,
-            defining_query: None,
-            st_user_columns: None,
-            merge_safe_dedup: false,
-            inside_semijoin: false,
-            st_has_pgt_count: false,
-            delta_source: DeltaSource::ChangeBuffer,
-            st_column_alias_map: None,
-            having_filter: false,
-            source_cdc_columns: HashMap::new(),
-            source_key_columns: HashMap::new(),
-            scan_pushed_predicate: None,
-            st_source_pgt_ids: HashMap::new(),
-            st_bypass_tables: HashMap::new(),
-            scan_delta_ctes: HashMap::new(),
-            snapshot_cte_cache: HashMap::new(),
-            // P-4 (v0.54.0): Fingerprint cache, empty at start of each diff call.
-            snapshot_fingerprint_cache: HashMap::new(),
-            fallback_leaf_oids: HashSet::new(),
-            source_buffer_names: HashMap::new(),
-            source_stage_tables: HashMap::new(),
-            // C-7 (v0.54.0): Depth tracking — use conservative default for unit tests.
-            diff_depth: 0,
-            max_diff_depth: 64,
-            // R-7 (v0.54.0): CTE count guard — use conservative default for unit tests.
-            max_diff_ctes: 1000,
-            // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
-            agg_sum_coalesce_defaults: None,
-            decision_trace: None,
-        }
+            "pgtrickle_changes".to_string(),
+            64,
+            1000,
+        )
     }
 
     /// Enable placeholder mode for generating cacheable SQL templates.
     pub fn with_placeholders(mut self) -> Self {
-        self.use_placeholders = true;
+        self.cdc.use_placeholders = true;
         self
+    }
+
+    pub(crate) fn prev_frontier(&self) -> &Frontier {
+        &self.cdc.prev_frontier
+    }
+
+    pub(crate) fn delta_source(&self) -> &DeltaSource {
+        &self.cdc.delta_source
+    }
+
+    pub(crate) fn source_cdc_columns(&self) -> &HashMap<u32, Vec<String>> {
+        &self.cdc.source_cdc_columns
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_cdc_columns_mut(&mut self) -> &mut HashMap<u32, Vec<String>> {
+        &mut self.cdc.source_cdc_columns
+    }
+
+    pub(crate) fn set_source_cdc_columns(&mut self, columns: HashMap<u32, Vec<String>>) {
+        self.cdc.source_cdc_columns = columns;
+    }
+
+    pub(crate) fn source_key_columns(&self) -> &HashMap<u32, Vec<String>> {
+        &self.cdc.source_key_columns
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_key_columns_mut(&mut self) -> &mut HashMap<u32, Vec<String>> {
+        &mut self.cdc.source_key_columns
+    }
+
+    pub(crate) fn set_source_key_columns(&mut self, columns: HashMap<u32, Vec<String>>) {
+        self.cdc.source_key_columns = columns;
+    }
+
+    pub(crate) fn st_source_pgt_ids(&self) -> &HashMap<u32, i64> {
+        &self.cdc.st_source_pgt_ids
+    }
+
+    pub(crate) fn set_st_source_pgt_ids(&mut self, ids: HashMap<u32, i64>) {
+        self.cdc.st_source_pgt_ids = ids;
+    }
+
+    pub(crate) fn set_source_buffer_names(&mut self, names: HashMap<u32, String>) {
+        self.cdc.source_buffer_names = names;
+    }
+
+    pub(crate) fn set_source_stage_tables(&mut self, tables: HashMap<u32, String>) {
+        self.cdc.source_stage_tables = tables;
+    }
+
+    pub(crate) fn cte_registry(&self) -> &CteRegistry {
+        &self.cache.cte_registry
+    }
+
+    pub(crate) fn scan_pushed_predicate(&self) -> Option<&Expr> {
+        self.cache.scan_pushed_predicate.as_ref()
+    }
+
+    pub(crate) fn replace_scan_pushed_predicate(
+        &mut self,
+        predicate: Option<Expr>,
+    ) -> Option<Expr> {
+        std::mem::replace(&mut self.cache.scan_pushed_predicate, predicate)
+    }
+
+    pub(crate) fn set_st_bypass_tables(&mut self, tables: HashMap<i64, String>) {
+        self.cache.st_bypass_tables = tables;
+    }
+
+    pub(crate) fn scan_delta_ctes(&self) -> &HashMap<String, String> {
+        &self.cache.scan_delta_ctes
+    }
+
+    pub(crate) fn scan_delta_ctes_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.cache.scan_delta_ctes
+    }
+
+    pub(crate) fn fallback_leaf_oids(&self) -> &HashSet<u32> {
+        &self.cache.fallback_leaf_oids
+    }
+
+    pub(crate) fn set_fallback_leaf_oids(&mut self, oids: HashSet<u32>) {
+        self.cache.fallback_leaf_oids = oids;
     }
 
     /// Enable structured DVM decision collection for a test or diagnostic run.
@@ -679,7 +779,9 @@ impl DiffContext {
     pub fn record_changed_leaf_bucket(&mut self, source_oids: &[u32]) {
         let changed = source_oids
             .iter()
-            .filter(|oid| self.prev_frontier.get_lsn(**oid) != self.new_frontier.get_lsn(**oid))
+            .filter(|oid| {
+                self.cdc.prev_frontier.get_lsn(**oid) != self.cdc.new_frontier.get_lsn(**oid)
+            })
             .count();
         let bucket = if changed == 1 {
             Some("1")
@@ -704,33 +806,14 @@ impl DiffContext {
 
     /// Set the delta source (change buffer vs transition tables).
     pub fn with_delta_source(mut self, ds: DeltaSource) -> Self {
-        self.delta_source = ds;
+        self.cdc.delta_source = ds;
         self
     }
 
     /// Resolve the relation a delta scan may read for one source.
     pub fn change_table_for_source(&self, source_oid: u32) -> String {
-        if let Some(stage) = self.source_stage_tables.get(&source_oid) {
-            return stage.clone();
-        }
-        if let Some(pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
-            return self
-                .st_bypass_tables
-                .get(pgt_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}.changes_pgt_{pgt_id}",
-                        quote_ident(&self.change_buffer_schema)
-                    )
-                });
-        }
-        let buffer = self
-            .source_buffer_names
-            .get(&source_oid)
-            .cloned()
-            .unwrap_or_else(|| format!("changes_{source_oid}"));
-        format!("{}.{}", quote_ident(&self.change_buffer_schema), buffer)
+        self.cdc
+            .change_table_for_source(source_oid, &self.cache.st_bypass_tables)
     }
 
     /// Get the previous LSN for a source table. In placeholder mode,
@@ -739,42 +822,13 @@ impl DiffContext {
     /// ST-ST-4: For ST sources, uses `pgt_{pgt_id}` in the token name
     /// instead of the raw OID, matching the `changes_pgt_{id}` buffer name.
     pub fn get_prev_lsn(&self, source_oid: u32) -> String {
-        if self.use_placeholders {
-            if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
-                format!("__PGS_PREV_LSN_pgt_{pgt_id}__")
-            } else {
-                format!("__PGS_PREV_LSN_{source_oid}__")
-            }
-        } else if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
-            // ST sources use pgt_{id} as the frontier key
-            self.prev_frontier
-                .sources
-                .get(&format!("pgt_{pgt_id}"))
-                .map(|sv| sv.lsn.clone())
-                .unwrap_or_else(|| "0/0".to_string())
-        } else {
-            self.prev_frontier.get_lsn(source_oid)
-        }
+        self.cdc.prev_lsn(source_oid)
     }
 
     /// Get the new (upper) LSN for a source table. In placeholder mode,
     /// returns a substitution token; otherwise returns the literal value.
     pub fn get_new_lsn(&self, source_oid: u32) -> String {
-        if self.use_placeholders {
-            if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
-                format!("__PGS_NEW_LSN_pgt_{pgt_id}__")
-            } else {
-                format!("__PGS_NEW_LSN_{source_oid}__")
-            }
-        } else if let Some(&pgt_id) = self.st_source_pgt_ids.get(&source_oid) {
-            self.new_frontier
-                .sources
-                .get(&format!("pgt_{pgt_id}"))
-                .map(|sv| sv.lsn.clone())
-                .unwrap_or_else(|| "0/0".to_string())
-        } else {
-            self.new_frontier.get_lsn(source_oid)
-        }
+        self.cdc.new_lsn(source_oid)
     }
 
     /// Set the stream table name for aggregate merge queries.
@@ -789,7 +843,7 @@ impl DiffContext {
 
     /// Set the CTE registry (populated by the parser).
     pub fn with_cte_registry(mut self, registry: CteRegistry) -> Self {
-        self.cte_registry = registry;
+        self.cache.cte_registry = registry;
         self
     }
 
@@ -801,12 +855,12 @@ impl DiffContext {
 
     /// Look up a cached CTE delta result by `cte_id`.
     pub fn get_cte_delta(&self, cte_id: usize) -> Option<&DiffResult> {
-        self.cte_delta_cache.get(&cte_id)
+        self.cache.get_cte_delta(cte_id)
     }
 
     /// Cache a CTE delta result.
     pub fn set_cte_delta(&mut self, cte_id: usize, result: DiffResult) {
-        self.cte_delta_cache.insert(cte_id, result);
+        self.cache.set_cte_delta(cte_id, result);
     }
 
     /// Generate the complete delta query for an operator tree.
@@ -814,7 +868,7 @@ impl DiffContext {
     /// Returns the final SQL `WITH ... SELECT ...` query string.
     /// The output has columns: `__pgt_row_id`, `__pgt_action`, plus user columns.
     pub fn differentiate(&mut self, op: &OpTree) -> Result<String, PgTrickleError> {
-        self.cte_counter = 0; // COR-9: reset per differentiation call
+        self.optimization.cte_counter = 0; // COR-9: reset per differentiation call
         let result = self.diff_node(op)?;
         Ok(self.build_with_query(&result.cte_name))
     }
@@ -849,20 +903,9 @@ impl DiffContext {
     /// check is intentionally approximate (not per `add_cte` call) to
     /// avoid changing the infallible `add_cte` API.
     pub fn diff_node(&mut self, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
-        // C-7: Depth guard — increment before dispatch, decrement after.
-        self.diff_depth += 1;
-        if self.diff_depth > self.max_diff_depth {
-            self.diff_depth -= 1;
-            return Err(PgTrickleError::DiffDepthExceeded(self.max_diff_depth));
-        }
-        // R-7: CTE count guard — checked at each diff_node entry so the
-        // approximation error is bounded by the max CTEs one operator adds.
-        if self.ctes.len() >= self.max_diff_ctes {
-            self.diff_depth -= 1;
-            return Err(PgTrickleError::DiffCteCountExceeded(self.max_diff_ctes));
-        }
+        self.optimization.enter_diff()?;
         let result = self.diff_node_inner(op);
-        self.diff_depth -= 1;
+        self.optimization.exit_diff();
         let result = result?;
         if result.schema.names() != result.columns {
             return Err(PgTrickleError::TypeMismatch(format!(
@@ -948,18 +991,17 @@ impl DiffContext {
 
     /// Generate a unique CTE name with a descriptive prefix.
     pub fn next_cte_name(&mut self, prefix: &str) -> String {
-        self.cte_counter += 1;
-        format!("__pgt_cte_{}_{}", prefix, self.cte_counter)
+        self.optimization.next_cte_name(prefix)
     }
 
     /// Add a CTE definition.
     pub fn add_cte(&mut self, name: String, sql: String) {
-        self.ctes.push((name, sql, false, false));
+        self.optimization.add_cte(name, sql, false, false);
     }
 
     /// Add a recursive CTE definition (requires `WITH RECURSIVE`).
     pub fn add_recursive_cte(&mut self, name: String, sql: String) {
-        self.ctes.push((name, sql, true, false));
+        self.optimization.add_cte(name, sql, true, false);
     }
 
     /// Add a `MATERIALIZED` CTE definition.
@@ -969,7 +1011,7 @@ impl DiffContext {
     /// the CTE body is expensive (e.g. EXCEPT ALL / UNION ALL set
     /// operation for R_old snapshots in semi-join / anti-join deltas).
     pub fn add_materialized_cte(&mut self, name: String, sql: String) {
-        self.ctes.push((name, sql, false, true));
+        self.optimization.add_cte(name, sql, false, true);
     }
 
     /// Retroactively mark an already-added CTE as `NOT MATERIALIZED`.
@@ -980,7 +1022,7 @@ impl DiffContext {
     /// Marking the CTE as NOT MATERIALIZED forces PG to inline it as
     /// a subquery for each reference, avoiding the temp file issue.
     pub fn mark_cte_not_materialized(&mut self, name: &str) {
-        self.not_materialized_ctes.insert(name.to_string());
+        self.optimization.mark_cte_not_materialized(name);
     }
 
     /// DI-1: Get or register a named CTE for a pre-change snapshot.
@@ -1007,31 +1049,32 @@ impl DiffContext {
         // P-4: Fast path — check fingerprint cache by pointer identity first.
         let ptr_key = op as *const _ as usize;
         let (cache_key, canonical) =
-            if let Some(pair) = self.snapshot_fingerprint_cache.get(&ptr_key) {
+            if let Some(pair) = self.cache.snapshot_fingerprint_cache.get(&ptr_key) {
                 pair.clone()
             } else {
                 // Slow path — compute the structural fingerprint (O(tree-size)) once.
                 let pair = snapshot_cache_key(op);
-                self.snapshot_fingerprint_cache
+                self.cache
+                    .snapshot_fingerprint_cache
                     .insert(ptr_key, pair.clone());
                 pair
             };
 
-        if let Some((stored_canonical, cte_name)) = self.snapshot_cte_cache.get(&cache_key) {
+        if let Some((stored_canonical, cte_name)) = self.cache.snapshot_cte_cache.get(&cache_key) {
             // COR-8: Secondary equality check to detect DefaultHasher collisions.
             if stored_canonical == &canonical {
                 return cte_name.clone();
             }
             // Hash collision detected — evict the stale entry and fall through.
             crate::shmem::increment_snapshot_cache_collisions();
-            self.snapshot_cte_cache.remove(&cache_key);
+            self.cache.snapshot_cte_cache.remove(&cache_key);
         }
 
         let snapshot_sql = crate::dvm::operators::join_common::build_pre_change_snapshot_sql(
             op,
-            &self.scan_delta_ctes,
-            &self.fallback_leaf_oids,
-            &self.st_source_pgt_ids,
+            &self.cache.scan_delta_ctes,
+            &self.cache.fallback_leaf_oids,
+            &self.cdc.st_source_pgt_ids,
         );
 
         let cte_name = self.next_cte_name("l0_snap");
@@ -1040,7 +1083,8 @@ impl DiffContext {
         self.add_cte(cte_name.clone(), format!("SELECT * FROM {snapshot_sql}"));
         self.mark_cte_not_materialized(&cte_name);
 
-        self.snapshot_cte_cache
+        self.cache
+            .snapshot_cte_cache
             .insert(cache_key, (canonical, cte_name.clone()));
         if let Some(trace) = self.decision_trace.as_mut() {
             let plan = SnapshotPlan::for_tree_in_context(op, self.inside_semijoin);
@@ -1059,7 +1103,8 @@ impl DiffContext {
     /// Look up the SQL body of a CTE by name (test helper).
     #[cfg(test)]
     pub fn cte_sql(&self, name: &str) -> Option<&str> {
-        self.ctes
+        self.optimization
+            .ctes
             .iter()
             .find(|(n, _, _, _)| n == name)
             .map(|(_, sql, _, _)| sql.as_str())
@@ -1067,35 +1112,7 @@ impl DiffContext {
 
     /// Build the final WITH query from accumulated CTEs.
     pub(crate) fn build_with_query(&self, final_cte: &str) -> String {
-        if self.ctes.is_empty() {
-            return format!("SELECT * FROM {final_cte}");
-        }
-
-        let has_recursive = self.ctes.iter().any(|(_, _, is_rec, _)| *is_rec);
-        let with_keyword = if has_recursive {
-            "WITH RECURSIVE"
-        } else {
-            "WITH"
-        };
-
-        let cte_defs: Vec<String> = self
-            .ctes
-            .iter()
-            .map(|(name, sql, _, is_mat)| {
-                if *is_mat {
-                    format!("{name} AS MATERIALIZED (\n{sql}\n)")
-                } else if self.not_materialized_ctes.contains(name.as_str()) {
-                    format!("{name} AS NOT MATERIALIZED (\n{sql}\n)")
-                } else {
-                    format!("{name} AS (\n{sql}\n)")
-                }
-            })
-            .collect();
-
-        format!(
-            "{with_keyword} {}\nSELECT * FROM {final_cte}",
-            cte_defs.join(",\n"),
-        )
+        self.optimization.build_with_query(final_cte)
     }
 }
 
@@ -1214,9 +1231,9 @@ mod tests {
     #[test]
     fn test_diff_context_defaults() {
         let ctx = DiffContext::new_standalone(Frontier::new(), Frontier::new());
-        assert_eq!(ctx.change_buffer_schema, "pgtrickle_changes");
+        assert_eq!(ctx.cdc.change_buffer_schema, "pgtrickle_changes");
         assert!(ctx.st_qualified_name.is_none());
-        assert!(!ctx.use_placeholders);
+        assert!(!ctx.cdc.use_placeholders);
         assert!(!ctx.merge_safe_dedup);
         assert!(ctx.defining_query.is_none());
         assert!(ctx.st_user_columns.is_none());
@@ -1225,9 +1242,11 @@ mod tests {
     #[test]
     fn test_change_table_prefers_owner_stage() {
         let mut ctx = DiffContext::new_standalone(Frontier::new(), Frontier::new());
-        ctx.source_buffer_names
+        ctx.cdc
+            .source_buffer_names
             .insert(42, "changes_private".to_string());
-        ctx.source_stage_tables
+        ctx.cdc
+            .source_stage_tables
             .insert(42, "pg_temp.\"__pgt_cdc_7_42\"".to_string());
 
         assert_eq!(
@@ -1244,8 +1263,8 @@ mod tests {
         new_f.set_source(100, "0/CCDD".to_string(), "2024-01-02".to_string());
 
         let ctx = DiffContext::new_standalone(prev, new_f);
-        assert_eq!(ctx.prev_frontier.get_lsn(100), "0/AABB");
-        assert_eq!(ctx.new_frontier.get_lsn(100), "0/CCDD");
+        assert_eq!(ctx.cdc.prev_frontier.get_lsn(100), "0/AABB");
+        assert_eq!(ctx.cdc.new_frontier.get_lsn(100), "0/CCDD");
     }
 
     // ── with_placeholders() ─────────────────────────────────────────
@@ -1253,7 +1272,7 @@ mod tests {
     #[test]
     fn test_with_placeholders_enables_flag() {
         let ctx = DiffContext::new_standalone(Frontier::new(), Frontier::new()).with_placeholders();
-        assert!(ctx.use_placeholders);
+        assert!(ctx.cdc.use_placeholders);
     }
 
     #[test]
@@ -1463,6 +1482,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_diff_depth_restored_after_limit_error() {
+        let mut ctx = test_ctx();
+        ctx.optimization.max_diff_depth = 0;
+        let scan = scan(1, "t", "public", "t", &["id"]);
+
+        assert!(matches!(
+            ctx.diff_node(&scan),
+            Err(PgTrickleError::DiffDepthExceeded(0))
+        ));
+        assert_eq!(ctx.optimization.diff_depth, 0);
+    }
+
     // ── differentiate() end-to-end ──────────────────────────────────
 
     #[test]
@@ -1521,7 +1553,7 @@ mod tests {
         let reg = CteRegistry::default();
         let ctx =
             DiffContext::new_standalone(Frontier::new(), Frontier::new()).with_cte_registry(reg);
-        assert!(ctx.cte_registry.get(0).is_none());
+        assert!(ctx.cte_registry().get(0).is_none());
     }
 
     // ── get_or_register_snapshot_cte() ──────────────────────────────
@@ -1555,12 +1587,12 @@ mod tests {
         let name = ctx.get_or_register_snapshot_cte(&op);
         // The CTE should appear in the context's CTE list
         assert!(
-            ctx.ctes.iter().any(|(n, _, _, _)| n == &name),
+            ctx.optimization.ctes.iter().any(|(n, _, _, _)| n == &name),
             "CTE should be registered in context"
         );
         // And should be marked NOT MATERIALIZED
         assert!(
-            ctx.not_materialized_ctes.contains(&name),
+            ctx.optimization.not_materialized_ctes.contains(&name),
             "snapshot CTE should be NOT MATERIALIZED"
         );
     }

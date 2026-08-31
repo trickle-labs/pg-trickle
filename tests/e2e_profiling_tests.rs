@@ -177,6 +177,51 @@ async fn test_explain_delta_invalid_format_errors() {
     );
 }
 
+/// explain_delta_plan returns the versioned shadow-planner contract without
+/// populating the execution template cache.
+#[tokio::test]
+async fn test_explain_delta_plan_is_read_only() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE prof_plan_src (id INT PRIMARY KEY, grp INT, v INT)")
+        .await;
+    db.execute("INSERT INTO prof_plan_src VALUES (1, 1, 10), (2, 1, 20)")
+        .await;
+    db.create_st(
+        "prof_plan_st",
+        "SELECT grp, SUM(v) AS total FROM prof_plan_src GROUP BY grp",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let before: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_template_cache")
+        .await;
+    let (format_version, epoch, has_chosen): (i32, String, bool) = sqlx::query_as(
+        "WITH diagnostic AS ( \
+             SELECT pgtrickle.explain_delta_plan(pgt_id) AS plan \
+               FROM pgtrickle.pgt_stream_tables \
+              WHERE pgt_schema = 'public' AND pgt_name = 'prof_plan_st' \
+         ) \
+         SELECT (plan ->> 'format_version')::integer, \
+                plan ->> 'statistics_epoch', \
+                plan -> 'chosen' IS NOT NULL \
+           FROM diagnostic",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("explain_delta_plan should return one diagnostic document");
+    let after: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_template_cache")
+        .await;
+
+    assert_eq!(format_version, 1);
+    assert!(!epoch.is_empty());
+    assert!(has_chosen);
+    assert_eq!(before, after, "planning diagnostics must not mutate caches");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  dedup_stats() — G14-MDED
 // ═══════════════════════════════════════════════════════════════════════════

@@ -57,7 +57,7 @@ pub fn diff_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTri
     // change buffer (DIFFERENTIAL).
     // Clone the delta_source to avoid holding an immutable borrow on ctx
     // while passing it as mutable to the sub-functions.
-    let delta_source = ctx.delta_source.clone();
+    let delta_source = ctx.delta_source().clone();
     match &delta_source {
         DeltaSource::TransitionTable { tables } => diff_scan_transition(
             ctx, *table_oid, schema, table_name, columns, pk_columns, alias, tables,
@@ -181,7 +181,7 @@ FROM {new_table}",
 
     // EC01B-1: Record this scan's delta CTE name for per-leaf
     // pre-change snapshots in deep join trees.
-    ctx.scan_delta_ctes
+    ctx.scan_delta_ctes_mut()
         .insert(alias.to_string(), cte_name.clone());
 
     Ok(DiffResult {
@@ -350,7 +350,7 @@ fn diff_scan_change_buffer(
     // ELSE TRUE = conservatively include the row (slight over-scan, but
     // always correct and never an error).
     if !is_keyless
-        && let Some(cdc_cols) = ctx.source_cdc_columns.get(&table_oid)
+        && let Some(cdc_cols) = ctx.source_cdc_columns().get(&table_oid)
         && let Some((mask_str, zero_str)) = compute_varbit_changed_cols_mask(columns, cdc_cols)
     {
         let mask_len = mask_str.len();
@@ -369,8 +369,8 @@ fn diff_scan_change_buffer(
     // column changed (or the row is INSERT/DELETE). FALSE means only
     // value columns changed — the row stays in its group/join bucket.
     let key_change_expr: Option<String> = if !is_keyless {
-        if let Some(cdc_cols) = ctx.source_cdc_columns.get(&table_oid)
-            && let Some(key_cols) = ctx.source_key_columns.get(&table_oid)
+        if let Some(cdc_cols) = ctx.source_cdc_columns().get(&table_oid)
+            && let Some(key_cols) = ctx.source_key_columns().get(&table_oid)
             && let Some((key_mask, key_zero)) = compute_varbit_key_cols_mask(key_cols, cdc_cols)
         {
             let mask_len = key_mask.len();
@@ -609,7 +609,7 @@ SELECT * FROM {multi_cte}",
     // A44-10 (D+I schema): both branches use the same flat column name
     // (no old_/new_ prefix). D-rows have old values, I-rows have new values.
     let (del_pushed_filter, ins_pushed_filter) =
-        if let Some(ref predicate) = ctx.scan_pushed_predicate {
+        if let Some(predicate) = ctx.scan_pushed_predicate() {
             let del = rewrite_predicate_for_scan(predicate, "");
             let ins = rewrite_predicate_for_scan(predicate, "");
             (format!("\nWHERE {del}"), format!("\nWHERE {ins}"))
@@ -717,7 +717,7 @@ FROM (
     // EC01B-1: Record this scan's delta CTE name so that
     // build_pre_change_snapshot_sql can construct per-leaf pre-change
     // snapshots for deep join trees without full-snapshot EXCEPT ALL.
-    ctx.scan_delta_ctes
+    ctx.scan_delta_ctes_mut()
         .insert(alias.to_string(), cte_name.clone());
 
     Ok(DiffResult {
@@ -1428,7 +1428,7 @@ mod tests {
         // When source_cdc_columns is populated and columns are pruned,
         // the generated SQL should contain a changed_cols VARBIT filter.
         let mut ctx = test_ctx();
-        ctx.source_cdc_columns.insert(
+        ctx.source_cdc_columns_mut().insert(
             100,
             vec!["id".into(), "name".into(), "amount".into(), "region".into()],
         );
@@ -1448,7 +1448,7 @@ mod tests {
     fn test_p2_5_bitmask_filter_skipped_when_all_columns() {
         // When all CDC columns are referenced, no bitmask filter is added.
         let mut ctx = test_ctx();
-        ctx.source_cdc_columns
+        ctx.source_cdc_columns_mut()
             .insert(100, vec!["id".into(), "amount".into()]);
         // Scan references ALL CDC columns.
         let tree = scan_with_pk(100, "orders", "public", "o", &["id", "amount"], &["id"]);
@@ -1463,7 +1463,7 @@ mod tests {
     fn test_p2_5_bitmask_filter_skipped_for_keyless() {
         // Keyless tables should not get a changed_cols filter.
         let mut ctx = test_ctx();
-        ctx.source_cdc_columns
+        ctx.source_cdc_columns_mut()
             .insert(100, vec!["id".into(), "name".into(), "amount".into()]);
         // Keyless scan (no pk_columns).
         let tree = scan(100, "orders", "public", "o", &["id"]);
@@ -1567,14 +1567,14 @@ mod tests {
     fn test_p2_7_pushed_filter_in_sql() {
         // A44-10 (D+I schema): pushed filter uses flat c."col" (no old_/new_ prefix)
         let mut ctx = test_ctx();
-        ctx.scan_pushed_predicate = Some(Expr::BinaryOp {
+        ctx.replace_scan_pushed_predicate(Some(Expr::BinaryOp {
             op: "=".into(),
             left: Box::new(Expr::ColumnRef {
                 table_alias: None,
                 column_name: "status".into(),
             }),
             right: Box::new(Expr::Literal("'shipped'".into())),
-        });
+        }));
         let tree = scan_with_pk(100, "orders", "public", "o", &["id", "status"], &["id"]);
         let result = diff_scan(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
@@ -1654,9 +1654,10 @@ mod tests {
         // When source_key_columns has entries for a scan' source table,
         // the generated delta SQL should contain __pgt_key_changed.
         let mut ctx = test_ctx();
-        ctx.source_cdc_columns
+        ctx.source_cdc_columns_mut()
             .insert(100, vec!["id".into(), "region".into(), "amount".into()]);
-        ctx.source_key_columns.insert(100, vec!["region".into()]);
+        ctx.source_key_columns_mut()
+            .insert(100, vec!["region".into()]);
 
         let tree = scan_with_pk(
             100,

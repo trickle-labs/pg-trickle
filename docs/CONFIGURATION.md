@@ -1,11 +1,10 @@
 # Configuration
 
-## v0.87 refresh tenancy controls
+## Refresh tenancy controls
 
 `pg_trickle.pipeline_batch_size` (default `4096`) is the maximum logical row
-count in one bounded differential apply batch. `pg_trickle.merge_batch_size`
-is a deprecated v0.87 alias and will be removed in v0.88; both names share one
-effective value.
+count in one bounded differential apply batch. v0.88 removes the deprecated
+`pg_trickle.merge_batch_size` alias.
 
 `pg_trickle.memory_budget_mb` (default `256`) derives pg_trickle-owned limits:
 75% for the delta pipeline, 15% for template/plan cache, and 5% each for the

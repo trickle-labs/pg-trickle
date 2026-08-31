@@ -41,7 +41,7 @@ pub fn diff_cte_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
     } else {
         // Retrieve the CTE body from the registry
         let (_, body) = ctx
-            .cte_registry
+            .cte_registry()
             .get(*cte_id)
             .ok_or_else(|| {
                 PgTrickleError::InternalError(format!(

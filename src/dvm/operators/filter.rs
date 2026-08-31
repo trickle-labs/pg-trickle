@@ -45,15 +45,15 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
             ..
         } = child.as_ref()
         && !pk_columns.is_empty()
-        && matches!(ctx.delta_source, DeltaSource::ChangeBuffer)
+        && matches!(ctx.delta_source(), DeltaSource::ChangeBuffer)
     {
         let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
         if crate::dvm::operators::scan::is_predicate_pushable_to_scan(predicate, alias, &col_names)
         {
-            ctx.scan_pushed_predicate = Some(predicate.clone());
-            let result = ctx.diff_node(child)?;
-            ctx.scan_pushed_predicate = None;
-            return Ok(result);
+            let saved = ctx.replace_scan_pushed_predicate(Some(predicate.clone()));
+            let result = ctx.diff_node(child);
+            ctx.replace_scan_pushed_predicate(saved);
+            return result;
         }
     }
 

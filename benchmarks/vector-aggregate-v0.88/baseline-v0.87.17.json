@@ -1,0 +1,33 @@
+{
+  "format_version": 1,
+  "extension_version": "0.87.17",
+  "extension_commit": "090aa4004c5727ec94a925117244f1016107e34f",
+  "image_id": "sha256:40910362056d44b424fe16281f8adb6d23512e95beef2be5fa7a56d32ffa1e55",
+  "host": {
+    "cpu": "Apple M1 Pro, 10 cores",
+    "memory_bytes": 34359738368,
+    "architecture": "arm64",
+    "macos": "26.6.2",
+    "rust": "1.98.0"
+  },
+  "source_rows": 1000000,
+  "changed_rows": 100000,
+  "measured_refreshes": 5,
+  "refresh_ms": [
+    7239.410917,
+    7248.636791,
+    7330.618042,
+    7343.426667,
+    7666.091292
+  ],
+  "median_ms": 7330.618042,
+  "p95_ms": 7601.5583670000005,
+  "median_changed_rows_per_second": 13641.414602024084,
+  "exact_checks": [true, true, true, true, true, true],
+  "exact_multiset_validated": true,
+  "merge_strategy": "DIFFERENTIAL",
+  "vector_profiles": [null, null, null, null, null],
+  "temp_bytes": 0,
+  "memory_peak_bytes": 1111855104,
+  "throughput_ratio_vs_baseline": null
+}

@@ -36,6 +36,7 @@ pub(crate) mod orchestrator;
 pub(crate) mod phd1;
 pub(crate) mod pipeline;
 pub(crate) mod sql_fragments;
+pub(crate) mod vectorized_agg;
 
 // SCAL-2 (v0.30.0): Explicit re-export lists enforce module boundary discipline.
 // Adding a new public symbol to a sub-module no longer silently promotes it;
@@ -381,6 +382,7 @@ pub fn finalize_success(
     }
 
     let effective_mode = take_effective_mode();
+    let merge_strategy = take_merge_strategy();
     let history_action = match effective_mode {
         "FULL" => RefreshAction::Full,
         "NO_DATA" => RefreshAction::NoData,
@@ -432,7 +434,11 @@ pub fn finalize_success(
         execution.rows_deleted,
         None,
         execution.rows_inserted + execution.rows_updated + execution.rows_deleted,
-        Some(history_action.as_str()),
+        Some(if merge_strategy.is_empty() {
+            history_action.as_str()
+        } else {
+            merge_strategy
+        }),
         execution.was_full_fallback,
         full_reason,
     )?;
@@ -727,6 +733,7 @@ pub(crate) fn classify_correlated_aggregate_subquery_in_where(defining_query: &s
 // refresh completes — even when an internal fallback changed the mode.
 thread_local! {
     static LAST_EFFECTIVE_MODE: Cell<&'static str> = const { Cell::new("") };
+    static LAST_MERGE_STRATEGY: Cell<&'static str> = const { Cell::new("") };
 }
 
 /// Record the effective refresh mode for the currently-executing refresh.
@@ -735,6 +742,14 @@ thread_local! {
 /// threshold → FULL, CTE → FULL) overwrite the initial mode correctly.
 pub(crate) fn set_effective_mode(mode: &'static str) {
     LAST_EFFECTIVE_MODE.with(|m| m.set(mode));
+}
+
+pub(crate) fn set_merge_strategy(strategy: &'static str) {
+    LAST_MERGE_STRATEGY.with(|value| value.set(strategy));
+}
+
+fn take_merge_strategy() -> &'static str {
+    LAST_MERGE_STRATEGY.with(|value| value.replace(""))
 }
 
 /// Take (read and reset) the effective mode recorded by the most recent

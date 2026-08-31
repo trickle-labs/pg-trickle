@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.88.0 — Vectorized Aggregates and Delta Planning](#0880--vectorized-aggregates-and-delta-planning)
 - [0.87.17 — Versioned Row Identity V2 Hardening and Recreation](#08717--versioned-row-identity-v2-hardening-and-recreation)
 - [0.87.16 — Versioned Row Identity V2 Engine Integration](#08716--versioned-row-identity-v2-engine-integration)
 - [0.87.15 — Versioned Row Identity V2 Contracts](#08715--versioned-row-identity-v2-contracts)
@@ -196,6 +197,26 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.88.0] — Vectorized Aggregates and Delta Planning
+
+v0.88.0 adds a narrow dependency-free aggregate executor and evidence-driven
+delta planning without changing stream-table results.
+
+- Split `DiffContext` into CDC, cache, and optimization state while preserving
+  generated delta SQL.
+- Added typed 1,024-row aggregate pages for eligible `COUNT`, `SUM`, `AVG`,
+  `MIN`, and `MAX` over one source scan. `MIN` and `MAX` deletions use one
+  batched PostgreSQL rescan for the affected groups.
+- Added `pgtrickle.explain_delta_plan(bigint)` for statistics, observations,
+  shadow candidates, validation state, semantic barriers, and planning time.
+- Kept unvalidated reorder rules in shadow mode and left physical join planning
+  to PostgreSQL.
+- Made delta invariant validation compare exact multisets instead of row counts.
+- Removed the deprecated `pg_trickle.merge_batch_size` alias. Use
+  `pg_trickle.pipeline_batch_size`.
+- Added statistics-aware delta-template validity, upgrade SQL, the frozen
+  aggregate benchmark contract, and dependency and planner ADRs.
 
 ## [0.87.17] — Versioned Row Identity V2 Hardening and Recreation
 

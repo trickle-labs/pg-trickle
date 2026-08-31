@@ -216,7 +216,7 @@ fn check_for_delete_changes(
     use pgrx::Spi;
 
     // ── IMMEDIATE mode: inspect OLD transition tables ─────────────────
-    if let DeltaSource::TransitionTable { tables } = &ctx.delta_source {
+    if let DeltaSource::TransitionTable { tables } = ctx.delta_source() {
         for &oid in source_oids {
             if let Some(tt) = tables.get(&oid)
                 && let Some(old_table) = &tt.old_name
@@ -245,7 +245,7 @@ fn check_for_delete_changes(
     // ── DIFFERENTIAL mode: query change buffer tables via LSN ─────────
     for &oid in source_oids {
         let change_table = ctx.change_table_for_source(oid);
-        let prev_lsn = ctx.prev_frontier.get_lsn(oid);
+        let prev_lsn = ctx.prev_frontier().get_lsn(oid);
 
         let check_sql = format!(
             "SELECT EXISTS(\
@@ -1822,7 +1822,7 @@ fn generate_change_buffer_from(
             ..
         } => {
             // ── IMMEDIATE mode: read from NEW transition table ────────
-            if let DeltaSource::TransitionTable { tables } = &ctx.delta_source {
+            if let DeltaSource::TransitionTable { tables } = ctx.delta_source() {
                 if let Some(tt) = tables.get(table_oid)
                     && let Some(new_table) = &tt.new_name
                 {
@@ -1939,7 +1939,7 @@ fn generate_old_change_buffer_from(
             columns,
             ..
         } => {
-            if let DeltaSource::TransitionTable { tables } = &ctx.delta_source {
+            if let DeltaSource::TransitionTable { tables } = ctx.delta_source() {
                 if let Some(tt) = tables.get(table_oid)
                     && let Some(old_table) = &tt.old_name
                 {

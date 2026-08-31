@@ -125,6 +125,13 @@ fn test_refresh_action_variants_exist() {
 }
 
 #[test]
+fn test_merge_strategy_is_consumed_once() {
+    set_merge_strategy("vector_agg");
+    assert_eq!(take_merge_strategy(), "vector_agg");
+    assert_eq!(take_merge_strategy(), "");
+}
+
+#[test]
 fn test_full_refresh_reason_codes_round_trip() {
     for code in [
         FullRefreshReasonCode::FirstRefresh,
@@ -399,6 +406,8 @@ fn test_merge_template_cache_insert_and_retrieve() {
             42,
             CachedMergeTemplate {
                 defining_query_hash: 12345,
+                statistics_epoch: "test".into(),
+                planning_version: crate::dvm::planner::FORMAT_VERSION,
                 merge_sql_template: "MERGE INTO t ...".into(),
                 source_oids: vec![100, 200],
                 cleanup_sql_template: "DELETE FROM ...".into(),
@@ -431,6 +440,8 @@ fn test_invalidate_merge_cache_removes_entry() {
             99,
             CachedMergeTemplate {
                 defining_query_hash: 0,
+                statistics_epoch: "test".into(),
+                planning_version: crate::dvm::planner::FORMAT_VERSION,
                 merge_sql_template: Arc::from(""),
                 source_oids: vec![],
                 cleanup_sql_template: Arc::from(""),

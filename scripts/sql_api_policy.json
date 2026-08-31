@@ -1,6 +1,6 @@
 {
   "policy_version": 2,
-  "generated_from": "sql/archive/pg_trickle--0.87.17.sql",
+  "generated_from": "sql/archive/pg_trickle--0.88.0.sql",
   "functions": {
     "pgtrickle._on_ddl_end()": {
       "schema": "pgtrickle",
@@ -342,6 +342,13 @@
       "schema": "pgtrickle",
       "name": "explain_delta",
       "identity_arguments": "text, text",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.explain_delta_plan(bigint)": {
+      "schema": "pgtrickle",
+      "name": "explain_delta_plan",
+      "identity_arguments": "bigint",
       "class": "public_read",
       "execution_policy": "capability_specific"
     },

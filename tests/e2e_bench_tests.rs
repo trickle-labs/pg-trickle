@@ -60,6 +60,165 @@ fn bulk_insert_single(n: usize) -> String {
     )
 }
 
+async fn apply_vector_aggregate_changes(db: &E2eDb, cycle: usize) {
+    let delete_start = 70_001 + cycle * 15_000;
+    let delete_end = delete_start + 14_999;
+    let insert_start = 1_000_001 + cycle * 15_000;
+    let insert_end = insert_start + 14_999;
+    db.execute(
+        "UPDATE vector_agg_source SET amount = amount + 1 \
+         WHERE id BETWEEN 1 AND 70000",
+    )
+    .await;
+    db.execute(&format!(
+        "DELETE FROM vector_agg_source WHERE id BETWEEN {delete_start} AND {delete_end}"
+    ))
+    .await;
+    db.execute(&format!(
+        "INSERT INTO vector_agg_source (id, group_id, amount) \
+         SELECT i, (i % 10000)::int, ((i * 17 + 13) % 100000)::int \
+         FROM generate_series({insert_start}, {insert_end}) AS rows(i)"
+    ))
+    .await;
+}
+
+async fn refresh_vector_aggregate(db: &E2eDb) {
+    db.execute_seq(&[
+        "SET pg_trickle.aggregate_fast_path = on",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('vector_agg_result')",
+    ])
+    .await;
+}
+
+async fn vector_aggregate_matches(db: &E2eDb, query: &str) -> bool {
+    db.query_scalar(&format!(
+        "SELECT NOT EXISTS (SELECT 1 FROM (\
+           (SELECT group_id, amount_sum, row_count, amount_avg FROM vector_agg_result \
+            EXCEPT ALL SELECT * FROM ({query}) expected) \
+           UNION ALL \
+           (SELECT * FROM ({query}) expected \
+            EXCEPT ALL SELECT group_id, amount_sum, row_count, amount_avg FROM vector_agg_result)\
+         ) mismatch)"
+    ))
+    .await
+}
+
+/// Frozen v0.88.0 vector-aggregate gate. Keep these dimensions synchronized
+/// with benchmarks/vector-aggregate-v0.88/contract.json.
+#[tokio::test]
+#[ignore]
+async fn bench_vector_aggregate_v088() {
+    const SOURCE_ROWS: usize = 1_000_000;
+    const CHANGED_ROWS: f64 = 100_000.0;
+    const QUERY: &str = "SELECT group_id, SUM(amount) AS amount_sum, \
+                         COUNT(*) AS row_count, AVG(amount) AS amount_avg \
+                         FROM vector_agg_source GROUP BY group_id";
+
+    let db = E2eDb::new_bench().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE vector_agg_source (\
+             id BIGINT PRIMARY KEY, group_id INT NOT NULL, amount INT\
+         )",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO vector_agg_source (id, group_id, amount) \
+         SELECT i, (i % 10000)::int, ((i * 17 + 13) % 100000)::int \
+         FROM generate_series(1, 1000000) AS rows(i)",
+    )
+    .await;
+    db.execute("ANALYZE vector_agg_source").await;
+    db.create_st("vector_agg_result", QUERY, "1m", "DIFFERENTIAL")
+        .await;
+    let extension_version: String = db.query_scalar("SELECT pgtrickle.version()").await;
+    let require_exact = extension_version == "0.88.0";
+
+    apply_vector_aggregate_changes(&db, 0).await;
+    refresh_vector_aggregate(&db).await;
+    let mut exact_checks = vec![vector_aggregate_matches(&db, QUERY).await];
+    assert!(!require_exact || exact_checks[0]);
+
+    let mut refresh_ms = Vec::with_capacity(5);
+    let mut vector_profiles = Vec::with_capacity(5);
+    let temp_bytes_before: i64 = db
+        .query_scalar(
+            "SELECT temp_bytes::bigint FROM pg_stat_database WHERE datname = current_database()",
+        )
+        .await;
+    for cycle in 1..=5 {
+        apply_vector_aggregate_changes(&db, cycle).await;
+        let start = Instant::now();
+        refresh_vector_aggregate(&db).await;
+        refresh_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        vector_profiles.push(e2e::extract_last_vector_profile(db.container_id()).await);
+        let exact = vector_aggregate_matches(&db, QUERY).await;
+        exact_checks.push(exact);
+        assert!(
+            !require_exact || exact,
+            "exact oracle failed in cycle {cycle}"
+        );
+    }
+
+    refresh_ms.sort_by(|left, right| left.total_cmp(right));
+    let median_ms = refresh_ms[refresh_ms.len() / 2];
+    let temp_bytes_after: i64 = db
+        .query_scalar(
+            "SELECT temp_bytes::bigint FROM pg_stat_database WHERE datname = current_database()",
+        )
+        .await;
+    let memory_peak_bytes = e2e::container_memory_peak_bytes(db.container_id()).await;
+    let merge_strategy: String = db
+        .query_scalar(
+            "SELECT COALESCE(h.merge_strategy_used, '') \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'vector_agg_result' \
+             ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .await;
+    if require_exact {
+        assert_eq!(merge_strategy, "vector_agg");
+    }
+    let baseline = std::env::var("PGS_VECTOR_BENCH_BASELINE_JSON")
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let throughput_ratio = baseline.as_ref().and_then(|value| {
+        value["median_ms"]
+            .as_f64()
+            .map(|baseline_ms| baseline_ms / median_ms)
+    });
+    if require_exact && baseline.is_some() {
+        assert!(
+            throughput_ratio.is_some_and(|ratio| ratio >= 5.0),
+            "v0.88 vector throughput ratio {throughput_ratio:?} is below 5x"
+        );
+    }
+    let result = serde_json::json!({
+        "format_version": 1,
+        "extension_version": extension_version,
+        "source_rows": SOURCE_ROWS,
+        "changed_rows": CHANGED_ROWS as u64,
+        "measured_refreshes": refresh_ms.len(),
+        "refresh_ms": refresh_ms,
+        "median_ms": median_ms,
+        "p95_ms": percentile(&refresh_ms, 95.0),
+        "median_changed_rows_per_second": CHANGED_ROWS * 1000.0 / median_ms,
+        "exact_checks": exact_checks,
+        "exact_multiset_validated": exact_checks.iter().all(|passed| *passed),
+        "merge_strategy": merge_strategy,
+        "vector_profiles": vector_profiles,
+        "temp_bytes": temp_bytes_after.saturating_sub(temp_bytes_before),
+        "memory_peak_bytes": memory_peak_bytes,
+        "throughput_ratio_vs_baseline": throughput_ratio,
+    });
+    eprintln!("[VECTOR_AGG_V088] {result}");
+    if let Ok(path) = std::env::var("PGS_VECTOR_BENCH_JSON") {
+        std::fs::write(path, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    }
+}
+
 /// Generate SQL to create the second source table for join benchmarks.
 fn create_join_table() -> &'static str {
     "CREATE TABLE dim (

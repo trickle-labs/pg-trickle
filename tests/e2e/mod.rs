@@ -1401,6 +1401,21 @@ pub struct ProfileData {
     pub path: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[allow(dead_code)]
+pub struct VectorAggregateProfile {
+    pub rows: u64,
+    pub pages: u64,
+    pub groups: u64,
+    pub rescans: u64,
+    pub bytes: u64,
+    pub max_page_bytes: u64,
+    pub read_ms: f64,
+    pub reduce_ms: f64,
+    pub rescan_ms: f64,
+    pub apply_ms: f64,
+}
+
 /// Extract the last `[PGS_PROFILE]` line from docker container logs.
 #[allow(dead_code)]
 pub async fn extract_last_profile(container_id: &str) -> Option<ProfileData> {
@@ -1412,6 +1427,53 @@ pub async fn extract_last_profile(container_id: &str) -> Option<ProfileData> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let line = stderr.lines().rev().find(|l| l.contains("[PGS_PROFILE]"))?;
     parse_profile_line(line)
+}
+
+#[allow(dead_code)]
+pub async fn extract_last_vector_profile(container_id: &str) -> Option<VectorAggregateProfile> {
+    let output = tokio::process::Command::new("docker")
+        .args(["logs", "--tail", "200", container_id])
+        .output()
+        .await
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|line| line.contains("[PGS_VECTOR_AGG]"))?;
+    let integer = |key: &str| -> Option<u64> {
+        let rest = line.split_once(&format!("{key}="))?.1;
+        rest.split_whitespace().next()?.parse().ok()
+    };
+    let decimal = |key: &str| -> Option<f64> {
+        let rest = line.split_once(&format!("{key}="))?.1;
+        rest.split_whitespace().next()?.parse().ok()
+    };
+    Some(VectorAggregateProfile {
+        rows: integer("rows")?,
+        pages: integer("pages")?,
+        groups: integer("groups")?,
+        rescans: integer("rescans")?,
+        bytes: integer("bytes")?,
+        max_page_bytes: integer("max_page_bytes")?,
+        read_ms: decimal("read_ms")?,
+        reduce_ms: decimal("reduce_ms")?,
+        rescan_ms: decimal("rescan_ms")?,
+        apply_ms: decimal("apply_ms")?,
+    })
+}
+
+#[allow(dead_code)]
+pub async fn container_memory_peak_bytes(container_id: &str) -> Option<u64> {
+    let output = tokio::process::Command::new("docker")
+        .args(["exec", container_id, "cat", "/sys/fs/cgroup/memory.peak"])
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok())?
 }
 
 /// Parse a `[PGS_PROFILE]` log line into structured data.

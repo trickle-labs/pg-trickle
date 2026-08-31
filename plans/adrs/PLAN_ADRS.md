@@ -141,6 +141,28 @@ transactionally with NULL-safe value equality.
 AUTO falls back to FULL for unsupported or uninspectable forms, while explicit
 incremental modes reject before mutation.
 
+### ADR-009: Dependency-free aggregate pages
+
+| Field | Value |
+|-------|-------|
+| **Status** | Accepted, see [ADR-009.md](ADR-009.md) |
+| **Category** | DVM performance / dependencies |
+| **Implemented** | v0.88.0 |
+
+**Decision:** Use concrete owned `Vec<T>` columns for the narrow aggregate
+executor. Do not restore Arrow without a measured 20 percent end-to-end win.
+
+### ADR-010: PostgreSQL owns physical delta-query planning
+
+| Field | Value |
+|-------|-------|
+| **Status** | Accepted, see [ADR-010.md](ADR-010.md) |
+| **Category** | DVM performance / planning |
+| **Implemented** | v0.88.0 |
+
+**Decision:** Express safe rewrites as relational SQL and let PostgreSQL choose
+the physical plan. Keep unvalidated pg_trickle rewrite classes in shadow mode.
+
 ---
 
 ### ADR-002: Hybrid CDC — Trigger Bootstrap with WAL Steady-State

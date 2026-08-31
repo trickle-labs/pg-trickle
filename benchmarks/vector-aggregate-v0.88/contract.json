@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "baseline_version": "0.87.17",
+  "postgres_version": "18.3",
+  "source_rows": 1000000,
+  "groups": 10000,
+  "changed_rows": 100000,
+  "page_rows": 1024,
+  "warmups": 1,
+  "measured_refreshes": 5,
+  "aggregates": ["sum_int4", "count_star", "avg_int4"],
+  "minimum_throughput_ratio": 5.0,
+  "maximum_eligible_workload_regression": 0.1,
+  "validation": "exact_multiset_after_each_refresh"
+}

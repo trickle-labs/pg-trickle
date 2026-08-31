@@ -2716,7 +2716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_row_id_key_columns_scalar_aggregate_returns_none() {
+    fn test_row_id_key_columns_scalar_aggregate_returns_empty_identity() {
         let tree = OpTree::Aggregate {
             group_by: vec![],
             aggregates: vec![AggExpr {
@@ -2731,7 +2731,7 @@ mod tests {
             }],
             child: Box::new(scan_node("t", 1, &["id"])),
         };
-        assert_eq!(tree.row_id_key_columns(), None);
+        assert_eq!(tree.row_id_key_columns(), Some(Vec::new()));
     }
 
     #[test]
