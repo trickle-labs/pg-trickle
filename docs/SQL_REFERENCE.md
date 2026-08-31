@@ -4642,7 +4642,7 @@ diagnostics and local profiling sessions.
 
 ---
 
-### `pgtrickle.explain_delta_plan(pgt_id bigint)`
+### pgtrickle.explain_delta_plan
 
 Return pg_trickle's engine-planning evidence as `jsonb`. The function parses
 and plans the defining query but does not execute it, consume change rows,
