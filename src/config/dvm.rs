@@ -1154,20 +1154,7 @@ pub fn register_dvm_gucs() {
         c"pg_trickle.pipeline_batch_size",
         c"Maximum logical rows in one differential pipeline batch.",
         c"Large or potentially amplifying differential deltas are fetched and applied in bounded batches. Default 4096.",
-        &PGS_MERGE_BATCH_SIZE,
-        1,
-        1_048_576,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-
-    // v0.87 compatibility alias. Both names intentionally point to the same
-    // GUC storage so SET/SHOW/reset have one effective value.
-    GucRegistry::define_int_guc(
-        c"pg_trickle.merge_batch_size",
-        c"Deprecated alias for pipeline_batch_size.",
-        c"Accepted in v0.87 only. It controls the maximum logical rows in one pipeline apply batch and will be removed in v0.88.",
-        &PGS_MERGE_BATCH_SIZE,
+        &PGS_PIPELINE_BATCH_SIZE,
         1,
         1_048_576,
         GucContext::Suset,
@@ -1483,10 +1470,8 @@ pub fn pg_trickle_ivm_recursive_max_depth() -> Option<i32> {
 /// caches that live in `src/dvm/mod.rs`.
 pub static PGS_L1_CACHE_MAX_ENTRIES: GucSetting<i32> = GucSetting::<i32>::new(256);
 
-/// v0.87: Maximum logical rows in one differential pipeline apply batch.
-///
-/// `pg_trickle.merge_batch_size` remains a one-release alias for this setting.
-pub static PGS_MERGE_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(4096);
+/// Maximum logical rows in one differential pipeline apply batch.
+pub static PGS_PIPELINE_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(4096);
 
 /// QW-1 (v0.81.0): Enable commit-to-visible latency tracking.
 ///
@@ -1506,14 +1491,9 @@ pub fn pg_trickle_l1_cache_max_entries() -> i32 {
     PGS_L1_CACHE_MAX_ENTRIES.get().max(0)
 }
 
-/// v0.87: Returns the canonical differential pipeline batch size.
-pub fn pg_trickle_merge_batch_size() -> i32 {
-    PGS_MERGE_BATCH_SIZE.get().clamp(1, 1_048_576)
-}
-
-/// v0.87: Returns the canonical differential pipeline batch size.
+/// Returns the canonical differential pipeline batch size.
 pub fn pg_trickle_pipeline_batch_size() -> usize {
-    pg_trickle_merge_batch_size() as usize
+    PGS_PIPELINE_BATCH_SIZE.get().clamp(1, 1_048_576) as usize
 }
 
 /// QW-1 (v0.81.0): Returns whether commit-timestamp latency tracking is enabled.

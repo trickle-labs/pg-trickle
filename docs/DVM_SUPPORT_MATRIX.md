@@ -314,7 +314,7 @@ O(delta × lineitem) work.
 |-------------|----------|----------|-------------|
 | Simple scan | DIFF | — | — |
 | Filter (WHERE) | DIFF | — | — |
-| Aggregate (GROUP BY) | DIFF / GROUP_RESCAN | — | — |
+| Aggregate (GROUP BY) | DIFF / VECTOR / GROUP_RESCAN | SQL producer | `vector_path.fallback_reason` in `explain_delta_plan` |
 | Inner join | DIFF | — | — |
 | Left / right / full join | DIFF | — | — |
 | Semi-join (EXISTS) | DIFF | — | — |
@@ -333,3 +333,13 @@ O(delta × lineitem) work.
 > **Legend**: DIFF = full incremental differential path; GROUP_RESCAN = aggregate
 > group is recomputed for changed groups; FULL = full recompute of the entire
 > result set.
+
+The VECTOR producer is fail-closed. It accepts a top-level aggregate over one
+scan, with fixed-width group keys and built-in `COUNT`, `SUM(int2/int4)`,
+`AVG(int2/int4)`, `MIN`, or `MAX` over the documented fixed-width types.
+`MIN` and `MAX` deletions use one PostgreSQL rescan for the affected groups
+after the vector pages are reduced. It rejects aggregate `DISTINCT`,
+aggregate `FILTER`, joins, subqueries,
+collation-sensitive keys, extension types, IMMEDIATE mode, and target layouts
+that require another apply strategy. Rejection keeps the existing SQL
+producer and does not change refresh mode.

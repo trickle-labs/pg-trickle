@@ -742,6 +742,8 @@ CREATE UNLOGGED TABLE IF NOT EXISTS pgtrickle.pgt_template_cache (
     is_dedup     BOOLEAN NOT NULL DEFAULT FALSE,
     key_changed  BOOLEAN NOT NULL DEFAULT FALSE,
     all_algebraic BOOLEAN NOT NULL DEFAULT FALSE,
+    statistics_epoch TEXT NOT NULL DEFAULT 'unknown',
+    planning_version INTEGER NOT NULL DEFAULT 1,
     cached_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -1911,6 +1913,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.diagnose_errors(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.diamond_groups() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_dag(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_delta(text, text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.explain_delta_plan(bigint) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_diff_sql(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_json(text) TO PUBLIC;

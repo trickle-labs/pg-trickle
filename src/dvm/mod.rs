@@ -53,6 +53,7 @@
 pub mod diff;
 pub mod operators;
 pub mod parser;
+pub mod planner;
 pub mod row_id;
 pub mod row_id_v2;
 pub mod schema;
@@ -88,6 +89,10 @@ use std::hash::{Hash, Hasher};
 struct CachedDeltaTemplate {
     /// Hash of the defining query string — used to detect changes.
     defining_query_hash: u64,
+    /// Source-statistics epoch that selected this physical template.
+    statistics_epoch: String,
+    /// Planner format version used to build this template.
+    planning_version: u16,
     /// Delta SQL with `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
     /// placeholder tokens instead of literal LSN values.
     delta_sql_template: String,
@@ -650,15 +655,15 @@ fn generate_delta_query_impl(
 
     // P2-5: Resolve CDC column ordinals for each source table so the
     // scan operator can build a changed_cols bitmask filter.
-    ctx.source_cdc_columns = resolve_cdc_columns_for_sources(&source_oids);
+    ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
 
     // A-2: Resolve key columns (GROUP BY, JOIN ON, WHERE) per source table
     // so the scan operator can compute a key-only bitmask for value-only
     // UPDATE detection.
-    ctx.source_key_columns = result.tree.source_key_columns_used();
+    ctx.set_source_key_columns(result.tree.source_key_columns_used());
 
     // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
-    ctx.st_source_pgt_ids = resolve_st_source_pgt_ids(&source_oids);
+    ctx.set_st_source_pgt_ids(resolve_st_source_pgt_ids(&source_oids));
 
     // C-4 (v0.54.0): Validate that all ST sources have entries in both frontiers.
     //
@@ -669,8 +674,8 @@ fn generate_delta_query_impl(
     // validate its frontier entry is present. Newly-created ST sources that have
     // never been refreshed legitimately have no frontier entry yet — we skip them
     // only if the new_frontier also lacks the key (both missing → not yet seeded).
-    if !ctx.st_source_pgt_ids.is_empty() {
-        for &src_pgt_id in ctx.st_source_pgt_ids.values() {
+    if !ctx.st_source_pgt_ids().is_empty() {
+        for &src_pgt_id in ctx.st_source_pgt_ids().values() {
             let key = format!("pgt_{src_pgt_id}");
             if !prev_frontier.sources.contains_key(&key) && !new_frontier.sources.contains_key(&key)
             {
@@ -681,28 +686,30 @@ fn generate_delta_query_impl(
 
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
-    ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
+    ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
     if let Some(pgt_id) = stage_pgt_id {
-        ctx.source_stage_tables = source_oids
-            .iter()
-            .map(|oid| {
-                (
-                    *oid,
-                    format!(
-                        "pg_temp.\"{}\"",
-                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
-                    ),
-                )
-            })
-            .collect();
+        ctx.set_source_stage_tables(
+            source_oids
+                .iter()
+                .map(|oid| {
+                    (
+                        *oid,
+                        format!(
+                            "pg_temp.\"{}\"",
+                            crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                        ),
+                    )
+                })
+                .collect(),
+        );
     }
 
     // DAG-4: Apply any active bypass table mappings from fused-chain execution.
-    ctx.st_bypass_tables = crate::refresh::get_st_bypass_tables();
+    ctx.set_st_bypass_tables(crate::refresh::get_st_bypass_tables());
 
     // DI-2: Per-leaf conditional fallback — leaves whose delta fraction
     // exceeds max_delta_fraction use EXCEPT ALL instead of NOT EXISTS.
-    ctx.fallback_leaf_oids = crate::refresh::get_fallback_leaf_oids();
+    ctx.set_fallback_leaf_oids(crate::refresh::get_fallback_leaf_oids());
 
     let (delta_sql, output_columns, diff_dedup, diff_has_key_changed) =
         ctx.differentiate_with_columns(&result.tree)?;
@@ -819,14 +826,17 @@ pub fn generate_delta_query_cached(
 
     // Check the thread-local cache.
     // OPS-10-02: Detect stale entries (hash mismatch) and count them.
-    let (cached, was_stale) = DELTA_TEMPLATE_CACHE.with(|cache| {
-        let map = cache.borrow();
-        match map.get(&pgt_id) {
-            Some(entry) if entry.defining_query_hash == query_hash => (Some(entry.clone()), false),
-            Some(_) => (None, true), // stale: entry exists but hash changed
-            None => (None, false),   // cold miss: no entry at all
-        }
-    });
+    let candidate = DELTA_TEMPLATE_CACHE.with(|cache| cache.borrow().get(&pgt_id).cloned());
+    let had_candidate = candidate.is_some();
+    let cached = candidate
+        .filter(|entry| {
+            entry.defining_query_hash == query_hash
+                && entry.planning_version == planner::FORMAT_VERSION
+        })
+        .filter(|entry| {
+            entry.statistics_epoch == planner::statistics_epoch_for_sources(&entry.source_oids)
+        });
+    let was_stale = had_candidate && cached.is_none();
     if was_stale {
         // Evict the stale entry so it doesn't consume cache space.
         DELTA_TEMPLATE_CACHE.with(|cache| {
@@ -872,6 +882,8 @@ pub fn generate_delta_query_cached(
 
         let entry = CachedDeltaTemplate {
             defining_query_hash: query_hash,
+            statistics_epoch: ct.statistics_epoch.clone(),
+            planning_version: ct.planning_version,
             delta_sql_template: ct.delta_sql_template.clone(),
             output_columns: ct.output_columns.clone(),
             source_oids: ct.source_oids.clone(),
@@ -945,38 +957,43 @@ pub fn generate_delta_query_cached(
     ctx.st_has_pgt_count = has_pgt_count;
 
     // P2-5: Resolve CDC column ordinals for bitmask filter.
-    ctx.source_cdc_columns = resolve_cdc_columns_for_sources(&source_oids);
+    ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
 
     // A-2: Resolve key columns for value-only UPDATE detection.
-    ctx.source_key_columns = result.tree.source_key_columns_used();
+    ctx.set_source_key_columns(result.tree.source_key_columns_used());
 
     // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
-    ctx.st_source_pgt_ids = resolve_st_source_pgt_ids(&source_oids);
+    ctx.set_st_source_pgt_ids(resolve_st_source_pgt_ids(&source_oids));
 
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
-    ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
-    ctx.source_stage_tables = source_oids
-        .iter()
-        .map(|oid| {
-            (
-                *oid,
-                format!(
-                    "pg_temp.\"{}\"",
-                    crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
-                ),
-            )
-        })
-        .collect();
+    ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
+    ctx.set_source_stage_tables(
+        source_oids
+            .iter()
+            .map(|oid| {
+                (
+                    *oid,
+                    format!(
+                        "pg_temp.\"{}\"",
+                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                    ),
+                )
+            })
+            .collect(),
+    );
 
     let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
         ctx.differentiate_with_columns(&result.tree)?;
 
     let is_all_algebraic = result.tree.is_all_algebraic_agg();
+    let statistics_epoch = planner::statistics_epoch_for_sources(&source_oids);
 
     // Store in cache (QW-5: with LRU eviction).
     let entry = CachedDeltaTemplate {
         defining_query_hash: query_hash,
+        statistics_epoch: statistics_epoch.clone(),
+        planning_version: planner::FORMAT_VERSION,
         delta_sql_template: template_sql.clone(),
         output_columns: output_columns.clone(),
         source_oids: source_oids.clone(),
@@ -998,6 +1015,8 @@ pub fn generate_delta_query_cached(
             is_deduplicated: diff_dedup,
             has_key_changed: diff_has_key_changed,
             is_all_algebraic,
+            statistics_epoch,
+            planning_version: planner::FORMAT_VERSION,
         },
     );
 
@@ -2437,6 +2456,8 @@ mod tests {
         let pgt_id = -9998;
         let entry = CachedDeltaTemplate {
             defining_query_hash: 12345,
+            statistics_epoch: "test".into(),
+            planning_version: planner::FORMAT_VERSION,
             delta_sql_template: "WITH cte AS (SELECT 1) SELECT * FROM cte".to_string(),
             output_columns: vec!["id".to_string()],
             source_oids: vec![42],
@@ -2463,6 +2484,8 @@ mod tests {
         let pgt_id = -9997;
         let entry = CachedDeltaTemplate {
             defining_query_hash: 0,
+            statistics_epoch: "test".into(),
+            planning_version: planner::FORMAT_VERSION,
             delta_sql_template: "SELECT 1".to_string(),
             output_columns: vec![],
             source_oids: vec![],
@@ -2491,6 +2514,8 @@ mod tests {
         // Insert with has_key_changed = true
         let entry = CachedDeltaTemplate {
             defining_query_hash: 0,
+            statistics_epoch: "test".into(),
+            planning_version: planner::FORMAT_VERSION,
             delta_sql_template: "SELECT 1".to_string(),
             output_columns: vec![],
             source_oids: vec![],

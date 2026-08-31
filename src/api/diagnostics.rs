@@ -716,6 +716,26 @@ pub(super) fn explain_delta_impl(name: &str, format: &str) -> Result<Vec<String>
     Ok(rows)
 }
 
+/// Report pg_trickle's evidence and shadow scheduling decision without
+/// generating or executing delta SQL.
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn explain_delta_plan(pgt_id: i64) -> Result<pgrx::JsonB, PgTrickleError> {
+    let st = StreamTableMeta::get_by_id(pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={pgt_id}")))?;
+    check_stream_table_ownership(st.pgt_relid, &st.pgt_schema, &st.pgt_name)?;
+    let parsed = crate::dvm::parse_defining_query_full(&st.defining_query)?;
+    let evidence = crate::dvm::planner::collect_evidence(pgt_id, &parsed)?;
+    let plan = crate::dvm::planner::build_delta_plan(
+        pgt_id,
+        &parsed.tree,
+        &evidence,
+        crate::dvm::planner::vector_path_evidence(&parsed.tree),
+    );
+    serde_json::to_value(plan)
+        .map(pgrx::JsonB)
+        .map_err(|error| PgTrickleError::InternalError(error.to_string()))
+}
+
 // ── G14-MDED: dedup_stats() ────────────────────────────────────────────────
 
 /// Show MERGE deduplication profiling counters accumulated since server start.
@@ -2297,27 +2317,26 @@ pub(super) fn tune_recommendations() -> TableIterator<
 > {
     let mut rows: Vec<(String, String, String, String)> = Vec::new();
 
-    // ── Recommendation 1: merge_batch_size based on p99 delta size ──────
+    // ── Recommendation 1: pipeline_batch_size from p99 delta size ───
     // If the p99 delta row count in pgt_refresh_history exceeds 100 000 and
-    // merge_batch_size is 0 (disabled), recommend enabling it.
-    let merge_batch_size = crate::config::pg_trickle_merge_batch_size();
+    // A batch smaller than the observed p99 pays more portal/apply overhead.
+    let pipeline_batch_size = crate::config::pg_trickle_pipeline_batch_size();
     let p99_delta: Option<i64> = Spi::get_one::<i64>(
-        "SELECT percentile_disc(0.99) WITHIN GROUP (ORDER BY delta_rows) \
+        "SELECT percentile_disc(0.99) WITHIN GROUP (ORDER BY delta_row_count) \
          FROM pgtrickle.pgt_refresh_history \
-         WHERE delta_rows IS NOT NULL AND delta_rows > 0",
+         WHERE delta_row_count IS NOT NULL AND delta_row_count > 0",
     )
     .unwrap_or(None);
-    if merge_batch_size == 0
+    if pipeline_batch_size < 50_000
         && let Some(p99) = p99_delta.filter(|&p| p > 100_000)
     {
         rows.push((
-            "pg_trickle.merge_batch_size".to_string(),
-            "0 (disabled)".to_string(),
+            "pg_trickle.pipeline_batch_size".to_string(),
+            pipeline_batch_size.to_string(),
             "50000".to_string(),
             format!(
-                "p99 delta size is {} rows — enabling chunked MERGE (QW-9) \
-                 will route large deltas through DELETE+INSERT, \
-                 reducing peak memory and MERGE join cost.",
+                "p99 delta size is {} rows; a larger pipeline batch can reduce \
+                 portal and apply overhead.",
                 p99
             ),
         ));

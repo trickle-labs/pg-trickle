@@ -576,7 +576,7 @@ fn build_inner_change_branch(
     use crate::dvm::operators::join_common::build_snapshot_sql;
 
     // Only change-buffer mode has persistent change tables to check.
-    if !matches!(ctx.delta_source, DeltaSource::ChangeBuffer) {
+    if !matches!(ctx.delta_source(), DeltaSource::ChangeBuffer) {
         return Ok(None);
     }
 

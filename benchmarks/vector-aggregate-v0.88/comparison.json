@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "baseline_version": "0.87.17",
+  "candidate_version": "0.88.0",
+  "baseline_median_ms": 7330.618042,
+  "candidate_median_ms": 794.573708,
+  "throughput_ratio": 9.225850249250884,
+  "latency_reduction": 0.8916089061730438,
+  "memory_ratio": 0.763741992050072,
+  "baseline_temp_bytes": 0,
+  "candidate_temp_bytes": 0,
+  "exact_multiset_validated": true,
+  "minimum_throughput_ratio": 5.0,
+  "gate_passed": true
+}

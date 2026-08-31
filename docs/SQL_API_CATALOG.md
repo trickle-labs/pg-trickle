@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**142 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**143 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -57,6 +57,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.explain()` | `pgtrickle` | `text` | v0.86.0: Explain the bounded refresh/cost/freshness snapshot as text. |
 | `pgtrickle.explain_dag()` | `pgtrickle` | `` | Node colours: user STs = blue, self-monitoring STs = green, suspended = red, fused = orange. |
 | `pgtrickle.explain_delta()` | `pgtrickle` | `` | Example: ```sql SELECT line FROM pgtrickle.explain_delta('public.orders_summary'); SELECT line FROM pgtrickle.explain_delta('public.orders_summary', 'json'); ```. |
+| `pgtrickle.explain_delta_plan()` | `pgtrickle` | `Result<jsonb, PgTrickleError>` | Report pg_trickle's evidence and shadow scheduling decision without generating or executing delta SQL. |
 | `pgtrickle.explain_diff_sql()` | `pgtrickle` | `text (nullable)` | Exposed as `pgtrickle.explain_diff_sql(name)`. |
 | `pgtrickle.explain_json()` | `pgtrickle` | `Result<jsonb, PgTrickleError>` | v0.86.0: Explain the same snapshot as evidence-aware JSON. |
 | `pgtrickle.explain_query_rewrite()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.explain_query_rewrite(   'SELECT customer_id, SUM(amount) FROM orders GROUP BY customer_id' ); ```. |

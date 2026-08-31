@@ -12,8 +12,8 @@
 //!    Cross-backend persistent cache.  ~1 ms SPI lookup on L1 miss.
 //!    Eliminates the ~45 ms DVM parse+differentiate cost for cold backends.
 //!
-//! Templates are validated by `defining_query_hash` — if the hash doesn't
-//! match, the entry is treated as stale and repopulated.
+//! Templates are validated by query hash, planner format version, and the
+//! bounded source-statistics epoch. A mismatch is treated as stale.
 
 use pgrx::spi::Spi;
 
@@ -27,6 +27,8 @@ pub struct CachedTemplate {
     pub is_deduplicated: bool,
     pub has_key_changed: bool,
     pub is_all_algebraic: bool,
+    pub statistics_epoch: String,
+    pub planning_version: u16,
 }
 
 /// Look up a cached delta template from the catalog table.
@@ -42,10 +44,11 @@ pub fn lookup(pgt_id: i64, defining_query_hash: u64) -> Option<CachedTemplate> {
 
     let hash_i64 = defining_query_hash as i64;
 
-    Spi::connect(|client| {
+    let cached = Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT delta_sql, columns, source_oids, is_dedup, key_changed, all_algebraic \
+                "SELECT delta_sql, columns, source_oids, is_dedup, key_changed, all_algebraic, \
+                        statistics_epoch, planning_version \
                  FROM pgtrickle.pgt_template_cache \
                  WHERE pgt_id = $1 AND query_hash = $2",
                 None,
@@ -65,6 +68,12 @@ pub fn lookup(pgt_id: i64, defining_query_hash: u64) -> Option<CachedTemplate> {
         let is_dedup: bool = row.get::<bool>(4).ok().flatten().unwrap_or(false);
         let key_changed: bool = row.get::<bool>(5).ok().flatten().unwrap_or(false);
         let all_algebraic: bool = row.get::<bool>(6).ok().flatten().unwrap_or(false);
+        let statistics_epoch: String = row.get::<String>(7).ok().flatten()?;
+        let planning_version = row
+            .get::<i32>(8)
+            .ok()
+            .flatten()
+            .and_then(|version| u16::try_from(version).ok())?;
 
         let source_oids: Vec<u32> = source_oids_i32.into_iter().map(|v| v as u32).collect();
 
@@ -75,7 +84,15 @@ pub fn lookup(pgt_id: i64, defining_query_hash: u64) -> Option<CachedTemplate> {
             is_deduplicated: is_dedup,
             has_key_changed: key_changed,
             is_all_algebraic: all_algebraic,
+            statistics_epoch,
+            planning_version,
         })
+    });
+
+    cached.filter(|template| {
+        template.planning_version == crate::dvm::planner::FORMAT_VERSION
+            && template.statistics_epoch
+                == crate::dvm::planner::statistics_epoch_for_sources(&template.source_oids)
     })
 }
 
@@ -98,8 +115,8 @@ pub fn store(
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_template_cache \
          (pgt_id, query_hash, delta_sql, columns, source_oids, \
-          is_dedup, key_changed, all_algebraic, cached_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
+          is_dedup, key_changed, all_algebraic, statistics_epoch, planning_version, cached_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now()) \
          ON CONFLICT (pgt_id) DO UPDATE SET \
            query_hash = EXCLUDED.query_hash, \
            delta_sql = EXCLUDED.delta_sql, \
@@ -108,6 +125,8 @@ pub fn store(
            is_dedup = EXCLUDED.is_dedup, \
            key_changed = EXCLUDED.key_changed, \
            all_algebraic = EXCLUDED.all_algebraic, \
+           statistics_epoch = EXCLUDED.statistics_epoch, \
+           planning_version = EXCLUDED.planning_version, \
            cached_at = now()",
         &[
             pgt_id.into(),
@@ -118,6 +137,8 @@ pub fn store(
             template.is_deduplicated.into(),
             template.has_key_changed.into(),
             template.is_all_algebraic.into(),
+            template.statistics_epoch.as_str().into(),
+            i32::from(template.planning_version).into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

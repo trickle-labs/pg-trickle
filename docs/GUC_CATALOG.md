@@ -92,7 +92,6 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.max_parse_depth` | `int4` | `64` | Prevents stack-overflow crashes on pathological queries with deeply nested subqueries, CTEs, or set operations. |
 | `pg_trickle.max_parse_nodes` | `int4` | `100000` | Queries that exceed this limit are rejected with `QueryTooComplex` to prevent unbounded memory allocation in the parse advisory warnings cache and CTE registry. |
 | `pg_trickle.memory_budget_mb` | `int4` | `256` | Master budget for pg_trickle-owned in-process accumulations, in MiB. |
-| `pg_trickle.merge_batch_size` | `int4` | `4096` | `pg_trickle.merge_batch_size` remains a one-release alias for this setting. |
 | `pg_trickle.merge_join_strategy` | `text` | `"auto"` | Controls the join strategy hint applied via `SET LOCAL` during MERGE: - `"auto"` (default): delta-size heuristics choose the strategy. |
 | `pg_trickle.merge_planner_hints` | `bool` | `true` | Deprecated — use `pg_trickle.planner_aggressive` instead. |
 | `pg_trickle.merge_seqscan_threshold` | `float8` | `0.001` | Set to 0.0 to disable this optimization. |
@@ -109,6 +108,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.parallel_refresh_mode` | `text` | `"on"` | - `"on"` (default as of v0.11.0): Enable true parallel refresh via   dynamic workers. |
 | `pg_trickle.part3_max_scan_count` | `int4` | `5` | Default: 5 (matches the previously hardcoded `PART3_MAX_SCAN_COUNT`). |
 | `pg_trickle.per_database_worker_quota` | `int4` | `0` | Set to 0 (default) to disable per-database quotas — all databases share `max_dynamic_refresh_workers` on a first-come-first-served basis, bounded per coordinator by `max_concurrent_refreshes`. |
+| `pg_trickle.pipeline_batch_size` | `int4` | `4096` | Maximum logical rows in one differential pipeline apply batch. |
 | `pg_trickle.planner_aggressive` | `bool` | `true` | Replaces the old `merge_planner_hints` and `merge_work_mem_mb` GUCs (both still accepted but emit deprecation warnings). |
 | `pg_trickle.prediction_min_samples` | `int4` | `5` | When fewer than this many data points exist, the predictor falls back to the existing fixed-threshold logic. |
 | `pg_trickle.prediction_ratio` | `float8` | `1.5` | When `predicted_diff_ms > last_full_ms × prediction_ratio`, the scheduler overrides the strategy to FULL refresh. |

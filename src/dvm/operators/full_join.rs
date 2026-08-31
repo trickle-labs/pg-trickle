@@ -212,8 +212,8 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 right,
                 &right_result.cte_name,
                 right_cols,
-                &ctx.fallback_leaf_oids,
-                &ctx.st_source_pgt_ids,
+                ctx.fallback_leaf_oids(),
+                ctx.st_source_pgt_ids(),
             );
             Some(r0)
         }
@@ -236,8 +236,8 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 left,
                 &left_result.cte_name,
                 left_cols,
-                &ctx.fallback_leaf_oids,
-                &ctx.st_source_pgt_ids,
+                ctx.fallback_leaf_oids(),
+                ctx.st_source_pgt_ids(),
             )
         }
     } else {
@@ -265,8 +265,8 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             right,
             &right_result.cte_name,
             &right_user_cols,
-            &ctx.fallback_leaf_oids,
-            &ctx.st_source_pgt_ids,
+            ctx.fallback_leaf_oids(),
+            ctx.st_source_pgt_ids(),
         )
     };
 
@@ -285,8 +285,8 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             left,
             &left_result.cte_name,
             &left_user_cols,
-            &ctx.fallback_leaf_oids,
-            &ctx.st_source_pgt_ids,
+            ctx.fallback_leaf_oids(),
+            ctx.st_source_pgt_ids(),
         )
     };
 

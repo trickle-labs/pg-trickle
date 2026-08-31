@@ -159,6 +159,10 @@ pub enum PgTrickleError {
     #[error("query too complex: {0}")]
     QueryTooComplex(String),
 
+    /// A checked COUNT or integer SUM transition overflowed in MT-8.
+    #[error("vector aggregate overflow in '{aggregate}'")]
+    VectorAggregateOverflow { aggregate: String },
+
     /// SEC-1: The current role does not own the stream table's storage table.
     #[error("permission denied: {0}")]
     PermissionDenied(String),
@@ -743,6 +747,7 @@ impl PgTrickleError {
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
             | PgTrickleError::QueryTooComplex(_)
+            | PgTrickleError::VectorAggregateOverflow { .. }
             | PgTrickleError::PermissionDenied(_)
             | PgTrickleError::WatermarkBackwardMovement(_)
             | PgTrickleError::WatermarkGroupNotFound(_)

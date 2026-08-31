@@ -46,6 +46,23 @@ roadmap requirement of at least 99% installed/no-stream TPS; active p99 and
 refresh CPU share are separately budgeted so CI noise cannot silently change
 the product contract.
 
+## v0.88 vector aggregate gate
+
+`benchmarks/vector-aggregate-v0.88/contract.json` freezes the primary v0.88
+workload. It uses 1,000,000 rows, 10,000 groups, and a deterministic
+100,000-row mixed delta with `SUM(int4)`, `COUNT(*)`, and `AVG(int4)`. The gate
+runs one warm-up and five measured differential refreshes and checks exact
+multiset equality after every refresh.
+
+```bash
+cargo test --test e2e_bench_tests --features pg18 -- \
+  --ignored --test-threads=1 --nocapture bench_vector_aggregate_v088
+```
+
+The release result must reach 5 times the saved v0.87.17 median changed rows
+per second. Eligible production-like workloads may not regress by more than
+10 percent.
+
 ---
 
 ## Prerequisites

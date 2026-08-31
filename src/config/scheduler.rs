@@ -1194,7 +1194,7 @@ pub fn register_scheduler_gucs() {
         c"pg_trickle.validate_delta_invariants",
         c"DVM-3: Validate DIFFERENTIAL refresh results against full recomputation (v0.77.0).",
         c"When true, after every successful differential MERGE the scheduler compares \
-          the stream table row count against a full recomputation of the defining query \
+          the exact stream table multiset against a full recomputation of the defining query \
           and emits a WARNING on any discrepancy. Significant performance impact — \
           enable only for debugging or in CI validation. Default: false.",
         &PGS_VALIDATE_DELTA_INVARIANTS,

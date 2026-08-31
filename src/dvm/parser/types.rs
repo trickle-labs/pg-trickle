@@ -2090,8 +2090,8 @@ impl OpTree {
             OpTree::Aggregate { group_by, .. } => {
                 let cols: Vec<String> = group_by.iter().map(|e| e.output_name()).collect();
                 if cols.is_empty() {
-                    // Scalar aggregate: special sentinel
-                    None // caller handles with pg_trickle_hash('__singleton_group')
+                    // Scalar aggregate: an empty key is the complete singleton identity.
+                    Some(Vec::new())
                 } else {
                     Some(cols)
                 }

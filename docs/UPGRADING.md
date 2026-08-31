@@ -271,6 +271,16 @@ durability remains the default. `pg_trickle.memory_budget_mb` defaults to 256
 MiB and bounds pg_trickle-owned accumulations; it is not a PostgreSQL-wide RSS
 limit, and the lossless change-buffer guard never drops committed rows.
 
+## 0.87.17 to 0.88.0
+
+v0.88.0 removes the deprecated `pg_trickle.merge_batch_size` name. Set
+`pg_trickle.pipeline_batch_size` instead. Existing stream tables need no
+rebuild.
+
+The upgrade invalidates cached delta templates because v0.88.0 adds planner
+evidence to their validity contract. Running `ANALYZE` can change a shadow
+candidate or an enabled validated rewrite, but it cannot change query results.
+
 ---
 
 ## Quick Upgrade (Recommended)

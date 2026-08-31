@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, offline release gate for the v0.87.17 row-identity contract."""
+"""Small, offline release gate for the row-identity contract since v0.87.17."""
 
 from __future__ import annotations
 
@@ -21,8 +21,9 @@ def main() -> int:
     cargo = read(ROOT / "Cargo.toml")
     version_match = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE)
     version = version_match.group(1) if version_match else ""
-    if version != "0.87.17":
-        errors.append(f"Cargo.toml version is {version!r}, expected '0.87.17'")
+    parsed_version = tuple(int(part) for part in version.split(".")) if version else ()
+    if parsed_version < (0, 87, 17):
+        errors.append(f"Cargo.toml version is {version!r}, expected 0.87.17 or newer")
 
     archive = ROOT / "sql" / "archive" / "pg_trickle--0.87.17.sql"
     migration = ROOT / "sql" / "pg_trickle--0.87.16--0.87.17.sql"

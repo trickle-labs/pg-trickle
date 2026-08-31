@@ -59,22 +59,15 @@ depended on the removed crate.
 
 ---
 
-## DuckLake Sink Dependencies
+## Columnar aggregate pages
 
-The DuckLake write path (introduced v0.66.0) uses:
+v0.76.0 removed `arrow-array`, `arrow-schema`, `parquet`, `object_store`, and
+`bytes` with the DuckLake sink. v0.88.0 does not restore them. The vectorized
+aggregate executor uses concrete owned `Vec<T>` columns for its small built-in
+type matrix.
 
-| Crate | Role | Justification |
-|-------|------|---------------|
-| `arrow-array` | In-memory columnar representation | Required by `parquet` writer |
-| `arrow-schema` | Schema type definitions | Required by `arrow-array` |
-| `parquet` | Parquet file serialisation | Core sink format |
-| `object_store` (optional feature `s3`) | S3/GCS object upload | Transport layer for cloud sinks |
-| `bytes` | Zero-copy byte buffer | Used by `object_store` API |
-| `tokio` (optional feature `rt`) | Async runtime for object_store | Isolated runtime per sink call |
-
-These dependencies are reviewed each release. Any crate reaching end-of-life
-or accumulating unpatched advisories will be replaced or removed at the
-following release boundary.
+[ADR-009](../plans/adrs/ADR-009.md) requires an end-to-end throughput gain of
+at least 20 percent before Arrow can replace the dependency-free pages.
 
 ---
 

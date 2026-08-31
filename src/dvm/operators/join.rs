@@ -370,8 +370,8 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
                 left,
                 &left_result.cte_name,
                 left_cols,
-                &ctx.fallback_leaf_oids,
-                &ctx.st_source_pgt_ids,
+                ctx.fallback_leaf_oids(),
+                ctx.st_source_pgt_ids(),
             );
             // Apply semi-join filter to L₀ if equi-keys are available
             if equi_keys.is_empty() {
@@ -484,8 +484,8 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
                 right,
                 &right_result.cte_name,
                 right_cols,
-                &ctx.fallback_leaf_oids,
-                &ctx.st_source_pgt_ids,
+                ctx.fallback_leaf_oids(),
+                ctx.st_source_pgt_ids(),
             );
             // Apply semi-join filter to R₀
             if equi_keys.is_empty() {
@@ -851,8 +851,8 @@ fn get_current_table_ref(op: &OpTree) -> String {
 pub fn mark_leaf_delta_ctes_not_materialized(op: &OpTree, ctx: &mut DiffContext) {
     match op {
         OpTree::Scan { alias, .. } => {
-            if let Some(cte_name) = ctx.scan_delta_ctes.get(alias.as_str()) {
-                ctx.mark_cte_not_materialized(&cte_name.clone());
+            if let Some(cte_name) = ctx.scan_delta_ctes().get(alias.as_str()).cloned() {
+                ctx.mark_cte_not_materialized(&cte_name);
             }
         }
         OpTree::InnerJoin { left, right, .. }

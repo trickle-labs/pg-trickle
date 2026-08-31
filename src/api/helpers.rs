@@ -1088,7 +1088,6 @@ pub(crate) fn row_identity_columns(
                 .collect();
             (selected.len() == keys.len()).then_some(selected)
         })
-        .filter(|keys: &Vec<ColumnDef>| !keys.is_empty())
         .unwrap_or_else(|| columns.to_vec())
 }
 
