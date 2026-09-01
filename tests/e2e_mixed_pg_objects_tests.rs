@@ -2061,8 +2061,8 @@ async fn test_mixed_alter_table_add_column_through_view() {
         .await;
 }
 
-/// DROP COLUMN on a source table — if the dropped column is NOT used by
-/// the view/ST, the ST should remain functional.
+/// DROP COLUMN on a source table — even when the dropped column is not used by
+/// the view/ST, the ST is suspended until its source contract is repaired.
 #[tokio::test]
 async fn test_mixed_alter_table_drop_unused_column() {
     let db = E2eDb::new().await.with_extension().await;
@@ -2093,7 +2093,19 @@ async fn test_mixed_alter_table_drop_unused_column() {
     ])
     .await;
 
-    // ST should still work
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'ma_st_dropcol'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
+
+    // Repair the source contract before refreshing.
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('ma_st_dropcol')")
+        .await;
+
+    // ST should work after the explicit repair.
     db.execute("INSERT INTO ma_dropcol (id, val) VALUES (3, 30)")
         .await;
     db.refresh_st("ma_st_dropcol").await;

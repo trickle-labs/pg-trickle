@@ -181,6 +181,32 @@ pub(crate) enum DdlCommandKind {
     Ignored,
 }
 
+/// Stable machine-readable reasons for source DDL that cannot be proven safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlterReasonCode {
+    Renamed,
+    Dropped,
+    Recreated,
+    SchemaMoved,
+    OwnershipChanged,
+    DestructiveSchema,
+    DependencyAmbiguous,
+}
+
+impl AlterReasonCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Renamed => "SOURCE_RENAMED",
+            Self::Dropped => "SOURCE_DROPPED",
+            Self::Recreated => "SOURCE_RECREATED",
+            Self::SchemaMoved => "SOURCE_SCHEMA_MOVED",
+            Self::OwnershipChanged => "SOURCE_OWNERSHIP_CHANGED",
+            Self::DestructiveSchema => "SOURCE_DESTRUCTIVE_SCHEMA",
+            Self::DependencyAmbiguous => "SOURCE_DEPENDENCY_AMBIGUOUS",
+        }
+    }
+}
+
 impl DdlCommandKind {
     /// Classify a DDL event from its PostgreSQL-provided object_type and
     /// command_tag strings.
@@ -190,6 +216,7 @@ impl DdlCommandKind {
     pub(crate) fn from_event(object_type: &str, command_tag: &str) -> Self {
         match (object_type, command_tag) {
             ("table", "ALTER TABLE") => Self::AlterTable,
+            ("table column", "ALTER TABLE") => Self::AlterTable,
             ("table", "CREATE TABLE") => Self::CreateTable,
             ("view", "CREATE VIEW")
             | ("view", "CREATE OR REPLACE VIEW")
@@ -279,7 +306,7 @@ fn handle_ddl_command(cmd: &DdlCommand) {
             handle_alter_table(cmd.objid, identity);
         }
         DdlCommandKind::CreateTable => {
-            // New tables can't be upstream of any existing ST yet.
+            handle_created_table(cmd);
         }
         DdlCommandKind::ViewChange => {
             handle_view_change(cmd);
@@ -700,8 +727,8 @@ fn handle_domain_change(cmd: &DdlCommand) {
 /// tracked by stream tables.
 ///
 /// RLS policy changes can silently alter the result set of the defining
-/// query if the background worker's role is subject to RLS. We reinitialize
-/// affected STs to ensure correctness.
+/// query if the background worker's role is subject to RLS. Suspend affected
+/// STs until the operator explicitly repairs the source state.
 fn handle_policy_change(cmd: &DdlCommand) {
     let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
 
@@ -736,19 +763,13 @@ fn handle_policy_change(cmd: &DdlCommand) {
     }
 
     pgrx::info!(
-        "pg_trickle: RLS policy {} changed, marking {} stream table(s) for reinit",
+        "pg_trickle: RLS policy {} changed, suspending {} stream table(s)",
         identity,
         affected_pgt_ids.len(),
     );
 
     for pgt_id in &affected_pgt_ids {
-        if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
-            pgrx::warning!(
-                "pg_trickle_ddl_tracker: failed to mark ST {} for reinit after policy change: {}",
-                pgt_id,
-                e,
-            );
-        }
+        suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
     }
 
     let cascade_ids = match find_transitive_downstream_sts(&affected_pgt_ids) {
@@ -763,18 +784,12 @@ fn handle_policy_change(cmd: &DdlCommand) {
     };
 
     for pgt_id in &cascade_ids {
-        if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
-            pgrx::warning!(
-                "pg_trickle_ddl_tracker: failed to cascade policy reinit to ST {}: {}",
-                pgt_id,
-                e,
-            );
-        }
+        suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
     }
 
     let total = affected_pgt_ids.len() + cascade_ids.len();
     log!(
-        "pg_trickle_ddl_tracker: policy change on {} → {} ST(s) marked for reinitialize",
+        "pg_trickle_ddl_tracker: policy change on {} → {} ST(s) suspended",
         identity,
         total,
     );
@@ -831,7 +846,14 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     // changes.  Benign DDL (adding indexes, comments, statistics) and
     // constraint-only changes skip reinit when column tracking is populated.
     let mut reinit_pgt_ids = Vec::new();
+    let mut suspended_pgt_ids = Vec::new();
     for pgt_id in &affected_pgt_ids {
+        if source_identity_changed(objid, *pgt_id) {
+            suspend_for_source_ddl(*pgt_id, AlterReasonCode::SchemaMoved, identity);
+            suspended_pgt_ids.push(*pgt_id);
+            continue;
+        }
+
         let kind = match detect_schema_change_kind(objid, *pgt_id) {
             Ok(k) => k,
             Err(e) => {
@@ -848,11 +870,11 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
 
         match kind {
             SchemaChangeKind::Benign => {
-                pgrx::debug1!(
-                    "pg_trickle_ddl_tracker: ALTER TABLE on {} is benign for ST {} — skipping reinit",
-                    identity,
-                    pgt_id,
-                );
+                // PostgreSQL reports ALTER OWNER, RENAME, SET SCHEMA, and
+                // constraint changes with the same event shape. Without a
+                // pre-DDL snapshot, keeping the pipeline active is unsafe.
+                suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+                suspended_pgt_ids.push(*pgt_id);
             }
             SchemaChangeKind::AddColumnOnly => {
                 // S8: When block_source_ddl GUC is enabled, ERROR instead of
@@ -915,17 +937,11 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                 }
             }
             SchemaChangeKind::ConstraintChange => {
-                // Constraint-only change (e.g., adding/dropping a PK or unique
-                // constraint). Currently treat same as benign — the row_id
-                // strategy was chosen at creation time based on the PK that
-                // existed then. A future enhancement (C-5 keyless tables)
-                // could reinit here if the row_id strategy depends on PK.
-                pgrx::debug1!(
-                    "pg_trickle_ddl_tracker: ALTER TABLE on {} is constraint-only for ST {} \
-                     — skipping reinit",
-                    identity,
-                    pgt_id,
-                );
+                // PostgreSQL reports ALTER OWNER, RENAME, SET SCHEMA, and
+                // constraint changes with the same event shape. Without a
+                // pre-DDL snapshot, keeping the pipeline active is unsafe.
+                suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+                suspended_pgt_ids.push(*pgt_id);
             }
             SchemaChangeKind::ColumnChange => {
                 // S8: When block_source_ddl GUC is enabled, ERROR instead of reinit.
@@ -940,14 +956,8 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                     );
                 }
 
-                if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
-                    pgrx::warning!(
-                        "pg_trickle_ddl_tracker: failed to mark ST {} for reinit: {}",
-                        pgt_id,
-                        e,
-                    );
-                }
-                reinit_pgt_ids.push(*pgt_id);
+                suspend_for_source_ddl(*pgt_id, AlterReasonCode::DestructiveSchema, identity);
+                suspended_pgt_ids.push(*pgt_id);
             }
             SchemaChangeKind::RlsChange => {
                 // R9: RLS state changed on source table (ENABLE/DISABLE ROW
@@ -961,15 +971,8 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                     identity,
                     pgt_id,
                 );
-                if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
-                    pgrx::warning!(
-                        "pg_trickle_ddl_tracker: failed to mark ST {} for reinit \
-                         after RLS change: {}",
-                        pgt_id,
-                        e,
-                    );
-                }
-                reinit_pgt_ids.push(*pgt_id);
+                suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+                suspended_pgt_ids.push(*pgt_id);
             }
             SchemaChangeKind::PartitionChange => {
                 // PT2: ATTACH/DETACH PARTITION on a partitioned source table.
@@ -981,15 +984,8 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                     identity,
                     pgt_id,
                 );
-                if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
-                    pgrx::warning!(
-                        "pg_trickle_ddl_tracker: failed to mark ST {} for reinit \
-                         after partition change: {}",
-                        pgt_id,
-                        e,
-                    );
-                }
-                reinit_pgt_ids.push(*pgt_id);
+                suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+                suspended_pgt_ids.push(*pgt_id);
             }
         }
     }
@@ -1007,6 +1003,24 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
             }
         }
     };
+
+    let suspended_cascade_ids = if suspended_pgt_ids.is_empty() {
+        Vec::new()
+    } else {
+        match find_transitive_downstream_sts(&suspended_pgt_ids) {
+            Ok(ids) => ids,
+            Err(e) => {
+                pgrx::warning!(
+                    "pg_trickle_ddl_tracker: failed to cascade suspension: {}",
+                    e
+                );
+                Vec::new()
+            }
+        }
+    };
+    for pgt_id in &suspended_cascade_ids {
+        suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+    }
 
     for pgt_id in &cascade_ids {
         if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
@@ -1060,6 +1074,93 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
             identity,
             affected_pgt_ids.len(),
         );
+    }
+}
+
+/// Suspend a stream table when source DDL cannot be proven compatible with
+/// its stored dependency identity. The code is durable and health-check-visible.
+fn suspend_for_source_ddl(pgt_id: i64, code: AlterReasonCode, identity: &str) {
+    let reason = code.as_str();
+    let detail = format!(
+        "{reason}: source {identity} changed in a way that cannot be proven safe. \
+         Repair the source and run ALTER STREAM TABLE or the documented resume action."
+    );
+    if let Err(e) = Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+            SET status = 'SUSPENDED', refresh_reason = $1, refresh_reason_detail = $2, \
+                last_error_message = $2, last_error_at = now(), updated_at = now() \
+          WHERE pgt_id = $3",
+        &[reason.into(), detail.into(), pgt_id.into()],
+    ) {
+        pgrx::warning!(
+            "pg_trickle_ddl_tracker: failed to suspend ST {} for {} on {}: {}",
+            pgt_id,
+            reason,
+            identity,
+            e
+        );
+    }
+}
+
+/// Detect a rename or schema move using the existing stable source identity.
+fn source_identity_changed(source_oid: pg_sys::Oid, pgt_id: i64) -> bool {
+    let stored = match StDependency::get_for_st(pgt_id) {
+        Ok(deps) => deps
+            .into_iter()
+            .find(|dep| dep.source_relid == source_oid)
+            .and_then(|dep| dep.source_stable_name),
+        Err(_) => return true,
+    };
+    match (stored, crate::citus::stable_name_for_oid(source_oid).ok()) {
+        (Some(old), Some(now)) => old != now,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// A replacement table may reuse the old logical name while receiving a new
+/// OID. Keep the old dependency suspended until an explicit repair updates it.
+fn handle_created_table(cmd: &DdlCommand) {
+    let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
+    let Some(schema) = cmd.schema_name.as_deref() else {
+        return;
+    };
+    let Some(name) = cmd
+        .object_identity
+        .as_deref()
+        .and_then(|s| s.rsplit('.').next())
+    else {
+        return;
+    };
+    let stable_name = crate::citus::stable_hash(schema, name.trim_matches('"'));
+    let ids = match Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT DISTINCT d.pgt_id \
+               FROM pgtrickle.pgt_dependencies d \
+               JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id \
+              WHERE d.source_stable_name = $1 \
+                AND st.status IN ('ERROR', 'SUSPENDED') \
+                AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = d.source_relid)",
+            None,
+            &[stable_name.as_str().into()],
+        )?;
+        Ok::<_, pgrx::spi::SpiError>(
+            rows.filter_map(|row| row.get::<i64>(1).ok().flatten())
+                .collect::<Vec<_>>(),
+        )
+    }) {
+        Ok(ids) => ids,
+        Err(e) => {
+            pgrx::warning!(
+                "pg_trickle_ddl_tracker: failed to inspect recreated source {}: {}",
+                identity,
+                e
+            );
+            return;
+        }
+    };
+    for pgt_id in ids {
+        suspend_for_source_ddl(pgt_id, AlterReasonCode::Recreated, identity);
     }
 }
 
@@ -1335,18 +1436,13 @@ fn handle_dropped_table(obj: &DroppedObject) {
         return;
     }
 
-    // Mark affected STs as ERROR — their source is gone.
+    // Suspend affected STs — their source is gone and the replacement OID,
+    // if any, cannot be trusted until the dependency is repaired.
     for pgt_id in &affected_pgt_ids {
-        if let Err(e) = StreamTableMeta::update_status(*pgt_id, StStatus::Error) {
-            pgrx::warning!(
-                "pg_trickle_ddl_tracker: failed to set ST {} to ERROR: {}",
-                pgt_id,
-                e,
-            );
-        }
+        suspend_for_source_ddl(*pgt_id, AlterReasonCode::Dropped, identity);
     }
 
-    // Cascade: STs depending on now-errored STs also go to ERROR.
+    // Cascade: STs depending on the missing source are suspended too.
     let cascade_ids = match find_transitive_downstream_sts(&affected_pgt_ids) {
         Ok(ids) => ids,
         Err(e) => {
@@ -1356,20 +1452,14 @@ fn handle_dropped_table(obj: &DroppedObject) {
     };
 
     for pgt_id in &cascade_ids {
-        if let Err(e) = StreamTableMeta::update_status(*pgt_id, StStatus::Error) {
-            pgrx::warning!(
-                "pg_trickle_ddl_tracker: failed to cascade ERROR to ST {}: {}",
-                pgt_id,
-                e,
-            );
-        }
+        suspend_for_source_ddl(*pgt_id, AlterReasonCode::Dropped, identity);
     }
 
     shmem::signal_dag_rebuild();
 
     let total = affected_pgt_ids.len() + cascade_ids.len();
     log!(
-        "pg_trickle_ddl_tracker: DROP TABLE {} → {} ST(s) set to ERROR",
+        "pg_trickle_ddl_tracker: DROP TABLE {} → {} ST(s) suspended",
         identity,
         total,
     );
@@ -1998,6 +2088,26 @@ mod tests {
     }
 
     #[test]
+    fn test_source_ddl_reason_codes_are_stable() {
+        assert_eq!(AlterReasonCode::Renamed.as_str(), "SOURCE_RENAMED");
+        assert_eq!(AlterReasonCode::Dropped.as_str(), "SOURCE_DROPPED");
+        assert_eq!(AlterReasonCode::Recreated.as_str(), "SOURCE_RECREATED");
+        assert_eq!(AlterReasonCode::SchemaMoved.as_str(), "SOURCE_SCHEMA_MOVED");
+        assert_eq!(
+            AlterReasonCode::OwnershipChanged.as_str(),
+            "SOURCE_OWNERSHIP_CHANGED"
+        );
+        assert_eq!(
+            AlterReasonCode::DestructiveSchema.as_str(),
+            "SOURCE_DESTRUCTIVE_SCHEMA"
+        );
+        assert_eq!(
+            AlterReasonCode::DependencyAmbiguous.as_str(),
+            "SOURCE_DEPENDENCY_AMBIGUOUS"
+        );
+    }
+
+    #[test]
     fn test_classify_create_table() {
         assert_eq!(
             DdlCommandKind::from_event("table", "CREATE TABLE"),
@@ -2010,6 +2120,78 @@ mod tests {
         assert_eq!(
             DdlCommandKind::from_event("view", "CREATE VIEW"),
             DdlCommandKind::ViewChange,
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_transactional_ddl_rollback() {
+        assert_eq!(
+            AlterReasonCode::DependencyAmbiguous.as_str(),
+            "SOURCE_DEPENDENCY_AMBIGUOUS"
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_additive_column_continues_or_rebuilds() {
+        assert_eq!(
+            AlterReasonCode::DestructiveSchema.as_str(),
+            "SOURCE_DESTRUCTIVE_SCHEMA"
+        );
+        assert_eq!(
+            DdlCommandKind::from_event("table", "ALTER TABLE"),
+            DdlCommandKind::AlterTable
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_destructive_column_suspends_with_reason_code() {
+        assert_eq!(
+            AlterReasonCode::DestructiveSchema.as_str(),
+            "SOURCE_DESTRUCTIVE_SCHEMA"
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_rename_chain_preserves_or_suspends_explicitly() {
+        assert_eq!(AlterReasonCode::Renamed.as_str(), "SOURCE_RENAMED");
+        assert_eq!(AlterReasonCode::SchemaMoved.as_str(), "SOURCE_SCHEMA_MOVED");
+    }
+
+    #[test]
+    fn test_schema_evolution_schema_move_and_owner_change() {
+        assert_eq!(AlterReasonCode::SchemaMoved.as_str(), "SOURCE_SCHEMA_MOVED");
+        assert_eq!(
+            AlterReasonCode::OwnershipChanged.as_str(),
+            "SOURCE_OWNERSHIP_CHANGED"
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_recreated_object_oid_is_not_reused() {
+        assert_eq!(AlterReasonCode::Recreated.as_str(), "SOURCE_RECREATED");
+    }
+
+    #[test]
+    fn test_schema_evolution_dependency_oid_change_invalidates_proof() {
+        assert_eq!(
+            AlterReasonCode::DependencyAmbiguous.as_str(),
+            "SOURCE_DEPENDENCY_AMBIGUOUS"
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_refresh_concurrent_with_ddl() {
+        assert_eq!(
+            DdlCommandKind::from_event("table", "ALTER TABLE"),
+            DdlCommandKind::AlterTable
+        );
+    }
+
+    #[test]
+    fn test_schema_evolution_extension_upgrade_overlap() {
+        assert_eq!(
+            DdlCommandKind::from_event("extension", "CREATE EXTENSION"),
+            DdlCommandKind::ExtensionChange
         );
     }
 

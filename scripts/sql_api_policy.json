@@ -394,6 +394,13 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.explain_alter(text, text)": {
+      "schema": "pgtrickle",
+      "name": "explain_alter",
+      "identity_arguments": "text, text",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.export_definition(text)": {
       "schema": "pgtrickle",
       "name": "export_definition",
@@ -705,6 +712,13 @@
     "pgtrickle.repair_stream_table(text)": {
       "schema": "pgtrickle",
       "name": "repair_stream_table",
+      "identity_arguments": "text",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.reinitialize_stream_table(text)": {
+      "schema": "pgtrickle",
+      "name": "reinitialize_stream_table",
       "identity_arguments": "text",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"

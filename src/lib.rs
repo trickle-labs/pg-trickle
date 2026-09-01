@@ -798,6 +798,12 @@ VALUES (
     'Freshness provenance, visibility settlement, and advisory controller state'
 )
 ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES (
+    '0.91.0',
+    'Safe defining-query replacement and source schema-evolution recovery'
+)
+ON CONFLICT (version) DO NOTHING;
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_stream_tables', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_dependencies', '');
@@ -1993,6 +1999,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.refresh_if_stale(text, interval) FROM PUBLI
 REVOKE EXECUTE ON FUNCTION pgtrickle.refresh_stream_table(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.refresh_timeline(integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.repair_stream_table(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.reinitialize_stream_table(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.reset_fuse(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.restore_from_snapshot(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.resume_stream_table(text) FROM PUBLIC;
@@ -2025,6 +2032,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.explain_delta(text, text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_delta_plan(bigint) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_diff_sql(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.explain_alter(text, text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_json(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_query_rewrite(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.explain_refresh_mode(text) TO PUBLIC;

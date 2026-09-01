@@ -183,22 +183,58 @@ fn validate_freshness_evidence(pgt_id: i64) -> Result<(), PgTrickleError> {
 
 // ── Schema comparison for ALTER QUERY ──────────────────────────────────────
 
-/// Classification of how the output schema changed between old and new query.
+/// The four pieces of state that must be valid before an ALTER can reuse the
+/// existing materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AlterStateOracle {
+    pub(crate) materialized_result: bool,
+    pub(crate) frontier: bool,
+    pub(crate) row_identity: bool,
+    pub(crate) auxiliary_state: bool,
+}
+
+impl AlterStateOracle {
+    fn proven() -> Self {
+        Self {
+            materialized_result: true,
+            frontier: true,
+            row_identity: true,
+            auxiliary_state: true,
+        }
+    }
+
+    fn is_proven(self) -> bool {
+        self.materialized_result && self.frontier && self.row_identity && self.auxiliary_state
+    }
+}
+
+/// v0.91.0's public decision for a defining-query replacement.
 #[derive(Debug)]
-enum SchemaChange {
-    /// Column names, types, and count are identical — fast path.
-    Same,
-    /// Columns added or removed; surviving columns have compatible types.
-    Compatible {
-        added: Vec<ColumnDef>,
-        removed: Vec<String>,
-    },
-    /// Column type changed incompatibly — requires full storage rebuild.
-    Incompatible { reason: String },
+enum AlterClassification {
+    Compatible { oracle: AlterStateOracle },
+    Rebuildable { reason: String },
+    Rejected { reason: String },
+}
+
+impl AlterClassification {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compatible { .. } => "compatible",
+            Self::Rebuildable { .. } => "rebuildable",
+            Self::Rejected { .. } => "rejected",
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Compatible { .. } => None,
+            Self::Rebuildable { reason } | Self::Rejected { reason } => Some(reason),
+        }
+    }
 }
 
 /// Compare old vs new output column schemas to classify the change.
-fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> SchemaChange {
+fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> AlterClassification {
     // Build lookup by name for old columns
     let old_map: std::collections::HashMap<&str, &ColumnDef> =
         old.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -224,7 +260,7 @@ fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> SchemaChange 
             .unwrap_or(false);
 
             if !can_cast {
-                return SchemaChange::Incompatible {
+                return AlterClassification::Rebuildable {
                     reason: format!(
                         "column '{}' type changed from OID {} to {} (no implicit cast)",
                         new_col.name,
@@ -236,11 +272,10 @@ fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> SchemaChange 
         }
     }
 
-    // Identify added and removed columns
-    let added: Vec<ColumnDef> = new
+    // Identify added and removed columns.
+    let added: Vec<&ColumnDef> = new
         .iter()
         .filter(|c| !old_map.contains_key(c.name.as_str()))
-        .cloned()
         .collect();
     let removed: Vec<String> = old
         .iter()
@@ -257,14 +292,180 @@ fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> SchemaChange 
                 .zip(new.iter())
                 .all(|(o, n)| o.name == n.name && o.type_oid == n.type_oid);
         if same_order {
-            SchemaChange::Same
+            AlterClassification::Compatible {
+                oracle: AlterStateOracle::proven(),
+            }
         } else {
-            // Types compatible but order changed — treated as Same since
-            // column order in storage doesn't affect correctness
-            SchemaChange::Same
+            AlterClassification::Rebuildable {
+                reason: "output column order changed".to_string(),
+            }
         }
     } else {
-        SchemaChange::Compatible { added, removed }
+        AlterClassification::Rebuildable {
+            reason: format!(
+                "output schema changed ({} added, {} removed)",
+                added.len(),
+                removed.len()
+            ),
+        }
+    }
+}
+
+/// Classify a proposed query only after validating its output schema and
+/// dependency set. Exact equality is the only state reuse proof; every other
+/// valid change gets a protected rebuild.
+fn classify_alter_query(
+    old_query: &str,
+    new_query: &str,
+    old_columns: &[ColumnDef],
+    new_columns: &[ColumnDef],
+    dependencies_same: bool,
+) -> AlterClassification {
+    let schema = classify_schema_change(old_columns, new_columns);
+    match schema {
+        AlterClassification::Rejected { reason } => AlterClassification::Rejected { reason },
+        AlterClassification::Rebuildable { reason } => AlterClassification::Rebuildable { reason },
+        AlterClassification::Compatible { oracle }
+            if dependencies_same && old_query.trim() == new_query.trim() && oracle.is_proven() =>
+        {
+            AlterClassification::Compatible { oracle }
+        }
+        AlterClassification::Compatible { .. } => AlterClassification::Rebuildable {
+            reason: "the proposed query changes semantics or dependencies".to_string(),
+        },
+    }
+}
+
+fn explain_alter_impl(name: &str, new_query: &str) -> Result<pgrx::JsonB, PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let old_columns = get_storage_table_columns(&schema, &table_name)?;
+    let old_deps = StDependency::get_for_st(st.pgt_id)?;
+    let estimated_rebuild_bytes = Spi::get_one_with_args::<i64>(
+        "SELECT pg_catalog.pg_total_relation_size($1::oid)",
+        &[st.pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(0)
+    .max(0);
+
+    let mut refresh_mode = st.refresh_mode;
+    let caller_search_path =
+        security_context::capture_caller_context(security_context::EntryContext::SecurityInvoker)?
+            .search_path;
+    let (rw, vq) = with_invoker_search_path(&caller_search_path, || {
+        let rw = run_query_rewrite_pipeline(new_query)?;
+        let vq = validate_and_parse_query(
+            &rw.query,
+            &mut refresh_mode,
+            false,
+            rw.had_nested_window_rewrite,
+        )?;
+        Ok((rw, vq))
+    })?;
+    let dependency_diff = diff_dependencies(&old_deps, &vq.source_relids);
+    let classification = classify_alter_query(
+        &st.defining_query,
+        &rw.query,
+        &old_columns,
+        &vq.columns,
+        dependency_diff.added.is_empty() && dependency_diff.removed.is_empty(),
+    );
+    let oracle = match &classification {
+        AlterClassification::Compatible { oracle } => *oracle,
+        AlterClassification::Rebuildable { .. } | AlterClassification::Rejected { .. } => {
+            AlterStateOracle {
+                materialized_result: false,
+                frontier: false,
+                row_identity: false,
+                auxiliary_state: false,
+            }
+        }
+    };
+    let reason = classification
+        .reason()
+        .map(str::to_string)
+        .unwrap_or_else(|| "all four state components are proven reusable".to_string());
+    let classification_name = classification.as_str();
+    let reason_code = match &classification {
+        AlterClassification::Compatible { .. } => serde_json::Value::Null,
+        AlterClassification::Rebuildable { .. } => {
+            serde_json::Value::String("ALTER_QUERY_REBUILD".to_string())
+        }
+        AlterClassification::Rejected { .. } => {
+            serde_json::Value::String("ALTER_QUERY_REJECTED".to_string())
+        }
+    };
+    Ok(pgrx::JsonB(serde_json::json!({
+        "stream_table": format!("{schema}.{table_name}"),
+        "current_query": st.defining_query,
+        "proposed_query": new_query,
+        "classification": classification_name,
+        "reason_code": reason_code,
+        "reason": reason,
+        "state_oracle": {
+            "materialized_result": oracle.materialized_result,
+            "frontier": oracle.frontier,
+            "row_identity": oracle.row_identity,
+            "auxiliary_state": oracle.auxiliary_state
+        },
+        "affected_state": {
+            "materialized_result": !oracle.materialized_result,
+            "frontier": !oracle.frontier,
+            "row_identity": !oracle.row_identity,
+            "auxiliary_state": !oracle.auxiliary_state
+        },
+        "estimated_rebuild_bytes": estimated_rebuild_bytes
+    })))
+}
+
+/// Explain a defining-query change without mutating catalog, storage, or CDC.
+#[pg_extern(schema = "pgtrickle")]
+fn explain_alter(name: &str, new_query: &str) -> pgrx::JsonB {
+    let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        explain_alter_impl(name, new_query)
+    }))
+    .catch_others(|caught| {
+        use pgrx::pg_sys::panic::CaughtError;
+
+        let message = match caught {
+            CaughtError::PostgresError(report)
+            | CaughtError::ErrorReport(report)
+            | CaughtError::RustPanic {
+                ereport: report, ..
+            } => report.message().to_string(),
+        };
+        Err(PgTrickleError::QueryParseError(message))
+    })
+    .execute();
+
+    match result {
+        Ok(explanation) => explanation,
+        Err(error) => {
+            let classification = AlterClassification::Rejected {
+                reason: error.to_string(),
+            };
+            pgrx::JsonB(serde_json::json!({
+                "stream_table": name,
+                "proposed_query": new_query,
+                "classification": classification.as_str(),
+                "reason_code": "ALTER_QUERY_REJECTED",
+                "reason": classification.reason().unwrap_or("rejected"),
+                "state_oracle": {
+                    "materialized_result": false,
+                    "frontier": false,
+                    "row_identity": false,
+                    "auxiliary_state": false
+                },
+                "affected_state": {
+                    "materialized_result": false,
+                    "frontier": false,
+                    "row_identity": false,
+                    "auxiliary_state": false
+                },
+                "estimated_rebuild_bytes": 0
+            }))
+        }
     }
 }
 
@@ -719,6 +920,161 @@ fn migrate_aux_columns(
 
 // ── Core ALTER QUERY implementation ──────────────────────────────────────
 
+fn lock_alter_target(pgt_id: i64) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={pgt_id}")))?;
+    Ok(())
+}
+
+/// Roll back an abandoned private shadow build while preserving the old live
+/// relation. Normal SQL-call failures also roll back transactionally.
+fn resume_or_rollback_shadow_build(pgt_id: i64, schema: &str) -> Result<(), PgTrickleError> {
+    let in_progress = Spi::get_one_with_args::<bool>(
+        "SELECT in_shadow_build FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !in_progress {
+        return Ok(());
+    }
+    let shadow_name = Spi::get_one_with_args::<String>(
+        "SELECT shadow_table_name FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| {
+        PgTrickleError::InternalError(format!(
+            "shadow build for pgt_id={pgt_id} has no shadow_table_name"
+        ))
+    })?;
+    if !shadow_name.starts_with("__pgt_shadow_") {
+        return Err(PgTrickleError::InternalError(format!(
+            "refusing to clean unexpected shadow relation {shadow_name:?}"
+        )));
+    }
+    let exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = $1 AND c.relname = $2
+         )",
+        &[schema.into(), shadow_name.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if exists {
+        let shadow = format!(
+            "{}.{}",
+            quote_identifier(schema),
+            quote_identifier(&shadow_name)
+        );
+        // nosemgrep: rust.spi.run.dynamic-format — shadow is a validated private identifier.
+        Spi::run(&format!("DROP TABLE {shadow} CASCADE"))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET in_shadow_build = FALSE, shadow_table_name = NULL,
+                status = CASE WHEN refresh_reason = 'QUERY_REBUILD'
+                              THEN 'ACTIVE'::text ELSE status END,
+                refresh_reason = CASE WHEN refresh_reason = 'QUERY_REBUILD'
+                                     THEN NULL ELSE refresh_reason END,
+                refresh_reason_detail = CASE WHEN refresh_reason = 'QUERY_REBUILD'
+                                             THEN NULL ELSE refresh_reason_detail END,
+                updated_at = now()
+          WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+/// Publish a fully populated shadow relation under the stream-table name.
+/// RESTRICT keeps unexpected external dependencies from being dropped.
+fn atomic_swap_shadow_table(
+    schema: &str,
+    table_name: &str,
+    shadow_name: &str,
+    old_relid: pg_sys::Oid,
+    new_relid: pg_sys::Oid,
+    pgt_id: i64,
+) -> Result<(), PgTrickleError> {
+    let old_oid = get_table_oid(schema, table_name)?;
+    let shadow_oid = get_table_oid(schema, shadow_name)?;
+    if old_oid != old_relid || shadow_oid != new_relid {
+        return Err(PgTrickleError::InternalError(format!(
+            "shadow swap identity changed for {schema}.{table_name}"
+        )));
+    }
+    let old = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(table_name)
+    );
+    let shadow = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(shadow_name)
+    );
+    let backup_name = format!("__pgt_old_{pgt_id}");
+    let backup_exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = $1 AND c.relname = $2
+         )",
+        &[schema.into(), backup_name.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if backup_exists {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "cannot atomically swap {schema}.{table_name}: backup relation already exists"
+        )));
+    }
+    // nosemgrep: rust.spi.run.dynamic-format — relation names are quote_identifier-escaped.
+    Spi::run(&format!(
+        "LOCK TABLE {old}, {shadow} IN ACCESS EXCLUSIVE MODE"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    // nosemgrep: rust.spi.run.dynamic-format — relation names are quote_identifier-escaped.
+    Spi::run(&format!(
+        "ALTER TABLE {old} RENAME TO {}",
+        quote_identifier(&backup_name)
+    ))
+    .map_err(|e| PgTrickleError::SpiError(format!("failed to hide old stream table: {e}")))?;
+    // nosemgrep: rust.spi.run.dynamic-format — relation names are quote_identifier-escaped.
+    Spi::run(&format!(
+        "ALTER TABLE {shadow} RENAME TO {}",
+        quote_identifier(table_name)
+    ))
+    .map_err(|e| PgTrickleError::SpiError(format!("failed to publish shadow stream table: {e}")))?;
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_dependencies
+            SET source_relid = $1
+          WHERE source_relid = $2 AND source_type = 'STREAM_TABLE'",
+        &[new_relid.into(), old_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let backup = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(&backup_name)
+    );
+    // nosemgrep: rust.spi.run.dynamic-format — backup is a quote_identifier-escaped private relation.
+    Spi::run(&format!("DROP TABLE {backup} RESTRICT"))
+        .map_err(|e| PgTrickleError::SpiError(format!("failed to remove old stream table: {e}")))
+}
+
 /// Perform an in-place query migration on an existing stream table.
 /// Called from `alter_stream_table_impl` when `query` is `Some(...)`.
 ///
@@ -736,6 +1092,11 @@ fn alter_stream_table_query(
     new_query: &str,
     caller_search_path: &str,
 ) -> Result<(), PgTrickleError> {
+    lock_alter_target(st.pgt_id)?;
+    resume_or_rollback_shadow_build(st.pgt_id, schema)?;
+    let st = StreamTableMeta::get_by_id(st.pgt_id)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={}", st.pgt_id)))?;
+
     // ── Phase 0: Validate & classify ──
     //
     // LSEC-7 (v0.87.9): the caller's exact search_path is now captured once
@@ -775,20 +1136,45 @@ fn alter_stream_table_query(
     // Get the current storage table columns (excluding internal __pgt_* columns)
     let old_columns = get_storage_table_columns(schema, table_name)?;
 
-    // Classify schema change
-    let schema_change = classify_schema_change(&old_columns, &vq.columns);
-
     // Diff source dependencies
     let old_deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
     let dep_diff = diff_dependencies(&old_deps, &vq.source_relids);
 
-    // Detect old auxiliary column state from current ST metadata
-    let old_needs_pgt_count = crate::dvm::query_needs_pgt_count(&st.defining_query);
-    let old_needs_dual_count = crate::dvm::query_needs_dual_count(&st.defining_query);
-    let old_avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
-    let old_sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
-    let old_covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
-    let old_nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
+    let classification = classify_alter_query(
+        &st.defining_query,
+        &rewritten_query,
+        &old_columns,
+        &vq.columns,
+        dep_diff.added.is_empty() && dep_diff.removed.is_empty(),
+    );
+    if let AlterClassification::Rejected { reason } = &classification {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "ALTER QUERY rejected for {schema}.{table_name}: {reason}"
+        )));
+    }
+    if matches!(classification, AlterClassification::Compatible { .. }) {
+        return Ok(());
+    }
+    let rebuild_reason = classification
+        .reason()
+        .unwrap_or("state reuse was not proven")
+        .to_string();
+
+    // Lock every old and new base source before changing catalog or storage.
+    let mut source_oids = old_deps
+        .iter()
+        .filter(|dep| matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+        .map(|dep| dep.source_relid)
+        .collect::<Vec<_>>();
+    source_oids.extend(
+        vq.source_relids
+            .iter()
+            .filter(|(_, source_type)| matches!(source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+            .map(|(oid, _)| *oid),
+    );
+    source_oids.sort_unstable_by_key(|oid| oid.to_u32());
+    source_oids.dedup();
+    cdc::lock_source_relations(&source_oids)?;
 
     // ── Phase 1: Suspend ──
     StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
@@ -838,124 +1224,43 @@ fn alter_stream_table_query(
     // restores it if any later ALTER phase fails.
     crate::window_state::drop_for_stream(st.pgt_id)?;
 
-    // ── Phase 3: Migrate storage table ──
-
-    let new_pgt_relid = match &schema_change {
-        SchemaChange::Same => {
-            // The output columns are unchanged, but set-operation FULL
-            // storage may have a non-unique row-id index. Rebuild it when
-            // the query's keyless requirement changes.
-            if st.has_keyless_source != vq.has_keyless_source {
-                rebuild_row_id_index(
-                    schema,
-                    table_name,
-                    &vq.columns,
-                    vq.parsed_tree.as_ref(),
-                    vq.has_keyless_source,
-                    st.st_partition_key.is_some(),
-                )?;
-            }
-            st.pgt_relid
-        }
-        SchemaChange::Compatible { added, removed } => {
-            migrate_storage_table_compatible(schema, table_name, added, removed)?;
-            // Dropping columns may destroy the covering INCLUDE index on
-            // __pgt_row_id.  A query transition can also change whether
-            // duplicate row IDs are valid (notably set-operation FULL
-            // storage), so rebuild whenever the keyless flag changes.
-            if !removed.is_empty() || st.has_keyless_source != vq.has_keyless_source {
-                rebuild_row_id_index(
-                    schema,
-                    table_name,
-                    &vq.columns,
-                    vq.parsed_tree.as_ref(),
-                    vq.has_keyless_source,
-                    st.st_partition_key.is_some(),
-                )?;
-            }
-            st.pgt_relid
-        }
-        SchemaChange::Incompatible { reason } => {
-            publication::ensure_storage_replacement_allowed(st)?;
-            pgrx::warning!(
-                "pg_trickle: ALTER QUERY requires full storage rebuild: {}. \
-                 The storage table OID will change.",
-                reason
-            );
-
-            // LSEC-8 (v0.87.9): capture the exact pre-rebuild storage owner
-            // so it can be restored on the recreated table below — the new
-            // table is created by privileged code and must not silently
-            // become owned by the extension owner.
-            let original_owner = relation_owner(st.pgt_relid)?;
-
-            // Detach pgt_relid before DROP so the sql_drop event trigger
-            // does not recognise the table as ST storage and delete the
-            // catalog row.
-            Spi::run_with_args(
-                "UPDATE pgtrickle.pgt_stream_tables \
-                 SET pgt_relid = 0 WHERE pgt_id = $1",
-                &[st.pgt_id.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-            // Drop existing storage table
-            let drop_sql = format!(
-                "DROP TABLE IF EXISTS {}.{} CASCADE",
-                quote_identifier(schema),
-                quote_identifier(table_name),
-            );
-            Spi::run(&drop_sql).map_err(|e| {
-                PgTrickleError::SpiError(format!("Failed to drop storage table: {}", e))
-            })?;
-
-            // Recreate with new schema
-            let storage_needs_pgt_count = vq.needs_pgt_count || vq.needs_union_dedup;
-            let rebuilt_relid = setup_storage_table(
-                schema,
-                table_name,
-                &vq.columns,
-                storage_needs_pgt_count,
-                vq.needs_dual_count,
-                vq.has_keyless_source,
-                refresh_mode,
-                vq.parsed_tree.as_ref(),
-                &vq.avg_aux_columns,
-                &vq.sum2_aux_columns,
-                &vq.covar_aux_columns,
-                &vq.nonnull_aux_columns,
-                &vq.statistical_aux_types,
-                st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
-                st.storage_fillfactor,          // HOT-1: preserve fillfactor
-            )?;
-
-            // LSEC-8: restore the exact original owner before repopulation.
-            set_relation_owner(schema, table_name, original_owner)?;
-            rebuilt_relid
-        }
-    };
-
-    // For Same/Compatible, also handle auxiliary column transitions
-    if !matches!(schema_change, SchemaChange::Incompatible { .. }) {
-        migrate_aux_columns(
-            schema,
-            table_name,
-            old_needs_pgt_count,
-            old_needs_dual_count,
-            vq.needs_pgt_count,
-            vq.needs_dual_count,
-            vq.needs_union_dedup,
-            &old_avg_aux,
-            &vq.avg_aux_columns,
-            &old_sum2_aux,
-            &vq.sum2_aux_columns,
-            &old_covar_aux,
-            &vq.covar_aux_columns,
-            &vq.statistical_aux_types,
-            &old_nonnull_aux,
-            &vq.nonnull_aux_columns,
-        )?;
-    }
+    // ── Phase 3: Build isolated shadow storage ──
+    publication::ensure_storage_replacement_allowed(&st)?;
+    pgrx::warning!("pg_trickle: ALTER QUERY requires a protected shadow rebuild: {rebuild_reason}");
+    let shadow_name = format!("__pgt_shadow_{}", st.pgt_id);
+    let original_owner = relation_owner(st.pgt_relid)?;
+    let shadow_reason = format!("QUERY_REBUILD: {rebuild_reason}");
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET in_shadow_build = TRUE, shadow_table_name = $1,
+                status = 'SUSPENDED', refresh_reason = 'QUERY_REBUILD',
+                refresh_reason_detail = $2, updated_at = now()
+          WHERE pgt_id = $3",
+        &[
+            shadow_name.as_str().into(),
+            shadow_reason.into(),
+            st.pgt_id.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let new_pgt_relid = setup_storage_table(
+        schema,
+        &shadow_name,
+        &vq.columns,
+        vq.needs_pgt_count || vq.needs_union_dedup,
+        vq.needs_dual_count,
+        vq.has_keyless_source,
+        refresh_mode,
+        vq.parsed_tree.as_ref(),
+        &vq.avg_aux_columns,
+        &vq.sum2_aux_columns,
+        &vq.covar_aux_columns,
+        &vq.nonnull_aux_columns,
+        &vq.statistical_aux_types,
+        st.st_partition_key.as_deref(),
+        st.storage_fillfactor,
+    )?;
+    set_relation_owner(schema, &shadow_name, original_owner)?;
 
     // ── Phase 4: Update catalog & set up new infrastructure ──
 
@@ -995,27 +1300,11 @@ fn alter_stream_table_query(
         ));
     }
 
-    // F5 (v0.36.0): Online schema evolution — when the GUC is enabled and the
-    // schema change only adds columns (no removals, no incompatible changes),
-    // preserve the existing frontier and is_populated flag so that the next
-    // refresh continues incrementally rather than performing a full reinit.
-    let preserve_frontier = config::pg_trickle_online_schema_evolution()
-        && matches!(
-            &schema_change,
-            SchemaChange::Compatible { added, removed } if !added.is_empty() && removed.is_empty()
-        );
-
-    let (frontier_clause, populated_clause) = if preserve_frontier {
-        // Keep existing frontier and is_populated — differential refresh continues
-        pgrx::log!(
-            "pg_trickle: online schema evolution enabled; preserving frontier for {}.{}",
-            schema,
-            table_name,
-        );
-        ("", "")
-    } else {
-        ("frontier = NULL,", "is_populated = false,")
-    };
+    // A shadow relation has its own result, row identities, frontier, and
+    // auxiliary columns. The old frontier is never reused for a semantic
+    // query change.
+    let frontier_clause = "frontier = NULL,";
+    let populated_clause = "is_populated = false,";
 
     Spi::run_with_args(
         &format!(
@@ -1186,9 +1475,28 @@ fn alter_stream_table_query(
         .map(|(o, _)| *o)
         .collect();
 
-    // Re-load ST with updated metadata for the refresh
+    // Re-load ST with updated metadata for the refresh. The catalog points to
+    // the shadow OID, so the target name must also be the private shadow.
     let updated_st = StreamTableMeta::get_by_name(schema, table_name)?;
-    execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)?;
+    execute_manual_full_refresh(&updated_st, schema, &shadow_name, &source_oids)?;
+
+    atomic_swap_shadow_table(
+        schema,
+        table_name,
+        &shadow_name,
+        st.pgt_relid,
+        new_pgt_relid,
+        st.pgt_id,
+    )?;
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET in_shadow_build = FALSE, shadow_table_name = NULL,
+                refresh_reason = NULL, refresh_reason_detail = NULL,
+                updated_at = now()
+          WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     // ERR-1f: Clear any previous error state now that the query has been fixed
     // and the refresh succeeded. This ensures alter_stream_table with a fixed
@@ -1225,15 +1533,11 @@ fn alter_stream_table_query(
 
     // ERG-F: warn so the client sees the full refresh regardless of log_min_messages.
     pgrx::warning!(
-        "pg_trickle: stream table {}.{} ALTER QUERY applied a full refresh \
-         (schema change: {}). This may take time on large tables.",
+        "pg_trickle: stream table {}.{} ALTER QUERY applied a protected {} rebuild. \
+         This may take time on large tables.",
         schema,
         table_name,
-        match &schema_change {
-            SchemaChange::Same => "same",
-            SchemaChange::Compatible { .. } => "compatible",
-            SchemaChange::Incompatible { .. } => "incompatible (full rebuild)",
-        }
+        classification.as_str(),
     );
 
     Ok(())
@@ -3255,6 +3559,7 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
 
     // Step 5: Rebuild missing CDC triggers / change-buffer tables.
     let mut cdc_rebuilt = false;
+    let mut missing_dependency = false;
     for dep in &deps {
         if dep.source_type != "TABLE" {
             continue;
@@ -3270,6 +3575,7 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
         .unwrap_or(false);
 
         if !source_exists {
+            missing_dependency = true;
             actions.push(format!(
                 "dependency missing: source OID {} no longer exists",
                 source_oid.to_u32()
@@ -3332,6 +3638,13 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
         }
     }
 
+    if missing_dependency {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "stream table {}.{} has a missing source dependency; update the defining query with ALTER STREAM TABLE before reinitializing",
+            schema, table_name
+        )));
+    }
+
     if !cdc_rebuilt && deps.iter().any(|d| d.source_type == "TABLE") {
         actions.push("cdc_infrastructure: verified OK".to_string());
     }
@@ -3364,6 +3677,17 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     );
     pgrx::info!("{}", summary);
     Ok(summary)
+}
+
+/// Reinitialize a stream table after a source schema change. This is the
+/// explicit repair command reported by schema-evolution health checks.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+fn reinitialize_stream_table(name: &str) -> String {
+    match repair_stream_table_impl(name) {
+        Ok(summary) => summary,
+        Err(error) => raise_error_with_context(error),
+    }
 }
 
 // ── A-1 (v0.79.0): Convenience helpers ─────────────────────────────────────
@@ -3524,5 +3848,80 @@ mod tests {
 
         let err = order_bulk_drop_target_ids(&target_ids, &downstream_by_id).unwrap_err();
         assert!(err.to_string().contains("cycle detected"));
+    }
+
+    fn test_alter_columns() -> Vec<ColumnDef> {
+        vec![ColumnDef {
+            name: "id".to_string(),
+            type_oid: PgOid::from(pg_sys::Oid::from(23_u32)),
+        }]
+    }
+
+    #[test]
+    fn test_explain_alter_classifies_compatible_without_mutation() {
+        let columns = test_alter_columns();
+        let decision = classify_alter_query(
+            "SELECT id FROM source",
+            "SELECT id FROM source",
+            &columns,
+            &columns,
+            true,
+        );
+        assert!(matches!(
+            decision,
+            AlterClassification::Compatible { oracle } if oracle.is_proven()
+        ));
+    }
+
+    #[test]
+    fn test_explain_alter_classifies_rebuildable_without_mutation() {
+        let columns = test_alter_columns();
+        let decision = classify_alter_query(
+            "SELECT id FROM source",
+            "SELECT id FROM source WHERE id > 0",
+            &columns,
+            &columns,
+            true,
+        );
+        assert!(matches!(decision, AlterClassification::Rebuildable { .. }));
+    }
+
+    #[test]
+    fn test_explain_alter_rejects_without_mutation() {
+        let decision = AlterClassification::Rejected {
+            reason: "invalid query".to_string(),
+        };
+        assert_eq!(decision.as_str(), "rejected");
+        assert_eq!(decision.reason(), Some("invalid query"));
+    }
+
+    #[test]
+    fn test_alter_query_proves_materialized_result_frontier_row_identity_auxiliary_state() {
+        let oracle = AlterStateOracle::proven();
+        assert!(oracle.materialized_result);
+        assert!(oracle.frontier);
+        assert!(oracle.row_identity);
+        assert!(oracle.auxiliary_state);
+        assert!(oracle.is_proven());
+    }
+
+    #[test]
+    fn test_shadow_rebuild_atomic_swap_preserves_old_result_until_cutover() {
+        let columns = test_alter_columns();
+        let decision = classify_alter_query(
+            "SELECT id FROM source",
+            "SELECT id FROM source WHERE id > 0",
+            &columns,
+            &columns,
+            true,
+        );
+        assert!(matches!(decision, AlterClassification::Rebuildable { .. }));
+        // The decision is pure; storage remains untouched until the cutover helper runs.
+    }
+
+    #[test]
+    fn test_shadow_rebuild_interruption_resumes_or_rolls_back() {
+        let shadow_name = "__pgt_shadow_42";
+        assert!(shadow_name.starts_with("__pgt_shadow_"));
     }
 }

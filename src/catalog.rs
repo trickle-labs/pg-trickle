@@ -1924,8 +1924,9 @@ impl StDependency {
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_dependencies \
              (pgt_id, source_relid, source_type, cdc_mode, columns_used, \
-              column_snapshot, schema_fingerprint) \
-             VALUES ($1, $2, $3, 'TRIGGER', $4, $5, $6) \
+              column_snapshot, schema_fingerprint, source_stable_name) \
+             VALUES ($1, $2, $3, 'TRIGGER', $4, $5, $6, \
+                     pgtrickle.source_stable_name($2)) \
              ON CONFLICT DO NOTHING",
             &[
                 pgt_id.into(),

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**145 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**147 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -55,6 +55,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.encode_row_id_v2()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into exact V2 identity bytes. |
 | `pgtrickle.exec_stream_ddl()` | `pgtrickle` | `boolean` | # Example ```sql SELECT pgtrickle.exec_stream_ddl(   'CREATE STREAM TABLE revenue AS SELECT SUM(amount) FROM orders' ); ```. |
 | `pgtrickle.explain()` | `pgtrickle` | `text` | v0.86.0: Explain the bounded refresh/cost/freshness snapshot as text. |
+| `pgtrickle.explain_alter()` | `pgtrickle` | `jsonb` | Explain a defining-query change without mutating catalog, storage, or CDC. |
 | `pgtrickle.explain_dag()` | `pgtrickle` | `` | Node colours: user STs = blue, self-monitoring STs = green, suspended = red, fused = orange. |
 | `pgtrickle.explain_delta()` | `pgtrickle` | `` | Example: ```sql SELECT line FROM pgtrickle.explain_delta('public.orders_summary'); SELECT line FROM pgtrickle.explain_delta('public.orders_summary', 'json'); ```. |
 | `pgtrickle.explain_delta_plan()` | `pgtrickle` | `Result<jsonb, PgTrickleError>` | Report pg_trickle's evidence and shadow scheduling decision without generating or executing delta SQL. |
@@ -106,6 +107,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.refresh_groups()` | `pgtrickle` | `SetOf row` | Return all user-declared refresh groups with member details. |
 | `pgtrickle.refresh_stream_table()` | `pgtrickle` | `` | Manually trigger a synchronous refresh of a stream table. |
 | `pgtrickle.refresh_timeline()` | `pgtrickle` | `` | Exposed as `pgtrickle.refresh_timeline(limit)`. |
+| `pgtrickle.reinitialize_stream_table()` | `pgtrickle` | `text` | Reinitialize a stream table after a source schema change. |
 | `pgtrickle.reliability_counters()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.reliability_counters()`. |
 | `pgtrickle.repair_stream_table()` | `pgtrickle` | `text` | Steps performed (actions taken are summarized in the return text): 1. |
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |

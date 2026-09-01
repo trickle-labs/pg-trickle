@@ -187,6 +187,43 @@ fn health_check() -> TableIterator<
         };
         rows.push(("error_tables".to_string(), sev, detail));
 
+        // v0.91.0: source-DDL suspensions are actionable errors, not generic
+        // refresh failures. Keep the durable reason code visible alongside the
+        // repair command so operators do not accidentally resume stale state.
+        let schema_evolution_rows = client
+            .select(
+                "SELECT pgt_id, pgt_schema::text || '.' || pgt_name::text,
+                        refresh_reason::text, refresh_reason_detail::text
+                   FROM pgtrickle.pgt_stream_tables
+                  WHERE status = 'SUSPENDED'
+                    AND refresh_reason LIKE 'SOURCE_%'
+                  ORDER BY pgt_id",
+                None,
+                &[],
+            )
+            .map(|result| {
+                result
+                    .filter_map(|row| {
+                        Some((
+                            row.get::<i64>(1).ok().flatten()?,
+                            row.get::<String>(2).ok().flatten()?,
+                            row.get::<String>(3).ok().flatten()?,
+                            row.get::<String>(4).ok().flatten()?,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (pgt_id, stream_table, reason, detail) in schema_evolution_rows {
+            rows.push((
+                format!("schema_evolution_{pgt_id}"),
+                "ERROR".to_string(),
+                format!(
+                    "{stream_table}: reason={reason}; {detail}; update the defining query if the source identity changed, then run pgtrickle.reinitialize_stream_table('{stream_table}')"
+                ),
+            ));
+        }
+
         // ── 3. Stale stream tables ──────────────────────────────────────────
         let stale_tables: Vec<String> = client
             .select(
