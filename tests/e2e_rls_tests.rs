@@ -530,11 +530,11 @@ async fn test_cdc_trigger_functions_security_definer() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// R10 — ENABLE/DISABLE RLS on source table triggers reinit
+// R10 — ENABLE/DISABLE RLS on source table suspends until repaired
 // ══════════════════════════════════════════════════════════════════════
 
-/// R10: ENABLE ROW LEVEL SECURITY on a source table should mark stream tables
-/// for reinit via the DDL event trigger hook.
+/// R10: ENABLE ROW LEVEL SECURITY on a source table should suspend stream
+/// tables via the DDL event trigger hook until explicitly repaired.
 #[tokio::test]
 async fn test_enable_rls_on_source_triggers_reinit() {
     let db = E2eDb::new().await.with_extension().await;
@@ -566,19 +566,20 @@ async fn test_enable_rls_on_source_triggers_reinit() {
         .await;
     assert!(!before, "ST should NOT need reinit before ENABLE RLS");
 
-    // ENABLE RLS on the source table — should trigger reinit.
+    // ENABLE RLS on the source table — should trigger suspension.
     db.execute("ALTER TABLE rls_ddl_src ENABLE ROW LEVEL SECURITY")
         .await;
 
-    let after: bool = db
+    let after: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_ddl_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'rls_ddl_st'",
         )
         .await;
-    assert!(
-        after,
-        "ST should be marked for reinit after ENABLE RLS on source"
-    );
+    assert_eq!(after, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('rls_ddl_st')")
+        .await;
 
     // Reinit (refresh) should succeed and the stream table should still
     // contain all rows because this stream's stable owner is the superuser.
@@ -592,7 +593,7 @@ async fn test_enable_rls_on_source_triggers_reinit() {
 }
 
 /// R10 variant: DISABLE ROW LEVEL SECURITY on a source table that previously
-/// had RLS enabled should also trigger reinit.
+/// had RLS enabled should also trigger suspension.
 #[tokio::test]
 async fn test_disable_rls_on_source_triggers_reinit() {
     let db = E2eDb::new().await.with_extension().await;
@@ -621,18 +622,16 @@ async fn test_disable_rls_on_source_triggers_reinit() {
     db.execute("ALTER TABLE rls_dis_src DISABLE ROW LEVEL SECURITY")
         .await;
 
-    let reinit: bool = db
+    let status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_dis_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'rls_dis_st'",
         )
         .await;
-    assert!(
-        reinit,
-        "ST should be marked for reinit after DISABLE RLS on source"
-    );
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
 }
 
-/// R10 variant: FORCE ROW LEVEL SECURITY on a source table triggers reinit.
+/// R10 variant: FORCE ROW LEVEL SECURITY on a source table triggers suspension.
 #[tokio::test]
 async fn test_force_rls_on_source_triggers_reinit() {
     let db = E2eDb::new().await.with_extension().await;
@@ -655,15 +654,13 @@ async fn test_force_rls_on_source_triggers_reinit() {
     db.execute("ALTER TABLE rls_force_src FORCE ROW LEVEL SECURITY")
         .await;
 
-    let reinit: bool = db
+    let status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_force_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'rls_force_st'",
         )
         .await;
-    assert!(
-        reinit,
-        "ST should be marked for reinit after FORCE RLS on source"
-    );
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
 }
 
 // ══════════════════════════════════════════════════════════════════════
