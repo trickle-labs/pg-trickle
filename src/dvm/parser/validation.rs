@@ -1812,6 +1812,7 @@ mod monotonicity_tests {
             cte_registry: CteRegistry::default(),
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         let admission = incremental_admission(&result, 'v', false).unwrap();
         assert!(matches!(admission, IncrementalAdmission::FullOnly(_)));
@@ -1833,6 +1834,7 @@ mod monotonicity_tests {
             cte_registry: CteRegistry::default(),
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(matches!(
             incremental_admission(&set_result, 'i', false).unwrap(),
@@ -1853,6 +1855,7 @@ mod monotonicity_tests {
             cte_registry: CteRegistry::default(),
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(matches!(
             incremental_admission(&lateral_result, 'i', true).unwrap(),
@@ -1892,6 +1895,7 @@ mod monotonicity_tests {
             cte_registry: CteRegistry::default(),
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         let admission = incremental_admission(&lateral_result, 'i', false).unwrap();
         let IncrementalAdmission::FullOnly(issues) = admission else {
@@ -1924,6 +1928,7 @@ mod monotonicity_tests {
             cte_registry: CteRegistry::default(),
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         let admission = incremental_admission(&lateral_result, 'i', false).unwrap();
         let IncrementalAdmission::FullOnly(issues) = admission else {

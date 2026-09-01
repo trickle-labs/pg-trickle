@@ -1430,6 +1430,325 @@ pub fn parse_defining_query_full(query: &str) -> Result<ParseResult, PgTrickleEr
     unsafe { parse_defining_query_inner(query) }
 }
 
+/// Return whether PostgreSQL's analyzed query tree contains a window function.
+///
+/// Unlike the DVM parser, this accepts every SELECT shape PostgreSQL accepts,
+/// so callers can avoid building an OpTree for non-window queries.
+#[cfg(any(not(test), feature = "pg_test"))]
+pub fn query_has_window_functions(query: &str) -> Result<bool, PgTrickleError> {
+    Ok(!collect_analyzed_window_metadata(query)?.is_empty())
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+pub fn query_has_window_functions(_query: &str) -> Result<bool, PgTrickleError> {
+    Err(PgTrickleError::QueryParseError(
+        "query_has_window_functions unavailable in unit tests".into(),
+    ))
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+#[derive(Debug)]
+struct AnalyzedWindowMetadata {
+    location: i32,
+    function_oid: u32,
+    argument_types: Vec<WindowExpressionType>,
+    result_type_oid: u32,
+    result_typmod: i32,
+    result_collation_oid: u32,
+    partition: Vec<WindowExpressionType>,
+    order: Vec<WindowOrderKey>,
+    frame: WindowFrameSpec,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+struct AnalyzedWindowCollectorCtx {
+    windows: *mut Vec<AnalyzedWindowMetadata>,
+    aggregates: *mut HashMap<i32, pg_sys::Oid>,
+    current_query: *mut pg_sys::Query,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe extern "C-unwind" fn analyzed_window_walker(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    // SAFETY: context was created by collect_analyzed_window_metadata and
+    // remains live for the whole PostgreSQL tree walk.
+    let ctx = unsafe { &mut *(context as *mut AnalyzedWindowCollectorCtx) };
+    // SAFETY: node is non-null and PostgreSQL owns it for the duration of the walk.
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Query) } {
+        let previous = ctx.current_query;
+        ctx.current_query = node as *mut pg_sys::Query;
+        // SAFETY: node tag is T_Query and the callback/context stay live.
+        let stopped = unsafe {
+            pg_sys::query_tree_walker_impl(
+                ctx.current_query,
+                Some(analyzed_window_walker),
+                context,
+                0,
+            )
+        };
+        ctx.current_query = previous;
+        return stopped;
+    }
+    // SAFETY: node is non-null and PostgreSQL owns it for the duration of the walk.
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_WindowFunc) } {
+        if !ctx.current_query.is_null() {
+            // SAFETY: node and current_query tags were established above.
+            let function = unsafe { &*(node as *const pg_sys::WindowFunc) };
+            // SAFETY: analyzed nodes live for this tree walk.
+            if let Some(metadata) =
+                unsafe { analyze_window_function(function, &*ctx.current_query) }
+            {
+                // SAFETY: windows points to the live vector owned by the caller.
+                unsafe { &mut *ctx.windows }.push(metadata);
+            }
+        }
+        return false;
+    }
+    // SAFETY: node is non-null and PostgreSQL owns it for the duration of the walk.
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_Aggref) } {
+        // SAFETY: node tag is T_Aggref and aggregates points to the caller's map.
+        let aggregate = unsafe { &*(node as *const pg_sys::Aggref) };
+        if aggregate.location >= 0 {
+            // SAFETY: aggregates remains live for the full tree walk.
+            unsafe { &mut *ctx.aggregates }
+                .entry(aggregate.location)
+                .or_insert(aggregate.aggfnoid);
+        }
+        return false;
+    }
+    // SAFETY: PostgreSQL owns and validates every analyzed expression node.
+    unsafe { pg_sys::expression_tree_walker_impl(node, Some(analyzed_window_walker), context) }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe fn analyze_window_function(
+    function: &pg_sys::WindowFunc,
+    query: &pg_sys::Query,
+) -> Option<AnalyzedWindowMetadata> {
+    let clauses = pg_list::<pg_sys::Node>(query.windowClause);
+    let clause = clauses.iter_ptr().find_map(|node| {
+        cast_node!(node, T_WindowClause, pg_sys::WindowClause)
+            .filter(|clause| clause.winref == function.winref)
+    })?;
+
+    let arguments = pg_list::<pg_sys::Node>(function.args)
+        .iter_ptr()
+        .map(|argument| {
+            // SAFETY: argument is an analyzed expression owned by the Query.
+            unsafe { analyzed_expression_type(argument, String::new()) }
+        })
+        .collect();
+    let partition = pg_list::<pg_sys::Node>(clause.partitionClause)
+        .iter_ptr()
+        .filter_map(|node| cast_node!(node, T_SortGroupClause, pg_sys::SortGroupClause))
+        .map(|sort| {
+            // SAFETY: sort belongs to query and references query.targetList.
+            let expression = unsafe {
+                pg_sys::get_sortgroupclause_expr(
+                    sort as *const _ as *mut pg_sys::SortGroupClause,
+                    query.targetList,
+                )
+            };
+            // SAFETY: PostgreSQL returned an analyzed expression for this clause.
+            unsafe { analyzed_expression_type(expression, String::new()) }
+        })
+        .collect();
+    let order = pg_list::<pg_sys::Node>(clause.orderClause)
+        .iter_ptr()
+        .filter_map(|node| cast_node!(node, T_SortGroupClause, pg_sys::SortGroupClause))
+        .map(|sort| {
+            // SAFETY: sort belongs to query and references query.targetList.
+            let expression = unsafe {
+                pg_sys::get_sortgroupclause_expr(
+                    sort as *const _ as *mut pg_sys::SortGroupClause,
+                    query.targetList,
+                )
+            };
+            // SAFETY: PostgreSQL returned an analyzed expression for this clause.
+            let resolved = unsafe { analyzed_expression_type(expression, String::new()) };
+            WindowOrderKey {
+                expression: resolved.expression,
+                type_oid: resolved.type_oid,
+                typmod: resolved.typmod,
+                collation_oid: resolved.collation_oid,
+                ascending: !sort.reverse_sort,
+                nulls_first: sort.nulls_first,
+                sort_operator_oid: sort.sortop.to_u32(),
+                equality_operator_oid: sort.eqop.to_u32(),
+            }
+        })
+        .collect();
+
+    Some(AnalyzedWindowMetadata {
+        location: function.location,
+        function_oid: function.winfnoid.to_u32(),
+        argument_types: arguments,
+        // SAFETY: WindowFunc is an analyzed expression.
+        result_type_oid: unsafe { pg_sys::exprType(function as *const _ as *const pg_sys::Node) }
+            .to_u32(),
+        // SAFETY: WindowFunc is an analyzed expression.
+        result_typmod: unsafe { pg_sys::exprTypmod(function as *const _ as *const pg_sys::Node) },
+        // SAFETY: WindowFunc is an analyzed expression.
+        result_collation_oid: unsafe {
+            pg_sys::exprCollation(function as *const _ as *const pg_sys::Node)
+        }
+        .to_u32(),
+        partition,
+        order,
+        // SAFETY: offsets are analyzed expressions owned by clause.
+        frame: unsafe { analyzed_window_frame(clause) },
+    })
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe fn analyzed_expression_type(
+    expression: *mut pg_sys::Node,
+    sql: String,
+) -> WindowExpressionType {
+    WindowExpressionType {
+        expression: sql,
+        // SAFETY: expression is owned by an analyzed Query.
+        type_oid: unsafe { pg_sys::exprType(expression) }.to_u32(),
+        // SAFETY: expression is owned by an analyzed Query.
+        typmod: unsafe { pg_sys::exprTypmod(expression) },
+        // SAFETY: expression is owned by an analyzed Query.
+        collation_oid: unsafe { pg_sys::exprCollation(expression) }.to_u32(),
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe fn analyzed_window_frame(clause: &pg_sys::WindowClause) -> WindowFrameSpec {
+    let opts = clause.frameOptions as u32;
+    WindowFrameSpec {
+        mode: if opts & pg_sys::FRAMEOPTION_ROWS != 0 {
+            WindowFrameMode::Rows
+        } else if opts & pg_sys::FRAMEOPTION_GROUPS != 0 {
+            WindowFrameMode::Groups
+        } else {
+            WindowFrameMode::Range
+        },
+        // SAFETY: startOffset is null or an analyzed expression owned by clause.
+        start: unsafe { analyzed_frame_bound(opts, true, clause.startOffset) },
+        // SAFETY: endOffset is null or an analyzed expression owned by clause.
+        end: unsafe { analyzed_frame_bound(opts, false, clause.endOffset) },
+        exclusion: if opts & pg_sys::FRAMEOPTION_EXCLUDE_CURRENT_ROW != 0 {
+            WindowFrameExclusion::CurrentRow
+        } else if opts & pg_sys::FRAMEOPTION_EXCLUDE_GROUP != 0 {
+            WindowFrameExclusion::Group
+        } else if opts & pg_sys::FRAMEOPTION_EXCLUDE_TIES != 0 {
+            WindowFrameExclusion::Ties
+        } else {
+            WindowFrameExclusion::None
+        },
+        was_implicit: opts & pg_sys::FRAMEOPTION_NONDEFAULT == 0,
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe fn analyzed_frame_bound(
+    opts: u32,
+    is_start: bool,
+    offset: *mut pg_sys::Node,
+) -> WindowFrameBound {
+    let resolved_offset = || {
+        if offset.is_null() {
+            WindowFrameOffset {
+                sql: String::new(),
+                type_oid: 0,
+                typmod: -1,
+                collation_oid: 0,
+            }
+        } else {
+            // SAFETY: offset is an analyzed expression owned by its WindowClause.
+            let resolved = unsafe { analyzed_expression_type(offset, String::new()) };
+            WindowFrameOffset {
+                sql: resolved.expression,
+                type_oid: resolved.type_oid,
+                typmod: resolved.typmod,
+                collation_oid: resolved.collation_oid,
+            }
+        }
+    };
+    if is_start {
+        if opts & pg_sys::FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+            WindowFrameBound::UnboundedPreceding
+        } else if opts & pg_sys::FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
+            WindowFrameBound::OffsetPreceding(resolved_offset())
+        } else if opts & pg_sys::FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
+            WindowFrameBound::OffsetFollowing(resolved_offset())
+        } else if opts & pg_sys::FRAMEOPTION_START_UNBOUNDED_FOLLOWING != 0 {
+            WindowFrameBound::UnboundedFollowing
+        } else {
+            WindowFrameBound::CurrentRow
+        }
+    } else if opts & pg_sys::FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+        WindowFrameBound::UnboundedFollowing
+    } else if opts & pg_sys::FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
+        WindowFrameBound::OffsetFollowing(resolved_offset())
+    } else if opts & pg_sys::FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+        WindowFrameBound::OffsetPreceding(resolved_offset())
+    } else if opts & pg_sys::FRAMEOPTION_END_UNBOUNDED_PRECEDING != 0 {
+        WindowFrameBound::UnboundedPreceding
+    } else {
+        WindowFrameBound::CurrentRow
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn collect_analyzed_window_metadata(
+    query: &str,
+) -> Result<Vec<AnalyzedWindowMetadata>, PgTrickleError> {
+    use pgrx::PgList;
+    use std::ffi::CString;
+    use std::panic::AssertUnwindSafe;
+
+    let c_sql =
+        CString::new(query).map_err(|error| PgTrickleError::QueryParseError(error.to_string()))?;
+    // SAFETY: the PostgreSQL parser/analyzer and tree walker run in the current
+    // backend memory context; every pointer remains live until this closure returns.
+    unsafe {
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(|| {
+            // SAFETY: parser and analyzer run in a PostgreSQL backend memory context.
+            let raw = pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+            let statements = PgList::<pg_sys::RawStmt>::from_pg(raw);
+            let statement = statements.get_ptr(0).ok_or_else(|| {
+                PgTrickleError::QueryParseError("Query produced no parse tree nodes".into())
+            })?;
+            let analyzed = pg_sys::parse_analyze_fixedparams(
+                statement,
+                c_sql.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            );
+            if analyzed.is_null() {
+                return Err(PgTrickleError::QueryParseError(
+                    "Query analysis returned null".into(),
+                ));
+            }
+            let mut windows = Vec::new();
+            let mut aggregates = HashMap::new();
+            let mut context = AnalyzedWindowCollectorCtx {
+                windows: &mut windows,
+                aggregates: &mut aggregates,
+                current_query: std::ptr::null_mut(),
+            };
+            analyzed_window_walker(
+                analyzed as *mut pg_sys::Node,
+                &mut context as *mut AnalyzedWindowCollectorCtx as *mut std::ffi::c_void,
+            );
+            ANALYZED_AGGREGATE_LOCATIONS.with(|cache| *cache.borrow_mut() = Some(aggregates));
+            Ok(windows)
+        }))
+        .execute()
+    }
+}
+
 #[cfg(any(not(test), feature = "pg_test"))]
 struct AnalyzedAggCollectorCtx {
     by_location: *mut HashMap<i32, pg_sys::Oid>,
@@ -1585,6 +1904,177 @@ fn load_type_sql_name(
         .map_err(|e| PgTrickleError::QueryParseError(format!("Failed to read type name: {e}")))
 }
 
+#[cfg(any(not(test), feature = "pg_test"))]
+fn load_window_function_kind(
+    client: &pgrx::spi::SpiClient<'_>,
+    function_oid: u32,
+) -> Result<WindowFunctionKind, PgTrickleError> {
+    let result = client
+        .select(
+            "SELECT p.proname::text, n.nspname::text \
+             FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE p.oid = $1::oid",
+            None,
+            &[pg_sys::Oid::from(function_oid).into()],
+        )
+        .map_err(|error| {
+            PgTrickleError::QueryParseError(format!(
+                "Failed to inspect window function {function_oid}: {error}"
+            ))
+        })?;
+    if result.is_empty() {
+        return Ok(WindowFunctionKind::Unsupported);
+    }
+    let row = result.first();
+    let name = row
+        .get::<String>(1)
+        .map_err(|error| PgTrickleError::QueryParseError(error.to_string()))?
+        .unwrap_or_default();
+    let namespace = row
+        .get::<String>(2)
+        .map_err(|error| PgTrickleError::QueryParseError(error.to_string()))?
+        .unwrap_or_default();
+    Ok(classify_window_function(&namespace, &name))
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn resolve_window_planning_inputs(
+    mut raw: Vec<WindowPlanningInput>,
+    analyzed: Vec<AnalyzedWindowMetadata>,
+) -> Result<Vec<WindowPlanningInput>, PgTrickleError> {
+    let mut function_kinds = HashMap::new();
+    let mut result_type_names = HashMap::new();
+    Spi::connect(|client| {
+        for metadata in &analyzed {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                function_kinds.entry(metadata.function_oid)
+            {
+                entry.insert(load_window_function_kind(client, metadata.function_oid)?);
+            }
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                result_type_names.entry(metadata.result_type_oid)
+                && let Some(sql) = load_type_sql_name(client, metadata.result_type_oid)?
+            {
+                entry.insert(sql);
+            }
+        }
+        Ok::<(), PgTrickleError>(())
+    })?;
+
+    for input in &mut raw {
+        let Some(location) = input.parse_location else {
+            continue;
+        };
+        let Some(metadata) = analyzed
+            .iter()
+            .find(|metadata| metadata.location == location)
+        else {
+            continue;
+        };
+        if !analyzed_window_shape_matches(
+            input,
+            metadata.argument_types.len(),
+            metadata.partition.len(),
+            metadata.order.len(),
+            &metadata.frame,
+        ) {
+            continue;
+        }
+        input.function_oid = metadata.function_oid;
+        input.kind = function_kinds
+            .get(&metadata.function_oid)
+            .copied()
+            .unwrap_or(WindowFunctionKind::Unsupported);
+        merge_expression_types(&mut input.argument_types, &metadata.argument_types);
+        merge_expression_types(&mut input.partition, &metadata.partition);
+        merge_order_types(&mut input.order, &metadata.order);
+        input.result_type_oid = metadata.result_type_oid;
+        input.result_type_sql = result_type_names
+            .get(&metadata.result_type_oid)
+            .cloned()
+            .unwrap_or_default();
+        input.result_typmod = metadata.result_typmod;
+        input.result_collation_oid = metadata.result_collation_oid;
+        input.frame = merge_analyzed_frame(&input.frame, &metadata.frame);
+    }
+    Ok(raw)
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn merge_expression_types(raw: &mut [WindowExpressionType], analyzed: &[WindowExpressionType]) {
+    for (raw, analyzed) in raw.iter_mut().zip(analyzed) {
+        raw.type_oid = analyzed.type_oid;
+        raw.typmod = analyzed.typmod;
+        raw.collation_oid = analyzed.collation_oid;
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn merge_order_types(raw: &mut [WindowOrderKey], analyzed: &[WindowOrderKey]) {
+    for (raw, analyzed) in raw.iter_mut().zip(analyzed) {
+        raw.type_oid = analyzed.type_oid;
+        raw.typmod = analyzed.typmod;
+        raw.collation_oid = analyzed.collation_oid;
+        raw.ascending = analyzed.ascending;
+        raw.nulls_first = analyzed.nulls_first;
+        raw.sort_operator_oid = analyzed.sort_operator_oid;
+        raw.equality_operator_oid = analyzed.equality_operator_oid;
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn merge_analyzed_frame(raw: &WindowFrameSpec, analyzed: &WindowFrameSpec) -> WindowFrameSpec {
+    WindowFrameSpec {
+        mode: analyzed.mode,
+        start: merge_analyzed_bound(&raw.start, &analyzed.start),
+        end: merge_analyzed_bound(&raw.end, &analyzed.end),
+        exclusion: analyzed.exclusion,
+        was_implicit: raw.was_implicit,
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn merge_analyzed_bound(raw: &WindowFrameBound, analyzed: &WindowFrameBound) -> WindowFrameBound {
+    match (raw, analyzed) {
+        (WindowFrameBound::OffsetPreceding(raw), WindowFrameBound::OffsetPreceding(analyzed)) => {
+            WindowFrameBound::OffsetPreceding(WindowFrameOffset {
+                sql: raw.sql.clone(),
+                type_oid: analyzed.type_oid,
+                typmod: analyzed.typmod,
+                collation_oid: analyzed.collation_oid,
+            })
+        }
+        (WindowFrameBound::OffsetFollowing(raw), WindowFrameBound::OffsetFollowing(analyzed)) => {
+            WindowFrameBound::OffsetFollowing(WindowFrameOffset {
+                sql: raw.sql.clone(),
+                type_oid: analyzed.type_oid,
+                typmod: analyzed.typmod,
+                collation_oid: analyzed.collation_oid,
+            })
+        }
+        _ => analyzed.clone(),
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn enrich_window_planning_inputs(
+    query: &str,
+    raw: Vec<WindowPlanningInput>,
+) -> Vec<WindowPlanningInput> {
+    collect_analyzed_window_metadata(query)
+        .and_then(|analyzed| resolve_window_planning_inputs(raw.clone(), analyzed))
+        .unwrap_or(raw)
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn enrich_window_planning_inputs(
+    _query: &str,
+    raw: Vec<WindowPlanningInput>,
+) -> Vec<WindowPlanningInput> {
+    raw
+}
+
 fn annotate_tree_statistical_support(
     tree: &mut OpTree,
     aggfnoids_by_location: &HashMap<i32, pg_sys::Oid>,
@@ -1732,10 +2222,14 @@ fn annotate_statistical_aggregate_support(
     // parseable query.  If PostgreSQL cannot analyze the query in this
     // planning context, leave the support unresolved so AUTO falls back to
     // FULL and explicit incremental modes fail closed.
-    let aggfnoids_by_location = match collect_analyzed_aggregate_locations(query) {
-        Ok(locations) => locations,
-        Err(_) => return Ok(()),
-    };
+    let aggfnoids_by_location =
+        match ANALYZED_AGGREGATE_LOCATIONS.with(|cache| cache.borrow().clone()) {
+            Some(locations) => locations,
+            None => match collect_analyzed_aggregate_locations(query) {
+                Ok(locations) => locations,
+                Err(_) => return Ok(()),
+            },
+        };
     if aggfnoids_by_location.is_empty() {
         return Ok(());
     }
@@ -1963,6 +2457,8 @@ fn annotate_statistical_aggregate_support(
 unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrickleError> {
     // Clear the per-parse warning accumulator so each invocation starts fresh.
     PARSE_ADVISORY_WARNINGS.with(|w| w.borrow_mut().clear());
+    WINDOW_PLANNING_INPUTS.with(|inputs| inputs.borrow_mut().clear());
+    ANALYZED_AGGREGATE_LOCATIONS.with(|cache| *cache.borrow_mut() = None);
 
     // PERF-2 (v0.30.0): Reject queries whose approximate parse-node count
     // would exceed pg_trickle.max_parse_nodes.  We estimate node count
@@ -2099,6 +2595,14 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
         unsafe { parse_select_stmt(select, query, &mut cte_ctx)? }
     };
 
+    let raw_window_inputs =
+        WINDOW_PLANNING_INPUTS.with(|inputs| std::mem::take(&mut *inputs.borrow_mut()));
+    let window_inputs = if raw_window_inputs.is_empty() {
+        Vec::new()
+    } else {
+        enrich_window_planning_inputs(query, raw_window_inputs)
+    };
+
     annotate_statistical_aggregate_support(query, &mut tree, &mut cte_ctx.registry)?;
 
     // Prune Scan columns to only those referenced by the defining query,
@@ -2108,6 +2612,8 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
         cte_tree.prune_scan_columns();
     }
 
+    let window_strategy = build_window_strategy_plan(&tree, &cte_ctx.registry, &window_inputs);
+
     // Drain advisory warnings accumulated during this parse.
     let warnings = PARSE_ADVISORY_WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()));
 
@@ -2116,6 +2622,7 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
         cte_registry: cte_ctx.registry,
         has_recursion,
         warnings,
+        window_strategy,
     })
 }
 
@@ -6309,6 +6816,11 @@ pub(crate) unsafe fn collect_all_window_func_nodes(
 /// Extraction result for window function parsing.
 type WindowExtraction = (Vec<WindowExpr>, Vec<(Expr, String)>);
 
+thread_local! {
+    static WINDOW_PLANNING_INPUTS: RefCell<Vec<WindowPlanningInput>> = const { RefCell::new(Vec::new()) };
+    static ANALYZED_AGGREGATE_LOCATIONS: RefCell<Option<HashMap<i32, pg_sys::Oid>>> = const { RefCell::new(None) };
+}
+
 /// Extract window function expressions and pass-through columns from a target list.
 ///
 /// Returns `(window_exprs, pass_through_cols)` where each pass-through column
@@ -6480,9 +6992,12 @@ unsafe fn parse_window_func_call(
         }
     }
 
-    // Parse window frame clause
+    // Parse window frame clause. Keep the legacy text renderer for runtime
+    // SQL and independently retain PostgreSQL's typed flags for planning.
     // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
     let frame_clause = unsafe { deparse_window_frame(effective_frame_wdef) };
+    // SAFETY: effective_frame_wdef points into the current raw parse tree.
+    let typed_frame = unsafe { parse_typed_window_frame(effective_frame_wdef) };
 
     // Alias
     let alias = if !rt.name.is_null() {
@@ -6491,14 +7006,102 @@ unsafe fn parse_window_func_call(
         func_name.clone()
     };
 
-    Ok(WindowExpr {
+    let window = WindowExpr {
         func_name,
         args,
         partition_by,
         order_by,
         frame_clause,
         alias,
-    })
+    };
+    let mut planning = WindowPlanningInput::unresolved(&window, typed_frame);
+    planning.parse_location = (fcall.location >= 0).then_some(fcall.location);
+    if !fcall.agg_filter.is_null() {
+        // SAFETY: agg_filter is a raw expression owned by this parse tree.
+        planning.filter = safe_node_to_expr(fcall.agg_filter)
+            .ok()
+            .map(|expr| expr.to_sql())
+            .or_else(|| Some("<unresolved>".into()));
+    }
+    WINDOW_PLANNING_INPUTS.with(|inputs| inputs.borrow_mut().push(planning));
+    Ok(window)
+}
+
+/// Convert PostgreSQL 18 frame flags to the typed semantic form.
+///
+/// # Safety
+/// `wdef` must point into a live PostgreSQL raw parse tree.
+unsafe fn parse_typed_window_frame(wdef: &pg_sys::WindowDef) -> WindowFrameSpec {
+    let opts = wdef.frameOptions as u32;
+    if opts & pg_sys::FRAMEOPTION_NONDEFAULT == 0 {
+        return WindowFrameSpec::postgres_default();
+    }
+    WindowFrameSpec {
+        mode: if opts & pg_sys::FRAMEOPTION_ROWS != 0 {
+            WindowFrameMode::Rows
+        } else if opts & pg_sys::FRAMEOPTION_GROUPS != 0 {
+            WindowFrameMode::Groups
+        } else {
+            WindowFrameMode::Range
+        },
+        // SAFETY: offset nodes belong to this WindowDef in the raw parse tree.
+        start: unsafe { parse_typed_frame_bound(opts, true, wdef.startOffset) },
+        // SAFETY: offset nodes belong to this WindowDef in the raw parse tree.
+        end: unsafe { parse_typed_frame_bound(opts, false, wdef.endOffset) },
+        exclusion: if opts & pg_sys::FRAMEOPTION_EXCLUDE_CURRENT_ROW != 0 {
+            WindowFrameExclusion::CurrentRow
+        } else if opts & pg_sys::FRAMEOPTION_EXCLUDE_GROUP != 0 {
+            WindowFrameExclusion::Group
+        } else if opts & pg_sys::FRAMEOPTION_EXCLUDE_TIES != 0 {
+            WindowFrameExclusion::Ties
+        } else {
+            WindowFrameExclusion::None
+        },
+        was_implicit: false,
+    }
+}
+
+/// Convert one raw frame bound without recovering semantics from deparsed SQL.
+///
+/// # Safety
+/// `offset` is either null or a node owned by the live raw parse tree.
+unsafe fn parse_typed_frame_bound(
+    opts: u32,
+    is_start: bool,
+    offset: *mut pg_sys::Node,
+) -> WindowFrameBound {
+    let raw_offset = || WindowFrameOffset {
+        // SAFETY: offset is owned by the current raw parse tree.
+        sql: safe_node_to_expr(offset)
+            .map(|expr| expr.to_sql())
+            .unwrap_or_else(|_| "<unresolved>".into()),
+        type_oid: 0,
+        typmod: -1,
+        collation_oid: 0,
+    };
+    if is_start {
+        if opts & pg_sys::FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+            WindowFrameBound::UnboundedPreceding
+        } else if opts & pg_sys::FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
+            WindowFrameBound::OffsetPreceding(raw_offset())
+        } else if opts & pg_sys::FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
+            WindowFrameBound::OffsetFollowing(raw_offset())
+        } else if opts & pg_sys::FRAMEOPTION_START_UNBOUNDED_FOLLOWING != 0 {
+            WindowFrameBound::UnboundedFollowing
+        } else {
+            WindowFrameBound::CurrentRow
+        }
+    } else if opts & pg_sys::FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+        WindowFrameBound::UnboundedFollowing
+    } else if opts & pg_sys::FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
+        WindowFrameBound::OffsetFollowing(raw_offset())
+    } else if opts & pg_sys::FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+        WindowFrameBound::OffsetPreceding(raw_offset())
+    } else if opts & pg_sys::FRAMEOPTION_END_UNBOUNDED_PRECEDING != 0 {
+        WindowFrameBound::UnboundedPreceding
+    } else {
+        WindowFrameBound::CurrentRow
+    }
 }
 
 /// Deparse a window frame clause from a WindowDef's frameOptions.

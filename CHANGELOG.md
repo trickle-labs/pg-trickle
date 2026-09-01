@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.89.0 — Incremental Window Admission](#0890--incremental-window-admission)
 - [0.88.0 — Vectorized Aggregates and Delta Planning](#0880--vectorized-aggregates-and-delta-planning)
 - [0.87.17 — Versioned Row Identity V2 Hardening and Recreation](#08717--versioned-row-identity-v2-hardening-and-recreation)
 - [0.87.16 — Versioned Row Identity V2 Engine Integration](#08716--versioned-row-identity-v2-engine-integration)
@@ -197,6 +198,42 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.89.0] — Incremental Window Admission
+
+v0.89.0 adds the state and planning contract for incremental window functions.
+No window family is runtime-enabled. Every window shape uses partition
+recomputation with an explicit reason.
+
+The release evaluated one built-in `ROW_NUMBER` candidate over a direct keyed
+scan with exact same-name projections and the complete non-null identity in
+`ORDER BY`. The state candidate lost to partition recomputation in every
+measured cell, so the performance gate rejected runtime admission.
+
+- Added typed window metadata for frames, function kinds, order keys, types,
+  collations, and stable-identity requirements.
+- Added the versioned `window_strategy` plan and the private
+  `pgtrickle.pgt_window_states` registry. Unknown versions or invalid state fail
+  closed.
+- Added and validated private LOGGED partition and ordered-row state lifecycle
+  for the rejected `ROW_NUMBER` candidate. Production plans create no active
+  window state.
+- Added a versioned cost selector that requires complete state and workload
+  evidence plus a 20 percent estimated win. Missing, stale, tied, or invalid
+  evidence selects partition recomputation.
+- Added stable `WINDOW_*` reason codes and window details to `explain()`,
+  `explain_json()`, `explain_delta_plan()`, refresh history, and health checks.
+- Kept `ROW_NUMBER` on partition recomputation because the measured candidate
+  lost. Other recognized families report that their incremental algorithm is
+  not implemented.
+- Added the adjacent `0.88.0--0.89.0` migration. Existing window stream tables
+  keep their current data and need no active window-state build.
+- Made per-database schedulers exit without refreshing while the loaded library
+  and installed SQL extension versions differ during an upgrade.
+
+The checked-in v0.89 benchmark artifact publishes the negative result. The
+recompute-to-state ratio ranged from 0.0446 to 0.4030, so v0.89 makes no
+incremental speedup claim. See [the window benchmark contract](benchmarks/window-v0.89/README.md).
 
 ## [0.88.0] — Vectorized Aggregates and Delta Planning
 

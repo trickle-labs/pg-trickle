@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.88.0-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.89.0-pg18 -f Dockerfile.hub .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -119,9 +119,13 @@ lint-ci: lint check-version-sync check-meta-version check-stale-versions
 row-id-v2-release-gate:
     python3 scripts/row_id_v2_release_gate.py
 
-# v0.88.0: Keep engine code, SQL, ADRs, benchmark, and docs aligned.
+# Keep engine code, SQL, benchmarks, and docs aligned.
 v0-88-release-gate:
     python3 scripts/v0_88_release_gate.py
+
+# Keep the v0.89 fail-closed window admission contract aligned.
+v0-89-release-gate:
+    python3 scripts/v0_89_release_gate.py
 
 # DOC-004 (v0.75.0): Scan Dockerfile examples for stale pg_trickle image tags.
 [group: "lint"]
@@ -628,12 +632,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.88.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.89.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.88.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.89.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

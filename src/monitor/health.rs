@@ -4,6 +4,74 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowStateHealthEntry {
+    pgt_id: i64,
+    stream_table: String,
+    node_ordinal: i32,
+    spec_ordinal: i32,
+    status: String,
+    total_estimated_bytes: u64,
+    first_for_stream: bool,
+}
+
+fn build_window_state_health_rows(
+    entries: &[WindowStateHealthEntry],
+    budget_bytes: u64,
+) -> Vec<(String, String, String)> {
+    let mut rows = Vec::new();
+    for entry in entries {
+        if entry.status != "READY" {
+            let (severity, action) = if entry.status == "OVER_BUDGET" {
+                (
+                    "WARN",
+                    "affected partitions use bounded recomputation until state fits the budget",
+                )
+            } else {
+                (
+                    "ERROR",
+                    "run pgtrickle.repair_stream_table() before differential execution",
+                )
+            };
+            rows.push((
+                format!(
+                    "window_state_{}_{}_{}",
+                    entry.pgt_id, entry.node_ordinal, entry.spec_ordinal
+                ),
+                severity.into(),
+                format!(
+                    "{} node {} spec {} status={}; {}",
+                    entry.stream_table,
+                    entry.node_ordinal,
+                    entry.spec_ordinal,
+                    entry.status,
+                    action
+                ),
+            ));
+        }
+
+        let utilization = entry
+            .total_estimated_bytes
+            .saturating_mul(100)
+            .checked_div(budget_bytes.max(1))
+            .unwrap_or(u64::MAX);
+        if entry.first_for_stream && utilization >= 80 {
+            rows.push((
+                format!("window_state_budget_{}", entry.pgt_id),
+                if utilization >= 100 { "ERROR" } else { "WARN" }.into(),
+                format!(
+                    "{} window state uses {} / {} bytes ({}%); new partitions recompute before the hard bound is crossed",
+                    entry.stream_table,
+                    entry.total_estimated_bytes,
+                    budget_bytes,
+                    utilization
+                ),
+            ));
+        }
+    }
+    rows
+}
+
 /// A single-query health overview of the pg_trickle installation.
 ///
 /// Returns one row per check. Each row has a `severity` of `OK`, `WARN`, or
@@ -20,6 +88,7 @@ use super::*;
 /// - `slot_lag`             — any WAL replication slot retaining > 100 MB of WAL
 /// - `dvm_fallbacks`        — any DVM fallback refreshes in the last hour (reason codes)
 /// - `ring_overflow_trend`  — whether the invalidation ring has overflowed since startup
+/// - `window_state_*`       — invalid or over-80-percent private window state
 ///
 /// Exposed as `pgtrickle.health_check()`.
 #[pg_extern(schema = "pgtrickle", name = "health_check")]
@@ -447,6 +516,43 @@ fn health_check() -> TableIterator<
         };
         rows.push(("ring_overflow_trend".to_string(), sev.to_string(), detail));
     });
+
+    // Registry-only window checks stay bounded by the number of semantic
+    // window specifications. They never scan a dynamic state relation.
+    let window_state_entries = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT ws.pgt_id, st.pgt_schema || '.' || st.pgt_name, \
+                        ws.node_ordinal, ws.spec_ordinal, ws.status, \
+                        SUM(ws.estimated_bytes) OVER (PARTITION BY ws.pgt_id)::bigint, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY ws.pgt_id \
+                            ORDER BY ws.node_ordinal, ws.spec_ordinal \
+                        ) = 1 \
+                   FROM pgtrickle.pgt_window_states ws \
+                   JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = ws.pgt_id \
+                  ORDER BY ws.pgt_id, ws.node_ordinal, ws.spec_ordinal",
+                None,
+                &[],
+            )?
+            .map(|row| {
+                Ok(WindowStateHealthEntry {
+                    pgt_id: row.get::<i64>(1)?.unwrap_or_default(),
+                    stream_table: row.get::<String>(2)?.unwrap_or_default(),
+                    node_ordinal: row.get::<i32>(3)?.unwrap_or_default(),
+                    spec_ordinal: row.get::<i32>(4)?.unwrap_or_default(),
+                    status: row.get::<String>(5)?.unwrap_or_default(),
+                    total_estimated_bytes: row.get::<i64>(6)?.unwrap_or_default().max(0) as u64,
+                    first_for_stream: row.get::<bool>(7)?.unwrap_or(false),
+                })
+            })
+            .collect::<Result<Vec<_>, pgrx::spi::SpiError>>()
+    })
+    .unwrap_or_default();
+    rows.extend(build_window_state_health_rows(
+        &window_state_entries,
+        crate::config::pg_trickle_memory_budget().total_bytes,
+    ));
 
     if let Some((severity, detail)) = crate::api::publication::publication_binding_health_summary()
     {
@@ -1220,4 +1326,37 @@ fn collect_wal_source_status_rows() -> Vec<(
     }
 
     rows
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::*;
+
+    fn entry(status: &str, bytes: u64) -> WindowStateHealthEntry {
+        WindowStateHealthEntry {
+            pgt_id: 7,
+            stream_table: "public.orders_window".into(),
+            node_ordinal: 1,
+            spec_ordinal: 2,
+            status: status.into(),
+            total_estimated_bytes: bytes,
+            first_for_stream: true,
+        }
+    }
+
+    #[test]
+    fn test_window_state_health_warns_at_eighty_percent() {
+        let rows = build_window_state_health_rows(&[entry("READY", 800)], 1_000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "window_state_budget_7");
+        assert_eq!(rows[0].1, "WARN");
+    }
+
+    #[test]
+    fn test_window_state_health_marks_mismatch_actionable() {
+        let rows = build_window_state_health_rows(&[entry("STALE", 100)], 1_000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "ERROR");
+        assert!(rows[0].2.contains("pgtrickle.repair_stream_table()"));
+    }
 }

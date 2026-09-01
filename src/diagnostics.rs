@@ -15,6 +15,7 @@
 //!   warnings, and the resolved refresh mode.
 
 use pgrx::prelude::*;
+use serde::Serialize;
 
 use crate::catalog::StreamTableMeta;
 use crate::dvm;
@@ -38,6 +39,247 @@ pub(crate) struct StreamTableExplanation {
     pub(crate) dominant_cost: String,
     pub(crate) dominant_cost_units: Option<f64>,
     pub(crate) dominant_cost_source: &'static str,
+    pub(crate) window: WindowDiagnostics,
+}
+
+/// One bounded registry row from `pgt_window_states`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct WindowStateDiagnostic {
+    pub(crate) node_ordinal: i32,
+    pub(crate) spec_ordinal: i32,
+    pub(crate) status: String,
+    pub(crate) schema_version: i16,
+    pub(crate) strategy_version: i16,
+    pub(crate) state_generation: i64,
+    pub(crate) estimated_bytes: i64,
+}
+
+/// Read-only window strategy, state, and latest execution evidence.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct WindowDiagnostics {
+    pub(crate) strategy: Option<serde_json::Value>,
+    pub(crate) states: Vec<WindowStateDiagnostic>,
+    pub(crate) estimated_bytes: u64,
+    pub(crate) budget_bytes: u64,
+    pub(crate) utilization_percent: f64,
+    pub(crate) last_actual_strategy: Option<String>,
+    pub(crate) last_fallback_reason: Option<String>,
+    pub(crate) last_fallback_detail: Option<String>,
+    pub(crate) estimated_emitted_rows: Option<u64>,
+    pub(crate) crossover_evidence: Option<serde_json::Value>,
+    pub(crate) reinitialization_required: bool,
+}
+
+fn strategy_requires_state(strategy: Option<&serde_json::Value>) -> bool {
+    strategy
+        .and_then(|strategy| strategy.get("nodes"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node.get("functions")?.as_array())
+        .flatten()
+        .any(|function| {
+            function
+                .get("runtime_enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+}
+
+fn window_runtime_evidence(
+    action: Option<&str>,
+    reason: Option<&str>,
+    detail: Option<&str>,
+    runtime_enabled: bool,
+) -> (Option<String>, Option<u64>, Option<serde_json::Value>) {
+    let detail = detail.and_then(|detail| serde_json::from_str::<serde_json::Value>(detail).ok());
+    let strategy = detail
+        .as_ref()
+        .and_then(|detail| detail.get("strategy"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| match action {
+            Some("FULL") => Some("full".into()),
+            Some("REINITIALIZE") => Some("reinitialize".into()),
+            Some("NO_DATA") => Some("no_data".into()),
+            Some("IMMEDIATE") => Some("immediate_recompute".into()),
+            Some("DIFFERENTIAL")
+                if reason
+                    .and_then(crate::refresh::RefreshReasonCode::from_str)
+                    .and_then(crate::refresh::RefreshReasonCode::window_priority)
+                    .is_some() =>
+            {
+                Some("partition_recompute".into())
+            }
+            Some("DIFFERENTIAL") if runtime_enabled => Some("incremental".into()),
+            _ => None,
+        });
+    let emitted_rows = detail
+        .as_ref()
+        .and_then(|detail| detail.get("estimated_emitted_rows"))
+        .and_then(serde_json::Value::as_u64);
+    let crossover = detail.and_then(|mut detail| {
+        detail
+            .get_mut("crossover_evidence")
+            .map(serde_json::Value::take)
+    });
+    (strategy, emitted_rows, crossover)
+}
+
+fn summarize_window_strategy(strategy: Option<&serde_json::Value>) -> String {
+    let summaries = strategy
+        .and_then(|strategy| strategy.get("nodes"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node.get("functions")?.as_array())
+        .flatten()
+        .map(|function| {
+            let kind = function
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let selected = function
+                .get("strategy")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            match function
+                .get("fallback_reason")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(reason) => format!("{kind}={selected} ({reason})"),
+                None => format!("{kind}={selected}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        "none".into()
+    } else {
+        summaries.join(", ")
+    }
+}
+
+fn gather_window_diagnostics(
+    pgt_id: i64,
+    needs_reinit: bool,
+    refresh_mode: crate::dag::RefreshMode,
+    strategy: Option<&crate::dvm::parser::WindowStrategyPlan>,
+) -> Result<WindowDiagnostics, PgTrickleError> {
+    let immediate_reason = if refresh_mode == crate::dag::RefreshMode::Immediate {
+        strategy
+            .map(crate::refresh::RefreshReason::from_immediate_window_plan)
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let strategy = strategy
+        .map(crate::dvm::parser::WindowStrategyPlan::to_json)
+        .transpose()
+        .map_err(|reason| PgTrickleError::WindowStateInvalid {
+            pgt_id,
+            node_ordinal: -1,
+            spec_ordinal: -1,
+            reason,
+        })?;
+    let states = crate::window_state::entries_for_stream(pgt_id)?
+        .into_iter()
+        .map(|entry| WindowStateDiagnostic {
+            node_ordinal: entry.node_ordinal,
+            spec_ordinal: entry.spec_ordinal,
+            status: entry.status.as_str().into(),
+            schema_version: entry.schema_version,
+            strategy_version: entry.strategy_version,
+            state_generation: entry.state_generation,
+            estimated_bytes: entry.estimated_bytes.max(0),
+        })
+        .collect::<Vec<_>>();
+    let (latest_action, latest_reason, latest_detail, last_fallback_reason, last_fallback_detail) =
+        Spi::connect(|client| {
+            let latest = client.select(
+                "SELECT action, refresh_reason, refresh_reason_detail \
+                   FROM pgtrickle.pgt_refresh_history \
+                  WHERE pgt_id = $1 AND status = 'COMPLETED' \
+                  ORDER BY refresh_id DESC LIMIT 1",
+                None,
+                &[pgt_id.into()],
+            )?;
+            let latest = if latest.is_empty() {
+                (None, None, None)
+            } else {
+                let row = latest.first();
+                (
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                )
+            };
+            let fallback = client.select(
+                "SELECT refresh_reason, refresh_reason_detail \
+                   FROM pgtrickle.pgt_refresh_history \
+                  WHERE pgt_id = $1 AND status = 'COMPLETED' \
+                    AND refresh_reason LIKE 'WINDOW\\_%' ESCAPE '\\' \
+                  ORDER BY refresh_id DESC LIMIT 1",
+                None,
+                &[pgt_id.into()],
+            )?;
+            let fallback = if fallback.is_empty() {
+                (None, None)
+            } else {
+                let row = fallback.first();
+                (row.get::<String>(1)?, row.get::<String>(2)?)
+            };
+            Ok::<_, pgrx::spi::SpiError>((latest.0, latest.1, latest.2, fallback.0, fallback.1))
+        })
+        .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+    let estimated_bytes = states.iter().fold(0_u64, |total, state| {
+        total.saturating_add(state.estimated_bytes as u64)
+    });
+    let budget_bytes = crate::config::pg_trickle_memory_budget().window_state_bytes;
+    let utilization_percent = estimated_bytes as f64 * 100.0 / budget_bytes.max(1) as f64;
+    let reinitialization_required = needs_reinit
+        || states.iter().any(|state| state.status != "READY")
+        || (strategy_requires_state(strategy.as_ref()) && states.is_empty());
+    let runtime_enabled = strategy_requires_state(strategy.as_ref());
+    let evidence_action = immediate_reason
+        .as_ref()
+        .map_or(latest_action.as_deref(), |_| Some("IMMEDIATE"));
+    let evidence_reason = immediate_reason
+        .as_ref()
+        .map(|reason| reason.code.as_str())
+        .or(latest_reason.as_deref());
+    let evidence_detail = immediate_reason
+        .as_ref()
+        .map(|reason| reason.detail.as_str())
+        .or(latest_detail.as_deref());
+    let (last_actual_strategy, estimated_emitted_rows, crossover_evidence) =
+        window_runtime_evidence(
+            evidence_action,
+            evidence_reason,
+            evidence_detail,
+            runtime_enabled,
+        );
+    let last_fallback_reason = immediate_reason
+        .as_ref()
+        .map(|reason| reason.code.as_str().to_string())
+        .or(last_fallback_reason);
+    let last_fallback_detail = immediate_reason
+        .map(|reason| reason.detail)
+        .or(last_fallback_detail);
+
+    Ok(WindowDiagnostics {
+        strategy,
+        states,
+        estimated_bytes,
+        budget_bytes,
+        utilization_percent,
+        last_actual_strategy,
+        last_fallback_reason,
+        last_fallback_detail,
+        estimated_emitted_rows,
+        crossover_evidence,
+        reinitialization_required,
+    })
 }
 
 fn dominant_plan_cost(query: &str) -> Option<(String, f64)> {
@@ -108,8 +350,8 @@ pub(crate) fn build_stream_table_explanation(
         let table = client
             .select(
                 "SELECT s.last_full_reason, s.last_full_reason_detail,
-                        EXTRACT(EPOCH FROM (now() - COALESCE(st.last_refresh_at, st.created_at))) * 1000,
-                        c.avg_full_ms, c.avg_diff_ms, c.sample_count
+                        (EXTRACT(EPOCH FROM (now() - COALESCE(st.last_refresh_at, st.created_at))) * 1000)::float8,
+                        c.avg_full_ms::float8, c.avg_diff_ms::float8, c.sample_count
                    FROM pgtrickle.pgt_stream_tables st
               LEFT JOIN pgtrickle.pgt_refresh_summary s ON s.pgt_id = st.pgt_id
               LEFT JOIN pgtrickle.pgt_cost_model_summary c ON c.pgt_id = st.pgt_id
@@ -143,24 +385,37 @@ pub(crate) fn build_stream_table_explanation(
     } else {
         avg_diff_ms.and_then(|per_delta_row| pending.map(|rows| per_delta_row * rows.max(0) as f64))
     };
-    let (dominant_cost, dominant_cost_units, dominant_cost_source) =
-        dominant_plan_cost(&st.defining_query)
-            .map(|(label, cost)| (label, Some(cost), "postgres_explain"))
-            .unwrap_or_else(|| {
-                (
-                    st.query_complexity_class
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    None,
-                    "optree_classifier",
-                )
-            });
+    let dominant =
+        crate::refresh::with_stream_owner(&st, || Ok(dominant_plan_cost(&st.defining_query)))?;
+    let (dominant_cost, dominant_cost_units, dominant_cost_source) = dominant
+        .map(|(label, cost)| (label, Some(cost), "postgres_explain"))
+        .unwrap_or_else(|| {
+            (
+                st.query_complexity_class
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                None,
+                "optree_classifier",
+            )
+        });
     let next_scheduled_refresh = match target_mode.as_deref() {
         Some("MANUAL") => "manual".to_string(),
         Some("ON_COMMIT") => "on_commit".to_string(),
         _ if st.schedule.is_some() => st.schedule.clone().unwrap_or_default(),
         _ => "unknown".to_string(),
     };
+    let window_strategy =
+        if st.window_strategy.is_some() || st.refresh_mode != crate::dag::RefreshMode::Full {
+            crate::window_state::ensure_plan(&st)?
+        } else {
+            None
+        };
+    let window = gather_window_diagnostics(
+        st.pgt_id,
+        st.needs_reinit,
+        st.refresh_mode,
+        window_strategy.as_ref(),
+    )?;
     Ok(StreamTableExplanation {
         refresh_mode: if requested_mode == effective {
             effective.to_string()
@@ -190,6 +445,7 @@ pub(crate) fn build_stream_table_explanation(
         dominant_cost,
         dominant_cost_units,
         dominant_cost_source,
+        window,
     })
 }
 
@@ -206,8 +462,25 @@ pub(crate) fn render_stream_table_explanation_text(explanation: &StreamTableExpl
     let threshold = explanation
         .full_fallback_threshold
         .map_or_else(|| "not applicable".into(), |value| format!("{value:.3}"));
+    let window_strategy = summarize_window_strategy(explanation.window.strategy.as_ref());
+    let window_state = if explanation.window.states.is_empty() {
+        "none".to_string()
+    } else {
+        explanation
+            .window
+            .states
+            .iter()
+            .map(|state| {
+                format!(
+                    "node {}/spec {}: {} generation {}",
+                    state.node_ordinal, state.spec_ordinal, state.status, state.state_generation
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
-        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFULL fallback threshold/reason: {} / {}\nWrite-path overhead: unknown",
+        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFULL fallback threshold/reason: {} / {}\nWindow strategy: {}\nWindow state: {}; {} / {} bytes ({:.1}%); reinitialization required={}\nLast window execution/fallback: {} / {}\nWrite-path overhead: unknown",
         explanation.refresh_mode,
         changed,
         explanation.dominant_cost,
@@ -216,6 +489,22 @@ pub(crate) fn render_stream_table_explanation_text(explanation: &StreamTableExpl
         explanation.next_scheduled_refresh,
         threshold,
         explanation.last_full_reason.as_deref().unwrap_or("none"),
+        window_strategy,
+        window_state,
+        explanation.window.estimated_bytes,
+        explanation.window.budget_bytes,
+        explanation.window.utilization_percent,
+        explanation.window.reinitialization_required,
+        explanation
+            .window
+            .last_actual_strategy
+            .as_deref()
+            .unwrap_or("none"),
+        explanation
+            .window
+            .last_fallback_reason
+            .as_deref()
+            .unwrap_or("none"),
     )
 }
 
@@ -230,6 +519,7 @@ pub(crate) fn render_stream_table_explanation_json(
         "current_lag": {"milliseconds": explanation.current_lag_ms, "meaning": "time_since_last_successful_verification"},
         "next_scheduled_refresh": explanation.next_scheduled_refresh,
         "full_fallback": {"threshold": explanation.full_fallback_threshold, "reason": explanation.last_full_reason, "detail": explanation.last_full_reason_detail},
+        "window": explanation.window,
         "write_path_overhead": null
     })
 }
@@ -2003,6 +2293,68 @@ pub fn gather_all_signals(st: &StreamTableMeta) -> DiagnosticsInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_window_strategy_state_requirement_is_closed() {
+        let eligible = serde_json::json!({
+            "nodes": [{"functions": [{"eligible": true, "runtime_enabled": true}]}]
+        });
+        let fallback = serde_json::json!({
+            "nodes": [{"functions": [{"eligible": true, "runtime_enabled": false}]}]
+        });
+        assert!(strategy_requires_state(Some(&eligible)));
+        assert!(!strategy_requires_state(Some(&fallback)));
+        assert!(!strategy_requires_state(Some(&serde_json::json!({
+            "schema_version": 999
+        }))));
+    }
+
+    #[test]
+    fn test_window_runtime_evidence_distinguishes_partition_recompute() {
+        let (strategy, emitted, crossover) = window_runtime_evidence(
+            Some("DIFFERENTIAL"),
+            Some("WINDOW_RECOMPUTE_CHEAPER"),
+            Some(
+                r#"{"strategy":"mixed","estimated_emitted_rows":42,"crossover_evidence":{"version":1}}"#,
+            ),
+            true,
+        );
+        assert_eq!(strategy.as_deref(), Some("mixed"));
+        assert_eq!(emitted, Some(42));
+        assert_eq!(crossover, Some(serde_json::json!({"version": 1})));
+
+        let (strategy, _, _) = window_runtime_evidence(
+            Some("DIFFERENTIAL"),
+            Some("WINDOW_UNSUPPORTED_FRAME"),
+            None,
+            true,
+        );
+        assert_eq!(strategy.as_deref(), Some("partition_recompute"));
+
+        let (strategy, _, _) = window_runtime_evidence(
+            Some("IMMEDIATE"),
+            Some("WINDOW_IMMEDIATE_RECOMPUTE"),
+            None,
+            false,
+        );
+        assert_eq!(strategy.as_deref(), Some("immediate_recompute"));
+    }
+
+    #[test]
+    fn test_window_strategy_summary_includes_static_fallback() {
+        let strategy = serde_json::json!({
+            "nodes": [{
+                "functions": [
+                    {"kind": "row_number", "strategy": "ordered_suffix", "fallback_reason": null},
+                    {"kind": "lag", "strategy": "partition_recompute", "fallback_reason": "WINDOW_UNSUPPORTED_ARGUMENT"}
+                ]
+            }]
+        });
+        assert_eq!(
+            summarize_window_strategy(Some(&strategy)),
+            "row_number=ordered_suffix, lag=partition_recompute (WINDOW_UNSUPPORTED_ARGUMENT)"
+        );
+    }
 
     #[test]
     fn test_score_change_ratio_boundaries() {

@@ -4,6 +4,8 @@
 //! [`CorrelationPredicate`], [`WindowExpr`], [`OpTree`], [`CteRegistry`],
 //! and [`ParseResult`] plus their associated `impl` blocks.
 
+use serde::{Deserialize, Serialize};
+
 /// Column metadata.
 #[derive(Debug, Clone)]
 pub struct Column {
@@ -894,6 +896,277 @@ pub struct SortExpr {
     pub nulls_first: bool,
 }
 
+/// Stored JSON contract version for incremental-window semantic plans.
+pub const WINDOW_STRATEGY_SCHEMA_VERSION: u16 = 1;
+/// Planner and state-layout version for incremental-window strategies.
+pub const WINDOW_STRATEGY_VERSION: u16 = 1;
+/// Stable child-row identity formula version used by window state.
+pub const WINDOW_IDENTITY_VERSION: u16 = 1;
+
+/// PostgreSQL window-frame unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameMode {
+    Rows,
+    Range,
+    Groups,
+}
+
+/// An analyzed constant used by an offset frame bound.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowFrameOffset {
+    pub sql: String,
+    pub type_oid: u32,
+    pub typmod: i32,
+    pub collation_oid: u32,
+}
+
+/// One normalized PostgreSQL window-frame bound.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "offset")]
+pub enum WindowFrameBound {
+    UnboundedPreceding,
+    OffsetPreceding(WindowFrameOffset),
+    CurrentRow,
+    OffsetFollowing(WindowFrameOffset),
+    UnboundedFollowing,
+}
+
+impl WindowFrameBound {
+    fn to_sql(&self) -> String {
+        match self {
+            Self::UnboundedPreceding => "UNBOUNDED PRECEDING".into(),
+            Self::OffsetPreceding(offset) => format!("{} PRECEDING", offset.sql),
+            Self::CurrentRow => "CURRENT ROW".into(),
+            Self::OffsetFollowing(offset) => format!("{} FOLLOWING", offset.sql),
+            Self::UnboundedFollowing => "UNBOUNDED FOLLOWING".into(),
+        }
+    }
+}
+
+/// PostgreSQL window-frame exclusion mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameExclusion {
+    None,
+    CurrentRow,
+    Group,
+    Ties,
+}
+
+/// Typed and normalized PostgreSQL 18 window frame.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowFrameSpec {
+    pub mode: WindowFrameMode,
+    pub start: WindowFrameBound,
+    pub end: WindowFrameBound,
+    pub exclusion: WindowFrameExclusion,
+    pub was_implicit: bool,
+}
+
+impl WindowFrameSpec {
+    /// PostgreSQL's omitted-frame default. Without ORDER BY, CURRENT ROW is
+    /// the last peer and therefore still covers the whole partition.
+    pub fn postgres_default() -> Self {
+        Self {
+            mode: WindowFrameMode::Range,
+            start: WindowFrameBound::UnboundedPreceding,
+            end: WindowFrameBound::CurrentRow,
+            exclusion: WindowFrameExclusion::None,
+            was_implicit: true,
+        }
+    }
+
+    /// Render the normalized frame as PostgreSQL SQL.
+    pub fn to_sql(&self) -> String {
+        let mode = match self.mode {
+            WindowFrameMode::Rows => "ROWS",
+            WindowFrameMode::Range => "RANGE",
+            WindowFrameMode::Groups => "GROUPS",
+        };
+        let exclusion = match self.exclusion {
+            WindowFrameExclusion::None => "",
+            WindowFrameExclusion::CurrentRow => " EXCLUDE CURRENT ROW",
+            WindowFrameExclusion::Group => " EXCLUDE GROUP",
+            WindowFrameExclusion::Ties => " EXCLUDE TIES",
+        };
+        format!(
+            "{mode} BETWEEN {} AND {}{exclusion}",
+            self.start.to_sql(),
+            self.end.to_sql()
+        )
+    }
+}
+
+/// Resolved type information for one expression used by a window function.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowExpressionType {
+    pub expression: String,
+    pub type_oid: u32,
+    pub typmod: i32,
+    pub collation_oid: u32,
+}
+
+/// Resolved ordering metadata from PostgreSQL's analyzed tree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowOrderKey {
+    pub expression: String,
+    pub type_oid: u32,
+    pub typmod: i32,
+    pub collation_oid: u32,
+    pub ascending: bool,
+    pub nulls_first: bool,
+    pub sort_operator_oid: u32,
+    pub equality_operator_oid: u32,
+}
+
+/// Closed v0.89 function classification. `Unsupported` is fail-closed and is
+/// never selected by textual name alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFunctionKind {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag,
+    Lead,
+    FirstValue,
+    LastValue,
+    NthValue,
+    Sum,
+    Count,
+    Unsupported,
+}
+
+impl WindowFunctionKind {
+    pub fn observes_frame(self) -> bool {
+        !matches!(
+            self,
+            Self::RowNumber | Self::Rank | Self::DenseRank | Self::Lag | Self::Lead
+        )
+    }
+}
+
+/// Canonical state-sharing key for one semantic window specification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowSpecKey {
+    pub partition: Vec<WindowExpressionType>,
+    pub order: Vec<WindowOrderKey>,
+    pub frame: Option<WindowFrameSpec>,
+    pub child_semantic_identity: String,
+}
+
+/// Static strategy selected by the v0.89 semantic planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowIncrementalStrategy {
+    OrderedSuffix,
+    PeerSuffix,
+    NeighborRing,
+    PartitionBoundary,
+    PeerBoundary,
+    CurrentRow,
+    NthPrefix,
+    PartitionAggregate,
+    CumulativeRows,
+    CumulativeRange,
+    PartitionRecompute,
+}
+
+/// Analyzed metadata and static decision for one window function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowFunctionStrategy {
+    pub function_ordinal: u32,
+    pub alias: String,
+    pub function_oid: u32,
+    pub kind: WindowFunctionKind,
+    pub argument_types: Vec<WindowExpressionType>,
+    pub result_type_oid: u32,
+    pub result_type_sql: String,
+    pub result_typmod: i32,
+    pub result_collation_oid: u32,
+    pub frame: WindowFrameSpec,
+    pub constant_offset: Option<i64>,
+    pub filter: Option<String>,
+    pub parse_location: Option<i32>,
+    pub strategy: WindowIncrementalStrategy,
+    /// The semantic proof passed for this function and specification.
+    pub eligible: bool,
+    /// Runtime execution stays off until the corresponding state algorithm is
+    /// wired and verified. Semantic planning alone never enables routing.
+    pub runtime_enabled: bool,
+    pub fallback_reason: Option<String>,
+}
+
+/// One semantic window specification and the functions sharing its state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowStrategyNode {
+    pub node_ordinal: u32,
+    pub spec_ordinal: u32,
+    pub state_name_prefix: String,
+    pub spec: WindowSpecKey,
+    pub child_identity: Vec<String>,
+    pub functions: Vec<WindowFunctionStrategy>,
+}
+
+/// Versioned, deterministic JSON contract stored with a stream table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowStrategyPlan {
+    pub schema_version: u16,
+    pub strategy_version: u16,
+    pub query_hash: i64,
+    pub identity_version: u16,
+    pub semantic_fingerprint: String,
+    pub nodes: Vec<WindowStrategyNode>,
+}
+
+impl WindowStrategyPlan {
+    pub fn empty(query_hash: i64) -> Self {
+        Self {
+            schema_version: WINDOW_STRATEGY_SCHEMA_VERSION,
+            strategy_version: WINDOW_STRATEGY_VERSION,
+            query_hash,
+            identity_version: WINDOW_IDENTITY_VERSION,
+            semantic_fingerprint: "none".into(),
+            nodes: Vec::new(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<serde_json::Value, String> {
+        serde_json::to_value(self).map_err(|error| error.to_string())
+    }
+
+    pub fn from_json(value: serde_json::Value) -> Result<Self, String> {
+        let plan: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if plan.schema_version != WINDOW_STRATEGY_SCHEMA_VERSION
+            || plan.strategy_version != WINDOW_STRATEGY_VERSION
+            || plan.identity_version != WINDOW_IDENTITY_VERSION
+        {
+            return Err(format!(
+                "unsupported window strategy versions: schema={}, strategy={}, identity={}",
+                plan.schema_version, plan.strategy_version, plan.identity_version
+            ));
+        }
+        Ok(plan)
+    }
+
+    pub fn with_query_hash(mut self, query_hash: i64) -> Self {
+        self.query_hash = query_hash;
+        self
+    }
+
+    pub fn with_state_names(mut self, pgt_id: i64) -> Self {
+        for node in &mut self.nodes {
+            node.state_name_prefix = format!(
+                "pgtrickle.__pgt_window_{pgt_id}_{}_{}",
+                node.node_ordinal, node.spec_ordinal
+            );
+        }
+        self
+    }
+}
+
 /// A correlation predicate extracted from a LATERAL subquery's WHERE clause.
 ///
 /// Represents an equality of the form `inner_alias.inner_col = outer_alias.outer_col`
@@ -1309,6 +1582,9 @@ pub struct ParseResult {
     /// to the user; downstream parser calls (cache pre-warm, row-id derivation)
     /// should silently discard them.
     pub warnings: Vec<String>,
+    /// Static incremental-window semantic plan. Runtime routing remains off
+    /// until each planned strategy is explicitly enabled.
+    pub window_strategy: Option<WindowStrategyPlan>,
 }
 
 impl ParseResult {
@@ -2103,13 +2379,39 @@ impl OpTree {
                 // when the CTE body contains an aggregate.
                 Some(columns.clone())
             }
-            OpTree::Window { .. } => {
-                // Window functions like RANK/DENSE_RANK can produce identical
-                // output rows (tied values). Fall back to row_number-based
-                // hash in the initial population to guarantee uniqueness.
-                // The window diff operator computes its own unique row_ids
-                // during partition recomputation.
-                None
+            OpTree::Window {
+                child,
+                pass_through,
+                window_exprs,
+                ..
+            } => {
+                if !window_exprs.iter().all(|window| {
+                    matches!(
+                        window.func_name.to_ascii_lowercase().as_str(),
+                        "row_number" | "rank" | "dense_rank"
+                    )
+                }) {
+                    return None;
+                }
+                // A window result preserves its child's identity only when the
+                // parser proved a real key and projected it exactly once.
+                // Keyless/content identities stay on partition replacement.
+                let child_keys = super::window_plan::exact_window_identity_columns(child)?;
+                let mapped = child_keys
+                    .iter()
+                    .map(|key| {
+                        let mut matches = pass_through.iter().filter(|(expr, _)| {
+                            matches!(expr, Expr::ColumnRef { column_name, .. } if column_name == key)
+                        });
+                        let alias = matches.next().map(|(_, alias)| alias.clone())?;
+                        matches.next().is_none().then_some(alias)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let mut unique = std::collections::HashSet::with_capacity(mapped.len());
+                mapped
+                    .iter()
+                    .all(|name| !name.is_empty() && unique.insert(name.as_str()))
+                    .then_some(mapped)
             }
             OpTree::LateralFunction { .. } => {
                 // SRF expansions have no natural primary key. Let callers
@@ -2717,7 +3019,12 @@ impl OpTree {
                 left.collect_source_columns(map);
                 right.collect_source_columns(map);
             }
-            OpTree::ScalarSubquery { child, .. } => child.collect_source_columns(map),
+            OpTree::ScalarSubquery {
+                subquery, child, ..
+            } => {
+                subquery.collect_source_columns(map);
+                child.collect_source_columns(map);
+            }
             OpTree::ConstantSelect { .. } => {}
         }
     }

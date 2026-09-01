@@ -425,9 +425,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
     // UG1: Version mismatch check — warn if the compiled .so version differs
     // from the SQL-installed extension version (stale install).
-    BackgroundWorker::transaction(AssertUnwindSafe(|| {
-        check_extension_version_match();
-    }));
+    let version_matches =
+        BackgroundWorker::transaction(AssertUnwindSafe(check_extension_version_match));
+    if !version_matches {
+        warning!(
+            "pg_trickle scheduler: refusing to refresh database '{}' until ALTER EXTENSION completes",
+            db_name
+        );
+        return;
+    }
 
     // F16 (G8.2): Detect read replicas — the scheduler cannot write on a
     // standby. Skip all work and sleep until promotion.

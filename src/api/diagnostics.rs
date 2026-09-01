@@ -723,7 +723,9 @@ pub(super) fn explain_delta_plan(pgt_id: i64) -> Result<pgrx::JsonB, PgTrickleEr
     let st = StreamTableMeta::get_by_id(pgt_id)?
         .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={pgt_id}")))?;
     check_stream_table_ownership(st.pgt_relid, &st.pgt_schema, &st.pgt_name)?;
-    let parsed = crate::dvm::parse_defining_query_full(&st.defining_query)?;
+    let parsed = crate::refresh::with_stream_owner(&st, || {
+        crate::dvm::parse_defining_query_full(&st.defining_query)
+    })?;
     let evidence = crate::dvm::planner::collect_evidence(pgt_id, &parsed)?;
     let plan = crate::dvm::planner::build_delta_plan(
         pgt_id,
@@ -731,9 +733,20 @@ pub(super) fn explain_delta_plan(pgt_id: i64) -> Result<pgrx::JsonB, PgTrickleEr
         &evidence,
         crate::dvm::planner::vector_path_evidence(&parsed.tree),
     );
-    serde_json::to_value(plan)
-        .map(pgrx::JsonB)
-        .map_err(|error| PgTrickleError::InternalError(error.to_string()))
+    let mut diagnostic = serde_json::to_value(plan)
+        .map_err(|error| PgTrickleError::InternalError(error.to_string()))?;
+    let window_strategy = st
+        .window_strategy
+        .as_ref()
+        .map(crate::dvm::parser::WindowStrategyPlan::to_json)
+        .transpose()
+        .map_err(PgTrickleError::InternalError)?
+        .unwrap_or(serde_json::Value::Null);
+    diagnostic
+        .as_object_mut()
+        .ok_or_else(|| PgTrickleError::InternalError("delta plan is not a JSON object".into()))?
+        .insert("window_strategy".into(), window_strategy);
+    Ok(pgrx::JsonB(diagnostic))
 }
 
 // ── G14-MDED: dedup_stats() ────────────────────────────────────────────────

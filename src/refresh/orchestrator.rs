@@ -5,7 +5,7 @@
 // SCAL-3 (v0.30.0): Removed dead #[allow(unused_imports)] shims; imports are now
 // concrete and will warn if unused, catching future stale imports early.
 
-use super::{QueryComplexityClass, execute_full_refresh};
+use super::QueryComplexityClass;
 use crate::catalog::StreamTableMeta;
 use crate::dag::RefreshMode;
 use crate::error::PgTrickleError;
@@ -470,20 +470,21 @@ pub(crate) fn batch_update_cost_model_summary() {
 /// (so current view definitions are resolved at execution time), then
 /// re-runs the rewrite pipeline to store the updated inlined query.
 pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
-    // Use original_query for the refresh so current view/function
-    // definitions are resolved at execution time.
-    let refresh_st = if let Some(oq) = &st.original_query {
-        let mut tmp = st.clone();
-        tmp.defining_query = oq.clone();
-        tmp
+    // Materialize the stored user query first so PostgreSQL resolves its
+    // current dependencies under the captured search path.
+    let refresh_st = if let Some(original_query) = &st.original_query {
+        let mut refresh_st = st.clone();
+        refresh_st.defining_query = original_query.clone();
+        refresh_st
     } else {
         st.clone()
     };
+    let result = crate::refresh::merge::execute_full_refresh_target(&refresh_st)?;
 
-    let result = execute_full_refresh(&refresh_st)?;
-
-    // After refresh, re-run the rewrite pipeline to update stored query.
-    let _ = crate::api::reinit_rewrite_if_needed(st);
+    // Replace the inlined query and all query-derived state in this same
+    // transaction after the target reflects the current source definitions.
+    let updated = crate::api::reinit_rewrite_if_needed(st)?;
+    let _window_plan = crate::window_state::prepare_for_protected_refresh(&updated)?;
 
     // Clear reinit flag
     Spi::run(&format!(

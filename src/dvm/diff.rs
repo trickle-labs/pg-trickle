@@ -115,6 +115,9 @@ pub struct DiffContext {
     optimization: OptimizationContext,
     /// The target stream table's schema.qualified name (for aggregate merge).
     pub st_qualified_name: Option<String>,
+    /// Validated READY row-state mirror for the admitted v0.89 ROW_NUMBER
+    /// path. `None` keeps the existing partition-recompute implementation.
+    pub window_state_row_relation: Option<String>,
     /// The original defining query text, used by recursive CTE
     /// recomputation to re-execute the query directly instead of
     /// reconstructing SQL from the OpTree.
@@ -633,6 +636,7 @@ impl DiffContext {
                 max_diff_ctes,
             },
             st_qualified_name: None,
+            window_state_row_relation: None,
             defining_query: None,
             st_user_columns: None,
             merge_safe_dedup: false,

@@ -191,6 +191,8 @@ fn execute_manual_refresh(
     // ERG-D: Determine the action label for history recording.
     let action = if st.topk_limit.is_some() {
         "FULL"
+    } else if st.needs_reinit {
+        "REINITIALIZE"
     } else {
         match st.refresh_mode {
             RefreshMode::Full | RefreshMode::Immediate => "FULL",
@@ -250,25 +252,22 @@ fn execute_manual_refresh(
             table_name,
         );
 
-        // If the ST has an original_query (pre-rewrite, e.g. referencing
-        // views by name), use it for the FULL refresh so the current view
-        // definitions are resolved at execution time.  Then re-run the
-        // rewrite pipeline to update the stored defining_query for future
-        // differential refreshes.
-        let refresh_st = if let Some(oq) = &st.original_query {
-            let mut tmp = st.clone();
-            tmp.defining_query = oq.clone();
-            tmp
+        // Materialize the stored user query first so PostgreSQL resolves its
+        // current view/function dependencies under the captured search path.
+        let refresh_st = if let Some(original_query) = &st.original_query {
+            let mut refresh_st = st.clone();
+            refresh_st.defining_query = original_query.clone();
+            refresh_st
         } else {
             st.clone()
         };
-
         let full_result =
-            execute_manual_full_refresh(&refresh_st, schema, table_name, source_oids)?;
+            execute_manual_full_refresh_target(&refresh_st, schema, table_name, source_oids)?;
 
-        // After the FULL refresh has committed the correct data, re-run
-        // the rewrite pipeline to store the updated inlined query.
+        // Replace the inlined query and all query-derived state only after the
+        // target was rebuilt from the current source definitions.
         let updated = reinit_rewrite_if_needed(st)?;
+        let _window_plan = crate::window_state::prepare_for_protected_refresh(&updated)?;
 
         // Clear the reinit flag after successful refresh.
         let sql = format!(
@@ -368,7 +367,13 @@ pub fn reinit_rewrite_if_needed(st: &StreamTableMeta) -> Result<StreamTableMeta,
 
     let rw = refresh::with_stream_owner(st, || run_query_rewrite_pipeline(&original))?;
     let new_defining = rw.query;
-    if new_defining == st.defining_query {
+    let query_hash = crate::catalog::compute_defining_query_hash(&new_defining);
+    let plan_is_current = st
+        .window_strategy
+        .as_ref()
+        .is_none_or(|plan| plan.query_hash == query_hash);
+    if new_defining == st.defining_query && st.defining_query_hash == query_hash && plan_is_current
+    {
         return Ok(st.clone());
     }
 
@@ -378,17 +383,28 @@ pub fn reinit_rewrite_if_needed(st: &StreamTableMeta) -> Result<StreamTableMeta,
         st.pgt_name,
     );
 
-    // Update the catalog with the new defining query.
+    // Old state belongs to the old semantic query. Replace query, hash, and
+    // plan in the same transaction before the protected FULL rebuild. The
+    // protected-refresh finalizer regenerates the plan after the target has
+    // been materialized from this exact query.
+    crate::window_state::drop_for_stream(st.pgt_id)?;
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
-         SET defining_query = $1, updated_at = now() \
-         WHERE pgt_id = $2",
-        &[new_defining.clone().into(), st.pgt_id.into()],
+         SET defining_query = $1, defining_query_hash = $2, \
+             window_strategy = NULL, updated_at = now() \
+         WHERE pgt_id = $3",
+        &[
+            new_defining.clone().into(),
+            query_hash.into(),
+            st.pgt_id.into(),
+        ],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     let mut updated = st.clone();
     updated.defining_query = new_defining;
+    updated.defining_query_hash = query_hash;
+    updated.window_strategy = None;
     Ok(updated)
 }
 
@@ -402,6 +418,18 @@ pub(crate) fn execute_manual_full_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(i64, i64), PgTrickleError> {
+    let result = execute_manual_full_refresh_target(st, schema, table_name, source_oids)?;
+    let _window_plan = crate::window_state::prepare_for_protected_refresh(st)?;
+    Ok(result)
+}
+
+fn execute_manual_full_refresh_target(
+    st: &StreamTableMeta,
+    schema: &str,
+    table_name: &str,
+    source_oids: &[pg_sys::Oid],
+) -> Result<(i64, i64), PgTrickleError> {
+    refresh::set_effective_mode("FULL");
     crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
@@ -427,7 +455,10 @@ pub(crate) fn execute_manual_full_refresh(
     // Incremental INTERSECT/EXCEPT admission is intentionally guarded.  A
     // FULL refresh therefore materializes only defining-query columns and
     // cleans up dual-count state from legacy storage.
-    if crate::dvm::query_needs_dual_count(&st.defining_query) {
+    let needs_dual_count = refresh::with_stream_owner(st, || {
+        Ok(crate::dvm::query_needs_dual_count(&st.defining_query))
+    })?;
+    if needs_dual_count {
         refresh::with_stream_owner(st, || {
             crate::api::helpers::normalize_full_set_operation_storage(
                 schema,
@@ -523,38 +554,40 @@ pub(crate) fn execute_manual_full_refresh(
     // For aggregate/distinct STs in DIFFERENTIAL mode, inject COUNT(*)
     // into the defining query so __pgt_count is populated for subsequent
     // differential refreshes.
-    let effective_query = if st.refresh_mode == RefreshMode::Differential
-        && crate::dvm::query_needs_pgt_count(&st.defining_query)
-    {
-        let mut eq = inject_pgt_count(&st.defining_query);
-        // Also inject AVG auxiliary columns for algebraic AVG maintenance.
-        let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
-        if !avg_aux.is_empty() {
-            eq = inject_avg_aux(&eq, &avg_aux);
+    let effective_query = refresh::with_stream_owner(st, || {
+        if st.refresh_mode == RefreshMode::Differential
+            && crate::dvm::query_needs_pgt_count(&st.defining_query)
+        {
+            let mut eq = inject_pgt_count(&st.defining_query);
+            // Also inject AVG auxiliary columns for algebraic AVG maintenance.
+            let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+            if !avg_aux.is_empty() {
+                eq = inject_avg_aux(&eq, &avg_aux);
+            }
+            // Also inject sum-of-squares columns for STDDEV/VAR maintenance.
+            let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
+            if !sum2_aux.is_empty() {
+                let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
+                let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
+                eq = inject_sum2_aux_typed(&eq, &typed);
+            }
+            // Also inject cross-product columns for CORR/COVAR/REGR maintenance (P3-2).
+            let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
+            if !covar_aux.is_empty() {
+                let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
+                let typed = crate::api::typed_statistical_aux_columns(&covar_aux, &types);
+                eq = inject_covar_aux_typed(&eq, &typed);
+            }
+            // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
+            let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
+            if !nonnull_aux.is_empty() {
+                eq = inject_nonnull_aux(&eq, &nonnull_aux);
+            }
+            Ok(eq)
+        } else {
+            Ok(st.defining_query.clone())
         }
-        // Also inject sum-of-squares columns for STDDEV/VAR maintenance.
-        let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
-        if !sum2_aux.is_empty() {
-            let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
-            let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
-            eq = inject_sum2_aux_typed(&eq, &typed);
-        }
-        // Also inject cross-product columns for CORR/COVAR/REGR maintenance (P3-2).
-        let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
-        if !covar_aux.is_empty() {
-            let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
-            let typed = crate::api::typed_statistical_aux_columns(&covar_aux, &types);
-            eq = inject_covar_aux_typed(&eq, &typed);
-        }
-        // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
-        let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
-        if !nonnull_aux.is_empty() {
-            eq = inject_nonnull_aux(&eq, &nonnull_aux);
-        }
-        eq
-    } else {
-        st.defining_query.clone()
-    };
+    })?;
 
     // Compute row_id using the same hash formula as the delta query so
     // the MERGE ON clause matches during subsequent differential refreshes.
@@ -562,26 +595,33 @@ pub(crate) fn execute_manual_full_refresh(
     // UNION (dedup), convert to UNION ALL and count.
     // For UNION ALL, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
-    let insert_body = if crate::dvm::query_needs_dual_count(&st.defining_query) {
-        crate::dvm::direct_full_refresh_insert_body(&st.defining_query, &effective_query)
-    } else if crate::dvm::query_needs_union_dedup_count(&st.defining_query) {
-        let col_names = refresh::with_stream_owner(st, || {
-            crate::dvm::get_defining_query_columns(&st.defining_query)
-        })?;
-        if let Some(union_sql) =
-            crate::dvm::try_union_dedup_refresh_sql(&st.defining_query, &col_names)
-        {
-            union_sql
+    let insert_body = refresh::with_stream_owner(st, || {
+        if needs_dual_count {
+            Ok(crate::dvm::direct_full_refresh_insert_body(
+                &st.defining_query,
+                &effective_query,
+            ))
+        } else if crate::dvm::query_needs_union_dedup_count(&st.defining_query) {
+            let col_names = crate::dvm::get_defining_query_columns(&st.defining_query)?;
+            if let Some(union_sql) =
+                crate::dvm::try_union_dedup_refresh_sql(&st.defining_query, &col_names)
+            {
+                Ok(union_sql)
+            } else {
+                let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
+                Ok(format!(
+                    "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",
+                ))
+            }
+        } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(&st.defining_query) {
+            Ok(ua_sql)
         } else {
             let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
-            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
+            Ok(format!(
+                "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",
+            ))
         }
-    } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(&st.defining_query) {
-        ua_sql
-    } else {
-        let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
-        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
-    };
+    })?;
 
     let insert_sql = format!("INSERT INTO {quoted_table} {insert_body}");
     let rows_inserted = refresh::with_stream_owner(st, || {

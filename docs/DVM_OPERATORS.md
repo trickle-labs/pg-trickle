@@ -730,17 +730,36 @@ The cost is proportional to the full result set size.
 
 **Module:** `src/dvm/operators/window.rs`
 
-Handles window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `SUM() OVER`, etc.) using partition-based recomputation.
+Handles window functions with partition recomputation.
 
-**Delta Rule:**
+v0.89 analyzes each window specification into a typed, versioned strategy plan.
+The release evaluated one built-in `ROW_NUMBER` state candidate over a direct
+keyed scan. The query projected each required column once under the same name,
+and `ORDER BY` included every non-null identity column. The candidate was slower
+than partition recomputation in all six measured cells.
 
-When any row in a partition changes (insert, update, or delete), the entire partition's window function output is recomputed:
+The private `pgt_window_states` registry and the versioned cost selector are
+implemented but inactive admission machinery. Every production plan records
+`runtime_enabled = false`, creates no state, and selects partition
+recomputation. If a candidate state operation exceeds the memory budget, the
+handler drops all private state and registry rows and persists a disabled plan.
+It does not retain an `OVER_BUDGET` row or re-admit partitions automatically.
+
+**Rejected `ROW_NUMBER` candidate:**
+
+The measured candidate filtered its emitted delta to rows whose result changed,
+but it still recomputed the affected partition. The output filtering did not
+produce a runtime win, so the release gate rejected the candidate.
+
+**Delta rule:**
+
+For every v0.89 window shape, a change recomputes the affected partition:
 
 $$\Delta(\omega_{f, P}(R)) = \omega_{f, P}(R'|_{\text{affected partitions}}) - \omega_{f, P}(R|_{\text{affected partitions}})$$
 
 Where $P$ is the PARTITION BY key and $f$ is the window function.
 
-**Strategy:**
+**Partition-recompute strategy:**
 
 1. Identify affected partition keys from the child delta.
 2. Delete old window function results for affected partitions from storage.
@@ -788,9 +807,10 @@ SELECT 'I' AS __pgt_action, ...  -- recomputed rows
 - Window functions wrapping aggregates (e.g., `RANK() OVER (ORDER BY SUM(x))`) are supported: the window diff rewrites ORDER BY / PARTITION BY expressions to reference aggregate output aliases via `build_agg_alias_map`.
 - Row IDs are computed from the full row content (`row_to_json`) plus a positional disambiguator (`row_number`) to avoid hash collisions with tied ranking values (DENSE_RANK, RANK).
 
-> **Known Limitation: O(partition_size) Recomputation Cost**
+> **Partition-recompute limitation: O(partition_size) cost**
 >
-> Any single-row change within a window partition triggers recomputation of the *entire* partition.
+> Any single-row change within a window partition triggers recomputation of the
+> *entire* partition.
 > For queries with large partitions (e.g., `PARTITION BY region` where a region has 500K rows),
 > a single INSERT into that partition causes all 500K rows to be recomputed and diffed. This is
 > inherent to the partition-based delta strategy — window functions cannot be incrementally
@@ -815,6 +835,12 @@ Window frame specifications are fully supported:
 - **Exclusion:** `EXCLUDE CURRENT ROW`, `EXCLUDE GROUP`, `EXCLUDE TIES`, `EXCLUDE NO OTHERS`
 
 Example: `SUM(val) OVER (ORDER BY ts ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`
+
+The clauses above remain semantically supported because PostgreSQL evaluates
+them during partition recomputation. They are not incremental admissions.
+`GROUPS`, `EXCLUDE`, unsupported bounds, dynamic offsets, `FILTER`, user-defined
+functions, and unsupported types stay on recomputation with a `WINDOW_*`
+reason.
 
 **Named WINDOW Clauses:**
 

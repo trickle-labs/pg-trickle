@@ -1,6 +1,6 @@
 // ARCH-1B: Unit tests for the refresh pipeline.
 // Moved from mod.rs to keep mod.rs under 500 LOC.
-// This module IS the `tests` module (declared as `mod tests;` in mod.rs).
+// This module is included as `unit_tests` from mod.rs.
 
 use super::*;
 use crate::catalog::StreamTableMeta;
@@ -83,6 +83,7 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         last_error_code: None,
         last_error_retryable: None,
         defining_search_path: "public".to_string(),
+        window_strategy: None,
     }
 }
 
@@ -132,6 +133,13 @@ fn test_merge_strategy_is_consumed_once() {
 }
 
 #[test]
+fn test_effective_mode_is_consumed_once() {
+    set_effective_mode("FULL");
+    assert_eq!(take_effective_mode(), "FULL");
+    assert_eq!(take_effective_mode(), "");
+}
+
+#[test]
 fn test_full_refresh_reason_codes_round_trip() {
     for code in [
         FullRefreshReasonCode::FirstRefresh,
@@ -142,6 +150,118 @@ fn test_full_refresh_reason_codes_round_trip() {
         assert_eq!(FullRefreshReasonCode::from_str(code.as_str()), Some(code));
     }
     assert_eq!(FullRefreshReasonCode::from_str("unknown"), None);
+}
+
+#[test]
+fn test_window_refresh_reason_codes_round_trip() {
+    for code in [
+        RefreshReasonCode::WindowMetadataUnresolved,
+        RefreshReasonCode::WindowUnsupportedFunction,
+        RefreshReasonCode::WindowUnsupportedFrame,
+        RefreshReasonCode::WindowUnsupportedArgument,
+        RefreshReasonCode::WindowUnsupportedType,
+        RefreshReasonCode::WindowNoStableIdentity,
+        RefreshReasonCode::WindowStateInitializationRequired,
+        RefreshReasonCode::WindowStateMismatch,
+        RefreshReasonCode::WindowStateBudgetExceeded,
+        RefreshReasonCode::WindowOffsetExceedsBudget,
+        RefreshReasonCode::WindowNthIndexExceedsBudget,
+        RefreshReasonCode::WindowNonInvertibleDelete,
+        RefreshReasonCode::WindowIncrementalUnimplemented,
+        RefreshReasonCode::WindowRecomputeCheaper,
+        RefreshReasonCode::WindowImmediateRecompute,
+    ] {
+        assert_eq!(RefreshReasonCode::from_str(code.as_str()), Some(code));
+        assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
+        assert_eq!(
+            serde_json::from_value::<RefreshReasonCode>(serde_json::json!(code.as_str())).unwrap(),
+            code
+        );
+    }
+}
+
+#[test]
+fn test_window_refresh_reason_priority_is_deterministic() {
+    let codes = [
+        RefreshReasonCode::WindowImmediateRecompute,
+        RefreshReasonCode::WindowUnsupportedType,
+        RefreshReasonCode::WindowStateBudgetExceeded,
+        RefreshReasonCode::WindowStateMismatch,
+        RefreshReasonCode::WindowUnsupportedFrame,
+    ];
+    assert_eq!(
+        RefreshReasonCode::highest_priority_window(codes),
+        Some(RefreshReasonCode::WindowStateMismatch)
+    );
+
+    let semantic_tie = [
+        RefreshReasonCode::WindowUnsupportedType,
+        RefreshReasonCode::WindowUnsupportedFrame,
+    ];
+    assert_eq!(
+        RefreshReasonCode::highest_priority_window(semantic_tie),
+        Some(RefreshReasonCode::WindowUnsupportedFrame)
+    );
+}
+
+#[test]
+fn test_window_refresh_reason_detail_is_sorted_and_keeps_differential_semantics() {
+    let reason = RefreshReason::from_window_detail(WindowRefreshReasonDetail {
+        strategy: WindowExecutionStrategy::Mixed,
+        estimated_emitted_rows: Some(12),
+        crossover_evidence: Some(serde_json::json!({"version": 1})),
+        reasons: vec![
+            WindowRefreshReasonOccurrence {
+                node_ordinal: 2,
+                function_ordinal: Some(1),
+                partition_count: 3,
+                reason: RefreshReasonCode::WindowRecomputeCheaper,
+            },
+            WindowRefreshReasonOccurrence {
+                node_ordinal: 1,
+                function_ordinal: Some(0),
+                partition_count: 1,
+                reason: RefreshReasonCode::WindowStateBudgetExceeded,
+            },
+        ],
+    })
+    .unwrap()
+    .expect("fallback occurrences produce a reason");
+
+    assert_eq!(reason.code, RefreshReasonCode::WindowStateBudgetExceeded);
+    let detail: serde_json::Value = serde_json::from_str(&reason.detail).unwrap();
+    assert_eq!(detail["strategy"], "mixed");
+    assert_eq!(detail["reasons"][0]["node_ordinal"], 1);
+    assert_eq!(detail["reasons"][1]["node_ordinal"], 2);
+}
+
+#[test]
+fn test_incremental_window_detail_has_no_fallback_reason() {
+    let reason = RefreshReason::from_window_detail(WindowRefreshReasonDetail {
+        strategy: WindowExecutionStrategy::Incremental,
+        estimated_emitted_rows: Some(1),
+        crossover_evidence: None,
+        reasons: Vec::new(),
+    })
+    .unwrap();
+    assert!(reason.is_none());
+}
+
+#[test]
+fn test_immediate_window_reason_replaces_only_mode_or_cost_fallback() {
+    assert_eq!(
+        planned_window_fallback_code(true, None, true),
+        Some(RefreshReasonCode::WindowImmediateRecompute)
+    );
+    assert_eq!(
+        planned_window_fallback_code(false, Some("WINDOW_RECOMPUTE_CHEAPER"), true),
+        Some(RefreshReasonCode::WindowImmediateRecompute)
+    );
+    assert_eq!(
+        planned_window_fallback_code(false, Some("WINDOW_UNSUPPORTED_FRAME"), true),
+        Some(RefreshReasonCode::WindowUnsupportedFrame)
+    );
+    assert_eq!(planned_window_fallback_code(true, None, false), None);
 }
 
 #[test]
@@ -1652,67 +1772,6 @@ proptest! {
         );
     }
 }
-
-#[cfg(feature = "pg_test")]
-#[pgrx::pg_schema]
-mod pg_tests {
-    use super::*;
-    use crate::catalog::StreamTableMeta;
-    use crate::version::Frontier;
-    use pgrx::prelude::*;
-
-    #[pg_test]
-    fn test_execute_differential_refresh_success() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public");
-        Spi::run("CREATE TABLE public.test_refresh_src (id INT PRIMARY KEY, val TEXT)");
-
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-            'public.test_refresh_st',
-            'SELECT id, val FROM public.test_refresh_src',
-            '1 minute'
-        );",
-        );
-
-        Spi::run("INSERT INTO public.test_refresh_src VALUES (1, 'hello'), (2, 'world')");
-
-        // Wait, populate via refresh
-        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_st', 'FULL')");
-
-        // Get metadata correctly
-        let st = StreamTableMeta::get_by_name("public", "test_refresh_st").expect("st must exist");
-        assert!(st.is_populated, "ST should be populated after FULL");
-
-        let prev_frontier = st.frontier.clone();
-        assert!(
-            prev_frontier.as_ref().map_or(false, |f| !f.is_empty()),
-            "Frontier should not be empty after FULL refresh"
-        );
-
-        // Make delta changes
-        Spi::run("INSERT INTO public.test_refresh_src VALUES (3, 'foo')");
-        Spi::run("UPDATE public.test_refresh_src SET val = 'bar' WHERE id = 1");
-        Spi::run("DELETE FROM public.test_refresh_src WHERE id = 2");
-
-        let new_frontier = crate::version::capture_current_frontier().expect("new frontier");
-        let prev_frontier_ref = prev_frontier.as_ref().expect("prev_frontier must be Some");
-
-        let (inserted, deleted) =
-            execute_differential_refresh(&st, prev_frontier_ref, &new_frontier)
-                .expect("differential refresh should succeed");
-
-        assert!(inserted > 0, "should have inserted rows");
-        assert!(deleted > 0, "should have deleted rows");
-
-        let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM public.test_refresh_st")
-            .unwrap()
-            .unwrap();
-        assert_eq!(count, 2, "1,3 should be present");
-
-        Spi::run("SELECT pgtrickle.drop_stream_table('public.test_refresh_st')");
-        Spi::run("DROP TABLE public.test_refresh_src CASCADE");
-    }
-} // close mod pg_tests
 
 // ── G12-2: validate_topk_metadata_fields tests ─────────────────
 

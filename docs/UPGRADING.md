@@ -2,6 +2,41 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.88.0 to 0.89.0
+
+Install the 0.89.0 shared library and extension files, restart PostgreSQL, then
+run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.89.0';
+```
+
+While the 0.89.0 library and 0.88.0 SQL catalog coexist, the per-database
+scheduler detects the version mismatch and exits without starting a refresh.
+The launcher starts it again after the extension upgrade completes. Manual
+refresh calls can fail during this short interval, so run the `ALTER EXTENSION`
+command before resuming application maintenance.
+
+The migration adds nullable `pgt_stream_tables.window_strategy` metadata and
+the private `pgt_window_states` registry. It does not rewrite stream-table
+storage, source data, change buffers, or existing window results.
+
+v0.89 records a versioned plan for each window query. Every function has
+`runtime_enabled = false` and uses partition recomputation. Existing catalog
+rows retain their data, and the upgrade creates no active private window state.
+Unknown strategy versions fail closed with an actionable reason.
+
+After the upgrade, check the extension version and window-state health rows:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+SELECT * FROM pgtrickle.health_check()
+WHERE check_name LIKE 'window_state_%';
+```
+
+The second query normally returns no rows because production plans create no
+window state.
+
 ## 0.87.16 → 0.87.17
 
 This is the breaking V1-to-V2 storage transition. The migration is
@@ -403,9 +438,9 @@ Install the released 0.83.0 shared library and SQL together, restart
 PostgreSQL, then run `ALTER EXTENSION pg_trickle UPDATE` before switching to
 the 0.84.0 package. Verify that `pgtrickle.version()`,
 `pg_extension.extversion`, and the latest migration audit row all report
-`0.84.0`. After a logical restore, keep scheduling disabled until
-`pgtrickle.restore_stream_tables()` completes protected FULL baselines and
-post-restore DML converges with each defining query.
+`0.84.0`. Automatic logical restore reconciliation remains disabled; use a
+physical backup for resumable stream tables or recreate them from their
+definitions after restoring source data.
 
 ### 0.84.0 → 0.85.0 scheduler and resource resilience
 
@@ -601,8 +636,9 @@ dependency catalog.
 
 **New API function added:**
 
-- `pgtrickle.restore_stream_tables()` — re-installs CDC triggers and
-  re-registers stream tables after a `pg_restore` from a `pg_dump`.
+- `pgtrickle.restore_stream_tables()` — reserved for logical reconciliation.
+  The current implementation fails closed because it cannot yet prove restored
+  relation, ownership, CDC, and frontier identity.
 
 **Hidden auxiliary columns for AVG / STDDEV / VAR aggregates.** Stream tables
 using these aggregates will automatically receive hidden `__pgt_aux_*`

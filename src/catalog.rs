@@ -9,6 +9,7 @@ use pgrx::spi::{SpiHeapTupleData, SpiTupleTable};
 use std::hash::{Hash, Hasher};
 
 use crate::dag::{DiamondConsistency, DiamondSchedulePolicy, RefreshMode, StStatus};
+use crate::dvm::parser::WindowStrategyPlan;
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
 
@@ -265,6 +266,9 @@ pub struct StreamTableMeta {
     /// v0.87.16: bounded identity probe encoding version.
     /// NULL is treated as unknown and fails closed on incremental paths.
     pub row_probe_version: Option<i16>,
+    /// v0.89.0: analyzed incremental-window strategy. Unknown versions fail
+    /// closed when the catalog row is loaded.
+    pub window_strategy: Option<WindowStrategyPlan>,
     pub self_heal_work_mem_percent: i16,
     pub self_heal_lock_backoff_exponent: i16,
     pub self_heal_success_streak: i16,
@@ -527,7 +531,8 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path \
+                     last_error_code, last_error_retryable, defining_search_path, \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -575,7 +580,8 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path \
+                     last_error_code, last_error_retryable, defining_search_path, \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_relid = $1",
                     None,
@@ -628,7 +634,8 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path \
+                     last_error_code, last_error_retryable, defining_search_path, \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_id = $1",
                     None,
@@ -676,7 +683,8 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path \
+                     last_error_code, last_error_retryable, defining_search_path, \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
                      FROM pgtrickle.pgt_stream_tables st",
                     None,
                     &[],
@@ -728,7 +736,8 @@ impl StreamTableMeta {
                      COALESCE(self_heal_work_mem_percent, 100::smallint), \
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path \
+                     last_error_code, last_error_retryable, defining_search_path, \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1582,6 +1591,17 @@ impl StreamTableMeta {
             .get::<String>(61)
             .map_err(map_spi)?
             .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
+        let window_strategy = table
+            .get::<pgrx::JsonB>(62)
+            .map_err(map_spi)?
+            .map(|json| WindowStrategyPlan::from_json(json.0))
+            .transpose()
+            .map_err(|reason| PgTrickleError::WindowStateInvalid {
+                pgt_id,
+                node_ordinal: -1,
+                spec_ordinal: -1,
+                reason,
+            })?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1645,6 +1665,7 @@ impl StreamTableMeta {
             last_error_code,
             last_error_retryable,
             defining_search_path,
+            window_strategy,
         })
     }
 
@@ -1784,6 +1805,17 @@ impl StreamTableMeta {
             .get::<String>(61)
             .map_err(map_spi)?
             .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
+        let window_strategy = row
+            .get::<pgrx::JsonB>(62)
+            .map_err(map_spi)?
+            .map(|json| WindowStrategyPlan::from_json(json.0))
+            .transpose()
+            .map_err(|reason| PgTrickleError::WindowStateInvalid {
+                pgt_id,
+                node_ordinal: -1,
+                spec_ordinal: -1,
+                reason,
+            })?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1847,6 +1879,7 @@ impl StreamTableMeta {
             last_error_code,
             last_error_retryable,
             defining_search_path,
+            window_strategy,
         })
     }
 }

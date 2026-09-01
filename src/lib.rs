@@ -76,6 +76,8 @@ mod template_cache;
 pub mod version;
 #[allow(dead_code)]
 pub mod wal_decoder;
+#[allow(dead_code)]
+pub(crate) mod window_state;
 
 ::pgrx::pg_module_magic!();
 
@@ -370,6 +372,10 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     row_identity_version SMALLINT,
     -- v0.87.16: bounded identity probe encoding version.
     row_probe_version SMALLINT,
+    -- v0.89.0: analyzed incremental-window strategy. Private state OIDs live
+    -- in pgt_window_states, never in this durable plan.
+    window_strategy JSONB
+        CHECK (window_strategy IS NULL OR jsonb_typeof(window_strategy) = 'object'),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- v0.87.7 LSEC-3: exact search_path defining_query was resolved under
@@ -413,6 +419,40 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_set_operation_states (
 );
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_set_operation_states', '');
+
+-- v0.89.0: Durable private registry for incremental window state. The
+-- relations referenced here are permanent LOGGED extension members; their
+-- contents are derived and rebuilt after logical restore.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_window_states (
+    pgt_id              BIGINT NOT NULL
+                        REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                        ON DELETE CASCADE,
+    node_ordinal        INTEGER NOT NULL,
+    spec_ordinal        INTEGER NOT NULL,
+    partition_relid     OID NOT NULL,
+    row_relid           OID NOT NULL,
+    peer_relid          OID,
+    schema_version      SMALLINT NOT NULL,
+    strategy_version    SMALLINT NOT NULL,
+    query_hash          BIGINT NOT NULL,
+    state_generation    BIGINT NOT NULL,
+    status              TEXT NOT NULL
+                        CHECK (status IN
+                               ('BUILDING', 'READY', 'STALE', 'OVER_BUDGET')),
+    estimated_bytes     BIGINT NOT NULL DEFAULT 0
+                        CHECK (estimated_bytes >= 0),
+    last_validated_at   TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (pgt_id, node_ordinal, spec_ordinal)
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_window_states FROM PUBLIC;
+
+-- Register the table with an always-false filter so pg_dump restores the
+-- durable strategy JSON but never stale live relation OIDs or derived rows.
+SELECT pg_catalog.pg_extension_config_dump(
+    'pgtrickle.pgt_window_states',
+    'WHERE false'
+);
 
 -- Snapshot metadata catalog
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_snapshots (
@@ -693,6 +733,12 @@ INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES (
     '0.85.0',
     'Scheduler and resource resilience gate'
+)
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES (
+    '0.89.0',
+    'Incremental window strategy and private state registry'
 )
 ON CONFLICT (version) DO NOTHING;
 

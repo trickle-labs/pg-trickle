@@ -508,7 +508,7 @@ diagnostics, and a support-matrix entry.
 | [v0.87.16](roadmap/v0.87.16.md) | Versioned Row Identity V2 Engine Integration: BYTEA storage, direct bounded and expression-probe indexes, trigger/WAL CDC, DVM producers, exact matching, version guards, and replication compatibility | "The same exact row identity drives storage, capture, refresh, and matching." | ✅ Implemented | 12 pw | [Full details](roadmap/v0.87.16.md) |
 | [v0.87.17](roadmap/v0.87.17.md) | Versioned Row Identity V2 Hardening and Recreation: cross-path correctness, performance gates, non-destructive preflight, stream-table recreation, external resnapshot guidance, and privacy controls | "I can adopt exact row identities with a clear, repeatable rebuild and no silent compatibility trap." | ✅ Implemented | 9 pw | [Full details](roadmap/v0.87.17.md) |
 | [v0.88.0](roadmap/v0.88.0.md) | Safe Engine Optimization Foundations: `DiffContext` decomposition, a narrowly eligible vectorized aggregate path, planner instrumentation, shadow planning, and automatic reordering only for validated operator classes | "One PostgreSQL instance can handle a lot." | ✅ Implemented | Large | [Full details](roadmap/v0.88.0.md) |
-| [v0.89.0](roadmap/v0.89.0.md) | Incremental Windows, Proven Subset: bounded crash-safe state, per-algorithm semantic and performance admission, and visible partition-recomputation fallback for every shape that does not pass | "One PostgreSQL instance can handle a lot." | Planned | Large | [Full details](roadmap/v0.89.0.md) |
+| [v0.89.0](roadmap/v0.89.0.md) | Incremental Windows: typed planning, validated state machinery, visible fallback, and a measured rejection of the `ROW_NUMBER` state candidate | "One PostgreSQL instance can handle a lot." | ✅ Implemented; runtime admission rejected | Large | [Full details](roadmap/v0.89.0.md) |
 | [v0.90.0](roadmap/v0.90.0.md) | Freshness Controller in Advisory Mode: authoritative freshness measurement, reproducible recommendations, separate resource, scheduling, and per-stream layers, and evidence-gated automation | "Tell me whether my freshness target is feasible and how pg_trickle would meet it." | Planned | Large | [Full details](roadmap/v0.90.0.md) |
 | [v0.91.0](roadmap/v0.91.0.md) | Schema & Query Evolution: conservative defining-query classification, shadow rebuild and atomic swap, deterministic source-DDL handling, and explicit suspension for unsafe changes | "Production schema and query changes fail safely." | Planned | Large | [Full details](roadmap/v0.91.0.md) |
 | [v0.92.0](roadmap/v0.92.0.md) | Backup, Restore, Upgrade & CDC Recovery: tested logical and physical recovery, clone isolation, machine-readable upgrade preflight, major and extension upgrade coverage, and proof-based CDC recovery classes | "Backups, upgrades, clones, and capture failures preserve correctness." | Planned | Large | [Full details](roadmap/v0.92.0.md) |
@@ -724,7 +724,7 @@ v0.88    ─── Safe engine optimization: DiffContext split, narrow vector pa
     │
     └── Parallel performance and product track that does not gate lifecycle work
         │
-        v0.89    ─── Incremental windows, proven subset: bounded crash-safe state, per-algorithm admission, visible recomputation fallback
+        v0.89    ─── Window admission foundation: bounded state machinery, measured runtime rejection, visible recomputation fallback
         │
         v0.90    ─── Freshness controller: authoritative measurement, advisory decisions, layered resource/SLA/execution control, evidence-gated automation
 
@@ -1094,8 +1094,9 @@ upgrade gates. Existing source tables remain intact, but pre-1.0 stream-table
 state is deliberately dropped and recreated; external consumers resnapshot
 against the new contract. v0.88.0 adds a narrow vectorized aggregate path and
 validates delta-plan alternatives before enabling them. v0.89.0 establishes
-bounded window state, then admits only algorithms that match PostgreSQL and
-beat partition recomputation. Window breadth does not block v1.0.
+bounded window-state machinery and measures its first candidate. The candidate
+lost to partition recomputation, so no window algorithm is runtime-enabled.
+Window breadth does not block v1.0.
 
 On the parallel product track, v0.90.0 makes freshness measurement authoritative
 and starts the controller in advisory mode. Each automatic decision earns

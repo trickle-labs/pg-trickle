@@ -13,15 +13,17 @@ pub enum MemoryComponent {
     DagQueue,
     InvalidationRing,
     ChangeBuffer,
+    WindowState,
 }
 
 impl MemoryComponent {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::DeltaPipeline,
         Self::TemplatePlanCache,
         Self::DagQueue,
         Self::InvalidationRing,
         Self::ChangeBuffer,
+        Self::WindowState,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -31,11 +33,12 @@ impl MemoryComponent {
             Self::DagQueue => "dag_queue",
             Self::InvalidationRing => "invalidation_ring",
             Self::ChangeBuffer => "change_buffer",
+            Self::WindowState => "window_state",
         }
     }
 }
 
-/// Derived byte limits. The change-buffer value is a guard, not a lossy cap.
+/// Derived byte limits. Storage values are guards, not lossy caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryBudget {
     pub total_bytes: u64,
@@ -44,6 +47,7 @@ pub struct MemoryBudget {
     pub dag_queue_bytes: u64,
     pub invalidation_ring_bytes: u64,
     pub change_buffer_bytes: u64,
+    pub window_state_bytes: u64,
 }
 
 impl MemoryBudget {
@@ -69,6 +73,7 @@ impl MemoryBudget {
             dag_queue_bytes,
             invalidation_ring_bytes,
             change_buffer_bytes: total_bytes,
+            window_state_bytes: total_bytes,
         })
     }
 
@@ -82,6 +87,7 @@ impl MemoryBudget {
                 dag_queue_bytes: 12 * Self::MIB,
                 invalidation_ring_bytes: 12 * Self::MIB,
                 change_buffer_bytes: 256 * Self::MIB,
+                window_state_bytes: 256 * Self::MIB,
             },
         }
     }
@@ -93,6 +99,7 @@ impl MemoryBudget {
             MemoryComponent::DagQueue => self.dag_queue_bytes,
             MemoryComponent::InvalidationRing => self.invalidation_ring_bytes,
             MemoryComponent::ChangeBuffer => self.change_buffer_bytes,
+            MemoryComponent::WindowState => self.window_state_bytes,
         }
     }
 
@@ -146,6 +153,7 @@ mod tests {
             budget.total_bytes
         );
         assert_eq!(budget.change_buffer_bytes, budget.total_bytes);
+        assert_eq!(budget.window_state_bytes, budget.total_bytes);
     }
 
     #[test]

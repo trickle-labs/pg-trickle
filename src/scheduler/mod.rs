@@ -1421,26 +1421,31 @@ enum RefreshOutcome {
 // ── Crash Recovery ─────────────────────────────────────────────────────────
 
 /// Check that the compiled shared library version matches the SQL-installed
-/// extension version. Warns loudly if they differ (stale install).
+/// extension version. Returns false after warning so the caller can fail
+/// closed during the library-before-SQL upgrade interval.
 ///
 /// Must be called inside a `BackgroundWorker::transaction()` block.
-fn check_extension_version_match() {
+fn check_extension_version_match() -> bool {
     let compiled_version = env!("CARGO_PKG_VERSION");
     let installed_version: Option<String> =
         Spi::get_one("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
             .unwrap_or(None);
 
-    if let Some(ref installed) = installed_version
-        && installed != compiled_version
-    {
+    if !extension_version_matches(compiled_version, installed_version.as_deref()) {
         warning!(
             "pg_trickle: version mismatch — shared library is {} but installed SQL extension \
              is {}. Run 'ALTER EXTENSION pg_trickle UPDATE;' to update the SQL objects, \
              or reinstall the matching shared library.",
             compiled_version,
-            installed
+            installed_version.as_deref().unwrap_or("not installed")
         );
+        return false;
     }
+    true
+}
+
+fn extension_version_matches(compiled: &str, installed: Option<&str>) -> bool {
+    installed == Some(compiled)
 }
 
 // ── SLA-3: Dynamic tier re-assignment ──────────────────────────────────────
@@ -4146,7 +4151,15 @@ fn execute_scheduled_refresh(
                                 e
                             );
                             if e.requires_reinitialize() {
-                                let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                                let _ = match &e {
+                                    crate::error::PgTrickleError::WindowStateInvalid { .. } => {
+                                        crate::window_state::mark_for_reinitialization(
+                                            st.pgt_id,
+                                            &e.to_string(),
+                                        )
+                                    }
+                                    _ => StreamTableMeta::mark_for_reinitialize(st.pgt_id),
+                                };
                             }
                             Err(e)
                         }
@@ -4317,7 +4330,12 @@ fn execute_scheduled_refresh(
 
             // Handle schema errors: mark for reinitialize
             if e.requires_reinitialize() {
-                let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                let _ = match &e {
+                    crate::error::PgTrickleError::WindowStateInvalid { .. } => {
+                        crate::window_state::mark_for_reinitialization(st.pgt_id, &e.to_string())
+                    }
+                    _ => StreamTableMeta::mark_for_reinitialize(st.pgt_id),
+                };
                 monitor::alert_reinitialize_needed(
                     &st.pgt_schema,
                     &st.pgt_name,
@@ -4659,6 +4677,13 @@ mod tests {
     use super::*;
     use crate::dag::{ExecutionUnitDag, ExecutionUnitId};
     use std::collections::VecDeque;
+
+    #[test]
+    fn test_scheduler_requires_matching_installed_extension_version() {
+        assert!(extension_version_matches("0.89.0", Some("0.89.0")));
+        assert!(!extension_version_matches("0.89.0", Some("0.88.0")));
+        assert!(!extension_version_matches("0.89.0", None));
+    }
 
     #[test]
     fn test_current_epoch_ms_returns_reasonable_value() {

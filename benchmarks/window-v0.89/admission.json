@@ -1,0 +1,156 @@
+{
+  "release": "0.89.0",
+  "schema_version": 1,
+  "strategy_version": 1,
+  "minimum_measured_improvement": 0.2,
+  "performance_measurements_published": true,
+  "raw_samples": "samples.json",
+  "speedup_claim": null,
+  "admission_result": "rejected",
+  "measurements": {
+    "status": "published_negative",
+    "row_number": [
+      {
+        "partition_rows": 1000,
+        "shape": "tail_insert",
+        "state_candidate_median_ms": 29.941625,
+        "state_candidate_range_ms": [28.490875, 31.011292],
+        "partition_recompute_median_ms": 12.065875,
+        "partition_recompute_range_ms": [11.525541, 13.216917],
+        "recompute_to_candidate_ratio": 0.4030,
+        "state_candidate_median_wal_bytes": 439056,
+        "partition_recompute_median_wal_bytes": 38840,
+        "state_candidate_median_output_rows": 1,
+        "partition_recompute_median_output_rows": 1
+      },
+      {
+        "partition_rows": 1000,
+        "shape": "front_insert",
+        "state_candidate_median_ms": 92.454083,
+        "state_candidate_range_ms": [44.982209, 152.869667],
+        "partition_recompute_median_ms": 20.670208,
+        "partition_recompute_range_ms": [18.595209, 38.816750],
+        "recompute_to_candidate_ratio": 0.2236,
+        "state_candidate_median_wal_bytes": 1239248,
+        "partition_recompute_median_wal_bytes": 416336,
+        "state_candidate_median_output_rows": 1010,
+        "partition_recompute_median_output_rows": 2019
+      },
+      {
+        "partition_rows": 10000,
+        "shape": "tail_insert",
+        "state_candidate_median_ms": 553.613125,
+        "state_candidate_range_ms": [143.272875, 594.418208],
+        "partition_recompute_median_ms": 24.684708,
+        "partition_recompute_range_ms": [23.715125, 25.846125],
+        "recompute_to_candidate_ratio": 0.0446,
+        "state_candidate_median_wal_bytes": 4360624,
+        "partition_recompute_median_wal_bytes": 41272,
+        "state_candidate_median_output_rows": 1,
+        "partition_recompute_median_output_rows": 1
+      },
+      {
+        "partition_rows": 10000,
+        "shape": "front_insert",
+        "state_candidate_median_ms": 691.848292,
+        "state_candidate_range_ms": [685.656292, 762.309333],
+        "partition_recompute_median_ms": 112.537125,
+        "partition_recompute_range_ms": [99.531458, 123.249584],
+        "recompute_to_candidate_ratio": 0.1627,
+        "state_candidate_median_wal_bytes": 11951736,
+        "partition_recompute_median_wal_bytes": 3752704,
+        "state_candidate_median_output_rows": 10010,
+        "partition_recompute_median_output_rows": 20019
+      },
+      {
+        "partition_rows": 100000,
+        "shape": "tail_insert",
+        "state_candidate_median_ms": 1556.859583,
+        "state_candidate_range_ms": [1311.842167, 1831.429541],
+        "partition_recompute_median_ms": 164.637041,
+        "partition_recompute_range_ms": [158.997375, 192.374791],
+        "recompute_to_candidate_ratio": 0.1057,
+        "state_candidate_median_wal_bytes": 43259896,
+        "partition_recompute_median_wal_bytes": 40880,
+        "state_candidate_median_output_rows": 1,
+        "partition_recompute_median_output_rows": 1
+      },
+      {
+        "partition_rows": 100000,
+        "shape": "front_insert",
+        "state_candidate_median_ms": 4190.417875,
+        "state_candidate_range_ms": [4085.014458, 4430.121000],
+        "partition_recompute_median_ms": 1299.224083,
+        "partition_recompute_range_ms": [1229.935416, 1420.041042],
+        "recompute_to_candidate_ratio": 0.3100,
+        "state_candidate_median_wal_bytes": 124280840,
+        "partition_recompute_median_wal_bytes": 37409824,
+        "state_candidate_median_output_rows": 100010,
+        "partition_recompute_median_output_rows": 200019
+      }
+    ]
+  },
+  "functions": [
+    {
+      "name": "row_number",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "scope": "one built-in ROW_NUMBER over a direct keyed scan with exact same-name projections and every non-null identity column in ORDER BY",
+      "reason": "WINDOW_RECOMPUTE_CHEAPER"
+    },
+    {
+      "name": "rank",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "dense_rank",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "lag",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "lead",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "first_value",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "last_value",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "nth_value",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "sum",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    },
+    {
+      "name": "count",
+      "runtime_enabled": false,
+      "strategy": "partition_recompute",
+      "reason": "WINDOW_INCREMENTAL_UNIMPLEMENTED"
+    }
+  ]
+}

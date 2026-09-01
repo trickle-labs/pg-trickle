@@ -1,18 +1,16 @@
 # Backup and Restore
 
-pg_trickle supports physical PostgreSQL backups directly. Logical restore is
-also supported, but it is an explicit reconciliation operation: restored OIDs,
-frontiers, dependency rows, and CDC infrastructure are not trusted. The
-extension rebuilds derived state and requires a protected FULL baseline before
-differential refresh resumes.
+pg_trickle supports physical PostgreSQL backups directly. Logical dumps retain
+durable configuration, but automatic logical restore reconciliation is not yet
+supported. Restored OIDs, frontiers, dependency rows, and CDC infrastructure
+are not trusted, so refresh remains fail-closed.
 
 This page walks through the recommended workflows, the gotchas, and
 how the [Snapshots](SNAPSHOTS.md) API fits in.
 
-> **TL;DR.** Physical backups preserve all runtime state. For `pg_dump` /
-> `pg_restore`, disable `pg_trickle.enabled` during the restore, run the
-> reconciliation helper, and wait for every stream table to complete its
-> protected FULL baseline before re-enabling scheduled differential refresh.
+> **TL;DR.** Physical backups preserve all runtime state. Do not use a logical
+> dump as a resumable pg_trickle backup until protected reconciliation ships;
+> restore source data and recreate stream tables from their definitions instead.
 > Snapshots are provenance-checked derived data, not a backup replacement.
 
 ---
@@ -22,7 +20,7 @@ how the [Snapshots](SNAPSHOTS.md) API fits in.
 | Tool | Best for | Notes |
 |---|---|---|
 | **pgBackRest / WAL-G / pg_basebackup** | Production backup & PITR | Full-fidelity; no special pg_trickle steps |
-| **`pg_dump` / `pg_restore`** | Logical copies, dev environments, schema migration | Works; restore order matters slightly |
+| **`pg_dump` / `pg_restore`** | Source-data copies and schema migration | Stream-table refresh remains disabled after restore; recreate stream tables |
 | **Stream-table [snapshots](SNAPSHOTS.md)** | Replica bootstrap, archival of derived state, fast rollback of one stream table | Not a substitute for a real backup |
 
 ---
@@ -63,9 +61,11 @@ see one `WARNING` per source; the system continues to work.
 ## Logical backups (`pg_dump` / `pg_restore`)
 
 `pg_dump` produces a portable SQL script (or directory archive). Durable
-pg_trickle configuration is included according to the extension's
-`pg_extension_config_dump` policy; derived CDC/runtime state is excluded or
-reset and rebuilt during reconciliation.
+pg_trickle configuration and the registered dependency/CDC catalog rows are
+included according to the extension's `pg_extension_config_dump` policy. Those
+rows retain source-cluster identities and are not trusted after restore. The
+private window-state registry is excluded, and the current release does not
+reconcile the remaining state automatically.
 
 **The one ordering rule:** restore must follow the standard
 PostgreSQL "schema, then data, then constraints/indexes" order.
@@ -84,25 +84,20 @@ createdb mydb_restored
 pg_restore --dbname=mydb_restored --jobs=4 mydb.dump
 ```
 
-Before restore, stop scheduling and avoid application writes. After restore,
-run the reconciliation helper and keep the scheduler fail-closed until all
-stream tables have a new FULL baseline:
+Before restore, stop scheduling and avoid application writes. The reconciliation
+helper intentionally fails because it cannot yet prove restored relation,
+ownership, CDC, and frontier identity:
 
 ```sql
 -- Inspect durable configuration and reconciliation state
 SELECT * FROM pgtrickle.pgt_status();
 
-SELECT pgtrickle.restore_stream_tables();
+SELECT pgtrickle.restore_stream_tables(); -- errors by design
 ```
 
-If reconciliation reports an unresolved relation or legacy snapshot, do not
-guess from a similarly named table. Repair or recreate the object, then retry:
-
-```sql
-SELECT pgtrickle.repair_stream_table(pgt_name)
-FROM pgtrickle.stream_tables_info
-WHERE status IN ('ERROR', 'SUSPENDED');
-```
+Do not resume refresh or guess from similarly named relations. Use a physical
+backup for a resumable deployment, or recreate stream tables from their
+declarative definitions after restoring the source data.
 
 ### What `pg_dump` does and does not capture
 
@@ -111,11 +106,19 @@ WHERE status IN ('ERROR', 'SUSPENDED');
 | Source tables (your data) | ✅ |
 | Stream-table storage (your derived data) | ✅ |
 | Durable `pgtrickle.*` configuration | ✅ |
-| Dependency and CDC registries | ✕ — derived and rebuilt |
-| CDC trigger definitions | ✕ — recreated during reconciliation |
-| `pgtrickle_changes.*` change buffers | ✕ — derived and rebuilt |
+| Dependency and CDC registries | ✅ — restored but untrusted |
+| CDC trigger definitions | Not a supported resume contract; do not trust after restore |
+| `pgtrickle_changes.*` change buffers | Not a supported resume contract; do not trust after restore |
+| `pgt_stream_tables.window_strategy` | ✅ |
+| `pgt_window_states` rows and private window state | ✕ — derived and excluded; v0.89 production plans create none |
 | WAL replication slots (WAL CDC mode) | ✕ (slots are not dumpable; the scheduler recreates them) |
 | Refresh history and runtime summaries | ✕ — operational history is excluded |
+
+`pgt_window_states` uses an always-false `pg_extension_config_dump` filter.
+Logical restore therefore cannot reuse relation OIDs from the source cluster.
+The durable `window_strategy` plan remains available for diagnostics. Every
+v0.89 window plan is runtime-disabled, but restored stream-table refresh still
+fails closed until the broader logical reconciliation path is implemented.
 
 If you do not need the audit history, you can shrink the dump with
 `pg_dump --exclude-table='pgtrickle.pgt_refresh_history'`.

@@ -33,6 +33,14 @@ pub use insert::execute_topk_refresh;
 pub(crate) use update::*;
 
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
+    let result = execute_full_refresh_target(st)?;
+    let _window_plan = crate::window_state::prepare_for_protected_refresh(st)?;
+    Ok(result)
+}
+
+pub(crate) fn execute_full_refresh_target(
+    st: &StreamTableMeta,
+) -> Result<(i64, i64), PgTrickleError> {
     crate::cdc::validate_stream_table_row_identity(st)?;
     let dependencies = StDependency::get_for_st(st.pgt_id)?;
     if !st.refresh_mode.is_immediate() {
@@ -426,6 +434,24 @@ pub fn execute_differential_refresh_with_tuning(
 ) -> Result<(i64, i64), PgTrickleError> {
     validate_differential_refresh_inputs(st, prev_frontier)?;
 
+    // Persist upgraded strategy metadata. Production v0.89 plans retain
+    // partition recomputation; tests may explicitly enable the rejected
+    // state-backed benchmark candidate.
+    let window_plan = crate::window_state::ensure_plan(st)?;
+    let window_runtime_enabled = window_plan.as_ref().is_some_and(|plan| {
+        plan.nodes.iter().any(|node| {
+            node.functions
+                .iter()
+                .any(|function| function.runtime_enabled)
+        })
+    });
+    let ready_window_state = window_plan
+        .as_ref()
+        .filter(|_| window_runtime_enabled)
+        .map(|plan| crate::window_state::ready_row_number_state(st, plan))
+        .transpose()?
+        .flatten();
+
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
     // F10: record start time for OTLP span (nanoseconds since Unix epoch).
@@ -553,7 +579,9 @@ pub fn execute_differential_refresh_with_tuning(
     // stream table or upgraded from pre-0.78.0), compute and persist it now.
     // This is a best-effort fire-and-forget — failure is logged but not fatal.
     if st.query_complexity_class.is_none() {
-        let class = classify_query_complexity_optree(&effective_defining_query);
+        let class = with_stream_owner(st, || {
+            Ok(classify_query_complexity_optree(&effective_defining_query))
+        })?;
         if let Err(e) =
             crate::catalog::StreamTableMeta::update_query_complexity_class(st.pgt_id, class)
         {
@@ -568,19 +596,25 @@ pub fn execute_differential_refresh_with_tuning(
     // Scan nodes in the join tree. Used for:
     //   (a) max_differential_joins guard: reject if too complex for DIFF
     //   (b) deep-join planner hints: SET LOCAL for 5+ table joins
-    let scan_count = dvm::query_total_scan_count(&effective_defining_query).unwrap_or_else(|e| {
-        pgrx::warning!(
-            "[pg_trickle] DI-7: failed to count scans for {schema}.{name}: {e}; \
-             assuming scan_count=1"
-        );
-        1
-    });
+    let scan_count = with_stream_owner(st, || {
+        Ok(
+            dvm::query_total_scan_count(&effective_defining_query).unwrap_or_else(|e| {
+                pgrx::warning!(
+                    "[pg_trickle] DI-7: failed to count scans for {schema}.{name}: {e}; \
+                 assuming scan_count=1"
+                );
+                1
+            }),
+        )
+    })?;
 
     if let Some(max_joins) = st.max_differential_joins
         && max_joins > 0
     {
         // DI-7 uses the join-specific scan count (stops at Aggregate etc.)
-        let join_sc = dvm::query_join_scan_count(&effective_defining_query).unwrap_or(0);
+        let join_sc = with_stream_owner(st, || {
+            Ok(dvm::query_join_scan_count(&effective_defining_query).unwrap_or(0))
+        })?;
         if join_sc > max_joins as usize {
             return Err(PgTrickleError::QueryTooComplex(format!(
                 "join scan count ({join_sc}) exceeds max_differential_joins ({max_joins}) \
@@ -1290,7 +1324,9 @@ pub fn execute_differential_refresh_with_tuning(
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
     if !should_fallback && !skip_ratio_check && total_change_count > 0 {
-        let complexity = classify_query_complexity(&effective_defining_query);
+        let complexity = with_stream_owner(st, || {
+            Ok(classify_query_complexity(&effective_defining_query))
+        })?;
         if let Some(hist) = query_refresh_history_stats(st.pgt_id)
             && cost_model_prefers_full(
                 hist.avg_ms_per_delta,
@@ -1478,6 +1514,11 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
+    // Production plans keep runtime window state disabled because the v0.89
+    // benchmark rejected the candidate. A manually enabled plan is used only
+    // by lifecycle and benchmark tests and executes the candidate directly.
+    let incremental_window_state = ready_window_state;
+
     let t_decision = t_decision_start.elapsed();
     let delta_stage = crate::refresh::delta_stage::DeltaStage::prepare(
         st,
@@ -1525,7 +1566,9 @@ pub fn execute_differential_refresh_with_tuning(
         }
     };
 
-    let has_recursive_cte = dvm::query_has_recursive_cte(&effective_defining_query)?;
+    let has_recursive_cte = with_stream_owner(st, || {
+        dvm::query_has_recursive_cte(&effective_defining_query)
+    })?;
     // Non-recursive CTEs (WITH … AS (…)) are fully supported by the DVM
     // engine: parse_defining_query_full() builds CteScan nodes and the
     // diff engine processes them via diff_cte_scan().  There is no need for
@@ -1534,7 +1577,7 @@ pub fn execute_differential_refresh_with_tuning(
     // generate their delta SQL on every refresh instead of caching a
     // template with LSN placeholders).
 
-    let cached = if has_recursive_cte {
+    let cached = if has_recursive_cte || incremental_window_state.is_some() {
         None
     } else {
         MERGE_TEMPLATE_CACHE
@@ -1624,16 +1667,33 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         // ── Cache miss: full pipeline + PREPARE + cache ──────────────
         pgrx::debug1!("[pg_trickle] cache MISS for pgt_id={}", st.pgt_id);
-        let delta_result = if has_recursive_cte {
-            dvm::generate_delta_query_staged(
-                st.pgt_id,
-                &effective_defining_query,
-                prev_frontier,
-                new_frontier,
-                schema,
-                name,
-            )?
+        let delta_result = if let Some(state) = incremental_window_state.as_ref() {
+            with_stream_owner(st, || {
+                dvm::generate_delta_query_staged_with_window_state(
+                    st.pgt_id,
+                    &state.row_relation,
+                    &effective_defining_query,
+                    prev_frontier,
+                    new_frontier,
+                    schema,
+                    name,
+                )
+            })?
+        } else if has_recursive_cte {
+            with_stream_owner(st, || {
+                dvm::generate_delta_query_staged(
+                    st.pgt_id,
+                    &effective_defining_query,
+                    prev_frontier,
+                    new_frontier,
+                    schema,
+                    name,
+                )
+            })?
         } else {
+            // The cached path owns private L2 catalog access and therefore
+            // runs as the extension, as it did before v0.89. Generated SQL is
+            // still executed separately through the stream-owner boundary.
             dvm::generate_delta_query_cached(
                 st.pgt_id,
                 &effective_defining_query,
@@ -1679,7 +1739,7 @@ pub fn execute_differential_refresh_with_tuning(
 
         // Build the MERGE template using the raw delta SQL template
         // (with __PGS_PREV_LSN_* / __PGS_NEW_LSN_* placeholder tokens).
-        let delta_sql_template = if has_recursive_cte {
+        let delta_sql_template = if has_recursive_cte || incremental_window_state.is_some() {
             delta_sql.clone()
         } else {
             dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_sql.clone())
@@ -1741,7 +1801,7 @@ pub fn execute_differential_refresh_with_tuning(
             };
 
         // Store templates in the cache for subsequent refreshes.
-        if !has_recursive_cte {
+        if !has_recursive_cte && incremental_window_state.is_none() {
             // P-8: Resize LRU cache if needed, then put() (automatically evicts LRU at capacity).
             maybe_evict_lru_cache_entry();
             MERGE_TEMPLATE_CACHE.with(|cache| {
@@ -2179,7 +2239,8 @@ pub fn execute_differential_refresh_with_tuning(
     // when multiple target rows match a single source row (non-unique
     // __pgt_row_id). Force explicit DML path for counted deletion.
     let is_dedup_flag = crate::dvm::is_delta_deduplicated(st.pgt_id);
-    let use_explicit_dml = use_explicit_dml || (st.has_keyless_source && !is_dedup_flag);
+    let use_explicit_dml =
+        use_explicit_dml || (st.has_keyless_source && !is_dedup_flag) || window_runtime_enabled;
 
     // CIT-1: Pre-compute whether this ST lives on a Citus distributed table.
     // Used below to override the MERGE strategy — cross-shard MERGE is blocked.
@@ -2273,7 +2334,9 @@ pub fn execute_differential_refresh_with_tuning(
     // handles these collisions.
     let use_delete_insert = if !resolved.is_deduplicated
         && !resolved.is_all_algebraic
-        && dvm::query_has_join(&effective_defining_query).unwrap_or(true)
+        && with_stream_owner(st, || {
+            Ok(dvm::query_has_join(&effective_defining_query).unwrap_or(true))
+        })?
         && !st.has_keyless_source
         && !use_explicit_dml
         && st.st_partition_key.is_none()
@@ -2348,7 +2411,9 @@ pub fn execute_differential_refresh_with_tuning(
 
     // MT-8: only the proven single-scan COUNT/SUM/AVG shape replaces the
     // SQL delta producer. Existing target/apply constraints fail closed.
-    let vector_plan = match dvm::parse_defining_query(&effective_defining_query) {
+    let vector_tree =
+        with_stream_owner(st, || dvm::parse_defining_query(&effective_defining_query));
+    let vector_plan = match vector_tree {
         Ok(tree) => {
             let admission = crate::dvm::operators::vectorized_agg::VectorAggregateAdmission {
                 immediate_mode: false,
@@ -2390,6 +2455,7 @@ pub fn execute_differential_refresh_with_tuning(
                             )
                         });
                         let has_deletes = has_minmax
+                            // nosemgrep: rust.spi.query.dynamic-format -- staged_source is an internally generated, quote-escaped temporary relation.
                             && Spi::get_one::<bool>(&format!(
                                 "SELECT EXISTS (SELECT 1 FROM {staged_source} WHERE action = 'D')"
                             ))
@@ -3010,6 +3076,10 @@ pub fn execute_differential_refresh_with_tuning(
     })?;
     crate::refresh::set_merge_strategy(strategy_label);
 
+    if let Some(plan) = window_plan.as_ref().filter(|_| window_runtime_enabled) {
+        crate::window_state::sync_after_differential(st, plan, &delta_table)?;
+    }
+
     // Private CDC finalization resumes only after owner SQL has completed.
     if let Some(diff_capture_cols) = downstream_capture {
         let capture_result = if diff_capture_cols.is_empty() {
@@ -3045,11 +3115,14 @@ pub fn execute_differential_refresh_with_tuning(
     // matching so comma-joins (`FROM a, b`) and joins inside subqueries are
     // also covered. Falls back to `true` (run cleanup, fail-safe) if the
     // query cannot be parsed.
-    let query_has_join = dvm::query_has_join(&effective_defining_query).unwrap_or(true);
+    let query_has_join =
+        with_stream_owner(st, || dvm::query_has_join(&effective_defining_query)).unwrap_or(true);
     // Skip full-query reconciliation for recursive CTEs — it bypasses the
     // ivm_recursive_max_depth guard and would insert suppressed rows.
-    let query_has_recursive_cte =
-        dvm::query_has_recursive_cte(&effective_defining_query).unwrap_or(false);
+    let query_has_recursive_cte = with_stream_owner(st, || {
+        dvm::query_has_recursive_cte(&effective_defining_query)
+    })
+    .unwrap_or(false);
     let phantom_cleanup_count = if query_has_join
         && !query_has_recursive_cte
         && !resolved.is_deduplicated
@@ -3255,7 +3328,9 @@ pub fn execute_differential_refresh_with_tuning(
         // derived from recent refresh history.  The cost model computes
         // the crossover delta ratio where INCR cost equals FULL cost,
         // adjusted for query complexity class.
-        let complexity = classify_query_complexity(&effective_defining_query);
+        let complexity = with_stream_owner(st, || {
+            Ok(classify_query_complexity(&effective_defining_query))
+        })?;
         let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
             Some(cost_threshold) => {
                 // Weighted blend: 60% ratio-based, 40% cost-based.

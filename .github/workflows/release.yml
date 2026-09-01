@@ -54,8 +54,8 @@ jobs:
       - name: ROWID-17 machine-enforced V2 release gate
         run: python3 scripts/row_id_v2_release_gate.py
 
-      - name: v0.88 engine release gate
-        run: python3 scripts/v0_88_release_gate.py
+      - name: v0.89 window-state release gate
+        run: python3 scripts/v0_89_release_gate.py
 
   # ── Build release artifacts for each platform ───────────────────────────
   build-release:

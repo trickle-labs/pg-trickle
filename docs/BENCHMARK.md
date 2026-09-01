@@ -63,6 +63,54 @@ The release result must reach 5 times the saved v0.87.17 median changed rows
 per second. Eligible production-like workloads may not regress by more than
 10 percent.
 
+## v0.89 window admission artifact
+
+`benchmarks/window-v0.89/admission.json` records the v0.89 decision for every
+candidate family. All entries have `runtime_enabled = false` and use
+`partition_recompute`. The narrow built-in `ROW_NUMBER` candidate failed the
+performance gate.
+
+The measured query used one direct keyed scan, exact same-name projections,
+and the complete non-null identity in `ORDER BY`. The candidate filtered
+changed output rows but still recomputed the affected partition. Each cell has
+five measured repetitions after one warm-up.
+
+| Rows | Change | State candidate median ms [range] | Partition recompute median ms [range] | Recompute/state ratio |
+|---:|---|---:|---:|---:|
+| 1,000 | Tail insert | 29.941625 [28.490875, 31.011292] | 12.065875 [11.525541, 13.216917] | 0.4030 |
+| 1,000 | Front insert | 92.454083 [44.982209, 152.869667] | 20.670208 [18.595209, 38.816750] | 0.2236 |
+| 10,000 | Tail insert | 553.613125 [143.272875, 594.418208] | 24.684708 [23.715125, 25.846125] | 0.0446 |
+| 10,000 | Front insert | 691.848292 [685.656292, 762.309333] | 112.537125 [99.531458, 123.249584] | 0.1627 |
+| 100,000 | Tail insert | 1556.859583 [1311.842167, 1831.429541] | 164.637041 [158.997375, 192.374791] | 0.1057 |
+| 100,000 | Front insert | 4190.417875 [4085.014458, 4430.121000] | 1299.224083 [1229.935416, 1420.041042] | 0.3100 |
+
+The ratio is the partition-recompute median divided by the state-candidate
+median. Every ratio is below 1.0. The candidate therefore failed the required
+20 percent improvement gate.
+
+| Rows | Change | State candidate WAL bytes / output rows | Partition recompute WAL bytes / output rows |
+|---:|---|---:|---:|
+| 1,000 | Tail insert | 439,056 / 1 | 38,840 / 1 |
+| 1,000 | Front insert | 1,239,248 / 1,010 | 416,336 / 2,019 |
+| 10,000 | Tail insert | 4,360,624 / 1 | 41,272 / 1 |
+| 10,000 | Front insert | 11,951,736 / 10,010 | 3,752,704 / 20,019 |
+| 100,000 | Tail insert | 43,259,896 / 1 | 40,880 / 1 |
+| 100,000 | Front insert | 124,280,840 / 100,010 | 37,409,824 / 200,019 |
+
+These are medians. The benchmark did not sample state relation size. v0.89
+publishes no incremental speedup claim.
+
+Run the offline contract check with:
+
+```bash
+python3 scripts/v0_89_release_gate.py
+```
+
+```bash
+bash scripts/run_light_e2e_tests.sh \
+  --package --test e2e_window_incremental_tests --ignored
+```
+
 ---
 
 ## Prerequisites

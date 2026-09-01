@@ -298,6 +298,32 @@ It records current-plan estimates, observations, semantic barriers, and shadow
 candidates. PostgreSQL still chooses physical join algorithms and build sides.
 An unvalidated rewrite stays in shadow mode and does not change generated SQL.
 
+The v0.89 window planner records a versioned semantic plan in
+`pgt_stream_tables.window_strategy`. The plan includes typed frame bounds,
+function and type identity, collations, ordering, exact child identity, the
+candidate strategy, and a fallback reason. Unknown versions and incomplete
+metadata fail closed.
+
+`pgt_window_states` is the private registry for LOGGED window state relations.
+Registry rows carry semantic ordinals, relation OIDs, plan versions,
+the defining-query hash, one generation, status, and estimated size. Logical
+dumps exclude these derived rows. Validation checks ownership, extension
+membership, relation persistence, schema, versions, the query hash, and the
+generation before any state can become usable.
+
+v0.89 evaluated one built-in `ROW_NUMBER` state candidate over one direct keyed
+scan. Required columns kept their names, and the complete non-null child
+identity appeared in `ORDER BY`. The candidate filtered changed output rows but
+still recomputed the affected partition. It lost to partition recomputation in
+all six benchmark cells.
+
+No window family is runtime-enabled. Production plans create no active window
+state and use the existing partition-recomputation operator. If a state build
+or synchronization exceeds the memory budget, the handler removes all private
+state and its registry rows, then persists a runtime-disabled plan. It does not
+evict or re-admit individual partitions. Partition recomputation is a
+DIFFERENTIAL strategy, not a FULL fallback.
+
 For an eligible top-level aggregate over one scan, the vector producer copies
 at most 1,024 change rows into concrete owned columns and reduces them with
 checked Rust loops. Page results combine in a memory-budgeted hash table; when
@@ -885,7 +911,7 @@ src/
 │       ├── subquery.rs      # Subquery / inlined CTE delegation
 │       ├── cte_scan.rs      # Shared CTE delta (multi-reference)
 │       ├── recursive_cte.rs # Recursive CTE (semi-naive + DRed + recomputation)
-│       ├── window.rs        # Window function (partition recomputation)
+│       ├── window.rs        # Window-function partition recomputation
 │       ├── lateral_function.rs  # LATERAL SRF (row-scoped recomputation)
 │       ├── lateral_subquery.rs  # LATERAL correlated subquery
 │       ├── semi_join.rs     # EXISTS / IN subquery (semi-join delta)

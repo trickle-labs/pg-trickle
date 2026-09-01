@@ -491,6 +491,11 @@ impl E2eDb {
         }
     }
 
+    /// Start an isolated container for tests that restart PostgreSQL itself.
+    pub async fn new_dedicated() -> Self {
+        Self::new_with_db("pg_trickle_test").await
+    }
+
     /// Start a fresh database WITHOUT the extension pre-installed.
     ///
     /// Unlike [`Self::new`] (which clones from the pre-seeded template), this
@@ -571,6 +576,23 @@ impl E2eDb {
 
     pub fn connection_string(&self) -> &str {
         &self.connection_string
+    }
+
+    /// Reconnect to a dedicated container after Docker may have remapped its host port.
+    pub async fn reconnect_after_restart(&self) -> PgPool {
+        let ContainerLease::Dedicated { _container } = &self._container else {
+            panic!("reconnect_after_restart requires a dedicated container");
+        };
+        let port = _container
+            .get_host_port_ipv4(5432_u16.tcp())
+            .await
+            .expect("Failed to get remapped PostgreSQL port after restart");
+        let db_name = self
+            .connection_string
+            .rsplit_once('/')
+            .map(|(_, db_name)| db_name)
+            .expect("E2E connection string must contain a database name");
+        Self::connect_with_retry(&connection_string(port, db_name), 30).await
     }
 
     /// Execute SQL on a dedicated connection and collect PostgreSQL notices.
@@ -775,8 +797,10 @@ impl E2eDb {
     /// after the "ready to accept connections" log line.
     async fn connect_with_retry(url: &str, max_attempts: u32) -> PgPool {
         for attempt in 1..=max_attempts {
-            match PgPool::connect(url).await {
-                Ok(pool) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), PgPool::connect(url))
+                .await
+            {
+                Ok(Ok(pool)) => {
                     // Verify the connection actually works
                     match sqlx::query("SELECT 1").execute(&pool).await {
                         Ok(_) => return pool,
@@ -791,15 +815,19 @@ impl E2eDb {
                         }
                     }
                 }
-                Err(e) if attempt < max_attempts => {
+                Ok(Err(e)) if attempt < max_attempts => {
                     eprintln!("E2E connect attempt {}/{}: {}", attempt, max_attempts, e);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     panic!(
                         "E2E: Failed to connect after {} attempts: {}",
                         max_attempts, e
                     );
                 }
+                Err(_) if attempt < max_attempts => {
+                    eprintln!("E2E connect attempt {attempt}/{max_attempts}: timed out");
+                }
+                Err(_) => panic!("E2E: connection timed out after {max_attempts} attempts"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }

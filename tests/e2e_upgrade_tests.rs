@@ -102,6 +102,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("topk_offset", "integer"),
         ("topk_order_by", "text"),
         ("updated_at", "timestamp with time zone"),
+        ("window_strategy", "jsonb"),
         // v0.47.0: VP-1/VP-2 — post-refresh action hooks
         ("post_refresh_action", "text"),
         ("reindex_drift_threshold", "double precision"),
@@ -619,6 +620,151 @@ async fn test_upgrade_v0877_missing_storage_aborts_before_catalog_mutation() {
 // ══════════════════════════════════════════════════════════════════════
 // L8 — All new functions exist after ALTER EXTENSION UPDATE
 // ══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_v088_window_catalog_rows_remain_valid() {
+    if std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.88.0")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.88.0' CASCADE")
+        .await;
+    db.execute("CREATE TABLE upgrade_window_source (id bigint PRIMARY KEY, value int NOT NULL)")
+        .await;
+    db.execute("INSERT INTO upgrade_window_source VALUES (1, 20), (2, 10)")
+        .await;
+    // Seed a v0.88 catalog row directly. The test image contains the v0.89
+    // library, which cannot safely execute v0.88 SQL functions before upgrade.
+    db.execute(
+        "CREATE TABLE upgrade_window_st ( \
+             __pgt_row_id bytea NOT NULL, id bigint, value integer, rn bigint)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO upgrade_window_st \
+         SELECT decode(md5(id::text), 'hex'), id, value, \
+                ROW_NUMBER() OVER (ORDER BY value, id) \
+         FROM public.upgrade_window_source",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables ( \
+             pgt_relid, pgt_name, pgt_schema, defining_query, original_query, \
+             schedule, refresh_mode, requested_refresh_mode, status, is_populated, \
+             defining_search_path) \
+         VALUES ( \
+             'public.upgrade_window_st'::regclass, 'upgrade_window_st', 'public', \
+             'SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn FROM public.upgrade_window_source', \
+             'SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn FROM public.upgrade_window_source', \
+             NULL, 'DIFFERENTIAL', 'DIFFERENTIAL', 'SUSPENDED', true, 'public, pg_catalog')",
+    )
+    .await;
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'upgrade_window_st'",
+        )
+        .await;
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_dependencies \
+         (pgt_id, source_relid, source_type, source_stable_name) \
+         VALUES ({pgt_id}, 'public.upgrade_window_source'::regclass, \
+                 'TABLE', 'public.upgrade_window_source')"
+    ))
+    .await;
+
+    db.execute(&format!(
+        "ALTER EXTENSION pg_trickle UPDATE TO '{CURRENT_PG_TRICKLE_VERSION}'"
+    ))
+    .await;
+
+    let (strategy_is_null, registry_exists, release_recorded): (bool, bool, bool) = sqlx::query_as(
+        "SELECT st.window_strategy IS NULL, \
+                    to_regclass('pgtrickle.pgt_window_states') IS NOT NULL, \
+                    EXISTS (SELECT 1 FROM pgtrickle.pgt_schema_version WHERE version = '0.89.0') \
+             FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id = $1",
+    )
+    .bind(pgt_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("load upgraded v0.88 window row");
+    assert!(
+        strategy_is_null,
+        "migration must not invent unvalidated state"
+    );
+    assert!(registry_exists);
+    assert!(release_recorded);
+
+    let dump_filter: String = db
+        .query_scalar(
+            "SELECT cfg.condition \
+             FROM pg_catalog.pg_extension e, \
+                  LATERAL unnest(e.extconfig, e.extcondition) cfg(relid, condition) \
+             WHERE e.extname = 'pg_trickle' \
+               AND cfg.relid = 'pgtrickle.pgt_window_states'::regclass",
+        )
+        .await;
+    assert_eq!(dump_filter, "WHERE false");
+
+    // The first v0.89 inspection plans the legacy row without inventing state
+    // for the benchmark-rejected candidate.
+    let _: serde_json::Value = db
+        .query_scalar("SELECT pgtrickle.explain_json('public.upgrade_window_st')")
+        .await;
+    let (strategy_persisted, runtime_enabled, registry_rows, needs_reinit): (
+        bool,
+        bool,
+        i64,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT st.window_strategy IS NOT NULL, \
+                COALESCE(( \
+                    SELECT bool_or((function ->> 'runtime_enabled')::boolean) \
+                    FROM jsonb_array_elements(st.window_strategy -> 'nodes') node, \
+                         jsonb_array_elements(node -> 'functions') function \
+                ), false), \
+                (SELECT count(*) FROM pgtrickle.pgt_window_states ws WHERE ws.pgt_id = st.pgt_id), \
+                st.needs_reinit \
+         FROM pgtrickle.pgt_stream_tables st WHERE st.pgt_id = $1",
+    )
+    .bind(pgt_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect lazily planned upgraded window row");
+    assert!(strategy_persisted);
+    assert!(!runtime_enabled);
+    assert_eq!(registry_rows, 0);
+    assert!(!needs_reinit);
+    db.assert_st_matches_query(
+        "public.upgrade_window_st",
+        "SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn \
+         FROM public.upgrade_window_source",
+    )
+    .await;
+
+    // Rebuild the v0.88 CDC/frontier metadata before consuming a new interval,
+    // then prove explicit DIFFERENTIAL remains exact after migration.
+    db.execute("SELECT pgtrickle.repair_stream_table('public.upgrade_window_st')")
+        .await;
+    db.refresh_st("public.upgrade_window_st").await;
+    db.execute_seq(&[
+        "INSERT INTO upgrade_window_source VALUES (3, 15)",
+        "UPDATE upgrade_window_source SET value = 5 WHERE id = 1",
+        "DELETE FROM upgrade_window_source WHERE id = 2",
+    ])
+    .await;
+    db.refresh_st("public.upgrade_window_st").await;
+    db.assert_st_matches_query(
+        "public.upgrade_window_st",
+        "SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn \
+         FROM public.upgrade_window_source",
+    )
+    .await;
+}
 
 /// Install from old version, run ALTER EXTENSION UPDATE, verify all
 /// new functions are callable.
