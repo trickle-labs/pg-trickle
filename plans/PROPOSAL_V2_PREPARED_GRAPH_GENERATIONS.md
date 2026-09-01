@@ -1008,7 +1008,7 @@ No output cursor advances. A later run sees the complete cumulative delta sequen
 
 ## 33. Delivery plan
 
-The capabilities should be delivered in four dependency-ordered phases in a future post-1.0 release. The roadmap must assign a release before implementation begins; this proposal does not invent that commitment. It does not reopen the v0.94 feature freeze or the v0.95 stabilization boundary. Each capability remains disabled in discovery until its normative paths are wired through the common mutation guards and its recovery matrix passes.
+The capabilities should be delivered in four dependency-ordered phases in a future post-1.0 release. The roadmap must assign a release before implementation begins; this proposal does not invent that commitment. It does not reopen the v0.97 feature freeze or the v0.98 stabilization boundary. Each capability remains disabled in discovery until its normative paths are wired through the common mutation guards and its recovery matrix passes.
 
 ### Phase 1: generation contract and durable leases
 

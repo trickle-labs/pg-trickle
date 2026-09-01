@@ -4,7 +4,7 @@
 
 **Status:** Proposed  
 **Scope:** Two independently versioned V1 capability contracts. Appendix A is non-normative and does not affect either V1 acceptance gate.
-**Target:** Additive graph-coordination contract before 1.0; separately gated durable output-delta contract
+**Target:** v0.93.0 for Graph V1 contracts, v0.94.0 for strict graph refresh, and v0.95.0 for separately gated Delta V1, all before v1.0
 **Decision:** Add a small, versioned SQL API that lets another PostgreSQL extension coordinate a private stream-table graph without depending on `pg_trickle` internals. Stabilize durable output consumption only after its separate retention, recovery, and upgrade gates pass.
 **Compatibility:** Existing stream tables remain scheduler-managed by default, and existing public APIs retain their behavior  
 **Motivating consumer:** [`pg_mdm`](https://github.com/grove/pg-mdm), beginning with its V1 entity-resolution design  
@@ -57,7 +57,7 @@
 
 The proposal defines two independent capability contracts. `external_graph_refresh` advertises integration support, exposes versioned stream-table and graph execution contracts, persists `EXTERNAL` orchestration, refreshes a complete graph strictly inside the caller's PostgreSQL transaction, and returns one coherent source-boundary manifest. This contract is sufficient for a coordinator to scan terminal stream tables, publish its own result, and commit or roll back everything together.
 
-`output_delta_consumer` is a separate optimization contract for coordinators that have proven that complete terminal scans are too expensive. It adds durable acknowledged typed output deltas, retention, resnapshot, recovery, and backpressure. Delta V1 requires a compatible enabled Graph V1, but Graph V1 does not require Delta V1. The contracts do not share a capability version or acceptance gate. A failure to stabilize output deltas must not delay or weaken graph coordination.
+`output_delta_consumer` is a separate optimization contract for coordinators that have proven that complete terminal scans are too expensive. It adds durable acknowledged typed output deltas, retention, resnapshot, recovery, and backpressure. Delta V1 requires a compatible enabled Graph V1, but Graph V1 does not require Delta V1. The contracts do not share a capability version or acceptance gate. A failure to stabilize output deltas must not delay or weaken the Graph V1 release, but the pre-1.0 roadmap now blocks v1.0 until Delta V1 passes its independent v0.95.0 gate.
 
 This proposal does not add MDM concepts to `pg_trickle`, and it does not expose private `pg_trickle` implementation state. `pg_trickle` continues to own source capture, safe frontiers, differential view maintenance, full fallback, stream-table storage, row identity, dependency ordering, and refresh finalization. The coordinating extension continues to own domain-specific decisions and public outputs. No supported integration path reads or mutates private catalogs, scheduler jobs, change buffers, generated columns, internal frontier encodings, or storage naming conventions.
 
@@ -69,7 +69,7 @@ This document contains two V1 proposals with separate acceptance boundaries.
 
 Graph V1 is a synchronous, single-database composition path in which the coordinating extension keeps one PostgreSQL transaction open while `pg_trickle` refreshes a private graph and the coordinator publishes its own result. It supports acyclic local stream-table graphs, complete source-boundary proofs for explicitly admitted source kinds, stable execution-contract digests, complete terminal-table reads, and fail-closed behavior under concurrency or schema change.
 
-Delta V1 adds exact output deltas when available, explicit full invalidation when an exact output delta is unavailable, owner-controlled durable cursors, and fail-closed behavior under retention loss, recovery, restore, and upgrade. A release may advertise Graph V1 while reporting Delta V1 as absent, disabled, or experimental.
+Delta V1 adds exact output deltas when available, explicit full invalidation when an exact output delta is unavailable, owner-controlled durable cursors, and fail-closed behavior under retention loss, recovery, restore, and upgrade. v0.94.0 may advertise Graph V1 while reporting Delta V1 as absent, disabled, or experimental; v1.0 may not ship until Delta V1 is stable.
 
 | Capability contract | Required components | Purpose |
 |---|---|---|
@@ -1215,7 +1215,7 @@ Nothing in Appendix A is part of either acceptance gate.
 
 Adopt Graph V1 as a focused pre-1.0 extension boundary. Deliver durable external orchestration and execution contracts first, then strict transactional graph refresh. Advertise `external_graph_refresh` major version 1 when its acceptance gate passes.
 
-Pursue Delta V1 as a separate optimization. Keep `output_delta_consumer` absent, disabled, or experimental until its own algebra, transaction, retention, crash, security, clone, and upgrade proofs pass. Delta V1 must not delay Graph V1 or weaken its complete terminal-read path.
+Pursue Delta V1 as a separate optimization. Keep `output_delta_consumer` absent, disabled, or experimental until its own algebra, transaction, retention, crash, security, clone, and upgrade proofs pass. Delta V1 must not delay Graph V1 or weaken its complete terminal-read path, but its independent v0.95.0 gate must pass before v1.0.
 
 The proposed boundary preserves the responsibilities of both projects:
 
