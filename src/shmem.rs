@@ -315,28 +315,6 @@ pub enum WorkerSlotState {
     Live,
 }
 
-/// Fixed-capacity worker reservation table.
-#[derive(Debug, Copy, Clone)]
-pub struct WorkerSlotTable {
-    pub slots: [RefreshWorkerSlot; 128],
-}
-
-impl Default for WorkerSlotTable {
-    fn default() -> Self {
-        Self {
-            slots: [RefreshWorkerSlot::default(); 128],
-        }
-    }
-}
-
-// SAFETY: The worker table contains only fixed-size primitive fields.
-unsafe impl PGRXSharedMemory for WorkerSlotTable {}
-
-/// Serializes every worker reservation transition.
-// SAFETY: PgLwLock::new requires a static CStr name.
-pub static WORKER_SLOT_TABLE: PgLwLock<WorkerSlotTable> =
-    unsafe { PgLwLock::new(c"pg_trickle_worker_slots") };
-
 /// Cluster-wide adaptive admission state. The durable worker reservation
 /// table remains authoritative; this state only supplies its bounded target.
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq)]
@@ -355,10 +333,29 @@ pub struct AdaptiveWorkerState {
 // SAFETY: AdaptiveWorkerState contains only fixed-size primitive fields.
 unsafe impl PGRXSharedMemory for AdaptiveWorkerState {}
 
-/// Serializes adaptive worker target changes across database schedulers.
+/// Fixed-capacity worker reservation table and adaptive admission state.
+#[derive(Debug, Copy, Clone)]
+pub struct WorkerSlotTable {
+    pub slots: [RefreshWorkerSlot; 128],
+    pub adaptive: AdaptiveWorkerState,
+}
+
+impl Default for WorkerSlotTable {
+    fn default() -> Self {
+        Self {
+            slots: [RefreshWorkerSlot::default(); 128],
+            adaptive: AdaptiveWorkerState::default(),
+        }
+    }
+}
+
+// SAFETY: The worker table contains only fixed-size primitive fields.
+unsafe impl PGRXSharedMemory for WorkerSlotTable {}
+
+/// Serializes worker reservation and adaptive target transitions.
 // SAFETY: PgLwLock::new requires a static CStr name.
-pub static ADAPTIVE_WORKER_STATE: PgLwLock<AdaptiveWorkerState> =
-    unsafe { PgLwLock::new(c"pg_trickle_adaptive_worker_state") };
+pub static WORKER_SLOT_TABLE: PgLwLock<WorkerSlotTable> =
+    unsafe { PgLwLock::new(c"pg_trickle_worker_slots") };
 
 /// Snapshot of configured and effective worker capacity for one dispatch tick.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -411,8 +408,8 @@ pub fn adaptive_worker_target(
     let hard_limit = hard_limit.max(1);
     let min = configured_min.max(1).min(hard_limit);
     let max = configured_max.max(min).min(hard_limit);
-    let state = ADAPTIVE_WORKER_STATE.share();
-    Some(state.target.max(min).clamp(min, max))
+    let table = WORKER_SLOT_TABLE.share();
+    Some(table.adaptive.target.max(min).clamp(min, max))
 }
 
 /// Snapshot adaptive worker diagnostics without exposing the lock guard.
@@ -420,7 +417,7 @@ pub fn adaptive_worker_state() -> AdaptiveWorkerState {
     if !is_shmem_available() {
         return AdaptiveWorkerState::default();
     }
-    *ADAPTIVE_WORKER_STATE.share()
+    WORKER_SLOT_TABLE.share().adaptive
 }
 
 /// Advance the cluster adaptive target after one bounded scheduler sample.
@@ -444,7 +441,8 @@ pub fn adjust_adaptive_worker_target(
     let hard_limit = hard_limit.max(1);
     let min = configured_min.max(1).min(hard_limit);
     let max = configured_max.max(min).min(hard_limit);
-    let mut state = ADAPTIVE_WORKER_STATE.exclusive();
+    let mut table = WORKER_SLOT_TABLE.exclusive();
+    let state = &mut table.adaptive;
     if state.target == 0 {
         state.target = min;
     }
@@ -1489,7 +1487,6 @@ pub fn init_shared_memory() {
     pg_shmem_init!(CACHE_GENERATION);
     pg_shmem_init!(ACTIVE_REFRESH_WORKERS);
     pg_shmem_init!(WORKER_SLOT_TABLE);
-    pg_shmem_init!(ADAPTIVE_WORKER_STATE);
     pg_shmem_init!(INVALIDATION_RING_OVERFLOWS);
     pg_shmem_init!(RECONCILE_EPOCH);
     pg_shmem_init!(TOTAL_DIFF_REFRESHES);
