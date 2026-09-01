@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Tables to extract from the archive SQL (order matters for FK dependencies).
 TABLES = [
     "pgt_stream_tables",
+    "pgt_window_states",
     "pgt_dependencies",
     "pgt_refresh_history",
     "pgt_change_tracking",

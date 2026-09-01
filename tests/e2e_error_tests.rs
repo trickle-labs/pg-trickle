@@ -1295,6 +1295,12 @@ async fn test_volatile_operator_allowed_in_full_mode() {
 
     let count = db.count("public.volop2_st").await;
     assert_eq!(count, 2);
+
+    // FULL lifecycle cleanup must not require a DVM plan for valid PostgreSQL
+    // queries that differential admission intentionally cannot analyze.
+    db.execute("INSERT INTO volop2_src VALUES (3, 9, 2)").await;
+    db.refresh_st("volop2_st").await;
+    assert_eq!(db.count("public.volop2_st").await, 3);
 }
 
 // ── Error Recovery: resume, suspended status ───────────────────────────

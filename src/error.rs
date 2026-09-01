@@ -208,6 +208,18 @@ pub enum PgTrickleError {
         reason: String,
     },
 
+    /// Private window state does not match its durable strategy metadata and
+    /// must be rebuilt before differential execution.
+    #[error(
+        "window state invalid for pgt_id={pgt_id}, node={node_ordinal}, spec={spec_ordinal}: {reason}"
+    )]
+    WindowStateInvalid {
+        pgt_id: i64,
+        node_ordinal: i32,
+        spec_ordinal: i32,
+        reason: String,
+    },
+
     /// A CDC cutover could not be proven safe.
     #[error(
         "CDC cutover to {target} unproven for source OID {source_oid}: required LSN {required_lsn}, confirmed LSN {confirmed_lsn:?}"
@@ -458,6 +470,7 @@ impl PgTrickleError {
                 | PgTrickleError::UpstreamTableDropped(_)
                 | PgTrickleError::StSourceFrontierMissing(_)
                 | PgTrickleError::CdcStateInvalid { .. }
+                | PgTrickleError::WindowStateInvalid { .. }
         )
     }
 
@@ -477,6 +490,7 @@ impl PgTrickleError {
                     | PgTrickleError::PermissionDenied(_)
                     | PgTrickleError::SafeFrontierUnavailable { .. }
                     | PgTrickleError::CdcStateInvalid { .. }
+                    | PgTrickleError::WindowStateInvalid { .. }
                     | PgTrickleError::CdcCutoverUnproven { .. }
             ),
         }
@@ -812,7 +826,9 @@ impl PgTrickleError {
             PgTrickleError::SnapshotAlignmentUnavailable { .. }
             | PgTrickleError::RefreshFinalizationFailed { .. } => PgTrickleErrorKind::System,
 
-            PgTrickleError::CdcStateInvalid { .. } => PgTrickleErrorKind::Schema,
+            PgTrickleError::CdcStateInvalid { .. } | PgTrickleError::WindowStateInvalid { .. } => {
+                PgTrickleErrorKind::Schema
+            }
         }
     }
 }
@@ -1001,6 +1017,15 @@ mod tests {
             }
             .requires_reinitialize()
         );
+        assert!(
+            PgTrickleError::WindowStateInvalid {
+                pgt_id: 1,
+                node_ordinal: 2,
+                spec_ordinal: 3,
+                reason: "generation mismatch".into(),
+            }
+            .requires_reinitialize()
+        );
         assert!(!PgTrickleError::SpiError("x".into()).requires_reinitialize());
     }
 
@@ -1033,6 +1058,15 @@ mod tests {
                 source_name: "source".into(),
                 buffer: "buffer".into(),
                 reason: "missing".into(),
+            }
+            .counts_toward_suspension()
+        );
+        assert!(
+            !PgTrickleError::WindowStateInvalid {
+                pgt_id: 1,
+                node_ordinal: 2,
+                spec_ordinal: 3,
+                reason: "generation mismatch".into(),
             }
             .counts_toward_suspension()
         );

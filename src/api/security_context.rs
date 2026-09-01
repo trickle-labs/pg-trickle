@@ -368,7 +368,7 @@ pub(crate) fn with_caller_context<T>(
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     #[test]
@@ -463,9 +463,8 @@ mod tests {
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]
-mod pg_tests {
+mod tests {
     use super::*;
-    use pgrx::prelude::*;
 
     /// Test-only SECURITY DEFINER probe that captures the caller's original
     /// search_path exactly as a real lifecycle entry point would, so LSEC-1's
@@ -487,10 +486,9 @@ mod pg_tests {
         let role_name = outer_user_name().expect("outer role must resolve");
         let expected = format!("lsec_probe_schema, \"{}\", public", role_name);
 
-        let captured =
-            Spi::get_one::<String>("SELECT security_context.pgt_test_capture_definer_path()")
-                .unwrap()
-                .expect("probe must return a value");
+        let captured = Spi::get_one::<String>("SELECT tests.pgt_test_capture_definer_path()")
+            .unwrap()
+            .expect("probe must return a value");
 
         assert_eq!(captured, expected);
     }
@@ -498,8 +496,7 @@ mod pg_tests {
     #[pg_test]
     fn test_capture_definer_path_restores_caller_guc_after_call() {
         Spi::run("SET search_path = public, pg_catalog").unwrap();
-        let _ = Spi::get_one::<String>("SELECT security_context.pgt_test_capture_definer_path()")
-            .unwrap();
+        let _ = Spi::get_one::<String>("SELECT tests.pgt_test_capture_definer_path()").unwrap();
 
         // PostgreSQL itself restores the function-local SET on return —
         // this proves the probe didn't leak its own pinned path outward.
@@ -529,7 +526,7 @@ mod pg_tests {
         };
 
         let (observed_role, observed_path) = with_stream_owner_context(&ctx, || {
-            let role = Spi::get_one::<String>("SELECT current_user")
+            let role = Spi::get_one::<String>("SELECT current_user::text")
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap();
             let path = Spi::get_one::<String>("SELECT current_setting('search_path')")
@@ -546,7 +543,7 @@ mod pg_tests {
         assert_eq!(observed_role, "lsec_probe_owner");
         assert_eq!(observed_path, "lsec_probe_owner_schema, pg_catalog");
 
-        let restored_role = Spi::get_one::<String>("SELECT current_user")
+        let restored_role = Spi::get_one::<String>("SELECT current_user::text")
             .unwrap()
             .unwrap();
         assert_eq!(restored_role, outer_role);
@@ -584,12 +581,22 @@ mod pg_tests {
             search_path: "pg_catalog, pg_temp".to_string(),
         };
 
-        let result = with_stream_owner_context(&ctx, || {
-            Spi::run("SELECT 1/0").map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        });
+        // SAFETY: the expected SQL error is caught immediately after the
+        // context helper restores the saved role and GUC state.
+        let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            with_stream_owner_context(&ctx, || {
+                Spi::run("SELECT 1/0").map_err(|e| PgTrickleError::SpiError(e.to_string()))
+            })
+        }))
+        .catch_when(pgrx::PgSqlErrorCode::ERRCODE_DIVISION_BY_ZERO, |_| {
+            Err(PgTrickleError::SpiError(
+                "expected division by zero".to_string(),
+            ))
+        })
+        .execute();
         assert!(result.is_err());
 
-        let restored_role = Spi::get_one::<String>("SELECT current_user")
+        let restored_role = Spi::get_one::<String>("SELECT current_user::text")
             .unwrap()
             .unwrap();
         assert_eq!(restored_role, outer_role);
@@ -640,7 +647,7 @@ mod pg_tests {
         let (observed_inner, observed_outer_after_inner) =
             with_stream_owner_context(&outer_ctx, || {
                 let observed_inner = with_stream_owner_context(&inner_ctx, || {
-                    let role = Spi::get_one::<String>("SELECT current_user")
+                    let role = Spi::get_one::<String>("SELECT current_user::text")
                         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                         .unwrap();
                     let path = Spi::get_one::<String>("SELECT current_setting('search_path')")
@@ -654,7 +661,7 @@ mod pg_tests {
                 })?;
 
                 let observed_outer = (
-                    Spi::get_one::<String>("SELECT current_user")
+                    Spi::get_one::<String>("SELECT current_user::text")
                         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                         .unwrap(),
                     Spi::get_one::<String>("SELECT current_setting('search_path')")
@@ -675,7 +682,7 @@ mod pg_tests {
         assert_eq!(observed_outer_after_inner.1, "public, pg_catalog");
         assert_eq!(observed_outer_after_inner.2, "on");
 
-        let restored_role = Spi::get_one::<String>("SELECT current_user")
+        let restored_role = Spi::get_one::<String>("SELECT current_user::text")
             .unwrap()
             .unwrap();
         assert_eq!(restored_role, starting_role);
@@ -720,7 +727,7 @@ mod pg_tests {
         }));
         assert!(result.is_err());
         assert_eq!(
-            Spi::get_one::<String>("SELECT current_user")
+            Spi::get_one::<String>("SELECT current_user::text")
                 .unwrap()
                 .unwrap(),
             outer_role
@@ -751,6 +758,10 @@ mod pg_tests {
              REVOKE ALL ON TABLE pgtrickle.lsec_extension_secret FROM PUBLIC",
         )
         .unwrap();
+        let secret_oid =
+            Spi::get_one::<pg_sys::Oid>("SELECT 'pgtrickle.lsec_extension_secret'::regclass::oid")
+                .unwrap()
+                .unwrap();
 
         let owner_oid = Spi::get_one::<pg_sys::Oid>(
             "SELECT oid FROM pg_roles WHERE rolname = 'lsec_probe_unprivileged'",
@@ -763,9 +774,9 @@ mod pg_tests {
         };
 
         with_stream_owner_context(&ctx, || {
-            let can_read = Spi::get_one::<bool>(
-                "SELECT has_table_privilege(current_user, \
-                 'pgtrickle.lsec_extension_secret', 'SELECT')",
+            let can_read = Spi::get_one_with_args::<bool>(
+                "SELECT has_table_privilege(current_user, $1, 'SELECT')",
+                &[secret_oid.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .unwrap();
@@ -853,9 +864,19 @@ mod pg_tests {
         Spi::run("SET search_path = public, pg_catalog").unwrap();
         Spi::run("SET row_security = off").unwrap();
         let caller = capture_caller_context(EntryContext::SecurityInvoker).unwrap();
-        let result = with_caller_context(&caller, || {
-            Spi::run("SELECT 1/0").map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        });
+        // SAFETY: the expected SQL error is caught immediately after the
+        // context helper restores the saved role and GUC state.
+        let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            with_caller_context(&caller, || {
+                Spi::run("SELECT 1/0").map_err(|e| PgTrickleError::SpiError(e.to_string()))
+            })
+        }))
+        .catch_when(pgrx::PgSqlErrorCode::ERRCODE_DIVISION_BY_ZERO, |_| {
+            Err(PgTrickleError::SpiError(
+                "expected division by zero".to_string(),
+            ))
+        })
+        .execute();
         assert!(result.is_err());
         assert_eq!(
             Spi::get_one::<String>("SELECT current_setting('row_security')")

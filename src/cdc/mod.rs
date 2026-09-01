@@ -3347,7 +3347,7 @@ pub fn estimate_pending_changes(pgt_id: i64) -> Option<i64> {
                 if r.is_empty() {
                     None
                 } else {
-                    r.get::<i64>(1).ok()?
+                    r.first().get::<i64>(1).ok()?
                 }
             })
     })

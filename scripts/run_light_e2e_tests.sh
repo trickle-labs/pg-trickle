@@ -132,6 +132,8 @@ LIGHT_E2E_TESTS=(
     e2e_v08711_snapshot_security_tests
     e2e_v08712_publication_security_tests
     e2e_row_id_v2_tests
+    e2e_window_state_catalog_tests
+    e2e_window_incremental_tests
 )
 
 usage() {
@@ -141,7 +143,8 @@ Usage: scripts/run_light_e2e_tests.sh [options]
 Options:
   --package                 Run cargo pgrx package before tests
   --package-only            Run cargo pgrx package and exit
-    --test <name>             Run only the named light-E2E test target
+  --test <name>             Run only the named light-E2E test target
+  --ignored                 Run only ignored tests
   --list                    Print selected test targets and exit
   --shard-index <n>         1-based shard index
   --shard-count <n>         Total shard count
@@ -276,6 +279,7 @@ validate_positive_integer() {
 package_before_run=false
 package_only=false
 list_only=false
+ignored_only=false
 shard_index=1
 shard_count=1
 requested_tests=()
@@ -295,6 +299,9 @@ while (($# > 0)); do
             ;;
         --list)
             list_only=true
+            ;;
+        --ignored)
+            ignored_only=true
             ;;
         --shard-index)
             shift
@@ -442,7 +449,15 @@ done
 
 
 if command -v cargo-nextest >/dev/null 2>&1; then
-    cargo nextest run "${cargo_args[@]}"
+    if [[ "$ignored_only" == true ]]; then
+        cargo nextest run "${cargo_args[@]}" --run-ignored only --nocapture
+    else
+        cargo nextest run "${cargo_args[@]}"
+    fi
 else
-    cargo test "${cargo_args[@]}" -- --test-threads=1
+    if [[ "$ignored_only" == true ]]; then
+        cargo test "${cargo_args[@]}" -- --ignored --test-threads=1 --nocapture
+    else
+        cargo test "${cargo_args[@]}" -- --test-threads=1
+    fi
 fi

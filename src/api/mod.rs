@@ -1442,9 +1442,9 @@ fn validate_and_parse_query(
     let identity_columns =
         crate::api::helpers::row_identity_columns(&columns, parsed_tree.as_ref());
     let identity_bounded = crate::api::helpers::row_identity_is_bounded(&identity_columns);
-    let identity_is_proven_unique = !crate::dvm::query_has_recursive_cte(query).unwrap_or(false)
-        && parsed_tree.as_ref().is_some_and(|pr| {
-            !crate::dvm::operators::join_common::tree_contains_join(&pr.tree)
+    let identity_is_proven_unique = parsed_tree.as_ref().is_some_and(|pr| {
+        !pr.has_recursion
+            && !crate::dvm::operators::join_common::tree_contains_join(&pr.tree)
                 && pr.tree.row_id_key_columns().is_some()
                     // GROUP_KEY rows are unique by SQL grouping, but their
                     // key may require the non-unique probe index. JOIN_KEY
@@ -1454,7 +1454,7 @@ fn validate_and_parse_query(
                         crate::dvm::row_identity_domain(&pr.tree),
                         "GROUP_KEY" | "JOIN_KEY"
                     )
-        });
+    });
     let identity_requires_uniqueness = identity_is_proven_unique
         && !has_keyless_input_source
         && !crate::dvm::query_has_incomplete_join_pk(query)
@@ -1868,6 +1868,17 @@ fn insert_catalog_and_deps(
         defining_search_path,
     )?;
 
+    let query_hash = crate::catalog::compute_defining_query_hash(defining_query);
+    let window_strategy = vq.parsed_tree.as_ref().map(|parsed| {
+        parsed
+            .window_strategy
+            .clone()
+            .unwrap_or_else(|| crate::dvm::parser::WindowStrategyPlan::empty(query_hash))
+            .with_query_hash(query_hash)
+            .with_state_names(pgt_id)
+    });
+    crate::window_state::persist_plan(pgt_id, window_strategy.as_ref())?;
+
     // Build per-source column usage map
     let columns_used_map = vq
         .parsed_tree
@@ -1916,14 +1927,13 @@ fn setup_trigger_infrastructure(
     refresh_mode: RefreshMode,
     pgt_id: i64,
     pgt_relid: pg_sys::Oid,
-    defining_query: &str,
+    ivm_lock_mode: crate::ivm::IvmLockMode,
 ) -> Result<(), PgTrickleError> {
     let change_schema = config::pg_trickle_change_buffer_schema();
     if refresh_mode.is_immediate() {
-        let lock_mode = crate::ivm::IvmLockMode::for_query(defining_query);
         for (source_oid, source_type) in source_relids {
             if source_type == "TABLE" {
-                crate::ivm::setup_ivm_triggers(*source_oid, pgt_id, pgt_relid, lock_mode)?;
+                crate::ivm::setup_ivm_triggers(*source_oid, pgt_id, pgt_relid, ivm_lock_mode)?;
             }
         }
     } else {
@@ -4134,6 +4144,7 @@ mod tests {
             last_error_code: None,
             last_error_retryable: None,
             defining_search_path: "public".to_string(),
+            window_strategy: None,
         }
     }
 

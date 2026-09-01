@@ -93,13 +93,37 @@ SELECT DISTINCT customer_id FROM orders
 ### Window functions
 
 ```sql
-SELECT id, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at)
+SELECT customer_id, created_at, id,
+       ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at, id) AS rn
 FROM orders
 ```
 
-- **DIFFERENTIAL path**: not supported — falls back to GROUP_RESCAN.
-- In GROUP_RESCAN mode the full group is recomputed for every changed row.
-- `refresh_reason` column: never set (GROUP_RESCAN is the normal path, no explicit reason code).
+- No window family is runtime-enabled in v0.89. Every shape uses partition
+  recomputation.
+- The benchmark evaluated one built-in `ROW_NUMBER` state candidate over a
+  direct keyed scan with exact same-name projections and the complete non-null
+  identity in `ORDER BY`. It lost to recomputation in all six measured cells.
+- `window_strategy` and explain output report the static reason. A differential
+  partition recomputation is not marked as a FULL fallback.
+
+| Condition | v0.89 strategy | Reason |
+|---|---|---|
+| Measured built-in `ROW_NUMBER` candidate over a direct keyed scan, exact same-name projections, and complete non-null identity in `ORDER BY` | Partition recompute | `WINDOW_RECOMPUTE_CHEAPER` |
+| Any other semantically eligible recognized candidate | Partition recompute | `WINDOW_INCREMENTAL_UNIMPLEMENTED` |
+| Unresolved function or expression metadata | Partition recompute | `WINDOW_METADATA_UNRESOLVED` |
+| Unsupported function OID | Partition recompute | `WINDOW_UNSUPPORTED_FUNCTION` |
+| `GROUPS`, `EXCLUDE`, or an unsupported bound | Partition recompute | `WINDOW_UNSUPPORTED_FRAME` |
+| Dynamic offset, `FILTER`, or unsupported argument form | Partition recompute | `WINDOW_UNSUPPORTED_ARGUMENT` |
+| Unsupported input, result type, or collation | Partition recompute | `WINDOW_UNSUPPORTED_TYPE` |
+| No exact stable child identity | Partition recompute | `WINDOW_NO_STABLE_IDENTITY` |
+| IMMEDIATE mode | Partition recompute | `WINDOW_IMMEDIATE_RECOMPUTE` |
+
+The state and runtime reason vocabulary also reserves
+`WINDOW_STATE_INITIALIZATION_REQUIRED`, `WINDOW_STATE_MISMATCH`,
+`WINDOW_STATE_BUDGET_EXCEEDED`, `WINDOW_OFFSET_EXCEEDS_BUDGET`,
+`WINDOW_NTH_INDEX_EXCEEDS_BUDGET`, and `WINDOW_NON_INVERTIBLE_DELETE`. No v0.89
+planner or supported SQL API enables incremental window state; lifecycle and
+benchmark tests exercise the rejected candidate through private catalog setup.
 
 ### CTEs (WITH clause)
 
@@ -242,7 +266,7 @@ restrictions on what the defining query can do:
 | DISTINCT | ✅ Yes | |
 | Non-correlated scalar subquery | ✅ Yes | |
 | Lateral join | ⚠️ Limited | Only if lateral body is a simple scan |
-| Window functions | ⚠️ Limited | GROUP_RESCAN allowed; large window may exceed lock timeout |
+| Window functions | ⚠️ Limited | Partition recomputation; large partitions may exceed lock timeout |
 | Recursive CTE | ❌ Blocked | Causes lock acquisition cycle risk |
 | Cross-database references | ❌ Blocked | SPI cannot span databases in one transaction |
 | Long-running aggregate (cost > threshold) | ❌ Blocked | May exceed `lock_timeout` |
@@ -324,13 +348,13 @@ O(delta × lineitem) work.
 | Recursive CTE | FULL | Always | `recursive_cte_fallback` |
 | UNION ALL | DIFF | — | — |
 | Lateral join | DIFF (snapshot) | — | — |
-| Window functions | GROUP_RESCAN | — | — |
+| Window functions | DIFF partition recompute | Always in v0.89 | `WINDOW_*` in strategy and diagnostics |
 | Non-correlated scalar subquery | DIFF | — | — |
 | SUM/COUNT(CASE) + IN-list + mutable | FULL | On UPDATE | `CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK` |
 | Correlated aggregate subquery in WHERE | FULL (if CTE rewrite fails) | Always | `CORRELATED_SUBQUERY_DELTA_QUADRATIC` |
 | CASE aggregate with EXISTS / subquery inside | FULL | Always | `REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN` |
 
-> **Legend**: DIFF = full incremental differential path; GROUP_RESCAN = aggregate
+> **Legend**: DIFF = differential path; GROUP_RESCAN = aggregate
 > group is recomputed for changed groups; FULL = full recompute of the entire
 > result set.
 

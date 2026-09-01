@@ -576,6 +576,7 @@ pub fn generate_delta_query(
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     generate_delta_query_impl(
         None,
+        None,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -594,6 +595,29 @@ pub(crate) fn generate_delta_query_staged(
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     generate_delta_query_impl(
         Some(pgt_id),
+        None,
+        defining_query,
+        prev_frontier,
+        new_frontier,
+        pgt_schema,
+        pgt_name,
+    )
+}
+
+/// Generate the benchmark candidate against a validated ROW_NUMBER row mirror.
+/// Production v0.89 plans keep this rejected path disabled.
+pub(crate) fn generate_delta_query_staged_with_window_state(
+    pgt_id: i64,
+    row_relation: &str,
+    defining_query: &str,
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+    pgt_schema: &str,
+    pgt_name: &str,
+) -> Result<DeltaQueryResult, PgTrickleError> {
+    generate_delta_query_impl(
+        Some(pgt_id),
+        Some(row_relation),
         defining_query,
         prev_frontier,
         new_frontier,
@@ -604,6 +628,7 @@ pub(crate) fn generate_delta_query_staged(
 
 fn generate_delta_query_impl(
     stage_pgt_id: Option<i64>,
+    window_state_row_relation: Option<&str>,
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
@@ -650,6 +675,7 @@ fn generate_delta_query_impl(
         ctx = ctx.with_decision_trace();
     }
     ctx.st_user_columns = Some(st_user_cols);
+    ctx.window_state_row_relation = window_state_row_relation.map(str::to_owned);
     ctx.merge_safe_dedup = is_scan_chain;
     ctx.st_has_pgt_count = has_pgt_count;
 
@@ -1495,11 +1521,25 @@ pub(crate) fn row_identity_domain(tree: &parser::OpTree) -> &'static str {
         parser::OpTree::InnerJoin { .. }
         | parser::OpTree::LeftJoin { .. }
         | parser::OpTree::FullJoin { .. } => "JOIN_KEY",
+        parser::OpTree::Window { .. } => "WINDOW_KEY",
         parser::OpTree::Filter { child, .. }
         | parser::OpTree::Project { child, .. }
         | parser::OpTree::Subquery { child, .. } => row_identity_domain(child),
         _ => "SCAN_KEY",
     }
+}
+
+/// Build the row identity shared by initial and differential window results.
+pub(crate) fn window_row_identity_expr(row_alias: &str, key_columns: &[String]) -> String {
+    let expressions = if key_columns.is_empty() {
+        vec!["'__singleton_window'::text".to_string()]
+    } else {
+        key_columns
+            .iter()
+            .map(|column| format!("{row_alias}.{}", diff::quote_ident(column)))
+            .collect()
+    };
+    crate::hash::build_row_identity_expr("WINDOW_KEY", &expressions)
 }
 
 /// Generate a SQL expression for computing `__pgt_row_id` from a subquery
@@ -1516,6 +1556,7 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
 
     match key_cols {
+        Some(cols) if domain == "WINDOW_KEY" => window_row_identity_expr("sub", &cols),
         Some(cols) if cols.len() == 1 => {
             format!(
                 "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
@@ -2102,6 +2143,18 @@ mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn test_window_row_identity_uses_stable_window_domain() {
+        assert_eq!(
+            window_row_identity_expr("sub", &["tenant_id".into(), "event_id".into()]),
+            "pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW(sub.\"tenant_id\", sub.\"event_id\"))"
+        );
+        assert_eq!(
+            window_row_identity_expr("sub", &[]),
+            "pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW('__singleton_window'::text))"
+        );
+    }
 
     // ── split_top_level_union_all (existing) ────────────────────────
 

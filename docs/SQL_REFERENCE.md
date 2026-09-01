@@ -116,6 +116,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [Reinitialisation](#reinitialisation)
 - [Catalog Tables](#catalog-tables)
   - [pgtrickle.pgt\_stream\_tables](#pgtricklepgt_stream_tables)
+  - [pgtrickle.pgt\_window\_states](#pgtricklepgt_window_states)
   - [pgtrickle.pgt\_dependencies](#pgtricklepgt_dependencies)
   - [pgtrickle.pgt\_refresh\_history](#pgtricklepgt_refresh_history)
   - [pgtrickle.pgt\_change\_tracking](#pgtricklepgt_change_tracking)
@@ -1610,7 +1611,12 @@ Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
 `worker_pool` (all worker tokens in use — parallel mode only), `job_queue`
 (> 10 jobs queued — parallel mode only),
 `dvm_fallbacks` (v0.80.0+, WARN if DVM fallback refreshes were recorded in the last hour),
-`ring_overflow_trend` (v0.80.0+, WARN if the DDL invalidation ring has overflowed since last restart).
+`ring_overflow_trend` (v0.80.0+, WARN if the DDL invalidation ring has overflowed since last restart),
+and `window_state_*` (v0.89.0+, WARN or ERROR for an existing non-ready state or
+at least 80 percent of the window-state budget). The check reads only existing
+registry rows. A budget overflow removes all state and registry rows and
+persists a runtime-disabled plan, so it does not leave an `OVER_BUDGET` health
+row.
 
 ---
 
@@ -1927,6 +1933,10 @@ SELECT * FROM pgtrickle.preview_stream_table(
 Return a bounded explanation of one stream table's refresh mode, recent
 refresh evidence, cost-model summary, and target freshness state as text.
 
+For a window query, the output includes the typed strategy summary and the
+latest fallback. Every v0.89 production plan is runtime-disabled, so its state
+list is empty.
+
 ```sql
 SELECT pgtrickle.explain('public.orders_summary');
 ```
@@ -1934,6 +1944,11 @@ SELECT pgtrickle.explain('public.orders_summary');
 ### pgtrickle.explain_json
 
 Return the same bounded explanation as evidence-aware JSON.
+
+The `window` object contains `strategy`, `states`, `estimated_bytes`,
+`budget_bytes`, `utilization_percent`, `last_actual_strategy`,
+`last_fallback_reason`, `last_fallback_detail`, `estimated_emitted_rows`,
+`crossover_evidence`, and `reinitialization_required`.
 
 ```sql
 SELECT pgtrickle.explain_json('public.orders_summary');
@@ -2705,7 +2720,7 @@ pg_trickle supports 60+ SQL constructs across three refresh modes. The table bel
 | Algebraic aggregates (COUNT, SUM, AVG, STDDEV, …) | ✅ | ✅ | ✅ | Fully invertible delta |
 | Semi-algebraic aggregates (MIN, MAX) | ✅ | ✅ | ✅ | Group rescan on ambiguous delete |
 | Group-rescan aggregates (STRING_AGG, ARRAY_AGG, …) | ✅ | ⚠️ | ⚠️ | Warning emitted at creation time |
-| Window functions (ROW_NUMBER, RANK, LAG, LEAD, …) | ✅ | ✅ | ✅ | Partition-scoped recompute |
+| Window functions (ROW_NUMBER, RANK, LAG, LEAD, …) | ✅ | ✅ | ✅ | Partition-scoped recompute in v0.89 |
 | CTEs (non-recursive and WITH RECURSIVE) | ✅ | ✅ | ✅ | Semi-naive / DRed strategies |
 | TopK (ORDER BY … LIMIT) | ✅ | ✅ | ✅ | Scoped recomputation |
 | LATERAL / set-returning functions / JSON_TABLE | ✅ | ✅ | ✅ | Row-scoped re-execution |
@@ -3739,6 +3754,7 @@ Core metadata for each stream table.
 | `consecutive_errors` | `int` | Current error streak count |
 | `needs_reinit` | `bool` | Whether upstream DDL requires reinitialization |
 | `row_identity_version` | `smallint` | Composite row-identity framing version; legacy or `NULL` values block incremental maintenance |
+| `window_strategy` | `jsonb` | Versioned typed window plan. `NULL` for queries without persisted window analysis. Function entries include `eligible`, `runtime_enabled`, the selected strategy, and a fallback reason. Unknown versions fail closed. |
 | `auto_threshold` | `double precision` | Per-ST adaptive fallback threshold (overrides GUC) |
 | `last_full_ms` | `double precision` | Last FULL refresh duration in milliseconds |
 | `functions_used` | `text[]` | Function names used in the defining query (for DDL tracking) |
@@ -3753,6 +3769,31 @@ Core metadata for each stream table.
 | `last_fixpoint_iterations` | `int` | Number of iterations in the last SCC fixpoint convergence (`NULL` if never iterated) |
 | `created_at` | `timestamptz` | Creation timestamp |
 | `updated_at` | `timestamptz` | Last modification timestamp |
+
+### pgtrickle.pgt_window_states
+
+Private registry for derived incremental window state. The table is not a user
+configuration API. Public access is revoked, and logical dumps exclude its
+rows. v0.89 validates the registry and its private LOGGED relation lifecycle,
+but no production window plan is runtime-enabled. Production plans create no
+window-state rows or relations.
+
+| Column | Type | Description |
+|---|---|---|
+| `pgt_id` | `bigint` | Stream table that owns the state |
+| `node_ordinal` | `integer` | Stable window node position in the semantic plan |
+| `spec_ordinal` | `integer` | Stable window specification position within the node |
+| `partition_relid` | `oid` | Private LOGGED partition-state relation |
+| `row_relid` | `oid` | Private LOGGED ordered-row relation |
+| `peer_relid` | `oid` | Optional private LOGGED peer-state relation |
+| `schema_version` | `smallint` | State schema version |
+| `strategy_version` | `smallint` | Planner and runtime strategy version |
+| `query_hash` | `bigint` | Hash of the defining query used to build the state |
+| `state_generation` | `bigint` | Shared generation validated with the private relations |
+| `status` | `text` | `BUILDING`, `READY`, or `STALE`. The schema reserves `OVER_BUDGET`, but the budget handler removes the registry row instead of writing that status. |
+| `estimated_bytes` | `bigint` | Bounded size estimate used by diagnostics and admission |
+| `last_validated_at` | `timestamptz` | Last successful validation time |
+| `updated_at` | `timestamptz` | Last registry update time |
 
 ### pgtrickle.pgt_dependencies
 
@@ -3794,6 +3835,8 @@ Audit log of all refresh operations.
 | `initiated_by` | `text` | What triggered: SCHEDULER, MANUAL, or INITIAL |
 | `freshness_deadline` | `timestamptz` | SLA deadline (duration schedules only; NULL for cron) |
 | `fixpoint_iteration` | `int` | Iteration of the fixed-point loop (`NULL` for non-cyclic refreshes) |
+| `refresh_reason` | `text` | Stable strategy or FULL reason. Window partition recomputation uses a `WINDOW_*` code without setting `was_full_fallback`. |
+| `refresh_reason_detail` | `text` | Deterministic JSON for window execution, including the actual strategy, bounded occurrence counts, and cost evidence when present. Partition keys are not stored. |
 
 ### pgtrickle.pgt_change_tracking
 
@@ -4655,6 +4698,11 @@ planning time. Observed intermediate rows are the final delta cardinality from
 the latest completed differential refresh; per-node and candidate runtime stay
 absent until a benchmark executes that plan. A shadow rule has
 `selected = false`; PostgreSQL still plans the generated relational SQL.
+
+For v0.89 window queries, the top-level `window_strategy` member contains the
+versioned semantic plan. Each function reports the candidate strategy,
+`eligible`, `runtime_enabled`, and `fallback_reason`. Every v0.89 function has
+`runtime_enabled = false` and uses partition recomputation.
 
 Only the stream-table owner or a superuser can inspect the plan.
 

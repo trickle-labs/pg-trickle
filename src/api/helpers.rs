@@ -101,7 +101,7 @@ pub(crate) fn outer_user_id() -> pg_sys::Oid {
 /// entire SECURITY DEFINER call) gets that value back, instead of every
 /// call silently collapsing the ambient path back to the pinned string
 /// regardless of context.
-pub(super) fn with_invoker_search_path<T>(
+pub(crate) fn with_invoker_search_path<T>(
     invoker_search_path: &str,
     f: impl FnOnce() -> Result<T, PgTrickleError>,
 ) -> Result<T, PgTrickleError> {
@@ -2904,35 +2904,37 @@ pub(super) fn initialize_st(
     // per-unique-row multiplicities for the __pgt_count column.
     // For UNION ALL queries, decompose into per-branch subqueries with
     // child-prefixed row IDs matching diff_union_all's formula.
-    let insert_body = if needs_dual_count {
-        crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
-    } else if needs_union_dedup {
-        let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-        if let Some(union_sql) = crate::dvm::try_union_dedup_refresh_sql(query, &col_names) {
-            union_sql
-        } else {
-            // Fallback: treat as normal query with __pgt_count = 1
+    let insert_body = crate::refresh::with_stream_owner(&st, || {
+        Ok(if needs_dual_count {
+            crate::dvm::direct_full_refresh_insert_body(query, &effective_query)
+        } else if needs_union_dedup {
+            let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+            if let Some(union_sql) = crate::dvm::try_union_dedup_refresh_sql(query, &col_names) {
+                union_sql
+            } else {
+                // Fallback: treat as normal query with __pgt_count = 1
+                let row_id_expr = crate::dvm::row_id_expr_for_query(query);
+                format!(
+                    "SELECT {row_id_expr} AS __pgt_row_id, sub.*, \
+                     1::bigint AS __pgt_count \
+                     FROM ({query}) sub",
+                )
+            }
+        } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(query) {
+            ua_sql
+        } else if let Some(info) = topk_info {
+            // TopK: use the full query (with ORDER BY + LIMIT) for initial population,
+            // so only the top K rows are inserted.
             let row_id_expr = crate::dvm::row_id_expr_for_query(query);
             format!(
-                "SELECT {row_id_expr} AS __pgt_row_id, sub.*, \
-                 1::bigint AS __pgt_count \
-                 FROM ({query}) sub",
+                "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub",
+                topk_query = info.full_query,
             )
-        }
-    } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(query) {
-        ua_sql
-    } else if let Some(info) = topk_info {
-        // TopK: use the full query (with ORDER BY + LIMIT) for initial population,
-        // so only the top K rows are inserted.
-        let row_id_expr = crate::dvm::row_id_expr_for_query(query);
-        format!(
-            "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub",
-            topk_query = info.full_query,
-        )
-    } else {
-        let row_id_expr = crate::dvm::row_id_expr_for_query(query);
-        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
-    };
+        } else {
+            let row_id_expr = crate::dvm::row_id_expr_for_query(query);
+            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
+        })
+    })?;
 
     let insert_sql = format!(
         "INSERT INTO {schema}.{table} {insert_body}",

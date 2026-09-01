@@ -21,7 +21,37 @@ async fn test_pg_dump_restore_fails_closed() {
 
     assert_eq!(db.count("public.dump_test_st").await, 2);
 
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'dump_test_st'",
+        )
+        .await;
+    db.execute_seq(&[
+        "CREATE TABLE pgtrickle.__pgt_dump_window_partitions \
+             (state_generation bigint NOT NULL)",
+        "CREATE TABLE pgtrickle.__pgt_dump_window_rows \
+             (state_generation bigint NOT NULL)",
+        "ALTER EXTENSION pg_trickle ADD TABLE pgtrickle.__pgt_dump_window_partitions",
+        "ALTER EXTENSION pg_trickle ADD TABLE pgtrickle.__pgt_dump_window_rows",
+    ])
+    .await;
+    sqlx::query(
+        "INSERT INTO pgtrickle.pgt_window_states \
+         (pgt_id, node_ordinal, spec_ordinal, partition_relid, row_relid, \
+          schema_version, strategy_version, query_hash, state_generation, status) \
+         SELECT $1, 0, 0, \
+                'pgtrickle.__pgt_dump_window_partitions'::regclass, \
+                'pgtrickle.__pgt_dump_window_rows'::regclass, \
+                1, 1, defining_query_hash, 1, 'STALE' \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+    )
+    .bind(pgt_id)
+    .execute(&db.pool)
+    .await
+    .expect("register derived window state before logical dump");
+
     let container_id = db.container_id();
+    let source_database: String = db.query_scalar("SELECT current_database()").await;
 
     // 1. pg_dump the database
     let dump_output = Command::new("docker")
@@ -32,7 +62,7 @@ async fn test_pg_dump_restore_fails_closed() {
             "-U",
             "postgres",
             "-d",
-            "postgres",
+            source_database.as_str(),
             "-F",
             "c",
             "-f",
@@ -62,6 +92,22 @@ async fn test_pg_dump_restore_fails_closed() {
         .output()
         .expect("Failed to create restored_db");
     assert!(create_db_output.status.success(), "create db failed");
+
+    let filler_output = Command::new("docker")
+        .args([
+            "exec",
+            container_id,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "restored_db",
+            "-c",
+            "CREATE TABLE public.restore_oid_filler (id bigint)",
+        ])
+        .output()
+        .expect("Failed to create restore OID filler");
+    assert!(filler_output.status.success(), "create filler failed");
 
     // 3. Section 1 Validate Restoring Pre-Data
     let restore_output = Command::new("docker")
@@ -101,10 +147,33 @@ async fn test_pg_dump_restore_fails_closed() {
     assert!(restore_data.status.success(), "pg_restore data failed");
 
     // 5. Connect to restored DB to manually heal metadata buffer
-    let restored_conn_str = db
+    let connection_base = db
         .connection_string()
-        .replace("/postgres?", "/restored_db?");
+        .rsplit_once('/')
+        .expect("E2E connection string must include a database")
+        .0;
+    let restored_conn_str = format!("{connection_base}/restored_db");
     let restored_pool = sqlx::PgPool::connect(&restored_conn_str).await.unwrap();
+
+    let (registry_rows, derived_relations_absent, strategy_preserved): (i64, bool, bool) =
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM pgtrickle.pgt_window_states), \
+                    to_regclass('pgtrickle.__pgt_dump_window_partitions') IS NULL \
+                    AND to_regclass('pgtrickle.__pgt_dump_window_rows') IS NULL, \
+                    EXISTS ( \
+                        SELECT 1 FROM pgtrickle.pgt_stream_tables \
+                        WHERE pgt_name = 'dump_test_st' AND window_strategy IS NOT NULL \
+                    )",
+        )
+        .fetch_one(&restored_pool)
+        .await
+        .expect("inspect restored window metadata");
+    assert_eq!(registry_rows, 0, "derived registry rows must not restore");
+    assert!(
+        derived_relations_absent,
+        "derived extension-member relations must not restore"
+    );
+    assert!(strategy_preserved, "durable strategy metadata must restore");
 
     // Unsafe logical restore is deliberately rejected until protected
     // reinitialization can guarantee catalog, CDC, and frontier consistency.

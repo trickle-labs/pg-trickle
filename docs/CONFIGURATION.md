@@ -13,6 +13,14 @@ lossless storage guard: committed rows are never discarded to satisfy it.
 `pg_trickle.load_shed_threshold` (default `0.80`, `0` disables) defers only
 non-urgent scheduled work under the documented load-pressure proxy.
 
+v0.89 adds no window-specific GUC. The window-state guard derives its hard
+ceiling from the full `pg_trickle.memory_budget_mb` value. If candidate state
+exceeds that ceiling during a build or synchronization, pg_trickle removes all
+private state and its registry rows, then persists a runtime-disabled plan. It
+does not evict or re-admit individual partitions. The guard never drops
+committed source changes or target rows. No v0.89 window family uses runtime
+state in production.
+
 Narrative reference for the pg_trickle GUC (Grand Unified Configuration)
 variables operators are most likely to tune. For the exhaustive generated
 catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).

@@ -78,7 +78,12 @@ impl IvmLockMode {
             }
         };
 
-        if Self::is_simple_scan_chain(&result) {
+        Self::for_tree(&result)
+    }
+
+    /// Determine the lock mode from an already validated operator tree.
+    pub fn for_tree(tree: &crate::dvm::parser::OpTree) -> Self {
+        if Self::is_simple_scan_chain(tree) {
             IvmLockMode::RowExclusive
         } else {
             IvmLockMode::Exclusive

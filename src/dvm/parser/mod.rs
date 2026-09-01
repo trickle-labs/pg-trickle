@@ -188,12 +188,14 @@ mod rewrites;
 mod sublinks;
 pub mod types;
 mod validation;
+mod window_plan;
 
 // Re-export everything from sub-modules so external callers are unaffected.
 pub use rewrites::*;
 pub use sublinks::*;
 pub use types::*;
 pub use validation::*;
+pub use window_plan::*;
 
 // ── SAF-2: Safe façades for common unsafe FFI operations ──────────────────
 //
@@ -1570,6 +1572,7 @@ mod tests {
             cte_registry: registry,
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert_eq!(result.tree.alias(), "orders");
         assert_eq!(result.cte_registry.entries.len(), 1);
@@ -1597,6 +1600,7 @@ mod tests {
             cte_registry: registry,
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(check_ivm_support_with_registry(&result).is_ok());
     }
@@ -1643,6 +1647,7 @@ mod tests {
             cte_registry: registry,
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(check_ivm_support_with_registry(&result).is_ok());
         // Only one entry in the registry despite two CteScan nodes
@@ -1682,6 +1687,7 @@ mod tests {
             cte_registry: registry,
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(check_ivm_support_with_registry(&result).is_ok());
         assert_eq!(result.cte_registry.entries.len(), 2);
@@ -1699,6 +1705,7 @@ mod tests {
             cte_registry: CteRegistry::default(),
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(!result.has_recursion);
     }
@@ -1710,6 +1717,7 @@ mod tests {
             cte_registry: CteRegistry::default(),
             has_recursion: true,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(result.has_recursion);
     }
@@ -1721,6 +1729,7 @@ mod tests {
             cte_registry: CteRegistry::default(),
             has_recursion: true,
             warnings: vec![],
+            window_strategy: None,
         };
         let cloned = result.clone();
         assert!(cloned.has_recursion);
@@ -3346,6 +3355,7 @@ mod tests {
             cte_registry: registry,
             has_recursion: false,
             warnings: vec![],
+            window_strategy: None,
         };
         assert!(check_ivm_support_with_registry(&result).is_ok());
     }

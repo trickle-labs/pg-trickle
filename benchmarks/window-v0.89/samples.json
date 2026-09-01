@@ -1,0 +1,542 @@
+[
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 1,
+    "elapsed_ms": 28.490875,
+    "wal_bytes": 459512,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 1,
+    "elapsed_ms": 13.216917,
+    "wal_bytes": 39448,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 2,
+    "elapsed_ms": 29.941625,
+    "wal_bytes": 446304,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 2,
+    "elapsed_ms": 12.065875,
+    "wal_bytes": 38056,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 3,
+    "elapsed_ms": 28.943625,
+    "wal_bytes": 439056,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 3,
+    "elapsed_ms": 12.137749999999999,
+    "wal_bytes": 39624,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 4,
+    "elapsed_ms": 30.785333,
+    "wal_bytes": 437400,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 4,
+    "elapsed_ms": 12.017709,
+    "wal_bytes": 38840,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 5,
+    "elapsed_ms": 31.011292,
+    "wal_bytes": 430408,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 5,
+    "elapsed_ms": 11.525541,
+    "wal_bytes": 38696,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 1,
+    "elapsed_ms": 104.718875,
+    "wal_bytes": 1239248,
+    "output_rows": 1008
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 1,
+    "elapsed_ms": 20.670208,
+    "wal_bytes": 413976,
+    "output_rows": 2015
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 2,
+    "elapsed_ms": 44.982209000000005,
+    "wal_bytes": 1252600,
+    "output_rows": 1009
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 2,
+    "elapsed_ms": 21.908375,
+    "wal_bytes": 419216,
+    "output_rows": 2017
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 3,
+    "elapsed_ms": 152.869667,
+    "wal_bytes": 1246448,
+    "output_rows": 1010
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 3,
+    "elapsed_ms": 18.595209,
+    "wal_bytes": 414704,
+    "output_rows": 2019
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 4,
+    "elapsed_ms": 92.45408300000001,
+    "wal_bytes": 1215344,
+    "output_rows": 1011
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 4,
+    "elapsed_ms": 19.300083,
+    "wal_bytes": 416336,
+    "output_rows": 2021
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 5,
+    "elapsed_ms": 87.828083,
+    "wal_bytes": 1223192,
+    "output_rows": 1012
+  },
+  {
+    "partition_rows": 1000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 5,
+    "elapsed_ms": 38.81675,
+    "wal_bytes": 417704,
+    "output_rows": 2023
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 1,
+    "elapsed_ms": 143.272875,
+    "wal_bytes": 4341264,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 1,
+    "elapsed_ms": 25.403708,
+    "wal_bytes": 40104,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 2,
+    "elapsed_ms": 553.6131250000001,
+    "wal_bytes": 4332912,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 2,
+    "elapsed_ms": 25.846125,
+    "wal_bytes": 43224,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 3,
+    "elapsed_ms": 563.6492499999999,
+    "wal_bytes": 4360624,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 3,
+    "elapsed_ms": 24.129875,
+    "wal_bytes": 37480,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 4,
+    "elapsed_ms": 594.418208,
+    "wal_bytes": 4409016,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 4,
+    "elapsed_ms": 23.715125,
+    "wal_bytes": 41272,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 5,
+    "elapsed_ms": 548.791042,
+    "wal_bytes": 4422552,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 5,
+    "elapsed_ms": 24.684708,
+    "wal_bytes": 45176,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 1,
+    "elapsed_ms": 688.913958,
+    "wal_bytes": 11963784,
+    "output_rows": 10008
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 1,
+    "elapsed_ms": 99.531458,
+    "wal_bytes": 3747096,
+    "output_rows": 20015
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 2,
+    "elapsed_ms": 691.848292,
+    "wal_bytes": 11919352,
+    "output_rows": 10009
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 2,
+    "elapsed_ms": 112.537125,
+    "wal_bytes": 3782312,
+    "output_rows": 20017
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 3,
+    "elapsed_ms": 685.656292,
+    "wal_bytes": 11951736,
+    "output_rows": 10010
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 3,
+    "elapsed_ms": 109.2415,
+    "wal_bytes": 3745896,
+    "output_rows": 20019
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 4,
+    "elapsed_ms": 762.309333,
+    "wal_bytes": 12111336,
+    "output_rows": 10011
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 4,
+    "elapsed_ms": 114.34275000000001,
+    "wal_bytes": 3780248,
+    "output_rows": 20021
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 5,
+    "elapsed_ms": 732.889792,
+    "wal_bytes": 11945736,
+    "output_rows": 10012
+  },
+  {
+    "partition_rows": 10000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 5,
+    "elapsed_ms": 123.249584,
+    "wal_bytes": 3752704,
+    "output_rows": 20023
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 1,
+    "elapsed_ms": 1311.842167,
+    "wal_bytes": 43088560,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 1,
+    "elapsed_ms": 158.997375,
+    "wal_bytes": 39968,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 2,
+    "elapsed_ms": 1348.871708,
+    "wal_bytes": 42972656,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 2,
+    "elapsed_ms": 192.374791,
+    "wal_bytes": 42848,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 3,
+    "elapsed_ms": 1556.8595830000002,
+    "wal_bytes": 43259896,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 3,
+    "elapsed_ms": 175.32925,
+    "wal_bytes": 36552,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 4,
+    "elapsed_ms": 1831.429541,
+    "wal_bytes": 44312896,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 4,
+    "elapsed_ms": 159.74379199999998,
+    "wal_bytes": 40880,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "state_backed",
+    "repetition": 5,
+    "elapsed_ms": 1811.2196250000002,
+    "wal_bytes": 44049744,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "tail_insert",
+    "strategy": "partition_recompute",
+    "repetition": 5,
+    "elapsed_ms": 164.637041,
+    "wal_bytes": 45792,
+    "output_rows": 1
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 1,
+    "elapsed_ms": 4190.417874999999,
+    "wal_bytes": 124280840,
+    "output_rows": 100008
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 1,
+    "elapsed_ms": 1229.935416,
+    "wal_bytes": 37089968,
+    "output_rows": 200015
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 2,
+    "elapsed_ms": 4430.121,
+    "wal_bytes": 119638376,
+    "output_rows": 100009
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 2,
+    "elapsed_ms": 1420.041042,
+    "wal_bytes": 37411440,
+    "output_rows": 200017
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 3,
+    "elapsed_ms": 4102.301667,
+    "wal_bytes": 163894352,
+    "output_rows": 100010
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 3,
+    "elapsed_ms": 1261.788208,
+    "wal_bytes": 57201848,
+    "output_rows": 200019
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 4,
+    "elapsed_ms": 4296.059167,
+    "wal_bytes": 128120584,
+    "output_rows": 100011
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 4,
+    "elapsed_ms": 1299.2240829999998,
+    "wal_bytes": 37409824,
+    "output_rows": 200021
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "state_backed",
+    "repetition": 5,
+    "elapsed_ms": 4085.0144579999996,
+    "wal_bytes": 117277288,
+    "output_rows": 100012
+  },
+  {
+    "partition_rows": 100000,
+    "shape": "front_insert",
+    "strategy": "partition_recompute",
+    "repetition": 5,
+    "elapsed_ms": 1333.6478339999999,
+    "wal_bytes": 37094552,
+    "output_rows": 200023
+  }
+]

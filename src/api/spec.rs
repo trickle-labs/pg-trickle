@@ -162,6 +162,7 @@ mod tests {
             last_error_code: None,
             last_error_retryable: None,
             defining_search_path: "public".to_string(),
+            window_strategy: None,
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).

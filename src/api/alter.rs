@@ -766,6 +766,11 @@ fn alter_stream_table_query(
     // Flush MERGE template cache and deallocate prepared statements
     refresh::invalidate_merge_cache(st.pgt_id);
 
+    // Window state is derived from the old semantic query. Drop it before
+    // changing the storage or catalog contract; the surrounding transaction
+    // restores it if any later ALTER phase fails.
+    crate::window_state::drop_for_stream(st.pgt_id)?;
+
     // ── Phase 3: Migrate storage table ──
 
     let new_pgt_relid = match &schema_change {
@@ -981,6 +986,17 @@ fn alter_stream_table_query(
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+    let query_hash = crate::catalog::compute_defining_query_hash(defining_query);
+    let window_strategy = vq.parsed_tree.as_ref().map(|parsed| {
+        parsed
+            .window_strategy
+            .clone()
+            .unwrap_or_else(|| crate::dvm::parser::WindowStrategyPlan::empty(query_hash))
+            .with_query_hash(query_hash)
+            .with_state_names(st.pgt_id)
+    });
+    crate::window_state::persist_plan(st.pgt_id, window_strategy.as_ref())?;
+
     // Delete old dependency rows and insert new ones
     StDependency::delete_for_st(st.pgt_id)?;
 
@@ -1024,7 +1040,11 @@ fn alter_stream_table_query(
     for (source_oid, source_type) in &dep_diff.added {
         if source_type == "TABLE" {
             if refresh_mode.is_immediate() {
-                let lock_mode = crate::ivm::IvmLockMode::for_query(defining_query);
+                let lock_mode = vq
+                    .parsed_tree
+                    .as_ref()
+                    .map(|parsed| crate::ivm::IvmLockMode::for_tree(&parsed.tree))
+                    .unwrap_or(crate::ivm::IvmLockMode::Exclusive);
                 crate::ivm::setup_ivm_triggers(*source_oid, st.pgt_id, new_pgt_relid, lock_mode)?;
             } else {
                 setup_cdc_for_source(*source_oid, st.pgt_id, &change_schema)?;
@@ -1752,7 +1772,18 @@ pub(crate) fn create_stream_table_impl(
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     // ── Phase 2: CDC / IVM trigger setup ──
-    setup_trigger_infrastructure(&vq.source_relids, refresh_mode, pgt_id, pgt_relid, query)?;
+    let ivm_lock_mode = vq
+        .parsed_tree
+        .as_ref()
+        .map(|parsed| crate::ivm::IvmLockMode::for_tree(&parsed.tree))
+        .unwrap_or(crate::ivm::IvmLockMode::Exclusive);
+    setup_trigger_infrastructure(
+        &vq.source_relids,
+        refresh_mode,
+        pgt_id,
+        pgt_relid,
+        ivm_lock_mode,
+    )?;
     transfer_output_table_ownership(&schema, &table_name)?;
 
     // ── NS-5: Diamond consistency NOTICE ──
@@ -1876,6 +1907,14 @@ pub(crate) fn create_stream_table_impl(
                 e
             );
         }
+
+        // Initial population is the first protected FULL materialization.
+        // Build any admitted durable window state only after the target rows
+        // exist and ownership has been transferred. A budget overflow disables
+        // runtime window maintenance without losing the successful target.
+        let st = StreamTableMeta::get_by_id(pgt_id)?
+            .ok_or_else(|| PgTrickleError::NotFound(format!("pgt_id={pgt_id}")))?;
+        let _window_plan = crate::window_state::prepare_for_protected_refresh(&st)?;
     }
 
     // Pre-warm delta SQL + MERGE template cache for DIFFERENTIAL mode,
@@ -2255,7 +2294,9 @@ pub(crate) fn alter_stream_table_impl(
                 match new_mode {
                     RefreshMode::Immediate => {
                         // Install IVM triggers on source tables.
-                        let lock_mode = crate::ivm::IvmLockMode::for_query(&st.defining_query);
+                        let lock_mode = refresh::with_stream_owner(&st, || {
+                            Ok(crate::ivm::IvmLockMode::for_query(&st.defining_query))
+                        })?;
                         for dep in &deps {
                             if dep.source_type == "TABLE" {
                                 crate::ivm::setup_ivm_triggers(
@@ -2890,6 +2931,8 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
         .collect();
     crate::refresh::flush_pending_cleanups_for_oids(&dep_oids);
 
+    crate::window_state::drop_for_stream(st.pgt_id)?;
+
     // Drop the storage table
     let drop_sql = format!(
         "DROP TABLE IF EXISTS {}.{} CASCADE",
@@ -3101,6 +3144,8 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     publication::prepare_publication_binding(&st, pg_sys::AccessShareLock as i32)?;
 
     let mut actions: Vec<String> = Vec::new();
+    crate::window_state::drop_for_stream(st.pgt_id)?;
+    actions.push("window state reset: scheduled protected rebuild".to_string());
     let change_schema = config::pg_trickle_change_buffer_schema();
     let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
 

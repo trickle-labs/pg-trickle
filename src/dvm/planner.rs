@@ -8,9 +8,203 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub const FORMAT_VERSION: u16 = 1;
+pub const WINDOW_COST_MODEL_VERSION: u16 = 1;
 const PLANNING_BUDGET: Duration = Duration::from_millis(10);
 const MINIMUM_IMPROVEMENT: f64 = 0.05;
+const MINIMUM_WINDOW_IMPROVEMENT: f64 = 0.20;
 const MAX_EPOCH_SOURCES: usize = 256;
+
+/// Window maintenance families have separate measured coefficients because
+/// their unavoidable result amplification differs substantially.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowCostFamily {
+    Rank,
+    Offset,
+    Boundary,
+    Aggregate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowCostInput {
+    pub family: WindowCostFamily,
+    pub partition_rows: Option<u64>,
+    pub peer_rows: Option<u64>,
+    pub delta_rows: Option<u64>,
+    pub earliest_affected_row: Option<u64>,
+    pub emitted_rows: Option<u64>,
+    pub state_rows_written: Option<u64>,
+    pub state_bytes_written: Option<u64>,
+    pub state_ready: bool,
+}
+
+/// Versioned coefficients fitted by the end-to-end window benchmark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowCostCoefficients {
+    pub version: u16,
+    pub family: WindowCostFamily,
+    pub incremental_fixed: f64,
+    pub incremental_per_delta_row: f64,
+    pub incremental_per_emitted_row: f64,
+    pub incremental_per_state_row: f64,
+    pub incremental_per_state_byte: f64,
+    pub recompute_fixed: f64,
+    pub recompute_per_partition_row: f64,
+    pub recompute_per_peer_row: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowCostChoice {
+    Incremental,
+    PartitionRecompute,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowCostReason {
+    IncrementalMaterialWin,
+    StateNotReady,
+    MissingEvidence,
+    InvalidEvidence,
+    FamilyMismatch,
+    RecomputeCheaper,
+    ImprovementBelowGate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct WindowCostDecision {
+    pub choice: WindowCostChoice,
+    pub reason: WindowCostReason,
+    pub incremental_cost: Option<f64>,
+    pub recompute_cost: Option<f64>,
+}
+
+impl WindowCostDecision {
+    const fn recompute(reason: WindowCostReason) -> Self {
+        Self {
+            choice: WindowCostChoice::PartitionRecompute,
+            reason,
+            incremental_cost: None,
+            recompute_cost: None,
+        }
+    }
+}
+
+/// Choose a window strategy before either target or state mutation.
+///
+/// Unknown, stale, non-finite, or tied evidence deliberately keeps the
+/// existing partition-recomputation path. The 20% gate matches the v0.89
+/// release contract and is not user-configurable.
+pub fn choose_window_cost_strategy(
+    input: WindowCostInput,
+    coefficients: Option<WindowCostCoefficients>,
+) -> WindowCostDecision {
+    if !input.state_ready {
+        return WindowCostDecision::recompute(WindowCostReason::StateNotReady);
+    }
+    let Some(coefficients) = coefficients else {
+        return WindowCostDecision::recompute(WindowCostReason::MissingEvidence);
+    };
+    if coefficients.version != WINDOW_COST_MODEL_VERSION {
+        return WindowCostDecision::recompute(WindowCostReason::MissingEvidence);
+    }
+    if coefficients.family != input.family {
+        return WindowCostDecision::recompute(WindowCostReason::FamilyMismatch);
+    }
+
+    let Some((
+        partition_rows,
+        peer_rows,
+        delta_rows,
+        earliest,
+        emitted_rows,
+        state_rows,
+        state_bytes,
+    )) = input
+        .partition_rows
+        .zip(input.peer_rows)
+        .zip(input.delta_rows)
+        .zip(input.earliest_affected_row)
+        .zip(input.emitted_rows)
+        .zip(input.state_rows_written)
+        .zip(input.state_bytes_written)
+        .map(
+            |(
+                (((((partition_rows, peer_rows), delta_rows), earliest), emitted_rows), state_rows),
+                state_bytes,
+            )| {
+                (
+                    partition_rows,
+                    peer_rows,
+                    delta_rows,
+                    earliest,
+                    emitted_rows,
+                    state_rows,
+                    state_bytes,
+                )
+            },
+        )
+    else {
+        return WindowCostDecision::recompute(WindowCostReason::MissingEvidence);
+    };
+    if earliest > partition_rows || emitted_rows > partition_rows.saturating_add(delta_rows) {
+        return WindowCostDecision::recompute(WindowCostReason::InvalidEvidence);
+    }
+
+    let weights = [
+        coefficients.incremental_fixed,
+        coefficients.incremental_per_delta_row,
+        coefficients.incremental_per_emitted_row,
+        coefficients.incremental_per_state_row,
+        coefficients.incremental_per_state_byte,
+        coefficients.recompute_fixed,
+        coefficients.recompute_per_partition_row,
+        coefficients.recompute_per_peer_row,
+    ];
+    if weights
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return WindowCostDecision::recompute(WindowCostReason::InvalidEvidence);
+    }
+
+    let incremental_cost = coefficients.incremental_fixed
+        + coefficients.incremental_per_delta_row * delta_rows as f64
+        + coefficients.incremental_per_emitted_row * emitted_rows as f64
+        + coefficients.incremental_per_state_row * state_rows as f64
+        + coefficients.incremental_per_state_byte * state_bytes as f64;
+    let recompute_cost = coefficients.recompute_fixed
+        + coefficients.recompute_per_partition_row * partition_rows as f64
+        + coefficients.recompute_per_peer_row * peer_rows as f64;
+    if !incremental_cost.is_finite() || !recompute_cost.is_finite() || recompute_cost <= 0.0 {
+        return WindowCostDecision::recompute(WindowCostReason::InvalidEvidence);
+    }
+
+    let ratio = incremental_cost / recompute_cost;
+    let (choice, reason) = if ratio <= 1.0 - MINIMUM_WINDOW_IMPROVEMENT {
+        (
+            WindowCostChoice::Incremental,
+            WindowCostReason::IncrementalMaterialWin,
+        )
+    } else if incremental_cost >= recompute_cost {
+        (
+            WindowCostChoice::PartitionRecompute,
+            WindowCostReason::RecomputeCheaper,
+        )
+    } else {
+        (
+            WindowCostChoice::PartitionRecompute,
+            WindowCostReason::ImprovementBelowGate,
+        )
+    };
+    WindowCostDecision {
+        choice,
+        reason,
+        incremental_cost: Some(incremental_cost),
+        recompute_cost: Some(recompute_cost),
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ColumnStatistics {
@@ -1042,6 +1236,83 @@ fn stable_operator_id(input: &ScanInput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window_input() -> WindowCostInput {
+        WindowCostInput {
+            family: WindowCostFamily::Rank,
+            partition_rows: Some(100),
+            peer_rows: Some(10),
+            delta_rows: Some(1),
+            earliest_affected_row: Some(20),
+            emitted_rows: Some(79),
+            state_rows_written: Some(0),
+            state_bytes_written: Some(0),
+            state_ready: true,
+        }
+    }
+
+    fn window_coefficients(incremental_per_emitted_row: f64) -> WindowCostCoefficients {
+        WindowCostCoefficients {
+            version: WINDOW_COST_MODEL_VERSION,
+            family: WindowCostFamily::Rank,
+            incremental_fixed: 1.0,
+            incremental_per_delta_row: 0.0,
+            incremental_per_emitted_row,
+            incremental_per_state_row: 0.0,
+            incremental_per_state_byte: 0.0,
+            recompute_fixed: 0.0,
+            recompute_per_partition_row: 1.0,
+            recompute_per_peer_row: 0.0,
+        }
+    }
+
+    #[test]
+    fn window_cost_admits_only_a_twenty_percent_measured_win() {
+        let admitted = choose_window_cost_strategy(window_input(), Some(window_coefficients(1.0)));
+        assert_eq!(admitted.choice, WindowCostChoice::Incremental);
+        assert_eq!(admitted.reason, WindowCostReason::IncrementalMaterialWin);
+
+        let below_gate =
+            choose_window_cost_strategy(window_input(), Some(window_coefficients(1.01)));
+        assert_eq!(below_gate.choice, WindowCostChoice::PartitionRecompute);
+        assert_eq!(below_gate.reason, WindowCostReason::ImprovementBelowGate);
+    }
+
+    #[test]
+    fn window_cost_fails_closed_without_current_complete_evidence() {
+        let missing = choose_window_cost_strategy(window_input(), None);
+        assert_eq!(missing.reason, WindowCostReason::MissingEvidence);
+
+        let mut not_ready = window_input();
+        not_ready.state_ready = false;
+        assert_eq!(
+            choose_window_cost_strategy(not_ready, Some(window_coefficients(0.1))).reason,
+            WindowCostReason::StateNotReady,
+        );
+
+        let mut stale = window_coefficients(0.1);
+        stale.version += 1;
+        assert_eq!(
+            choose_window_cost_strategy(window_input(), Some(stale)).reason,
+            WindowCostReason::MissingEvidence,
+        );
+    }
+
+    #[test]
+    fn window_cost_rejects_invalid_positions_and_non_finite_math() {
+        let mut bad_position = window_input();
+        bad_position.earliest_affected_row = Some(101);
+        assert_eq!(
+            choose_window_cost_strategy(bad_position, Some(window_coefficients(0.1))).reason,
+            WindowCostReason::InvalidEvidence,
+        );
+
+        let invalid_math = window_coefficients(f64::NAN);
+        assert_eq!(
+            choose_window_cost_strategy(window_input(), Some(invalid_math)).reason,
+            WindowCostReason::InvalidEvidence,
+        );
+    }
 
     fn column_stats(name: &str, distinct_count: f64) -> ColumnStatistics {
         ColumnStatistics {

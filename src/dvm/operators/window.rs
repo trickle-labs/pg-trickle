@@ -8,10 +8,11 @@
 //! CTE chain:
 //! 1. Child delta (from recursive diff_node)
 //! 2. Changed partition keys (DISTINCT partition_by cols from delta)
-//! 3. Old ST rows for changed partitions (emitted as 'D' actions)
+//! 3. Old ST rows for changed partitions
 //! 4. Reconstruct current input for changed partitions from ST + delta
-//! 5. Recompute window function on current input (emitted as 'I' actions)
-//! 6. Combine deletes + inserts into final delta
+//! 5. Recompute window functions on current input
+//! 6. With an exact child identity, emit only inserted, deleted, or changed rows;
+//!    otherwise replace every affected partition.
 
 use crate::dvm::diff::{DiffContext, DiffResult, col_list, prefixed_col_list, quote_ident};
 use crate::dvm::parser::{AggFunc, OpTree, WindowExpr};
@@ -168,6 +169,15 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     all_output_cols.extend(wf_aliases.iter().cloned());
     all_output_cols.extend(aux_cols.iter().cloned());
 
+    // `row_id_key_columns` is strict for Window nodes: it returns a key only
+    // when the child has a proved identity projected exactly once.
+    let stable_identity = op.row_id_key_columns();
+    let state_backed = stable_identity.is_some() && ctx.window_state_row_relation.is_some();
+    let old_relation = ctx
+        .window_state_row_relation
+        .clone()
+        .unwrap_or_else(|| st_table.clone());
+
     // Determine which output columns actually exist in the ST storage
     // table. When a Window is wrapped by an outer Project that strips
     // some columns (e.g., DISTINCT ON rewrite strips __pgt_rn), the
@@ -262,7 +272,7 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
 
     let old_rows_sql = format!(
         "SELECT st.\"__pgt_row_id\", {all_cols_st}\n\
-         FROM {st_table} st\n\
+         FROM {old_relation} st\n\
          WHERE EXISTS (\n\
          SELECT 1 FROM {changed_parts_cte} cp WHERE {partition_join_st_cp}\n\
          )",
@@ -317,8 +327,8 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
         // GROUP BY columns, not necessarily as full-row DELETE+INSERT pairs.
         // When key columns are available, ANY child delta row for the same key
         // should replace the previous input row.
-        let child_key_cols = child
-            .row_id_key_columns()
+        let child_key_cols = stable_identity
+            .clone()
             .filter(|keys| !keys.is_empty() && keys.iter().all(|key| pt_aliases.contains(key)));
         let key_match_cond = child_key_cols.as_ref().map(|keys| {
             keys.iter()
@@ -458,13 +468,6 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
         })
         .collect();
 
-    // Compute unique row_ids using row_to_json + row_number, matching the
-    // initial population formula. This guarantees uniqueness even when
-    // pass-through columns have duplicates (e.g., DENSE_RANK ties).
-    // The window diff deletes ALL old rows in changed partitions and
-    // inserts ALL recomputed rows, so row_ids don't need to match between
-    // old and new — they just need to be unique.
-
     let pt_cols_ci = prefixed_col_list("ci", &pt_aliases);
 
     // Include aux columns in recomputed output
@@ -478,10 +481,16 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
         parts.join("")
     };
 
+    let recomputed_row_id = stable_identity.as_ref().map_or_else(
+        || {
+            "pgtrickle.encode_row_id_v2('WINDOW_KEY', \
+             ROW(row_to_json(w)::text, row_number() OVER ()))"
+                .to_string()
+        },
+        |keys| crate::dvm::window_row_identity_expr("w", keys),
+    );
     let recomputed_sql = format!(
-        "SELECT pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW(\
-               row_to_json(w)::text, row_number() OVER ())\
-         ) AS \"__pgt_row_id\",\n\
+        "SELECT {recomputed_row_id} AS \"__pgt_row_id\",\n\
                {all_cols_w}{aux_w}\n\
          FROM (\n\
                SELECT {pt_cols_ci},\n\
@@ -507,23 +516,52 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     );
     ctx.add_cte(recomputed_cte.clone(), recomputed_sql);
 
-    // ── CTE 5: Final delta — DELETE old + INSERT recomputed ────────────
+    // ── CTE 5: Final delta ──────────────────────────────────────────────
     let final_cte = ctx.next_cte_name("win_final");
 
     let all_cols_name = col_list(&all_output_cols);
 
-    let final_sql = format!(
-        "-- Insert recomputed window results (listed first so that\n\
-         -- PostgreSQL infers correct column types for the UNION ALL;\n\
-         -- old_rows may contain NULL placeholders for window columns\n\
-         -- stripped by an outer Project, which default to type text)\n\
-         SELECT \"__pgt_row_id\", 'I' AS \"__pgt_action\", {all_cols_name}\n\
-         FROM {recomputed_cte}\n\
-         UNION ALL\n\
-         -- Delete old window results for changed partitions\n\
-         SELECT \"__pgt_row_id\", 'D' AS \"__pgt_action\", {all_cols_name}\n\
-         FROM {old_rows_cte}",
-    );
+    let final_sql = if state_backed {
+        let changed_columns = all_output_cols
+            .iter()
+            .map(|column| {
+                let quoted = quote_ident(column);
+                format!("r.{quoted} IS DISTINCT FROM o.{quoted}")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!(
+            "-- Insert new rows and update rows whose window output changed\n\
+             SELECT r.\"__pgt_row_id\", 'I' AS \"__pgt_action\", {}\n\
+             FROM {recomputed_cte} r\n\
+             LEFT JOIN {old_rows_cte} o\n\
+               ON o.\"__pgt_row_id\" = r.\"__pgt_row_id\"\n\
+             WHERE o.\"__pgt_row_id\" IS NULL OR {changed_columns}\n\
+             UNION ALL\n\
+             -- Delete identities no longer present in the recomputed partition\n\
+             SELECT o.\"__pgt_row_id\", 'D' AS \"__pgt_action\", {}\n\
+             FROM {old_rows_cte} o\n\
+             WHERE NOT EXISTS (\n\
+                 SELECT 1 FROM {recomputed_cte} r\n\
+                 WHERE r.\"__pgt_row_id\" = o.\"__pgt_row_id\"\n\
+             )",
+            prefixed_col_list("r", &all_output_cols),
+            prefixed_col_list("o", &all_output_cols),
+        )
+    } else {
+        format!(
+            "-- Insert recomputed window results (listed first so that\n\
+             -- PostgreSQL infers correct column types for the UNION ALL;\n\
+             -- old_rows may contain NULL placeholders for window columns\n\
+             -- stripped by an outer Project, which default to type text)\n\
+             SELECT \"__pgt_row_id\", 'I' AS \"__pgt_action\", {all_cols_name}\n\
+             FROM {recomputed_cte}\n\
+             UNION ALL\n\
+             -- Delete old window results for changed partitions\n\
+             SELECT \"__pgt_row_id\", 'D' AS \"__pgt_action\", {all_cols_name}\n\
+             FROM {old_rows_cte}",
+        )
+    };
     ctx.add_cte(final_cte.clone(), final_sql);
 
     Ok(DiffResult {
@@ -561,6 +599,7 @@ mod tests {
             ],
             child,
         );
+        assert_eq!(tree.row_id_key_columns(), None);
         let result = diff_window(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
@@ -573,6 +612,143 @@ mod tests {
         // Should have the CTE chain: changed parts, old rows, input, recompute, final
         assert_sql_contains(&sql, "DELETE");
         assert_sql_contains(&sql, "INSERT");
+        assert_sql_contains(&sql, "row_to_json(w)::text, row_number() OVER ()");
+    }
+
+    #[test]
+    fn test_diff_window_ready_state_emits_only_real_changes() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        ctx.window_state_row_relation = Some("pgtrickle.__pgt_window_1_0_0_rows".to_string());
+        let child = scan_with_pk(
+            1,
+            "orders",
+            "public",
+            "o",
+            &["id", "region", "amount"],
+            &["id"],
+        );
+        let tree = window(
+            vec![window_expr(
+                "ROW_NUMBER",
+                vec![],
+                vec![colref("region")],
+                vec![sort_asc(colref("amount")), sort_asc(colref("id"))],
+                "rn",
+            )],
+            vec![colref("region")],
+            vec![
+                (colref("id"), "id".to_string()),
+                (colref("region"), "region".to_string()),
+                (colref("amount"), "amount".to_string()),
+            ],
+            child,
+        );
+
+        assert_eq!(tree.row_id_key_columns(), Some(vec!["id".to_string()]));
+        let result = diff_window(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(
+            &sql,
+            "pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW(w.\"id\"))",
+        );
+        assert_sql_contains(&sql, "FROM pgtrickle.__pgt_window_1_0_0_rows st");
+        assert_sql_contains(&sql, "ON o.\"__pgt_row_id\" = r.\"__pgt_row_id\"");
+        assert_sql_contains(&sql, "r.\"rn\" IS DISTINCT FROM o.\"rn\"");
+        assert_sql_contains(&sql, "WHERE NOT EXISTS");
+        assert!(!sql.contains("row_to_json(w)"), "stable path SQL: {sql}");
+    }
+
+    #[test]
+    fn test_diff_window_exact_identity_without_ready_state_recomputes_partition() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        let child = scan_with_pk(1, "orders", "public", "o", &["id", "amount"], &["id"]);
+        let tree = window(
+            vec![window_expr(
+                "ROW_NUMBER",
+                vec![],
+                vec![],
+                vec![sort_asc(colref("amount")), sort_asc(colref("id"))],
+                "rn",
+            )],
+            vec![],
+            vec![
+                (colref("id"), "id".to_string()),
+                (colref("amount"), "amount".to_string()),
+            ],
+            child,
+        );
+
+        let result = diff_window(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "FROM \"public\".\"my_st\" st");
+        assert_sql_contains(&sql, "Delete old window results for changed partitions");
+        assert!(!sql.contains(" IS DISTINCT FROM o."), "fallback SQL: {sql}");
+    }
+
+    #[test]
+    fn test_diff_window_ambiguous_identity_keeps_partition_replacement() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        let child = scan_with_pk(1, "orders", "public", "o", &["id", "amount"], &["id"]);
+        let tree = window(
+            vec![window_expr(
+                "ROW_NUMBER",
+                vec![],
+                vec![],
+                vec![sort_asc(colref("amount"))],
+                "rn",
+            )],
+            vec![],
+            vec![
+                (colref("id"), "id".to_string()),
+                (colref("id"), "id_copy".to_string()),
+                (colref("amount"), "amount".to_string()),
+            ],
+            child,
+        );
+
+        assert_eq!(tree.row_id_key_columns(), None);
+        let result = diff_window(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "row_to_json(w)::text, row_number() OVER ()");
+        assert_sql_contains(&sql, "Delete old window results for changed partitions");
+        assert!(!sql.contains(" IS DISTINCT FROM o."), "fallback SQL: {sql}");
+    }
+
+    #[test]
+    fn test_diff_window_non_rank_family_keeps_partition_replacement() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        let child = scan_with_pk(
+            1,
+            "orders",
+            "public",
+            "o",
+            &["id", "region", "amount"],
+            &["id"],
+        );
+        let tree = window(
+            vec![window_expr(
+                "SUM",
+                vec![colref("amount")],
+                vec![colref("region")],
+                vec![],
+                "running_sum",
+            )],
+            vec![colref("region")],
+            vec![
+                (colref("id"), "id".to_string()),
+                (colref("region"), "region".to_string()),
+                (colref("amount"), "amount".to_string()),
+            ],
+            child,
+        );
+
+        assert_eq!(tree.row_id_key_columns(), None);
+        let result = diff_window(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "row_to_json(w)::text, row_number() OVER ()");
+        assert!(!sql.contains(" IS DISTINCT FROM o."), "fallback SQL: {sql}");
     }
 
     #[test]

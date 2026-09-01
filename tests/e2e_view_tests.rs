@@ -503,6 +503,20 @@ async fn test_view_inline_view_replaced() {
     // After reinit (manual or scheduler-driven), data must match the new view.
     db.assert_st_matches_query("vi_st_repl", "SELECT id, val FROM vi_repl_view")
         .await;
+    let (query_rewritten, strategy_hash_matches, runtime_disabled): (bool, bool, bool) =
+        sqlx::query_as(
+            "SELECT defining_query ILIKE '%val > 10%', \
+                    (window_strategy ->> 'query_hash')::bigint = defining_query_hash, \
+                    NOT jsonb_path_exists(window_strategy, \
+                        '$.nodes[*].functions[*] ? (@.runtime_enabled == true)') \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'vi_st_repl'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("load rewritten query and window plan");
+    assert!(query_rewritten);
+    assert!(strategy_hash_matches);
+    assert!(runtime_disabled);
 }
 
 #[tokio::test]

@@ -25,7 +25,7 @@
 | [PLAN_0_87_5.md](PLAN_0_87_5.md) | PLAN | v0.87.5 Implementation Plan — DVM Correctness Contracts and Semantic Coverage |
 | [PLAN_0_87_6.md](PLAN_0_87_6.md) | PLAN | v0.87.6 Implementation Plan — Deep Fuzzing, Shrinking, and Release Gate |
 | [PLAN_0_88_0.md](PLAN_0_88_0.md) | PLAN | v0.88.0 Implementation Plan: Vectorized Aggregates and Delta Planning |
-| [PLAN_0_89_0.md](PLAN_0_89_0.md) | PLAN | v0.89.0 Implementation Plan: Incremental Window Functions |
+| [PLAN_0_89_0.md](PLAN_0_89_0.md) | PLAN | v0.89.0 Incremental Window Admission Plan (state candidate measured and runtime admission rejected) |
 | [PLAN_0_90_0.md](PLAN_0_90_0.md) | PLAN | v0.90.0 Implementation Plan: Freshness Controller and Self-Tuning |
 | [PLAN_AGENT_SKILLS.md](PLAN_AGENT_SKILLS.md) | PLAN | PLAN_AGENT_SKILLS.md — Agent Skill Proposals for pg_trickle |
 | [PLAN_DOCUMENTATION_GAPS_1.md](PLAN_DOCUMENTATION_GAPS_1.md) | PLAN | Plan: Documentation Gap Analysis (Round 1) |

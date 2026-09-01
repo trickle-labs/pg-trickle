@@ -192,9 +192,9 @@ pub(crate) fn drop_owner_temp_table(st: &StreamTableMeta, basename: &str) {
 }
 // phd1: cross-cycle phantom cleanup (CORR-1, deferred — see merge.rs).
 
-/// Stable machine-readable causes for FULL/recomputation refreshes.
+/// Stable machine-readable causes for refresh strategy selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FullRefreshReasonCode {
+pub enum RefreshReasonCode {
     FirstRefresh,
     ConfiguredFull,
     AutoQueryFullOnly,
@@ -221,9 +221,24 @@ pub enum FullRefreshReasonCode {
     TopKRecompute,
     ManualImmediateRebuild,
     StreamTableSourceManualRebuild,
+    WindowMetadataUnresolved,
+    WindowUnsupportedFunction,
+    WindowUnsupportedFrame,
+    WindowUnsupportedArgument,
+    WindowUnsupportedType,
+    WindowNoStableIdentity,
+    WindowStateInitializationRequired,
+    WindowStateMismatch,
+    WindowStateBudgetExceeded,
+    WindowOffsetExceedsBudget,
+    WindowNthIndexExceedsBudget,
+    WindowNonInvertibleDelete,
+    WindowIncrementalUnimplemented,
+    WindowRecomputeCheaper,
+    WindowImmediateRecompute,
 }
 
-impl FullRefreshReasonCode {
+impl RefreshReasonCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::FirstRefresh => "FIRST_REFRESH",
@@ -252,6 +267,21 @@ impl FullRefreshReasonCode {
             Self::TopKRecompute => "TOP_K_RECOMPUTE",
             Self::ManualImmediateRebuild => "MANUAL_IMMEDIATE_REBUILD",
             Self::StreamTableSourceManualRebuild => "STREAM_TABLE_SOURCE_MANUAL_REBUILD",
+            Self::WindowMetadataUnresolved => "WINDOW_METADATA_UNRESOLVED",
+            Self::WindowUnsupportedFunction => "WINDOW_UNSUPPORTED_FUNCTION",
+            Self::WindowUnsupportedFrame => "WINDOW_UNSUPPORTED_FRAME",
+            Self::WindowUnsupportedArgument => "WINDOW_UNSUPPORTED_ARGUMENT",
+            Self::WindowUnsupportedType => "WINDOW_UNSUPPORTED_TYPE",
+            Self::WindowNoStableIdentity => "WINDOW_NO_STABLE_IDENTITY",
+            Self::WindowStateInitializationRequired => "WINDOW_STATE_INITIALIZATION_REQUIRED",
+            Self::WindowStateMismatch => "WINDOW_STATE_MISMATCH",
+            Self::WindowStateBudgetExceeded => "WINDOW_STATE_BUDGET_EXCEEDED",
+            Self::WindowOffsetExceedsBudget => "WINDOW_OFFSET_EXCEEDS_BUDGET",
+            Self::WindowNthIndexExceedsBudget => "WINDOW_NTH_INDEX_EXCEEDS_BUDGET",
+            Self::WindowNonInvertibleDelete => "WINDOW_NON_INVERTIBLE_DELETE",
+            Self::WindowIncrementalUnimplemented => "WINDOW_INCREMENTAL_UNIMPLEMENTED",
+            Self::WindowRecomputeCheaper => "WINDOW_RECOMPUTE_CHEAPER",
+            Self::WindowImmediateRecompute => "WINDOW_IMMEDIATE_RECOMPUTE",
         }
     }
 
@@ -283,20 +313,139 @@ impl FullRefreshReasonCode {
             "TOP_K_RECOMPUTE" => Self::TopKRecompute,
             "MANUAL_IMMEDIATE_REBUILD" => Self::ManualImmediateRebuild,
             "STREAM_TABLE_SOURCE_MANUAL_REBUILD" => Self::StreamTableSourceManualRebuild,
+            "WINDOW_METADATA_UNRESOLVED" => Self::WindowMetadataUnresolved,
+            "WINDOW_UNSUPPORTED_FUNCTION" => Self::WindowUnsupportedFunction,
+            "WINDOW_UNSUPPORTED_FRAME" => Self::WindowUnsupportedFrame,
+            "WINDOW_UNSUPPORTED_ARGUMENT" => Self::WindowUnsupportedArgument,
+            "WINDOW_UNSUPPORTED_TYPE" => Self::WindowUnsupportedType,
+            "WINDOW_NO_STABLE_IDENTITY" => Self::WindowNoStableIdentity,
+            "WINDOW_STATE_INITIALIZATION_REQUIRED" => Self::WindowStateInitializationRequired,
+            "WINDOW_STATE_MISMATCH" => Self::WindowStateMismatch,
+            "WINDOW_STATE_BUDGET_EXCEEDED" => Self::WindowStateBudgetExceeded,
+            "WINDOW_OFFSET_EXCEEDS_BUDGET" => Self::WindowOffsetExceedsBudget,
+            "WINDOW_NTH_INDEX_EXCEEDS_BUDGET" => Self::WindowNthIndexExceedsBudget,
+            "WINDOW_NON_INVERTIBLE_DELETE" => Self::WindowNonInvertibleDelete,
+            "WINDOW_INCREMENTAL_UNIMPLEMENTED" => Self::WindowIncrementalUnimplemented,
+            "WINDOW_RECOMPUTE_CHEAPER" => Self::WindowRecomputeCheaper,
+            "WINDOW_IMMEDIATE_RECOMPUTE" => Self::WindowImmediateRecompute,
             _ => return None,
         })
     }
+
+    /// Priority for competing window fallback reasons. Lower values win.
+    pub const fn window_priority(self) -> Option<u8> {
+        match self {
+            Self::WindowStateMismatch | Self::WindowStateInitializationRequired => Some(0),
+            Self::WindowMetadataUnresolved
+            | Self::WindowUnsupportedFunction
+            | Self::WindowUnsupportedFrame
+            | Self::WindowUnsupportedArgument
+            | Self::WindowUnsupportedType
+            | Self::WindowNoStableIdentity => Some(1),
+            Self::WindowStateBudgetExceeded
+            | Self::WindowOffsetExceedsBudget
+            | Self::WindowNthIndexExceedsBudget => Some(2),
+            Self::WindowNonInvertibleDelete => Some(3),
+            Self::WindowIncrementalUnimplemented | Self::WindowRecomputeCheaper => Some(4),
+            Self::WindowImmediateRecompute => Some(5),
+            _ => None,
+        }
+    }
+
+    /// Select the deterministic primary code for a refresh with several
+    /// window fallback reasons.
+    pub fn highest_priority_window(codes: impl IntoIterator<Item = Self>) -> Option<Self> {
+        codes
+            .into_iter()
+            .filter(|code| code.window_priority().is_some())
+            .min_by(|left, right| {
+                left.window_priority()
+                    .cmp(&right.window_priority())
+                    .then_with(|| left.as_str().cmp(right.as_str()))
+            })
+    }
 }
 
-/// A typed, durable FULL-refresh reason.
+impl serde::Serialize for RefreshReasonCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RefreshReasonCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let code = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_str(&code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown refresh reason code {code}")))
+    }
+}
+
+/// Backward-compatible name for callers that only produce FULL reasons.
+pub type FullRefreshReasonCode = RefreshReasonCode;
+
+/// Actual strategy used by a window refresh interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowExecutionStrategy {
+    Incremental,
+    PartitionRecompute,
+    Mixed,
+    ImmediateRecompute,
+}
+
+/// Aggregate occurrence of one window fallback reason. Partition keys are
+/// deliberately omitted from durable history.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowRefreshReasonOccurrence {
+    pub node_ordinal: u32,
+    pub function_ordinal: Option<u32>,
+    pub partition_count: u64,
+    pub reason: RefreshReasonCode,
+}
+
+/// Deterministic JSON stored in `refresh_reason_detail` for window execution.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowRefreshReasonDetail {
+    pub strategy: WindowExecutionStrategy,
+    pub estimated_emitted_rows: Option<u64>,
+    pub crossover_evidence: Option<serde_json::Value>,
+    pub reasons: Vec<WindowRefreshReasonOccurrence>,
+}
+
+impl WindowRefreshReasonDetail {
+    fn normalize(&mut self) {
+        self.reasons.sort_by(|left, right| {
+            (
+                left.node_ordinal,
+                left.function_ordinal,
+                left.reason.as_str(),
+                left.partition_count,
+            )
+                .cmp(&(
+                    right.node_ordinal,
+                    right.function_ordinal,
+                    right.reason.as_str(),
+                    right.partition_count,
+                ))
+        });
+    }
+}
+
+/// A typed, durable refresh reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FullRefreshReason {
-    pub code: FullRefreshReasonCode,
+pub struct RefreshReason {
+    pub code: RefreshReasonCode,
     pub detail: String,
 }
 
-impl FullRefreshReason {
-    pub fn new(code: FullRefreshReasonCode, detail: impl Into<String>) -> Self {
+impl RefreshReason {
+    pub fn new(code: RefreshReasonCode, detail: impl Into<String>) -> Self {
         Self {
             code,
             detail: detail.into(),
@@ -305,29 +454,121 @@ impl FullRefreshReason {
 
     pub fn from_catalog(code: Option<String>, detail: Option<String>) -> Option<Self> {
         Some(Self::new(
-            FullRefreshReasonCode::from_str(code.as_deref()?)?,
+            RefreshReasonCode::from_str(code.as_deref()?)?,
             detail.unwrap_or_default(),
         ))
+    }
+
+    /// Build the primary window reason and deterministic detail document.
+    /// An incremental interval with no fallback occurrences returns `None`.
+    pub fn from_window_detail(
+        mut detail: WindowRefreshReasonDetail,
+    ) -> Result<Option<Self>, serde_json::Error> {
+        detail.normalize();
+        let Some(code) = RefreshReasonCode::highest_priority_window(
+            detail.reasons.iter().map(|occurrence| occurrence.reason),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::new(code, serde_json::to_string(&detail)?)))
+    }
+
+    fn from_window_plan(
+        plan: &crate::dvm::parser::WindowStrategyPlan,
+    ) -> Result<Option<Self>, PgTrickleError> {
+        Self::from_window_plan_for_mode(plan, false)
+    }
+
+    /// Describe the retained IMMEDIATE window recomputation path without
+    /// claiming that any state-backed algorithm ran.
+    pub(crate) fn from_immediate_window_plan(
+        plan: &crate::dvm::parser::WindowStrategyPlan,
+    ) -> Result<Option<Self>, PgTrickleError> {
+        Self::from_window_plan_for_mode(plan, true)
+    }
+
+    fn from_window_plan_for_mode(
+        plan: &crate::dvm::parser::WindowStrategyPlan,
+        immediate: bool,
+    ) -> Result<Option<Self>, PgTrickleError> {
+        let mut has_incremental = false;
+        let mut reasons = Vec::new();
+        for node in &plan.nodes {
+            for function in &node.functions {
+                let Some(code) = planned_window_fallback_code(
+                    function.runtime_enabled,
+                    function.fallback_reason.as_deref(),
+                    immediate,
+                ) else {
+                    has_incremental = true;
+                    continue;
+                };
+                reasons.push(WindowRefreshReasonOccurrence {
+                    node_ordinal: node.node_ordinal,
+                    function_ordinal: Some(function.function_ordinal),
+                    partition_count: 0,
+                    reason: code,
+                });
+            }
+        }
+        let strategy = if immediate {
+            WindowExecutionStrategy::ImmediateRecompute
+        } else if has_incremental {
+            WindowExecutionStrategy::Mixed
+        } else {
+            WindowExecutionStrategy::PartitionRecompute
+        };
+        Self::from_window_detail(WindowRefreshReasonDetail {
+            strategy,
+            estimated_emitted_rows: None,
+            crossover_evidence: None,
+            reasons,
+        })
+        .map_err(|error| PgTrickleError::InternalError(error.to_string()))
     }
 
     pub fn for_action(action: RefreshAction, first_refresh: bool) -> Option<Self> {
         match action {
             RefreshAction::Full | RefreshAction::Reinitialize if first_refresh => Some(Self::new(
-                FullRefreshReasonCode::FirstRefresh,
+                RefreshReasonCode::FirstRefresh,
                 "The stream table has not been populated yet.",
             )),
             RefreshAction::Full => Some(Self::new(
-                FullRefreshReasonCode::ConfiguredFull,
+                RefreshReasonCode::ConfiguredFull,
                 "FULL refresh was selected by the configured refresh mode.",
             )),
             RefreshAction::Reinitialize => Some(Self::new(
-                FullRefreshReasonCode::SchemaChanged,
+                RefreshReasonCode::SchemaChanged,
                 "A rebuild was requested because the stored stream-table definition changed.",
             )),
             _ => None,
         }
     }
 }
+
+fn planned_window_fallback_code(
+    runtime_enabled: bool,
+    fallback_reason: Option<&str>,
+    immediate: bool,
+) -> Option<RefreshReasonCode> {
+    if runtime_enabled && fallback_reason.is_none() {
+        return immediate.then_some(RefreshReasonCode::WindowImmediateRecompute);
+    }
+    let code = fallback_reason
+        .and_then(RefreshReasonCode::from_str)
+        .unwrap_or(RefreshReasonCode::WindowMetadataUnresolved);
+    Some(
+        if immediate && code == RefreshReasonCode::WindowRecomputeCheaper {
+            RefreshReasonCode::WindowImmediateRecompute
+        } else {
+            code
+        },
+    )
+}
+
+/// Backward-compatible name retained for existing FULL-refresh callers and
+/// catalog APIs. New code should use [`RefreshReason`].
+pub type FullRefreshReason = RefreshReason;
 
 /// The durable result of a refresh executor before catalog finalization.
 ///
@@ -388,6 +629,16 @@ pub fn finalize_success(
         "NO_DATA" => RefreshAction::NoData,
         _ => execution.effective_action,
     };
+    let window_reason =
+        if execution.full_reason.is_none() && history_action == RefreshAction::Differential {
+            crate::window_state::ensure_plan(st)?
+                .as_ref()
+                .map(RefreshReason::from_window_plan)
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
     let catalog_reason = if execution.full_reason.is_none()
         && matches!(
             history_action,
@@ -412,6 +663,7 @@ pub fn finalize_success(
     let derived_reason = execution
         .full_reason
         .clone()
+        .or(window_reason)
         .or(catalog_reason)
         .or_else(|| FullRefreshReason::for_action(history_action, !st.is_populated));
     let full_reason = derived_reason.as_ref();
@@ -756,7 +1008,7 @@ fn take_merge_strategy() -> &'static str {
 /// execution path.  Returns `""` if no refresh has been recorded yet
 /// in this thread.
 pub fn take_effective_mode() -> &'static str {
-    LAST_EFFECTIVE_MODE.with(|m| m.get())
+    LAST_EFFECTIVE_MODE.with(|m| m.replace(""))
 }
 
 pub(crate) fn effective_mode_is_no_data() -> bool {
@@ -800,5 +1052,73 @@ pub fn take_last_temp_blks_written() -> i64 {
     })
 }
 
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod tests {
+    use super::*;
+    use crate::catalog::StreamTableMeta;
+    use pgrx::prelude::*;
+
+    #[pg_test]
+    fn test_execute_differential_refresh_success() {
+        Spi::run("CREATE SCHEMA IF NOT EXISTS public").expect("create public schema");
+        Spi::run("CREATE TABLE public.test_refresh_src (id INT PRIMARY KEY, val TEXT)")
+            .expect("create refresh source");
+        Spi::run("INSERT INTO public.test_refresh_src VALUES (1, 'hello'), (2, 'world')")
+            .expect("seed refresh source");
+
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+            'public.test_refresh_st',
+            'SELECT id, val FROM public.test_refresh_src',
+            schedule => '1m',
+            refresh_mode => 'DIFFERENTIAL'
+        );",
+        )
+        .expect("create stream table");
+
+        let st = StreamTableMeta::get_by_name("public", "test_refresh_st").expect("st must exist");
+        assert!(st.is_populated, "ST should be populated after FULL");
+
+        let prev_frontier = st.frontier.clone();
+        assert!(
+            prev_frontier.as_ref().is_some_and(|f| !f.is_empty()),
+            "Frontier should not be empty after FULL refresh"
+        );
+
+        Spi::run("INSERT INTO public.test_refresh_src VALUES (3, 'foo')")
+            .expect("insert source delta");
+        Spi::run("UPDATE public.test_refresh_src SET val = 'bar' WHERE id = 1")
+            .expect("update source delta");
+        Spi::run("DELETE FROM public.test_refresh_src WHERE id = 2").expect("delete source delta");
+
+        let prev_frontier_ref = prev_frontier.as_ref().expect("prev_frontier must be Some");
+        let current_lsn = crate::cdc::get_current_wal_lsn().expect("current WAL LSN");
+        let mut new_frontier = prev_frontier_ref.clone();
+        for source_oid in prev_frontier_ref.source_oids() {
+            new_frontier.set_source(
+                source_oid,
+                current_lsn.clone(),
+                "pg_test upper bound".to_string(),
+            );
+        }
+
+        let (affected, _) = execute_differential_refresh(&st, prev_frontier_ref, &new_frontier)
+            .expect("differential refresh should succeed");
+
+        assert!(affected > 0, "should have affected rows");
+
+        let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM public.test_refresh_st")
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 2, "1,3 should be present");
+
+        Spi::run("SELECT pgtrickle.drop_stream_table('public.test_refresh_st')")
+            .expect("drop stream table");
+        Spi::run("DROP TABLE public.test_refresh_src CASCADE").expect("drop refresh source");
+    }
+}
+
 #[cfg(test)]
-mod tests;
+#[path = "tests.rs"]
+mod unit_tests;

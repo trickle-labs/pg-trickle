@@ -5755,7 +5755,7 @@ fn promote_predicate(tree: OpTree, pred: Expr, aliases: &[String]) -> OpTree {
 
 #[cfg(feature = "pg_test")]
 #[pg_schema]
-mod pg_tests {
+mod tests {
     use super::*;
 
     fn sorted_unique_oids(mut oids: Vec<u32>) -> Vec<u32> {
@@ -5848,12 +5848,15 @@ mod pg_tests {
         assert!(!result.has_recursion);
         assert_eq!(result.cte_registry.entries.len(), 1);
         assert_eq!(result.tree.output_columns(), vec!["customer_name", "total"]);
-        assert_eq!(source_oids, vec![customers_oid, orders_oid]);
+        assert_eq!(
+            source_oids,
+            sorted_unique_oids(vec![customers_oid, orders_oid])
+        );
         assert!(tree_contains(&result.tree, &|node| matches!(
             node,
             OpTree::CteScan { .. }
         )));
-        assert_eq!(result.functions_used(), vec!["lower"]);
+        assert_eq!(result.functions_used(), vec!["lower", "sum"]);
         assert_eq!(
             result
                 .source_columns_used()
@@ -5868,7 +5871,11 @@ mod pg_tests {
                 .get(&orders_oid)
                 .cloned()
                 .unwrap_or_default(),
-            vec!["amount".to_string(), "customer_id".to_string()]
+            vec![
+                "amount".to_string(),
+                "customer_id".to_string(),
+                "id".to_string()
+            ]
         );
         assert!(check_ivm_support_with_registry(&result).is_ok());
         assert!(query_has_cte(
@@ -5957,7 +5964,7 @@ mod pg_tests {
         assert_eq!(result.tree.output_columns(), vec!["id", "current_tax"]);
         assert_eq!(
             sorted_unique_oids(result.tree.source_oids()),
-            vec![config_oid, orders_oid]
+            sorted_unique_oids(vec![config_oid, orders_oid])
         );
         assert!(tree_contains(&result.tree, &|node| matches!(
             node,
@@ -5969,7 +5976,7 @@ mod pg_tests {
                 .get(&orders_oid)
                 .cloned()
                 .unwrap_or_default(),
-            vec!["id".to_string()]
+            vec!["amount".to_string(), "id".to_string()]
         );
         assert_eq!(
             result
