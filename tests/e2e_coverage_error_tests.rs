@@ -228,7 +228,19 @@ async fn test_alter_source_drop_column_not_in_query() {
     ])
     .await;
 
-    // Insert a new row and refresh — should still work
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'drop_col_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
+
+    // Repair the source contract before refreshing.
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('drop_col_st')")
+        .await;
+
+    // Insert a new row and refresh after the explicit repair.
     db.execute("INSERT INTO drop_col_src (id, val) VALUES (2, 'world')")
         .await;
     db.refresh_st("drop_col_st").await;
@@ -295,7 +307,19 @@ async fn test_alter_source_change_column_type() {
     ])
     .await;
 
-    // Refresh should still work since VARCHAR is compatible with TEXT
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'type_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
+
+    // Repair the source contract before refreshing.
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('type_st')")
+        .await;
+
+    // Refresh after the explicit repair.
     db.execute("INSERT INTO type_src VALUES (2, 'hello')").await;
     db.refresh_st("type_st").await;
 

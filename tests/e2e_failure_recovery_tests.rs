@@ -237,7 +237,7 @@ async fn test_refresh_after_repeated_failures_counter_grows() {
         "consecutive_errors should be > 0 after repeated failures; got {errs}"
     );
 
-    // Add the column back and reinitialize
+    // Add the column back and repair the source contract
     db.execute_seq(&[
         "SET pg_trickle.block_source_ddl = false",
         "ALTER TABLE fr_rep_src ADD COLUMN important TEXT",
@@ -247,13 +247,8 @@ async fn test_refresh_after_repeated_failures_counter_grows() {
     db.execute("UPDATE fr_rep_src SET important = 'a' WHERE id = 1")
         .await;
 
-    // Reset the ST state for recovery
-    db.execute(
-        "UPDATE pgtrickle.pgt_stream_tables \
-         SET consecutive_errors = 0, needs_reinit = true \
-         WHERE pgt_name = 'fr_rep_st'",
-    )
-    .await;
+    db.execute("SELECT pgtrickle.resume_stream_table('fr_rep_st')")
+        .await;
     db.refresh_st("fr_rep_st").await;
     db.assert_st_matches_query("fr_rep_st", "SELECT id, important FROM fr_rep_src")
         .await;
@@ -323,7 +318,7 @@ async fn test_recovery_after_consecutive_errors_reset() {
 // ── FR-6: Concurrent DDL during refresh ────────────────────────────────────
 
 /// Verify that a DROP on a source table that's referenced by an existing ST
-/// produces a clear error (not a panic) and the ST transitions to ERROR.
+/// produces a clear error (not a panic) and the ST transitions to SUSPENDED.
 /// Then the source is recreated and the ST is reinitialized to recover.
 #[tokio::test]
 async fn test_drop_source_and_reinit_recovery() {
@@ -337,12 +332,12 @@ async fn test_drop_source_and_reinit_recovery() {
     db.create_st("fr_drop_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("fr_drop_st", q).await;
 
-    // Drop the source table — should set the ST to ERROR state (not crash)
+    // Drop the source table — should suspend the ST (not crash)
     let drop_result = db.try_execute("DROP TABLE fr_drop_src CASCADE").await;
 
     if drop_result.is_ok() {
         // Verify the catalog is consistent — either ST was cleaned up (CASCADE)
-        // or it's in ERROR state.
+        // or it's in SUSPENDED state.
         let st_count: i64 = db
             .query_scalar(
                 "SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_drop_st'",
@@ -356,7 +351,10 @@ async fn test_drop_source_and_reinit_recovery() {
                      WHERE pgt_name = 'fr_drop_st'",
                 )
                 .await;
-            assert_eq!(status, "ERROR", "ST must be ERROR after source dropped");
+            assert_eq!(
+                status, "SUSPENDED",
+                "ST must be SUSPENDED after source dropped"
+            );
 
             // Recovery: recreate source, drop old ST, recreate ST
             db.execute("CREATE TABLE fr_drop_src (id INT PRIMARY KEY, val TEXT)")
