@@ -139,10 +139,8 @@ async fn test_scheduler_isolates_failing_st_from_healthy_st() {
     );
 
     // ── Inject fault: drop the column that bad_st queries ───────────────
-    // After the next INSERT, bad_st will try to FULL-refresh but fail because
-    // the change-buffer trigger tries to reference a dropped column.
-    // ALTER TABLE DROP COLUMN triggers a DDL hook which marks bad_st for
-    // reinitialization — then the reinit fails because the schema changed.
+    // ALTER TABLE DROP COLUMN triggers a DDL hook which suspends bad_st
+    // until the changed source schema is explicitly repaired.
     db.execute("INSERT INTO bad_src VALUES (2, 'y')").await;
     db.execute_seq(&[
         "SET pg_trickle.block_source_ddl = false",
@@ -150,25 +148,12 @@ async fn test_scheduler_isolates_failing_st_from_healthy_st() {
     ])
     .await;
 
-    // ── Wait: bad_st should eventually show error symptoms ────────────
-    // The DDL hook marks bad_st for reinit. The parallel worker attempts
-    // the reinit query, which fails because important_col is gone.
-    // The worker may crash (PG ERROR → exit), so the FAILED history record
-    // may be rolled back. Poll for the scheduler to still be alive after
-    // processing the crash (up to 10 s for slow/emulated environments).
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let sched: i64 = db
-            .query_scalar(
-                "SELECT count(*) FROM pg_stat_activity \
-                 WHERE backend_type = 'pg_trickle scheduler'",
-            )
-            .await;
-        if sched >= 1 || std::time::Instant::now() > deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // ── Wait: bad_st should be suspended ───────────────────────────────
+    let suspended = wait_for_status(&db, "bad_st", "SUSPENDED", Duration::from_secs(10)).await;
+    assert!(
+        suspended,
+        "bad_st should be suspended after source schema change"
+    );
 
     // ── Verify: scheduler is still alive ───────────────────────────────
     let sched_count: i64 = db
@@ -201,17 +186,14 @@ async fn test_scheduler_isolates_failing_st_from_healthy_st() {
         good_row_count
     );
 
-    // ── Verify: bad_st is still marked for reinit (source column gone) ──
-    let bad_reinit: bool = db
+    // ── Verify: bad_st records why it is suspended ─────────────────────
+    let bad_status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables \
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'bad_st'",
         )
         .await;
-    assert!(
-        bad_reinit,
-        "bad_st should still have needs_reinit=true after source column was dropped"
-    );
+    assert_eq!(bad_status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
 }
 
 /// SAF-2b: Verify that revoking SELECT on a source table from a non-superuser
@@ -257,18 +239,22 @@ async fn test_scheduler_continues_after_permission_error() {
         "st_ok should complete initial scheduled refresh"
     );
 
-    // ── Inject fault: mark st_perm for reinit then drop the source ──────
-    // Dropping the source table triggers a permanent error for st_perm,
-    // exercising the error-isolation path.
+    // ── Inject fault: drop the source table ─────────────────────────────
+    // Dropping the source suspends st_perm, exercising the scheduler's
+    // isolation from an unavailable stream table.
     db.execute("DROP TABLE src_perm CASCADE").await;
 
-    // ── Wait for st_perm to enter ERROR status ─────────────────────────
-    // DROP TABLE CASCADE triggers the handle_dropped_table event handler
-    // which sets the ST to ERROR directly (no FAILED refresh history record).
-    let perm_failed = wait_for_status(&db, "st_perm", "ERROR", Duration::from_secs(60)).await;
-    assert!(
-        perm_failed,
-        "st_perm should be ERROR after its source table is dropped"
+    // ── Verify st_perm is suspended before the scheduler continues ─────
+    let perm_status: String = db
+        .query_scalar(
+            "SELECT status || ':' || COALESCE(refresh_reason, 'NULL') \
+             FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'st_perm'",
+        )
+        .await;
+    assert_eq!(
+        perm_status, "SUSPENDED:SOURCE_DROPPED",
+        "st_perm should be SUSPENDED:SOURCE_DROPPED after source table is dropped"
     );
 
     db.execute("INSERT INTO src_ok VALUES (3, 30)").await;
@@ -294,17 +280,16 @@ async fn test_scheduler_continues_after_permission_error() {
         "st_ok should still be refreshed by scheduler after st_perm failure"
     );
 
-    // ── Verify: st_perm is in ERROR state ─────────────────────────────
-    // DROP TABLE CASCADE sets status to ERROR directly via the DDL event
-    // trigger, without incrementing consecutive_errors.
-    let perm_status: String = db
+    // ── Verify: st_perm records the source drop ─────────────────────────
+    let final_perm_status: String = db
         .query_scalar(
-            "SELECT status FROM pgtrickle.pgt_stream_tables \
+            "SELECT status || ':' || COALESCE(refresh_reason, 'NULL') \
+             FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'st_perm'",
         )
         .await;
     assert_eq!(
-        perm_status, "ERROR",
-        "st_perm should be in ERROR state after source table is dropped"
+        final_perm_status, "SUSPENDED:SOURCE_DROPPED",
+        "st_perm should be SUSPENDED:SOURCE_DROPPED after source table is dropped"
     );
 }
