@@ -315,7 +315,7 @@ Mutable operational fields such as state, age, warning counters, active readers,
 
 The caller stores both the UUID and digest in its own run manifest. Every later open, promotion, or abandonment supplies the expected digest. An identifier that exists with a different digest is a hard error rather than an invitation to use the current row.
 
-Preparation also accepts a caller-provided `request_id`. The pair `(owner_role, request_id)` is unique. Before graph mutation, `prepare_graph()` computes a canonical `request_digest` over `database_instance_id`, owner, canonical roots, expected graph digest, sorted output-consumer identities, `full_policy`, and requested V2 capability majors. A repeated request returns the existing generation in its current state only when this digest matches. Reusing the identifier with different inputs raises a stable idempotency error. This prevents a lost response after commit from leaving the coordinator unable to rediscover which prepared generation owns the graph.
+Preparation also accepts a caller-provided `request_id`. The pair `(owner_role, request_id)` is unique. Before graph mutation, `prepare_graph()` computes a canonical `request_digest` over `database_instance_id`, owner, canonical roots, expected graph digest, sorted output-consumer identities, `full_policy`, and requested V2 capability majors. It then acquires a namespaced transaction advisory lock derived from `(database_instance_id, owner_role, request_id)` and checks the generation catalog while holding that lock. The lock remains held through transaction end. A repeated request returns the existing generation in its current state only when this digest matches. When no row exists, the caller retains the request lock while it acquires graph locks, refreshes, and inserts the generation. The unique catalog key is a final integrity constraint, not the primary serialization mechanism. Hash collisions may serialize unrelated requests but cannot weaken correctness. Reusing the identifier with different inputs raises a stable idempotency error. This prevents concurrent identical calls from both refreshing the graph and prevents a lost response after commit from leaving the coordinator unable to rediscover which prepared generation owns the graph.
 
 ---
 
@@ -613,17 +613,19 @@ A fast verification checks generation and member catalogs, stored contract diges
 
 ## 22. Concurrency and lock ordering
 
-Preparation, opening, promotion, abandonment, graph refresh, and lifecycle operations must share one documented lock hierarchy. A recommended order is:
+Preparation, opening, promotion, abandonment, graph refresh, and lifecycle operations must share one documented lock hierarchy. The order is:
 
 ```text
-generation transition lock, when an existing generation is targeted
+integration drain lock, shared by prepare_graph() and exclusive for supported logical dump
+  -> preparation request lock, only when prepare_graph() targets a request_id
+  -> generation transition lock, when an existing generation is targeted
   -> member refresh, lifecycle, and catalog-row locks in the canonical Graph V1 order
   -> member storage relations in ascending OID where required
   -> output consumers in ascending UUID byte order, when delta binding applies
   -> output batch and payload relations
 ```
 
-The member locks are the graph-isolation mechanism. V2 uses the exact canonical database-local member key and ordering implemented by the negotiated Graph V1 capability; it does not derive a second V2 order from `pgt_id`, relation OID, root order, or generation identity. No hash of the root or member set and no database-wide integration-registry lock may substitute for those locks. Preparation also serializes `(owner_role, request_id)` through the unique catalog key while establishing idempotency, but that key does not protect graph members.
+The member locks are the graph-isolation mechanism. V2 uses the exact canonical database-local member key and ordering implemented by the negotiated Graph V1 capability; it does not derive a second V2 order from `pgt_id`, relation OID, root order, or generation identity. No hash of the root or member set and no database-wide integration-registry lock may substitute for those locks. The integration drain lock only closes the supported logical-dump admission window, and the request lock only serializes idempotent preparation; neither protects graph members. Every path that combines these lock classes follows the hierarchy above.
 
 `prepare_graph()` locks the complete member set before refreshing any member and inserts the durable leases while those locks remain held. Concurrent preparations with overlapping members serialize at the first common member and one fails with a stable lease conflict. A V1 strict graph refresh, manual refresh, scheduler dispatch, or lifecycle mutation that encounters an active lease fails rather than waiting indefinitely and later mutating evidence whose coordinator assumptions may have changed.
 
@@ -638,6 +640,8 @@ Deadlock tests must cover graphs with overlapping roots, consumer UUID order dif
 Preparation and transition APIs preserve the V1 owner-equivalent execution model. The caller must own every member and every bound output consumer, be a member of their owner roles under the documented policy, or hold a future explicit maintenance privilege that is checked per object. `USAGE` on the `pgtrickle` schema is not sufficient. A `SECURITY DEFINER` function in another extension cannot borrow `pg_trickle`'s installation authority to prepare or release unrelated graphs.
 
 Defining SQL still executes as each stored stream-table owner under the stored defining search path and row-security contract. The generation owner is the authorized coordinating role, not necessarily the role used to evaluate every defining query. Ownership and role identities are pinned in the generation contract and cannot be changed while prepared.
+
+Durable generation and binding rows that store role OIDs follow Graph V1's owner-lifecycle rule. They register PostgreSQL shared dependencies on their owner roles, or use an equivalent mechanism that prevents role deletion while active state exists. A dangling owner OID invalidates the object, and later OID reuse must never transfer authority. Removing or reassigning an owner requires an explicit lifecycle operation with the same generation and member locks. Terminal audit retention may replace the live dependency with a non-authoritative recorded role name or another immutable audit identity.
 
 Prepared output ranges may contain complete values from deleted or superseded rows. Opening a generation does not bypass the V1 consumer authorization rules, and the generated typed delta relation remains accessible only to roles trusted to see the complete output history. Application RLS is not applied as an incomplete filter over a logical delta. A coordinator that cannot see complete terminal evidence cannot own a prepared consumer binding.
 
@@ -659,7 +663,7 @@ Startup recovery performs a fast verification of every active generation and lea
 
 Restart and failover that preserve the v0.92 `database_instance_id` preserve generation catalogs, member storage, leases, output logs, and consumer cursors as ordinary durable PostgreSQL state. Any restore, PITR, template copy, physical clone, or logical restore activated with a new writable `database_instance_id` marks imported active generations `INVALID`. Their leases remain until explicit abandonment so the restored graph cannot refresh under ambiguous ownership.
 
-Capability major 1 does not preserve active prepared generations through the supported logical dump and restore workflow. Backup preflight rejects logical dump while a generation is `PREPARED` and instructs the operator to promote or abandon it. If unsupported tooling nevertheless restores active rows into a new instance, startup recovery marks them `INVALID` and retains their leases until explicit abandonment. Terminal audit rows may be restored as history.
+Capability major 1 does not preserve active prepared generations through the supported logical dump and restore workflow. `pgtrickle.assert_logical_dump_safe()` raises a stable state-conflict error when any generation is `PREPARED`. The supported `pg_trickle_dump` workflow takes the integration drain lock exclusively, calls the assertion, and holds the lock through export; `prepare_graph()` takes the shared form before its request lock. The extension-config dump filter for the generation catalog also invokes a side-effect-free row predicate that raises on `PREPARED`, so direct `pg_dump` cannot silently serialize an active generation from its consistent dump snapshot while still dumping terminal audit rows. If unsupported tooling bypasses these checks and restores active rows into a new instance, startup recovery marks them `INVALID` and retains their leases until explicit abandonment. Terminal audit rows may be restored as history.
 
 ---
 
@@ -781,7 +785,7 @@ A batch or payload row referenced by an active prepared consumer binding partici
 
 ### 26.4 Content epoch
 
-Every stream table must expose one durable, monotonically increasing `content_epoch`; an existing field may satisfy this requirement only if it is already a complete mutation epoch. Every supported operation that can change logical rows, replace storage, restore a snapshot, reinitialize, recreate generated columns, or change the interpretation of stored values increments it in the same transaction. Preparation pins it, and opening or promotion validates it. A no-data refresh may leave it unchanged only when logical contents, storage identity, and stored-value interpretation are unchanged.
+Every stream table must expose one durable, monotonically increasing `content_epoch`; an existing field may satisfy this requirement only if it is already a complete mutation epoch. The capability migration initializes existing stream tables to zero while holding the ordinary lifecycle and catalog locks and leaves discovery disabled until every row and mutation guard is installed. Zero means only "baseline established by this migration"; it does not claim that the table has never changed. Every supported operation that can change logical rows, replace storage, restore a snapshot, reinitialize, recreate generated columns, or change the interpretation of stored values increments it in the same transaction. Preparation pins it, and opening or promotion validates it. A no-data refresh may leave it unchanged only when logical contents, storage identity, and stored-value interpretation are unchanged.
 
 The mutation classification is normative:
 
@@ -886,7 +890,7 @@ A compatible extension upgrade preserves active generation identifiers, digests,
 
 An upgrade that cannot preserve an active prepared generation must fail before mutating extension state and instruct the operator to promote or abandon the generation. It may not auto-abandon or mark it promoted. A mandatory correctness repair that proves an existing generation invalid may mark it `INVALID` with an explicit reason, but it cannot silently reinterpret or rebuild that generation under new semantics.
 
-Upgrade scripts and dump support must preserve the lease-before-scheduler invariant. There must be no startup window after an upgrade or restore in which the scheduler can refresh a member before active leases have been loaded and validated. Recovery and upgrade tests should deliberately crash or restart at each migration boundary.
+Upgrade scripts and dump support must preserve the lease-before-scheduler invariant. There must be no startup window after an upgrade or restore in which the scheduler can refresh a member before active leases have been loaded and validated. The supported logical-dump workflow calls `assert_logical_dump_safe()` while holding the integration drain lock; the extension-config dump predicate provides a second fail-closed check for direct `pg_dump`. Recovery and upgrade tests should deliberately crash or restart at each migration boundary.
 
 The public contract is SQL-facing. A coordinating extension pins capability majors and generation digests and does not link to private Rust symbols. Package dependency ranges may narrow installation combinations, but runtime negotiation remains authoritative.
 
@@ -1028,7 +1032,7 @@ Add fast and deep verification, startup recovery, invalid-state handling, future
 
 ### 34.1 Unit and property tests
 
-Pure core tests should cover canonical request and generation encoding, digest golden vectors, state-transition legality, request idempotency, member ordering, lock-key derivation, and future-validity classification. Property tests must prove that no path releases a member lease while the generation remains prepared. Prepared delta-binding tests additionally cover consumer ordering, required acknowledgement computation, and `EXACT`, `FULL_INVALIDATION`, and `RESNAPSHOT_REQUIRED` classification, and prove that no bound path reaches `PROMOTED` without complete matching dispositions.
+Pure core tests should cover canonical request and generation encoding, digest golden vectors, state-transition legality, request idempotency, member ordering, lock-key derivation, content-epoch classification, and future-validity classification. Property tests must prove that no path releases a member lease while the generation remains prepared. Prepared delta-binding tests additionally cover consumer ordering, required acknowledgement computation, and `EXACT`, `FULL_INVALIDATION`, and `RESNAPSHOT_REQUIRED` classification, and prove that no bound path reaches `PROMOTED` without complete matching dispositions.
 
 ### 34.2 PostgreSQL integration tests
 
@@ -1036,7 +1040,7 @@ Core integration tests should prepare one-node and multi-node external graphs wi
 
 Every member mutation path must have a prepared-lease test: manual refresh, scheduler dispatch, V1 strict graph refresh, another preparation, alter query, storage recreation, owner transfer, orchestration-mode change, suspend/resume, repair, restore, rename, and drop. Physical-only operations classified as safe should have positive tests proving that generation digest and contents remain valid.
 
-Concurrency tests should race overlapping preparations, prepared readers, promotion, abandonment, source DML, source DDL, output acknowledgement, consumer drop, and extension lifecycle operations. They should use condition-based synchronization rather than sleeps and run under PostgreSQL's supported isolation levels. Deadlock detection and deterministic lock order are release gates.
+Concurrency tests should race duplicate and conflicting uses of one `(owner_role, request_id)`, supported logical-dump preflight, overlapping preparations, prepared readers, promotion, abandonment, source DML, source DDL, output acknowledgement, consumer drop, and extension lifecycle operations. A duplicate request may execute the graph refresh at most once, and no preparation may commit inside the supported dump window. Tests should use condition-based synchronization rather than sleeps and run under PostgreSQL's supported isolation levels. Deadlock detection and deterministic lock order are release gates.
 
 ### 34.3 Atomic publication tests
 
@@ -1046,7 +1050,7 @@ The same test extension should abandon a generation and prove that no cursor adv
 
 ### 34.4 Crash, recovery, and upgrade tests
 
-Tests should restart PostgreSQL after preparation, during an open read, during promotion before commit, and after promotion commit. Restart, failover, backup, and PITR preserve an active generation only when they preserve `database_instance_id`. Supported logical dump preflight rejects `PREPARED` generations. Unsupported restore into a new instance must mark imported active generations `INVALID` without releasing their leases.
+Tests should restart PostgreSQL after preparation, during an open read, during promotion before commit, and after promotion commit. Restart, failover, backup, and PITR preserve an active generation only when they preserve `database_instance_id`. The supported dump wrapper and the extension-config dump predicate both reject `PREPARED` generations, and the drain lock prevents a preparation from committing between wrapper preflight and dump. Unsupported restore into a new instance must mark imported active generations `INVALID` without releasing their leases.
 
 Upgrade tests should cover no active generation, one valid prepared generation, one invalid generation, terminal audit generations, and a deliberately incompatible future migration. The incompatible path must fail before catalog or storage mutation. Clone-isolation tests must prove that tokens from one `database_instance_id` cannot be promoted in another.
 
@@ -1056,7 +1060,7 @@ Tests should remove or alter a lease, member relation, content epoch, stored con
 
 ### 34.6 Security tests
 
-Cross-role tests should verify mixed member ownership, revoked role membership, `SECURITY DEFINER` wrappers, unauthorized status inspection, deleted-row access through output deltas, generation ownership transfer attempts, and administrator abandonment. Search-path shadowing and dynamic SQL identifier tests remain mandatory.
+Cross-role tests should verify mixed member ownership, revoked role membership, blocked owner-role drop, role OID reuse resistance, `SECURITY DEFINER` wrappers, unauthorized status inspection, deleted-row access through output deltas, generation ownership transfer attempts, and administrator abandonment. Search-path shadowing and dynamic SQL identifier tests remain mandatory.
 
 ### 34.7 Performance and longevity tests
 

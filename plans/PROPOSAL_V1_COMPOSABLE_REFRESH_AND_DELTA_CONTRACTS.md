@@ -625,7 +625,7 @@ row_identity      bytea    NOT NULL
 <stream-table output columns, preserving PostgreSQL types>
 ```
 
-The relation preserves the stream table's user-visible PostgreSQL types and contains complete old values for `DELETE` and complete new values for `INSERT`. Private generated columns are not exposed, except for the opaque canonical `row_identity` needed to pair and order changes. The relation is read only. Its physical name and implementation are not stable; the returned relation identity and logical schema remain valid for the lifetime of the consumer contract.
+The relation preserves the stream table's user-visible PostgreSQL types and contains complete old values for `DELETE` and complete new values for `INSERT`. Private generated columns are not exposed, except for the opaque canonical `row_identity` needed to pair and order changes. The relation is read only. Its physical name, relation OID, and implementation are not stable. The logical schema and lookup contract remain stable for the lifetime of the consumer contract, but a returned `regclass` is only the current binding. `output_delta_consumer_status()` returns that binding, and callers must rediscover it after extension upgrade, logical restore, repair, or any reported storage recreation rather than persisting the OID as durable identity.
 
 `ordinal` is unique within a batch, starts at zero, and is immutable once stored. A `DELETE` precedes the matching `INSERT` for a same-identity update. Order between distinct row identities has no public meaning. Consumers apply every row as a multiset operation and must not infer source transaction order from the ordinal. Consumers may page within the relation, but acknowledgement remains batch-granular so a partially read batch cannot be discarded accidentally.
 
@@ -665,7 +665,7 @@ RETURNS TABLE (
 
 Batch tokens are positive, monotonically increasing integers scoped to one stream table's output log and database-instance identity. The log head is a catalog counter locked and incremented in the same transaction that inserts batch metadata and payload. PostgreSQL sequences must not allocate these tokens because sequence increments do not roll back. Every committed refresh of an opted-in stream table records exactly one metadata row, including exact zero-row and invalidation batches. Token zero denotes the pristine empty origin and never has payload.
 
-The result begins after the consumer's acknowledged token and ends at `through_token`, or at the current log head when no upper token is supplied. It must return every metadata token in that closed range in order. A missing token, payload relation, required payload row, or continuity sentinel changes the consumer to `RESNAPSHOT_REQUIRED` with reason `LOG_INCOMPLETE` and raises a delta-gap error. It never treats missing history as no changes.
+The result begins after the consumer's acknowledged token and ends at `through_token`, or at the current log head when no upper token is supplied. It must return every metadata token in that closed range in order. A missing token, payload relation, required payload row, or continuity sentinel is treated immediately as `RESNAPSHOT_REQUIRED` with reason `LOG_INCOMPLETE` and raises a delta-gap error. The failing request does not claim to persist that state transition because PostgreSQL rolls back statement changes when it raises the error. Startup recovery, repair, or an explicit non-throwing validation operation must acquire the consumer lock and commit the transition in a separate transaction. Until that succeeds, every read continues to fail closed on the same integrity check. Missing history is never treated as no changes.
 
 The initial modes are:
 
@@ -739,17 +739,17 @@ State transitions record one stable reason code:
 | `CONTRACT_CHANGED` | `INVALIDATED` | The stream-table or output contract no longer matches registration |
 | `ADMIN_RESET` | `RESNAPSHOT_REQUIRED` | An administrator explicitly requested a new baseline |
 
-An execution-contract or output-contract-changing `ALTER QUERY` is rejected while active consumers exist under Delta V1. `pg_mdm` avoids in-place mutation by creating a new private graph for each entity-definition version. Dropping a stream table requires dropping or explicitly cascading its consumers. Dropping a consumer is authorization-checked and may allow retained rows to be cleaned immediately.
+An execution-contract or output-contract-changing `ALTER QUERY` is rejected while any nonterminal consumer remains registered under Delta V1, including `ACTIVE`, `PAUSED`, `RESNAPSHOT_REQUIRED`, and `INVALIDATED`. `pg_mdm` avoids in-place mutation by creating a new private graph for each entity-definition version. Dropping a stream table requires dropping or explicitly cascading its consumers. Dropping a consumer is authorization-checked and may allow retained rows to be cleaned immediately.
 
 ### 15.8 Retention and backpressure
 
-The output log is retained through the minimum acknowledged batch among active consumers. Internal downstream stream-table consumers continue to use their private frontier contract; an implementation may combine retention minima physically, but neither public cursor is represented as the other.
+The output log is retained through the minimum acknowledged batch among every consumer whose state still claims continuity. `ACTIVE` and `PAUSED` consumers both pin history. `RESNAPSHOT_REQUIRED`, `INVALIDATED`, and `DROPPED` consumers stop pinning discarded history only after the transaction that records their discarded-through token or terminal state commits. A future prepared binding also participates in this minimum while active. Internal downstream stream-table consumers continue to use their private frontier contract; an implementation may combine retention minima physically, but neither public cursor is represented as the other.
 
 The default V1 retention behavior is fail closed. A slow consumer may retain substantial data, and `pg_trickle` must expose row, byte, batch, and age lag. Soft limits warn but do not delete history. If finalizing a new exact batch would cross an enabled hard limit, the refresh raises `PGT_EXT_CONSUMER_BLOCKED` before inserting batch metadata, payload, or advancing the transactional log head. The outer refresh transaction then rolls back.
 
 An administrator may explicitly move one or more blocking consumers to `RESNAPSHOT_REQUIRED` with reason `HISTORY_EXPIRED` or `ADMIN_RESET`. That transaction records the discarded-through token before cleanup becomes eligible. The administrator then retries the refresh. Delta V1 never expires history, truncates the current batch, or changes consumer state automatically merely because a size or age threshold elapsed.
 
-Output logs required by active consumers are logged and crash-safe. Loss of a log sentinel, batch metadata, typed relation, or continuity proof changes affected consumers to `RESNAPSHOT_REQUIRED`; it is never interpreted as no changes.
+Output logs required by continuity-pinning consumers are logged and crash-safe. Loss of a log sentinel, batch metadata, typed relation, or continuity proof is treated as `RESNAPSHOT_REQUIRED`; it is never interpreted as no changes. Request paths raise without claiming a durable state change, while startup recovery, repair, or explicit validation records the transition in its own committing transaction.
 
 ---
 
@@ -826,6 +826,8 @@ The composition API is intended for trusted in-database coordinators, but it mus
 
 Output-delta registration, reading, resnapshot, acknowledgement, pause, and deletion should be restricted to the stream-table owner or superuser in V1. This avoids a subtle information leak from deleted rows retained in output history, because ordinary table RLS cannot reliably be reevaluated against a row that no longer exists. A later delegated-consumer design would require explicit row filters, masking rules, and retained-row policy rather than an informal grant.
 
+Any durable consumer row that stores a PostgreSQL role OID must register a PostgreSQL shared dependency on that role, or use an equivalent mechanism that prevents the role from being dropped while the consumer exists. A dangling owner OID is invalid state, and later OID reuse must never transfer consumer authority to an unrelated role. Reassignment or removal therefore uses an explicit authorization-checked consumer lifecycle operation rather than raw catalog mutation.
+
 Every `SECURITY DEFINER` entry point must use a fixed safe `search_path`, resolve objects through PostgreSQL catalogs, distinguish identifiers from values in generated SQL, and avoid exposing private relation names to unauthorized callers. Consumer and resnapshot tokens are references only after authorization; knowledge of a UUID is not authority.
 
 ---
@@ -834,7 +836,7 @@ Every `SECURITY DEFINER` entry point must use a fixed safe `search_path`, resolv
 
 ### 18.1 Lock ordering
 
-Strict graph refresh resolves the complete closure and acquires all graph-member locks in one canonical order before executing the first member. The order must be independent of root-array order and shared with alter, repair, drop, resnapshot, and orchestration-mode transitions so that callers do not create lock-order cycles. Source relation locks required by a full baseline follow the existing source-lock protocol and are acquired in deterministic relation order.
+Strict graph refresh resolves the complete closure and acquires all graph-member locks in one canonical order before executing the first member. The order must be independent of root-array order and shared with alter, repair, drop, resnapshot, and orchestration-mode transitions so that callers do not create lock-order cycles. One shared lock-plan helper must define the canonical member key and acquire, for each complete member set, refresh or lifecycle locks before catalog-row locks, followed by required member storage locks. A path may omit a lock class it does not need, but it may not invert the remaining order. Multi-member lifecycle operations lock the complete set before mutating any prefix. Source relation locks required by a full baseline follow the existing source-lock protocol and are then acquired in ascending relation OID. Delta V1 consumer locks follow member and source locks in ascending UUID byte order, followed by batch and payload relations. The strict API uses blocking locks governed by `lock_timeout`, or an explicit no-wait variant, and never uses `SKIP LOCKED`.
 
 ### 18.2 Scheduler interaction
 
@@ -862,7 +864,7 @@ A backend crash or server restart during an uncommitted strict refresh relies on
 
 Output-log integrity is durable control state. On startup, restore, or repair, `pg_trickle` validates consumer catalog rows, output-log relation identity, required columns and types, contract versions, sentinels, batch continuity, and acknowledged positions. Missing or unverifiable history moves the consumer to `RESNAPSHOT_REQUIRED`. The system does not synthesize an empty batch or silently jump the cursor.
 
-An execution-contract change invalidates active consumers rather than reinterpreting retained rows. A contract-neutral physical change may preserve the contract and consumer continuity. Clone activation assigns and validates a different database-instance identity, so copied tokens are rejected even when relation OIDs happen to match.
+An execution-contract change discovered through recovery, unsupported mutation, or mandatory correctness repair invalidates affected consumers rather than reinterpreting retained rows. Supported contract-changing lifecycle operations are rejected while any nonterminal consumer remains registered. A contract-neutral physical change may preserve the contract and consumer continuity. Clone activation assigns and validates a different database-instance identity, so copied tokens are rejected even when relation OIDs happen to match.
 
 `repair_stream_table()` may rebuild triggers, buffers, or derived storage, but it cannot repair an exact external history that has been lost. Its result must state whether consumers remain active, require resnapshot, or were invalidated by the repair.
 
@@ -942,6 +944,7 @@ pgt_output_delta_consumers
   output_contract_digest
   row_identity_version
   acknowledged_batch_token
+  discarded_through_token
   state
   state_reason
   created_at
@@ -1054,7 +1057,7 @@ Capability major versions are independent of each other and of the extension pac
 
 A mandatory correctness repair that changes tracked logical behavior increments the relevant rewrite or DVM contract version and the stream-table contract generation. A coordinating extension then refuses to refresh the old graph until it creates or explicitly adopts a new definition. A repair must not claim compatibility merely because the output column list is unchanged.
 
-Graph V1 upgrade scripts preserve durable orchestration mode, contract generations, contract versions, and graph refresh identities. Delta V1 scripts additionally preserve consumer registrations and cursors, the transactional log head, batch metadata, and output-log payload. `pg_dump`, physical backup, PITR, and failover treat enabled capability state as durable. The shared typed view may be recreated deterministically from catalog state, but missing payload history moves affected consumers to `RESNAPSHOT_REQUIRED`.
+Graph V1 upgrade scripts preserve durable orchestration mode, contract generations, contract versions, and graph refresh identities. Delta V1 scripts additionally preserve consumer registrations and cursors, the transactional log head, batch metadata, and output-log payload. `pg_dump`, physical backup, PITR, and failover treat enabled capability state as durable. The shared typed view may be recreated deterministically from catalog state, and status returns its current `regclass` binding after recreation. Callers must not treat a prior relation OID as durable. Missing payload history requires resnapshot under the separate-transition rule in Section 15.4.
 
 Both V1 contracts are SQL-facing. Coordinating extensions must not link to private Rust modules or assume a stable Rust ABI. Runtime capability negotiation is authoritative even when package dependencies pin a supported release line.
 
@@ -1101,7 +1104,7 @@ At minimum, Graph V1 tests cover:
 
 ### 28.3 Delta V1 unit and property tests
 
-Output-delta algebra tests compare old and new stream-table multisets with every exact batch after inserts, deletes, same-identity updates, key-changing updates, duplicates, aggregates, joins, set operations, TopK paths, no-op changes, and full fallback. Applying all exposed deletes and inserts must produce the full query result at the same source boundary. State-machine tests cover default registration, pristine `CURRENT`, idempotency, transactional token allocation, acknowledgement, invalidation disposition, resnapshot, gaps, pause and resume, multiple consumers, drop, and contract change.
+Output-delta algebra tests compare old and new stream-table multisets with every exact batch after inserts, deletes, same-identity updates, key-changing updates, duplicates, aggregates, joins, set operations, TopK paths, no-op changes, and full fallback. Applying all exposed deletes and inserts must produce the full query result at the same source boundary. State-machine tests cover default registration, pristine `CURRENT`, idempotency, transactional token allocation, acknowledgement, invalidation disposition, resnapshot, gaps, pause and resume, multiple consumers, drop, and contract change. They also prove that an error cannot claim a committed state transition and that non-throwing validation can persist the same transition.
 
 ### 28.4 Delta V1 integration tests
 
@@ -1109,11 +1112,11 @@ At minimum, Delta V1 tests cover:
 
 1. Exact differential output and exact full output, including delete-plus-insert updates and zero-row batches.
 2. Full refresh without an exact diff, producing one `FULL_INVALIDATION` and no partial payload.
-3. Several consumers sharing one typed relation while cleanup follows the slowest cursor.
+3. Several consumers sharing one typed relation while cleanup follows the slowest `ACTIVE` or `PAUSED` cursor, plus any active prepared binding.
 4. Refresh and acknowledgement rollback, proving the log head, payload, and cursor all return to their prior state without a token gap.
 5. Hard retention backpressure before metadata, payload, or log-head mutation.
 6. Explicit resnapshot, proving the complete read and cursor activation commit together.
-7. Contract change, missing storage, damaged continuity, recovery rollback, and clone activation, proving the documented state and reason code.
+7. Contract change, missing storage, damaged continuity, recovery rollback, role drop, relation rebinding, and clone activation, proving the documented state and reason code.
 8. Registration rejection for managed stream tables and non-pristine `CURRENT` requests.
 
 ### 28.5 Security and compatibility tests
