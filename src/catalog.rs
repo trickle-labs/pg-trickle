@@ -2532,7 +2532,7 @@ impl RefreshRecord {
     /// timestamp. Rows without both provenance values remain unmeasured.
     pub fn settle_visibility_timestamps() -> Result<(), PgTrickleError> {
         let limit = crate::config::pg_trickle_scheduler_maintenance_batch_size();
-        Spi::run(&format!(
+        Spi::run_with_args(
             "WITH candidates AS (
                  SELECT refresh_id
                    FROM pgtrickle.pgt_refresh_history
@@ -2544,7 +2544,7 @@ impl RefreshRecord {
                     AND CASE WHEN current_setting('track_commit_timestamp', true) = 'on'
                              THEN pg_xact_commit_timestamp(visibility_xid) END IS NOT NULL
                   ORDER BY refresh_id
-                  LIMIT {limit}
+                  LIMIT $1
              )
              UPDATE pgtrickle.pgt_refresh_history h
                 SET visible_at = pg_xact_commit_timestamp(h.visibility_xid),
@@ -2554,8 +2554,9 @@ impl RefreshRecord {
              WHERE h.refresh_id = candidates.refresh_id
                AND current_setting('track_commit_timestamp', true) = 'on'
                AND CASE WHEN current_setting('track_commit_timestamp', true) = 'on'
-                        THEN pg_xact_commit_timestamp(h.visibility_xid) END IS NOT NULL"
-        ))
+                        THEN pg_xact_commit_timestamp(h.visibility_xid) END IS NOT NULL",
+            &[limit.into()],
+        )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))
     }
 
@@ -2656,6 +2657,7 @@ impl RefreshRecord {
             })
             .collect::<Vec<_>>()
             .join(" UNION ALL ");
+        // nosemgrep: rust.spi.query.dynamic-format — buffer identifiers are catalog-derived and quote_identifier-escaped; numeric values are internal OIDs.
         Spi::get_one::<TimestampWithTimeZone>(&format!(
             "SELECT min(source_commit_at) FROM ({selects}) samples"
         ))
@@ -2988,14 +2990,13 @@ impl RefreshRecord {
     fn update_freshness_state(pgt_id: i64) -> Result<(), PgTrickleError> {
         let window_hours = crate::config::pg_trickle_sla_window_hours().max(1);
         Spi::run_with_args(
-            &format!(
-                "WITH samples AS (
+            "WITH samples AS (
                      SELECT h.refresh_id, h.commit_to_visible_ms
                        FROM pgtrickle.pgt_refresh_history h
                       WHERE h.pgt_id = $1
                         AND h.status = 'COMPLETED'
                         AND h.commit_to_visible_ms IS NOT NULL
-                        AND h.start_time >= clock_timestamp() - {window_hours} * interval '1 hour'
+                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
                       ORDER BY h.refresh_id DESC
                       LIMIT 128
                  ), stats AS (
@@ -3016,7 +3017,7 @@ impl RefreshRecord {
                                                  FROM pgtrickle.pgt_stream_tables
                                                 WHERE pgt_id = $1)
                         AND h.duration_ms IS NOT NULL
-                        AND h.start_time >= clock_timestamp() - {window_hours} * interval '1 hour'
+                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
                  ), previous AS (
                      SELECT * FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1
                  ), decision AS (
@@ -3118,9 +3119,8 @@ impl RefreshRecord {
                                         EXCLUDED.next_due_at),
                  last_input_snapshot = EXCLUDED.last_input_snapshot,
                  last_decision_at = EXCLUDED.last_decision_at,
-                 updated_at = now()"
-            ),
-            &[pgt_id.into()],
+                 updated_at = now()",
+            &[pgt_id.into(), window_hours.into()],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Self::update_controller_advisory(pgt_id)
