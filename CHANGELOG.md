@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.91.0 — Schema and Query Evolution](#0910--schema-and-query-evolution)
 - [0.90.0 — Freshness Controller and Exact Freshness Evidence](#0900--freshness-controller-and-exact-freshness-evidence)
 - [0.89.0 — Incremental Window Admission](#0890--incremental-window-admission)
 - [0.88.0 — Vectorized Aggregates and Delta Planning](#0880--vectorized-aggregates-and-delta-planning)
@@ -199,6 +200,34 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.91.0] — Schema and Query Evolution
+
+v0.91.0 makes defining-query and source-schema changes deterministic and
+failure-safe.
+
+- Adds `pgtrickle.explain_alter()` with a four-part state oracle and explicit
+  compatible, rebuildable, or rejected classifications.
+- Rebuilds valid semantic query changes in isolated shadow storage and swaps
+  the fully refreshed result atomically, preserving the old result until the
+  cutover succeeds.
+- Recovers or rolls back interrupted shadow builds without exposing partial
+  state.
+- Suspends stream tables for destructive or ambiguous source DDL with stable
+  reason codes, health-check visibility, and the explicit
+  `reinitialize_stream_table()` repair path.
+- Detects renamed, moved, dropped, and recreated dependencies by OID and keeps
+  source-DDL changes transactionally safe.
+- Adds the 0.90.0 → 0.91.0 migration, full-install archive, release gate, and
+  upgrade documentation.
+
+See the [v0.91 roadmap](roadmap/v0.91.0.md), [release contract](roadmap/v0.91.0.md-full.md),
+and [upgrade guide](docs/UPGRADING.md).
+
+## Upgrade
+
+Install the 0.91.0 shared library and extension files, restart PostgreSQL,
+then run `ALTER EXTENSION pg_trickle UPDATE TO '0.91.0';`.
 
 ## [0.90.0] — Freshness Controller and Exact Freshness Evidence
 

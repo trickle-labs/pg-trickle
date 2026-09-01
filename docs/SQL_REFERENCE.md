@@ -17,6 +17,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
     - [pgtrickle.bulk\_create](#pgtricklebulk_create)
     - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
+    - [pgtrickle.explain\_alter](#pgtrickleexplain_alter)
     - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
     - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
     - [pgtrickle.pause\_stream\_table](#pgtricklepause_stream_table)
@@ -24,6 +25,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.set\_stream\_table\_storage\_policy](#pgtrickleset_stream_table_storage_policy)
     - [pgtrickle.refresh\_stream\_table](#pgtricklerefresh_stream_table)
     - [pgtrickle.repair\_stream\_table](#pgtricklerepair_stream_table)
+    - [pgtrickle.reinitialize\_stream\_table](#pgtricklereinitialize_stream_table)
   - [Status & Monitoring](#status--monitoring)
     - [pgtrickle.pgt\_status](#pgtricklepgt_status)
     - [pgtrickle.health\_check](#pgtricklehealth_check)
@@ -1587,6 +1589,36 @@ SELECT pgtrickle.repair_stream_table('order_totals');
 - Useful after `pg_basebackup` or PITR restores where triggers may not have been captured in the backup.
 - Use `pgtrickle.trigger_inventory()` first to identify which triggers are missing.
 - Safe to call on a healthy stream table — it is a no-op if everything is intact.
+
+---
+
+### pgtrickle.explain_alter
+
+Classify a proposed defining-query replacement without changing catalog,
+storage, dependencies, or refresh state.
+
+```sql
+pgtrickle.explain_alter(name text, new_query text) → jsonb
+```
+
+The result reports `compatible`, `rebuildable`, or `rejected`, the four-part
+state oracle, affected state, a stable reason code, and an estimated rebuild
+size. Only `compatible` means the existing materialization may be reused;
+other accepted changes use an atomic shadow rebuild.
+
+---
+
+### pgtrickle.reinitialize_stream_table
+
+Explicitly repair and reinitialize a stream table after a destructive or
+ambiguous source-schema change.
+
+```sql
+pgtrickle.reinitialize_stream_table(name text) → text
+```
+
+The command validates dependencies, resets the frontier, rebuilds missing CDC
+infrastructure, and schedules a protected full refresh.
 
 ---
 

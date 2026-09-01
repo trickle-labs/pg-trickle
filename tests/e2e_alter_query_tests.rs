@@ -10,6 +10,58 @@ mod e2e;
 
 use e2e::E2eDb;
 
+#[tokio::test]
+async fn test_explain_alter_is_read_only_and_classifies_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE aq_explain_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO aq_explain_src VALUES (1, 'a'), (2, 'b')")
+        .await;
+    db.create_st(
+        "aq_explain_st",
+        "SELECT id, val FROM aq_explain_src",
+        "1m",
+        "FULL",
+    )
+    .await;
+    let oid_before = db.table_oid("aq_explain_st").await;
+
+    let compatible: bool = db
+        .query_scalar(
+            "SELECT (pgtrickle.explain_alter(\
+                'aq_explain_st', 'SELECT id, val FROM aq_explain_src')\
+             ->> 'classification') = 'compatible'",
+        )
+        .await;
+    assert!(compatible);
+
+    let rebuildable: bool = db
+        .query_scalar(
+            "SELECT (pgtrickle.explain_alter(\
+                'aq_explain_st', 'SELECT id, val FROM aq_explain_src WHERE id > 1')\
+             ->> 'classification') = 'rebuildable'",
+        )
+        .await;
+    assert!(rebuildable);
+
+    let rejected: bool = db
+        .query_scalar(
+            "SELECT (pgtrickle.explain_alter(\
+                'aq_explain_st', 'SELECT missing FROM aq_explain_src')\
+             ->> 'classification') = 'rejected'",
+        )
+        .await;
+    assert!(rejected);
+
+    let oid_after = db.table_oid("aq_explain_st").await;
+    assert_eq!(
+        oid_before, oid_after,
+        "explain_alter must not mutate storage"
+    );
+    assert_eq!(db.count("public.aq_explain_st").await, 2);
+}
+
 // ── Same-Schema Tests ──────────────────────────────────────────────────
 
 #[tokio::test]
@@ -495,10 +547,10 @@ async fn test_alter_query_view_inlining() {
     );
 }
 
-// ── OID Stability Test ─────────────────────────────────────────────────
+// ── Protected Rebuild OID Test ───────────────────────────────────────────
 
 #[tokio::test]
-async fn test_alter_query_oid_stable_same_schema() {
+async fn test_alter_query_oid_changes_for_semantic_same_schema_change() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE aq_oid (id INT PRIMARY KEY, val TEXT)")
@@ -511,7 +563,8 @@ async fn test_alter_query_oid_stable_same_schema() {
 
     let oid_before = db.table_oid("aq_oid_st").await;
 
-    // Same-schema change: OID should be preserved
+    // Same output schema is not enough to reuse state: the WHERE clause
+    // changes the materialized result, so ALTER QUERY uses a shadow rebuild.
     db.alter_st(
         "aq_oid_st",
         "query => $$ SELECT id, val FROM aq_oid WHERE id = 1 $$",
@@ -519,9 +572,9 @@ async fn test_alter_query_oid_stable_same_schema() {
     .await;
 
     let oid_after = db.table_oid("aq_oid_st").await;
-    assert_eq!(
+    assert_ne!(
         oid_before, oid_after,
-        "Storage table OID should be stable for same-schema ALTER QUERY"
+        "Storage table OID should change for a semantic same-schema ALTER QUERY"
     );
 }
 

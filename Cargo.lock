@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "pg_trickle"
-version = "0.90.0"
+version = "0.91.0"
 dependencies = [
  "aho-corasick",
  "chrono",

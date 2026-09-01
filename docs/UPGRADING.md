@@ -2,6 +2,31 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.90.0 to 0.91.0
+
+Install the 0.91.0 shared library and extension files, restart PostgreSQL, then
+run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.91.0';
+```
+
+v0.91 adds protected defining-query replacement and deterministic source-schema
+evolution handling. Use `pgtrickle.explain_alter()` before changing a query;
+only a fully proven no-op reuses the existing materialization. Other valid
+changes build a shadow result and publish it with an atomic cutover.
+
+Destructive or ambiguous source DDL suspends affected stream tables with a
+stable `SOURCE_*` reason visible in `pgtrickle.health_check()`. Repair the
+source, update the defining query when its dependency OID changed, and then
+run:
+
+```sql
+SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
+```
+
+The migration is additive and does not rewrite existing stream-table results.
+
 ## 0.89.0 to 0.90.0
 
 Install the 0.90.0 shared library and extension files, restart PostgreSQL, then

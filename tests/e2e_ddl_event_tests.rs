@@ -95,7 +95,7 @@ async fn test_drop_source_fires_event_trigger() {
     // The event trigger should handle this gracefully
     // Whether it succeeds or is prevented depends on implementation
     if result.is_ok() {
-        // If allowed, the ST catalog entry may still exist with status=ERROR,
+        // If allowed, the ST catalog entry may still exist with status=SUSPENDED,
         // or the storage table may have been cascade-dropped too (cleaning up the catalog).
         let st_count: i64 = db
             .query_scalar(
@@ -103,15 +103,15 @@ async fn test_drop_source_fires_event_trigger() {
             )
             .await;
         if st_count > 0 {
-            // The event trigger sets status to ERROR when a source is dropped
+            // The event trigger suspends the ST when a source is dropped
             let status: String = db
                 .query_scalar(
                     "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'evt_drop_st'",
                 )
                 .await;
             assert_eq!(
-                status, "ERROR",
-                "ST should be set to ERROR after source drop"
+                status, "SUSPENDED",
+                "ST should be suspended after source drop"
             );
         }
         // If st_count == 0, CASCADE dropped the storage table too,
@@ -473,7 +473,7 @@ async fn test_add_column_unused_immediate_st_stays_functional() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// B2 — DROP COLUMN not referenced in query → ST remains functional
+// B2 — DROP COLUMN not referenced in query → explicit suspension
 // ══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -503,14 +503,15 @@ async fn test_drop_unused_column_st_survives() {
 
     let status: String = db
         .query_scalar(
-            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ddl_drop_col_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'ddl_drop_col_st'",
         )
         .await;
-    assert_ne!(
-        status, "ERROR",
-        "ST should not be in ERROR after unused column drop"
-    );
+    assert_eq!(status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
 
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.reinitialize_stream_table('ddl_drop_col_st')")
+        .await;
     db.refresh_st("ddl_drop_col_st").await;
     let count: i64 = db
         .query_scalar("SELECT count(*) FROM public.ddl_drop_col_st")
@@ -529,11 +530,11 @@ async fn test_drop_unused_column_st_survives() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// B3 — ALTER COLUMN TYPE on a used column → reinit
+// B3 — ALTER COLUMN TYPE on a used column → explicit suspension
 // ══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_alter_column_type_triggers_reinit() {
+async fn test_alter_column_type_suspends_with_reason_code() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE ddl_type_src (id INT PRIMARY KEY, score INT)")
@@ -557,17 +558,18 @@ async fn test_alter_column_type_triggers_reinit() {
     ])
     .await;
 
-    let needs_reinit: bool = db
+    let status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ddl_type_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'ddl_type_st'",
         )
         .await;
-    assert!(
-        needs_reinit,
-        "ST should be marked for reinit after column type change"
-    );
+    assert_eq!(status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
 
-    // Trigger reinit/refresh and verify data is correct with the new column type
+    // Explicit repair resets the frontier before the next full refresh.
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.reinitialize_stream_table('ddl_type_st')")
+        .await;
     db.refresh_st("ddl_type_st").await;
     db.assert_st_matches_query("public.ddl_type_st", "SELECT id, score FROM ddl_type_src")
         .await;
@@ -652,7 +654,10 @@ async fn test_drop_source_with_multiple_downstream_sts() {
                 ))
                 .await;
             if let Some(status) = status_opt {
-                assert_eq!(status, "ERROR", "{st} should be in ERROR after source DROP");
+                assert_eq!(
+                    status, "SUSPENDED",
+                    "{st} should be suspended after source DROP"
+                );
             }
             // If None: cascade cleaned up the catalog entry — also valid
         }
@@ -760,10 +765,10 @@ async fn test_add_column_on_joined_source_st_survives() {
 // Phase 5.2 (TESTING_GAPS_2) — Schema Evolution Tests
 // ══════════════════════════════════════════════════════════════════════
 
-/// SE-1: RENAME a column that is NOT in the defining query → benign;
-/// ST remains ACTIVE and continues to refresh correctly.
+/// SE-1: RENAME a column that is NOT in the defining query → suspension;
+/// the operator repairs the captured source contract before refreshing.
 #[tokio::test]
-async fn test_rename_unused_column_is_benign() {
+async fn test_rename_unused_column_suspends() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE se_rename_src (id INT PRIMARY KEY, used_col TEXT, extra TEXT)")
         .await;
@@ -780,7 +785,7 @@ async fn test_rename_unused_column_is_benign() {
     db.assert_st_matches_query("se_rename_st", "SELECT id, used_col FROM se_rename_src")
         .await;
 
-    // Rename the unused column — should be benign
+    // Rename the unused column — a post-DDL snapshot cannot prove safety.
     db.execute_seq(&[
         "SET pg_trickle.block_source_ddl = false",
         "ALTER TABLE se_rename_src RENAME COLUMN extra TO extra_renamed",
@@ -788,24 +793,26 @@ async fn test_rename_unused_column_is_benign() {
     ])
     .await;
 
-    let needs_reinit: bool = db
+    let status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'se_rename_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'se_rename_st'",
         )
         .await;
-    // Renaming an unused column should not mark the ST for reinit
-    // (or, at most, mark it for reinit which the refresh recovers from)
+    assert_eq!(status, "SUSPENDED:SOURCE_DESTRUCTIVE_SCHEMA");
+
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.reinitialize_stream_table('se_rename_st')")
+        .await;
     let q = "SELECT id, used_col FROM se_rename_src";
     db.refresh_st("se_rename_st").await;
     db.assert_st_matches_query("se_rename_st", q).await;
-    let _ = needs_reinit; // behavior is implementation-defined; correctness is what matters
 }
 
 /// SE-2: Widen a VARCHAR column that IS in the defining query
-/// (VARCHAR(50) → VARCHAR(200)) — type widening is backward-compatible;
-/// ST should remain functional after refresh.
+/// (VARCHAR(50) → VARCHAR(200)) — source type changes suspend conservatively.
 #[tokio::test]
-async fn test_widen_varchar_type_benign() {
+async fn test_widen_varchar_type_suspends() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE se_widen_src (id INT PRIMARY KEY, label VARCHAR(50))")
         .await;
@@ -830,7 +837,19 @@ async fn test_widen_varchar_type_benign() {
     ])
     .await;
 
-    // Insert a value longer than 50 chars to confirm the widening took effect
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'se_widen_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.reinitialize_stream_table('se_widen_st')")
+        .await;
+
+    // Insert a value longer than 50 chars to confirm the widening took effect.
     db.execute("INSERT INTO se_widen_src VALUES (2, 'a_longer_label_than_fifty_characters_xxxxxxxxxxxxxxxxxx')")
         .await;
     db.refresh_st("se_widen_st").await;
@@ -840,9 +859,9 @@ async fn test_widen_varchar_type_benign() {
 }
 
 /// SE-3: ADD NOT NULL constraint on a column NOT in the defining query
-/// is benign — ST continues to refresh correctly.
+/// is ambiguous without a pre-DDL snapshot and therefore suspends explicitly.
 #[tokio::test]
-async fn test_add_not_null_constraint_benign() {
+async fn test_add_not_null_constraint_suspends_with_reason_code() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE se_nn_src (id INT PRIMARY KEY, score INT, note TEXT)")
         .await;
@@ -868,7 +887,18 @@ async fn test_add_not_null_constraint_benign() {
     ])
     .await;
 
-    // Normal DML + refresh cycle should still work
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'se_nn_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+
+    // Explicit repair makes the next refresh rebuild from the source.
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.reinitialize_stream_table('se_nn_st')")
+        .await;
     db.execute("INSERT INTO se_nn_src VALUES (3, 30, 'new')")
         .await;
     db.refresh_st("se_nn_st").await;
@@ -1041,9 +1071,9 @@ async fn test_alter_domain_triggers_invalidation() {
 }
 
 /// TEST-2c: ALTER POLICY on an RLS policy affecting a source table
-/// triggers stream table invalidation.
+/// suspends the stream table until it is explicitly repaired.
 #[tokio::test]
-async fn test_alter_policy_triggers_invalidation() {
+async fn test_alter_policy_suspends_until_repaired() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE ddl_pol_src (id INT PRIMARY KEY, dept TEXT, val INT)")
@@ -1069,8 +1099,19 @@ async fn test_alter_policy_triggers_invalidation() {
     ])
     .await;
 
-    // Refresh — data must remain correct from the superuser perspective
-    // (this stream is owned by the extension superuser, which bypasses RLS)
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'ddl_pol_st'",
+        )
+        .await;
+    assert!(status.starts_with("SUSPENDED:SOURCE_"));
+
+    // Repair, then refresh — data remains correct from the superuser
+    // perspective (the stream owner bypasses RLS).
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.reinitialize_stream_table('ddl_pol_st')")
+        .await;
     db.refresh_st("ddl_pol_st").await;
     db.assert_st_matches_query("ddl_pol_st", q).await;
 }
