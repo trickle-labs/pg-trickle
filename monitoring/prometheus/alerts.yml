@@ -173,6 +173,32 @@ groups:
             {{ $value | humanizeDuration }} stale (p99 lag threshold: 10 min).
             Check scheduler health and CDC buffer depth.
 
+      - alert: PgTrickleFreshnessBreach
+        expr: pg_trickle_sla_breach_duration_seconds > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >
+            Stream table freshness target is breaching for
+            {{ $labels.schema }}.{{ $labels.name }}
+          description: >
+            Exact source-commit-to-visible freshness has exceeded its target
+            for {{ $value | humanizeDuration }}. Check pg_trickle.freshness()
+            and pg_trickle.health_check().
+
+      - alert: PgTrickleFreshnessInfeasible
+        expr: pg_trickle_sla_infeasible_tables > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} stream table freshness target(s) are infeasible"
+          description: >
+            The fastest compatible observed refresh cost still exceeds the
+            declared target. Check pg_trickle.freshness() and
+            pgtrickle.explain() for the bounded diagnosis.
+
       # ── Refresh p99 duration (O40-4) ─────────────────────────────────────
 
       # Refresh p99 latency exceeds 60 seconds — may indicate runaway query
@@ -300,4 +326,3 @@ groups:
             pg_trickle has recorded {{ $value }} OpenTelemetry trace export
             errors. Check connectivity to the OTLP endpoint configured in
             pg_trickle.otel_endpoint and verify the collector is reachable.
-

@@ -193,6 +193,17 @@ fn st_refresh_stats() -> TableIterator<
 
 // ── OP-2: OpenMetrics text generation ─────────────────────────────────────
 
+type FreshnessMetricRow = (
+    String,
+    String,
+    Option<i64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    String,
+    f64,
+);
+
 /// Generate an OpenMetrics (Prometheus) text exposition from pg_trickle's
 /// internal monitoring data.
 ///
@@ -296,6 +307,105 @@ pub(crate) fn collect_metrics_text() -> String {
         let is_active: u8 = if status == "ACTIVE" { 1 } else { 0 };
         out.push_str(&format!("pg_trickle_active{{{labels}}} {is_active}\n"));
     }
+
+    // v0.90.0: freshness metrics read the bounded controller summary only.
+    let freshness_rows = Spi::connect(|client| -> Vec<FreshnessMetricRow> {
+        client
+            .select(
+                "SELECT st.pgt_name::text, st.pgt_schema::text,
+                        st.freshness_deadline_ms, f.p50_freshness_ms,
+                        f.p95_freshness_ms, f.p99_freshness_ms,
+                        COALESCE(f.sla_status, 'INSUFFICIENT_DATA')::text,
+                        CASE WHEN f.sla_status = 'BREACHING' AND f.breach_started_at IS NOT NULL
+                             THEN GREATEST(EXTRACT(EPOCH FROM
+                                  (clock_timestamp() - f.breach_started_at)), 0)
+                             ELSE 0 END
+                   FROM pgtrickle.pgt_stream_tables st
+                   LEFT JOIN pgtrickle.pgt_freshness_controller_state f
+                     ON f.pgt_id = st.pgt_id
+                  WHERE st.target_freshness_mode = 'INTERVAL'
+                  ORDER BY st.pgt_schema, st.pgt_name",
+                None,
+                &[],
+            )
+            .map(|result| {
+                result
+                    .filter_map(|row| {
+                        Some((
+                            row.get::<String>(1).ok().flatten()?,
+                            row.get::<String>(2).ok().flatten()?,
+                            row.get::<i64>(3).ok().flatten(),
+                            row.get::<f64>(4).ok().flatten(),
+                            row.get::<f64>(5).ok().flatten(),
+                            row.get::<f64>(6).ok().flatten(),
+                            row.get::<String>(7)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| "INSUFFICIENT_DATA".into()),
+                            row.get::<f64>(8).ok().flatten().unwrap_or(0.0),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    out.push_str(
+        "# HELP pg_trickle_target_freshness_seconds Declared freshness target per interval stream table\n",
+    );
+    out.push_str("# TYPE pg_trickle_target_freshness_seconds gauge\n");
+    out.push_str("# HELP pg_trickle_freshness_p50_seconds Exact source-commit-to-visible p50\n# TYPE pg_trickle_freshness_p50_seconds gauge\n");
+    out.push_str("# HELP pg_trickle_freshness_p95_seconds Exact source-commit-to-visible p95\n# TYPE pg_trickle_freshness_p95_seconds gauge\n");
+    out.push_str("# HELP pg_trickle_freshness_p99_seconds Exact source-commit-to-visible p99\n# TYPE pg_trickle_freshness_p99_seconds gauge\n");
+    out.push_str("# HELP pg_trickle_sla_breach_duration_seconds Current BREACHING duration\n# TYPE pg_trickle_sla_breach_duration_seconds gauge\n");
+    let mut at_risk_tables = 0;
+    let mut infeasible_tables = 0;
+    for (name, schema, target, p50, p95, p99, status, breach_seconds) in freshness_rows {
+        let labels = format!(
+            "schema=\"{}\",name=\"{}\",db_oid=\"{}\",db_name=\"{}\"",
+            schema.replace('\\', "\\\\").replace('"', "\\\""),
+            name.replace('\\', "\\\\").replace('"', "\\\""),
+            db_oid_str,
+            db_name_str
+        );
+        if let Some(target) = target {
+            out.push_str(&format!(
+                "pg_trickle_target_freshness_seconds{{{labels}}} {:.3}\n",
+                target as f64 / 1000.0
+            ));
+        }
+        for (metric, value) in [
+            ("pg_trickle_freshness_p50_seconds", p50),
+            ("pg_trickle_freshness_p95_seconds", p95),
+            ("pg_trickle_freshness_p99_seconds", p99),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{metric}{{{labels}}} {:.3}\n", value / 1000.0));
+            }
+        }
+        out.push_str(&format!(
+            "pg_trickle_sla_breach_duration_seconds{{{labels}}} {breach_seconds:.3}\n"
+        ));
+        at_risk_tables += if status == "AT_RISK" || status == "BREACHING" {
+            1
+        } else {
+            0
+        };
+        infeasible_tables += if status == "INFEASIBLE" { 1 } else { 0 };
+    }
+    let adaptive_target = crate::shmem::adaptive_worker_target(
+        config::pg_trickle_adaptive_workers(),
+        config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32,
+        config::pg_trickle_adaptive_workers_min().max(1) as u32,
+        config::pg_trickle_adaptive_workers_max().max(1) as u32,
+    )
+    .unwrap_or_else(|| config::pg_trickle_worker_pool_size().max(1) as u32);
+    out.push_str(&format!(
+        "# HELP pg_trickle_adaptive_worker_target Advisory adaptive worker target\n# TYPE pg_trickle_adaptive_worker_target gauge\npg_trickle_adaptive_worker_target {}\n",
+        adaptive_target
+    ));
+    out.push_str(&format!(
+        "# HELP pg_trickle_sla_at_risk_tables Number of interval targets at risk\n# TYPE pg_trickle_sla_at_risk_tables gauge\npg_trickle_sla_at_risk_tables {at_risk_tables}\n# HELP pg_trickle_sla_infeasible_tables Number of infeasible interval targets\n# TYPE pg_trickle_sla_infeasible_tables gauge\npg_trickle_sla_infeasible_tables {infeasible_tables}\n"
+    ));
 
     // #536: Frontier holdback gauges
     let (holdback_lsn, holdback_age) = crate::shmem::read_holdback_metrics();
@@ -572,6 +682,89 @@ pub(crate) fn collect_metrics_text_with_deadline(
         crate::metrics_server::MetricsServerError::Io(format!("set metrics statement_timeout: {e}"))
     })?;
     Ok(collect_metrics_text())
+}
+
+/// Build one bounded OTLP metrics payload from the controller summary cache.
+/// The scheduler sends it asynchronously, so exporter failure is harmless.
+pub(crate) fn collect_otel_freshness_metrics() -> Option<String> {
+    let rows = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT st.pgt_schema::text, st.pgt_name::text,
+                        st.freshness_deadline_ms, f.p95_freshness_ms,
+                        COALESCE(f.sla_status, 'INSUFFICIENT_DATA')::text,
+                        CASE WHEN f.sla_status = 'BREACHING' AND f.breach_started_at IS NOT NULL
+                             THEN GREATEST(EXTRACT(EPOCH FROM
+                                  (clock_timestamp() - f.breach_started_at)), 0)
+                             ELSE 0 END
+                   FROM pgtrickle.pgt_stream_tables st
+                   LEFT JOIN pgtrickle.pgt_freshness_controller_state f
+                     ON f.pgt_id = st.pgt_id
+                  WHERE st.target_freshness_mode = 'INTERVAL'
+                  ORDER BY st.pgt_schema, st.pgt_name",
+                None,
+                &[],
+            )
+            .ok()?;
+        Some(
+            result
+                .filter_map(|row| {
+                    Some((
+                        row.get::<String>(1).ok().flatten()?,
+                        row.get::<String>(2).ok().flatten()?,
+                        row.get::<i64>(3).ok().flatten()?,
+                        row.get::<f64>(4).ok().flatten(),
+                        row.get::<String>(5)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "INSUFFICIENT_DATA".into()),
+                        row.get::<f64>(6).ok().flatten().unwrap_or(0.0),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        )
+    })?;
+    let (db_oid, db_name) = crate::api::cluster::current_db_labels();
+    let db_oid = db_oid.map_or_else(|| "0".into(), |oid| oid.to_string());
+    let db_name = db_name.unwrap_or_else(|| "unknown".into());
+    let timestamp = crate::otel::now_ns().to_string();
+    let mut metrics = Vec::with_capacity(rows.len() * 3);
+    for (schema, name, target_ms, p95_ms, status, breach_seconds) in rows {
+        let attributes = serde_json::json!([
+            {"key": "schema", "value": {"stringValue": schema}},
+            {"key": "name", "value": {"stringValue": name}},
+            {"key": "db_oid", "value": {"stringValue": db_oid}},
+            {"key": "db_name", "value": {"stringValue": db_name}},
+            {"key": "status", "value": {"stringValue": status}}
+        ]);
+        let metric = |name: &str, value: f64| {
+            serde_json::json!({
+                "name": name,
+                "unit": "s",
+                "gauge": {"dataPoints": [{"asDouble": value, "timeUnixNano": timestamp.clone(), "attributes": attributes.clone()}]}
+            })
+        };
+        metrics.push(metric(
+            "pg_trickle.target_freshness",
+            target_ms as f64 / 1000.0,
+        ));
+        if let Some(p95_ms) = p95_ms {
+            metrics.push(metric("pg_trickle.freshness.p95", p95_ms / 1000.0));
+        }
+        metrics.push(metric("pg_trickle.sla.breach_duration", breach_seconds));
+    }
+    Some(
+        serde_json::json!({
+            "resourceMetrics": [{
+                "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "pg_trickle"}}]},
+                "scopeMetrics": [{
+                    "scope": {"name": "pg_trickle", "version": env!("CARGO_PKG_VERSION")},
+                    "metrics": metrics
+                }]
+            }]
+        })
+        .to_string(),
+    )
 }
 
 /// Return refresh history for a specific ST, most recent first.

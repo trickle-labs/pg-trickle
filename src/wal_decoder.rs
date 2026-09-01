@@ -547,7 +547,7 @@ pub fn poll_wal_changes(
     // A44-3: Read max changes per poll from GUC (default 10 000, previously hardcoded).
     let max_changes_per_poll = crate::config::pg_trickle_wal_max_changes_per_poll();
     let poll_sql = format!(
-        "SELECT lsn::text, xid, data \
+        "SELECT lsn::text, xid::text, data \
          FROM pg_logical_slot_get_changes(\
              '{slot_name}', NULL, {max_changes}\
          )",
@@ -575,6 +575,9 @@ pub fn poll_wal_changes(
                 .get::<String>(1)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or_default();
+            let source_xid = row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             let data = row
                 .get::<String>(3)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
@@ -612,6 +615,7 @@ pub fn poll_wal_changes(
                 write_decoded_change(
                     oid_u32,
                     &lsn,
+                    source_xid.as_deref(),
                     &action,
                     &data,
                     change_schema,
@@ -809,9 +813,11 @@ pub fn parse_test_decoding_old_columns_for_fuzz(
 ///
 /// Maps the parsed pgoutput data into the typed buffer table columns,
 /// matching the same schema used by trigger-based CDC.
+#[allow(clippy::too_many_arguments)]
 fn write_decoded_change(
     source_oid: u32,
     lsn: &str,
+    source_xid: Option<&str>,
     action: &char,
     data: &str,
     change_schema: &str,
@@ -923,6 +929,8 @@ fn write_decoded_change(
         col_names_u.push("lsn".to_string());
         col_names_u.push("action".to_string());
         col_names_u.push("__pgt_row_id".to_string());
+        col_names_u.push("source_xid".to_string());
+        col_names_u.push("source_commit_at".to_string());
         for (col_name, _) in columns {
             let cb_name = crate::cdc::cb_col_name(col_name);
             col_names_u.push(format!("\"{}\"", cb_name.replace('"', "\"\"")));
@@ -936,10 +944,19 @@ fn write_decoded_change(
         d_vals.push("$1::pg_lsn".to_string());
         d_vals.push("'D'".to_string());
         d_vals.push(d_pk_hash_expr);
+        let source_xid_idx = 2 + num_columns;
+        let source_xid_expr = format!("NULLIF(${source_xid_idx}, '')::xid");
+        d_vals.push(source_xid_expr.clone());
+        d_vals.push(format!(
+            "CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+             THEN pg_xact_commit_timestamp({source_xid_expr}) END"
+        ));
         for (col_name, col_type) in columns {
             d_all_params.push(old_parsed.get(col_name).cloned());
             d_vals.push(format!("${}::{}", d_all_params.len(), col_type));
         }
+
+        d_all_params.push(source_xid.map(str::to_owned));
 
         // I-row params: offset by d_all_params.len() (they follow D params in the SPI args).
         let d_len = d_all_params.len();
@@ -949,6 +966,11 @@ fn write_decoded_change(
         i_vals.push("$1::pg_lsn".to_string());
         i_vals.push("'I'".to_string());
         i_vals.push(i_pk_hash_expr);
+        i_vals.push(source_xid_expr.clone());
+        i_vals.push(format!(
+            "CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+             THEN pg_xact_commit_timestamp({source_xid_expr}) END"
+        ));
         for (col_name, col_type) in columns {
             i_all_params.push(parsed.get(col_name).cloned());
             i_vals.push(format!("${}::{}", d_len + i_all_params.len(), col_type));
@@ -977,6 +999,20 @@ fn write_decoded_change(
         })?;
         return Ok(());
     }
+
+    // Logical decoding emits changes only after the source transaction has
+    // committed. Preserve its xid and let PostgreSQL resolve the authoritative
+    // commit timestamp; never substitute the local WAL polling transaction.
+    param_values.push(source_xid.map(str::to_owned));
+    let source_xid_idx = param_values.len();
+    let source_xid_expr = format!("NULLIF(${source_xid_idx}, '')::xid");
+    col_names.push("source_xid".to_string());
+    placeholders.push(source_xid_expr.clone());
+    col_names.push("source_commit_at".to_string());
+    placeholders.push(format!(
+        "CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp({source_xid_expr}) END"
+    ));
 
     for (col_name, col_type) in columns {
         let cb_name = crate::cdc::cb_col_name(col_name);
@@ -2416,7 +2452,7 @@ pub fn write_worker_changes_to_buffer(
 
     // Fetch all rows from the temp table created by the dblink call.
     let select_sql = format!(
-        "SELECT lsn, data FROM {} WHERE data IS NOT NULL AND data != '' ORDER BY lsn",
+        "SELECT lsn, xid, data FROM {} WHERE data IS NOT NULL AND data != '' ORDER BY lsn",
         temp_table
     );
 
@@ -2435,8 +2471,11 @@ pub fn write_worker_changes_to_buffer(
                 .get::<String>(1)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or_default();
-            let data = row
+            let source_xid = row
                 .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let data = row
+                .get::<String>(3)
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or_default();
 
@@ -2461,6 +2500,7 @@ pub fn write_worker_changes_to_buffer(
                 write_decoded_change(
                     oid_u32,
                     &lsn,
+                    source_xid.as_deref(),
                     &action,
                     &data,
                     change_schema,

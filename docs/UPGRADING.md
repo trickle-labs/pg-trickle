@@ -2,6 +2,43 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.89.0 to 0.90.0
+
+Install the 0.90.0 shared library and extension files, restart PostgreSQL, then
+run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.90.0';
+```
+
+The migration adds exact freshness evidence columns, a bounded controller
+summary, provenance columns to registered change buffers, and the
+`pgtrickle.freshness()` API. Existing rows remain nullable and are not treated
+as exact measurements. Existing interval targets continue safely and report
+`EVIDENCE_UNAVAILABLE` when PostgreSQL commit timestamps are disabled.
+
+New interval targets require `track_commit_timestamp = on` and a base-table
+source path with managed provenance. Enable it in `postgresql.conf` and restart
+PostgreSQL before declaring a target:
+
+```conf
+track_commit_timestamp = on
+```
+
+Verify the upgrade and exact evidence:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+SELECT * FROM pgtrickle.freshness();
+SELECT table_name, p95_freshness_ms, sla_status
+  FROM pgtrickle.pg_stat_pgtrickle;
+```
+
+`commit_to_visible_ms` is populated only after a committed refresh is settled
+by a later scheduler or refresh transaction. It is never inferred from
+refresh duration. The controller is advisory and remains bounded by the
+existing `max_dynamic_refresh_workers` limit.
+
 ## 0.88.0 to 0.89.0
 
 Install the 0.89.0 shared library and extension files, restart PostgreSQL, then

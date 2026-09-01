@@ -59,6 +59,12 @@ pub enum AlertEvent {
     WatermarkResumed,
     /// Self-monitoring detected an anomaly.
     SelfMonitorAnomaly,
+    /// An exact freshness target entered sustained breach.
+    FreshnessBreach,
+    /// An exact freshness target recovered from breach or infeasibility.
+    FreshnessRecovered,
+    /// The fastest compatible refresh cost cannot meet the target.
+    FreshnessInfeasible,
 }
 
 impl AlertEvent {
@@ -86,8 +92,33 @@ impl AlertEvent {
             AlertEvent::WatermarkStuck => "watermark_stuck",
             AlertEvent::WatermarkResumed => "watermark_resumed",
             AlertEvent::SelfMonitorAnomaly => "self_monitor_anomaly",
+            AlertEvent::FreshnessBreach => "freshness_breach",
+            AlertEvent::FreshnessRecovered => "freshness_recovered",
+            AlertEvent::FreshnessInfeasible => "freshness_infeasible",
         }
     }
+}
+
+/// Emit a bounded freshness status transition notification.
+pub fn alert_freshness_transition(
+    event: AlertEvent,
+    pgt_schema: &str,
+    pgt_name: &str,
+    target_ms: i64,
+    p95_ms: Option<f64>,
+    reason: &str,
+) {
+    let _ = emit_alert(
+        event,
+        pgt_schema,
+        pgt_name,
+        json!({
+            "target_ms": target_ms,
+            "p95_ms": p95_ms,
+            "reason": reason,
+        }),
+        false,
+    );
 }
 
 /// Emit a NOTIFY on the `pg_trickle_alert` channel with a JSON payload.

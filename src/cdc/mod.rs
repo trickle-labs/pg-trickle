@@ -915,9 +915,10 @@ pub fn create_change_trigger(
                  RETURN NULL;
              END IF;
              INSERT INTO {change_schema}.changes_{name}
-                 (lsn, action, __pgt_row_id)
+                 (lsn, action, __pgt_row_id, source_xid, source_commit_at)
              VALUES (pg_current_wal_insert_lsn(), 'T',
-                     pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)));
+                     pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)),
+                     NULL::xid, NULL::timestamptz);
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
@@ -1287,7 +1288,9 @@ pub fn create_change_buffer_table(
         "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_{name} (\
             change_id             BIGSERIAL,\
             lsn                   PG_LSN NOT NULL,\
-            action                CHAR(1) NOT NULL\
+            action                CHAR(1) NOT NULL,\
+            source_xid            XID DEFAULT pg_current_xact_id()::xid,\
+            source_commit_at     TIMESTAMPTZ\
             {pk_col}\
             {typed_col_defs},\
             __pgt_trace_context   TEXT\
@@ -1384,6 +1387,8 @@ pub fn create_st_change_buffer_table(
             change_id             BIGSERIAL,\
             lsn                   PG_LSN NOT NULL,\
             action                CHAR(1) NOT NULL,\
+            source_xid            XID,\
+            source_commit_at     TIMESTAMPTZ,\
             __pgt_row_id               BYTEA NOT NULL\
             {typed_col_defs},\
             __pgt_trace_context   TEXT\
@@ -2103,6 +2108,31 @@ pub fn alter_change_buffer_add_columns(
                  failed to add __pgt_trace_context: {e}"
             );
         }
+    }
+
+    // v0.90.0: provenance is nullable so existing buffered rows remain safe
+    // but are excluded from exact freshness samples.
+    if !existing_set.contains("source_xid") {
+        let add_source_xid = format!(
+            "ALTER TABLE {schema}.{buf} ADD COLUMN IF NOT EXISTS source_xid XID",
+            schema = change_schema,
+            buf = buf_base,
+        );
+        Spi::run(&add_source_xid).map_err(|e| {
+            PgTrickleError::SpiError(format!("Failed to add source_xid to change buffer: {e}"))
+        })?;
+    }
+    if !existing_set.contains("source_commit_at") {
+        let add_source_commit = format!(
+            "ALTER TABLE {schema}.{buf} ADD COLUMN IF NOT EXISTS source_commit_at TIMESTAMPTZ",
+            schema = change_schema,
+            buf = buf_base,
+        );
+        Spi::run(&add_source_commit).map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to add source_commit_at to change buffer: {e}"
+            ))
+        })?;
     }
 
     for (col_name, col_type) in &source_cols {

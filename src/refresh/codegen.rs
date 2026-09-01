@@ -1098,6 +1098,7 @@ pub(crate) fn capture_delta_to_st_buffer(
     crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
 
     crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
+    let source_commit_at = crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
 
     // A44-10: ST change buffers use flat D+I schema (no new_/old_ prefix).
     let flat_col_list: String = user_cols
@@ -1120,13 +1121,13 @@ pub(crate) fn capture_delta_to_st_buffer(
     {
         format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, __pgt_row_id, {flat_col_list}) \
+             (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
              SELECT pg_current_wal_lsn(), \
                     CASE WHEN ins.__pgt_row_id IS NOT NULL \
                               AND del.__pgt_row_id IS NOT NULL \
                          THEN 'U' ELSE COALESCE(ins.__pgt_action, del.__pgt_action) \
                     END, \
-                    COALESCE(ins.__pgt_row_id, del.__pgt_row_id), \
+                    COALESCE(ins.__pgt_row_id, del.__pgt_row_id), NULL::xid, {source_commit_at}, \
                     {coal_cols} \
              FROM (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'I') ins \
              FULL OUTER JOIN \
@@ -1134,6 +1135,7 @@ pub(crate) fn capture_delta_to_st_buffer(
              ON {row_match}",
             change_schema = change_schema,
             pgt_id = pgt_id,
+            source_commit_at = source_commit_at,
             flat_col_list = flat_col_list,
             row_match = build_row_id_match("ins.__pgt_row_id", "del.__pgt_row_id"),
             coal_cols = user_cols
@@ -1148,11 +1150,16 @@ pub(crate) fn capture_delta_to_st_buffer(
     } else {
         format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, __pgt_row_id, {flat_col_list}) \
+             (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
              SELECT pg_current_wal_lsn(), d.__pgt_action, d.__pgt_row_id, \
-                    {d_col_list} \
+                    NULL::xid, {source_commit_at}, {d_col_list} \
              FROM __pgt_delta_{pgt_id} d \
-             WHERE d.__pgt_action IN ('I', 'D')"
+             WHERE d.__pgt_action IN ('I', 'D')",
+            change_schema = change_schema,
+            pgt_id = pgt_id,
+            source_commit_at = source_commit_at,
+            flat_col_list = flat_col_list,
+            d_col_list = d_col_list,
         )
     };
 
@@ -1249,6 +1256,8 @@ pub fn capture_delta_to_bypass_table(
         let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
             .chain(std::iter::once("action \"char\"".to_string()))
             .chain(std::iter::once("__pgt_row_id bytea NOT NULL".to_string()))
+            .chain(std::iter::once("source_xid xid".to_string()))
+            .chain(std::iter::once("source_commit_at timestamptz".to_string()))
             .chain(
                 user_cols_typed
                     .iter()
@@ -1261,12 +1270,15 @@ pub fn capture_delta_to_bypass_table(
         Spi::run(&create_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         capture_diff_to_table(st, &user_cols, &bypass_table, pgt_id, buffer_lsn.as_deref())?
     } else {
+        let source_commit_at =
+            crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
         let sql = build_bypass_capture_sql(
             pgt_id,
             user_cols_typed,
             &bypass_table,
             buffer_lsn.as_deref(),
         );
+        let sql = sql.replace("NULL::timestamptz", &source_commit_at);
         Spi::connect_mut(|client| {
             let result = client
                 .update(&sql, None, &[])
@@ -1352,6 +1364,7 @@ pub(crate) fn capture_diff_to_table(
     let post_pk_hash = "post.__pgt_row_id";
     let pre_post_match = build_row_id_match("pre.__pgt_row_id", "post.__pgt_row_id");
     let delta_post_match = build_row_id_match("delta.__pgt_row_id", "post.__pgt_row_id");
+    let source_commit_at = crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
 
     // DAG-4: When an LSN override is provided (bypass tables), use the
     // literal value so the rows fall within the downstream frontier range.
@@ -1364,8 +1377,8 @@ pub(crate) fn capture_diff_to_table(
 
     // Deleted rows: in pre but no longer in the table.
     let del_sql = format!(
-        "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
-         SELECT {lsn_expr}, 'D', {pre_pk_hash}, {pre_col_refs} \
+        "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+         SELECT {lsn_expr}, 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
          FROM __pgt_pre_{pgt_id} pre \
          LEFT JOIN {quoted_table} post ON {pre_post_match} \
          WHERE post.__pgt_row_id IS NULL"
@@ -1380,8 +1393,8 @@ pub(crate) fn capture_diff_to_table(
 
     // Inserted rows: in table (scoped to delta row_ids) but not in pre.
     let ins_sql = format!(
-        "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
-         SELECT {lsn_expr}, 'I', {post_pk_hash}, {post_col_refs} \
+        "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+         SELECT {lsn_expr}, 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
          FROM {quoted_table} post \
          JOIN (SELECT DISTINCT __pgt_row_id FROM __pgt_delta_{pgt_id}) delta \
            ON {delta_post_match} \
@@ -1399,8 +1412,8 @@ pub(crate) fn capture_diff_to_table(
     // Changed rows: same row_id, different column values.
     if !is_distinct_pairs.is_empty() {
         let chg_del_sql = format!(
-            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
-             SELECT {lsn_expr}, 'D', {pre_pk_hash}, {pre_col_refs} \
+            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+             SELECT {lsn_expr}, 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
              FROM __pgt_pre_{pgt_id} pre \
              JOIN {quoted_table} post ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
@@ -1414,8 +1427,8 @@ pub(crate) fn capture_diff_to_table(
         })?;
 
         let chg_ins_sql = format!(
-            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
-             SELECT {lsn_expr}, 'I', {post_pk_hash}, {post_col_refs} \
+            "INSERT INTO {target_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+             SELECT {lsn_expr}, 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
              FROM {quoted_table} post \
              JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
@@ -1445,6 +1458,8 @@ pub fn build_bypass_capture_sql(
     let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
         .chain(std::iter::once("action \"char\"".to_string()))
         .chain(std::iter::once("__pgt_row_id bytea NOT NULL".to_string()))
+        .chain(std::iter::once("source_xid xid".to_string()))
+        .chain(std::iter::once("source_commit_at timestamptz".to_string()))
         .chain(
             user_cols_typed
                 .iter()
@@ -1474,8 +1489,8 @@ pub fn build_bypass_capture_sql(
 
     format!(
         "CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP;\n\
-         INSERT INTO {bypass_table} (lsn, action, __pgt_row_id, {flat_col_list}) \
-         SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, {d_col_list} \
+         INSERT INTO {bypass_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+         SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, NULL::xid, NULL::timestamptz, {d_col_list} \
          FROM __pgt_delta_{pgt_id} d \
          WHERE d.__pgt_action IN ('I', 'D')"
     )
@@ -1526,6 +1541,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
 
     crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
     crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
+    let source_commit_at = crate::catalog::RefreshRecord::source_commit_at_sql_for_refresh(pgt_id)?;
 
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
@@ -1575,8 +1591,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
     // Deleted rows: in pre but not in post
     let deleted_sql = format!(
         "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, __pgt_row_id, {flat_col_list}) \
-         SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
+         (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+         SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
          FROM __pgt_pre_{pgt_id} pre \
          LEFT JOIN {quoted_table} post ON {pre_post_match} \
          WHERE post.__pgt_row_id IS NULL"
@@ -1592,8 +1608,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
     // Inserted rows: in post but not in pre
     let inserted_sql = format!(
         "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, __pgt_row_id, {flat_col_list}) \
-         SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
+         (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+         SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
          FROM {quoted_table} post \
          LEFT JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
          WHERE pre.__pgt_row_id IS NULL"
@@ -1618,8 +1634,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         // D event: old content hash + old column values
         let changed_del_sql = format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, __pgt_row_id, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
+             (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+             SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
              FROM __pgt_pre_{pgt_id} pre \
              JOIN {quoted_table} post ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
@@ -1635,8 +1651,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         // I event: new content hash + new column values
         let changed_ins_sql = format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, __pgt_row_id, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
+             (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
+             SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
              FROM {quoted_table} post \
              JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
              WHERE {is_distinct_pairs}"

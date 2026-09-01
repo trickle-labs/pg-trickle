@@ -143,6 +143,10 @@ pub enum PgTrickleError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// Exact freshness evidence cannot be collected for the requested target.
+    #[error("freshness evidence unavailable: {0}")]
+    FreshnessEvidenceUnavailable(String),
+
     /// A fixed-capacity shared-memory registry could not accept a new entry.
     #[error("shared state capacity exhausted: {0}")]
     SharedStateCapacity(String),
@@ -760,6 +764,7 @@ impl PgTrickleError {
             | PgTrickleError::NotFound(_)
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
+            | PgTrickleError::FreshnessEvidenceUnavailable(_)
             | PgTrickleError::QueryTooComplex(_)
             | PgTrickleError::VectorAggregateOverflow { .. }
             | PgTrickleError::PermissionDenied(_)

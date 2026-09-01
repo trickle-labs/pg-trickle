@@ -84,6 +84,20 @@ All metrics are prefixed `pg_trickle_`.
 | `pg_trickle_health_summary_avg_refresh_ms_1h` | gauge | Average refresh latency over 1 hour (ms) |
 | `pg_trickle_health_summary_total_refreshes_1h` | gauge | Total refreshes in last hour |
 | `pg_trickle_health_summary_failed_refreshes_1h` | gauge | Failed refreshes in last hour |
+| `pg_trickle_target_freshness_seconds` | gauge | Declared interval freshness target per table |
+| `pg_trickle_freshness_p50_seconds` | gauge | Exact settled source-commit-to-visible p50 |
+| `pg_trickle_freshness_p95_seconds` | gauge | Exact settled source-commit-to-visible p95 |
+| `pg_trickle_freshness_p99_seconds` | gauge | Exact settled source-commit-to-visible p99 |
+| `pg_trickle_sla_breach_duration_seconds` | gauge | Current exact freshness SLA breach duration |
+| `pg_trickle_sla_at_risk_tables` | gauge | Interval targets at risk or breaching |
+| `pg_trickle_sla_infeasible_tables` | gauge | Interval targets proven infeasible |
+| `pg_trickle_adaptive_worker_target` | gauge | Advisory worker target when enabled |
+
+Per-table freshness series use only the bounded labels `db_oid`, `db_name`,
+`schema`, and `name`. Status, reason, query text, source relation, and target
+values are metric values, not labels. Percentiles are omitted until exact
+settled evidence exists. The exporter query reads the stored controller
+summary; it does not recompute it.
 
 ## Alerting
 
@@ -97,9 +111,15 @@ Alerts are defined in `prometheus/alerts.yml`:
 | `PgTrickleCdcBufferLarge` | CDC buffer > 1 GB | warning |
 | `PgTrickleSchedulerDown` | Scheduler not running for > 2 minutes | critical |
 | `PgTrickleHighRefreshDuration` | Avg refresh > 30 s | warning |
+| `PgTrickleFreshnessBreach` | Exact breach duration > 0 for 5 minutes | warning |
+| `PgTrickleFreshnessInfeasible` | Any interval target is infeasible | warning |
+
+The dashboard’s v0.90 freshness row shows target versus exact p95, p50/p99,
+breach duration, at-risk targets, infeasible targets, and the adaptive worker
+target. `AT_RISK` is informational; only a sustained `BREACHING` state alerts.
 
 ## Requirements
 
 - Docker 24+ with Compose v2
-- pg_trickle 0.10.0+ installed in the target database
+- pg_trickle 0.90.0+ installed in the target database
 - PostgreSQL user with `SELECT` on `pgtrickle.*` schema

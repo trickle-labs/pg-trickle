@@ -559,6 +559,120 @@ fn health_check() -> TableIterator<
         rows.push(("publication_bindings".to_string(), severity, detail));
     }
 
+    // v0.90.0: expose controller status without reading refresh history. The
+    // state table is bounded one row per interval-targeted stream table.
+    let freshness_rows = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT st.pgt_id, st.pgt_schema::text || '.' || st.pgt_name::text,
+                        COALESCE(f.sla_status, 'INSUFFICIENT_DATA')::text,
+                        f.p95_freshness_ms, st.freshness_deadline_ms
+                   FROM pgtrickle.pgt_stream_tables st
+                   LEFT JOIN pgtrickle.pgt_freshness_controller_state f
+                     ON f.pgt_id = st.pgt_id
+                  WHERE st.target_freshness_mode = 'INTERVAL'
+                  ORDER BY st.pgt_id",
+                None,
+                &[],
+            )
+            .ok()
+            .map(|result| {
+                result
+                    .filter_map(|row| {
+                        Some((
+                            row.get::<i64>(1).ok().flatten()?,
+                            row.get::<String>(2).ok().flatten()?,
+                            row.get::<String>(3).ok().flatten()?,
+                            row.get::<f64>(4).ok().flatten(),
+                            row.get::<i64>(5).ok().flatten()?,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let mut freshness_evidence_unavailable = 0;
+    let mut freshness_breaching = 0;
+    let mut freshness_infeasible = 0;
+    for (pgt_id, stream_table, status, p95, target) in freshness_rows {
+        let severity = match status.as_str() {
+            "MEETING" => "OK",
+            "INSUFFICIENT_DATA" => "WARN",
+            "EVIDENCE_UNAVAILABLE" | "NOT_APPLICABLE" => "WARN",
+            _ => "ERROR",
+        };
+        rows.push((
+            format!("freshness_sla_{pgt_id}"),
+            severity.to_string(),
+            format!(
+                "{stream_table}: status={status}; p95_ms={}; target_ms={target}",
+                p95.map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "unavailable".into())
+            ),
+        ));
+        freshness_evidence_unavailable += if status == "EVIDENCE_UNAVAILABLE" {
+            1
+        } else {
+            0
+        };
+        freshness_breaching += if status == "BREACHING" { 1 } else { 0 };
+        freshness_infeasible += if status == "INFEASIBLE" { 1 } else { 0 };
+    }
+    rows.push((
+        "freshness_evidence".to_string(),
+        if freshness_evidence_unavailable == 0 {
+            "OK"
+        } else {
+            "ERROR"
+        }
+        .to_string(),
+        format!(
+            "{} interval target(s) lack exact commit provenance",
+            freshness_evidence_unavailable
+        ),
+    ));
+    rows.push((
+        "freshness_breach".to_string(),
+        if freshness_breaching == 0 {
+            "OK"
+        } else {
+            "WARN"
+        }
+        .to_string(),
+        format!("{} interval target(s) are breaching", freshness_breaching),
+    ));
+    rows.push((
+        "freshness_infeasible".to_string(),
+        if freshness_infeasible == 0 {
+            "OK"
+        } else {
+            "WARN"
+        }
+        .to_string(),
+        format!("{} interval target(s) are infeasible", freshness_infeasible),
+    ));
+    rows.push((
+        "freshness_override".to_string(),
+        "OK".to_string(),
+        "No safety-capped freshness overrides are recorded.".to_string(),
+    ));
+    rows.push((
+        "adaptive_workers".to_string(),
+        if crate::config::pg_trickle_adaptive_workers_max()
+            < crate::config::pg_trickle_adaptive_workers_min()
+        {
+            "ERROR"
+        } else {
+            "OK"
+        }
+        .to_string(),
+        format!(
+            "adaptive worker bounds={}..{}",
+            crate::config::pg_trickle_adaptive_workers_min(),
+            crate::config::pg_trickle_adaptive_workers_max()
+        ),
+    ));
+
     // v0.87: report the closest observed pg_trickle-owned memory component.
     // This is deliberately bounded and uses existing live counters; it is not
     // a claim about PostgreSQL-wide RSS.
@@ -991,6 +1105,7 @@ fn trigger_inventory() -> TableIterator<
 /// - last scheduler tick time (unix seconds),
 /// - invalidation ring overflow count,
 /// - Citus worker failure total.
+/// - adaptive worker target and resize signal.
 ///
 /// Exposed as `pgtrickle.worker_pool_status()`.
 #[pg_extern(schema = "pgtrickle", name = "worker_pool_status")]
@@ -1006,6 +1121,14 @@ fn worker_pool_status() -> TableIterator<
         name!(last_scheduler_tick_unix, i64),
         name!(ring_overflow_count, i64),
         name!(citus_failure_total, i64),
+        name!(adaptive_enabled, bool),
+        name!(adaptive_min, i32),
+        name!(adaptive_max, i32),
+        name!(adaptive_target, i32),
+        name!(resize_signal, i16),
+        name!(resize_consecutive, i16),
+        name!(queue_depth, i32),
+        name!(cpu_percent, Option<f64>),
     ),
 > {
     let active = shmem::active_worker_count() as i32;
@@ -1016,6 +1139,17 @@ fn worker_pool_status() -> TableIterator<
     let last_tick = shmem::last_scheduler_wake();
     let ring_overflows = shmem::invalidation_ring_overflow_count() as i64;
     let citus_failures = shmem::citus_worker_failure_total() as i64;
+    let adaptive_state = shmem::adaptive_worker_state();
+    let adaptive_enabled = config::pg_trickle_adaptive_workers();
+    let adaptive_min = config::pg_trickle_adaptive_workers_min();
+    let adaptive_max = config::pg_trickle_adaptive_workers_max();
+    let adaptive_target = shmem::adaptive_worker_target(
+        adaptive_enabled,
+        max_workers.max(1) as u32,
+        adaptive_min.max(1) as u32,
+        adaptive_max.max(1) as u32,
+    )
+    .unwrap_or(max_workers.max(1) as u32) as i32;
 
     TableIterator::new(vec![(
         active,
@@ -1026,6 +1160,16 @@ fn worker_pool_status() -> TableIterator<
         last_tick,
         ring_overflows,
         citus_failures,
+        adaptive_enabled,
+        adaptive_min,
+        adaptive_max,
+        adaptive_target,
+        i16::from(adaptive_state.signal),
+        i16::from(adaptive_state.consecutive),
+        adaptive_state.queue_depth as i32,
+        adaptive_state
+            .cpu_valid
+            .then_some(adaptive_state.cpu_percent as f64),
     )])
 }
 

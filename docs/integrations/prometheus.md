@@ -79,6 +79,22 @@ All metrics are prefixed `pg_trickle_`.
 | `pg_trickle_cdc_buffer_bytes` | gauge | CDC change buffer size in bytes |
 | `pg_trickle_scheduler_running` | gauge | 1 if scheduler background worker is alive |
 | `pg_trickle_health_status` | gauge | Overall health: 0=OK, 1=WARNING, 2=CRITICAL |
+| `pg_trickle_target_freshness_seconds` | gauge | Declared interval freshness target per table |
+| `pg_trickle_freshness_p50_seconds` | gauge | Exact settled source-commit-to-visible p50 |
+| `pg_trickle_freshness_p95_seconds` | gauge | Exact settled source-commit-to-visible p95 |
+| `pg_trickle_freshness_p99_seconds` | gauge | Exact settled source-commit-to-visible p99 |
+| `pg_trickle_sla_breach_duration_seconds` | gauge | Current exact freshness SLA breach duration |
+| `pg_trickle_sla_at_risk_tables` | gauge | Number of interval targets at risk or breaching |
+| `pg_trickle_sla_infeasible_tables` | gauge | Number of interval targets proven infeasible |
+| `pg_trickle_adaptive_worker_target` | gauge | Advisory worker target when adaptive workers are enabled |
+
+Freshness metrics are emitted only for interval-targeted tables. Per-table
+series use the stable bounded labels `db_oid`, `db_name`, `schema`, and `name`.
+They never add status, reason detail, query text, source relation, or target
+values as labels. Percentiles are omitted when exact settled evidence is NULL;
+the scrape reads the stored summary and does not recompute controller state.
+Controller status remains available through `pgtrickle.freshness()` and
+`pg_stat_pgtrickle`.
 
 ## Pre-configured Alerts
 
@@ -92,6 +108,8 @@ Alerting rules are defined in `prometheus/alerts.yml`:
 | `PgTrickleCdcBufferLarge` | CDC buffer > 1 GB | warning |
 | `PgTrickleSchedulerDown` | Scheduler not running for > 2 min | critical |
 | `PgTrickleHighRefreshDuration` | Avg refresh > 30 s | warning |
+| `PgTrickleFreshnessBreach` | Exact breach duration > 0 for 5 min | warning |
+| `PgTrickleFreshnessInfeasible` | Any interval target is infeasible | warning |
 
 ## NOTIFY-Based Alerting
 
@@ -122,6 +140,22 @@ The pre-provisioned **pg_trickle Overview** dashboard
 - CDC buffer sizes
 - Consecutive error counts
 - Scheduler uptime
+- Freshness target versus exact p95 and p50/p99
+- Sustained breach duration, at-risk and infeasible target counts
+- Advisory adaptive worker target
+
+The dashboard uses the same bounded database, schema, and stream-table labels
+as the exporter query. `AT_RISK` remains visible without being treated as a
+health failure; the breach alert is driven by exact breach duration.
+
+## OpenTelemetry Metrics
+
+When `pg_trickle.otel_endpoint` is configured, pg_trickle sends one bounded
+OTLP/HTTP JSON metrics batch per monitoring cadence to
+`{endpoint}/v1/metrics`. It exports `pg_trickle.target_freshness`,
+`pg_trickle.freshness.p95`, and `pg_trickle.sla.breach_duration` in seconds,
+using the same `db_oid`, `db_name`, `schema`, and `name` attributes plus the
+controller status. The batch is best-effort and never blocks refreshes.
 
 ## Built-in SQL Monitoring Views
 
@@ -163,5 +197,5 @@ complete list of monitoring functions.
 ## Requirements
 
 - Docker 24+ with Compose v2
-- pg_trickle 0.10.0+ installed in the target database
+- pg_trickle 0.90.0+ installed in the target database
 - PostgreSQL user with `SELECT` on the `pgtrickle.*` schema

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**143 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**145 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -65,6 +65,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.explain_st()` | `pgtrickle` | `` | PERF-3: When `with_analyze` is true, the defining query is EXPLAINed with ANALYZE to show actual row counts, timings, and buffer usage. |
 | `pgtrickle.explain_stream_table()` | `pgtrickle` | `text` | v0.39.0 extends the output to include: - Explicit DIFF/FULL fallback reason from the stream table catalog - Whether `force_full_refresh` GUC is overriding the mode - The effective refresh mode from the last completed refresh cycle - Whether the backpressure or CDC-pause state is active. |
 | `pgtrickle.export_definition()` | `pgtrickle` | `text` | Returns a `DROP STREAM TABLE IF EXISTS` + `CREATE STREAM TABLE . |
+| `pgtrickle.freshness()` | `pgtrickle` | `SetOf row` | v0.90.0: Return bounded exact freshness summaries for interval-targeted stream tables. |
 | `pgtrickle.fuse_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table with fuse configuration and state. |
 | `pgtrickle.gate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |
 | `pgtrickle.get_refresh_history()` | `pgtrickle` | `` | Exposed as `pgtrickle.get_refresh_history(name, limit)`. |
@@ -100,6 +101,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.rebuild_cdc_triggers()` | `pgtrickle` | `text` | Returns `'done'` on success. |
 | `pgtrickle.recommend_refresh_mode()` | `pgtrickle` | `` | Read-only — no side effects. |
 | `pgtrickle.recommend_schedule()` | `pgtrickle` | `jsonb` | PLAN-1 (v0.27.0): Return a schedule recommendation for the given stream table as a JSONB object with keys: `recommended_interval_seconds`, `peak_window_cron`, `confidence` (0–1), `reasoning`. |
+| `pgtrickle.recommend_target_freshness()` | `pgtrickle` | `SetOf row` | v0.90.0: Recommend a target from exact settled p95 evidence without changing the stream table or collecting new cost data. |
 | `pgtrickle.refresh_efficiency()` | `pgtrickle` | `SetOf row (failable)` | Returns operational metrics for each stream table: FULL vs DIFFERENTIAL timing, change ratios, speedup factor, and refresh counts. |
 | `pgtrickle.refresh_groups()` | `pgtrickle` | `SetOf row` | Return all user-declared refresh groups with member details. |
 | `pgtrickle.refresh_stream_table()` | `pgtrickle` | `` | Manually trigger a synchronous refresh of a stream table. |

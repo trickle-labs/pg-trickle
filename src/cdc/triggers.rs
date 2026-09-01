@@ -9,8 +9,16 @@
 /// Built-in CDC metadata column names that live at the top of every change-buffer
 /// table.  A source table column with any of these names would collide with the
 /// metadata column in a flat (A44-10 D+I) change-buffer schema.
-pub(super) const RESERVED_CB_COLS: &[&str] =
-    &["change_id", "lsn", "action", "__pgt_row_id", "changed_cols"];
+pub(super) const RESERVED_CB_COLS: &[&str] = &[
+    "change_id",
+    "lsn",
+    "action",
+    "__pgt_row_id",
+    "changed_cols",
+    "source_xid",
+    "source_commit_at",
+    "__pgt_trace_context",
+];
 
 /// Map a *source* column name to its change-buffer storage name.
 ///

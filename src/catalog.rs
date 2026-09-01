@@ -404,6 +404,12 @@ pub struct RefreshRecord {
     pub error_code: Option<String>,
     pub error_sqlstate: Option<String>,
     pub retryable: Option<bool>,
+    pub duration_ms: Option<f64>,
+    pub source_commit_at: Option<TimestampWithTimeZone>,
+    pub visibility_xid: Option<pg_sys::TransactionId>,
+    pub visible_at: Option<TimestampWithTimeZone>,
+    pub commit_to_visible_ms: Option<f64>,
+    pub plan_identity: Option<i64>,
 }
 
 // ── StreamTableMeta CRUD ──────────────────────────────────────────────────
@@ -2522,6 +2528,604 @@ pub fn store_column_snapshot_for_pgt_id(
 // ── Refresh history CRUD ───────────────────────────────────────────────────
 
 impl RefreshRecord {
+    /// Settle committed refreshes using PostgreSQL's authoritative commit
+    /// timestamp. Rows without both provenance values remain unmeasured.
+    pub fn settle_visibility_timestamps() -> Result<(), PgTrickleError> {
+        let limit = crate::config::pg_trickle_scheduler_maintenance_batch_size();
+        Spi::run_with_args(
+            "WITH candidates AS (
+                 SELECT refresh_id
+                   FROM pgtrickle.pgt_refresh_history
+                  WHERE visible_at IS NULL
+                    AND visibility_xid IS NOT NULL
+                    AND source_commit_at IS NOT NULL
+                    AND status = 'COMPLETED'
+                    AND current_setting('track_commit_timestamp', true) = 'on'
+                    AND CASE WHEN current_setting('track_commit_timestamp', true) = 'on'
+                             THEN pg_xact_commit_timestamp(visibility_xid) END IS NOT NULL
+                  ORDER BY refresh_id
+                  LIMIT $1
+             )
+             UPDATE pgtrickle.pgt_refresh_history h
+                SET visible_at = pg_xact_commit_timestamp(h.visibility_xid),
+                    commit_to_visible_ms = EXTRACT(EPOCH FROM
+                        (pg_xact_commit_timestamp(h.visibility_xid) - h.source_commit_at)) * 1000
+              FROM candidates
+             WHERE h.refresh_id = candidates.refresh_id
+               AND current_setting('track_commit_timestamp', true) = 'on'
+               AND CASE WHEN current_setting('track_commit_timestamp', true) = 'on'
+                        THEN pg_xact_commit_timestamp(h.visibility_xid) END IS NOT NULL",
+            &[limit.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// Settle committed history and refresh the bounded summaries for active
+    /// interval targets. This is intentionally scheduler-maintenance work;
+    /// refresh execution never waits for an external metrics consumer.
+    pub fn settle_and_refresh_freshness() -> Result<(), PgTrickleError> {
+        Self::settle_visibility_timestamps()?;
+        let ids = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                      WHERE target_freshness_mode = 'INTERVAL'
+                      ORDER BY pgt_id",
+                    None,
+                    &[],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                if let Some(id) = row
+                    .get::<i64>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                {
+                    ids.push(id);
+                }
+            }
+            Ok::<_, PgTrickleError>(ids)
+        })?;
+        for id in ids {
+            Self::update_freshness_state(id)?;
+        }
+        Ok(())
+    }
+
+    fn source_commit_at(
+        pgt_id: i64,
+        tick_watermark_lsn: Option<&str>,
+    ) -> Result<Option<TimestampWithTimeZone>, PgTrickleError> {
+        let keys: Vec<(String, i64)> = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT DISTINCT cb.buffer_key::text, cb.source_id
+                       FROM pgtrickle.pgt_change_buffers cb
+                       JOIN pgtrickle.pgt_dependencies d
+                         ON ((d.source_type = 'STREAM_TABLE'
+                              AND cb.source_kind = 'STREAM_TABLE'
+                              AND cb.source_id = (SELECT st.pgt_id
+                                                    FROM pgtrickle.pgt_stream_tables st
+                                                   WHERE st.pgt_relid = d.source_relid))
+                          OR (d.source_type <> 'STREAM_TABLE'
+                              AND cb.source_kind = 'BASE'
+                              AND cb.source_id = d.source_relid::bigint))
+                      WHERE d.pgt_id = $1",
+                    None,
+                    &[pgt_id.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let mut keys = Vec::new();
+            for row in rows {
+                if let (Some(key), Some(source_id)) = (
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                    row.get::<i64>(2)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                ) {
+                    keys.push((key, source_id));
+                }
+            }
+            Ok(keys)
+        })?;
+        if keys.is_empty() {
+            return Ok(None);
+        }
+
+        let schema = crate::config::pg_trickle_change_buffer_schema();
+        let upper_lsn_filter = tick_watermark_lsn
+            .map(|lsn| format!(" AND lsn <= '{}'::pg_lsn", lsn.replace('\'', "''")))
+            .unwrap_or_default();
+        let selects = keys
+            .iter()
+            .map(|(key, source_id)| {
+                format!(
+                    r#"SELECT min(COALESCE(source_commit_at, CASE
+                               WHEN current_setting('track_commit_timestamp', true) = 'on'
+                               THEN pg_xact_commit_timestamp(source_xid) END)) AS source_commit_at
+                       FROM {qualified} WHERE lsn > COALESCE(
+                           (SELECT (frontier->'sources'->'{source_id}'->>'lsn')::pg_lsn
+                              FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {pgt_id}),
+                           '0/0'::pg_lsn)
+                         AND (source_commit_at IS NOT NULL
+                          OR (source_xid IS NOT NULL
+                              AND current_setting('track_commit_timestamp', true) = 'on')){upper_lsn_filter}"#,
+                    qualified = crate::sql_builder::qualified(&schema, key),
+                    pgt_id = pgt_id,
+                    upper_lsn_filter = upper_lsn_filter
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        // nosemgrep: rust.spi.query.dynamic-format — buffer identifiers are catalog-derived and quote_identifier-escaped; numeric values are internal OIDs.
+        Spi::get_one::<TimestampWithTimeZone>(&format!(
+            "SELECT min(source_commit_at) FROM ({selects}) samples"
+        ))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// Return a safely quoted exact source timestamp for generated downstream
+    /// CDC rows, or a typed NULL when the input frontier has no evidence.
+    pub(crate) fn source_commit_at_sql_for_refresh(pgt_id: i64) -> Result<String, PgTrickleError> {
+        let Some(timestamp) = Self::source_commit_at(pgt_id, None)? else {
+            return Ok("NULL::timestamptz".into());
+        };
+        Spi::get_one_with_args::<String>(
+            "SELECT pg_catalog.quote_literal($1::timestamptz)",
+            &[timestamp.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| PgTrickleError::SpiError("could not quote source timestamp".into()))
+    }
+
+    /// Evaluate and persist the bounded advisory controller snapshot.
+    ///
+    /// The snapshot is deliberately derived from the already-persisted
+    /// summary plus bounded pending/cost probes.  It never changes refresh
+    /// mode, batch size, or frontier state; those decision classes remain
+    /// advisory until their rollout gates are earned.
+    fn update_controller_advisory(pgt_id: i64) -> Result<(), PgTrickleError> {
+        let state = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT st.freshness_deadline_ms, st.defining_query_hash,
+                            f.sample_count, f.last_sample_ms,
+                            f.p50_freshness_ms, f.p95_freshness_ms,
+                            f.p99_freshness_ms, st.refresh_mode::text,
+                            COALESCE(st.requested_refresh_mode, st.refresh_mode)::text,
+                            f.last_applied_batch_size
+                       FROM pgtrickle.pgt_stream_tables st
+                       JOIN pgtrickle.pgt_freshness_controller_state f
+                         ON f.pgt_id = st.pgt_id
+                      WHERE st.pgt_id = $1
+                        AND st.target_freshness_mode = 'INTERVAL'",
+                    None,
+                    &[pgt_id.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if rows.is_empty() {
+                return Ok::<_, PgTrickleError>(None);
+            }
+            let row = rows.first();
+            let target_ms = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let Some(target_ms) = target_ms else {
+                return Ok::<_, PgTrickleError>(None);
+            };
+            Ok(Some((
+                target_ms,
+                row.get::<i64>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<i64>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<f64>(4)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<f64>(5)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<f64>(6)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<f64>(7)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<String>(8)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<String>(9)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<i64>(10)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+            )))
+        })?;
+        let Some((
+            target_ms,
+            plan_identity,
+            sample_count,
+            last_sample,
+            p50,
+            p95,
+            p99,
+            current_mode,
+            requested_mode,
+            last_batch,
+        )) = state
+        else {
+            return Ok(());
+        };
+        let target_ms = u64::try_from(target_ms)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| PgTrickleError::InvalidArgument("invalid freshness target".into()))?;
+        let finite = |value: Option<f64>| {
+            value.and_then(crate::scheduler::controller::FiniteMs::try_from_f64)
+        };
+        let p50 = finite(p50);
+        let p95 = finite(p95);
+        let p99 = finite(p99);
+        let last_sample = finite(last_sample);
+        let freshness = if sample_count > 0
+            && p50.is_some()
+            && p95.is_some()
+            && p99.is_some()
+            && last_sample.is_some()
+        {
+            crate::scheduler::controller::FreshnessDistribution {
+                samples: usize::try_from(sample_count)
+                    .unwrap_or(crate::scheduler::controller::FRESHNESS_SAMPLE_CAP)
+                    .min(crate::scheduler::controller::FRESHNESS_SAMPLE_CAP),
+                p50_ms: p50,
+                p95_ms: p95,
+                p99_ms: p99,
+                last_ms: last_sample,
+            }
+        } else {
+            crate::scheduler::controller::FreshnessDistribution {
+                samples: 0,
+                p50_ms: None,
+                p95_ms: None,
+                p99_ms: None,
+                last_ms: None,
+            }
+        };
+
+        let mode_costs = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT h.action::text, count(*)::bigint,
+                            min(h.duration_ms),
+                            percentile_cont(0.50) WITHIN GROUP (ORDER BY h.duration_ms),
+                            percentile_cont(0.95) WITHIN GROUP (ORDER BY h.duration_ms)
+                       FROM pgtrickle.pgt_refresh_history h
+                      WHERE h.pgt_id = $1
+                        AND h.status = 'COMPLETED'
+                        AND h.action IN ('FULL', 'DIFFERENTIAL')
+                        AND h.plan_identity = $2
+                        AND h.duration_ms IS NOT NULL
+                      GROUP BY h.action",
+                    None,
+                    &[pgt_id.into(), plan_identity.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let mut costs = Vec::new();
+            for row in rows {
+                costs.push((
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap_or_default(),
+                    row.get::<i64>(2)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap_or_default(),
+                    row.get::<f64>(3)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                    row.get::<f64>(4)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                    row.get::<f64>(5)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                ));
+            }
+            Ok::<_, PgTrickleError>(costs)
+        })?;
+        let plan_token = plan_identity as u64;
+        let cost_for = |mode: RefreshMode| {
+            let action = match mode {
+                RefreshMode::Full => "FULL",
+                RefreshMode::Differential => "DIFFERENTIAL",
+                RefreshMode::Immediate => return None,
+            };
+            let (_, samples, min, p50, p95) = mode_costs
+                .iter()
+                .find(|(candidate, ..)| candidate == action)?;
+            Some(crate::scheduler::controller::ModeCostEvidence {
+                mode,
+                samples: usize::try_from(*samples).unwrap_or(0),
+                min_ms: finite(*min),
+                p50_ms: finite(*p50),
+                p95_ms: finite(*p95),
+                updated_token: plan_token,
+                compatible: true,
+            })
+        };
+        let source_commit = Self::source_commit_at(pgt_id, None)?;
+        let pending_age_ms = source_commit.and_then(|timestamp| {
+            Spi::get_one_with_args::<f64>(
+                "SELECT EXTRACT(EPOCH FROM (clock_timestamp() - $1::timestamptz)) * 1000",
+                &[timestamp.into()],
+            )
+            .ok()
+            .flatten()
+            .and_then(crate::scheduler::controller::FiniteMs::try_from_f64)
+        });
+        let estimated_pending = crate::cdc::estimate_pending_changes(pgt_id)
+            .unwrap_or_default()
+            .max(0) as u64;
+        let pending_rows = if estimated_pending == 0 && pending_age_ms.is_some() {
+            1
+        } else {
+            estimated_pending
+        };
+        let (pressure, _, _) = crate::shmem::scheduler_load_stats();
+        let load = crate::scheduler::controller::LoadEvidence {
+            cpu_percent: None,
+            queue_depth: crate::shmem::parallel_queue_depth(),
+            lock_waits: 0,
+            overloaded: pressure >= crate::config::pg_trickle_load_shed_threshold(),
+        };
+        let mode_override = match requested_mode.to_ascii_uppercase().as_str() {
+            "FULL" => Some(RefreshMode::Full),
+            "DIFFERENTIAL" => Some(RefreshMode::Differential),
+            _ => None,
+        };
+        let current_decision_mode = match current_mode.to_ascii_uppercase().as_str() {
+            "FULL" => Some(RefreshMode::Full),
+            "DIFFERENTIAL" => Some(RefreshMode::Differential),
+            _ => None,
+        };
+        let inputs = crate::scheduler::controller::ControllerInputs {
+            target_ms: crate::scheduler::controller::FiniteMs::new(target_ms),
+            current_plan_token: Some(plan_token),
+            freshness,
+            differential_cost: cost_for(RefreshMode::Differential),
+            full_cost: cost_for(RefreshMode::Full),
+            pending: crate::scheduler::controller::PendingEvidence {
+                rows: pending_rows,
+                oldest_commit_age_ms: pending_age_ms,
+                inflow_rows_per_ms: None,
+            },
+            row_width_bytes: None,
+            memory_budget_bytes: Some(
+                crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
+            ),
+            queue_delay_ms: None,
+            load,
+            semantic_modes: crate::scheduler::controller::SemanticModes::default(),
+            overrides: crate::scheduler::controller::OverrideSet {
+                mode: mode_override,
+                ..Default::default()
+            },
+            current_decision: crate::scheduler::controller::CurrentDecision {
+                interval_ms: None,
+                mode: current_decision_mode,
+                batch_size: last_batch.and_then(|value| u64::try_from(value).ok()),
+            },
+            min_batch_size: 1,
+            max_batch_size: crate::config::pg_trickle_pipeline_batch_size() as u64,
+            batch_step: 1,
+        };
+        let decision = crate::scheduler::controller::propose(&inputs);
+        let cost_json = |mode: RefreshMode| {
+            cost_for(mode).map(|cost| {
+                serde_json::json!({
+                    "samples": cost.samples,
+                    "min_ms": cost.min_ms.map(crate::scheduler::controller::FiniteMs::get),
+                    "p50_ms": cost.p50_ms.map(crate::scheduler::controller::FiniteMs::get),
+                    "p95_ms": cost.p95_ms.map(crate::scheduler::controller::FiniteMs::get),
+                    "compatible": cost.compatible,
+                })
+            })
+        };
+        let snapshot = serde_json::json!({
+            "controller_version": 1,
+            "target_ms": target_ms,
+            "freshness": {
+                "samples": inputs.freshness.samples,
+                "p50_ms": inputs.freshness.p50_ms.map(crate::scheduler::controller::FiniteMs::get),
+                "p95_ms": inputs.freshness.p95_ms.map(crate::scheduler::controller::FiniteMs::get),
+                "p99_ms": inputs.freshness.p99_ms.map(crate::scheduler::controller::FiniteMs::get),
+                "last_ms": inputs.freshness.last_ms.map(crate::scheduler::controller::FiniteMs::get),
+            },
+            "cost": {
+                "differential": cost_json(RefreshMode::Differential),
+                "full": cost_json(RefreshMode::Full),
+            },
+            "pending": {
+                "rows": inputs.pending.rows,
+                "oldest_commit_age_ms": inputs.pending.oldest_commit_age_ms.map(crate::scheduler::controller::FiniteMs::get),
+            },
+            "load": {
+                "pressure": pressure,
+                "queue_depth": inputs.load.queue_depth,
+                "overloaded": inputs.load.overloaded,
+            },
+            "memory_budget_bytes": inputs.memory_budget_bytes,
+            "overrides": {
+                "mode": inputs.overrides.mode.map(|mode| mode.as_str()),
+            },
+            "decision": decision.as_json(),
+        });
+        let applied_interval = decision
+            .next_due_in_ms
+            .map(crate::scheduler::controller::FiniteMs::get)
+            .or(Some(target_ms));
+        let applied_batch = decision
+            .batch_size
+            .and_then(|value| i64::try_from(value).ok());
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_freshness_controller_state
+                SET last_applied_interval_ms = $2,
+                    last_applied_mode = $3,
+                    last_applied_batch_size = $4,
+                    last_input_snapshot = $5,
+                    last_decision_at = clock_timestamp(),
+                    updated_at = now()
+              WHERE pgt_id = $1
+                AND (last_applied_interval_ms IS DISTINCT FROM $2
+                  OR last_applied_mode IS DISTINCT FROM $3
+                  OR last_applied_batch_size IS DISTINCT FROM $4
+                  OR last_input_snapshot IS DISTINCT FROM $5)",
+            &[
+                pgt_id.into(),
+                applied_interval
+                    .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+                    .into(),
+                Some(decision.action.as_str().to_string()).into(),
+                applied_batch.into(),
+                pgrx::JsonB(snapshot).into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    fn update_freshness_state(pgt_id: i64) -> Result<(), PgTrickleError> {
+        let window_hours = crate::config::pg_trickle_sla_window_hours().max(1);
+        Spi::run_with_args(
+            "WITH samples AS (
+                     SELECT h.refresh_id, h.commit_to_visible_ms
+                       FROM pgtrickle.pgt_refresh_history h
+                      WHERE h.pgt_id = $1
+                        AND h.status = 'COMPLETED'
+                        AND h.commit_to_visible_ms IS NOT NULL
+                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+                      ORDER BY h.refresh_id DESC
+                      LIMIT 128
+                 ), stats AS (
+                     SELECT count(*)::integer AS sample_count,
+                            max(refresh_id) AS last_refresh_id,
+                            (array_agg(commit_to_visible_ms ORDER BY refresh_id DESC))[1] AS last_sample,
+                            percentile_cont(0.50) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p50,
+                            percentile_cont(0.95) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p95,
+                            percentile_cont(0.99) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p99
+                       FROM samples
+                 ), costs AS (
+                     SELECT min(h.duration_ms) AS minimum_cost_ms,
+                            count(h.duration_ms)::integer AS cost_samples
+                       FROM pgtrickle.pgt_refresh_history h
+                      WHERE h.pgt_id = $1
+                        AND h.status = 'COMPLETED'
+                        AND h.plan_identity = (SELECT defining_query_hash
+                                                 FROM pgtrickle.pgt_stream_tables
+                                                WHERE pgt_id = $1)
+                        AND h.duration_ms IS NOT NULL
+                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+                 ), previous AS (
+                     SELECT * FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1
+                 ), decision AS (
+                     SELECT st.pgt_id, st.defining_query_hash, st.freshness_deadline_ms,
+                            stats.sample_count, stats.last_refresh_id, stats.last_sample,
+                            stats.p50, stats.p95, stats.p99,
+                            costs.minimum_cost_ms, costs.cost_samples,
+                            COALESCE(previous.breach_streak, 0) AS old_breach_streak,
+                            COALESCE(previous.recovery_streak, 0) AS old_recovery_streak,
+                            COALESCE(previous.infeasibility_streak, 0) AS old_infeasibility_streak,
+                            COALESCE(previous.last_settled_refresh_id, 0) AS old_last_refresh_id,
+                            COALESCE(previous.sla_status, '') AS old_status,
+                            previous.next_due_at
+                       FROM pgtrickle.pgt_stream_tables st
+                      CROSS JOIN stats CROSS JOIN costs
+                      LEFT JOIN previous ON true
+                      WHERE st.pgt_id = $1
+                        AND st.target_freshness_mode = 'INTERVAL'
+                 )
+                 INSERT INTO pgtrickle.pgt_freshness_controller_state
+                 (pgt_id, controller_version, plan_identity, target_ms,
+                  sample_count, last_settled_refresh_id, last_sample_ms,
+                  p50_freshness_ms, p95_freshness_ms, p99_freshness_ms,
+                  sla_status, evidence_state, breach_streak, recovery_streak,
+                  breach_started_at, infeasibility_streak, minimum_cost_ms,
+                  infeasibility_reason, next_due_at, last_decision_at,
+                  last_input_snapshot)
+             SELECT pgt_id, 1, defining_query_hash, freshness_deadline_ms,
+                    sample_count, last_refresh_id, last_sample,
+                    p50, p95, p99,
+                    CASE
+                      WHEN current_setting('track_commit_timestamp', true) <> 'on'
+                        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+                                    WHERE d.pgt_id = decision.pgt_id
+                                      AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+                        THEN 'EVIDENCE_UNAVAILABLE'
+                      WHEN sample_count < 20 THEN 'INSUFFICIENT_DATA'
+                      WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+                           AND old_infeasibility_streak >= 2 THEN 'INFEASIBLE'
+                      WHEN old_status = 'BREACHING' AND p95 <= freshness_deadline_ms
+                           AND old_recovery_streak < 2 THEN 'BREACHING'
+                      WHEN old_breach_streak >= 2 AND p95 > freshness_deadline_ms THEN 'BREACHING'
+                      WHEN p95 <= freshness_deadline_ms THEN 'MEETING'
+                      ELSE 'AT_RISK'
+                    END,
+                    CASE
+                      WHEN current_setting('track_commit_timestamp', true) = 'on'
+                       AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+                                        WHERE d.pgt_id = decision.pgt_id
+                                          AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+                        THEN 'EXACT' ELSE 'UNAVAILABLE'
+                    END,
+                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+                         THEN LEAST(old_breach_streak + 1, 3) ELSE 0 END,
+                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 <= freshness_deadline_ms
+                         THEN LEAST(old_recovery_streak + 1, 3) ELSE 0 END,
+                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+                              AND old_breach_streak = 0
+                         THEN clock_timestamp() ELSE NULL END,
+                    CASE WHEN last_refresh_id > old_last_refresh_id
+                               AND cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+                         THEN LEAST(old_infeasibility_streak + 1, 3) ELSE 0 END,
+                    minimum_cost_ms,
+                    CASE WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+                         THEN 'FASTEST_COMPATIBLE_REFRESH_EXCEEDS_TARGET' ELSE NULL END,
+                    COALESCE(next_due_at,
+                             clock_timestamp() + freshness_deadline_ms * interval '1 millisecond'),
+                    clock_timestamp(),
+                    jsonb_build_object(
+                        'controller_version', 1,
+                        'sample_count', sample_count,
+                        'last_settled_refresh_id', last_refresh_id,
+                        'minimum_cost_ms', minimum_cost_ms,
+                        'cost_samples', cost_samples)
+               FROM decision
+             ON CONFLICT (pgt_id) DO UPDATE SET
+                 controller_version = EXCLUDED.controller_version,
+                 plan_identity = EXCLUDED.plan_identity,
+                 target_ms = EXCLUDED.target_ms,
+                 last_settled_refresh_id = EXCLUDED.last_settled_refresh_id,
+                 last_sample_ms = EXCLUDED.last_sample_ms,
+                 sample_count = EXCLUDED.sample_count,
+                 p50_freshness_ms = EXCLUDED.p50_freshness_ms,
+                 p95_freshness_ms = EXCLUDED.p95_freshness_ms,
+                 p99_freshness_ms = EXCLUDED.p99_freshness_ms,
+                 sla_status = EXCLUDED.sla_status,
+                 evidence_state = EXCLUDED.evidence_state,
+                 breach_streak = EXCLUDED.breach_streak,
+                 recovery_streak = EXCLUDED.recovery_streak,
+                 breach_started_at = CASE
+                     WHEN EXCLUDED.sla_status = 'MEETING' THEN NULL
+                     WHEN pgtrickle.pgt_freshness_controller_state.breach_started_at IS NOT NULL
+                         THEN pgtrickle.pgt_freshness_controller_state.breach_started_at
+                     ELSE EXCLUDED.breach_started_at END,
+                 infeasibility_streak = EXCLUDED.infeasibility_streak,
+                 minimum_cost_ms = EXCLUDED.minimum_cost_ms,
+                 infeasibility_reason = EXCLUDED.infeasibility_reason,
+                 next_due_at = COALESCE(pgtrickle.pgt_freshness_controller_state.next_due_at,
+                                        EXCLUDED.next_due_at),
+                 last_input_snapshot = EXCLUDED.last_input_snapshot,
+                 last_decision_at = EXCLUDED.last_decision_at,
+                 updated_at = now()",
+            &[pgt_id.into(), window_hours.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Self::update_controller_advisory(pgt_id)
+    }
+
     fn upsert_refresh_summary_for_refresh(refresh_id: i64) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_refresh_summary (
@@ -2615,13 +3219,21 @@ impl RefreshRecord {
         was_full_fallback: bool,
         tick_watermark_lsn: Option<&str>,
     ) -> Result<i64, PgTrickleError> {
+        Self::settle_visibility_timestamps()?;
+        // Settlement runs before the new row is inserted, so refresh the
+        // bounded summary now to include any rows that became visible since
+        // the last refresh.
+        let _ = Self::update_freshness_state(pgt_id);
+        let source_commit_at = Self::source_commit_at(pgt_id, tick_watermark_lsn)?;
         let refresh_id = Spi::get_one_with_args::<i64>(
             "INSERT INTO pgtrickle.pgt_refresh_history \
              (pgt_id, data_timestamp, start_time, action, status, \
               rows_inserted, rows_deleted, error_message, \
               initiated_by, freshness_deadline, \
-              delta_row_count, merge_strategy_used, was_full_fallback, tick_watermark_lsn) \
-             VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::pg_lsn) \
+              delta_row_count, merge_strategy_used, was_full_fallback, tick_watermark_lsn,
+              source_commit_at, plan_identity) \
+             VALUES ($1, $2, clock_timestamp(), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::pg_lsn, $14, \
+                     (SELECT defining_query_hash FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1)) \
              RETURNING refresh_id",
             &[
                 pgt_id.into(),
@@ -2637,6 +3249,7 @@ impl RefreshRecord {
                 merge_strategy_used.into(),
                 was_full_fallback.into(),
                 tick_watermark_lsn.into(),
+                source_commit_at.into(),
             ],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -2717,7 +3330,8 @@ impl RefreshRecord {
     ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_refresh_history \
-             SET end_time = clock_timestamp(), status = $1, rows_inserted = $2, \
+             SET end_time = clock_timestamp(), duration_ms = EXTRACT(EPOCH FROM (clock_timestamp() - start_time)) * 1000, \
+             visibility_xid = pg_current_xact_id_if_assigned()::xid, status = $1, rows_inserted = $2, \
              rows_updated = $3, rows_deleted = $4, error_message = $5, \
              delta_row_count = $6, merge_strategy_used = $7, \
              was_full_fallback = $8, refresh_reason = $9, \
@@ -2739,7 +3353,16 @@ impl RefreshRecord {
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
 
-        Self::upsert_refresh_summary_for_refresh(refresh_id)
+        Self::upsert_refresh_summary_for_refresh(refresh_id)?;
+        let pgt_id = Spi::get_one_with_args::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_refresh_history WHERE refresh_id = $1",
+            &[refresh_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        if let Some(pgt_id) = pgt_id {
+            Self::update_freshness_state(pgt_id)?;
+        }
+        Ok(())
     }
 
     pub fn complete_with_failure(
@@ -2752,7 +3375,8 @@ impl RefreshRecord {
     ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
             "UPDATE pgtrickle.pgt_refresh_history
-             SET end_time = clock_timestamp(), status = $1, error_message = $2,
+             SET end_time = clock_timestamp(), duration_ms = EXTRACT(EPOCH FROM (clock_timestamp() - start_time)) * 1000,
+                 status = $1, error_message = $2,
                  error_code = $3, error_sqlstate = $4, retryable = $5
              WHERE refresh_id = $6",
             &[
