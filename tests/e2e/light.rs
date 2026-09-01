@@ -241,6 +241,7 @@ async fn shared_container() -> &'static SharedContainer {
                 ))
                 .with_env_var("POSTGRES_PASSWORD", "postgres")
                 .with_env_var("POSTGRES_DB", "postgres")
+                .with_cmd(["postgres", "-c", "track_commit_timestamp=on"])
                 .with_mount(Mount::bind_mount(ext_dir, "/tmp/pg_ext"))
                 .with_label("com.pgtrickle.test", "true")
                 .with_label("com.pgtrickle.suite", "light-e2e")

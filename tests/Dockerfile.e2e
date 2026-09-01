@@ -110,6 +110,7 @@ COPY tests/pg_tide.control \
 RUN echo "" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "# pg_trickle E2E test configuration" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "shared_preload_libraries = 'pg_trickle'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "track_commit_timestamp = on" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "wal_level = logical" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "max_replication_slots = 10" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "# Each test database spawns one pg_trickle scheduler BGW via the launcher." >> /usr/share/postgresql/postgresql.conf.sample && \
