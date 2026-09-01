@@ -39,7 +39,26 @@ pub(crate) struct StreamTableExplanation {
     pub(crate) dominant_cost: String,
     pub(crate) dominant_cost_units: Option<f64>,
     pub(crate) dominant_cost_source: &'static str,
+    pub(crate) freshness_controller: FreshnessControllerDiagnostic,
     pub(crate) window: WindowDiagnostics,
+}
+
+/// The bounded controller snapshot shown by both explain renderers.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FreshnessControllerDiagnostic {
+    pub(crate) target_mode: String,
+    pub(crate) target_ms: Option<i64>,
+    pub(crate) p50_ms: Option<f64>,
+    pub(crate) p95_ms: Option<f64>,
+    pub(crate) p99_ms: Option<f64>,
+    pub(crate) sample_count: i64,
+    pub(crate) status: String,
+    pub(crate) evidence_state: String,
+    pub(crate) next_due_at: Option<String>,
+    pub(crate) last_decision_at: Option<String>,
+    pub(crate) adaptive_workers: bool,
+    pub(crate) adaptive_worker_min: i32,
+    pub(crate) adaptive_worker_max: i32,
 }
 
 /// One bounded registry row from `pgt_window_states`.
@@ -378,6 +397,48 @@ pub(crate) fn build_stream_table_explanation(
         avg_diff_ms,
         samples,
     ) = summary;
+    let freshness_controller = Spi::connect(|client| {
+        let table = client.select(
+            "SELECT st.target_freshness_mode::text, st.freshness_deadline_ms,
+                    f.p50_freshness_ms, f.p95_freshness_ms, f.p99_freshness_ms,
+                    COALESCE(f.sample_count, 0),
+                    CASE WHEN st.target_freshness_mode <> 'INTERVAL' THEN 'NOT_APPLICABLE'
+                         ELSE COALESCE(f.sla_status, 'INSUFFICIENT_DATA') END::text,
+                    CASE WHEN st.target_freshness_mode <> 'INTERVAL' THEN 'NOT_APPLICABLE'
+                         ELSE COALESCE(f.evidence_state, 'EXACT') END::text,
+                    f.next_due_at::text, f.last_decision_at::text,
+                    current_setting('pg_trickle.adaptive_workers', true)
+               FROM pgtrickle.pgt_stream_tables st
+               LEFT JOIN pgtrickle.pgt_freshness_controller_state f
+                 ON f.pgt_id = st.pgt_id
+              WHERE st.pgt_id = $1",
+            None,
+            &[st.pgt_id.into()],
+        )?;
+        let row = table.first();
+        Ok::<_, pgrx::spi::SpiError>(FreshnessControllerDiagnostic {
+            target_mode: row.get::<String>(1)?.unwrap_or_else(|| "NONE".into()),
+            target_ms: row.get::<i64>(2)?,
+            p50_ms: row.get::<f64>(3)?,
+            p95_ms: row.get::<f64>(4)?,
+            p99_ms: row.get::<f64>(5)?,
+            sample_count: row.get::<i64>(6)?.unwrap_or(0),
+            status: row
+                .get::<String>(7)?
+                .unwrap_or_else(|| "NOT_APPLICABLE".into()),
+            evidence_state: row
+                .get::<String>(8)?
+                .unwrap_or_else(|| "NOT_APPLICABLE".into()),
+            next_due_at: row.get::<String>(9)?,
+            last_decision_at: row.get::<String>(10)?,
+            adaptive_workers: row
+                .get::<String>(11)?
+                .is_some_and(|value| value.eq_ignore_ascii_case("on")),
+            adaptive_worker_min: crate::config::pg_trickle_adaptive_workers_min(),
+            adaptive_worker_max: crate::config::pg_trickle_adaptive_workers_max(),
+        })
+    })
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     let effective = st.refresh_mode.as_str();
     let pending = crate::cdc::estimate_pending_changes(st.pgt_id);
     let expected_refresh_ms = if effective == "FULL" {
@@ -445,6 +506,7 @@ pub(crate) fn build_stream_table_explanation(
         dominant_cost,
         dominant_cost_units,
         dominant_cost_source,
+        freshness_controller,
         window,
     })
 }
@@ -479,14 +541,35 @@ pub(crate) fn render_stream_table_explanation_text(explanation: &StreamTableExpl
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let controller = &explanation.freshness_controller;
     format!(
-        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFULL fallback threshold/reason: {} / {}\nWindow strategy: {}\nWindow state: {}; {} / {} bytes ({:.1}%); reinitialization required={}\nLast window execution/fallback: {} / {}\nWrite-path overhead: unknown",
+        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFreshness controller: mode={}, target_ms={}, p50_ms={}, p95_ms={}, p99_ms={}, samples={}, status={}, evidence={}, next_due_at={}, adaptive_workers={} ({}..{})\nFULL fallback threshold/reason: {} / {}\nWindow strategy: {}\nWindow state: {}; {} / {} bytes ({:.1}%); reinitialization required={}\nLast window execution/fallback: {} / {}\nWrite-path overhead: unknown",
         explanation.refresh_mode,
         changed,
         explanation.dominant_cost,
         expected,
         lag,
         explanation.next_scheduled_refresh,
+        controller.target_mode,
+        controller
+            .target_ms
+            .map_or_else(|| "none".into(), |value| value.to_string()),
+        controller
+            .p50_ms
+            .map_or_else(|| "none".into(), |value| format!("{value:.3}")),
+        controller
+            .p95_ms
+            .map_or_else(|| "none".into(), |value| format!("{value:.3}")),
+        controller
+            .p99_ms
+            .map_or_else(|| "none".into(), |value| format!("{value:.3}")),
+        controller.sample_count,
+        controller.status,
+        controller.evidence_state,
+        controller.next_due_at.as_deref().unwrap_or("none"),
+        controller.adaptive_workers,
+        controller.adaptive_worker_min,
+        controller.adaptive_worker_max,
         threshold,
         explanation.last_full_reason.as_deref().unwrap_or("none"),
         window_strategy,
@@ -519,6 +602,7 @@ pub(crate) fn render_stream_table_explanation_json(
         "current_lag": {"milliseconds": explanation.current_lag_ms, "meaning": "time_since_last_successful_verification"},
         "next_scheduled_refresh": explanation.next_scheduled_refresh,
         "full_fallback": {"threshold": explanation.full_fallback_threshold, "reason": explanation.last_full_reason, "detail": explanation.last_full_reason_detail},
+        "freshness_controller": explanation.freshness_controller,
         "window": explanation.window,
         "write_path_overhead": null
     })

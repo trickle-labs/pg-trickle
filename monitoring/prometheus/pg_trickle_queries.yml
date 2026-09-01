@@ -4,7 +4,7 @@
 # (or PG_EXPORTER_EXTEND_QUERY_PATH env var).
 #
 # All metrics are prefixed "pg_trickle_".
-# Requires pg_trickle 0.11.0+ with pgtrickle.pg_stat_stream_tables and quick_health views
+# Requires pg_trickle 0.90.0+ with the v0.90 freshness summary table
 
 # ── Overall cluster health summary ─────────────────────────────────────────────
 
@@ -102,6 +102,109 @@ pg_trickle_table_stats:
     - avg_duration_ms:
         usage: GAUGE
         description: "Rolling average refresh duration in milliseconds"
+
+# ── Exact freshness controller evidence (v0.90.0) ────────────────────────────
+# The query key is intentionally `pg_trickle`: postgres_exporter prefixes each
+# metric column with this key, producing the same names as the native endpoint.
+# The summary row uses empty schema/name labels; per-table rows have all four
+# bounded identity labels.
+
+pg_trickle:
+  query: |
+    WITH database_identity AS (
+        SELECT oid::text AS db_oid, datname AS db_name
+        FROM pg_catalog.pg_database
+        WHERE datname = current_database()
+    ),
+    freshness AS (
+        SELECT
+            d.db_oid,
+            d.db_name,
+            s.pgt_schema AS schema,
+            s.pgt_name AS name,
+            s.freshness_deadline_ms / 1000.0 AS target_freshness_seconds,
+            f.p50_freshness_ms / 1000.0 AS freshness_p50_seconds,
+            f.p95_freshness_ms / 1000.0 AS freshness_p95_seconds,
+            f.p99_freshness_ms / 1000.0 AS freshness_p99_seconds,
+            CASE WHEN f.sla_status = 'BREACHING' AND f.breach_started_at IS NOT NULL
+                 THEN GREATEST(EXTRACT(EPOCH FROM
+                                      (clock_timestamp() - f.breach_started_at)), 0)::double precision
+                 ELSE 0::double precision END AS sla_breach_duration_seconds,
+            NULL::bigint AS sla_at_risk_tables,
+            NULL::bigint AS sla_infeasible_tables,
+            NULL::double precision AS adaptive_worker_target
+        FROM database_identity d
+        CROSS JOIN pgtrickle.pgt_stream_tables s
+        LEFT JOIN pgtrickle.pgt_freshness_controller_state f ON f.pgt_id = s.pgt_id
+        WHERE s.target_freshness_mode = 'INTERVAL'
+    ),
+    summary AS (
+        SELECT
+            d.db_oid,
+            d.db_name,
+            ''::text AS schema,
+            ''::text AS name,
+            NULL::double precision AS target_freshness_seconds,
+            NULL::double precision AS freshness_p50_seconds,
+            NULL::double precision AS freshness_p95_seconds,
+            NULL::double precision AS freshness_p99_seconds,
+            NULL::double precision AS sla_breach_duration_seconds,
+            count(*) FILTER (WHERE f.sla_status IN ('AT_RISK', 'BREACHING'))::bigint
+                AS sla_at_risk_tables,
+            count(*) FILTER (WHERE f.sla_status = 'INFEASIBLE')::bigint
+                AS sla_infeasible_tables,
+            CASE
+                WHEN current_setting('pg_trickle.adaptive_workers', true) = 'on'
+                THEN (SELECT adaptive_target::double precision
+                        FROM pgtrickle.worker_pool_status())
+                ELSE current_setting('pg_trickle.worker_pool_size', true)::double precision
+            END AS adaptive_worker_target
+        FROM database_identity d
+        LEFT JOIN pgtrickle.pgt_stream_tables s
+               ON s.target_freshness_mode = 'INTERVAL'
+        LEFT JOIN pgtrickle.pgt_freshness_controller_state f ON f.pgt_id = s.pgt_id
+        GROUP BY d.db_oid, d.db_name
+    )
+    SELECT * FROM freshness
+    UNION ALL
+    SELECT * FROM summary
+  metrics:
+    - db_oid:
+        usage: LABEL
+        description: "OID of the database emitting the metric"
+    - db_name:
+        usage: LABEL
+        description: "Name of the database emitting the metric"
+    - schema:
+        usage: LABEL
+        description: "Schema of the stream table"
+    - name:
+        usage: LABEL
+        description: "Name of the stream table"
+    - target_freshness_seconds:
+        usage: GAUGE
+        description: "Declared freshness target in seconds"
+    - freshness_p50_seconds:
+        usage: GAUGE
+        description: "Exact source-commit-to-visible p50 in seconds"
+    - freshness_p95_seconds:
+        usage: GAUGE
+        description: "Exact source-commit-to-visible p95 in seconds"
+    - freshness_p99_seconds:
+        usage: GAUGE
+        description: "Exact source-commit-to-visible p99 in seconds"
+    - sla_breach_duration_seconds:
+        usage: GAUGE
+        description: "Current BREACHING duration in seconds"
+    - sla_at_risk_tables:
+        usage: GAUGE
+        description: "Number of interval targets at risk or breaching"
+    - sla_infeasible_tables:
+        usage: GAUGE
+        description: "Number of interval targets proven infeasible"
+    - adaptive_worker_target:
+        usage: GAUGE
+        description: "Configured advisory adaptive worker target"
 
 # ── Stream table status counts ────────────────────────────────────────────────
 

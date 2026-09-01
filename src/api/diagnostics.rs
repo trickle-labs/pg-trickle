@@ -2233,14 +2233,8 @@ pub(super) fn vector_status() -> TableIterator<
 ///
 /// Each row corresponds to one stream table and reports the minimum,
 /// median (p50), p95, and maximum observed latency (in milliseconds)
-/// between the scheduler tick start and the refresh end time.
-///
-/// When `pg_trickle.commit_timestamp_tracking = off` (the default), the
-/// latency is estimated as `end_time - start_time` (refresh duration only).
-/// Enabling `commit_timestamp_tracking` with `track_commit_timestamp = on`
-/// in `postgresql.conf` would allow the extension to compute the true
-/// commit-to-visible wall-clock latency; this is planned for a future
-/// release.
+/// between a captured source commit and the refresh transaction's committed
+/// visibility timestamp. Rows without exact provenance are excluded.
 ///
 /// Returns rows only for stream tables that have at least one completed
 /// refresh in the history table.
@@ -2259,30 +2253,31 @@ pub(super) fn commit_latency_stats() -> TableIterator<
         name!(tracking_mode, String),
     ),
 > {
-    let tracking_enabled = crate::config::pg_trickle_commit_timestamp_tracking();
+    let tracking_enabled =
+        Spi::get_one::<String>("SELECT current_setting('track_commit_timestamp', true)::text")
+            .unwrap_or(None)
+            .is_some_and(|value| value.eq_ignore_ascii_case("on"));
     let tracking_mode = if tracking_enabled {
         "commit_timestamp"
     } else {
-        "refresh_duration"
+        "unavailable"
     };
 
-    // Query refresh latency stats per stream table from history.
-    // For now, latency = EXTRACT(EPOCH FROM (end_time - start_time)) * 1000 ms.
+    // Only settled source-commit-to-visible samples are SLA evidence.
     let rows: Vec<(String, String, i64, f64, f64, f64, f64, String)> = Spi::connect(|client| {
         let sql = "\
             SELECT \
                 s.pgt_schema::text, \
                 s.pgt_name::text, \
                 count(*)::bigint AS samples, \
-                min(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS min_ms, \
-                percentile_disc(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS p50_ms, \
-                percentile_disc(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS p95_ms, \
-                max(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::float8 AS max_ms \
+                min(h.commit_to_visible_ms)::float8 AS min_ms, \
+                percentile_disc(0.5) WITHIN GROUP (ORDER BY h.commit_to_visible_ms)::float8 AS p50_ms, \
+                percentile_disc(0.95) WITHIN GROUP (ORDER BY h.commit_to_visible_ms)::float8 AS p95_ms, \
+                max(h.commit_to_visible_ms)::float8 AS max_ms \
             FROM pgtrickle.pgt_refresh_history h \
             JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = h.pgt_id \
             WHERE h.status = 'COMPLETED' \
-              AND h.end_time IS NOT NULL \
-              AND h.start_time IS NOT NULL \
+              AND h.commit_to_visible_ms IS NOT NULL \
             GROUP BY s.pgt_schema, s.pgt_name \
             ORDER BY s.pgt_schema, s.pgt_name";
 
@@ -2307,10 +2302,168 @@ pub(super) fn commit_latency_stats() -> TableIterator<
     TableIterator::new(rows)
 }
 
-/// QW-2 (v0.81.0): Returns a set of GUC tuning recommendations based on
-/// recent refresh history and current configuration.
+/// v0.90.0: Return bounded exact freshness summaries for interval-targeted
+/// stream tables. The controller state table is a summary cache, so this
+/// endpoint never scans refresh history.
+#[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
+#[allow(clippy::type_complexity)]
+pub(super) fn freshness() -> TableIterator<
+    'static,
+    (
+        name!(stream_table, String),
+        name!(target, pgrx::datum::Interval),
+        name!(p50, Option<pgrx::datum::Interval>),
+        name!(p95, Option<pgrx::datum::Interval>),
+        name!(p99, Option<pgrx::datum::Interval>),
+        name!(status, String),
+    ),
+> {
+    let rows = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT s.pgt_schema::text || '.' || s.pgt_name::text,
+                        s.freshness_deadline_ms * interval '1 millisecond',
+                        f.p50_freshness_ms * interval '1 millisecond',
+                        f.p95_freshness_ms * interval '1 millisecond',
+                        f.p99_freshness_ms * interval '1 millisecond',
+                        COALESCE(f.sla_status, 'INSUFFICIENT_DATA')::text
+                   FROM pgtrickle.pgt_stream_tables s
+                   LEFT JOIN pgtrickle.pgt_freshness_controller_state f
+                     ON f.pgt_id = s.pgt_id
+                  WHERE s.target_freshness_mode = 'INTERVAL'
+                  ORDER BY s.pgt_schema, s.pgt_name",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in result {
+            let target = row
+                .get::<pgrx::datum::Interval>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InvalidArgument("freshness target is NULL".into())
+                })?;
+            out.push((
+                row.get::<String>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                target,
+                row.get::<pgrx::datum::Interval>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<pgrx::datum::Interval>(4)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<pgrx::datum::Interval>(5)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<String>(6)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_else(|| "INSUFFICIENT_DATA".into()),
+            ));
+        }
+        Ok::<_, PgTrickleError>(out)
+    })
+    .unwrap_or_default();
+    TableIterator::new(rows)
+}
+
+/// v0.90.0: Recommend a target from exact settled p95 evidence without
+/// changing the stream table or collecting new cost data.
+#[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
+#[allow(clippy::type_complexity)]
+pub(super) fn recommend_target_freshness(
+    name: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(stream_table, String),
+        name!(current_target, pgrx::datum::Interval),
+        name!(recommended_target, pgrx::datum::Interval),
+        name!(observed_p95, Option<pgrx::datum::Interval>),
+        name!(sample_count, i64),
+        name!(confidence, f64),
+        name!(reason, String),
+    ),
+> {
+    let (schema, table) = match crate::api::helpers::parse_qualified_name_pub(name) {
+        Ok(value) => value,
+        Err(error) => pgrx::error!("recommend_target_freshness: {error}"),
+    };
+    let st = match StreamTableMeta::get_by_name(&schema, &table) {
+        Ok(st) => st,
+        Err(error) => pgrx::error!("recommend_target_freshness: {error}"),
+    };
+    let (p95_ms, sample_count) = Spi::connect(|client| {
+        let result = client.select(
+            "SELECT f.p95_freshness_ms, COALESCE(f.sample_count, 0)
+               FROM pgtrickle.pgt_stream_tables st
+               LEFT JOIN pgtrickle.pgt_freshness_controller_state f
+                 ON f.pgt_id = st.pgt_id
+              WHERE st.pgt_id = $1",
+            None,
+            &[st.pgt_id.into()],
+        )?;
+        let row = result.first();
+        Ok::<_, pgrx::spi::SpiError>((row.get::<f64>(1)?, row.get::<i64>(2)?.unwrap_or(0)))
+    })
+    .unwrap_or((None, 0));
+    let current_target_ms = match st.freshness_deadline_ms {
+        Some(value) if value > 0 => value as f64,
+        _ => pgrx::error!(
+            "recommend_target_freshness: stream table has no interval freshness target"
+        ),
+    };
+    let recommended_target_ms = p95_ms
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map_or(current_target_ms, |value| {
+            if value > current_target_ms {
+                (value * 1.25).ceil()
+            } else {
+                current_target_ms
+            }
+        });
+    let current_target = Spi::get_one_with_args::<pgrx::datum::Interval>(
+        "SELECT $1::float8 * interval '1 millisecond'",
+        &[current_target_ms.into()],
+    )
+    .unwrap_or(None)
+    .unwrap_or_else(|| pgrx::error!("recommend_target_freshness: could not build target interval"));
+    let recommended_target = Spi::get_one_with_args::<pgrx::datum::Interval>(
+        "SELECT $1::float8 * interval '1 millisecond'",
+        &[recommended_target_ms.into()],
+    )
+    .unwrap_or(None)
+    .unwrap_or_else(|| {
+        pgrx::error!("recommend_target_freshness: could not build recommendation interval")
+    });
+    let observed_p95 = p95_ms.and_then(|value| {
+        Spi::get_one_with_args::<pgrx::datum::Interval>(
+            "SELECT $1::float8 * interval '1 millisecond'",
+            &[value.into()],
+        )
+        .unwrap_or(None)
+    });
+    let confidence = (sample_count as f64 / 20.0).min(1.0);
+    let reason = match p95_ms {
+        None => "INSUFFICIENT_DATA".to_string(),
+        Some(value) if value > current_target_ms => "P95_EXCEEDS_TARGET".to_string(),
+        Some(_) => "P95_WITHIN_TARGET".to_string(),
+    };
+    TableIterator::new(vec![(
+        format!("{}.{}", st.pgt_schema, st.pgt_name),
+        current_target,
+        recommended_target,
+        observed_p95,
+        sample_count,
+        confidence,
+        reason,
+    )])
+}
+
+/// QW-2 (v0.81.0): Returns compatibility-cycle instance safety advice.
 ///
-/// Each row describes one recommendation:
+/// Workload tuning belongs to the v0.90 freshness controller; this function
+/// must not recommend controller-owned schedule, batch, mode, or worker
+/// settings. Each row describes one retained safety recommendation:
 /// - `guc_name`: the GUC parameter name (e.g. `pg_trickle.merge_work_mem_mb`)
 /// - `current_value`: the current value as a string
 /// - `recommended_value`: the suggested value
@@ -2329,31 +2482,6 @@ pub(super) fn tune_recommendations() -> TableIterator<
     ),
 > {
     let mut rows: Vec<(String, String, String, String)> = Vec::new();
-
-    // ── Recommendation 1: pipeline_batch_size from p99 delta size ───
-    // If the p99 delta row count in pgt_refresh_history exceeds 100 000 and
-    // A batch smaller than the observed p99 pays more portal/apply overhead.
-    let pipeline_batch_size = crate::config::pg_trickle_pipeline_batch_size();
-    let p99_delta: Option<i64> = Spi::get_one::<i64>(
-        "SELECT percentile_disc(0.99) WITHIN GROUP (ORDER BY delta_row_count) \
-         FROM pgtrickle.pgt_refresh_history \
-         WHERE delta_row_count IS NOT NULL AND delta_row_count > 0",
-    )
-    .unwrap_or(None);
-    if pipeline_batch_size < 50_000
-        && let Some(p99) = p99_delta.filter(|&p| p > 100_000)
-    {
-        rows.push((
-            "pg_trickle.pipeline_batch_size".to_string(),
-            pipeline_batch_size.to_string(),
-            "50000".to_string(),
-            format!(
-                "p99 delta size is {} rows; a larger pipeline batch can reduce \
-                 portal and apply overhead.",
-                p99
-            ),
-        ));
-    }
 
     // ── Recommendation 2: merge_work_mem_mb when p95 latency is high ────
     // If p95 refresh latency exceeds 10 s and work_mem_mb is already >= 512,
@@ -2386,8 +2514,8 @@ pub(super) fn tune_recommendations() -> TableIterator<
     if !self_heal_oom {
         let oom_count: Option<i64> = Spi::get_one::<i64>(
             "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
-             WHERE last_error_message ILIKE '%out of memory%' \
-               AND refreshed_at > now() - INTERVAL '7 days'",
+             WHERE error_message ILIKE '%out of memory%' \
+               AND end_time > now() - INTERVAL '7 days'",
         )
         .unwrap_or(None);
         if oom_count.unwrap_or(0) > 0 {
@@ -2406,24 +2534,17 @@ pub(super) fn tune_recommendations() -> TableIterator<
         }
     }
 
-    // ── Recommendation 4: concurrent_refreshes vs. worker_count ─────────
-    let max_concurrent = crate::config::pg_trickle_max_concurrent_refreshes();
-    let worker_count = crate::config::pg_trickle_worker_pool_size();
-    if max_concurrent > worker_count && worker_count > 0 {
-        rows.push((
-            "pg_trickle.max_concurrent_refreshes".to_string(),
-            max_concurrent.to_string(),
-            worker_count.to_string(),
-            format!(
-                "max_concurrent_refreshes ({}) exceeds worker_count ({}). \
-                 The extra concurrency slots will never be used. \
-                 Lower max_concurrent_refreshes to match worker_count.",
-                max_concurrent, worker_count
-            ),
-        ));
-    }
-
+    // Keep this compatibility endpoint limited to the instance-safety advice
+    // above, even if a controller-owned recommendation is added later.
+    rows.retain(|(guc_name, _, _, _)| is_instance_safety_recommendation(guc_name));
     TableIterator::new(rows)
+}
+
+fn is_instance_safety_recommendation(guc_name: &str) -> bool {
+    matches!(
+        guc_name,
+        "pg_trickle.delta_work_mem_cap_mb" | "pg_trickle.self_heal_oom"
+    )
 }
 
 // ── QW-3 (v0.81.0): preview_stream_table ─────────────────────────────────
@@ -2780,7 +2901,10 @@ fn preview_depth(tree: &crate::dvm::parser::OpTree) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SchemaVersionAuditRow, build_migrate_report, compare_release_versions};
+    use super::{
+        SchemaVersionAuditRow, build_migrate_report, compare_release_versions,
+        is_instance_safety_recommendation,
+    };
     use std::cmp::Ordering;
 
     #[test]
@@ -2904,6 +3028,25 @@ mod tests {
     fn test_explain_format_unknown_is_rejected() {
         let format = "binary";
         assert!(!["text", "json", "yaml", "xml"].contains(&format));
+    }
+
+    #[test]
+    fn test_tune_recommendations_only_keep_instance_safety_advice() {
+        for guc_name in [
+            "pg_trickle.delta_work_mem_cap_mb",
+            "pg_trickle.self_heal_oom",
+        ] {
+            assert!(is_instance_safety_recommendation(guc_name));
+        }
+
+        for guc_name in [
+            "pg_trickle.pipeline_batch_size",
+            "pg_trickle.refresh_strategy",
+            "pg_trickle.max_concurrent_refreshes",
+            "pg_trickle.worker_pool_size",
+        ] {
+            assert!(!is_instance_safety_recommendation(guc_name));
+        }
     }
 
     #[test]

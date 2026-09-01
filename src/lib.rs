@@ -454,6 +454,49 @@ SELECT pg_catalog.pg_extension_config_dump(
     'WHERE false'
 );
 
+-- v0.90.0: bounded controller summary. It is a cache of exact samples and
+-- decisions, never a second source of truth for refresh execution.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_freshness_controller_state (
+    pgt_id              BIGINT PRIMARY KEY
+                        REFERENCES pgtrickle.pgt_stream_tables(pgt_id)
+                        ON DELETE CASCADE,
+    controller_version   SMALLINT NOT NULL DEFAULT 1,
+    plan_identity        BIGINT,
+    target_ms           BIGINT NOT NULL CHECK (target_ms > 0),
+    sample_count        INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+    last_settled_refresh_id BIGINT,
+    last_sample_ms      DOUBLE PRECISION,
+    p50_freshness_ms    DOUBLE PRECISION,
+    p95_freshness_ms    DOUBLE PRECISION,
+    p99_freshness_ms    DOUBLE PRECISION,
+    sla_status          TEXT NOT NULL DEFAULT 'INSUFFICIENT_DATA'
+                        CHECK (sla_status IN ('MEETING', 'AT_RISK', 'BREACHING',
+                                              'INFEASIBLE', 'INSUFFICIENT_DATA',
+                                              'EVIDENCE_UNAVAILABLE', 'NOT_APPLICABLE')),
+    evidence_state      TEXT NOT NULL DEFAULT 'EXACT',
+    breach_streak       SMALLINT NOT NULL DEFAULT 0 CHECK (breach_streak >= 0),
+    recovery_streak     SMALLINT NOT NULL DEFAULT 0 CHECK (recovery_streak >= 0),
+    breach_started_at   TIMESTAMPTZ,
+    infeasibility_streak SMALLINT NOT NULL DEFAULT 0 CHECK (infeasibility_streak >= 0),
+    feasibility_recovery_streak SMALLINT NOT NULL DEFAULT 0 CHECK (feasibility_recovery_streak >= 0),
+    infeasible_since    TIMESTAMPTZ,
+    infeasibility_reason TEXT,
+    minimum_cost_ms     DOUBLE PRECISION,
+    last_applied_interval_ms BIGINT,
+    last_applied_mode   TEXT,
+    last_applied_batch_size BIGINT,
+    last_input_snapshot JSONB CHECK (last_input_snapshot IS NULL OR jsonb_typeof(last_input_snapshot) = 'object'),
+    next_due_at         TIMESTAMPTZ,
+    last_decision_at    TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+REVOKE ALL ON TABLE pgtrickle.pgt_freshness_controller_state FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump(
+    'pgtrickle.pgt_freshness_controller_state',
+    'WHERE false'
+);
+
 -- Snapshot metadata catalog
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_snapshots (
     snapshot_id      BIGSERIAL PRIMARY KEY,
@@ -545,7 +588,15 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
                       'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
                       'PERMANENT', 'UNKNOWN_RETRYABLE')),
     error_sqlstate  TEXT,
-    retryable       BOOLEAN
+    retryable       BOOLEAN,
+    -- v0.90.0: exact provenance and visibility settlement. Nullable values
+    -- are deliberately not backfilled: old rows cannot prove freshness.
+    duration_ms     DOUBLE PRECISION,
+    source_commit_at TIMESTAMPTZ,
+    visibility_xid  XID,
+    visible_at      TIMESTAMPTZ,
+    commit_to_visible_ms DOUBLE PRECISION,
+    plan_identity   BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt_id, data_timestamp);
@@ -739,6 +790,12 @@ INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES (
     '0.89.0',
     'Incremental window strategy and private state registry'
+)
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES (
+    '0.90.0',
+    'Freshness provenance, visibility settlement, and advisory controller state'
 )
 ON CONFLICT (version) DO NOTHING;
 
@@ -1447,10 +1504,15 @@ SELECT
     s.last_full_reason_detail,
     st.last_error_message AS last_error,
     st.last_error_at,
-    s.stats_reset_at
+    s.stats_reset_at,
+    f.p95_freshness_ms,
+    COALESCE(f.sla_status,
+        CASE WHEN st.target_freshness_mode = 'INTERVAL'
+             THEN 'INSUFFICIENT_DATA' ELSE 'NOT_APPLICABLE' END) AS sla_status
 FROM pgtrickle.pgt_stream_tables st
 LEFT JOIN pgtrickle.pgt_refresh_summary s ON s.pgt_id = st.pgt_id
-LEFT JOIN pgtrickle.pgt_cost_model_summary c ON c.pgt_id = st.pgt_id;
+LEFT JOIN pgtrickle.pgt_cost_model_summary c ON c.pgt_id = st.pgt_id
+LEFT JOIN pgtrickle.pgt_freshness_controller_state f ON f.pgt_id = st.pgt_id;
 
 -- Per-source CDC status view (G5): exposes cdc_mode, slot names, and
 -- transition timestamps for every TABLE dependency of a stream table.
@@ -1953,6 +2015,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.change_buffer_sizes() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.check_cdc_health() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cluster_worker_summary() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.commit_latency_stats() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.freshness() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.dedup_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.dependency_tree() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.diagnose_errors(text) TO PUBLIC;

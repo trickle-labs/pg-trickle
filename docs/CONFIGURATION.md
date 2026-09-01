@@ -1707,6 +1707,31 @@ SET pg_trickle.max_dynamic_refresh_workers = 8;
 
 ---
 
+### pg_trickle.adaptive_workers
+
+Enable advisory worker-demand recommendations from the v0.90 freshness
+controller. The recommendation never exceeds
+`max_dynamic_refresh_workers`.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `off` |
+| Context | `SUSET` |
+| Restart required | No |
+
+Use `adaptive_workers_min` and `adaptive_workers_max` to set the advisory
+range. The controller needs three matching observations before it changes the
+recommended target. It does not cancel running refreshes.
+
+```sql
+SET pg_trickle.adaptive_workers = on;
+SET pg_trickle.adaptive_workers_min = 1;
+SET pg_trickle.adaptive_workers_max = 4;
+```
+
+---
+
 ### pg_trickle.max_concurrent_refreshes
 
 Per-database dispatch cap for parallel refresh workers.
@@ -2677,7 +2702,7 @@ SELECT pg_reload_conf();
 
 When `true`, pg_trickle reads `pg_trickle.trace_id` from the session GUC at
 CDC capture time and stores the W3C traceparent in the change buffer column
-`__pgt_trace_context`. At refresh time, spans are exported via OTLP/gRPC to
+`__pgt_trace_context`. At refresh time, spans are exported via OTLP/HTTP to
 `pg_trickle.otel_endpoint`.
 
 | Property | Value |
@@ -2691,20 +2716,22 @@ CDC capture time and stores the W3C traceparent in the change buffer column
 
 ### pg_trickle.otel_endpoint
 
-OTLP/gRPC endpoint for OpenTelemetry span export. Empty string (default)
-disables span export.
+OTLP/HTTP endpoint for OpenTelemetry export. Empty string (default) disables
+trace and freshness-metrics export. pg_trickle posts spans to
+`{endpoint}/v1/traces` and one bounded freshness metrics batch per monitoring
+cadence to `{endpoint}/v1/metrics`.
 
 | Property | Value |
 |---|---|
 | Type | `string` |
 | Default | `''` (disabled) |
-| Example | `'http://jaeger:4317'` |
+| Example | `'http://jaeger:4318'` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
 
 ```sql
 -- Export spans to a local Jaeger instance
-ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://localhost:4317';
+ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://localhost:4318';
 ALTER SYSTEM SET pg_trickle.enable_trace_propagation = true;
 SELECT pg_reload_conf();
 ```

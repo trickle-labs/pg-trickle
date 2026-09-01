@@ -401,6 +401,13 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.freshness()": {
+      "schema": "pgtrickle",
+      "name": "freshness",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.fuse_status()": {
       "schema": "pgtrickle",
       "name": "fuse_status",
@@ -635,6 +642,13 @@
     "pgtrickle.recommend_refresh_mode(text)": {
       "schema": "pgtrickle",
       "name": "recommend_refresh_mode",
+      "identity_arguments": "text",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.recommend_target_freshness(text)": {
+      "schema": "pgtrickle",
+      "name": "recommend_target_freshness",
       "identity_arguments": "text",
       "class": "public_read",
       "execution_policy": "capability_specific"

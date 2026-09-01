@@ -148,8 +148,8 @@ pub fn poll_foreign_table_changes(
     // INSERT target uses cb_col_list (change-buffer names); SELECT uses src_col_list
     // (original source names). Values are matched positionally.
     let deleted_sql = format!(
-        "INSERT INTO {change_table} (lsn, action, __pgt_row_id, {cb_col_list}) \
-         SELECT pg_current_wal_insert_lsn(), 'D', {pk_hash_expr}, {src_col_list} \
+        "INSERT INTO {change_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {cb_col_list}) \
+         SELECT pg_current_wal_insert_lsn(), 'D', {pk_hash_expr}, NULL::xid, NULL::timestamptz, {src_col_list} \
          FROM (\
            SELECT {src_col_list} FROM {snapshot_table} \
            EXCEPT ALL \
@@ -161,8 +161,8 @@ pub fn poll_foreign_table_changes(
     // ── Inserted rows: in current foreign table but not in snapshot ──
     // These appear as 'I' (insert) rows in the change buffer.
     let inserted_sql = format!(
-        "INSERT INTO {change_table} (lsn, action, __pgt_row_id, {cb_col_list}) \
-         SELECT pg_current_wal_insert_lsn(), 'I', {pk_hash_expr}, {src_col_list} \
+        "INSERT INTO {change_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {cb_col_list}) \
+         SELECT pg_current_wal_insert_lsn(), 'I', {pk_hash_expr}, NULL::xid, NULL::timestamptz, {src_col_list} \
          FROM (\
            SELECT {src_col_list} FROM {source_table} \
            EXCEPT ALL \

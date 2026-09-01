@@ -318,10 +318,13 @@ fn sync_change_buffer_columns(
     // System columns: never dropped, not tracked as data columns.
     // changed_cols is a system column (Task 3.1 bitmask — preserved across schema changes).
     // __pgt_trace_context is the F10 trace propagation column — preserved as a system column.
+    // source_xid and source_commit_at are v0.90 provenance columns.
     let system_cols: std::collections::HashSet<&str> = [
         "change_id",
         "lsn",
         "action",
+        "source_xid",
+        "source_commit_at",
         "__pgt_row_id",
         "changed_cols",
         "__pgt_trace_context",

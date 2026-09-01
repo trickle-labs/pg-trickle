@@ -42,9 +42,6 @@ def read(path: str) -> str:
 def main() -> int:
     errors: list[str] = []
     cargo = read("Cargo.toml")
-    version = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE)
-    if not version or version.group(1) != "0.89.0":
-        errors.append("Cargo.toml version must be 0.89.0")
 
     for path in (
         "sql/pg_trickle--0.88.0--0.89.0.sql",

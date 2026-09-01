@@ -95,6 +95,7 @@ use crate::shmem;
 use crate::version;
 
 pub mod citus;
+pub mod controller;
 pub mod cost;
 pub mod dispatch;
 pub mod scheduler_loop;
@@ -2352,6 +2353,22 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
         return true;
     }
 
+    // v0.90.0: interval targets are controller-owned. The persisted next due
+    // time keeps scheduling independent of the legacy `schedule` string.
+    let interval_target = Spi::get_one_with_args::<bool>(
+        "SELECT target_freshness_mode = 'INTERVAL'
+           FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .unwrap_or(None)
+    .unwrap_or(false);
+    if interval_target {
+        if !check_upstream_changes(st) {
+            return false;
+        }
+        return check_controller_due(st.pgt_id);
+    }
+
     // G-7: When tiered scheduling is enabled, check tier first.
     if config::pg_trickle_tiered_scheduling() {
         let tier = RefreshTier::from_sql_str(&st.refresh_tier);
@@ -2433,6 +2450,27 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
     // first within a tick, so their change buffers are already populated by
     // the time we check here.
     check_upstream_changes(st)
+}
+
+fn check_controller_due(pgt_id: i64) -> bool {
+    if let Some(due) = Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE(next_due_at <= clock_timestamp(), true)
+           FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(None)
+    {
+        return due;
+    }
+    Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE(last_refresh_at, created_at)
+                    + freshness_deadline_ms * interval '1 millisecond'
+                    <= clock_timestamp()
+           FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(Some(true))
+    .unwrap_or(true)
 }
 
 const LOAD_SHED_BUFFER_GUARD_SAMPLE_MS: u64 = 10_000;
@@ -4645,6 +4683,20 @@ fn get_source_oids_for_st(pgt_id: i64) -> Vec<pg_sys::Oid> {
 /// stale). For cron-based schedules, returns `None` because cron doesn't
 /// define a continuous freshness SLA.
 fn compute_freshness_deadline(st: &StreamTableMeta) -> Option<TimestampWithTimeZone> {
+    let target_mode = Spi::get_one_with_args::<String>(
+        "SELECT target_freshness_mode::text FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .unwrap_or(None);
+    if target_mode.as_deref() == Some("INTERVAL") {
+        return Spi::get_one_with_args::<TimestampWithTimeZone>(
+            "SELECT COALESCE(data_timestamp, clock_timestamp())
+                        + freshness_deadline_ms * interval '1 millisecond'
+               FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+            &[st.pgt_id.into()],
+        )
+        .unwrap_or(None);
+    }
     let schedule_str = st.schedule.as_deref()?;
 
     // Cron expressions contain spaces or start with '@' — no deadline for those.

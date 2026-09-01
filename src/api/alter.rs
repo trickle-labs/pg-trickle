@@ -89,29 +89,96 @@ pub(crate) fn apply_target_freshness(
     pgt_id: i64,
     target: TargetFreshness,
 ) -> Result<(), PgTrickleError> {
-    let (mode, milliseconds) = match target.mode {
-        TargetFreshnessMode::Interval => (Some("INTERVAL"), target.milliseconds),
-        TargetFreshnessMode::OnCommit => (Some("ON_COMMIT"), None),
-        TargetFreshnessMode::Manual => (Some("MANUAL"), None),
-        TargetFreshnessMode::Clear => (None, None),
+    if target.mode == TargetFreshnessMode::Interval {
+        validate_freshness_evidence(pgt_id)?;
+    }
+    let (control, milliseconds) = match target.mode {
+        TargetFreshnessMode::Interval => ("INTERVAL", target.milliseconds),
+        TargetFreshnessMode::OnCommit => ("ON_COMMIT", None),
+        TargetFreshnessMode::Manual => ("MANUAL", None),
+        TargetFreshnessMode::Clear => ("CLEAR", None),
     };
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables
-            SET target_freshness_mode = $1,
+            SET target_freshness_mode = CASE WHEN $1 = 'CLEAR' THEN NULL ELSE $1 END,
                 freshness_deadline_ms = $2,
                 schedule = CASE
-                    WHEN $3::text = 'ON_COMMIT' THEN NULL
-                    WHEN $3::text = 'MANUAL' THEN 'manual'
-                    WHEN $3::text = 'INTERVAL'
-                        AND (schedule IS NULL OR schedule = 'calculated')
-                        THEN GREATEST(1, CEIL($2::double precision / 1000.0))::bigint::text || 's'
+                    WHEN $1 = 'ON_COMMIT' THEN NULL
+                    WHEN $1 = 'MANUAL' THEN 'manual'
+                    WHEN $1 = 'CLEAR' AND target_freshness_mode = 'INTERVAL'
+                        THEN freshness_deadline_ms::text || ' milliseconds'
                     ELSE schedule
                 END,
                 updated_at = now()
-          WHERE pgt_id = $4",
-        &[mode.into(), milliseconds.into(), mode.into(), pgt_id.into()],
+          WHERE pgt_id = $3",
+        &[control.into(), milliseconds.into(), pgt_id.into()],
     )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    match target.mode {
+        TargetFreshnessMode::Interval => Spi::run_with_args(
+            "INSERT INTO pgtrickle.pgt_freshness_controller_state
+                 (pgt_id, controller_version, plan_identity, target_ms,
+                  sla_status, evidence_state, next_due_at, last_decision_at)
+             SELECT $1, 1, defining_query_hash, $2,
+                     CASE WHEN current_setting('track_commit_timestamp', true) = 'on'
+                          THEN 'INSUFFICIENT_DATA' ELSE 'EVIDENCE_UNAVAILABLE' END,
+                     CASE WHEN current_setting('track_commit_timestamp', true) = 'on'
+                          THEN 'EXACT' ELSE 'UNAVAILABLE' END,
+                     clock_timestamp() + $2 * interval '1 millisecond',
+                     clock_timestamp()
+               FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1
+             ON CONFLICT (pgt_id) DO UPDATE SET
+                 plan_identity = EXCLUDED.plan_identity,
+                 target_ms = EXCLUDED.target_ms,
+                 sla_status = EXCLUDED.sla_status,
+                 evidence_state = EXCLUDED.evidence_state,
+                 next_due_at = EXCLUDED.next_due_at,
+                 breach_streak = 0,
+                 recovery_streak = 0,
+                 breach_started_at = NULL,
+                 infeasibility_streak = 0,
+                 feasibility_recovery_streak = 0,
+                 infeasible_since = NULL,
+                 infeasibility_reason = NULL,
+                 updated_at = now()",
+            &[pgt_id.into(), milliseconds.into()],
+        ),
+        TargetFreshnessMode::Clear
+        | TargetFreshnessMode::OnCommit
+        | TargetFreshnessMode::Manual => Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        ),
+    }
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+/// Exact freshness requires commit timestamps and a source path that carries
+/// provenance. Existing degraded targets are retained by the upgrade SQL, but
+/// new interval declarations fail closed when evidence cannot be supplied.
+fn validate_freshness_evidence(pgt_id: i64) -> Result<(), PgTrickleError> {
+    let tracking_enabled =
+        Spi::get_one::<String>("SELECT current_setting('track_commit_timestamp', true)::text")
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .is_some_and(|value| value.eq_ignore_ascii_case("on"));
+    if !tracking_enabled {
+        return Err(PgTrickleError::FreshnessEvidenceUnavailable(
+            "track_commit_timestamp must be on (HINT: enable it and restart PostgreSQL before declaring an interval target)".into(),
+        ));
+    }
+    let unsupported = Spi::get_one_with_args::<String>(
+        "SELECT source_type::text FROM pgtrickle.pgt_dependencies
+          WHERE pgt_id = $1 AND source_type NOT IN ('TABLE', 'STREAM_TABLE') LIMIT 1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    if let Some(source_type) = unsupported {
+        return Err(PgTrickleError::FreshnessEvidenceUnavailable(format!(
+            "source type {source_type} has no exact commit provenance"
+        )));
+    }
+    Ok(())
 }
 
 // ── Schema comparison for ALTER QUERY ──────────────────────────────────────

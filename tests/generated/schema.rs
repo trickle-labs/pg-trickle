@@ -200,7 +200,15 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
                       'SERIALIZATION', 'OUT_OF_MEMORY', 'CANCELLED',
                       'PERMANENT', 'UNKNOWN_RETRYABLE')),
     error_sqlstate  TEXT,
-    retryable       BOOLEAN
+    retryable       BOOLEAN,
+
+
+    duration_ms     DOUBLE PRECISION,
+    source_commit_at TIMESTAMPTZ,
+    visibility_xid  XID,
+    visible_at      TIMESTAMPTZ,
+    commit_to_visible_ms DOUBLE PRECISION,
+    plan_identity   BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt_id, data_timestamp);

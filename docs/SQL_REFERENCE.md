@@ -35,6 +35,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.explain\_refresh\_mode](#pgtrickleexplain_refresh_mode)
     - [pgtrickle.cache\_stats](#pgtricklecache_stats)
     - [pgtrickle.commit\_latency\_stats](#pgtricklecommit_latency_stats)
+    - [pgtrickle.freshness](#pgtricklefreshness)
     - [pgtrickle.tune\_recommendations](#pgtrickletune_recommendations)
     - [pgtrickle.preview\_stream\_table](#pgtricklepreview_stream_table)
     - [pgtrickle.explain](#pgtrickleexplain)
@@ -68,6 +69,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.row\_probe\_v1](#pgtricklerow_probe_v1)
   - [Diagnostics](#diagnostics)
     - [pgtrickle.recommend\_refresh\_mode](#pgtricklerecommend_refresh_mode)
+    - [pgtrickle.recommend\_target\_freshness](#pgtricklerecommend_target_freshness)
     - [pgtrickle.refresh\_efficiency](#pgtricklerefresh_efficiency)
     - [pgtrickle.export\_definition](#pgtrickleexport_definition)
     - [pgtrickle.row\_identity\_v2\_recreation\_preflight](#pgtricklerow_identity_v2_recreation_preflight)
@@ -1353,8 +1355,46 @@ SELECT pgtrickle.set_stream_table_sla('order_totals', interval '10 seconds');
 ```
 
 **Notes:**
-- The scheduler periodically checks actual refresh performance and dynamically
-  re-assigns tiers if the SLA is consistently breached or over-served.
+- Interval targets use the v0.90 freshness controller for due-time decisions.
+  The controller remains advisory for refresh mode, batch size, priority, and
+  worker demand.
+
+---
+
+### pgtrickle.freshness
+
+Return exact source-commit-to-visible freshness summaries for stream tables with
+an interval target. The function reads the bounded controller summary and does
+not scan refresh history.
+
+```sql
+pgtrickle.freshness() → SETOF record(
+    stream_table text,
+    target       interval,
+    p50          interval,
+    p95          interval,
+    p99          interval,
+    status       text
+)
+```
+
+The percentile columns are `NULL` until 20 exact samples settle. The status is
+`MEETING`, `AT_RISK`, `BREACHING`, `INFEASIBLE`, `INSUFFICIENT_DATA`, or
+`EVIDENCE_UNAVAILABLE`.
+
+```sql
+SELECT * FROM pgtrickle.freshness();
+```
+
+### pgtrickle.recommend_target_freshness
+
+Return a read-only target recommendation for one stream table. The function
+uses settled exact p95 evidence and does not alter the target.
+
+```sql
+SELECT *
+FROM pgtrickle.recommend_target_freshness('public.order_totals');
+```
 
 ---
 
@@ -1853,10 +1893,9 @@ SELECT * FROM pgtrickle.cache_stats();
 Return per-stream-table refresh latency statistics (min, p50, p95, max) in
 milliseconds, computed from `pgtrickle.pgt_refresh_history`.
 
-When `pg_trickle.commit_timestamp_tracking = off` (default) the latency
-measures total refresh duration (`end_time - start_time`).  Enabling
-`commit_timestamp_tracking` with `track_commit_timestamp = on` in
-`postgresql.conf` switches to true commit-to-visible wall-clock latency.
+The function returns only settled source-commit-to-visible samples. It never
+uses refresh duration as a substitute. Set `track_commit_timestamp = on` in
+`postgresql.conf` before creating an interval target.
 
 ```sql
 pgtrickle.commit_latency_stats() → SETOF record(
@@ -1932,6 +1971,9 @@ SELECT * FROM pgtrickle.preview_stream_table(
 
 Return a bounded explanation of one stream table's refresh mode, recent
 refresh evidence, cost-model summary, and target freshness state as text.
+
+The v0.90 controller section includes the declared target, exact p50/p95/p99,
+sample count, evidence state, next due time, and adaptive worker bounds.
 
 For a window query, the output includes the typed strategy summary and the
 latest fallback. Every v0.89 production plan is runtime-disabled, so its state
@@ -3584,7 +3626,9 @@ SELECT * FROM pgtrickle.pg_stat_pgtrickle;
 
 The view reports refresh totals, average/p95/p99 duration, current lag,
 requested and target freshness modes, the last machine-readable FULL reason
-and detail, the last operational error, and `stats_reset_at`.
+and detail, the last operational error, `stats_reset_at`, exact
+`p95_freshness_ms`, and `sla_status`. Refresh-duration percentiles and
+freshness percentiles measure different intervals.
 
 ---
 

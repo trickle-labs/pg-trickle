@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.90.0 — Freshness Controller and Exact Freshness Evidence](#0900--freshness-controller-and-exact-freshness-evidence)
 - [0.89.0 — Incremental Window Admission](#0890--incremental-window-admission)
 - [0.88.0 — Vectorized Aggregates and Delta Planning](#0880--vectorized-aggregates-and-delta-planning)
 - [0.87.17 — Versioned Row Identity V2 Hardening and Recreation](#08717--versioned-row-identity-v2-hardening-and-recreation)
@@ -198,6 +199,32 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.90.0] — Freshness Controller and Exact Freshness Evidence
+
+v0.90.0 adds a bounded advisory freshness controller backed by exact
+source-commit and committed-visibility evidence.
+
+- Captures source transaction provenance in managed base-table change buffers.
+- Settles refresh visibility from PostgreSQL commit timestamps and records
+  `commit_to_visible_ms` only when both endpoints are provable.
+- Adds `pgtrickle.freshness()` and exact freshness columns to
+  `pg_stat_pgtrickle`.
+- Adds deterministic bounded controller decisions, hysteresis, infeasibility
+  status, and adaptive-worker demand primitives without creating a second
+  refresh executor.
+- Rejects new interval targets when `track_commit_timestamp` or exact source
+  provenance is unavailable; existing degraded targets remain safe.
+- Adds the v0.89 → v0.90 migration, fresh-install catalog parity, version
+  checks, release gate, and upgrade documentation.
+
+See the [v0.90 roadmap](roadmap/v0.90.0.md), [implementation plan](plans/PLAN_0_90_0.md),
+and [upgrade guide](docs/UPGRADING.md).
+
+## Upgrade
+
+Install the 0.90.0 shared library and extension files, restart PostgreSQL,
+then run `ALTER EXTENSION pg_trickle UPDATE TO '0.90.0';`.
 
 ## [0.89.0] — Incremental Window Admission
 

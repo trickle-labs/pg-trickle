@@ -40,8 +40,8 @@ Application session                pg_trickle background worker
 -- Enable trace propagation
 ALTER SYSTEM SET pg_trickle.enable_trace_propagation = true;
 
--- Set the OTLP endpoint (gRPC)
-ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://localhost:4317';
+-- Set the OTLP/HTTP endpoint
+ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://localhost:4318';
 
 SELECT pg_reload_conf();
 ```
@@ -64,7 +64,7 @@ INSERT INTO orders (id, total) VALUES (42, 99.99);
 | GUC | Type | Default | Description |
 |-----|------|---------|-------------|
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | Enable W3C Trace Context capture and export |
-| `pg_trickle.otel_endpoint` | `string` | `''` | OTLP/gRPC endpoint (empty = disabled) |
+| `pg_trickle.otel_endpoint` | `string` | `''` | OTLP/HTTP endpoint; pg_trickle appends `/v1/traces` and `/v1/metrics` |
 | `pg_trickle.trace_id` | `string` | `''` | Session W3C traceparent header |
 
 ---
@@ -75,18 +75,24 @@ INSERT INTO orders (id, total) VALUES (42, 99.99);
 
 ```bash
 docker run -d \
-  -p 4317:4317 \
+  -p 4318:4318 \
   -p 16686:16686 \
   jaegertracing/all-in-one:latest
 ```
 
 ```sql
-ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://localhost:4317';
+ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://localhost:4318';
 ALTER SYSTEM SET pg_trickle.enable_trace_propagation = true;
 SELECT pg_reload_conf();
 ```
 
 Access traces at `http://localhost:16686`. Look for service name `pg_trickle`.
+
+When the endpoint is configured, the existing monitoring cadence also sends a
+bounded OTLP/HTTP metrics batch to `{endpoint}/v1/metrics`. It contains the
+target freshness, exact p95, and breach-duration gauges in seconds. Metrics
+use bounded `db_oid`, `db_name`, `schema`, and `name` attributes plus the
+controller status; missing percentile evidence is omitted.
 
 ### Grafana Tempo
 
@@ -95,12 +101,12 @@ Access traces at `http://localhost:16686`. Look for service name `pg_trickle`.
 tempo:
   image: grafana/tempo:latest
   ports:
-    - "4317:4317"   # OTLP gRPC
+    - "4318:4318"   # OTLP HTTP
     - "3200:3200"   # Tempo HTTP API
 ```
 
 ```sql
-ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://tempo:4317';
+ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://tempo:4318';
 ```
 
 ### OpenTelemetry Collector (recommended for production)
@@ -110,12 +116,12 @@ ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://tempo:4317';
 receivers:
   otlp:
     protocols:
-      grpc:
-        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
 
 exporters:
   otlp:
-    endpoint: "your-backend:4317"
+    endpoint: "your-backend:4317" # Collector export remains gRPC
     tls:
       insecure: false
 
@@ -124,10 +130,13 @@ service:
     traces:
       receivers: [otlp]
       exporters: [otlp]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlp]
 ```
 
 ```sql
-ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://otel-collector:4317';
+ALTER SYSTEM SET pg_trickle.otel_endpoint = 'http://otel-collector:4318';
 ```
 
 ---
@@ -167,11 +176,13 @@ LIMIT 5;
 -- Should return the traceparent you set
 ```
 
-### Check the OTLP endpoint
+### Check the OTLP/HTTP endpoint
 
 ```bash
-# Quick check: send a test span to verify connectivity
-grpcurl -plaintext -d '{}' localhost:4317 opentelemetry.proto.collector.trace.v1.TraceService/Export
+# Quick check: verify the collector accepts the metrics route
+curl -i -X POST http://localhost:4318/v1/metrics \
+  -H 'Content-Type: application/json' \
+  --data '{"resourceMetrics":[]}'
 ```
 
 ---
@@ -211,7 +222,8 @@ Refresh spans exported by pg_trickle include:
    grep -i "otel\|otlp\|trace" /var/log/postgresql/postgresql.log
    ```
 
-4. Ensure the collector is listening on the correct port and protocol (gRPC, not HTTP/1.1).
+4. Ensure the collector is listening for OTLP/HTTP on the configured port and
+   accepts `/v1/traces` and `/v1/metrics`.
 
 ### `__pgt_trace_context` column missing
 

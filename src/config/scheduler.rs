@@ -113,6 +113,19 @@ pub static PGS_ALLOW_CIRCULAR: GucSetting<bool> = GucSetting::<bool>::new(false)
 /// from overcommitting the shared PostgreSQL `max_worker_processes` budget.
 pub static PGS_MAX_DYNAMIC_REFRESH_WORKERS: GucSetting<i32> = GucSetting::<i32>::new(4);
 
+/// v0.90.0: Enable advisory adaptive worker recommendations.
+///
+/// Worker admission remains bounded by `max_dynamic_refresh_workers`; the
+/// adaptive target starts at the configured floor and moves one worker at a
+/// time after three matching observations.
+pub static PGS_ADAPTIVE_WORKERS: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// v0.90.0: Lower bound for adaptive worker demand.
+pub static PGS_ADAPTIVE_WORKERS_MIN: GucSetting<i32> = GucSetting::<i32>::new(1);
+
+/// v0.90.0: Upper bound for adaptive worker demand.
+pub static PGS_ADAPTIVE_WORKERS_MAX: GucSetting<i32> = GucSetting::<i32>::new(8);
+
 /// v0.85.0: Hard upper bound for explicit drain waits.
 pub static PGS_DRAIN_TIMEOUT_MAX_SECONDS: GucSetting<i32> = GucSetting::<i32>::new(86_400);
 
@@ -758,6 +771,35 @@ pub fn register_scheduler_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.adaptive_workers",
+        c"Enable advisory adaptive worker demand.",
+        c"When enabled, the v0.90 controller publishes measured worker demand; the hard cluster cap still applies.",
+        &PGS_ADAPTIVE_WORKERS,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_trickle.adaptive_workers_min",
+        c"Minimum adaptive worker demand.",
+        c"Lower bound for the advisory adaptive worker target.",
+        &PGS_ADAPTIVE_WORKERS_MIN,
+        1,
+        128,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_trickle.adaptive_workers_max",
+        c"Maximum adaptive worker demand.",
+        c"Upper bound for the advisory adaptive worker target; it is also capped by max_dynamic_refresh_workers.",
+        &PGS_ADAPTIVE_WORKERS_MAX,
+        1,
+        128,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_trickle.scheduled_lock_timeout_ms",
         c"Lock wait deadline for scheduler refreshes in milliseconds.",
@@ -1319,6 +1361,27 @@ pub fn pg_trickle_allow_circular() -> bool {
 /// Returns the cluster-wide cap on dynamic refresh workers.
 pub fn pg_trickle_max_dynamic_refresh_workers() -> i32 {
     PGS_MAX_DYNAMIC_REFRESH_WORKERS.get()
+}
+
+/// Returns whether adaptive worker demand recommendations are enabled.
+pub fn pg_trickle_adaptive_workers() -> bool {
+    PGS_ADAPTIVE_WORKERS.get()
+}
+
+/// Returns the lower adaptive worker demand bound.
+pub fn pg_trickle_adaptive_workers_min() -> i32 {
+    PGS_ADAPTIVE_WORKERS_MIN
+        .get()
+        .max(1)
+        .min(PGS_MAX_DYNAMIC_REFRESH_WORKERS.get().max(1))
+}
+
+/// Returns the upper adaptive worker demand bound.
+pub fn pg_trickle_adaptive_workers_max() -> i32 {
+    PGS_ADAPTIVE_WORKERS_MAX
+        .get()
+        .max(pg_trickle_adaptive_workers_min())
+        .min(pg_trickle_max_dynamic_refresh_workers().max(1))
 }
 
 /// C3-1: Returns the per-database worker quota (0 = disabled).

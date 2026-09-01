@@ -337,6 +337,29 @@ unsafe impl PGRXSharedMemory for WorkerSlotTable {}
 pub static WORKER_SLOT_TABLE: PgLwLock<WorkerSlotTable> =
     unsafe { PgLwLock::new(c"pg_trickle_worker_slots") };
 
+/// Cluster-wide adaptive admission state. The durable worker reservation
+/// table remains authoritative; this state only supplies its bounded target.
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq)]
+pub struct AdaptiveWorkerState {
+    pub target: u32,
+    pub last_adjust_epoch_ms: u64,
+    /// -1 means shrink, 1 means grow, and 0 means no pending signal.
+    pub signal: i8,
+    pub consecutive: u8,
+    pub cpu_percent: u8,
+    pub cpu_valid: bool,
+    pub feasible_at_risk: u32,
+    pub queue_depth: u32,
+}
+
+// SAFETY: AdaptiveWorkerState contains only fixed-size primitive fields.
+unsafe impl PGRXSharedMemory for AdaptiveWorkerState {}
+
+/// Serializes adaptive worker target changes across database schedulers.
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static ADAPTIVE_WORKER_STATE: PgLwLock<AdaptiveWorkerState> =
+    unsafe { PgLwLock::new(c"pg_trickle_adaptive_worker_state") };
+
 /// Snapshot of configured and effective worker capacity for one dispatch tick.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct WorkerCapacity {
@@ -364,6 +387,108 @@ impl WorkerCapacity {
             effective_limit,
         }
     }
+
+    /// Apply the adaptive target below all existing hard worker limits.
+    pub fn with_adaptive_target(mut self, target: Option<u32>) -> Self {
+        if let Some(target) = target.filter(|target| *target > 0) {
+            self.effective_limit = self.effective_limit.min(target);
+        }
+        self
+    }
+}
+
+/// Return the current adaptive admission target, or the static hard limit when
+/// adaptive workers are disabled or shared memory is unavailable.
+pub fn adaptive_worker_target(
+    enabled: bool,
+    hard_limit: u32,
+    configured_min: u32,
+    configured_max: u32,
+) -> Option<u32> {
+    if !enabled || !is_shmem_available() {
+        return None;
+    }
+    let hard_limit = hard_limit.max(1);
+    let min = configured_min.max(1).min(hard_limit);
+    let max = configured_max.max(min).min(hard_limit);
+    let state = ADAPTIVE_WORKER_STATE.share();
+    Some(state.target.max(min).clamp(min, max))
+}
+
+/// Snapshot adaptive worker diagnostics without exposing the lock guard.
+pub fn adaptive_worker_state() -> AdaptiveWorkerState {
+    if !is_shmem_available() {
+        return AdaptiveWorkerState::default();
+    }
+    *ADAPTIVE_WORKER_STATE.share()
+}
+
+/// Advance the cluster adaptive target after one bounded scheduler sample.
+/// CPU protection wins over growth, and a target moves by at most one worker
+/// after three matching observations.
+#[allow(clippy::too_many_arguments)]
+pub fn adjust_adaptive_worker_target(
+    enabled: bool,
+    hard_limit: u32,
+    configured_min: u32,
+    configured_max: u32,
+    cpu_percent: Option<u8>,
+    feasible_at_risk: u32,
+    queue_depth: u32,
+    active: u32,
+    now_ms: u64,
+) -> AdaptiveWorkerState {
+    if !is_shmem_available() {
+        return AdaptiveWorkerState::default();
+    }
+    let hard_limit = hard_limit.max(1);
+    let min = configured_min.max(1).min(hard_limit);
+    let max = configured_max.max(min).min(hard_limit);
+    let mut state = ADAPTIVE_WORKER_STATE.exclusive();
+    if state.target == 0 {
+        state.target = min;
+    }
+    state.target = state.target.clamp(min, max);
+    state.cpu_percent = cpu_percent.unwrap_or_default();
+    state.cpu_valid = cpu_percent.is_some();
+    state.feasible_at_risk = feasible_at_risk;
+    state.queue_depth = queue_depth;
+    if !enabled {
+        state.signal = 0;
+        state.consecutive = 0;
+        state.target = max;
+        return *state;
+    }
+
+    let signal = if cpu_percent.is_some_and(|cpu| cpu > 70) {
+        -1
+    } else if feasible_at_risk > 0 || queue_depth > state.target.saturating_mul(2) {
+        1
+    } else if queue_depth == 0 && active == 0 {
+        -1
+    } else {
+        0
+    };
+    if signal == 0 {
+        state.signal = 0;
+        state.consecutive = 0;
+    } else if state.signal == signal {
+        state.consecutive = state.consecutive.saturating_add(1);
+    } else {
+        state.signal = signal;
+        state.consecutive = 1;
+    }
+    if state.consecutive >= 3 {
+        state.target = if signal < 0 {
+            state.target.saturating_sub(1).max(min)
+        } else {
+            state.target.saturating_add(1).min(max)
+        };
+        state.last_adjust_epoch_ms = now_ms;
+        state.signal = 0;
+        state.consecutive = 0;
+    }
+    *state
 }
 
 /// Pure worker-capacity helper used by the scheduler and unit tests.
@@ -1364,6 +1489,7 @@ pub fn init_shared_memory() {
     pg_shmem_init!(CACHE_GENERATION);
     pg_shmem_init!(ACTIVE_REFRESH_WORKERS);
     pg_shmem_init!(WORKER_SLOT_TABLE);
+    pg_shmem_init!(ADAPTIVE_WORKER_STATE);
     pg_shmem_init!(INVALIDATION_RING_OVERFLOWS);
     pg_shmem_init!(RECONCILE_EPOCH);
     pg_shmem_init!(TOTAL_DIFF_REFRESHES);

@@ -690,7 +690,13 @@ pub(super) fn parallel_dispatch_tick(
         max_cluster,
         (par_workers > 0).then_some(par_workers as u32),
         postgres_parallel_workers,
-    );
+    )
+    .with_adaptive_target(shmem::adaptive_worker_target(
+        config::pg_trickle_adaptive_workers(),
+        max_cluster,
+        config::pg_trickle_adaptive_workers_min().max(1) as u32,
+        config::pg_trickle_adaptive_workers_max().max(1) as u32,
+    ));
     let effective_max_cluster = capacity.effective_limit;
     // C3-1: Per-database quota with burst capacity.
     let max_per_db = compute_per_db_quota(

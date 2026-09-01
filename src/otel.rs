@@ -213,19 +213,32 @@ pub fn export_span_sync(endpoint: &str, span: &OtelSpan) -> Result<(), String> {
     do_export_http(endpoint, span)
 }
 
+/// Export one bounded OTLP metrics batch asynchronously. Metrics are sent on
+/// the same best-effort path as traces and can never affect refresh execution.
+pub fn export_metrics_background(endpoint: String, payload: String) {
+    std::thread::spawn(move || {
+        if let Err(error) = do_export_payload(&endpoint, "/v1/metrics", &payload) {
+            pgrx::debug1!("[pg_trickle] OTLP metrics export failed: {}", error);
+        }
+    });
+}
+
 /// Make a blocking HTTP/1.1 POST to `{endpoint}/v1/traces` with the OTLP JSON payload.
 fn do_export_http(endpoint: &str, span: &OtelSpan) -> Result<(), String> {
+    do_export_payload(endpoint, "/v1/traces", &span.to_otlp_json())
+}
+
+fn do_export_payload(endpoint: &str, suffix: &str, payload: &str) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
 
-    let payload = span.to_otlp_json();
     let body = payload.as_bytes();
 
     // Parse the endpoint URL to extract host:port and path prefix.
     // Expected format: "http://host:port" or "host:port"
     let (host_port, path_prefix) = parse_endpoint(endpoint);
 
-    let path = format!("{path_prefix}/v1/traces");
+    let path = format!("{path_prefix}{suffix}");
 
     let mut stream =
         TcpStream::connect(&host_port).map_err(|e| format!("connect to {host_port}: {e}"))?;

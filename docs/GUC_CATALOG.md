@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**143 configuration parameters** extracted from `src/config/`.
+**146 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -13,6 +13,9 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 |----------|------|---------|-------------|
 | `pg_trickle.adaptive_batch_coalescing` | `bool` | `true` | Disable if the batched query plan is unexpectedly slow (rare). |
 | `pg_trickle.adaptive_merge_strategy` | `bool` | `false` | Default `false` — the fixed `merge_strategy` GUC governs. |
+| `pg_trickle.adaptive_workers` | `bool` | `true` | Worker admission remains bounded by `max_dynamic_refresh_workers`; the adaptive target starts at the configured floor and moves one worker at a time after three matching observations. |
+| `pg_trickle.adaptive_workers_max` | `int4` | `8` | v0.90.0: Upper bound for adaptive worker demand. |
+| `pg_trickle.adaptive_workers_min` | `int4` | `1` | v0.90.0: Lower bound for adaptive worker demand. |
 | `pg_trickle.agg_diff_cardinality_threshold` | `int4` | `1000` | Set to 0 to disable the cardinality warning. |
 | `pg_trickle.aggregate_fast_path` | `bool` | `true` | B-1: Aggregate fast-path — use explicit DML instead of MERGE for GROUP BY queries where all aggregates are algebraically invertible (COUNT, SUM, AVG, etc.). |
 | `pg_trickle.algebraic_drift_reset_cycles` | `int4` | `0` | Set to 0 to disable periodic drift reset (default). |

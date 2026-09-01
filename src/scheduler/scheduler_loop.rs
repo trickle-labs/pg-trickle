@@ -536,6 +536,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // Per-ST drift reset counters (differential cycles since last reinit)
     let mut drift_counters: HashMap<i64, i32> = HashMap::new();
 
+    // v0.90.0: status memory is only for transition notifications. Durable
+    // freshness status remains in the controller table and survives restart.
+    let mut freshness_statuses: HashMap<i64, String> = HashMap::new();
+
     // P3-5: Per-ST auto-backoff factors (multiplicative schedule stretch).
     // When auto_backoff is enabled and a ST is falling behind, the factor
     // doubles each consecutive cycle; resets to 1.0 on the first on-time cycle.
@@ -666,6 +670,18 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 slot.running = true;
                 slot.last_wake_epoch_secs = (now_for_stats / 1000) as i64;
             });
+
+            // v0.90.0: export one bounded freshness metrics batch per database
+            // on the existing monitoring cadence. HTTP is best-effort and
+            // runs asynchronously after the SPI transaction closes.
+            if let Some(endpoint) = config::pg_trickle_otel_endpoint().filter(|e| !e.is_empty()) {
+                let payload = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    monitor::collect_otel_freshness_metrics()
+                }));
+                if let Some(payload) = payload {
+                    crate::otel::export_metrics_background(endpoint, payload);
+                }
+            }
         }
 
         unsafe {
@@ -700,6 +716,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                  WHERE status = 'QUEUED'",
             )
         }));
+        let queued_depth_count = queued_depth
+            .as_ref()
+            .ok()
+            .and_then(|depth| *depth)
+            .unwrap_or(0)
+            .max(0) as u32;
         if let Ok(Some(depth)) = queued_depth {
             crate::shmem::update_database_scheduler(database_oid, |slot| {
                 slot.queue_depth = depth.max(0) as u32;
@@ -738,6 +760,73 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             return;
         }
 
+        // v0.90.0: settle completed visibility XIDs before refreshing the
+        // bounded SLA summaries. Missing commit timestamps remain NULL and
+        // therefore cannot become fabricated freshness evidence.
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            if let Err(error) = crate::catalog::RefreshRecord::settle_and_refresh_freshness() {
+                pgrx::warning!("pg_trickle: freshness maintenance failed: {}", error);
+            }
+        }));
+
+        let freshness_transitions = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        "SELECT s.pgt_id, s.pgt_schema::text, s.pgt_name::text,
+                                s.freshness_deadline_ms, f.p95_freshness_ms,
+                                f.sla_status::text
+                           FROM pgtrickle.pgt_stream_tables s
+                           JOIN pgtrickle.pgt_freshness_controller_state f
+                             ON f.pgt_id = s.pgt_id
+                          WHERE s.target_freshness_mode = 'INTERVAL'
+                          ORDER BY s.pgt_id",
+                        None,
+                        &[],
+                    )
+                    .ok()
+                    .map(|rows| {
+                        rows.filter_map(|row| {
+                            Some((
+                                row.get::<i64>(1).ok().flatten()?,
+                                row.get::<String>(2).ok().flatten()?,
+                                row.get::<String>(3).ok().flatten()?,
+                                row.get::<i64>(4).ok().flatten()?,
+                                row.get::<f64>(5).ok().flatten(),
+                                row.get::<String>(6).ok().flatten()?,
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+        }));
+        for (pgt_id, schema, name, target_ms, p95_ms, status) in freshness_transitions {
+            let previous = freshness_statuses.insert(pgt_id, status.clone());
+            let event = match (previous.as_deref(), status.as_str()) {
+                (_, "BREACHING") if previous.as_deref() != Some("BREACHING") => {
+                    Some(monitor::AlertEvent::FreshnessBreach)
+                }
+                (_, "INFEASIBLE") if previous.as_deref() != Some("INFEASIBLE") => {
+                    Some(monitor::AlertEvent::FreshnessInfeasible)
+                }
+                (Some("BREACHING" | "INFEASIBLE"), "MEETING") => {
+                    Some(monitor::AlertEvent::FreshnessRecovered)
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                monitor::alert_freshness_transition(
+                    event,
+                    &schema,
+                    &name,
+                    target_ms,
+                    p95_ms,
+                    status.as_str(),
+                );
+            }
+        }
+
         let now_ms = current_epoch_ms();
         let load_snapshot = sample_load_snapshot();
         let load_deferred = pressure_state.observe(
@@ -748,6 +837,31 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             load_snapshot.pressure(),
             load_deferred,
             pressure_state.deferral_factor(),
+        );
+        // v0.90.0: one cluster-wide adaptive admission signal. This only
+        // changes the target below the existing hard reservation limit; live
+        // workers are never cancelled when the target shrinks.
+        let feasible_at_risk = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            Spi::get_one::<i64>(
+                "SELECT count(*)::bigint
+                   FROM pgtrickle.pgt_freshness_controller_state
+                  WHERE sla_status = 'AT_RISK' AND evidence_state = 'EXACT'",
+            )
+        }))
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+        .max(0) as u32;
+        shmem::adjust_adaptive_worker_target(
+            config::pg_trickle_adaptive_workers(),
+            config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32,
+            config::pg_trickle_adaptive_workers_min().max(1) as u32,
+            config::pg_trickle_adaptive_workers_max().max(1) as u32,
+            None, // v0.87 has no valid host CPU sample on this platform.
+            feasible_at_risk,
+            queued_depth_count,
+            shmem::active_worker_count(),
+            now_ms,
         );
 
         // WAL transition processing — three phases with separate transactions
