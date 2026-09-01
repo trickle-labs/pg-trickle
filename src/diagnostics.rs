@@ -59,6 +59,7 @@ pub(crate) struct FreshnessControllerDiagnostic {
     pub(crate) adaptive_workers: bool,
     pub(crate) adaptive_worker_min: i32,
     pub(crate) adaptive_worker_max: i32,
+    pub(crate) advisory: Option<serde_json::Value>,
 }
 
 /// One bounded registry row from `pgt_window_states`.
@@ -407,7 +408,8 @@ pub(crate) fn build_stream_table_explanation(
                     CASE WHEN st.target_freshness_mode <> 'INTERVAL' THEN 'NOT_APPLICABLE'
                          ELSE COALESCE(f.evidence_state, 'EXACT') END::text,
                     f.next_due_at::text, f.last_decision_at::text,
-                    current_setting('pg_trickle.adaptive_workers', true)
+                    current_setting('pg_trickle.adaptive_workers', true),
+                    f.last_input_snapshot
                FROM pgtrickle.pgt_stream_tables st
                LEFT JOIN pgtrickle.pgt_freshness_controller_state f
                  ON f.pgt_id = st.pgt_id
@@ -436,6 +438,7 @@ pub(crate) fn build_stream_table_explanation(
                 .is_some_and(|value| value.eq_ignore_ascii_case("on")),
             adaptive_worker_min: crate::config::pg_trickle_adaptive_workers_min(),
             adaptive_worker_max: crate::config::pg_trickle_adaptive_workers_max(),
+            advisory: row.get::<pgrx::JsonB>(12)?.map(|value| value.0),
         })
     })
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -542,8 +545,14 @@ pub(crate) fn render_stream_table_explanation_text(explanation: &StreamTableExpl
             .join(", ")
     };
     let controller = &explanation.freshness_controller;
+    let advisory = controller
+        .advisory
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("decision"))
+        .map(serde_json::Value::to_string)
+        .unwrap_or_else(|| "none".into());
     format!(
-        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFreshness controller: mode={}, target_ms={}, p50_ms={}, p95_ms={}, p99_ms={}, samples={}, status={}, evidence={}, next_due_at={}, adaptive_workers={} ({}..{})\nFULL fallback threshold/reason: {} / {}\nWindow strategy: {}\nWindow state: {}; {} / {} bytes ({:.1}%); reinitialization required={}\nLast window execution/fallback: {} / {}\nWrite-path overhead: unknown",
+        "Refresh mode: {}\nEstimated changed rows: {}\nDominant cost: {}\nExpected refresh time: {}\nCurrent lag: {}\nNext scheduled refresh: {}\nFreshness controller: mode={}, target_ms={}, p50_ms={}, p95_ms={}, p99_ms={}, samples={}, status={}, evidence={}, next_due_at={}, adaptive_workers={} ({}..{}), advisory={}\nFULL fallback threshold/reason: {} / {}\nWindow strategy: {}\nWindow state: {}; {} / {} bytes ({:.1}%); reinitialization required={}\nLast window execution/fallback: {} / {}\nWrite-path overhead: unknown",
         explanation.refresh_mode,
         changed,
         explanation.dominant_cost,
@@ -570,6 +579,7 @@ pub(crate) fn render_stream_table_explanation_text(explanation: &StreamTableExpl
         controller.adaptive_workers,
         controller.adaptive_worker_min,
         controller.adaptive_worker_max,
+        advisory,
         threshold,
         explanation.last_full_reason.as_deref().unwrap_or("none"),
         window_strategy,

@@ -2676,6 +2676,315 @@ impl RefreshRecord {
         .ok_or_else(|| PgTrickleError::SpiError("could not quote source timestamp".into()))
     }
 
+    /// Evaluate and persist the bounded advisory controller snapshot.
+    ///
+    /// The snapshot is deliberately derived from the already-persisted
+    /// summary plus bounded pending/cost probes.  It never changes refresh
+    /// mode, batch size, or frontier state; those decision classes remain
+    /// advisory until their rollout gates are earned.
+    fn update_controller_advisory(pgt_id: i64) -> Result<(), PgTrickleError> {
+        let state = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT st.freshness_deadline_ms, st.defining_query_hash,
+                            f.sample_count, f.last_sample_ms,
+                            f.p50_freshness_ms, f.p95_freshness_ms,
+                            f.p99_freshness_ms, st.refresh_mode::text,
+                            COALESCE(st.requested_refresh_mode, st.refresh_mode)::text,
+                            f.last_applied_batch_size
+                       FROM pgtrickle.pgt_stream_tables st
+                       JOIN pgtrickle.pgt_freshness_controller_state f
+                         ON f.pgt_id = st.pgt_id
+                      WHERE st.pgt_id = $1
+                        AND st.target_freshness_mode = 'INTERVAL'",
+                    None,
+                    &[pgt_id.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if rows.is_empty() {
+                return Ok::<_, PgTrickleError>(None);
+            }
+            let row = rows.first();
+            let target_ms = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let Some(target_ms) = target_ms else {
+                return Ok::<_, PgTrickleError>(None);
+            };
+            Ok(Some((
+                target_ms,
+                row.get::<i64>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<i64>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<f64>(4)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<f64>(5)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<f64>(6)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<f64>(7)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                row.get::<String>(8)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<String>(9)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or_default(),
+                row.get::<i64>(10)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+            )))
+        })?;
+        let Some((
+            target_ms,
+            plan_identity,
+            sample_count,
+            last_sample,
+            p50,
+            p95,
+            p99,
+            current_mode,
+            requested_mode,
+            last_batch,
+        )) = state
+        else {
+            return Ok(());
+        };
+        let target_ms = u64::try_from(target_ms)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| PgTrickleError::InvalidArgument("invalid freshness target".into()))?;
+        let finite = |value: Option<f64>| {
+            value.and_then(crate::scheduler::controller::FiniteMs::try_from_f64)
+        };
+        let p50 = finite(p50);
+        let p95 = finite(p95);
+        let p99 = finite(p99);
+        let last_sample = finite(last_sample);
+        let freshness = if sample_count > 0
+            && p50.is_some()
+            && p95.is_some()
+            && p99.is_some()
+            && last_sample.is_some()
+        {
+            crate::scheduler::controller::FreshnessDistribution {
+                samples: usize::try_from(sample_count)
+                    .unwrap_or(crate::scheduler::controller::FRESHNESS_SAMPLE_CAP)
+                    .min(crate::scheduler::controller::FRESHNESS_SAMPLE_CAP),
+                p50_ms: p50,
+                p95_ms: p95,
+                p99_ms: p99,
+                last_ms: last_sample,
+            }
+        } else {
+            crate::scheduler::controller::FreshnessDistribution {
+                samples: 0,
+                p50_ms: None,
+                p95_ms: None,
+                p99_ms: None,
+                last_ms: None,
+            }
+        };
+
+        let mode_costs = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT h.action::text, count(*)::bigint,
+                            min(h.duration_ms),
+                            percentile_cont(0.50) WITHIN GROUP (ORDER BY h.duration_ms),
+                            percentile_cont(0.95) WITHIN GROUP (ORDER BY h.duration_ms)
+                       FROM pgtrickle.pgt_refresh_history h
+                      WHERE h.pgt_id = $1
+                        AND h.status = 'COMPLETED'
+                        AND h.action IN ('FULL', 'DIFFERENTIAL')
+                        AND h.plan_identity = $2
+                        AND h.duration_ms IS NOT NULL
+                      GROUP BY h.action",
+                    None,
+                    &[pgt_id.into(), plan_identity.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let mut costs = Vec::new();
+            for row in rows {
+                costs.push((
+                    row.get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap_or_default(),
+                    row.get::<i64>(2)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                        .unwrap_or_default(),
+                    row.get::<f64>(3)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                    row.get::<f64>(4)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                    row.get::<f64>(5)
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?,
+                ));
+            }
+            Ok::<_, PgTrickleError>(costs)
+        })?;
+        let plan_token = plan_identity as u64;
+        let cost_for = |mode: RefreshMode| {
+            let action = match mode {
+                RefreshMode::Full => "FULL",
+                RefreshMode::Differential => "DIFFERENTIAL",
+                RefreshMode::Immediate => return None,
+            };
+            let (_, samples, min, p50, p95) = mode_costs
+                .iter()
+                .find(|(candidate, ..)| candidate == action)?;
+            Some(crate::scheduler::controller::ModeCostEvidence {
+                mode,
+                samples: usize::try_from(*samples).unwrap_or(0),
+                min_ms: finite(*min),
+                p50_ms: finite(*p50),
+                p95_ms: finite(*p95),
+                updated_token: plan_token,
+                compatible: true,
+            })
+        };
+        let source_commit = Self::source_commit_at(pgt_id, None)?;
+        let pending_age_ms = source_commit.and_then(|timestamp| {
+            Spi::get_one_with_args::<f64>(
+                "SELECT EXTRACT(EPOCH FROM (clock_timestamp() - $1::timestamptz)) * 1000",
+                &[timestamp.into()],
+            )
+            .ok()
+            .flatten()
+            .and_then(crate::scheduler::controller::FiniteMs::try_from_f64)
+        });
+        let estimated_pending = crate::cdc::estimate_pending_changes(pgt_id)
+            .unwrap_or_default()
+            .max(0) as u64;
+        let pending_rows = if estimated_pending == 0 && pending_age_ms.is_some() {
+            1
+        } else {
+            estimated_pending
+        };
+        let (pressure, _, _) = crate::shmem::scheduler_load_stats();
+        let load = crate::scheduler::controller::LoadEvidence {
+            cpu_percent: None,
+            queue_depth: crate::shmem::parallel_queue_depth(),
+            lock_waits: 0,
+            overloaded: pressure >= crate::config::pg_trickle_load_shed_threshold(),
+        };
+        let mode_override = match requested_mode.to_ascii_uppercase().as_str() {
+            "FULL" => Some(RefreshMode::Full),
+            "DIFFERENTIAL" => Some(RefreshMode::Differential),
+            _ => None,
+        };
+        let current_decision_mode = match current_mode.to_ascii_uppercase().as_str() {
+            "FULL" => Some(RefreshMode::Full),
+            "DIFFERENTIAL" => Some(RefreshMode::Differential),
+            _ => None,
+        };
+        let inputs = crate::scheduler::controller::ControllerInputs {
+            target_ms: crate::scheduler::controller::FiniteMs::new(target_ms),
+            current_plan_token: Some(plan_token),
+            freshness,
+            differential_cost: cost_for(RefreshMode::Differential),
+            full_cost: cost_for(RefreshMode::Full),
+            pending: crate::scheduler::controller::PendingEvidence {
+                rows: pending_rows,
+                oldest_commit_age_ms: pending_age_ms,
+                inflow_rows_per_ms: None,
+            },
+            row_width_bytes: None,
+            memory_budget_bytes: Some(
+                crate::config::pg_trickle_memory_budget().delta_pipeline_bytes,
+            ),
+            queue_delay_ms: None,
+            load,
+            semantic_modes: crate::scheduler::controller::SemanticModes::default(),
+            overrides: crate::scheduler::controller::OverrideSet {
+                mode: mode_override,
+                ..Default::default()
+            },
+            current_decision: crate::scheduler::controller::CurrentDecision {
+                interval_ms: None,
+                mode: current_decision_mode,
+                batch_size: last_batch.and_then(|value| u64::try_from(value).ok()),
+            },
+            min_batch_size: 1,
+            max_batch_size: crate::config::pg_trickle_pipeline_batch_size() as u64,
+            batch_step: 1,
+        };
+        let decision = crate::scheduler::controller::propose(&inputs);
+        let cost_json = |mode: RefreshMode| {
+            cost_for(mode).map(|cost| {
+                serde_json::json!({
+                    "samples": cost.samples,
+                    "min_ms": cost.min_ms.map(crate::scheduler::controller::FiniteMs::get),
+                    "p50_ms": cost.p50_ms.map(crate::scheduler::controller::FiniteMs::get),
+                    "p95_ms": cost.p95_ms.map(crate::scheduler::controller::FiniteMs::get),
+                    "compatible": cost.compatible,
+                })
+            })
+        };
+        let snapshot = serde_json::json!({
+            "controller_version": 1,
+            "target_ms": target_ms,
+            "freshness": {
+                "samples": inputs.freshness.samples,
+                "p50_ms": inputs.freshness.p50_ms.map(crate::scheduler::controller::FiniteMs::get),
+                "p95_ms": inputs.freshness.p95_ms.map(crate::scheduler::controller::FiniteMs::get),
+                "p99_ms": inputs.freshness.p99_ms.map(crate::scheduler::controller::FiniteMs::get),
+                "last_ms": inputs.freshness.last_ms.map(crate::scheduler::controller::FiniteMs::get),
+            },
+            "cost": {
+                "differential": cost_json(RefreshMode::Differential),
+                "full": cost_json(RefreshMode::Full),
+            },
+            "pending": {
+                "rows": inputs.pending.rows,
+                "oldest_commit_age_ms": inputs.pending.oldest_commit_age_ms.map(crate::scheduler::controller::FiniteMs::get),
+            },
+            "load": {
+                "pressure": pressure,
+                "queue_depth": inputs.load.queue_depth,
+                "overloaded": inputs.load.overloaded,
+            },
+            "memory_budget_bytes": inputs.memory_budget_bytes,
+            "overrides": {
+                "mode": inputs.overrides.mode.map(|mode| mode.as_str()),
+            },
+            "decision": decision.as_json(),
+        });
+        let applied_interval = decision
+            .next_due_in_ms
+            .map(crate::scheduler::controller::FiniteMs::get)
+            .or(Some(target_ms));
+        let applied_batch = decision
+            .batch_size
+            .and_then(|value| i64::try_from(value).ok());
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_freshness_controller_state
+                SET last_applied_interval_ms = $2,
+                    last_applied_mode = $3,
+                    last_applied_batch_size = $4,
+                    last_input_snapshot = $5,
+                    last_decision_at = clock_timestamp(),
+                    updated_at = now()
+              WHERE pgt_id = $1
+                AND (last_applied_interval_ms IS DISTINCT FROM $2
+                  OR last_applied_mode IS DISTINCT FROM $3
+                  OR last_applied_batch_size IS DISTINCT FROM $4
+                  OR last_input_snapshot IS DISTINCT FROM $5)",
+            &[
+                pgt_id.into(),
+                applied_interval
+                    .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+                    .into(),
+                Some(decision.action.as_str().to_string()).into(),
+                applied_batch.into(),
+                pgrx::JsonB(snapshot).into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+    }
+
     fn update_freshness_state(pgt_id: i64) -> Result<(), PgTrickleError> {
         let window_hours = crate::config::pg_trickle_sla_window_hours().max(1);
         Spi::run_with_args(
@@ -2813,7 +3122,8 @@ impl RefreshRecord {
             ),
             &[pgt_id.into()],
         )
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Self::update_controller_advisory(pgt_id)
     }
 
     fn upsert_refresh_summary_for_refresh(refresh_id: i64) -> Result<(), PgTrickleError> {

@@ -270,6 +270,18 @@ pub enum PriorityClass {
     Infeasible,
 }
 
+impl PriorityClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Overdue => "OVERDUE",
+            Self::AtRisk => "AT_RISK",
+            Self::Meeting => "MEETING",
+            Self::Untargeted => "UNTARGETED",
+            Self::Infeasible => "INFEASIBLE",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasonCode {
     NoPendingChanges,
@@ -311,6 +323,24 @@ pub struct ControllerDecision {
     pub feasibility: SlaStatus,
     pub worker_demand: u32,
     pub reason_code: ReasonCode,
+}
+
+impl ControllerDecision {
+    /// Render the stable, bounded advisory result stored beside the inputs.
+    pub fn as_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "due": self.due,
+            "next_due_in_ms": self.next_due_in_ms.map(FiniteMs::get),
+            "action": self.action.as_str(),
+            "batch_size": self.batch_size,
+            "deadline_slack_ms": self.deadline_slack_ms,
+            "priority_class": self.priority_class.as_str(),
+            "defer": self.defer,
+            "feasibility": self.feasibility.as_str(),
+            "worker_demand": self.worker_demand,
+            "reason_code": self.reason_code.as_str(),
+        })
+    }
 }
 
 fn mode_cost(input: &ControllerInputs, mode: RefreshMode) -> Option<FiniteMs> {
