@@ -1047,9 +1047,9 @@ fn validate_relation(
                 crate::api::quote_identifier(&facts.schema),
                 crate::api::quote_identifier(&facts.name)
             );
+            // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- qualified contains only quote_identifier-escaped catalog identifiers.
             let generation_matches = Spi::get_one_with_args::<bool>(
                 &format!(
-                    // nosemgrep: rust.spi.get_one_with_args.dynamic-format -- qualified contains only quote_identifier-escaped catalog identifiers.
                     "SELECT NOT EXISTS ( \
                          SELECT FROM {qualified} \
                          WHERE state_generation IS DISTINCT FROM $1 LIMIT 1 \
@@ -1551,16 +1551,13 @@ fn drop_named_state_relation(
         ));
     }
     let qualified = state_relation_name(name);
+    // nosemgrep: rust.spi.run.dynamic-format -- the catalog name is checked and quote_identifier-escaped.
     Spi::run(&format!(
-        // nosemgrep: rust.spi.run.dynamic-format -- the catalog name is checked and quote_identifier-escaped.
         "ALTER EXTENSION pg_trickle DROP TABLE {qualified}"
     ))
     .map_err(spi_error)?;
-    Spi::run(&format!(
-        // nosemgrep: rust.spi.run.dynamic-format -- the catalog name is checked and quote_identifier-escaped.
-        "DROP TABLE {qualified}"
-    ))
-    .map_err(spi_error)
+    // nosemgrep: rust.spi.run.dynamic-format -- the catalog name is checked and quote_identifier-escaped.
+    Spi::run(&format!("DROP TABLE {qualified}")).map_err(spi_error)
 }
 
 fn build_runtime_state(
@@ -1962,12 +1959,10 @@ pub(crate) fn sync_after_differential(
     let expected: Vec<_> = states.iter().map(|state| state.expected.clone()).collect();
     validate_registry(st.pgt_id, &expected)?;
     validate_runtime_access(st.pgt_id, &states)?;
-    let has_delta = Spi::get_one::<bool>(&format!(
-        // nosemgrep: rust.spi.get_one.dynamic-format -- delta_table must equal the numeric-ID-derived expected_delta above.
-        "SELECT EXISTS (SELECT 1 FROM {delta_table})"
-    ))
-    .map_err(spi_error)?
-    .unwrap_or(false);
+    // nosemgrep: rust.spi.query.dynamic-format -- delta_table is validated against the numeric-ID-derived expected_delta above.
+    let has_delta = Spi::get_one::<bool>(&format!("SELECT EXISTS (SELECT 1 FROM {delta_table})"))
+        .map_err(spi_error)?
+        .unwrap_or(false);
     if !has_delta {
         return Ok(());
     }
@@ -2658,8 +2653,8 @@ pub(crate) fn drop_for_stream(pgt_id: i64) -> Result<(), PgTrickleError> {
             crate::api::quote_identifier(&facts.schema),
             crate::api::quote_identifier(&facts.name)
         );
+        // nosemgrep: rust.spi.run.dynamic-format -- qualified is built only from quote_identifier-escaped catalog identifiers.
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format -- qualified is built only from quote_identifier-escaped catalog identifiers.
             "ALTER EXTENSION pg_trickle DROP TABLE {qualified}"
         ))
         .map_err(spi_error)?;

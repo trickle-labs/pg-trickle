@@ -2455,6 +2455,7 @@ pub fn execute_differential_refresh_with_tuning(
                             )
                         });
                         let has_deletes = has_minmax
+                            // nosemgrep: rust.spi.query.dynamic-format -- staged_source is an internally generated, quote-escaped temporary relation.
                             && Spi::get_one::<bool>(&format!(
                                 "SELECT EXISTS (SELECT 1 FROM {staged_source} WHERE action = 'D')"
                             ))

@@ -2746,12 +2746,12 @@ pub(crate) fn normalize_full_set_operation_storage(
         } else {
             String::new()
         };
-        // nosemgrep: rust.spi.run.dynamic-format — table and column names are quote_identifier()-escaped catalog identifiers.
         let index_key = if identity_bounded {
             "__pgt_row_id"
         } else {
             "pgtrickle.row_probe_v1(__pgt_row_id)"
         };
+        // nosemgrep: rust.spi.run.dynamic-format — quoted_table and include_clause are quote_identifier()-escaped catalog identifiers; index_key is fixed.
         Spi::run(&format!(
             "CREATE INDEX ON {quoted_table} ({index_key}){include_clause}"
         ))
