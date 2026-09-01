@@ -168,12 +168,12 @@ fn validate_freshness_evidence(pgt_id: i64) -> Result<(), PgTrickleError> {
         ));
     }
     let unsupported = Spi::get_one_with_args::<String>(
-        "SELECT source_type::text FROM pgtrickle.pgt_dependencies
-          WHERE pgt_id = $1 AND source_type NOT IN ('TABLE', 'STREAM_TABLE') LIMIT 1",
+        "SELECT COALESCE(MIN(source_type::text), '') FROM pgtrickle.pgt_dependencies
+          WHERE pgt_id = $1 AND source_type NOT IN ('TABLE', 'STREAM_TABLE')",
         &[pgt_id.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    if let Some(source_type) = unsupported {
+    if let Some(source_type) = unsupported.filter(|source_type| !source_type.is_empty()) {
         return Err(PgTrickleError::FreshnessEvidenceUnavailable(format!(
             "source type {source_type} has no exact commit provenance"
         )));
