@@ -56,6 +56,13 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.fuse\_status](#pgtricklefuse_status)
     - [pgtrickle.reset\_fuse](#pgtricklereset_fuse)
     - [pgtrickle.lifecycle\_preflight](#pgtricklelifecycle_preflight)
+    - [pgtrickle.capture\_instance\_status](#pgtricklecapture_instance_status)
+    - [pgtrickle.validate\_recovery](#pgtricklevalidate_recovery)
+    - [pgtrickle.preflight\_upgrade](#pgtricklepreflight_upgrade)
+    - [pgtrickle.quiesce](#pgtricklequiesce)
+    - [pgtrickle.pause\_all](#pgtricklepause_all)
+    - [pgtrickle.resume\_all](#pgtrickleresume_all)
+    - [pgtrickle.recover\_capture\_instance](#pgtricklerecover_capture_instance)
   - [Dependency & Inspection](#dependency--inspection)
     - [pgtrickle.dependency\_tree](#pgtrickledependency_tree)
     - [pgtrickle.diamond\_groups](#pgtricklediamond_groups)
@@ -4614,6 +4621,13 @@ table management.
 | Function | Returns | Purpose |
 |----------|---------|---------|
 | `pgtrickle.preflight()` | `text` (JSON) | Pre-deployment health check — returns one JSON object per check with `pass`, `check`, `detail`. |
+| `pgtrickle.capture_instance_status()` | `text` (JSON) | Reports the durable database identity that owns CDC and whether capture is active, quiesced, or quarantined. |
+| `pgtrickle.validate_recovery()` | `text` (JSON) | Validates clone/restore identity, source relations, CDC triggers, slots, buffers, and frontiers without advancing state. |
+| `pgtrickle.preflight_upgrade()` | `text` (JSON) | Reports stable `BLOCKER`, `DRAIN_RECOMMENDED`, `WARNING`, or `SAFE` upgrade checks. |
+| `pgtrickle.quiesce(timeout_s integer DEFAULT 60)` | `bool` | Drains in-flight refresh work and closes capture before an upgrade. |
+| `pgtrickle.resume_all()` | `bool` | Reopens capture after a completed upgrade; it does not repair suspended stream tables. |
+| `pgtrickle.pause_all()` | `bool` | Compatibility alias for `quiesce(60)`. |
+| `pgtrickle.recover_capture_instance()` | `text` | Superuser-only explicit adoption of a restored or cloned database; all stream tables then require protected reinitialization. |
 | `pgtrickle.lifecycle_preflight()` | `text` (JSON) | Superuser-only, read-only owner-privilege preflight for upgrades; lists every missing source `SELECT` or source-schema `USAGE` grant with exact remediation SQL. |
 | `pgtrickle.row_identity_v2_recreation_preflight()` | `jsonb` | Owner/superuser-only, read-only V2 recreation gate. Checks storage, markers, source contracts, indexes, PostgreSQL major, scheduler quiescence, and consumer acknowledgments without returning identity bytes. |
 | `pgtrickle.row_identity_v2_consumer_inventory()` | `SETOF record` | Owner/superuser-only inventory of external consumers and their `BYTEA` schema/resnapshot plans. |
@@ -4637,6 +4651,73 @@ table management.
 legacy `row_identity_version` on a stream table or required CDC buffer means
 incremental maintenance is not considered safe until a protected rebuild has
 completed.
+
+### pgtrickle.capture_instance_status
+
+Return the durable identity that owns capture for the current database.
+`QUARANTINED` means the current database OID or PostgreSQL system identifier
+does not match the recorded owner.
+
+```sql
+SELECT pgtrickle.capture_instance_status();
+```
+
+### pgtrickle.validate_recovery
+
+Validate recovery evidence after a restore, promotion, or clone. The JSON
+report contains named checks and stable recovery classes. It never repairs a
+missing source or advances a persisted frontier.
+
+```sql
+SELECT pgtrickle.validate_recovery();
+```
+
+### pgtrickle.preflight_upgrade
+
+Return a machine-readable upgrade decision. `BLOCKER` and
+`OPERATOR_INTERVENTION_REQUIRED` conditions must be resolved before changing
+the extension or PostgreSQL major version.
+
+```sql
+SELECT pgtrickle.preflight_upgrade();
+```
+
+### pgtrickle.quiesce
+
+Drain scheduler work and persist `QUIESCED` capture state. A timeout returns
+`false` and leaves the upgrade boundary unopened.
+
+```sql
+SELECT pgtrickle.quiesce(60);
+```
+
+### pgtrickle.pause_all
+
+Backward-compatible alias for `quiesce(60)`. It drains scheduler work and
+persists `QUIESCED` capture state before an upgrade.
+
+```sql
+SELECT pgtrickle.pause_all();
+```
+
+### pgtrickle.resume_all
+
+Reopen a completed upgrade boundary. A quarantined capture owner must first be
+handled with `recover_capture_instance()`.
+
+```sql
+SELECT pgtrickle.resume_all();
+```
+
+### pgtrickle.recover_capture_instance
+
+Superuser-only explicit adoption for a restored or cloned database. Adoption
+clears the old ownership record and marks all stream tables for protected
+reinitialization; it does not claim that their old frontiers remain valid.
+
+```sql
+SELECT pgtrickle.recover_capture_instance();
+```
 
 ### pgtrickle.lifecycle_preflight
 

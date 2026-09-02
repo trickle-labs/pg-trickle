@@ -72,6 +72,8 @@ fn refresh_stream_table_impl(
         ));
     }
 
+    crate::api::recovery::assert_capture_ready()?;
+
     let (schema, table_name, st) = resolve_owned_stream_table(name, entry_context)?;
 
     // Phase 10: Check if ST is suspended or in error — refuse manual refresh

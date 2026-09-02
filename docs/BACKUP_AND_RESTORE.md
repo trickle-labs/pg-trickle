@@ -1,17 +1,19 @@
 # Backup and Restore
 
-pg_trickle supports physical PostgreSQL backups directly. Logical dumps retain
-durable configuration, but automatic logical restore reconciliation is not yet
-supported. Restored OIDs, frontiers, dependency rows, and CDC infrastructure
-are not trusted, so refresh remains fail-closed.
+pg_trickle supports physical PostgreSQL backups directly and validates durable
+stream-table state after restore, promotion, and cloning. Logical dumps retain
+the durable configuration, but restored database identity, relation OIDs,
+frontiers, and CDC infrastructure are not trusted until the v0.92 recovery
+checks pass.
 
 This page walks through the recommended workflows, the gotchas, and
 how the [Snapshots](SNAPSHOTS.md) API fits in.
 
-> **TL;DR.** Physical backups preserve all runtime state. Do not use a logical
-> dump as a resumable pg_trickle backup until protected reconciliation ships;
-> restore source data and recreate stream tables from their definitions instead.
-> Snapshots are provenance-checked derived data, not a backup replacement.
+> **TL;DR.** Physical backups preserve runtime state, but validate the restored
+> capture owner and frontier before accepting writes. Logical restores start
+> quarantined when their database identity changes; explicitly adopt the
+> database and protected-rebuild affected stream tables. Snapshots are
+> provenance-checked derived data, not a backup replacement.
 
 ---
 
@@ -37,24 +39,28 @@ and (in WAL CDC mode) the replication slots' on-disk state.
 1. Restore the data directory exactly as you would for any
    PostgreSQL database.
 2. Start PostgreSQL.
-3. The pg_trickle launcher discovers each database on the next
-   tick (~10 s) and resumes the per-database scheduler.
+3. Before resuming application writes, validate the capture owner and all
+   source frontiers:
 
-After a physical restore, verify the launcher and CDC resources before
-resuming application writes. Physical restore preserves OIDs and runtime
-state, but a promoted or rebuilt cluster may still require WAL-slot repair.
+   ```sql
+   SELECT pgtrickle.capture_instance_status();
+   SELECT pgtrickle.validate_recovery();
+   ```
 
-**Point-in-time recovery (PITR).** PITR works as expected. If you
-recover to a point in the middle of a refresh, that refresh is
-marked failed in `pgtrickle.pgt_refresh_history` on first start;
-the next scheduler tick re-runs it. No data loss.
+4. Resume the scheduler only after the report is `SAFE`. A promoted or
+   point-in-time-restored cluster may require protected reinitialization when
+   the recoverable WAL position is behind a persisted frontier.
 
-**WAL CDC slots after restore.** If you were running in
-`pg_trickle.cdc_mode = 'wal'` and the restored cluster came up
-without the original slots (e.g. a logical-decoding replica that
-did not inherit slots), pg_trickle's scheduler detects the absence
-and re-bootstraps trigger CDC for the affected sources. You will
-see one `WARNING` per source; the system continues to work.
+**Point-in-time recovery (PITR).** The recovery validator compares each
+persisted frontier with the restored WAL position. If the frontier is ahead,
+the affected stream table is suspended with `RECOVERY_FRONTIER_UNPROVEN` and
+must be protected-rebuilt; it is never replayed from an unproven position.
+
+**WAL CDC slots after restore.** If a WAL slot is missing or has lost required
+history, `validate_recovery()` reports `CDC_SLOT_MISSING` or
+`CDC_WAL_UNAVAILABLE` and suspends the affected stream tables. Recreate the
+capture state and protected-rebuild before resuming; the scheduler does not
+silently switch to a new frontier.
 
 ---
 
@@ -84,20 +90,26 @@ createdb mydb_restored
 pg_restore --dbname=mydb_restored --jobs=4 mydb.dump
 ```
 
-Before restore, stop scheduling and avoid application writes. The reconciliation
-helper intentionally fails because it cannot yet prove restored relation,
-ownership, CDC, and frontier identity:
+Before restore, stop scheduling and avoid application writes. After restore,
+the capture owner is checked against the current database identity:
 
 ```sql
 -- Inspect durable configuration and reconciliation state
 SELECT * FROM pgtrickle.pgt_status();
-
-SELECT pgtrickle.restore_stream_tables(); -- errors by design
+SELECT pgtrickle.capture_instance_status();
+SELECT pgtrickle.validate_recovery();
 ```
 
-Do not resume refresh or guess from similarly named relations. Use a physical
-backup for a resumable deployment, or recreate stream tables from their
-declarative definitions after restoring the source data.
+If the database identity changed, run the explicit superuser adoption command
+and then rebuild every affected stream table:
+
+```sql
+SELECT pgtrickle.recover_capture_instance();
+SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
+```
+
+Do not guess from similarly named relations or reuse the source database's
+capture slots and frontiers.
 
 ### What `pg_dump` does and does not capture
 
@@ -106,19 +118,19 @@ declarative definitions after restoring the source data.
 | Source tables (your data) | ✅ |
 | Stream-table storage (your derived data) | ✅ |
 | Durable `pgtrickle.*` configuration | ✅ |
-| Dependency and CDC registries | ✅ — restored but untrusted |
+| Dependency and CDC registries | ✅ — validated before resume |
 | CDC trigger definitions | Not a supported resume contract; do not trust after restore |
 | `pgtrickle_changes.*` change buffers | Not a supported resume contract; do not trust after restore |
 | `pgt_stream_tables.window_strategy` | ✅ |
 | `pgt_window_states` rows and private window state | ✕ — derived and excluded; v0.89 production plans create none |
-| WAL replication slots (WAL CDC mode) | ✕ (slots are not dumpable; the scheduler recreates them) |
+| WAL replication slots (WAL CDC mode) | ✕ — missing slots require protected recovery |
 | Refresh history and runtime summaries | ✕ — operational history is excluded |
 
 `pgt_window_states` uses an always-false `pg_extension_config_dump` filter.
 Logical restore therefore cannot reuse relation OIDs from the source cluster.
 The durable `window_strategy` plan remains available for diagnostics. Every
-v0.89 window plan is runtime-disabled, but restored stream-table refresh still
-fails closed until the broader logical reconciliation path is implemented.
+v0.89 window plan is runtime-disabled, and restored stream-table refresh stays
+blocked until identity, CDC infrastructure, and frontier validation succeed.
 
 If you do not need the audit history, you can shrink the dump with
 `pg_dump --exclude-table='pgtrickle.pgt_refresh_history'`.
@@ -154,8 +166,9 @@ storage. pg_trickle is fully compatible:
 
 - Use `Cluster.spec.backup` exactly as you would for any other
   PG cluster.
-- After a `Cluster.spec.bootstrap.recovery` operation, the
-  pg_trickle launcher resumes automatically.
+- After a `Cluster.spec.bootstrap.recovery` operation, the pg_trickle launcher
+  starts normally, but run `capture_instance_status()` and
+  `validate_recovery()` before resuming application writes.
 - For very large stream tables, consider taking pre-backup
   snapshots and restoring them on the new cluster to skip an
   initial full refresh.
@@ -173,7 +186,8 @@ See [CloudNativePG integration](integrations/cloudnativepg.md).
       `pg_trickle.slot_lag_critical_threshold_mb`.
 - [ ] Periodic snapshot of business-critical stream tables.
 - [ ] Documented logical-restore procedure tested with changed relation OIDs,
-      reconciliation, and post-restore DML.
+      explicit ownership adoption, protected reinitialization, and post-restore
+      DML.
 - [ ] Off-site copy of backups (managed service, S3 with
       cross-region replication, etc.).
 - [ ] Monitoring on `pg_trickle.pgt_refresh_history` for restore

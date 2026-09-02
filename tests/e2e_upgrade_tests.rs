@@ -179,7 +179,7 @@ async fn test_upgrade_catalog_indexes_present() {
 async fn test_upgrade_migration_era_catalog_tables_and_config_dump_policy_present() {
     let db = E2eDb::new().await.with_extension().await;
 
-    for table_name in ["pgt_snapshots", "pgt_subscriptions"] {
+    for table_name in ["pgt_snapshots", "pgt_subscriptions", "pgt_capture_instance"] {
         let exists: bool = db
             .query_scalar(&format!(
                 "SELECT EXISTS( \
@@ -205,7 +205,11 @@ async fn test_upgrade_migration_era_catalog_tables_and_config_dump_policy_presen
     .await
     .expect("load pg_extension_config_dump registrations");
 
-    for relation in ["pgtrickle.pgt_snapshots", "pgtrickle.pgt_subscriptions"] {
+    for relation in [
+        "pgtrickle.pgt_snapshots",
+        "pgtrickle.pgt_subscriptions",
+        "pgtrickle.pgt_capture_instance",
+    ] {
         assert!(
             config_dump_relations.iter().any(|item| item == relation),
             "Config-dump policy missing for {relation}"
@@ -1669,5 +1673,84 @@ async fn test_upgrade_v080_metrics_summary_columns() {
     // Verify cleanup_blocked_count column is queryable (O-3).
     let _blocked: Option<i64> = db
         .query_scalar_opt("SELECT cleanup_blocked_count FROM pgtrickle.metrics_summary()")
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "v0.92 upgrade boundary coverage runs in the full upgrade job"]
+async fn test_upgrade_preflight_reports_stable_statuses() {
+    let db = E2eDb::new().await.with_extension().await;
+    let has_stable_shape: bool = db
+        .query_scalar(
+            "SELECT (report ? 'status')
+                    AND (report ? 'safe')
+                    AND (report ? 'checks')
+               FROM (SELECT pgtrickle.preflight_upgrade()::jsonb AS report) current_report",
+        )
+        .await;
+    assert!(has_stable_shape);
+}
+
+#[tokio::test]
+#[ignore = "v0.92 upgrade boundary coverage runs in the full upgrade job"]
+async fn test_upgrade_quiesce_preserves_pending_deltas() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE v092_upgrade_src (id INT PRIMARY KEY, value TEXT)")
+        .await;
+    db.execute("INSERT INTO v092_upgrade_src VALUES (1, 'before')")
+        .await;
+    db.create_st(
+        "v092_upgrade_st",
+        "SELECT id, value FROM v092_upgrade_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO v092_upgrade_src VALUES (2, 'pending')")
+        .await;
+
+    let quiesced: bool = db.query_scalar("SELECT pgtrickle.quiesce(30)").await;
+    assert!(quiesced);
+    let state: String = db
+        .query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+        .await;
+    assert_eq!(state, "QUIESCED");
+
+    let resumed: bool = db.query_scalar("SELECT pgtrickle.resume_all()").await;
+    assert!(resumed);
+    db.refresh_st("v092_upgrade_st").await;
+    db.assert_st_matches_query("v092_upgrade_st", "SELECT id, value FROM v092_upgrade_src")
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "v0.92 PostgreSQL major-upgrade coverage runs in the full upgrade job"]
+async fn test_upgrade_major_version_active_stream_table_with_pending_deltas() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE v092_major_src (id INT PRIMARY KEY, value INT)")
+        .await;
+    db.execute("INSERT INTO v092_major_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "v092_major_st",
+        "SELECT id, value FROM v092_major_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("INSERT INTO v092_major_src VALUES (2, 20)")
+        .await;
+
+    let preflight: String = db
+        .query_scalar("SELECT pgtrickle.preflight_upgrade()")
+        .await;
+    assert!(preflight.contains("\"checks\""));
+
+    let quiesced: bool = db.query_scalar("SELECT pgtrickle.quiesce(30)").await;
+    assert!(quiesced);
+    let resumed: bool = db.query_scalar("SELECT pgtrickle.resume_all()").await;
+    assert!(resumed);
+    db.refresh_st("v092_major_st").await;
+    db.assert_st_matches_query("v092_major_st", "SELECT id, value FROM v092_major_src")
         .await;
 }

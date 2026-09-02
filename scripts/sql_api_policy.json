@@ -121,6 +121,13 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.capture_instance_status()": {
+      "schema": "pgtrickle",
+      "name": "capture_instance_status",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.change_buffer_sizes()": {
       "schema": "pgtrickle",
       "name": "change_buffer_sizes",
@@ -632,6 +639,13 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.preflight_upgrade()": {
+      "schema": "pgtrickle",
+      "name": "preflight_upgrade",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.preview_stream_table(text, text, text, text)": {
       "schema": "pgtrickle",
       "name": "preview_stream_table",
@@ -639,9 +653,23 @@
       "class": "public_read",
       "execution_policy": "capability_specific"
     },
+    "pgtrickle.quiesce(integer)": {
+      "schema": "pgtrickle",
+      "name": "quiesce",
+      "identity_arguments": "integer",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.rebuild_cdc_triggers()": {
       "schema": "pgtrickle",
       "name": "rebuild_cdc_triggers",
+      "identity_arguments": "",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.recover_capture_instance()": {
+      "schema": "pgtrickle",
+      "name": "recover_capture_instance",
       "identity_arguments": "",
       "class": "admin_global",
       "execution_policy": "capability_specific"
@@ -1035,6 +1063,13 @@
       "schema": "pgtrickle",
       "name": "validate_query",
       "identity_arguments": "text",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.validate_recovery()": {
+      "schema": "pgtrickle",
+      "name": "validate_recovery",
+      "identity_arguments": "",
       "class": "public_read",
       "execution_policy": "capability_specific"
     },

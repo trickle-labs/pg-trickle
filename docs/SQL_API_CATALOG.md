@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**147 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**154 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -24,6 +24,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.bulk_create()` | `pgtrickle` | `jsonb` | On any error, the entire transaction is rolled back (standard PostgreSQL transactional semantics). |
 | `pgtrickle.bulk_drop_stream_tables()` | `pgtrickle` | `integer` | # Example ```sql SELECT pgtrickle.bulk_drop_stream_tables(     ARRAY['public.orders_summary', 'public.stale_view'] ); ```. |
 | `pgtrickle.cache_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.cache_stats()`. |
+| `pgtrickle.capture_instance_status()` | `pgtrickle` | `text` | Return the current capture-instance identity and quarantine state. |
 | `pgtrickle.cdc_pause_status()` | `pgtrickle` | `SetOf row` | Returns a table with one row containing: - `paused` — `true` when `cdc_paused = on` - `capture_mode` — `'discard'` or `'hold'` - `note` — human-readable explanation of the current state. |
 | `pgtrickle.change_buffer_sizes()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.change_buffer_sizes()`. |
 | `pgtrickle.check_cdc_health()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.check_cdc_health()`. |
@@ -86,6 +87,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.migrate()` | `pgtrickle` | `text` | This function performs no INSERT, UPDATE, DELETE, or DDL. |
 | `pgtrickle.parallel_job_status()` | `pgtrickle` | `` | Exposed as `pgtrickle.parallel_job_status(max_age_seconds)`. |
 | `pgtrickle.parse_duration_seconds()` | `pgtrickle` | `bigint (nullable)` | Used by SQL views to compare schedule. |
+| `pgtrickle.pause_all()` | `pgtrickle` | `boolean` | Backward-compatible alias for the upgrade boundary. |
 | `pgtrickle.pause_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.pause_scheduler(ARRAY['public.my_view', 'analytics.summary']); ```. |
 | `pgtrickle.pause_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.pause_stream_table('my_schema.my_st'); SELECT pgtrickle.resume_stream_table('my_schema.my_st'); ```. |
 | `pgtrickle.pg_trickle_hash()` | `pgtrickle` | `bigint` | NULL input is mapped to a deterministic sentinel (`\x00NULL\x00`) so that rows with NULL-valued group keys receive a non-NULL `__pgt_row_id`. |
@@ -98,11 +100,14 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.pgt_test_capture_definer_path()` | `pgtrickle` | `text` | Test-only SECURITY DEFINER probe that captures the caller's original search_path exactly as a real lifecycle entry point would, so LSEC-1's GUC-stack recovery can be proven against a real backend rather than only unit-tested in isolation. |
 | `pgtrickle.pgtrickle_refresh_stats()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.pgtrickle_refresh_stats()`. |
 | `pgtrickle.preflight()` | `pgtrickle` | `text` | Returns a JSON string with one entry per check: `pass` (bool), `check` (name), `detail` (human-readable message). |
+| `pgtrickle.preflight_upgrade()` | `pgtrickle` | `text` | Check whether an upgrade can proceed and return stable machine-readable statuses. |
 | `pgtrickle.preview_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT * FROM pgtrickle.preview_stream_table(     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id' ); ```. |
+| `pgtrickle.quiesce()` | `pgtrickle` | `` | Quiesce capture and refresh dispatch before a PostgreSQL or extension upgrade. |
 | `pgtrickle.rebuild_cdc_triggers()` | `pgtrickle` | `text` | Returns `'done'` on success. |
 | `pgtrickle.recommend_refresh_mode()` | `pgtrickle` | `` | Read-only — no side effects. |
 | `pgtrickle.recommend_schedule()` | `pgtrickle` | `jsonb` | PLAN-1 (v0.27.0): Return a schedule recommendation for the given stream table as a JSONB object with keys: `recommended_interval_seconds`, `peak_window_cron`, `confidence` (0–1), `reasoning`. |
 | `pgtrickle.recommend_target_freshness()` | `pgtrickle` | `SetOf row` | v0.90.0: Recommend a target from exact settled p95 evidence without changing the stream table or collecting new cost data. |
+| `pgtrickle.recover_capture_instance()` | `pgtrickle` | `text` | Adopt the current database as a new capture owner after an explicit clone recovery. |
 | `pgtrickle.refresh_efficiency()` | `pgtrickle` | `SetOf row (failable)` | Returns operational metrics for each stream table: FULL vs DIFFERENTIAL timing, change ratios, speedup factor, and refresh counts. |
 | `pgtrickle.refresh_groups()` | `pgtrickle` | `SetOf row` | Return all user-declared refresh groups with member details. |
 | `pgtrickle.refresh_stream_table()` | `pgtrickle` | `` | Manually trigger a synchronous refresh of a stream table. |
@@ -114,6 +119,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
 | `pgtrickle.restore_stream_tables()` | `pgtrickle` | `void` | During a `pg_restore`, `pg_dump` will restore the base storage tables and the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers, dependency wiring, frontiers, and ownership state cannot be safely reconstructed here without a protected reconciliation flow. |
 | `pgtrickle.resume_after_drain()` | `pgtrickle` | `boolean` | v0.85.0: Explicitly resume dispatch after a persistent drain. |
+| `pgtrickle.resume_all()` | `pgtrickle` | `boolean` | Resume all capture and refresh dispatch after a completed upgrade. |
 | `pgtrickle.resume_scheduler()` | `pgtrickle` | `text` | Example: ```sql SELECT pgtrickle.resume_scheduler(ARRAY['public.my_view']); ```. |
 | `pgtrickle.resume_stream_table()` | `pgtrickle` | `` | Resume a suspended stream table, clearing its consecutive error count and re-enabling automated and manual refreshes. |
 | `pgtrickle.row_probe_v1()` | `pgtrickle` | `Vec<u8>` | Return the full identity for short inputs, or a bounded prefix plus XXH3-128 digest. |
@@ -147,6 +153,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.unsubscribe()` | `pgtrickle` | `void` | UX-SUB: Remove a NOTIFY subscription for a stream table / channel pair. |
 | `pgtrickle.unsubscribe_distance()` | `pgtrickle` | `void` | VH-2 (v0.48.0): Remove a distance-predicate subscription. |
 | `pgtrickle.validate_query()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.validate_query(   'SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id' ); ```. |
+| `pgtrickle.validate_recovery()` | `pgtrickle` | `text` | Validate capture ownership, source infrastructure, and persisted frontiers. |
 | `pgtrickle.vector_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table that has a `post_refresh_action` other than 'none', or that has any ANN-relevant index on its storage table. |
 | `pgtrickle.version()` | `pgtrickle` | `text` |  |
 | `pgtrickle.version_check()` | `pgtrickle` | `text` | Returns a JSON string with library_version, extension_version, pg_version, and a boolean `version_match`. |
