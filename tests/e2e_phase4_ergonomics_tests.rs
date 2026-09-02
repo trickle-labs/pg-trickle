@@ -488,7 +488,7 @@ async fn test_erg_t3_alter_refresh_mode_emits_warning() {
 }
 
 /// ERG-T3: Changing the defining query via `alter_stream_table` should
-/// emit a WARNING about the full refresh triggered by the schema change.
+/// emit a WARNING about the protected rebuild triggered by the schema change.
 #[tokio::test]
 async fn test_erg_t3_alter_query_emits_warning() {
     let db = E2eDb::new().await.with_extension().await;
@@ -512,10 +512,10 @@ async fn test_erg_t3_alter_query_emits_warning() {
 
     let saw_warning = notices
         .iter()
-        .any(|n| n.contains("ALTER QUERY") && n.contains("full refresh"));
+        .any(|n| n.contains("ALTER QUERY applied a protected") && n.contains("rebuild"));
     assert!(
         saw_warning,
-        "Expected WARNING about ALTER QUERY full refresh; got: {notices:?}"
+        "Expected WARNING about ALTER QUERY protected rebuild; got: {notices:?}"
     );
 }
 

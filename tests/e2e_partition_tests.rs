@@ -300,18 +300,19 @@ async fn test_partition_attach_triggers_reinit() {
     )
     .await;
 
-    // Check that the stream table is marked for reinit
-    let needs_reinit: bool = db
+    // Partition changes suspend the stream table until it is explicitly repaired.
+    let status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'attach_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'attach_st'",
         )
         .await;
-    assert!(
-        needs_reinit,
-        "ATTACH PARTITION should mark dependent stream table for reinitialize"
-    );
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
 
-    // Refresh should pick up all data including newly attached partition
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('attach_st')")
+        .await;
+
+    // Refresh after repair should pick up all data including the newly attached partition.
     db.refresh_st("attach_st").await;
 
     let count: i64 = db.count("attach_st").await;
@@ -370,18 +371,19 @@ async fn test_partition_detach_triggers_reinit() {
     db.execute("ALTER TABLE detach_orders DETACH PARTITION detach_orders_2026")
         .await;
 
-    // Stream table should be marked for reinit
-    let needs_reinit: bool = db
+    // Partition changes suspend the stream table until it is explicitly repaired.
+    let status: String = db
         .query_scalar(
-            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'detach_st'",
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'detach_st'",
         )
         .await;
-    assert!(
-        needs_reinit,
-        "DETACH PARTITION should mark dependent stream table for reinitialize"
-    );
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
 
-    // After refresh, only the remaining partition's data should be visible
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('detach_st')")
+        .await;
+
+    // After repair, only the remaining partition's data should be visible.
     db.refresh_st("detach_st").await;
 
     let count: i64 = db.count("detach_st").await;
