@@ -326,6 +326,20 @@ async fn create_extension_template(admin_connection_string: &str, port: u16) -> 
     .await;
     admin_pool.close().await;
 
+    // The scheduler may have initialized the durable capture owner before
+    // the template was disabled. Do not clone that identity into test
+    // databases; each database must establish its own owner on first use.
+    let template_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&connection_string(port, template_name))
+        .await
+        .unwrap_or_else(|e| panic!("Failed to reconnect to template DB for cleanup: {e}"));
+    sqlx::query("DELETE FROM pgtrickle.pgt_capture_instance")
+        .execute(&template_pool)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to clear template capture identity: {e}"));
+    template_pool.close().await;
+
     template_name.to_string()
 }
 
