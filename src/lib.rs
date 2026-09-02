@@ -677,6 +677,24 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     frontier_per_node   JSONB
 );
 
+-- v0.92.0: durable capture ownership and upgrade quiescence state.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_capture_instance (
+    singleton                   BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    instance_id                 TEXT NOT NULL,
+    database_oid                OID NOT NULL,
+    system_identifier           TEXT NOT NULL,
+    state                       TEXT NOT NULL DEFAULT 'ACTIVE'
+                                CHECK (state IN ('ACTIVE', 'QUIESCED', 'QUARANTINED')),
+    observed_database_oid       OID,
+    observed_system_identifier  TEXT,
+    quarantine_reason           TEXT,
+    initialized_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+REVOKE ALL ON TABLE pgtrickle.pgt_capture_instance FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_capture_instance', '');
+
 -- v0.82.0: Registry for validated base-table and stream-table change buffers.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_buffers (
     buffer_key       TEXT PRIMARY KEY,
@@ -1582,42 +1600,14 @@ SELECT
     requires = [parse_duration_seconds],
 );
 
-// ── OP-3: pause_all / resume_all ─────────────────────────────────────
+// ── v0.92.0: Rust-backed pause/resume compatibility entity ─────────────
 
 extension_sql!(
     r#"
-CREATE OR REPLACE FUNCTION pgtrickle."pause_all"()
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    UPDATE pgtrickle.pgt_stream_tables
-       SET status = 'PAUSED'
-     WHERE status = 'ACTIVE';
-    RAISE NOTICE 'pg_trickle: all stream tables paused.';
-END;
-$$;
-
-COMMENT ON FUNCTION pgtrickle."pause_all"() IS
-    'Pause automatic refreshes for every ACTIVE stream table. '
-    'Use pgtrickle.resume_all() to re-activate them.';
-
-CREATE OR REPLACE FUNCTION pgtrickle."resume_all"()
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    UPDATE pgtrickle.pgt_stream_tables
-       SET status = 'ACTIVE'
-     WHERE status = 'PAUSED';
-    RAISE NOTICE 'pg_trickle: all paused stream tables resumed.';
-END;
-$$;
-
-COMMENT ON FUNCTION pgtrickle."resume_all"() IS
-    'Re-activate all stream tables that were paused with pgtrickle.pause_all().';
+-- pause_all(), resume_all(), and quiesce() are exported by the Rust API.
 "#,
     name = "pg_trickle_pause_resume",
+    requires = [],
 );
 
 // ── OP-4: refresh_if_stale ────────────────────────────────────────────
@@ -1949,6 +1939,8 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.lifecycle_preflight() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.migrate() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_all() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_scheduler(text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.quiesce(integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.recover_capture_instance() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.rebuild_cdc_triggers() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.restore_stream_tables() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.resume_all() FROM PUBLIC;
@@ -2020,6 +2012,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.cache_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cdc_pause_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.change_buffer_sizes() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.check_cdc_health() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.capture_instance_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cluster_worker_summary() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.commit_latency_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.freshness() TO PUBLIC;
@@ -2062,6 +2055,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.pgt_scc_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pgt_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pgtrickle_refresh_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.preflight() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.preflight_upgrade() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.preview_stream_table(text, text, text, text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.recommend_refresh_mode(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.recommend_schedule(text) TO PUBLIC;
@@ -2083,6 +2077,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.stream_table_spec(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.trigger_inventory() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.tune_recommendations() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.validate_query(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.validate_recovery() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.vector_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.version() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.version_check() TO PUBLIC;

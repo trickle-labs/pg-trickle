@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.92.0 — Backup, Restore, Upgrade & CDC Recovery](#0920--backup-restore-upgrade--cdc-recovery)
 - [0.91.0 — Schema and Query Evolution](#0910--schema-and-query-evolution)
 - [0.90.0 — Freshness Controller and Exact Freshness Evidence](#0900--freshness-controller-and-exact-freshness-evidence)
 - [0.89.0 — Incremental Window Admission](#0890--incremental-window-admission)
@@ -200,6 +201,31 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.92.0] — Backup, Restore, Upgrade & CDC Recovery
+
+v0.92.0 makes persistent stream-table state fail closed across restore, clone,
+promotion, and upgrade boundaries.
+
+- Persists a capture-owner identity and quarantines databases whose identity
+  changes after restore or cloning.
+- Adds `validate_recovery()` checks for sources, CDC triggers, slots, buffers,
+  WAL retention, and persisted frontiers, with stable recovery reason codes.
+- Adds `preflight_upgrade()`, `quiesce()`, `resume_all()`, and the
+  superuser-only `recover_capture_instance()` adoption workflow.
+- Prevents scheduler, manual refresh, and repair paths from advancing state
+  while capture is quarantined or quiesced.
+- Adds the bounded PostgreSQL 18 source-version support manifest, the
+  0.91.0 → 0.92.0 migration, recovery E2E coverage, and the upgrade runbook.
+
+See the [v0.92 roadmap](roadmap/v0.92.0.md), [release contract](roadmap/v0.92.0.md-full.md),
+and [upgrade guide](docs/UPGRADING.md).
+
+## Upgrade
+
+Install the 0.92.0 shared library and extension files, restart PostgreSQL,
+then run `ALTER EXTENSION pg_trickle UPDATE TO '0.92.0';` inside the documented
+quiesced upgrade boundary.
 
 ## [0.91.0] — Schema and Query Evolution
 

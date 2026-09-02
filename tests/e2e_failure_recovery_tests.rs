@@ -577,3 +577,221 @@ async fn test_no_resource_leak_after_timeout() {
         "No __pgt_delta_* temp tables should remain after successful refresh"
     );
 }
+
+// ── v0.92.0: fail-closed capture recovery ──────────────────────────────────
+
+#[tokio::test]
+#[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
+async fn test_recovery_capture_instance_catalog_and_safe_report() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    let report: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    assert!(
+        report.contains("\"status\":\"SAFE\""),
+        "unexpected report: {report}"
+    );
+
+    let state: String = db
+        .query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+        .await;
+    assert_eq!(state, "ACTIVE");
+    assert!(report.contains("\"capture_instance\""));
+}
+
+#[tokio::test]
+#[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
+async fn test_recovery_quiesce_and_resume_boundary() {
+    let db = E2eDb::new().await.with_extension().await;
+    let quiesced: bool = db.query_scalar("SELECT pgtrickle.quiesce(30)").await;
+    assert!(quiesced);
+
+    let state: String = db
+        .query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+        .await;
+    assert_eq!(state, "QUIESCED");
+
+    let resumed: bool = db.query_scalar("SELECT pgtrickle.resume_all()").await;
+    assert!(resumed);
+    let state: String = db
+        .query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+        .await;
+    assert_eq!(state, "ACTIVE");
+}
+
+#[tokio::test]
+#[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
+async fn test_recovery_clone_isolation_requires_explicit_adoption() {
+    let db = E2eDb::new().await.with_extension().await;
+    let _: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_capture_instance
+            SET database_oid = (database_oid::bigint + 1)::oid
+          WHERE singleton",
+    )
+    .await;
+
+    let report: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    assert!(
+        report.contains("OPERATOR_INTERVENTION_REQUIRED"),
+        "unexpected report: {report}"
+    );
+
+    let state: String = db
+        .query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+        .await;
+    assert_eq!(state, "QUARANTINED");
+
+    let resume_error = sqlx::query("SELECT pgtrickle.resume_all()")
+        .execute(&db.pool)
+        .await
+        .expect_err("resume_all() must fail while capture is quarantined");
+    assert!(
+        resume_error
+            .to_string()
+            .contains("recover_capture_instance() is required"),
+        "unexpected resume error: {resume_error}"
+    );
+
+    let adoption: String = db
+        .query_scalar("SELECT pgtrickle.recover_capture_instance()")
+        .await;
+    assert!(adoption.contains("capture ownership adopted"));
+}
+
+#[tokio::test]
+#[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
+async fn test_recovery_missing_trigger_is_reinitialization_required() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE v092_missing_trigger_src (id INT PRIMARY KEY, value TEXT)")
+        .await;
+    db.execute("INSERT INTO v092_missing_trigger_src VALUES (1, 'a')")
+        .await;
+    db.create_st(
+        "v092_missing_trigger_st",
+        "SELECT id, value FROM v092_missing_trigger_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_dependencies
+            SET cdc_mode = 'TRIGGER'
+          WHERE pgt_id = (
+              SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+               WHERE pgt_name = 'v092_missing_trigger_st'
+          )",
+    )
+    .await;
+
+    db.execute("ALTER TABLE v092_missing_trigger_src DISABLE TRIGGER ALL")
+        .await;
+
+    let report: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    assert!(
+        report.contains("CDC_TRIGGER_MISSING"),
+        "unexpected report: {report}"
+    );
+    assert!(
+        report.contains("REINITIALIZATION_REQUIRED"),
+        "unexpected report: {report}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
+async fn test_recovery_missing_slot_is_reinitialization_required() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE v092_missing_slot_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO v092_missing_slot_src VALUES (1)")
+        .await;
+    db.create_st(
+        "v092_missing_slot_st",
+        "SELECT id FROM v092_missing_slot_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_dependencies
+            SET cdc_mode = 'WAL', slot_name = 'v092_missing_slot'
+          WHERE pgt_id = (
+              SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+               WHERE pgt_name = 'v092_missing_slot_st'
+          )",
+    )
+    .await;
+
+    let report: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    assert!(
+        report.contains("CDC_SLOT_MISSING"),
+        "unexpected report: {report}"
+    );
+    assert!(
+        report.contains("REINITIALIZATION_REQUIRED"),
+        "unexpected report: {report}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
+async fn test_recovery_frontier_ahead_of_wal_fails_closed() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE v092_frontier_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO v092_frontier_src VALUES (1)").await;
+    db.create_st(
+        "v092_frontier_st",
+        "SELECT id FROM v092_frontier_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables
+            SET frontier = jsonb_build_object(
+                'sources',
+                jsonb_build_object(
+                    (
+                        SELECT source_relid::text
+                          FROM pgtrickle.pgt_dependencies
+                         WHERE pgt_id = (
+                             SELECT pgt_id
+                               FROM pgtrickle.pgt_stream_tables
+                              WHERE pgt_name = 'v092_frontier_st'
+                         )
+                         LIMIT 1
+                    ),
+                    jsonb_build_object(
+                        'lsn', 'FFFFFFFF/FFFFFFFF',
+                        'snapshot_ts', now()::text
+                    )
+                ),
+                'data_timestamp', now()::text
+            )
+          WHERE pgt_name = 'v092_frontier_st'",
+    )
+    .await;
+
+    let report: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    assert!(
+        report.contains("RECOVERY_FRONTIER_UNPROVEN"),
+        "unexpected report: {report}"
+    );
+    assert!(
+        report.contains("REINITIALIZATION_REQUIRED"),
+        "unexpected report: {report}"
+    );
+}

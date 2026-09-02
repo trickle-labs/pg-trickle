@@ -3418,6 +3418,7 @@ fn resume_stream_table(name: &str) {
 }
 
 fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
+    crate::api::recovery::assert_capture_ready()?;
     let (schema, table_name, st) =
         resolve_owned_stream_table(name, security_context::EntryContext::SecurityDefiner)?;
 
@@ -3490,6 +3491,7 @@ fn repair_stream_table(name: &str) -> String {
 }
 
 fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
+    crate::api::recovery::assert_capture_ready()?;
     let caller =
         security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
     let (schema, table_name, st) =

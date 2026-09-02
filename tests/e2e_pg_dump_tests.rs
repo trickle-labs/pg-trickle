@@ -21,6 +21,13 @@ async fn test_pg_dump_restore_fails_closed() {
 
     assert_eq!(db.count("public.dump_test_st").await, 2);
 
+    // A logical restore must run with the scheduler stopped. Otherwise the
+    // restored catalog can be initialized before pg_restore loads its data.
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = 'off'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     let pgt_id: i64 = db
         .query_scalar(
             "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'dump_test_st'",
@@ -144,7 +151,11 @@ async fn test_pg_dump_restore_fails_closed() {
         ])
         .output()
         .expect("Failed to execute pg_restore data");
-    assert!(restore_data.status.success(), "pg_restore data failed");
+    assert!(
+        restore_data.status.success(),
+        "pg_restore data failed: {}",
+        String::from_utf8_lossy(&restore_data.stderr)
+    );
 
     // 5. Connect to restored DB to manually heal metadata buffer
     let connection_base = db
@@ -175,8 +186,26 @@ async fn test_pg_dump_restore_fails_closed() {
     );
     assert!(strategy_preserved, "durable strategy metadata must restore");
 
-    // Unsafe logical restore is deliberately rejected until protected
-    // reinitialization can guarantee catalog, CDC, and frontier consistency.
+    // v0.92 validates the restored identity and keeps capture quarantined
+    // until a superuser explicitly adopts the restored database.
+    let recovery_report: String = sqlx::query_scalar("SELECT pgtrickle.validate_recovery()")
+        .fetch_one(&restored_pool)
+        .await
+        .expect("validate restored capture state");
+    assert!(
+        recovery_report.contains("CDC_CLONE_DETECTED")
+            && recovery_report.contains("OPERATOR_INTERVENTION_REQUIRED"),
+        "logical restore must be quarantined: {recovery_report}"
+    );
+    let capture_state: String =
+        sqlx::query_scalar("SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton")
+            .fetch_one(&restored_pool)
+            .await
+            .expect("inspect restored capture state");
+    assert_eq!(capture_state, "QUARANTINED");
+
+    // The legacy bulk restore helper remains disabled; use the explicit
+    // adoption and protected-reinitialization workflow above instead.
     let restore_error = sqlx::query("SELECT pgtrickle.restore_stream_tables()")
         .execute(&restored_pool)
         .await

@@ -2,6 +2,56 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.91.0 to 0.92.0
+
+Install the 0.92.0 shared library and extension files, restart PostgreSQL, and
+run the read-only preflight before starting the upgrade:
+
+```sql
+SELECT pgtrickle.preflight_upgrade();
+SELECT pgtrickle.validate_recovery();
+```
+
+Do not continue when either report contains `BLOCKER`,
+`REINITIALIZATION_REQUIRED`, or `OPERATOR_INTERVENTION_REQUIRED`. Quiesce the
+capture boundary, apply the extension migration, and resume it only after the
+new library and SQL objects are installed:
+
+```sql
+SELECT pgtrickle.quiesce(60);
+ALTER EXTENSION pg_trickle UPDATE TO '0.92.0';
+SELECT pgtrickle.resume_all();
+```
+
+`quiesce()` drains scheduler work without changing stream-table results.
+`resume_all()` reopens capture after the upgrade; it does not repair suspended
+tables or invent a missing frontier.
+
+v0.92 records the database OID and PostgreSQL system identifier that own CDC.
+After a dump/restore, clone, or promotion, inspect:
+
+```sql
+SELECT pgtrickle.capture_instance_status();
+SELECT pgtrickle.validate_recovery();
+```
+
+If ownership changed, capture remains quarantined. A superuser must explicitly
+adopt the restored database, after which every stream table requires a
+protected rebuild:
+
+```sql
+SELECT pgtrickle.recover_capture_instance();
+SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
+```
+
+Recovery never advances a frontier when a source, trigger, slot, buffer, or
+required WAL history is missing. Stable reason codes (`CDC_TRIGGER_MISSING`,
+`CDC_SLOT_MISSING`, `CDC_WAL_UNAVAILABLE`, `CDC_BUFFER_MISSING`,
+`CDC_BUFFER_CORRUPT`, `CDC_CLONE_DETECTED`, and
+`RECOVERY_FRONTIER_UNPROVEN`) identify the required action in the catalog and
+health reports. See the [v1.0 upgrade support manifest](upgrade-support-manifest.json)
+for the bounded PostgreSQL 18 source-version matrix.
+
 ## 0.90.0 to 0.91.0
 
 Install the 0.91.0 shared library and extension files, restart PostgreSQL, then

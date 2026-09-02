@@ -3413,6 +3413,7 @@ pub mod alter;
 /// This matches the version reported by `pg_extension.extversion`.
 // ── Sub-modules ─────────────────────────────────────────────────────────────
 pub mod create;
+pub(crate) mod recovery;
 pub mod refresh_ops;
 
 // Re-export from submodules for backward-compatible crate::api:: paths.

@@ -598,6 +598,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // OPS-6: Workload-aware poll — overlap count from df_scheduling_interference.
     // Refreshed once per auto-apply cycle (10 min).
     let mut interference_overlap_count: i64 = 0;
+    let mut capture_gate_blocked = false;
 
     // OP-2: Start the Prometheus metrics HTTP server if metrics_port is non-zero.
     let mut metrics_server = {
@@ -1205,6 +1206,35 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
         // Run the scheduler tick inside a transaction
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            // v0.92.0: Validate capture ownership before computing or
+            // advancing any frontier. A cloned or quiesced database may not
+            // dispatch refresh work until an explicit recovery/resume action.
+            match crate::api::recovery::capture_gate_allows_work() {
+                Ok(true) => {
+                    capture_gate_blocked = false;
+                }
+                Ok(false) => {
+                    if !capture_gate_blocked {
+                        warning!(
+                            "pg_trickle scheduler: capture is quarantined or quiesced; \
+                             refresh dispatch is disabled"
+                        );
+                        capture_gate_blocked = true;
+                    }
+                    return;
+                }
+                Err(error) => {
+                    if !capture_gate_blocked {
+                        warning!(
+                            "pg_trickle scheduler: capture ownership validation failed: {}",
+                            error
+                        );
+                        capture_gate_blocked = true;
+                    }
+                    return;
+                }
+            }
+
             // CSS1 / #536: Capture tick watermark for cross-source snapshot consistency
             // with frontier holdback to prevent silent data loss from long-running
             // transactions that span a tick boundary.
