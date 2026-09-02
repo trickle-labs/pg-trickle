@@ -60,6 +60,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.validate\_recovery](#pgtricklevalidate_recovery)
     - [pgtrickle.preflight\_upgrade](#pgtricklepreflight_upgrade)
     - [pgtrickle.quiesce](#pgtricklequiesce)
+    - [pgtrickle.pause\_all](#pgtricklepause_all)
     - [pgtrickle.resume\_all](#pgtrickleresume_all)
     - [pgtrickle.recover\_capture\_instance](#pgtricklerecover_capture_instance)
   - [Dependency & Inspection](#dependency--inspection)
@@ -4688,6 +4689,15 @@ Drain scheduler work and persist `QUIESCED` capture state. A timeout returns
 
 ```sql
 SELECT pgtrickle.quiesce(60);
+```
+
+### pgtrickle.pause_all
+
+Backward-compatible alias for `quiesce(60)`. It drains scheduler work and
+persists `QUIESCED` capture state before an upgrade.
+
+```sql
+SELECT pgtrickle.pause_all();
 ```
 
 ### pgtrickle.resume_all

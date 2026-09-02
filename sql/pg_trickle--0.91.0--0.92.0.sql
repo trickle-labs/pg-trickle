@@ -61,7 +61,7 @@ AS 'MODULE_PATHNAME', 'pause_all_wrapper';
 CREATE OR REPLACE FUNCTION pgtrickle."recover_capture_instance"()
 RETURNS TEXT
 STRICT
-SECURITY DEFINER
+SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'recover_capture_instance_wrapper';
