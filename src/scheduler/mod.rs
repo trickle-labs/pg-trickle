@@ -308,6 +308,10 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::RetryableFailure;
     }
 
+    if is_external_orchestration(&st) {
+        return RefreshOutcome::Success;
+    }
+
     // D-3 TEST-MODE: same chaos check as refresh_single_st — ensures the GUC
     // is honoured in parallel dispatch mode where execute_worker_singleton is
     // the code path rather than refresh_single_st.
@@ -457,6 +461,10 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
             continue;
         }
 
+        if is_external_orchestration(&st) {
+            continue;
+        }
+
         // BOOT-4: skip if any source is gated.
         if is_any_source_gated(pgt_id, &gated_oids) {
             log!(
@@ -591,6 +599,10 @@ fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::RetryableFailure;
     }
 
+    if is_external_orchestration(&st) {
+        return RefreshOutcome::Success;
+    }
+
     // FUSE-5: Check fuse circuit breaker for immediate closure root.
     if evaluate_fuse(&st) {
         log!(
@@ -637,17 +649,25 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
     }
 
     for &pgt_id in member_ids {
-        if let Some(st) = load_st_by_id(pgt_id)
-            && st.refresh_mode != RefreshMode::Differential
-        {
-            pgrx::warning!(
-                "pg_trickle refresh worker: SCC fixpoint — {}.{} uses {} mode, \
-                 only DIFFERENTIAL is supported in cyclic dependencies",
-                st.pgt_schema,
-                st.pgt_name,
-                st.refresh_mode.as_str()
-            );
-            return RefreshOutcome::PermanentFailure;
+        if let Some(st) = load_st_by_id(pgt_id) {
+            if is_external_orchestration(&st) {
+                log!(
+                    "pg_trickle refresh worker: skipping external SCC member {}.{}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                );
+                return RefreshOutcome::Success;
+            }
+            if st.refresh_mode != RefreshMode::Differential {
+                pgrx::warning!(
+                    "pg_trickle refresh worker: SCC fixpoint — {}.{} uses {} mode, \
+                     only DIFFERENTIAL is supported in cyclic dependencies",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    st.refresh_mode.as_str()
+                );
+                return RefreshOutcome::PermanentFailure;
+            }
         }
     }
 
@@ -673,6 +693,10 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
                 };
 
                 if st.status != StStatus::Active && st.status != StStatus::Initializing {
+                    continue;
+                }
+
+                if is_external_orchestration(&st) {
                     continue;
                 }
 
@@ -801,6 +825,9 @@ fn try_fused_chain_refresh(
             Some(s) => s,
             None => continue,
         };
+        if is_external_orchestration(&st) {
+            continue;
+        }
         let dependencies =
             deps_map
                 .get(&pgt_id)
@@ -854,6 +881,9 @@ fn try_fused_chain_refresh(
             Some(s) => s,
             None => continue,
         };
+        if is_external_orchestration(&st) {
+            continue;
+        }
         let prev_frontier = match &st.frontier {
             Some(f) if !f.is_empty() => f.clone(),
             _ => continue,
@@ -1269,6 +1299,10 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
         };
 
         if st.status != StStatus::Active && st.status != StStatus::Initializing {
+            continue;
+        }
+
+        if is_external_orchestration(&st) {
             continue;
         }
 
@@ -2324,6 +2358,10 @@ fn load_st_by_id(pgt_id: i64) -> Option<StreamTableMeta> {
     })
 }
 
+fn is_external_orchestration(st: &StreamTableMeta) -> bool {
+    st.orchestration_mode.eq_ignore_ascii_case("EXTERNAL")
+}
+
 /// Check if a ST is stale (staleness exceeds effective schedule or cron is due).
 ///
 /// G-7: When tiered scheduling is enabled, the tier multiplier is applied
@@ -2336,6 +2374,11 @@ fn load_st_by_id(pgt_id: i64) -> Option<StreamTableMeta> {
 /// dependants are unaffected: they detect upstream changes via
 /// `has_stream_table_source_changes()` independently.
 fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
+    // v0.93.0: EXTERNAL stream tables advance only through their coordinator.
+    if is_external_orchestration(st) {
+        return false;
+    }
+
     // v0.86.0: MANUAL declarations are scheduler-ineligible regardless of
     // tier scheduling configuration.
     if st.schedule.as_deref() == Some("manual") {
@@ -3157,6 +3200,10 @@ fn refresh_single_st(
         return;
     }
 
+    if is_external_orchestration(&st) {
+        return;
+    }
+
     // D-3 TEST-MODE: When pg_trickle.test_chaos_for_table names this ST,
     // simulate a retryable refresh failure by directly incrementing
     // consecutive_errors and returning early — no subtransaction, no SPI
@@ -3243,6 +3290,10 @@ fn refresh_single_st(
         Some(st) => st,
         None => return,
     };
+
+    if is_external_orchestration(&st) {
+        return;
+    }
 
     // Revalidate persisted explicit incremental definitions before scheduling.
     // This closes the upgrade path where a query was accepted by an older
@@ -3745,6 +3796,17 @@ fn execute_scheduled_refresh(
         }
     };
     let st = &st;
+
+    // v0.93.0: Re-check after acquiring the row lock so a mode change racing
+    // with scheduler dispatch cannot enter the refresh path.
+    if is_external_orchestration(st) {
+        log!(
+            "pg_trickle: skipping scheduled refresh for {}.{} — orchestration mode is EXTERNAL",
+            st.pgt_schema,
+            st.pgt_name,
+        );
+        return RefreshOutcome::Success;
+    }
 
     let dependencies = match crate::catalog::StDependency::get_for_st(st.pgt_id) {
         Ok(dependencies) => dependencies,

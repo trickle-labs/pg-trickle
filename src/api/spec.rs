@@ -40,6 +40,8 @@ fn build_spec(meta: &StreamTableMeta) -> pgrx::JsonB {
         "diamond_group": diamond_group,
         "attach_outbox": attach_outbox,
         "cdc_slot_name": cdc_slot,
+        "orchestration_mode": meta.orchestration_mode,
+        "contract_generation": meta.contract_generation,
     });
 
     pgrx::JsonB(obj)
@@ -163,6 +165,8 @@ mod tests {
             last_error_retryable: None,
             defining_search_path: "public".to_string(),
             window_strategy: None,
+            orchestration_mode: "MANAGED".to_string(),
+            contract_generation: 1,
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).
@@ -177,6 +181,8 @@ mod tests {
             "diamond_group": Option::<String>::None,
             "attach_outbox": false,
             "cdc_slot_name": Option::<String>::None,
+            "orchestration_mode": meta.orchestration_mode,
+            "contract_generation": meta.contract_generation,
         });
 
         assert_eq!(obj["name"], "my_view");
@@ -188,6 +194,8 @@ mod tests {
         assert!(obj["diamond_group"].is_null());
         assert_eq!(obj["attach_outbox"], false);
         assert!(obj["cdc_slot_name"].is_null());
+        assert_eq!(obj["orchestration_mode"], "MANAGED");
+        assert_eq!(obj["contract_generation"], 1);
     }
 
     /// Verify that the spec returns None for unknown OIDs (no SPI — pure logic).

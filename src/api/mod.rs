@@ -21,6 +21,7 @@ use crate::template_cache;
 use crate::version;
 use crate::wal_decoder;
 
+pub(crate) mod integration;
 pub(crate) mod outbox;
 pub(crate) mod publication;
 pub(crate) mod scheduler_control;
@@ -182,6 +183,16 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .set_hint(
                 "See docs/SQL_REFERENCE.md for valid parameter values and syntax.".to_string(),
             )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::IntegrationError { code, detail } => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("{code}: {detail}"),
+                "",
+            )
+            .set_detail(format!("pg_trickle_reason_code={code}"))
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
@@ -1821,6 +1832,7 @@ fn insert_catalog_and_deps(
     storage_fillfactor: Option<i32>,
     // LSEC-3 (v0.87.7): the caller's search_path used to resolve `defining_query`
     defining_search_path: &str,
+    orchestration_mode: &str,
 ) -> Result<i64, PgTrickleError> {
     let topk_limit = vq
         .topk_info
@@ -1866,6 +1878,7 @@ fn insert_catalog_and_deps(
         storage_backend,
         storage_fillfactor,
         defining_search_path,
+        orchestration_mode,
     )?;
 
     let query_hash = crate::catalog::compute_defining_query_hash(defining_query);
@@ -4146,6 +4159,8 @@ mod tests {
             last_error_retryable: None,
             defining_search_path: "public".to_string(),
             window_strategy: None,
+            orchestration_mode: "MANAGED".to_string(),
+            contract_generation: 1,
         }
     }
 

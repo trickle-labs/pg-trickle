@@ -170,10 +170,10 @@
       "class": "admin_global",
       "execution_policy": "capability_specific"
     },
-    "pgtrickle.create_or_replace_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text)": {
+    "pgtrickle.create_or_replace_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, text)": {
       "schema": "pgtrickle",
       "name": "create_or_replace_stream_table",
-      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text",
+      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, text",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
@@ -184,10 +184,10 @@
       "class": "admin_global",
       "execution_policy": "capability_specific"
     },
-    "pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text)": {
+    "pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text)": {
       "schema": "pgtrickle",
       "name": "create_stream_table",
-      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text",
+      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
@@ -212,10 +212,10 @@
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
-    "pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text)": {
+    "pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text)": {
       "schema": "pgtrickle",
       "name": "create_stream_table_if_not_exists",
-      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text",
+      "identity_arguments": "text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
@@ -225,6 +225,48 @@
       "identity_arguments": "text, text, text, boolean, text, integer, double precision",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle._bump_contract_generation()": {
+      "schema": "pgtrickle",
+      "name": "_bump_contract_generation",
+      "identity_arguments": "",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle._bump_dependency_contract_generation()": {
+      "schema": "pgtrickle",
+      "name": "_bump_dependency_contract_generation",
+      "identity_arguments": "",
+      "class": "internal",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.graph_contract(regclass[])": {
+      "schema": "pgtrickle",
+      "name": "graph_contract",
+      "identity_arguments": "regclass[]",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.integration_capabilities()": {
+      "schema": "pgtrickle",
+      "name": "integration_capabilities",
+      "identity_arguments": "",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
+    },
+    "pgtrickle.set_orchestration_mode(regclass, text)": {
+      "schema": "pgtrickle",
+      "name": "set_orchestration_mode",
+      "identity_arguments": "regclass, text",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.stream_table_contract(regclass)": {
+      "schema": "pgtrickle",
+      "name": "stream_table_contract",
+      "identity_arguments": "regclass",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     },
     "pgtrickle.create_watermark_group(text, text[], double precision)": {
       "schema": "pgtrickle",

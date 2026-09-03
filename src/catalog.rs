@@ -282,6 +282,10 @@ pub struct StreamTableMeta {
     /// their storage relation's owner at the current storage owner and
     /// `public` on upgrade.
     pub defining_search_path: String,
+    /// v0.93.0: durable owner of refresh orchestration.
+    pub orchestration_mode: String,
+    /// v0.93.0: generation of the result-affecting execution contract.
+    pub contract_generation: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +450,7 @@ impl StreamTableMeta {
         storage_fillfactor: Option<i32>,
         // LSEC-3 (v0.87.7): the caller's search_path used to resolve `defining_query`
         defining_search_path: &str,
+        orchestration_mode: &str,
     ) -> Result<i64, PgTrickleError> {
         // PERF-2: Compute hash of the defining query at INSERT time so that
         // the refresh engine can skip the per-refresh DefaultHasher computation.
@@ -461,9 +466,10 @@ impl StreamTableMeta {
                       requested_cdc_mode, is_append_only, pooler_compatibility_mode, \
                       st_partition_key, max_differential_joins, max_delta_fraction, \
                       temporal_mode, storage_backend, defining_query_hash, \
-                      storage_fillfactor, row_identity_version, row_probe_version, defining_search_path) \
+                      storage_fillfactor, row_identity_version, row_probe_version, defining_search_path, \
+                      orchestration_mode) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27) \
+                             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -494,6 +500,7 @@ impl StreamTableMeta {
                         crate::hash::CURRENT_ROW_IDENTITY_VERSION.into(),
                         (crate::dvm::row_id_v2::PROBE_VERSION_V1 as i16).into(),
                         defining_search_path.into(),
+                        orchestration_mode.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -538,7 +545,9 @@ impl StreamTableMeta {
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
+                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
+                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -587,7 +596,9 @@ impl StreamTableMeta {
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
+                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
+                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_relid = $1",
                     None,
@@ -641,7 +652,9 @@ impl StreamTableMeta {
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
+                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
+                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE pgt_id = $1",
                     None,
@@ -690,7 +703,9 @@ impl StreamTableMeta {
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
+                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
+                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
                      FROM pgtrickle.pgt_stream_tables st",
                     None,
                     &[],
@@ -743,7 +758,9 @@ impl StreamTableMeta {
                      COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
                      COALESCE(self_heal_success_streak, 0::smallint), \
                      last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
+                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
+                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
                      FROM pgtrickle.pgt_stream_tables st \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1172,6 +1189,28 @@ impl StreamTableMeta {
              SET requested_cdc_mode = $1, updated_at = now() \
              WHERE pgt_id = $2",
             &[requested_cdc_mode.into(), pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// v0.93.0: Persist the durable refresh orchestration owner.
+    pub fn update_orchestration_mode(pgt_id: i64, mode: &str) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET orchestration_mode = $1, updated_at = now() \
+             WHERE pgt_id = $2",
+            &[mode.into(), pgt_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
+
+    /// Bump the semantic contract generation after an upstream DDL change.
+    pub fn bump_contract_generation(pgt_id: i64) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables \
+             SET contract_generation = contract_generation + 1, updated_at = now() \
+             WHERE pgt_id = $1",
+            &[pgt_id.into()],
         )
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
     }
@@ -1608,6 +1647,11 @@ impl StreamTableMeta {
                 spec_ordinal: -1,
                 reason,
             })?;
+        let contract_generation = table.get::<i64>(63).map_err(map_spi)?.unwrap_or(1);
+        let orchestration_mode = table
+            .get::<String>(64)
+            .map_err(map_spi)?
+            .unwrap_or_else(|| "MANAGED".to_string());
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1672,6 +1716,8 @@ impl StreamTableMeta {
             last_error_retryable,
             defining_search_path,
             window_strategy,
+            orchestration_mode,
+            contract_generation,
         })
     }
 
@@ -1822,6 +1868,11 @@ impl StreamTableMeta {
                 spec_ordinal: -1,
                 reason,
             })?;
+        let contract_generation = row.get::<i64>(63).map_err(map_spi)?.unwrap_or(1);
+        let orchestration_mode = row
+            .get::<String>(64)
+            .map_err(map_spi)?
+            .unwrap_or_else(|| "MANAGED".to_string());
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1886,6 +1937,8 @@ impl StreamTableMeta {
             last_error_retryable,
             defining_search_path,
             window_strategy,
+            orchestration_mode,
+            contract_generation,
         })
     }
 }

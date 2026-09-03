@@ -57,6 +57,8 @@ mod hash;
 #[allow(dead_code)]
 mod hooks;
 #[allow(dead_code)]
+pub(crate) mod integration_contract;
+#[allow(dead_code)]
 mod ivm;
 pub mod logging;
 #[allow(dead_code)]
@@ -382,8 +384,57 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     -- (bare $user already expanded). Set at CREATE and on any ALTER that
     -- changes the query; preserved by configuration-only ALTERs and
     -- ownership transfer.
-    defining_search_path TEXT NOT NULL
+    defining_search_path TEXT NOT NULL,
+    -- v0.93.0: durable ownership of refresh orchestration.
+    orchestration_mode TEXT NOT NULL DEFAULT 'MANAGED'
+        CHECK (orchestration_mode IN ('MANAGED', 'EXTERNAL')),
+    -- v0.93.0: generation of the result-affecting execution contract.
+    contract_generation BIGINT NOT NULL DEFAULT 1 CHECK (contract_generation > 0)
 );
+
+CREATE OR REPLACE FUNCTION pgtrickle._bump_contract_generation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pgtrickle, pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF ROW(OLD.pgt_relid, OLD.pgt_name, OLD.pgt_schema, OLD.defining_query,
+           OLD.original_query, OLD.refresh_mode, OLD.requested_refresh_mode,
+           OLD.functions_used, OLD.topk_limit, OLD.topk_order_by,
+           OLD.topk_offset, OLD.diamond_consistency,
+           OLD.diamond_schedule_policy, OLD.has_keyless_source,
+           OLD.requested_cdc_mode, OLD.is_append_only, OLD.scc_id,
+           OLD.st_partition_key, OLD.temporal_mode, OLD.storage_backend,
+           OLD.row_identity_version, OLD.row_probe_version,
+           OLD.defining_search_path, OLD.orchestration_mode)
+       IS DISTINCT FROM
+       ROW(NEW.pgt_relid, NEW.pgt_name, NEW.pgt_schema, NEW.defining_query,
+           NEW.original_query, NEW.refresh_mode, NEW.requested_refresh_mode,
+           NEW.functions_used, NEW.topk_limit, NEW.topk_order_by,
+           NEW.topk_offset, NEW.diamond_consistency,
+           NEW.diamond_schedule_policy, NEW.has_keyless_source,
+           NEW.requested_cdc_mode, NEW.is_append_only, NEW.scc_id,
+           NEW.st_partition_key, NEW.temporal_mode, NEW.storage_backend,
+           NEW.row_identity_version, NEW.row_probe_version,
+           NEW.defining_search_path, NEW.orchestration_mode) THEN
+        NEW.contract_generation := OLD.contract_generation + 1;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS pgt_stream_tables_contract_generation
+    ON pgtrickle.pgt_stream_tables;
+CREATE TRIGGER pgt_stream_tables_contract_generation
+BEFORE UPDATE OF pgt_relid, pgt_name, pgt_schema, defining_query,
+    original_query, refresh_mode, requested_refresh_mode, functions_used,
+    topk_limit, topk_order_by, topk_offset, diamond_consistency,
+    diamond_schedule_policy, has_keyless_source, requested_cdc_mode,
+    is_append_only, scc_id, st_partition_key, temporal_mode, storage_backend,
+    row_identity_version, row_probe_version, defining_search_path,
+    orchestration_mode
+ON pgtrickle.pgt_stream_tables
+FOR EACH ROW EXECUTE FUNCTION pgtrickle._bump_contract_generation();
 
 CREATE INDEX IF NOT EXISTS idx_pgt_status ON pgtrickle.pgt_stream_tables (status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pgt_name ON pgtrickle.pgt_stream_tables (pgt_schema, pgt_name);
@@ -555,6 +606,28 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
 CREATE INDEX IF NOT EXISTS idx_deps_source ON pgtrickle.pgt_dependencies (source_relid);
 -- PERF-4: Fast lookup by pgt_id (non‐PK prefix for multi‐column PK).
 CREATE INDEX IF NOT EXISTS idx_deps_pgt_id ON pgtrickle.pgt_dependencies (pgt_id);
+
+CREATE OR REPLACE FUNCTION pgtrickle._bump_dependency_contract_generation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pgtrickle, pg_catalog, pg_temp
+AS $$
+BEGIN
+    UPDATE pgtrickle.pgt_stream_tables
+       SET contract_generation = contract_generation + 1
+     WHERE pgt_id = CASE WHEN TG_OP = 'DELETE' THEN OLD.pgt_id ELSE NEW.pgt_id END;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS pgt_dependencies_contract_generation
+    ON pgtrickle.pgt_dependencies;
+CREATE TRIGGER pgt_dependencies_contract_generation
+AFTER INSERT OR UPDATE OR DELETE ON pgtrickle.pgt_dependencies
+FOR EACH ROW EXECUTE FUNCTION pgtrickle._bump_dependency_contract_generation();
 
 -- Refresh history / audit log
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
@@ -820,6 +893,12 @@ INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES (
     '0.91.0',
     'Safe defining-query replacement and source schema-evolution recovery'
+)
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES (
+    '0.93.0',
+    'Graph V1 contracts and durable external orchestration ownership'
 )
 ON CONFLICT (version) DO NOTHING;
 
@@ -1971,12 +2050,12 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.bulk_drop_stream_tables(text[]) FROM PUBLIC
 REVOKE EXECUTE ON FUNCTION pgtrickle.canary_begin(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.canary_diff(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.canary_promote(text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pgtrickle.create_or_replace_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_or_replace_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_batch(text, text, text, boolean, text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_cost_optimized(text, text, text, boolean, text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_fast_append_only(text, text, text, text, text, integer, double precision) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_if_not_exists(text, text, text, text, boolean, text, text, text, boolean, boolean, text, integer, double precision, text, boolean, text, integer, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.create_stream_table_realtime(text, text, text, boolean, text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.detach_outbox(text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.drop_snapshot(text) FROM PUBLIC;

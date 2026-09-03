@@ -21,11 +21,16 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
     - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
     - [pgtrickle.pause\_stream\_table](#pgtricklepause_stream_table)
+    - [pgtrickle.set\_orchestration\_mode](#pgtrickleset_orchestration_mode)
     - [pgtrickle.set\_stream\_table\_refresh\_policy](#pgtrickleset_stream_table_refresh_policy)
     - [pgtrickle.set\_stream\_table\_storage\_policy](#pgtrickleset_stream_table_storage_policy)
     - [pgtrickle.refresh\_stream\_table](#pgtricklerefresh_stream_table)
     - [pgtrickle.repair\_stream\_table](#pgtricklerepair_stream_table)
     - [pgtrickle.reinitialize\_stream\_table](#pgtricklereinitialize_stream_table)
+  - [Integration Contracts](#integration-contracts)
+    - [pgtrickle.integration\_capabilities](#pgtrickleintegration_capabilities)
+    - [pgtrickle.stream\_table\_contract](#pgtricklestream_table_contract)
+    - [pgtrickle.graph\_contract](#pgtricklegraph_contract)
   - [Status & Monitoring](#status--monitoring)
     - [pgtrickle.pgt\_status](#pgtricklepgt_status)
     - [pgtrickle.health\_check](#pgtricklehealth_check)
@@ -234,6 +239,7 @@ pgtrickle.create_stream_table(
     temporal                  bool      DEFAULT false,
     storage_backend           text      DEFAULT NULL,
     sink                      text      DEFAULT NULL,
+    orchestration_mode        text      DEFAULT 'MANAGED',
 ) → void
 ```
 
@@ -257,6 +263,7 @@ pgtrickle.create_stream_table(
 | `output_distribution_column` | `text` | `NULL` | Citus only: distribution column for the stream table storage table. Must be a column present in the query output. |
 | `temporal` | `bool` | `false` | When `true`, enables temporal IVM mode — the stream table tracks effective-time ranges and can answer as-of queries. |
 | `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
+| `orchestration_mode` | `text` | `'MANAGED'` | Durable refresh owner. `MANAGED` enables pg_trickle scheduling; `EXTERNAL` leaves refresh submission to an external coordinator. `EXTERNAL` cannot be combined with `IMMEDIATE`. |
 
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
@@ -1626,6 +1633,63 @@ pgtrickle.reinitialize_stream_table(name text) → text
 
 The command validates dependencies, resets the frontier, rebuilds missing CDC
 infrastructure, and schedules a protected full refresh.
+
+---
+
+## Integration Contracts
+
+The v0.93 contract APIs expose stable, typed metadata for integrations. Graph
+refresh execution and output-delta delivery remain disabled until later
+capability versions.
+
+### pgtrickle.integration_capabilities
+
+List independently versioned integration capabilities and whether they are
+enabled on this installation.
+
+```sql
+SELECT * FROM pgtrickle.integration_capabilities();
+```
+
+### pgtrickle.set_orchestration_mode
+
+Assign durable refresh ownership to a stream table. The caller must own the
+stream table or have owner-equivalent authority.
+
+```sql
+SELECT pgtrickle.set_orchestration_mode('public.orders_total'::regclass, 'EXTERNAL');
+```
+
+`MANAGED` returns scheduling to pg_trickle. `EXTERNAL` disables scheduler and
+manual refresh entry points for the table; a coordinator may use the contract
+APIs to inspect the graph. `EXTERNAL` is rejected for `IMMEDIATE` tables.
+
+### pgtrickle.stream_table_contract
+
+Return the stream table's contract generation, SHA-256 digest, and JSON
+projection. The digest includes query rewrite identity, output schema,
+dependencies, source identity, ownership, RLS flags, search path, row identity
+versions, DVM format, and database instance identity.
+
+```sql
+SELECT * FROM pgtrickle.stream_table_contract('public.orders_total'::regclass);
+```
+
+### pgtrickle.graph_contract
+
+Return one canonical contract for the complete upstream closure of one or more
+`EXTERNAL` roots. Members, edges, sources, roots, and topological order are
+deterministically encoded; cycles, temporary relations, unsupported sources,
+cross-database inputs, malformed catalog rows, and unauthorized members or
+sources fail closed.
+
+```sql
+SELECT *
+FROM pgtrickle.graph_contract(ARRAY['public.orders_total'::regclass]);
+```
+
+The `external_graph_refresh` capability is experimental and disabled in v0.93;
+`output_delta_consumer` is absent until v0.95.
 
 ---
 

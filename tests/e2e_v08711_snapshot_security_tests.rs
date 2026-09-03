@@ -5,7 +5,7 @@ mod e2e;
 use e2e::E2eDb;
 
 const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
-     text, integer, double precision, text, boolean, text, integer, text";
+     text, integer, double precision, text, boolean, text, integer, text, text";
 
 async fn create_snapshot_role(db: &E2eDb, role: &str) {
     db.execute(&format!(

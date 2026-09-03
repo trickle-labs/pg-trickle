@@ -205,7 +205,7 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = 'pgtrickle' \
                AND p.proname = 'create_stream_table' \
-               AND p.pronargs = 18",
+               AND p.pronargs = 19",
         )
         .await;
     assert!(secured_api, "creation API must be SECURITY DEFINER");
@@ -218,7 +218,7 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
              unnest(p.proconfig) AS setting \
              WHERE n.nspname = 'pgtrickle' \
                AND p.proname = 'create_stream_table' \
-               AND p.pronargs = 18 \
+               AND p.pronargs = 19 \
                AND setting = 'search_path=pgtrickle, pg_catalog, pg_temp' \
              )",
         )
@@ -359,7 +359,7 @@ async fn test_ownership_nonsuperuser_lifecycle_without_private_grants() {
     db.execute(
         "GRANT EXECUTE ON FUNCTION pgtrickle.create_or_replace_stream_table(\
             text, text, text, text, boolean, text, text, text, boolean, boolean, \
-            text, integer, double precision, text, boolean, text) \
+            text, integer, double precision, text, boolean, text, text) \
          TO sec941_owner",
     )
     .await;

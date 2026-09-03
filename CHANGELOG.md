@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.93.0 — Graph Contracts and External Ownership](#0930--graph-contracts-and-external-ownership)
 - [0.92.0 — Backup, Restore, Upgrade & CDC Recovery](#0920--backup-restore-upgrade--cdc-recovery)
 - [0.91.0 — Schema and Query Evolution](#0910--schema-and-query-evolution)
 - [0.90.0 — Freshness Controller and Exact Freshness Evidence](#0900--freshness-controller-and-exact-freshness-evidence)
@@ -201,6 +202,23 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.93.0] — Graph Contracts and External Ownership
+
+v0.93.0 adds the contract and ownership foundation for composable graph
+refresh.
+
+- Adds independent capability discovery for graph refresh and output-delta
+  integrations.
+- Adds deterministic stream-table and upstream graph contracts with generation
+  counters, SHA-256 digests, canonical ordering, and fail-closed validation.
+- Adds durable `MANAGED`/`EXTERNAL` ownership, owner-checked mode changes, and
+  scheduler exclusion for externally coordinated tables.
+- Adds the 0.92.0 → 0.93.0 migration, full-install archive, and upgrade runbook.
+- Strict transactional refresh remains the v0.94.0 gate; output deltas remain
+  the v0.95.0 gate.
+
+See the [v0.93 roadmap](roadmap/v0.93.0.md) and [upgrade guide](docs/UPGRADING.md).
 
 ## [0.92.0] — Backup, Restore, Upgrade & CDC Recovery
 

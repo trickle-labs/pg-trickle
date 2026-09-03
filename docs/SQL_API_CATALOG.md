@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**154 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**158 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -72,10 +72,12 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.gate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |
 | `pgtrickle.get_refresh_history()` | `pgtrickle` | `` | Exposed as `pgtrickle.get_refresh_history(name, limit)`. |
 | `pgtrickle.get_staleness()` | `pgtrickle` | `double precision (nullable)` |  |
+| `pgtrickle.graph_contract()` | `pgtrickle` | `SetOf row` | Return a canonical contract for the complete upstream closure of roots. |
 | `pgtrickle.handle_vp_promoted()` | `pgtrickle` | `boolean` | Returns `true` if the payload was valid and a matching source was found; `false` if the payload was invalid or no source matched. |
 | `pgtrickle.health_check()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_check()`. |
 | `pgtrickle.health_summary()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_summary()`. |
 | `pgtrickle.history_prune_status()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.history_prune_status()`. |
+| `pgtrickle.integration_capabilities()` | `pgtrickle` | `SetOf row` | Advertise independently versioned integration capabilities. |
 | `pgtrickle.is_drained()` | `pgtrickle` | `boolean (nullable)` | A scheduler is considered drained when `DRAIN_COMPLETED >= DRAIN_REQUESTED` in shared memory. |
 | `pgtrickle.lifecycle_preflight()` | `pgtrickle` | `text` | This read-only upgrade and operations preflight is intentionally superuser-only: it reports the exact missing grants without changing catalog state. |
 | `pgtrickle.list_auxiliary_columns()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.list_auxiliary_columns('my_stream_table'); ```. |
@@ -126,6 +128,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.schedule_recommendations()` | `pgtrickle` | `SetOf row` | PLAN-2 (v0.27.0): Return one schedule recommendation row per registered stream table, sortable by `delta_pct DESC`. |
 | `pgtrickle.scheduler_overhead()` | `pgtrickle` | `SetOf row` | Computes busy-time ratio, queue depth, avg dispatch latency, and the fraction of CPU spent on self-monitoring STs vs user STs from refresh history. |
 | `pgtrickle.self_monitoring_status()` | `pgtrickle` | `SetOf row` | For each of the five expected DF stream tables, reports whether it exists, its current status, refresh mode, and last refresh time. |
+| `pgtrickle.set_orchestration_mode()` | `pgtrickle` | `text` | Change durable refresh ownership for one stream table. |
 | `pgtrickle.set_stream_table_refresh_policy()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.set_stream_table_refresh_policy('my_schema.my_st', 'DIFFERENTIAL'); ```. |
 | `pgtrickle.set_stream_table_sla()` | `pgtrickle` | `` | Accepts an interval and stores it as `freshness_deadline_ms`. |
 | `pgtrickle.set_stream_table_storage_policy()` | `pgtrickle` | `` | # Example ```sql SELECT pgtrickle.set_stream_table_storage_policy('my_schema.my_st', true, 'hot'); ```. |
@@ -140,6 +143,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.st_refresh_stats()` | `pgtrickle` | `SetOf row` | This is the primary monitoring function, exposed as `pgtrickle.st_refresh_stats()`. |
 | `pgtrickle.stat_reset()` | `pgtrickle` | `` | Reset cumulative diagnostics for one owned stream table without deleting immutable refresh history or operational error state. |
 | `pgtrickle.stat_reset_all()` | `pgtrickle` | `` | Reset cumulative diagnostics for all stream tables. |
+| `pgtrickle.stream_table_contract()` | `pgtrickle` | `SetOf row` | Return the versioned semantic contract for one stream table. |
 | `pgtrickle.stream_table_lineage()` | `pgtrickle` | `SetOf row` | # Example ```sql SELECT * FROM pgtrickle.stream_table_lineage('public.revenue_summary'); ```. |
 | `pgtrickle.stream_table_spec()` | `pgtrickle` | `jsonb (nullable)` | Example: ```sql SELECT pgtrickle.stream_table_spec('public.my_view'::regclass); ```. |
 | `pgtrickle.stream_table_spec()` | `pgtrickle` | `jsonb (nullable)` | Example: ```sql SELECT pgtrickle.stream_table_spec('public.my_view'); ```. |
