@@ -143,7 +143,7 @@ CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
     "orchestration_mode" TEXT DEFAULT 'MANAGED'
 )
 RETURNS void
-SECURITY DEFINER
+SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
@@ -170,7 +170,7 @@ CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
     "orchestration_mode" TEXT DEFAULT 'MANAGED'
 )
 RETURNS void
-SECURITY DEFINER
+SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
@@ -195,7 +195,7 @@ CREATE OR REPLACE FUNCTION pgtrickle."create_or_replace_stream_table"(
     "orchestration_mode" TEXT DEFAULT NULL
 )
 RETURNS void
-SECURITY DEFINER
+SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_or_replace_stream_table_wrapper';
@@ -217,7 +217,7 @@ CREATE OR REPLACE FUNCTION pgtrickle."set_orchestration_mode"(
     "mode" TEXT
 )
 RETURNS TEXT
-STRICT SECURITY DEFINER
+STRICT SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'set_orchestration_mode_wrapper';
@@ -231,7 +231,7 @@ RETURNS TABLE (
     "contract_digest" bytea,
     "contract" jsonb
 )
-STRICT SECURITY DEFINER
+STRICT SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'stream_table_contract_wrapper';
@@ -244,7 +244,7 @@ RETURNS TABLE (
     "graph_digest" bytea,
     "contract" jsonb
 )
-STRICT SECURITY DEFINER
+STRICT SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present — search_path is pinned immediately below.
 SET search_path TO pgtrickle, pg_catalog, pg_temp
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'graph_contract_wrapper';

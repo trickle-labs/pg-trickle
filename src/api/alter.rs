@@ -1072,7 +1072,16 @@ fn atomic_swap_shadow_table(
     );
     // nosemgrep: rust.spi.run.dynamic-format — backup is a quote_identifier-escaped private relation.
     Spi::run(&format!("DROP TABLE {backup} RESTRICT"))
-        .map_err(|e| PgTrickleError::SpiError(format!("failed to remove old stream table: {e}")))
+        .map_err(|e| PgTrickleError::SpiError(format!("failed to remove old stream table: {e}")))?;
+
+    let shadow_index = quote_identifier(&format!("{shadow_name}_row_id_idx"));
+    let stream_index = quote_identifier(&format!("{table_name}_row_id_idx"));
+    // nosemgrep: rust.spi.run.dynamic-format — schema and private index names are quote_identifier-escaped.
+    Spi::run(&format!(
+        "ALTER INDEX {}.{shadow_index} RENAME TO {stream_index}",
+        quote_identifier(schema)
+    ))
+    .map_err(|e| PgTrickleError::SpiError(format!("failed to rename row-id index: {e}")))
 }
 
 /// Perform an in-place query migration on an existing stream table.
