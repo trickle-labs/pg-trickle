@@ -216,6 +216,7 @@ async fn create_database_from_template(
     admin_connection_string: &str,
     db_name: &str,
     template: &str,
+    port: u16,
 ) {
     let admin_pool = PgPoolOptions::new()
         .max_connections(1)
@@ -246,6 +247,22 @@ async fn create_database_from_template(
             .await
         {
             Ok(_) => {
+                // The clone may contain the template's capture identity.
+                // Clear it before enabling the scheduler so the database
+                // establishes ownership using its own database OID.
+                let clone_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&connection_string(port, db_name))
+                    .await
+                    .unwrap_or_else(|e| panic!("Failed to connect to cloned DB {db_name}: {e}"));
+                sqlx::query("DELETE FROM pgtrickle.pgt_capture_instance")
+                    .execute(&clone_pool)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to clear cloned DB capture identity {db_name}: {e}")
+                    });
+                clone_pool.close().await;
+
                 // The cloned DB inherits the template's per-database
                 // pg_trickle.enabled = off setting.  Reset it so the
                 // extension is active in the test database.
@@ -491,6 +508,7 @@ impl E2eDb {
             &shared.admin_connection_string,
             &db_name,
             &shared.template_db_name,
+            shared.port,
         )
         .await;
         let pool = Self::connect_with_retry(&connection_string(shared.port, &db_name), 15).await;
@@ -550,6 +568,7 @@ impl E2eDb {
             &shared.admin_connection_string,
             &db_name,
             &shared.template_db_name,
+            shared.port,
         )
         .await;
         let connection_string = connection_string(shared.port, &db_name);
