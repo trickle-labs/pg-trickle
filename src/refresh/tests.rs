@@ -84,6 +84,8 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         last_error_retryable: None,
         defining_search_path: "public".to_string(),
         window_strategy: None,
+        orchestration_mode: "MANAGED".to_string(),
+        contract_generation: 1,
     }
 }
 

@@ -200,12 +200,13 @@ fn ensure_capture_instance() -> Result<CaptureGate, PgTrickleError> {
     let database_oid = current_database_oid()?;
     let system_identifier = current_system_identifier()?;
     let existing = load_instance_state()?;
-    let Some(instance) = existing else {
+    if existing.is_none() {
         let instance_id = new_instance_id()?;
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_capture_instance
                     (singleton, instance_id, database_oid, system_identifier, state)
-             VALUES (true, $1, $2, $3, 'ACTIVE')",
+             VALUES (true, $1, $2, $3, 'ACTIVE')
+             ON CONFLICT (singleton) DO NOTHING",
             &[
                 instance_id.as_str().into(),
                 database_oid.into(),
@@ -213,7 +214,12 @@ fn ensure_capture_instance() -> Result<CaptureGate, PgTrickleError> {
             ],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        return Ok(CaptureGate::Ready);
+    }
+
+    let Some(instance) = load_instance_state()? else {
+        return Err(PgTrickleError::InternalError(
+            "capture instance disappeared after initialization".into(),
+        ));
     };
 
     if instance.database_oid != database_oid

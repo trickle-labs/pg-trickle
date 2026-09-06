@@ -143,6 +143,10 @@ pub enum PgTrickleError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// A versioned integration contract rejected the requested operation.
+    #[error("{code}: {detail}")]
+    IntegrationError { code: &'static str, detail: String },
+
     /// Exact freshness evidence cannot be collected for the requested target.
     #[error("freshness evidence unavailable: {0}")]
     FreshnessEvidenceUnavailable(String),
@@ -764,6 +768,7 @@ impl PgTrickleError {
             | PgTrickleError::NotFound(_)
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
+            | PgTrickleError::IntegrationError { .. }
             | PgTrickleError::FreshnessEvidenceUnavailable(_)
             | PgTrickleError::QueryTooComplex(_)
             | PgTrickleError::VectorAggregateOverflow { .. }

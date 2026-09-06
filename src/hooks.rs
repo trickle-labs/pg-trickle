@@ -78,6 +78,7 @@
 //! is resolved by walking transitive dependencies in `pgtrickle.pgt_dependencies`.
 
 use pgrx::prelude::*;
+use std::collections::HashSet;
 
 use crate::catalog::{CdcMode, StDependency, StreamTableMeta};
 use crate::dag::StStatus;
@@ -770,6 +771,13 @@ fn handle_policy_change(cmd: &DdlCommand) {
 
     for pgt_id in &affected_pgt_ids {
         suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+        if let Err(e) = StreamTableMeta::bump_contract_generation(*pgt_id) {
+            pgrx::warning!(
+                "pg_trickle_ddl_tracker: failed to bump contract generation for ST {}: {}",
+                pgt_id,
+                e,
+            );
+        }
     }
 
     let cascade_ids = match find_transitive_downstream_sts(&affected_pgt_ids) {
@@ -785,6 +793,16 @@ fn handle_policy_change(cmd: &DdlCommand) {
 
     for pgt_id in &cascade_ids {
         suspend_for_source_ddl(*pgt_id, AlterReasonCode::DependencyAmbiguous, identity);
+    }
+
+    for pgt_id in &cascade_ids {
+        if let Err(e) = StreamTableMeta::bump_contract_generation(*pgt_id) {
+            pgrx::warning!(
+                "pg_trickle_ddl_tracker: failed to bump contract generation for ST {}: {}",
+                pgt_id,
+                e,
+            );
+        }
     }
 
     let total = affected_pgt_ids.len() + cascade_ids.len();
@@ -848,6 +866,16 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     let mut reinit_pgt_ids = Vec::new();
     let mut suspended_pgt_ids = Vec::new();
     for pgt_id in &affected_pgt_ids {
+        // ALTER TABLE also covers owner and row-security changes. Those values
+        // are part of the external contract, so invalidate the generation in
+        // the same transaction as the DDL.
+        if let Err(e) = StreamTableMeta::bump_contract_generation(*pgt_id) {
+            pgrx::warning!(
+                "pg_trickle_ddl_tracker: failed to bump contract generation for ST {}: {}",
+                pgt_id,
+                e,
+            );
+        }
         if source_identity_changed(objid, *pgt_id) {
             suspend_for_source_ddl(*pgt_id, AlterReasonCode::SchemaMoved, identity);
             suspended_pgt_ids.push(*pgt_id);
@@ -1026,6 +1054,21 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
         if let Err(e) = StreamTableMeta::mark_for_reinitialize(*pgt_id) {
             pgrx::warning!(
                 "pg_trickle_ddl_tracker: failed to cascade reinit to ST {}: {}",
+                pgt_id,
+                e,
+            );
+        }
+    }
+
+    let cascade_contract_ids: HashSet<i64> = suspended_cascade_ids
+        .iter()
+        .chain(cascade_ids.iter())
+        .copied()
+        .collect();
+    for pgt_id in cascade_contract_ids {
+        if let Err(e) = StreamTableMeta::bump_contract_generation(pgt_id) {
+            pgrx::warning!(
+                "pg_trickle_ddl_tracker: failed to bump contract generation for ST {}: {}",
                 pgt_id,
                 e,
             );

@@ -115,7 +115,12 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
 
 
 
-    defining_search_path TEXT NOT NULL
+    defining_search_path TEXT NOT NULL,
+
+    orchestration_mode TEXT NOT NULL DEFAULT 'MANAGED'
+        CHECK (orchestration_mode IN ('MANAGED', 'EXTERNAL')),
+
+    contract_generation BIGINT NOT NULL DEFAULT 1 CHECK (contract_generation > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pgt_status ON pgtrickle.pgt_stream_tables (status);

@@ -8,7 +8,7 @@ async fn grant_stream_create(db: &E2eDb, role: &str) {
     db.execute(&format!(
         "GRANT EXECUTE ON FUNCTION pgtrickle.create_stream_table(\
          text, text, text, text, boolean, text, text, text, boolean, boolean, \
-         text, integer, double precision, text, boolean, text, integer, text) TO {role}"
+         text, integer, double precision, text, boolean, text, integer, text, text) TO {role}"
     ))
     .await;
 }

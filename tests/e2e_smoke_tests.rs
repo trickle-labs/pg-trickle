@@ -225,3 +225,117 @@ async fn test_event_triggers_installed() {
         .await;
     assert!(drop_trigger, "Drop event trigger should exist");
 }
+
+#[tokio::test]
+async fn test_v093_capabilities_are_independent() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    let capability_count: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.integration_capabilities()")
+        .await;
+    assert_eq!(capability_count, 2);
+
+    let graph_enabled: bool = db
+        .query_scalar(
+            "SELECT enabled FROM pgtrickle.integration_capabilities() \
+             WHERE capability = 'external_graph_refresh'",
+        )
+        .await;
+    let delta_status: String = db
+        .query_scalar(
+            "SELECT details->>'status' FROM pgtrickle.integration_capabilities() \
+             WHERE capability = 'output_delta_consumer'",
+        )
+        .await;
+    assert!(!graph_enabled);
+    assert_eq!(delta_status, "absent");
+}
+
+#[tokio::test]
+async fn test_v093_external_ownership_blocks_managed_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE v093_source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v093_external',\
+             query => 'SELECT id, val FROM v093_source',\
+             schedule => '1m',\
+             refresh_mode => 'FULL',\
+             initialize => false,\
+             orchestration_mode => 'EXTERNAL'\
+         )",
+    )
+    .await;
+
+    let mode: String = db
+        .query_scalar(
+            "SELECT orchestration_mode FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'v093_external'",
+        )
+        .await;
+    assert_eq!(mode, "EXTERNAL");
+
+    let refresh = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('v093_external')")
+        .await;
+    assert!(
+        refresh.is_err(),
+        "managed refresh must reject EXTERNAL tables"
+    );
+
+    db.execute(
+        "SELECT pgtrickle.set_orchestration_mode(\
+             'public.v093_external'::regclass, 'MANAGED'\
+         )",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_v093_contracts_include_digest_and_canonical_graph() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE v093_graph_source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    for name in ["v093_graph_a", "v093_graph_b"] {
+        let query = if name.ends_with('a') {
+            "SELECT id, val FROM v093_graph_source"
+        } else {
+            "SELECT id, val FROM public.v093_graph_a"
+        };
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table(\
+                 name => '{name}', query => '{query}', schedule => '1m',\
+                 refresh_mode => 'FULL', initialize => false,\
+                 orchestration_mode => 'EXTERNAL'\
+             )"
+        ))
+        .await;
+    }
+
+    let digest_length: i64 = db
+        .query_scalar(
+            "SELECT octet_length(contract_digest)::bigint \
+             FROM pgtrickle.stream_table_contract('public.v093_graph_a'::regclass)",
+        )
+        .await;
+    let member_count: i64 = db
+        .query_scalar(
+            "SELECT jsonb_array_length(contract->'members')::bigint \
+             FROM pgtrickle.graph_contract(ARRAY['public.v093_graph_b'::regclass])",
+        )
+        .await;
+    assert_eq!(digest_length, 32);
+    assert_eq!(member_count, 2);
+
+    let duplicate_roots = db
+        .try_execute(
+            "SELECT * FROM pgtrickle.graph_contract(ARRAY[\
+                 'public.v093_graph_b'::regclass, 'public.v093_graph_b'::regclass\
+             ])",
+        )
+        .await;
+    assert!(duplicate_roots.is_err(), "duplicate roots must be rejected");
+}

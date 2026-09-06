@@ -52,6 +52,8 @@ fn create_stream_table(
     fillfactor: default!(Option<i32>, "NULL"),
     // v0.86.0: declared freshness target
     target_freshness: default!(Option<&str>, "NULL"),
+    // v0.93.0: durable refresh orchestration owner.
+    orchestration_mode: default!(&str, "'MANAGED'"),
 ) {
     let result = create_stream_table_impl(CreateStreamTableOptions {
         name,
@@ -72,6 +74,7 @@ fn create_stream_table(
         storage_backend,
         storage_fillfactor: fillfactor,
         target_freshness,
+        orchestration_mode: Some(orchestration_mode),
         entry_context: None,
     });
     if let Err(e) = result {
@@ -112,6 +115,8 @@ fn create_stream_table_if_not_exists(
     fillfactor: default!(Option<i32>, "NULL"),
     // v0.86.0: declared freshness target
     target_freshness: default!(Option<&str>, "NULL"),
+    // v0.93.0: durable refresh orchestration owner.
+    orchestration_mode: default!(&str, "'MANAGED'"),
 ) {
     let result = create_stream_table_if_not_exists_impl(CreateStreamTableOptions {
         name,
@@ -132,6 +137,7 @@ fn create_stream_table_if_not_exists(
         storage_backend,
         storage_fillfactor: fillfactor,
         target_freshness,
+        orchestration_mode: Some(orchestration_mode),
         entry_context: None,
     });
     if let Err(e) = result {
@@ -299,6 +305,7 @@ pub(crate) fn bulk_create_impl(
             storage_backend: definition.storage_backend.as_deref(),
             storage_fillfactor,
             target_freshness: None,
+            orchestration_mode: Some(&definition.orchestration_mode),
             entry_context: Some(security_context::EntryContext::SecurityDefiner),
         }) {
             Ok(()) => {
@@ -382,10 +389,16 @@ struct BulkCreateDefinition {
     storage_backend: Option<String>,
     #[serde(default)]
     fillfactor: Option<i64>,
+    #[serde(default = "default_managed_orchestration_mode")]
+    orchestration_mode: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_managed_orchestration_mode() -> String {
+    "MANAGED".to_string()
 }
 
 /// Create or replace a stream table.
@@ -423,6 +436,8 @@ fn create_or_replace_stream_table(
     temporal: default!(bool, false),
     // CORR-2/UX-3 (v0.36.0): columnar storage backend
     storage_backend: default!(Option<&str>, "NULL"),
+    // v0.93.0: durable refresh orchestration owner.
+    orchestration_mode: default!(Option<&str>, "NULL"),
 ) {
     let result = create_or_replace_stream_table_impl(
         name,
@@ -441,6 +456,7 @@ fn create_or_replace_stream_table(
         output_distribution_column,
         temporal,
         storage_backend,
+        orchestration_mode,
     );
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -581,6 +597,9 @@ fn create_or_replace_stream_table_impl(
     temporal_mode: bool,
     // CORR-2/UX-3 (v0.36.0): columnar storage backend (used only on first creation).
     storage_backend: Option<&str>,
+    // v0.93.0: durable refresh orchestration owner (used on first creation or
+    // when explicitly changing an existing table).
+    orchestration_mode: Option<&str>,
 ) -> Result<(), PgTrickleError> {
     // LSEC-7/LSEC-8 (v0.87.9): `create_or_replace_stream_table` is now
     // SECURITY DEFINER with a pinned search_path so a non-superuser owner
@@ -628,8 +647,10 @@ fn create_or_replace_stream_table_impl(
                 append_only,
                 pooler_compatibility_mode,
             );
+            let mode_changed = orchestration_mode
+                .is_some_and(|mode| !existing.orchestration_mode.eq_ignore_ascii_case(mode));
 
-            if !query_changed && config_diff.is_empty() {
+            if !query_changed && config_diff.is_empty() && !mode_changed {
                 pgrx::info!(
                     "Stream table {}.{} already exists with identical definition — no changes made.",
                     schema,
@@ -656,6 +677,17 @@ fn create_or_replace_stream_table_impl(
                 entry_context: Some(security_context::EntryContext::SecurityDefiner),
                 ..Default::default()
             })?;
+
+            if mode_changed {
+                super::integration::set_orchestration_mode_for_meta(
+                    &existing,
+                    orchestration_mode.ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "orchestration mode changed without a requested value".into(),
+                        )
+                    })?,
+                )?;
+            }
 
             pgrx::info!(
                 "Stream table {}.{} replaced (query_changed={}, config_changed={}).",
@@ -688,6 +720,7 @@ fn create_or_replace_stream_table_impl(
                 storage_backend, // passed through from caller
                 storage_fillfactor: None,
                 target_freshness: None,
+                orchestration_mode,
                 entry_context: Some(security_context::EntryContext::SecurityDefiner),
             })
         }

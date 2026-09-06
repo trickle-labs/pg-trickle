@@ -76,6 +76,16 @@ fn refresh_stream_table_impl(
 
     let (schema, table_name, st) = resolve_owned_stream_table(name, entry_context)?;
 
+    if st.orchestration_mode.eq_ignore_ascii_case("EXTERNAL") {
+        return Err(PgTrickleError::IntegrationError {
+            code: "PGT_EXT_ORCHESTRATION_MODE",
+            detail: format!(
+                "stream table {}.{} is EXTERNAL; refreshes must be submitted by its coordinator",
+                schema, table_name
+            ),
+        });
+    }
+
     // Phase 10: Check if ST is suspended or in error — refuse manual refresh
     if st.status == StStatus::Suspended || st.status == StStatus::Error {
         return Err(PgTrickleError::InvalidArgument(format!(

@@ -1,11 +1,11 @@
 //! ERR-1e: E2E tests for the error-state circuit breaker.
 //!
 //! Validates the full cycle:
-//!   1. A stream table with a query that triggers a permanent refresh error
-//!      enters ERROR status after a single scheduler cycle.
+//!   1. A stream table whose source changes incompatibly enters SUSPENDED
+//!      status with error details.
 //!   2. `last_error_message` is populated with a meaningful error.
 //!   3. `last_error_at` is set.
-//!   4. The scheduler skips ERROR tables (no further refresh attempts).
+//!   4. The scheduler skips SUSPENDED tables (no further refresh attempts).
 //!   5. `alter_stream_table` with a fixed query clears the error and
 //!      returns the ST to ACTIVE status.
 //!
@@ -62,13 +62,13 @@ async fn wait_for_status(db: &E2eDb, pgt_name: &str, status: &str, timeout: Dura
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-/// ERR-1e: A permanent refresh error immediately sets ERROR status with
+/// ERR-1e: A permanent source schema error immediately sets SUSPENDED status with
 /// last_error_message, and alter_stream_table with a fixed query clears it.
 ///
 /// Scenario:
 /// 1. Create a FULL-mode ST querying a specific column.
 /// 2. Drop the column from the source table (permanent schema error).
-/// 3. Wait for the scheduler to attempt refresh → ST enters ERROR.
+/// 3. The DDL hook suspends the ST and records the schema error.
 /// 4. Verify `last_error_message` is populated.
 /// 5. Verify `last_error_at` is set.
 /// 6. Fix the source table (re-add the column).
@@ -109,11 +109,12 @@ async fn test_permanent_error_sets_error_status_and_alter_clears() {
     ])
     .await;
 
-    // ── Wait for ERROR status ──
-    let entered_error = wait_for_status(&db, "err1e_st", "ERROR", Duration::from_secs(60)).await;
+    // ── Wait for SUSPENDED status ──
+    let entered_error =
+        wait_for_status(&db, "err1e_st", "SUSPENDED", Duration::from_secs(60)).await;
     assert!(
         entered_error,
-        "ST should enter ERROR status after permanent schema-change error"
+        "ST should enter SUSPENDED status after permanent schema-change error"
     );
 
     // ── Verify last_error_message is populated ──
@@ -200,7 +201,7 @@ async fn test_permanent_error_sets_error_status_and_alter_clears() {
 }
 
 /// ERR-1e: `last_error_message` and `last_error_at` are visible in the
-/// `stream_tables_info` view for ERROR tables.
+/// `stream_tables_info` view for SUSPENDED tables.
 #[tokio::test]
 async fn test_error_columns_visible_in_info_view() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
@@ -233,8 +234,8 @@ async fn test_error_columns_visible_in_info_view() {
     .await;
 
     let entered_error =
-        wait_for_status(&db, "err1e_view_st", "ERROR", Duration::from_secs(60)).await;
-    assert!(entered_error, "ST should enter ERROR status");
+        wait_for_status(&db, "err1e_view_st", "SUSPENDED", Duration::from_secs(60)).await;
+    assert!(entered_error, "ST should enter SUSPENDED status");
 
     // Verify error fields visible in the info view
     let has_error_info: bool = db
@@ -250,8 +251,8 @@ async fn test_error_columns_visible_in_info_view() {
     );
 }
 
-/// ERR-1e: `refresh_stream_table()` rejects ERROR status.
-/// Use `resume_stream_table()` to clear error first.
+/// ERR-1e: `refresh_stream_table()` rejects SUSPENDED status.
+/// Use `resume_stream_table()` to clear the suspension first.
 #[tokio::test]
 async fn test_refresh_rejects_error_status() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
@@ -281,8 +282,8 @@ async fn test_refresh_rejects_error_status() {
     .await;
 
     let entered_error =
-        wait_for_status(&db, "err1e_rej_st", "ERROR", Duration::from_secs(60)).await;
-    assert!(entered_error, "ST should enter ERROR status");
+        wait_for_status(&db, "err1e_rej_st", "SUSPENDED", Duration::from_secs(60)).await;
+    assert!(entered_error, "ST should enter SUSPENDED status");
 
     // Manual refresh should be rejected
     let result = db
@@ -290,6 +291,6 @@ async fn test_refresh_rejects_error_status() {
         .await;
     assert!(
         result.is_err(),
-        "refresh_stream_table should reject ERROR status"
+        "refresh_stream_table should reject SUSPENDED status"
     );
 }

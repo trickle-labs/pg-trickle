@@ -1072,7 +1072,16 @@ fn atomic_swap_shadow_table(
     );
     // nosemgrep: rust.spi.run.dynamic-format — backup is a quote_identifier-escaped private relation.
     Spi::run(&format!("DROP TABLE {backup} RESTRICT"))
-        .map_err(|e| PgTrickleError::SpiError(format!("failed to remove old stream table: {e}")))
+        .map_err(|e| PgTrickleError::SpiError(format!("failed to remove old stream table: {e}")))?;
+
+    let shadow_index = quote_identifier(&format!("{shadow_name}_row_id_idx"));
+    let stream_index = quote_identifier(&format!("{table_name}_row_id_idx"));
+    // nosemgrep: rust.spi.run.dynamic-format — schema and private index names are quote_identifier-escaped.
+    Spi::run(&format!(
+        "ALTER INDEX {}.{shadow_index} RENAME TO {stream_index}",
+        quote_identifier(schema)
+    ))
+    .map_err(|e| PgTrickleError::SpiError(format!("failed to rename row-id index: {e}")))
 }
 
 /// Perform an in-place query migration on an existing stream table.
@@ -1733,6 +1742,8 @@ pub(crate) struct CreateStreamTableOptions<'a> {
     pub(crate) storage_fillfactor: Option<i32>,
     /// v0.86.0: declared freshness target (`interval`, `on_commit`, `manual`).
     pub(crate) target_freshness: Option<&'a str>,
+    /// v0.93.0: durable refresh orchestration owner.
+    pub(crate) orchestration_mode: Option<&'a str>,
     /// Entry context used to capture the defining query's search path.
     pub(crate) entry_context: Option<security_context::EntryContext>,
 }
@@ -1771,15 +1782,49 @@ pub(crate) fn create_stream_table_impl(
         storage_backend,
         storage_fillfactor,
         target_freshness,
+        orchestration_mode,
         entry_context,
     } = opts;
     let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
     let mut refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
+    let orchestration_mode = orchestration_mode
+        .unwrap_or("MANAGED")
+        .trim()
+        .to_uppercase();
+    if !matches!(orchestration_mode.as_str(), "MANAGED" | "EXTERNAL") {
+        return Err(PgTrickleError::IntegrationError {
+            code: "PGT_EXT_ORCHESTRATION_MODE",
+            detail: format!(
+                "invalid orchestration_mode '{}'; expected MANAGED or EXTERNAL",
+                orchestration_mode
+            ),
+        });
+    }
+    if orchestration_mode == "EXTERNAL" && refresh_mode.is_immediate() {
+        return Err(PgTrickleError::IntegrationError {
+            code: "PGT_EXT_ORCHESTRATION_MODE",
+            detail: "EXTERNAL orchestration requires a scheduled or manually coordinated refresh mode; IMMEDIATE is managed by PostgreSQL triggers".to_string(),
+        });
+    }
     let target = parse_target_freshness(target_freshness)?;
     if let Some(target) = target
         && target.mode == TargetFreshnessMode::OnCommit
     {
         refresh_mode = RefreshMode::Immediate;
+    }
+    if orchestration_mode == "EXTERNAL" && refresh_mode.is_immediate() {
+        return Err(PgTrickleError::IntegrationError {
+            code: "PGT_EXT_ORCHESTRATION_MODE",
+            detail: "EXTERNAL orchestration cannot be combined with IMMEDIATE refresh mode"
+                .to_string(),
+        });
+    }
+    let should_initialize = initialize && orchestration_mode != "EXTERNAL";
+    if initialize && !should_initialize {
+        pgrx::notice!(
+            "pg_trickle: EXTERNAL stream table {} will remain unpopulated until its coordinator submits a refresh",
+            name
+        );
     }
     // LSEC-1 (v0.87.7): capture the exact original-caller search_path (with
     // a bare `$user` expanded) instead of guessing `"<user>", public`.
@@ -2131,6 +2176,7 @@ pub(crate) fn create_stream_table_impl(
         &storage_backend_str,
         storage_fillfactor,
         &invoker_search_path,
+        &orchestration_mode,
     )?;
 
     if let Some(target) = target {
@@ -2231,7 +2277,7 @@ pub(crate) fn create_stream_table_impl(
     }
 
     // Initialize if requested
-    if initialize {
+    if should_initialize {
         let t_init = Instant::now();
         initialize_st(
             &schema,
@@ -2293,7 +2339,7 @@ pub(crate) fn create_stream_table_impl(
     // LSEC-7 (v0.87.9): must run under the caller's captured search_path —
     // see the matching comment in `alter_stream_table_query`. Best-effort:
     // a failure here must not fail the CREATE itself.
-    if refresh_mode == RefreshMode::Differential && initialize {
+    if refresh_mode == RefreshMode::Differential && should_initialize {
         let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
         let _ = with_invoker_search_path(&invoker_search_path, || {
             refresh::prewarm_merge_cache(&st);
@@ -2310,7 +2356,7 @@ pub(crate) fn create_stream_table_impl(
         table_name,
         pgt_id,
         refresh_mode.as_str(),
-        initialize
+        should_initialize
     );
 
     Ok(())
@@ -2480,6 +2526,21 @@ pub(crate) fn alter_stream_table_impl(
 
     // SEC-1: Ownership check — only the owner (or superuser) can alter.
     check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+
+    if st.orchestration_mode.eq_ignore_ascii_case("EXTERNAL")
+        && (query.is_some()
+            || refresh_mode.is_some()
+            || partition_by.is_some()
+            || target_freshness.is_some())
+    {
+        return Err(PgTrickleError::IntegrationError {
+            code: "PGT_EXT_ORCHESTRATION_MODE",
+            detail: format!(
+                "stream table {}.{} is EXTERNAL; refresh-affecting alterations require MANAGED ownership",
+                schema, table_name
+            ),
+        });
+    }
 
     // LSEC-7 (v0.87.9): the rest of this function may re-parse
     // `st.defining_query` (e.g. `validate_incremental_mode_for_query`,

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**154 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**155 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -76,6 +76,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.health_check()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_check()`. |
 | `pgtrickle.health_summary()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.health_summary()`. |
 | `pgtrickle.history_prune_status()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.history_prune_status()`. |
+| `pgtrickle.integration_capabilities()` | `pgtrickle` | `SetOf row` | Advertise independently versioned integration capabilities. |
 | `pgtrickle.is_drained()` | `pgtrickle` | `boolean (nullable)` | A scheduler is considered drained when `DRAIN_COMPLETED >= DRAIN_REQUESTED` in shared memory. |
 | `pgtrickle.lifecycle_preflight()` | `pgtrickle` | `text` | This read-only upgrade and operations preflight is intentionally superuser-only: it reports the exact missing grants without changing catalog state. |
 | `pgtrickle.list_auxiliary_columns()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.list_auxiliary_columns('my_stream_table'); ```. |

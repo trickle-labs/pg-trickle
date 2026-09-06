@@ -2,6 +2,25 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.92.0 to 0.93.0
+
+Install the v0.93.0 shared library and extension files, then run the upgrade
+inside the normal quiesced boundary:
+
+```sql
+SELECT pgtrickle.preflight_upgrade();
+SELECT pgtrickle.quiesce(60);
+ALTER EXTENSION pg_trickle UPDATE TO '0.93.0';
+SELECT pgtrickle.resume_all();
+```
+
+The migration adds `MANAGED` orchestration ownership and contract generations
+to existing stream tables. Existing tables remain scheduler-owned. New
+integrations can opt a table into `EXTERNAL` ownership with
+`pgtrickle.set_orchestration_mode()`. Verify the contract surface with
+`pgtrickle.integration_capabilities()`, `stream_table_contract()`, and
+`graph_contract()` after the upgrade.
+
 ## 0.91.0 to 0.92.0
 
 Install the 0.92.0 shared library and extension files, restart PostgreSQL, and
