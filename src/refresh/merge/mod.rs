@@ -626,9 +626,21 @@ fn distinct_aggregate_max_values(
         q(&check.source_table),
         q(&check.source_alias),
     );
-    let prev_lsn = prev_frontier.get_lsn(check.source_oid);
-    let new_lsn = new_frontier.get_lsn(check.source_oid);
-    let buffer = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(check.source_oid));
+    let (prev_lsn, new_lsn, buffer) = if let Some(pgt_id) =
+        crate::catalog::StreamTableMeta::pgt_id_for_relid(pg_sys::Oid::from(check.source_oid))
+    {
+        (
+            prev_frontier.get_st_lsn(pgt_id),
+            new_frontier.get_st_lsn(pgt_id),
+            format!("changes_pgt_{pgt_id}"),
+        )
+    } else {
+        (
+            prev_frontier.get_lsn(check.source_oid),
+            new_frontier.get_lsn(check.source_oid),
+            crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(check.source_oid)),
+        )
+    };
 
     let changed_predicate = format!(
         "c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn AND c.action IN ('I', 'D')"

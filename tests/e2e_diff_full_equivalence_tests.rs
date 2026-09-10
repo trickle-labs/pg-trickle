@@ -327,7 +327,7 @@ async fn test_diff_full_equivalence_window_row_number() {
 
     let q = "SELECT id, dept, salary, \
                     ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn \
-             FROM dfe_wrn";
+             FROM public.dfe_wrn";
     db.create_st("dfe_wrn_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("dfe_wrn_st", q).await;
 
@@ -378,7 +378,7 @@ async fn test_diff_full_equivalence_window_rank() {
     let q = "SELECT id, cat, score, \
                     RANK() OVER (PARTITION BY cat ORDER BY score DESC) AS rnk, \
                     DENSE_RANK() OVER (PARTITION BY cat ORDER BY score DESC) AS drnk \
-             FROM dfe_wrnk";
+             FROM public.dfe_wrnk";
     db.create_st("dfe_wrnk_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("dfe_wrnk_st", q).await;
 
