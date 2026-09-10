@@ -443,7 +443,7 @@ async fn test_window_rejected_runtime_plan_is_persisted_and_explained() {
     .await;
     db.create_st(
         "ws_plan_st",
-        "SELECT id, dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC, id) AS rn FROM ws_plan_source",
+        "SELECT id, dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC, id) AS rn FROM public.ws_plan_source",
         "1m",
         "DIFFERENTIAL",
     )
@@ -479,7 +479,7 @@ async fn test_window_rejected_runtime_plan_is_persisted_and_explained() {
     db.refresh_st("ws_plan_st").await;
     db.assert_st_matches_query(
         "public.ws_plan_st",
-        "SELECT id, dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC, id) AS rn FROM ws_plan_source",
+        "SELECT id, dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC, id) AS rn FROM public.ws_plan_source",
     )
     .await;
 
@@ -542,7 +542,7 @@ async fn test_window_unsupported_frame_and_stale_version_fail_closed() {
         .await;
     db.create_st(
         "ws_frame_st",
-        "SELECT id, dept, salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary, id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) AS nearby FROM ws_frame_source",
+        "SELECT id, dept, salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary, id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) AS nearby FROM public.ws_frame_source",
         "1m",
         "DIFFERENTIAL",
     )
@@ -605,7 +605,7 @@ async fn test_window_unsupported_frame_and_stale_version_fail_closed() {
     db.refresh_st("ws_frame_st").await;
     db.assert_st_matches_query(
         "public.ws_frame_st",
-        "SELECT id, dept, salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary, id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) AS nearby FROM ws_frame_source",
+        "SELECT id, dept, salary, SUM(salary) OVER (PARTITION BY dept ORDER BY salary, id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) AS nearby FROM public.ws_frame_source",
     )
     .await;
 }
@@ -619,7 +619,7 @@ async fn test_window_v088_null_strategy_is_lazily_replanned() {
         .await;
     db.create_st(
         "ws_legacy_st",
-        "SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn FROM ws_legacy_source",
+        "SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn FROM public.ws_legacy_source",
         "1m",
         "DIFFERENTIAL",
     )
@@ -665,7 +665,7 @@ async fn test_window_v088_null_strategy_is_lazily_replanned() {
     assert_eq!(state_rows_after_finalize, 0);
     db.assert_st_matches_query(
         "public.ws_legacy_st",
-        "SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn FROM ws_legacy_source",
+        "SELECT id, value, ROW_NUMBER() OVER (ORDER BY value, id) AS rn FROM public.ws_legacy_source",
     )
     .await;
 }

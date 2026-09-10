@@ -28,7 +28,7 @@ async fn test_multi_window_different_partitions_differential() {
     let q = "SELECT region, dept, amount, \
              ROW_NUMBER() OVER (PARTITION BY region ORDER BY amount DESC) AS region_rank, \
              RANK() OVER (PARTITION BY dept ORDER BY amount DESC) AS dept_rank \
-             FROM mw_sales";
+             FROM public.mw_sales";
     db.create_st("mw_part_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("mw_part_st", q).await;
 
@@ -65,7 +65,7 @@ async fn test_window_frame_rows_differential() {
     let q = "SELECT grp, val, \
              SUM(val) OVER (PARTITION BY grp ORDER BY val \
                  ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS rolling_sum \
-             FROM wf_ts";
+             FROM public.wf_ts";
     db.create_st("wf_rows_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_rows_st", q).await;
 
@@ -93,7 +93,7 @@ async fn test_window_frame_range_differential() {
     let q = "SELECT grp, val, \
              AVG(val) OVER (PARTITION BY grp ORDER BY val \
                  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_avg \
-             FROM wf_range";
+             FROM public.wf_range";
     db.create_st("wf_range_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_range_st", q).await;
 
@@ -121,7 +121,7 @@ async fn test_window_lag_lead_differential() {
     let q = "SELECT grp, seq, val, \
              LAG(val) OVER (PARTITION BY grp ORDER BY seq) AS prev_val, \
              LEAD(val) OVER (PARTITION BY grp ORDER BY seq) AS next_val \
-             FROM wf_ll";
+             FROM public.wf_ll";
     db.create_st("wf_ll_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_ll_st", q).await;
 
@@ -156,7 +156,7 @@ async fn test_window_ranking_functions_differential() {
     let q = "SELECT dept, salary, \
              DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary) AS drank, \
              NTILE(2) OVER (PARTITION BY dept ORDER BY salary) AS tile \
-             FROM wf_rank";
+             FROM public.wf_rank";
     db.create_st("wf_rank_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_rank_st", q).await;
 
@@ -189,7 +189,7 @@ async fn test_window_over_aggregate_differential() {
 
     let q = "SELECT region, dept, SUM(val) AS dept_total, \
              RANK() OVER (PARTITION BY region ORDER BY SUM(val) DESC) AS rank_in_region \
-             FROM wa_data GROUP BY region, dept";
+             FROM public.wa_data GROUP BY region, dept";
     db.create_st("wa_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wa_st", q).await;
 
@@ -213,7 +213,7 @@ async fn test_multi_window_lag_lead_nulls() {
     db.execute("INSERT INTO mwin_ll_src VALUES (1, 1, NULL), (2, 1, 10), (3, 1, NULL)")
         .await;
 
-    let q = "SELECT id, grp, val, LAG(val) OVER (PARTITION BY grp ORDER BY id) as l1, LEAD(val) OVER (PARTITION BY grp ORDER BY id) as l2 FROM mwin_ll_src";
+    let q = "SELECT id, grp, val, LAG(val) OVER (PARTITION BY grp ORDER BY id) as l1, LEAD(val) OVER (PARTITION BY grp ORDER BY id) as l2 FROM public.mwin_ll_src";
 
     db.create_st("mwin_ll_st", q, "1m", "DIFFERENTIAL").await;
 

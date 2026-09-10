@@ -95,7 +95,7 @@ async fn test_cte_with_window_function_full_mode() {
     // so FULL mode should work — the raw query is executed as-is.
     db.create_st(
         "cte_st",
-        "WITH ranked AS (SELECT id, val, ROW_NUMBER() OVER (ORDER BY val DESC) AS rn FROM cte_src) SELECT id, val FROM ranked WHERE rn <= 2",
+        "WITH ranked AS (SELECT id, val, ROW_NUMBER() OVER (ORDER BY val DESC) AS rn FROM public.cte_src) SELECT id, val FROM ranked WHERE rn <= 2",
         "1m",
         "FULL",
     )

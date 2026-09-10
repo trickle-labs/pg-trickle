@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.102.0 — Output-sensitive delta performance](#01020--output-sensitive-delta-performance)
 - [0.101.0 — Exact relational state and semantic depth](#01010--exact-relational-state-and-semantic-depth)
 - [0.100.0 — Unified transactional IVM execution](#01000--unified-transactional-ivm-execution)
 - [0.99.0 — Verified capabilities and product truth](#0990--verified-capabilities-and-product-truth)
@@ -211,6 +212,21 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.102.0] — Output-sensitive delta performance
+
+v0.102.0 records bounded cost evidence for completed differential refreshes.
+
+- Stores input delta rows, changed output rows, output amplification, scan
+  count, plan identity, cache path, planner hints, temp blocks, and phase
+  timings in `refresh_reason_detail`.
+- Keeps the current PostgreSQL planner and rewrite rules unchanged until
+  retained benchmark evidence supports a new rule.
+- Adds the v0.101.0 to v0.102.0 upgrade path and release gate.
+
+See the [v0.102.0 roadmap](roadmap/v0.102.0.md), the
+[v0.102.0 implementation plan](plans/PLAN_0_102_0.md), and the
+[capability manifest](docs/capability-manifest.json).
 
 ## [0.101.0] — Exact relational state and semantic depth
 

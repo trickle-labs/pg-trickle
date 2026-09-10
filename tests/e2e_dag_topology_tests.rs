@@ -265,7 +265,7 @@ async fn test_deep_linear_5_layers() {
     // L1: passthrough (scan)
     db.create_st(
         "d5_l1",
-        "SELECT id, grp, val FROM d5_src",
+        "SELECT id, grp, val FROM public.d5_src",
         "1m",
         "DIFFERENTIAL",
     )
@@ -275,7 +275,7 @@ async fn test_deep_linear_5_layers() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             'd5_l2',
-            $$SELECT id, grp, val * 2 AS v2 FROM d5_l1$$,
+            $$SELECT id, grp, val * 2 AS v2 FROM public.d5_l1$$,
             'calculated',
             'DIFFERENTIAL'
         )",
@@ -286,7 +286,7 @@ async fn test_deep_linear_5_layers() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             'd5_l3',
-            $$SELECT grp, SUM(v2) AS total FROM d5_l2 GROUP BY grp$$,
+            $$SELECT grp, SUM(v2) AS total FROM public.d5_l2 GROUP BY grp$$,
             'calculated',
             'DIFFERENTIAL'
         )",
@@ -297,7 +297,7 @@ async fn test_deep_linear_5_layers() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             'd5_l4',
-            $$SELECT grp, total, RANK() OVER (ORDER BY total DESC) AS rnk FROM d5_l3$$,
+            $$SELECT grp, total, RANK() OVER (ORDER BY total DESC) AS rnk FROM public.d5_l3$$,
             'calculated',
             'DIFFERENTIAL'
         )",
@@ -308,7 +308,7 @@ async fn test_deep_linear_5_layers() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             'd5_l5',
-            $$SELECT grp, total FROM d5_l4 WHERE rnk <= 2$$,
+            $$SELECT grp, total FROM public.d5_l4 WHERE rnk <= 2$$,
             'calculated',
             'DIFFERENTIAL'
         )",

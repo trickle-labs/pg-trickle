@@ -179,6 +179,24 @@ async fn create_database_from_template(
 ///
 /// Returns the name of the created template database.
 async fn create_extension_template(admin_connection_string: &str, port: u16) -> String {
+    // CREATE EXTENSION also creates cluster-wide predefined roles.  The
+    // light-E2E shards share one PostgreSQL instance, so serialize template
+    // installation across test-binary processes.
+    let lock_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_connection_string)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to connect for template lock: {e}"));
+    let mut template_lock = lock_pool
+        .acquire()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to acquire template lock: {e}"));
+    sqlx::query("SELECT pg_advisory_lock($1::bigint)")
+        .bind(7_102_018_i64)
+        .execute(&mut *template_lock)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to acquire template lock: {e}"));
+
     // Use a PID-scoped name so that multiple test binary processes sharing
     // the same PostgreSQL server (e.g. the light-E2E shared container where
     // PGT_LIGHT_E2E_PORT is set) each get their own template without
@@ -200,6 +218,13 @@ async fn create_extension_template(admin_connection_string: &str, port: u16) -> 
         .unwrap_or_else(|e| panic!("Failed to CREATE EXTENSION on template DB: {e}"));
 
     template_pool.close().await;
+    sqlx::query("SELECT pg_advisory_unlock($1::bigint)")
+        .bind(7_102_018_i64)
+        .execute(&mut *template_lock)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to release template lock: {e}"));
+    drop(template_lock);
+    lock_pool.close().await;
 
     template_name.to_string()
 }

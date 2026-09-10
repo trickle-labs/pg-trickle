@@ -293,7 +293,7 @@ async fn test_window_rows_between_frame() {
     // 3-day moving average using ROWS BETWEEN
     db.create_st(
         "win_frame_st",
-        "SELECT id, ts, val, AVG(val) OVER (ORDER BY ts ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving_avg FROM win_frame_src",
+        "SELECT id, ts, val, AVG(val) OVER (ORDER BY ts ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving_avg FROM public.win_frame_src",
         "1m",
         "FULL",
     )
@@ -325,7 +325,7 @@ async fn test_window_range_frame() {
     // Cumulative sum with RANGE
     db.create_st(
         "win_range_st",
-        "SELECT id, grp, val, SUM(val) OVER (PARTITION BY grp ORDER BY val RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumsum FROM win_range_src",
+        "SELECT id, grp, val, SUM(val) OVER (PARTITION BY grp ORDER BY val RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumsum FROM public.win_range_src",
         "1m",
         "FULL",
     )
@@ -356,7 +356,7 @@ async fn test_window_nth_value() {
 
     db.create_st(
         "win_nth_st",
-        "SELECT id, dept, salary, NTH_VALUE(salary, 2) OVER (PARTITION BY dept ORDER BY salary DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS second_highest FROM win_nth_src",
+        "SELECT id, dept, salary, NTH_VALUE(salary, 2) OVER (PARTITION BY dept ORDER BY salary DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS second_highest FROM public.win_nth_src",
         "1m",
         "FULL",
     )

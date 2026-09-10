@@ -512,7 +512,7 @@ async fn test_ivm_window_function_create_succeeds() {
     create_immediate_st(
         &db,
         "win_imm",
-        "SELECT id, val, grp, row_number() OVER (PARTITION BY grp ORDER BY val) AS rn FROM win_src",
+        "SELECT id, val, grp, row_number() OVER (PARTITION BY grp ORDER BY val) AS rn FROM public.win_src",
     )
     .await;
 
@@ -534,7 +534,7 @@ async fn test_ivm_window_insert_propagates() {
     create_immediate_st(
         &db,
         "win_prop_imm",
-        "SELECT id, val, grp, row_number() OVER (PARTITION BY grp ORDER BY val) AS rn FROM win_prop",
+        "SELECT id, val, grp, row_number() OVER (PARTITION BY grp ORDER BY val) AS rn FROM public.win_prop",
     )
     .await;
     assert_eq!(db.count("public.win_prop_imm").await, 2);
@@ -745,7 +745,7 @@ async fn test_ivm_alter_to_immediate_allows_window() {
     // Create as DIFFERENTIAL with a window function query.
     db.execute(
         "SELECT pgtrickle.create_stream_table('sw_win_st', \
-         $$SELECT id, val, row_number() OVER (PARTITION BY grp ORDER BY val) AS rn FROM sw_win$$, \
+         $$SELECT id, val, row_number() OVER (PARTITION BY grp ORDER BY val) AS rn FROM public.sw_win$$, \
          '5m', 'DIFFERENTIAL')",
     )
     .await;

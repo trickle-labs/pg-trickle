@@ -18,6 +18,15 @@ use crate::refresh::merge::columns::{
 };
 use crate::refresh::merge::delete::{build_hash_child_merge, should_warn_amplification};
 
+#[test]
+fn test_differential_cost_evidence_reports_output_amplification() {
+    let evidence = build_differential_cost_evidence(4, 20);
+    assert_eq!(evidence["schema_version"], 1);
+    assert_eq!(evidence["input_delta_rows"], 4);
+    assert_eq!(evidence["output_rows_changed"], 20);
+    assert_eq!(evidence["output_amplification_ratio"], 5.0);
+}
+
 // ── Helper: build a minimal StreamTableMeta for testing ─────────
 
 fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {

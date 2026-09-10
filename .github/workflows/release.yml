@@ -66,8 +66,8 @@ jobs:
       - name: v0.98 qualification contract gate
         run: python3 scripts/v0_98_qualification_gate.py
 
-      - name: v0.100 unified IVM release gate
-        run: python3 scripts/v0_100_release_gate.py
+      - name: v0.102 output-sensitive evidence release gate
+        run: python3 scripts/v0_102_release_gate.py
 
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py

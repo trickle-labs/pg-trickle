@@ -678,6 +678,22 @@ pub struct RefreshExecution {
     pub downstream_capture_complete: bool,
 }
 
+/// Build the stable, output-sensitive part of differential refresh evidence.
+pub(crate) fn build_differential_cost_evidence(
+    input_delta_rows: i64,
+    output_rows_changed: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "input_delta_rows": input_delta_rows.max(0),
+        "output_rows_changed": output_rows_changed.max(0),
+        "output_amplification_ratio": crate::refresh::compute_amplification_ratio(
+            input_delta_rows,
+            output_rows_changed,
+        ),
+    })
+}
+
 /// Finalize a successful refresh in the caller's existing transaction.
 ///
 /// Required durable operations deliberately propagate errors.  A failed
@@ -756,6 +772,12 @@ pub fn finalize_success(
         .or(catalog_reason)
         .or_else(|| FullRefreshReason::for_action(history_action, !st.is_populated));
     let full_reason = derived_reason.as_ref();
+    let cost_evidence = if history_action == RefreshAction::Differential {
+        take_last_cost_evidence()
+    } else {
+        clear_last_cost_evidence();
+        None
+    };
     if matches!(
         history_action,
         RefreshAction::Full | RefreshAction::Reinitialize
@@ -796,6 +818,12 @@ pub fn finalize_success(
             ],
         )
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
+
+    if full_reason.is_none()
+        && let Some(evidence) = cost_evidence
+    {
+        RefreshRecord::set_cost_evidence(refresh_id, &evidence)?;
     }
 
     if !effective_mode.is_empty() {
@@ -1076,6 +1104,19 @@ pub(crate) fn classify_correlated_aggregate_subquery_in_where(defining_query: &s
 thread_local! {
     static LAST_EFFECTIVE_MODE: Cell<&'static str> = const { Cell::new("") };
     static LAST_MERGE_STRATEGY: Cell<&'static str> = const { Cell::new("") };
+    static LAST_COST_EVIDENCE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn clear_last_cost_evidence() {
+    LAST_COST_EVIDENCE.with(|value| value.borrow_mut().take());
+}
+
+pub(crate) fn set_last_cost_evidence(evidence: String) {
+    LAST_COST_EVIDENCE.with(|value| value.replace(Some(evidence)));
+}
+
+fn take_last_cost_evidence() -> Option<String> {
+    LAST_COST_EVIDENCE.with(|value| value.borrow_mut().take())
 }
 
 /// Record the effective refresh mode for the currently-executing refresh.

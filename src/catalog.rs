@@ -3443,6 +3443,18 @@ impl RefreshRecord {
         .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
         Self::upsert_refresh_summary_for_refresh(refresh_id)
     }
+
+    /// Persist bounded output-sensitive evidence for a completed differential
+    /// refresh in the existing diagnostic detail column.
+    pub fn set_cost_evidence(refresh_id: i64, evidence: &str) -> Result<(), PgTrickleError> {
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_refresh_history
+                SET refresh_reason_detail = $1
+              WHERE refresh_id = $2",
+            &[evidence.into(), refresh_id.into()],
+        )
+        .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
+    }
 }
 
 // ── Source gate CRUD (v0.5.0, Phase 3 — Bootstrap Source Gating) ──────────

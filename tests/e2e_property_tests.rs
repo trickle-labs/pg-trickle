@@ -948,7 +948,7 @@ async fn test_property_window_function_full() {
 
     let query = "SELECT id, dept, salary, \
                  RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS rnk \
-                 FROM prop_win";
+                 FROM public.prop_win";
     db.create_st("prop_win_st", query, "1m", "FULL").await;
     assert_invariant(&db, "prop_win_st", query, seed, 0).await;
 

@@ -2011,7 +2011,9 @@ pgtrickle.get_refresh_history(
     rows_updated     bigint,
     rows_deleted     bigint,
     duration_ms      float8,
-    error_message    text
+    error_message    text,
+    refresh_reason   text,
+    refresh_reason_detail text
 )
 ```
 
@@ -2021,6 +2023,10 @@ pgtrickle.get_refresh_history(
 SELECT action, status, rows_inserted, duration_ms
 FROM pgtrickle.get_refresh_history('order_totals', 5);
 ```
+
+For completed differential refreshes, `refresh_reason_detail` contains a JSON
+document with bounded cost evidence. It includes the input delta size, changed
+output size, output amplification ratio, plan identity, and phase timings.
 
 ---
 
@@ -4122,7 +4128,7 @@ Audit log of all refresh operations.
 | `freshness_deadline` | `timestamptz` | SLA deadline (duration schedules only; NULL for cron) |
 | `fixpoint_iteration` | `int` | Iteration of the fixed-point loop (`NULL` for non-cyclic refreshes) |
 | `refresh_reason` | `text` | Stable strategy or FULL reason. Window partition recomputation uses a `WINDOW_*` code without setting `was_full_fallback`. |
-| `refresh_reason_detail` | `text` | Deterministic JSON for window execution, including the actual strategy, bounded occurrence counts, and cost evidence when present. Partition keys are not stored. |
+| `refresh_reason_detail` | `text` | Deterministic JSON for window execution or bounded differential cost evidence. Cost evidence includes input and output rows, output amplification, plan identity, resource samples, and phase timings. Partition keys are not stored. |
 
 ### pgtrickle.pgt_change_tracking
 

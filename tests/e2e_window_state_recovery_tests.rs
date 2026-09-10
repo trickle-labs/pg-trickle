@@ -15,7 +15,7 @@ async fn test_window_state_and_frontier_survive_restart_then_differential_conver
     db.create_st(
         "ws_restart_st",
         "SELECT id, value, row_number() OVER (ORDER BY value, id) AS rn \
-         FROM ws_restart_source",
+         FROM public.ws_restart_source",
         "1m",
         "DIFFERENTIAL",
     )

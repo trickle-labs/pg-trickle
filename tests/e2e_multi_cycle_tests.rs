@@ -212,7 +212,7 @@ async fn test_multi_cycle_window_differential() {
 
     let q = "SELECT dept, salary, \
              ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn \
-             FROM mc_win";
+             FROM public.mc_win";
     db.create_st("mc_win_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("mc_win_st", q).await;
 
