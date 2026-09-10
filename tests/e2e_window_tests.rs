@@ -27,7 +27,7 @@ async fn test_window_row_number_full_refresh() {
 
     db.create_st(
         "wf_rn_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_rn",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_rn",
         "1m",
         "FULL",
     )
@@ -64,7 +64,7 @@ async fn test_window_sum_over_full_refresh() {
 
     db.create_st(
         "wf_sum_st",
-        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM wf_sum",
+        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM public.wf_sum",
         "1m",
         "FULL",
     )
@@ -101,7 +101,7 @@ async fn test_window_rank_full_refresh() {
 
     db.create_st(
         "wf_rank_st",
-        "SELECT dept, salary, RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS rnk FROM wf_rank",
+        "SELECT dept, salary, RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS rnk FROM public.wf_rank",
         "1m",
         "FULL",
     )
@@ -137,7 +137,7 @@ async fn test_window_full_refresh_after_insert() {
 
     db.create_st(
         "wf_fi_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_fi",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_fi",
         "1m",
         "FULL",
     )
@@ -180,7 +180,7 @@ async fn test_window_full_refresh_after_delete() {
 
     db.create_st(
         "wf_fd_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_fd",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_fd",
         "1m",
         "FULL",
     )
@@ -217,7 +217,7 @@ async fn test_window_differential_insert() {
 
     db.create_st(
         "wf_ii_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_ii",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_ii",
         "1m",
         "DIFFERENTIAL",
     )
@@ -271,7 +271,7 @@ async fn test_window_differential_delete() {
 
     db.create_st(
         "wf_id_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_id",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_id",
         "1m",
         "DIFFERENTIAL",
     )
@@ -309,7 +309,7 @@ async fn test_window_differential_update() {
 
     db.create_st(
         "wf_iu_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_iu",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_iu",
         "1m",
         "DIFFERENTIAL",
     )
@@ -348,7 +348,7 @@ async fn test_window_differential_multiple_partitions_changed() {
 
     db.create_st(
         "wf_mp_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_mp",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_mp",
         "1m",
         "DIFFERENTIAL",
     )
@@ -364,7 +364,7 @@ async fn test_window_differential_multiple_partitions_changed() {
     // Verify both partitions recomputed
     db.assert_st_matches_query(
         "public.wf_mp_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_mp",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_mp",
     )
     .await;
 }
@@ -385,7 +385,7 @@ async fn test_window_differential_sum_over() {
 
     db.create_st(
         "wf_is_st",
-        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM wf_is",
+        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM public.wf_is",
         "1m",
         "DIFFERENTIAL",
     )
@@ -427,7 +427,7 @@ async fn test_window_with_where_clause() {
 
     db.create_st(
         "wf_wh_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_wh WHERE active = true",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_wh WHERE active = true",
         "1m",
         "FULL",
     )
@@ -465,7 +465,7 @@ async fn test_window_dense_rank() {
 
     db.create_st(
         "wf_dr_st",
-        "SELECT dept, salary, DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS drnk FROM wf_dr",
+        "SELECT dept, salary, DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS drnk FROM public.wf_dr",
         "1m",
         "FULL",
     )
@@ -500,7 +500,7 @@ async fn test_window_in_case_expression_rejected() {
         .try_execute(
             "SELECT pgtrickle.create_stream_table('wf_nested_st', \
              $$ SELECT CASE WHEN ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) <= 3 \
-             THEN 'top' ELSE 'other' END AS tier FROM wf_nested $$, '1m', 'DIFFERENTIAL')",
+             THEN 'top' ELSE 'other' END AS tier FROM public.wf_nested $$, '1m', 'DIFFERENTIAL')",
         )
         .await;
 
@@ -523,7 +523,7 @@ async fn test_window_in_coalesce_rejected() {
     let result = db
         .try_execute(
             "SELECT pgtrickle.create_stream_table('wf_coal_st', \
-             $$ SELECT COALESCE(SUM(val) OVER (PARTITION BY dept), 0) AS total FROM wf_coal $$, '1m', 'DIFFERENTIAL')",
+             $$ SELECT COALESCE(SUM(val) OVER (PARTITION BY dept), 0) AS total FROM public.wf_coal $$, '1m', 'DIFFERENTIAL')",
         )
         .await;
 
@@ -549,7 +549,7 @@ async fn test_window_in_arithmetic_rejected() {
         .try_execute(
             "SELECT pgtrickle.create_stream_table('wf_arith_st', \
              $$ SELECT ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) * 10 AS scaled_rank \
-             FROM wf_arith $$, '1m', 'DIFFERENTIAL')",
+             FROM public.wf_arith $$, '1m', 'DIFFERENTIAL')",
         )
         .await;
 
@@ -576,7 +576,7 @@ async fn test_window_in_cast_rejected() {
         .try_execute(
             "SELECT pgtrickle.create_stream_table('wf_cast_st', \
              $$ SELECT CAST(ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS TEXT) AS rn_text \
-             FROM wf_cast $$, '1m', 'DIFFERENTIAL')",
+             FROM public.wf_cast $$, '1m', 'DIFFERENTIAL')",
         )
         .await;
 
@@ -604,7 +604,7 @@ async fn test_window_deeply_nested_rejected() {
         .try_execute(
             "SELECT pgtrickle.create_stream_table('wf_deep_st', \
              $$ SELECT CASE WHEN COALESCE(ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC), 0) <= 3 \
-             THEN 'top' ELSE 'other' END AS tier FROM wf_deep $$, '1m', 'DIFFERENTIAL')"
+             THEN 'top' ELSE 'other' END AS tier FROM public.wf_deep $$, '1m', 'DIFFERENTIAL')"
         )
         .await;
 
@@ -629,7 +629,7 @@ async fn test_top_level_window_still_works() {
 
     db.create_st(
         "wf_ok_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_ok",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_ok",
         "1m",
         "FULL",
     )
@@ -663,7 +663,7 @@ async fn test_ec03_case_window_data_correctness() {
     let query = "SELECT id, dept, \
         CASE WHEN ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) = 1 \
         THEN 'top' ELSE 'other' END AS tier \
-        FROM ec03_case";
+        FROM public.ec03_case";
 
     db.create_st("ec03_case_st", query, "1m", "FULL").await;
 
@@ -714,7 +714,7 @@ async fn test_ec03_arithmetic_window_data_correctness() {
 
     let query = "SELECT id, dept, \
         ROW_NUMBER() OVER (PARTITION BY dept ORDER BY score DESC) * 10 AS scaled_rank \
-        FROM ec03_arith";
+        FROM public.ec03_arith";
 
     db.create_st("ec03_arith_st", query, "1m", "FULL").await;
 
@@ -759,7 +759,7 @@ async fn test_ec03_coalesce_window_data_correctness() {
     db.execute("INSERT INTO ec03_coal (dept, val) VALUES ('eng', 10), ('eng', 20), ('hr', 30)")
         .await;
 
-    let query = "SELECT id, dept, COALESCE(SUM(val) OVER (PARTITION BY dept), 0) AS dept_sum FROM ec03_coal";
+    let query = "SELECT id, dept, COALESCE(SUM(val) OVER (PARTITION BY dept), 0) AS dept_sum FROM public.ec03_coal";
 
     db.create_st("ec03_coal_st", query, "1m", "FULL").await;
 
@@ -801,7 +801,7 @@ async fn test_window_differential_partition_key_change() {
 
     db.create_st(
         "wf_pkc_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_pkc",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_pkc",
         "1m",
         "DIFFERENTIAL",
     )
@@ -825,7 +825,7 @@ async fn test_window_differential_partition_key_change() {
     // Verify the full result matches a from-scratch execution
     db.assert_st_matches_query(
         "public.wf_pkc_st",
-        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM wf_pkc",
+        "SELECT dept, salary, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM public.wf_pkc",
     )
     .await;
 
@@ -867,7 +867,7 @@ async fn test_window_differential_partition_key_change_sum() {
 
     db.create_st(
         "wf_pkcs_st",
-        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM wf_pkcs",
+        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM public.wf_pkcs",
         "1m",
         "DIFFERENTIAL",
     )
@@ -881,7 +881,7 @@ async fn test_window_differential_partition_key_change_sum() {
     // Verify the result matches from-scratch query
     db.assert_st_matches_query(
         "public.wf_pkcs_st",
-        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM wf_pkcs",
+        "SELECT dept, salary, SUM(salary) OVER (PARTITION BY dept) AS dept_total FROM public.wf_pkcs",
     )
     .await;
 
@@ -906,7 +906,8 @@ async fn test_window_with_nulls() {
 
     db.execute("INSERT INTO window_null_src VALUES (1, NULL, 10), (2, 1, NULL), (3, NULL, NULL), (4, 1, 20)").await;
 
-    let q = "SELECT id, grp, val, SUM(val) OVER (PARTITION BY grp) as s FROM window_null_src";
+    let q =
+        "SELECT id, grp, val, SUM(val) OVER (PARTITION BY grp) as s FROM public.window_null_src";
 
     db.create_st("window_null_st", q, "1m", "DIFFERENTIAL")
         .await;
@@ -935,7 +936,7 @@ async fn test_window_lag_differential() {
     )
     .await;
 
-    let q = "SELECT dept, salary, LAG(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS prev_salary FROM wf_lag";
+    let q = "SELECT dept, salary, LAG(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS prev_salary FROM public.wf_lag";
     db.create_st("wf_lag_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_lag_st", q).await;
 
@@ -970,7 +971,7 @@ async fn test_window_lead_differential() {
     )
     .await;
 
-    let q = "SELECT dept, salary, LEAD(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS next_salary FROM wf_lead";
+    let q = "SELECT dept, salary, LEAD(salary) OVER (PARTITION BY dept ORDER BY salary DESC) AS next_salary FROM public.wf_lead";
     db.create_st("wf_lead_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_lead_st", q).await;
 
@@ -1005,7 +1006,7 @@ async fn test_window_dense_rank_differential() {
     )
     .await;
 
-    let q = "SELECT dept, salary, DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS dr FROM wf_dr";
+    let q = "SELECT dept, salary, DENSE_RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS dr FROM public.wf_dr";
     db.create_st("wf_dr_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("wf_dr_st", q).await;
 
