@@ -515,7 +515,7 @@ async fn test_window_frame_rows_between() {
     .await;
 
     // Window function with explicit frame clause
-    let query_running_avg = "SELECT id, ts, val, AVG(val) OVER (ORDER BY ts ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving_avg FROM timeseries";
+    let query_running_avg = "SELECT id, ts, val, AVG(val) OVER (ORDER BY ts ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving_avg FROM public.timeseries";
     db.create_st("running_avg", query_running_avg, "1m", "FULL")
         .await;
     db.assert_st_matches_query("running_avg", query_running_avg)
