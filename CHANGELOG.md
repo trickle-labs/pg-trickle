@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.105.0 — Qualification contract and release evidence](#01050--qualification-contract-and-release-evidence)
 - [0.104.0 — Extension conformance and final feature freeze](#01040--extension-conformance-and-final-feature-freeze)
 - [0.103.0 — Durable WAL receipts and workload budgets](#01030--durable-wal-receipts-and-workload-budgets)
 - [0.102.0 — Output-sensitive delta performance](#01020--output-sensitive-delta-performance)
@@ -214,6 +215,24 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.105.0] — Qualification contract and release evidence
+
+v0.105.0 qualifies the frozen v0.104.0 public surface and ties release
+evidence to the exact candidate and shipped artifacts.
+
+- Adds the v0.105.0 qualification contract and offline release gate.
+- Runs the packaged Graph V1 and Delta V1 conformance suites in release CI.
+- Records candidate, artifact, PostgreSQL, suite, workload, and retained-log
+  metadata in `RELEASE-EVIDENCE.json`.
+- Adds the 0.104.0 to 0.105.0 metadata-only upgrade path and full-install
+  archive.
+- Defers the 72-hour soak and seven-day longevity run to later v1.0
+  qualification.
+
+See the [v0.105.0 roadmap](roadmap/v0.105.0.md), the
+[v0.105.0 implementation plan](plans/PLAN_0_105_0.md), and the
+[qualification contract](tests/release/v0.105.0-qualification.json).
 
 ## [0.104.0] — Extension conformance and final feature freeze
 

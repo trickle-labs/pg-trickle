@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   PG_VERSION: "18"
+  POSTGRESQL_VERSION: "18.3"
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/pg_trickle-ext
 
@@ -73,6 +74,9 @@ jobs:
       - name: v0.104 contracts and conformance release gate
         if: github.ref_name == 'v0.104.0'
         run: python3 scripts/v0_104_release_gate.py
+
+      - name: v0.105 qualification contract release gate
+        run: python3 scripts/v0_105_0_release_gate.py
 
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
@@ -354,9 +358,52 @@ jobs:
         run: docker rm -f smoketest 2>/dev/null || true
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
+  qualification:
+    name: Packaged Graph and Delta conformance
+    needs: build-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Download Linux release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: release-linux-amd64
+          path: dist/
+
+      - name: Extract packaged candidate
+        run: |
+          mkdir -p candidate
+          tar xzf dist/*.tar.gz -C candidate --strip-components=1
+          test -f candidate/usr/share/postgresql/18/extension/pg_trickle.control
+          test -f candidate/usr/lib/postgresql/18/lib/pg_trickle.so
+
+      - name: Run packaged Graph V1 and Delta V1 conformance
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/candidate
+        run: |
+          mkdir -p qualification-logs
+          set -o pipefail
+          bash ./scripts/run_light_e2e_tests.sh \
+            --test e2e_v104_conformance_tests 2>&1 | \
+            tee qualification-logs/graph-delta-v1.log
+
+      - name: Retain qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-evidence
+          path: qualification-logs/
+          retention-days: 30
+          if-no-files-found: ignore
+
   publish-release:
     name: Publish GitHub Release
-    needs: [build-release, test-release]
+    needs: [build-release, test-release, qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -368,11 +415,18 @@ jobs:
           path: artifacts/
           pattern: release-*
 
+      - name: Download qualification evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: qualification-evidence
+          path: qualification/
+
       - name: Collect release files
         run: |
           mkdir -p release-files
           find artifacts/ -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
             -exec cp {} release-files/ \;
+          find qualification/ -type f -name '*.log' -exec cp {} release-files/ \;
           echo "Release files:"
           ls -lh release-files/
 
@@ -382,11 +436,19 @@ jobs:
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
             --candidate-commit "$GITHUB_SHA" \
+            --qualification tests/release/v0.105.0-qualification.json \
+            --capability-manifest docs/capability-manifest.json \
+            --postgresql-version "$POSTGRESQL_VERSION" \
+            --suite-version "0.105.0" \
+            --workload "packaged v0.105.0 release qualification" \
             --artifact release-files/*.tar.gz release-files/*.zip \
+            --suite graph-v1=passed \
+            --suite delta-v1=passed \
             --suite version-sync=passed \
             --suite package-smoke=passed \
             --suite monitoring-contract=passed \
-            --suite release-artifact-smoke=passed
+            --suite release-artifact-smoke=passed \
+            --log release-files/graph-delta-v1.log
 
       - name: Generate checksums
         run: |
