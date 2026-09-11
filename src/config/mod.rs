@@ -49,10 +49,7 @@ pub static PGS_WARN_WRITE_PATH_OVERHEAD_US: GucSetting<f64> = GucSetting::<f64>:
 /// Add pg_trickle properties to PostgreSQL EXPLAIN output.
 pub static PGS_EXPLAIN_ANNOTATIONS: GucSetting<bool> = GucSetting::<bool>::new(false);
 
-/// Enable the experimental Graph V1 coordinator API for this session.
-///
-/// Graph V1 remains unavailable by default until its independent conformance
-/// suite is complete. This opt-in is restricted to superusers.
+/// Deprecated compatibility setting. Graph V1 is stable and no longer gated.
 pub static PGS_EXPERIMENTAL_GRAPH_V1: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 // ── Registration ──────────────────────────────────────────────────────────
@@ -148,8 +145,8 @@ pub fn register_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_trickle.experimental_graph_v1",
-        c"Enable the experimental Graph V1 coordinator API.",
-        c"Graph V1 remains disabled by default and is not a stable compatibility contract.",
+        c"Deprecated Graph V1 compatibility setting.",
+        c"Graph V1 is stable in v0.104.0. This setting has no effect and remains for upgrade compatibility.",
         &PGS_EXPERIMENTAL_GRAPH_V1,
         GucContext::Suset,
         GucFlags::default(),
@@ -192,7 +189,7 @@ pub fn pg_trickle_explain_annotations() -> bool {
     PGS_EXPLAIN_ANNOTATIONS.get()
 }
 
-/// Returns whether the experimental Graph V1 coordinator API is enabled.
+/// Returns the deprecated Graph V1 compatibility setting.
 pub fn pg_trickle_experimental_graph_v1() -> bool {
     PGS_EXPERIMENTAL_GRAPH_V1.get()
 }

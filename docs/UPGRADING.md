@@ -2,6 +2,24 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.103.0 to 0.104.0
+
+Install the v0.104.0 shared library and extension files, then run the upgrade
+inside the normal quiesced boundary:
+
+```sql
+SELECT pgtrickle.preflight_upgrade();
+SELECT pgtrickle.quiesce(60);
+ALTER EXTENSION pg_trickle UPDATE TO '0.104.0';
+SELECT pgtrickle.resume_all();
+```
+
+The migration adds the `EXTERNAL_GRAPH` refresh-history provenance value.
+Existing stream tables, graph contracts, and output-delta consumers remain in
+place. Graph V1 and Delta V1 are stable in v0.104.0; verify their status with
+`pgtrickle.integration_capabilities()`. The deprecated
+`pg_trickle.experimental_graph_v1` setting remains accepted but has no effect.
+
 ## 0.92.0 to 0.93.0
 
 Install the v0.93.0 shared library and extension files, then run the upgrade

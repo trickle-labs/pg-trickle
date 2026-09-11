@@ -1642,10 +1642,9 @@ infrastructure, and schedules a protected full refresh.
 ## Integration Contracts
 
 The v0.94 contract APIs expose typed metadata and strict transactional graph
-refresh for integrations. In v0.100, Graph V1 is available only as an explicit
-superuser opt-in; stable admission remains deferred until v0.104. The generated
-[capability manifest](capability-manifest.json) is the source of truth for the
-default support state.
+refresh for integrations. In v0.104, Graph V1 and Delta V1 are stable public
+SQL contracts. The generated [capability manifest](capability-manifest.json)
+is the source of truth for support state.
 
 ### pgtrickle.integration_capabilities
 
@@ -1728,12 +1727,8 @@ Lists the current owner-visible consumer state, cursor, lag, and contract
 metadata.
 
 Validate and refresh the complete upstream closure of `EXTERNAL` roots in
-topological order inside the caller's transaction. Graph V1 remains disabled
-by default in v0.100; enable the experimental path explicitly for a session:
-
-```sql
-SET pg_trickle.experimental_graph_v1 = on;
-```
+topological order inside the caller's transaction. Graph V1 is stable in
+v0.104 and does not require a feature GUC.
 
 ```sql
 SELECT * FROM pgtrickle.refresh_graph_strict(
@@ -1753,10 +1748,10 @@ existing fallback behavior. Graph refresh holds its source and member locks
 until the caller commits or rolls back, so callers should keep the transaction
 short and treat the returned node results as transaction-local until commit.
 
-The `external_graph_refresh` capability reports `experimental` and is disabled
-by default. The `output_delta_consumer` capability remains disabled. Calls made
-without the Graph V1 opt-in fail before locks or catalog mutation with
-`PGT_EXT_CAPABILITY_DISABLED`.
+The `external_graph_refresh` and `output_delta_consumer` capabilities report
+`stable` and enabled in v0.104. The deprecated
+`pg_trickle.experimental_graph_v1` setting remains only for upgrade
+compatibility and has no effect.
 
 ---
 

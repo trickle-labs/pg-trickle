@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.104.0 — Extension conformance and final feature freeze](#01040--extension-conformance-and-final-feature-freeze)
 - [0.103.0 — Durable WAL receipts and workload budgets](#01030--durable-wal-receipts-and-workload-budgets)
 - [0.102.0 — Output-sensitive delta performance](#01020--output-sensitive-delta-performance)
 - [0.101.0 — Exact relational state and semantic depth](#01010--exact-relational-state-and-semantic-depth)
@@ -213,6 +214,23 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.104.0] — Extension conformance and final feature freeze
+
+v0.104.0 makes Graph V1 and Delta V1 stable public SQL contracts.
+
+- Adds independent public-SQL conformance coverage and minimal reference
+  coordinator and consumer clients.
+- Records external graph provenance in refresh history and output-delta
+  batches, including the graph refresh ID and source-boundary digest.
+- Adds the v0.103.0 to v0.104.0 migration, package metadata, capability
+  manifest, and release gate.
+- Retains `pg_trickle.experimental_graph_v1` as a deprecated no-op for
+  configuration compatibility.
+
+See the [v0.104.0 roadmap](roadmap/v0.104.0.md), the
+[v0.104.0 implementation plan](plans/PLAN_0_104_0.md), and the
+[capability manifest](docs/capability-manifest.json).
 
 ## [0.103.0] — Durable WAL receipts and workload budgets
 

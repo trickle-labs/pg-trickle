@@ -96,10 +96,11 @@ Set `pg_trickle.explain_annotations = on` to add compact pg_trickle properties
 to PostgreSQL 18 `EXPLAIN` output. The default is `off`, so normal planning has
 no annotation lookup cost.
 
-Set `pg_trickle.experimental_graph_v1 = on` only for explicit Graph V1
-integration testing. It is `off` by default, is restricted to superusers, and
-does not make the graph contract stable. Use `full_policy => 'ERROR'` when a
-coordinator must fail instead of allowing a whole-query FULL fallback.
+`pg_trickle.experimental_graph_v1` is a deprecated compatibility setting. Graph
+V1 is stable in v0.104, so the setting has no effect and remains only so an
+upgrade does not reject an existing configuration entry. Use
+`full_policy => 'ERROR'` when a coordinator must fail instead of allowing a
+whole-query FULL fallback.
 
 ---
 

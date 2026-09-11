@@ -1,4 +1,4 @@
-//! v0.100 Graph V1 opt-in admission.
+//! v0.104 Graph V1 stable admission compatibility coverage.
 
 mod common;
 mod e2e;
@@ -6,38 +6,21 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
-async fn test_v100_graph_v1_opt_in_is_explicit() {
+async fn test_v104_graph_v1_is_stable_by_default() {
     let db = E2eDb::new().await.with_extension().await;
 
-    let default_enabled: bool = db
+    let enabled: bool = db
         .query_scalar(
             "SELECT enabled FROM pgtrickle.integration_capabilities() \
              WHERE capability = 'external_graph_refresh'",
         )
         .await;
-    assert!(!default_enabled, "Graph V1 must remain disabled by default");
-
-    let opt_in_enabled: bool = db
+    let status: String = db
         .query_scalar(
-            "WITH configured AS MATERIALIZED ( \
-                 SELECT set_config('pg_trickle.experimental_graph_v1', 'on', false) \
-             ) \
-             SELECT enabled FROM configured, pgtrickle.integration_capabilities() \
+            "SELECT details->>'status' FROM pgtrickle.integration_capabilities() \
              WHERE capability = 'external_graph_refresh'",
         )
         .await;
-    let phase: String = db
-        .query_scalar(
-            "WITH configured AS MATERIALIZED ( \
-                 SELECT set_config('pg_trickle.experimental_graph_v1', 'on', false) \
-             ) \
-             SELECT details->>'phase' FROM configured, pgtrickle.integration_capabilities() \
-             WHERE capability = 'external_graph_refresh'",
-        )
-        .await;
-    assert!(
-        opt_in_enabled,
-        "Graph V1 should report enabled after opt-in"
-    );
-    assert_eq!(phase, "v0.100_scoped_opt_in");
+    assert!(enabled, "Graph V1 must be enabled by default");
+    assert_eq!(status, "stable");
 }

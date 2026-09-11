@@ -49,14 +49,14 @@ async fn test_v103_wal_admission_is_receipt_backed() {
 }
 
 #[tokio::test]
-async fn test_v098_integration_capabilities_are_disabled() {
+async fn test_v104_integration_capabilities_are_stable() {
     let db = E2eDb::new().await.with_extension().await;
 
-    let disabled: i64 = db
+    let stable: i64 = db
         .query_scalar(
             "SELECT count(*)::bigint FROM pgtrickle.integration_capabilities() \
-             WHERE enabled = false AND details->>'status' = 'experimental'",
+             WHERE enabled AND details->>'status' = 'stable'",
         )
         .await;
-    assert_eq!(disabled, 2);
+    assert_eq!(stable, 2);
 }
