@@ -534,7 +534,7 @@ freeze the core IVM engine. v0.105.0 through v0.105.2 perform qualification.
 | [v0.103.0](roadmap/v0.103.0.md) | Low-Interference Capture and Workload Control: economical capture, proven lock reductions, fair resource admission, and bounded controller authority | "IVM stays within a visible database budget while pursuing an achievable freshness target." | ✅ Released | Large | [Full details](roadmap/v0.103.0.md) |
 | [v0.104.0](roadmap/v0.104.0.md) | Extension Conformance and Final Feature Freeze: packaged Graph V1 and Delta V1 suites, reference clients, and frozen public contracts | "Other PostgreSQL tools can build on a small, stable contract." | ✅ Released | Medium | [Full details](roadmap/v0.104.0.md) |
 | [v0.105.0](roadmap/v0.105.0.md) | Qualification contract and release evidence: candidate metadata, conformance wiring, package evidence, and deferred long-running gates | "Every qualification result identifies the build it tested." | ✅ Released | Medium | [Full details](roadmap/v0.105.0.md) |
-| [v0.105.1](roadmap/v0.105.1.md) | Runtime conformance and recovery: Graph V1, Delta V1, DVM correctness, WAL fault handling, rollback, and upgrade behavior | "Supported contracts behave correctly under failure and replay." | Planned | Large | [Full details](roadmap/v0.105.1.md) |
+| [v0.105.1](roadmap/v0.105.1.md) | Runtime conformance and recovery: delegated Graph V1 source authorization, Graph V1 and Delta V1 conformance, DVM correctness, WAL fault handling, rollback, and upgrade behavior | "Supported contracts behave correctly under delegated access, failure, and replay." | Planned | Large | [Full details](roadmap/v0.105.1.md) |
 | [v0.105.2](roadmap/v0.105.2.md) | Package, upgrade, performance, and field validation: supported artifacts, active-data upgrades, workload budgets, and operator procedures | "The released build works in the environments we support." | Planned | Large | [Full details](roadmap/v0.105.2.md) |
 
 ### Toward v1.0
@@ -1169,10 +1169,13 @@ diagnostics, and roles. v0.97.0 adds monitoring, package, and release-evidence
 machinery, but its required qualification is incomplete. v0.98.0 resolves or
 disables the known unsafe contracts. v0.98.1 then runs the release gates on
 one frozen candidate. The September 2026 assessment drives v0.99.0 through
-v0.105.2. These releases qualify the frozen contracts, runtime behavior,
-supported packages, upgrades, and field procedures. The 72-hour mixed-workload
-soak, longevity environment, release candidates, and v1.0 release remain
-deferred indefinitely.
+v0.105.2. v0.105.1 also qualifies delegated Graph V1 source authorization
+without changing the frozen SQL signatures or contract versions. An authorized
+`pg-mdm` execution role owns its graph members while source owners grant schema
+`USAGE` and table `SELECT` plus `MAINTAIN`. These releases qualify the frozen
+contracts, runtime behavior, supported packages, upgrades, and field procedures.
+The 72-hour mixed-workload soak, longevity environment, release candidates, and
+v1.0 release remain deferred indefinitely.
 
 **The distributed work has moved past 1.0.** External workers, external CDC
 consumers, Kubernetes operators, distributed delta computation, cross-cluster
