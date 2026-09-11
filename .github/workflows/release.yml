@@ -379,6 +379,9 @@ jobs:
         run: |
           mkdir -p candidate
           tar xzf dist/*.tar.gz -C candidate --strip-components=1
+          mkdir -p candidate/usr/share/postgresql/18 candidate/usr/lib/postgresql/18
+          cp -a candidate/extension candidate/usr/share/postgresql/18/
+          cp -a candidate/lib candidate/usr/lib/postgresql/18/
           test -f candidate/usr/share/postgresql/18/extension/pg_trickle.control
           test -f candidate/usr/lib/postgresql/18/lib/pg_trickle.so
 
