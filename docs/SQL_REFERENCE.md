@@ -1673,7 +1673,10 @@ APIs to inspect the graph. `EXTERNAL` is rejected for `IMMEDIATE` tables.
 Return the stream table's contract generation, SHA-256 digest, and JSON
 projection. The digest includes query rewrite identity, output schema,
 dependencies, source identity, ownership, RLS flags, search path, row identity
-versions, DVM format, and database instance identity.
+versions, DVM format, and database instance identity. The caller must have
+owner-equivalent authority over the stream table. For each base-table source,
+the caller must either have owner-equivalent authority or have schema `USAGE`
+and the table privileges `SELECT` and `MAINTAIN`.
 
 ```sql
 SELECT * FROM pgtrickle.stream_table_contract('public.orders_total'::regclass);
@@ -1686,6 +1689,15 @@ Return one canonical contract for the complete upstream closure of one or more
 deterministically encoded; cycles, temporary relations, unsupported sources,
 cross-database inputs, malformed catalog rows, and unauthorized members or
 sources fail closed.
+
+A source owner can delegate coordination without transferring ownership:
+
+```sql
+GRANT USAGE ON SCHEMA app TO graph_coordinator;
+GRANT SELECT, MAINTAIN ON TABLE app.orders TO graph_coordinator;
+```
+
+Graph members still require owner-equivalent authority.
 
 ```sql
 SELECT *
@@ -1739,8 +1751,9 @@ SELECT * FROM pgtrickle.refresh_graph_strict(
 ```
 
 The expected digest is mandatory. The function rejects stale contracts,
-unsupported members, ownership failures, and busy or changed catalog state
-before executing any member. It does not commit.
+unsupported members, authorization failures, and busy or changed catalog state
+before executing any member. It does not commit. Revoking a required source
+grant causes subsequent contract and refresh calls to fail closed.
 
 `full_policy => 'ERROR'` rejects any graph member that needs a whole-query FULL
 refresh, including runtime differential fallbacks. `ALLOW` permits the

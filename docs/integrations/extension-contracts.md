@@ -9,6 +9,11 @@ Graph coordinators should read `graph_contract()` and pass its digest to
 The refresh does not commit, so a rollback removes both the materialized
 changes and the coordinator's publication.
 
+The coordinator needs owner-equivalent authority over every graph member. A
+base-table owner may instead delegate source coordination with schema `USAGE`
+and table `SELECT` plus `MAINTAIN`; revoking either table grant makes contract
+and strict-refresh calls fail closed.
+
 Delta consumers register with `register_output_delta_consumer()`, read batch
 metadata with `output_delta_batches()`, read rows from its returned
 `delta_relation`, and acknowledge with `ack_output_delta()`. A consumer uses
