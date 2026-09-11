@@ -321,14 +321,20 @@ jobs:
             postgres -c "shared_preload_libraries=pg_trickle"
 
           echo "Waiting for PostgreSQL..."
+          ready_streak=0
           for i in $(seq 1 30); do
             if docker exec smoketest pg_isready -U postgres 2>/dev/null; then
-              break
+              ready_streak=$((ready_streak + 1))
+              if [[ "$ready_streak" -ge 3 ]]; then
+                break
+              fi
+            else
+              ready_streak=0
             fi
             sleep 1
           done
 
-          if ! docker exec smoketest pg_isready -U postgres; then
+          if [[ "$ready_streak" -lt 3 ]]; then
             echo "ERROR: PostgreSQL did not become ready"
             docker logs smoketest
             exit 1
