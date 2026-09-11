@@ -9,6 +9,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -413,7 +414,39 @@ jobs:
             bash ./scripts/run_light_e2e_tests.sh --test "$test_target" 2>&1 | \
               tee -a qualification-logs/runtime-qualification.log
           done
-          just check-upgrade-all
+          # Release runners do not install `just`; keep this equivalent to
+          # the repository's upgrade-check CI job.
+          SUPPORT_CUTOFF="0.40.0"
+          version_ge() { printf '%s\n%s' "$2" "$1" | sort -V -C; }
+          current_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          pairs=()
+          for f in sql/pg_trickle--*--*.sql; do
+            base=$(basename "$f" .sql)
+            from=${base#pg_trickle--}
+            to=${from#*--}
+            from=${from%%--*}
+            if version_ge "$from" "$SUPPORT_CUTOFF"; then
+              pairs+=("$from $to")
+            fi
+          done
+          last_to=$(printf '%s\n' "${pairs[@]}" | awk '{print $2}' | sort -V | tail -1)
+          if [[ "$last_to" != "$current_version" ]]; then
+            echo "ERROR: Latest upgrade script target ($last_to) != Cargo.toml ($current_version)"
+            exit 1
+          fi
+          failed=0
+          for pair in "${pairs[@]}"; do
+            from=${pair%% *}
+            to=${pair##* }
+            echo "--- Checking upgrade: ${from} -> ${to}"
+            if ! scripts/check_upgrade_completeness.sh "$from" "$to"; then
+              failed=1
+            fi
+          done
+          if [[ $failed -ne 0 ]]; then
+            echo "FAILED: One or more upgrade completeness checks failed."
+            exit 1
+          fi
 
       - name: Retain qualification logs
         if: always()
