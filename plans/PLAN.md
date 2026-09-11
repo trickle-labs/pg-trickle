@@ -10,7 +10,7 @@
 | [ROADMAP.md](../ROADMAP.md) | Current release milestones and feature backlog |
 | [roadmap/](../roadmap/) | Per-version detailed roadmap files |
 | [PLAN_0_105_0.md](PLAN_0_105_0.md) | v0.105.0 qualification contract and release evidence |
-| [PLAN_0_105_1.md](PLAN_0_105_1.md) | v0.105.1 runtime conformance and recovery qualification |
+| [PLAN_0_105_1.md](PLAN_0_105_1.md) | v0.105.1 delegated Graph V1 authorization, runtime conformance, and recovery qualification |
 | [PLAN_0_105_2.md](PLAN_0_105_2.md) | v0.105.2 package, upgrade, performance, and field validation |
 | [pg-trickle assessment and pre-1.0 roadmap](pg-trickle-assessment-and-pre-1.0-roadmap.md) | September 2026 assessment that drives v0.99.0 through v0.105.2 |
 | [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) | System architecture and design overview |
