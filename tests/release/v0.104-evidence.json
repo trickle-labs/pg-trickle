@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "release_version": "0.104.0",
+  "status": "historical",
+  "candidate_commit": "c9eee742c2ac96eb12023bdfd3898aeedaf9b6b6",
+  "artifacts": [],
+  "executed_suites": [
+    {"name": "graph-v1", "status": "passed", "suite_version": "0.104.0", "workload": "public-SQL Graph V1 conformance"},
+    {"name": "delta-v1", "status": "passed", "suite_version": "0.104.0", "workload": "public-SQL Delta V1 conformance"}
+  ],
+  "unverified_exit_criteria": [
+    "full rollback, replay, invalidation, slow-consumer, restore, clone, permission, and upgrade matrix",
+    "foreground write overhead budget",
+    "full supported-platform package matrix"
+  ],
+  "notes": "The v0.104 gate proved the checked-in public conformance cases. It did not retain artifact digests or claim the broader exit checklist. v0.105.0 carries those items as explicit qualification work."
+}

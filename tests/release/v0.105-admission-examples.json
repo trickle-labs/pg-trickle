@@ -95,6 +95,5 @@
       "docs/integrations/citus.md",
       "docs/integrations/extension-contracts.md"
     ]
-  },
-  "manifest_digest": "sha256:cde89d6028b52f4c1e2822da9153bae52db0e49088bf76ea78245b865a01b3ea"
+  }
 }

@@ -1,0 +1,106 @@
+{
+  "contract_version": 1,
+  "release_version": "0.105.0",
+  "source_versions": ["0.104.0"],
+  "required_suites": [
+    {
+      "id": "graph-v1",
+      "command": "just test-v104-conformance",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.104.0",
+      "workload": "packaged Graph V1 public-SQL coordinator and rollback"
+    },
+    {
+      "id": "delta-v1",
+      "command": "just test-v104-conformance",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.104.0",
+      "workload": "packaged Delta V1 public-SQL consumer and acknowledgement"
+    },
+    {
+      "id": "version-sync",
+      "command": "just check-version-sync",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.0",
+      "workload": "release metadata and upgrade-chain validation"
+    },
+    {
+      "id": "package-smoke",
+      "command": "just test-package-smoke",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.0",
+      "workload": "packaged extension installation and version smoke test"
+    },
+    {
+      "id": "monitoring-contract",
+      "command": "python3 scripts/check_monitoring_contract.py",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.0",
+      "workload": "checked-in monitoring contract validation"
+    },
+    {
+      "id": "release-artifact-smoke",
+      "command": "release test-release job",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.0",
+      "workload": "Linux package installation and live PostgreSQL smoke test"
+    }
+  ],
+  "deferred_suites": [
+    {
+      "id": "soak-72h",
+      "command": "just test-soak duration_hours=72",
+      "required": false,
+      "enabled": false,
+      "status": "deferred",
+      "reason": "Deferred to post-v0.105.2 v1.0 qualification."
+    },
+    {
+      "id": "longevity-7d",
+      "command": "just test-longevity duration_days=7",
+      "required": false,
+      "enabled": false,
+      "status": "deferred",
+      "reason": "Deferred to post-v0.105.2 v1.0 qualification."
+    }
+  ],
+  "artifacts": [
+    {"id": "linux-amd64", "platform": "linux-amd64", "postgresql_major": 18, "version": "0.105.0"},
+    {"id": "linux-arm64", "platform": "linux-arm64", "postgresql_major": 18, "version": "0.105.0"},
+    {"id": "macos-arm64", "platform": "macos-arm64", "postgresql_major": 18, "version": "0.105.0"},
+    {"id": "windows-amd64", "platform": "windows-amd64", "postgresql_major": 18, "version": "0.105.0"}
+  ],
+  "performance_budgets": [
+    {"id": "trigger-write-overhead", "metric": "foreground DML overhead", "threshold": 15.0, "unit": "percent", "comparison": "max"},
+    {"id": "differential-refresh-regression", "metric": "differential refresh p95 regression", "threshold": 10.0, "unit": "percent", "comparison": "max"}
+  ],
+  "evidence": {
+    "schema_version": 2,
+    "allowed_result_states": ["passed", "failed", "skipped", "unavailable", "stale", "historical"],
+    "required_fields": [
+      "candidate_commit",
+      "artifact_digest",
+      "postgresql_version",
+      "suite_version",
+      "workload",
+      "retained_logs"
+    ]
+  },
+  "reconciled_previous_release": {
+    "version": "0.104.0",
+    "evidence_file": "tests/release/v0.104-evidence.json",
+    "status": "historical"
+  }
+}
