@@ -16,7 +16,7 @@ VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["pack
 SOURCE = ROOT / f"tests/release/v{VERSION.rsplit('.', 1)[0]}-admission-examples.json"
 OUTPUT = ROOT / "docs/capability-manifest.json"
 OUTCOMES = {"accepted", "rejected", "experimental-disabled"}
-STRATEGIES = {"DIFFERENTIAL", "FULL", "IMMEDIATE", "UNAVAILABLE"}
+STRATEGIES = {"DIFFERENTIAL", "FULL", "IMMEDIATE", "WAL", "UNAVAILABLE"}
 STATUSES = {"stable", "experimental", "unsupported"}
 
 
@@ -66,7 +66,7 @@ def validate(source: dict) -> None:
             errors.append(f"unknown capability status: {item.get('status')!r}")
         if not isinstance(item.get("enabled"), bool):
             errors.append(f"capability {item.get('id')!r} must declare enabled")
-        if item.get("strategy") not in {"trigger", "unavailable"}:
+        if item.get("strategy") not in {"trigger", "wal", "unavailable"}:
             errors.append(f"capability {item.get('id')!r} has an unknown strategy")
         reason = item.get("reason_code")
         if reason is not None and reason not in reasons:

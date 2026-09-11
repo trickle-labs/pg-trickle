@@ -227,6 +227,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     source_relid        OID PRIMARY KEY,
     slot_name           TEXT NOT NULL,
     last_consumed_lsn   PG_LSN,
+    receipt_high_water_lsn PG_LSN,
+    acknowledged_high_water_lsn PG_LSN,
     tracked_by_pgt_ids   BIGINT[],
 
 

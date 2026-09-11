@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.103.0 — Durable WAL receipts and workload budgets](#01030--durable-wal-receipts-and-workload-budgets)
 - [0.102.0 — Output-sensitive delta performance](#01020--output-sensitive-delta-performance)
 - [0.101.0 — Exact relational state and semantic depth](#01010--exact-relational-state-and-semantic-depth)
 - [0.100.0 — Unified transactional IVM execution](#01000--unified-transactional-ivm-execution)
@@ -212,6 +213,24 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.103.0] — Durable WAL receipts and workload budgets
+
+v0.103.0 re-enables WAL CDC behind a durable receipt boundary. Logical-decoding
+rows are committed to `pgtrickle.pgt_wal_receipts` before the slot advances;
+replay and acknowledgement are separate, idempotent scheduler phases with
+per-source high-water marks. Sources that do not meet the prerequisites or
+encounter repeated decoder failures fall back to trigger CDC.
+
+- Adds the 0.102.0 to 0.103.0 schema migration and full install archive.
+- Keeps IMMEDIATE refreshes on in-transaction triggers even when the global CDC
+  setting is `wal`; explicit WAL plus IMMEDIATE remains rejected.
+- Freezes the v0.103 workload-budget contract and release gate while reusing the
+  existing scheduler quotas, deadlines, backpressure, and freshness controls.
+
+See the [v0.103.0 roadmap](roadmap/v0.103.0.md), the
+[v0.103.0 implementation plan](plans/PLAN_0_103_0.md), and the
+[capability manifest](docs/capability-manifest.json).
 
 ## [0.102.0] — Output-sensitive delta performance
 

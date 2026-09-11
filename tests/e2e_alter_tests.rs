@@ -71,7 +71,7 @@ async fn test_alter_refresh_mode() {
 }
 
 #[tokio::test]
-async fn test_alter_to_immediate_rejects_wal_cdc_guc() {
+async fn test_alter_to_immediate_ignores_global_wal_cdc_guc() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE al_mode_wal_src (id INT PRIMARY KEY, val TEXT)")
@@ -108,10 +108,9 @@ async fn test_alter_to_immediate_rejects_wal_cdc_guc() {
         )
         .await;
 
-    let error = format!("{}", result.unwrap_err());
     assert!(
-        error.contains("PGT_EXT_CDC_UNAVAILABLE"),
-        "unexpected error: {error}"
+        result.is_ok(),
+        "global WAL mode must not override IMMEDIATE: {result:?}"
     );
 }
 
@@ -149,8 +148,8 @@ async fn test_alter_to_immediate_rejects_explicit_wal_cdc_mode() {
 
     let error = format!("{}", result.unwrap_err());
     assert!(
-        error.contains("PGT_EXT_CDC_UNAVAILABLE"),
-        "Expected WAL unavailable error, got: {error}"
+        error.contains("IMMEDIATE"),
+        "Expected mode interaction error, got: {error}"
     );
 }
 
