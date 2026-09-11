@@ -535,7 +535,7 @@ freeze the core IVM engine. v0.105.0 through v0.105.2 perform qualification.
 | [v0.104.0](roadmap/v0.104.0.md) | Extension Conformance and Final Feature Freeze: packaged Graph V1 and Delta V1 suites, reference clients, and frozen public contracts | "Other PostgreSQL tools can build on a small, stable contract." | ✅ Released | Medium | [Full details](roadmap/v0.104.0.md) |
 | [v0.105.0](roadmap/v0.105.0.md) | Qualification contract and release evidence: candidate metadata, conformance wiring, package evidence, and deferred long-running gates | "Every qualification result identifies the build it tested." | ✅ Released | Medium | [Full details](roadmap/v0.105.0.md) |
 | [v0.105.1](roadmap/v0.105.1.md) | Runtime conformance and recovery: delegated Graph V1 source authorization, Graph V1 and Delta V1 conformance, DVM correctness, WAL fault handling, rollback, and upgrade behavior | "Supported contracts behave correctly under delegated access, failure, and replay." | ✅ Released | Large | [Full details](roadmap/v0.105.1.md) |
-| [v0.105.2](roadmap/v0.105.2.md) | Package, upgrade, performance, and field validation: supported artifacts, active-data upgrades, workload budgets, and operator procedures | "The released build works in the environments we support." | Planned | Large | [Full details](roadmap/v0.105.2.md) |
+| [v0.105.2](roadmap/v0.105.2.md) | Package, upgrade, performance, and field validation: supported artifacts, active-data upgrades, workload budgets, and operator procedures | "The released build works in the environments we support." | ✅ Released | Large | [Full details](roadmap/v0.105.2.md) |
 
 ### Toward v1.0
 

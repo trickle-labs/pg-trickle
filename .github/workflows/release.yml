@@ -84,6 +84,10 @@ jobs:
         if: github.ref_name == 'v0.105.1'
         run: python3 scripts/v0_105_1_release_gate.py
 
+      - name: v0.105.2 package and field qualification release gate
+        if: github.ref_name == 'v0.105.2'
+        run: python3 scripts/v0_105_2_release_gate.py
+
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 
@@ -371,10 +375,10 @@ jobs:
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
   qualification:
-    name: Packaged v0.105.1 runtime qualification
+    name: Packaged v0.105.2 package and field qualification
     needs: build-release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 
@@ -397,7 +401,7 @@ jobs:
           test -f candidate/usr/share/postgresql/18/extension/pg_trickle.control
           test -f candidate/usr/lib/postgresql/18/lib/pg_trickle.so
 
-      - name: Run packaged v0.105.1 runtime qualification
+      - name: Run packaged v0.105.2 package and field qualification
         env:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/candidate
         run: |
@@ -410,7 +414,9 @@ jobs:
             e2e_diff_full_equivalence_tests \
             e2e_failure_recovery_tests \
             e2e_publication_crash_recovery_tests \
-            e2e_v098_stability_tests; do
+            e2e_v098_stability_tests \
+            e2e_v08711_snapshot_security_tests \
+            e2e_diagnostics_tests; do
             bash ./scripts/run_light_e2e_tests.sh --test "$test_target" 2>&1 | \
               tee -a qualification-logs/runtime-qualification.log
           done
@@ -447,6 +453,8 @@ jobs:
             echo "FAILED: One or more upgrade completeness checks failed."
             exit 1
           fi
+          BENCH_QUICK=1 ./scripts/run_benchmarks.sh 2>&1 | \
+            tee qualification-logs/performance-qualification.log
 
       - name: Retain qualification logs
         if: always()
@@ -492,11 +500,11 @@ jobs:
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
             --candidate-commit "$GITHUB_SHA" \
-            --qualification tests/release/v0.105.1-qualification.json \
+            --qualification tests/release/v0.105.2-qualification.json \
             --capability-manifest docs/capability-manifest.json \
             --postgresql-version "$POSTGRESQL_VERSION" \
-            --suite-version "0.105.1" \
-            --workload "packaged v0.105.1 runtime qualification" \
+            --suite-version "0.105.2" \
+            --workload "packaged v0.105.2 package and field qualification" \
             --artifact release-files/*.tar.gz release-files/*.zip \
             --suite graph-v1=passed \
             --suite delta-v1=passed \
@@ -504,11 +512,14 @@ jobs:
             --suite recovery=passed \
             --suite wal-admission=passed \
             --suite upgrade-chain=passed \
+            --suite operations=passed \
+            --suite performance=passed \
             --suite version-sync=passed \
             --suite package-smoke=passed \
             --suite monitoring-contract=passed \
             --suite release-artifact-smoke=passed \
-            --log release-files/runtime-qualification.log
+            --log release-files/runtime-qualification.log \
+            --log release-files/performance-qualification.log
 
       - name: Generate checksums
         run: |
