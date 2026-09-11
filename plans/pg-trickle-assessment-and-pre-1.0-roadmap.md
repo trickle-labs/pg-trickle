@@ -4,7 +4,8 @@
 **Repository:** [trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle)\
 **Reviewed revision:** [`ef6d75a60a431b407bccc623b6dbea4390589902`](https://github.com/trickle-labs/pg-trickle/commit/ef6d75a60a431b407bccc623b6dbea4390589902), corresponding to v0.94.0\
 **Requested direction:** An exceptional PostgreSQL incremental view maintenance engine, with carefully bounded extension points.\
-**Roadmap proposal:** v0.99.0 through v0.105.x, followed by 1.0 release candidates.
+**Roadmap proposal:** v0.99.0 through v0.105.2. v1.0 qualification and
+release candidates are deferred indefinitely.
 
 ## 1. Executive assessment
 
@@ -24,7 +25,7 @@ These are not reasons to replace the architecture. They are reasons to consolida
 
 > Keep expensive PostgreSQL query results correct and fresh, with the least practical recomputation and a predictable impact on the database that serves the application.
 
-**Recommended order:** close correctness and contract hazards immediately; finish the already planned operational work through 0.98; then execute a bounded 0.99–0.105 IVM improvement programme. New external platforms and broad integrations should not enter that critical path.
+**Recommended order:** close correctness and contract hazards immediately; finish the already planned operational work through 0.98; then execute the bounded v0.99.0–v0.105.2 IVM improvement programme. New external platforms and broad integrations should not enter that critical path.
 
 ## 2. Scope, evidence, and limitations
 
@@ -461,7 +462,7 @@ The next roadmap should build on the current one:
 
 [0.95][r095], [0.96][r096], [0.97][r097], [0.98][r098].
 
-The policy change should be explicit: **0.97 ceases to be the final feature release; 0.98 remains a stabilization series; the final feature freeze moves to 0.104, followed by 0.105.x qualification.** Update roadmap prose, release automation, feature-freeze checks, and upgrade manifests together. Do not leave incompatible freeze statements in different documents.
+The policy change should be explicit: **0.97 ceases to be the final feature release; 0.98 remains a stabilization series; the final feature freeze moves to 0.104, followed by the v0.105.0–v0.105.2 qualification series. v1.0 qualification is deferred indefinitely.** Update roadmap prose, release automation, feature-freeze checks, and upgrade manifests together. Do not leave incompatible freeze statements in different documents.
 
 Urgent correctness, security, and misleading-contract fixes should ship at the earliest appropriate release. Their inclusion in later acceptance criteria is a regression requirement, not permission to defer them.
 
@@ -477,7 +478,9 @@ Version numbers are semantic-version components: `0.100.0` follows `0.99.0`; the
 | **0.102.0** | Efficient delta plans: small changes touch less irrelevant data. | Large | Exact oracle, measured state costs, stable executor boundary. |
 | **0.103.0** | Predictable OLTP coexistence: freshness and throughput fit the application’s resource budget. | Large | Reliable capture and execution instrumentation. |
 | **0.104.0** | Proven extension contracts and final feature freeze. | Medium | Graph/Delta conformance and preceding core behavior settled. |
-| **0.105.x** | Release qualification and compatibility: the final candidate contains less unresolved risk. | Variable | Frozen 0.104 feature surface. |
+| **0.105.0** | Qualification contract and release evidence. | Medium | Frozen 0.104 feature surface. |
+| **0.105.1** | Runtime conformance and recovery qualification. | Large | v0.105.0 qualification contract. |
+| **0.105.2** | Package, upgrade, performance, and field validation. | Large | v0.105.1 runtime evidence. |
 
 ### 0.99.0 — Verified capabilities and product truth
 
@@ -587,24 +590,37 @@ Clarify the supported boundary with pg_tide, dbt, and optional source integratio
 
 **Scope control:** no connector marketplace, stable Rust ABI, or remote delivery service. Finish the boundary already designed in 0.93–0.95.
 
-### 0.105.x — Qualification, longevity, and 1.0 candidates
+### 0.105.0–0.105.2 — Qualification and maintenance
 
 **User promise:** “The documented build has passed the documented release conditions.”
 
-Allow correctness/security fixes, compatibility repair, documentation, package fixes, and removal or narrowing of unstable optimizations. Add no SQL features or capabilities.
+Allow correctness and security fixes, compatibility repair, documentation,
+package fixes, missing tests, and removal or narrowing of unstable
+optimizations. Add no SQL features or capabilities.
 
-Run the exact oracle, capture fault matrix, graph/delta conformance, real binary upgrades/recreation paths, 72-hour mixed-workload soak, package maintenance tests, and performance budgets on the final candidate. Maintain a longer-running deployment across builds to expose cumulative state growth and recurring recovery loops. Have independent operators exercise the install, diagnose, alter, upgrade, restore, and resnapshot runbooks.
+Use [v0.105.0](../roadmap/v0.105.0.md) for the qualification contract and
+candidate-bound release evidence. Use [v0.105.1](../roadmap/v0.105.1.md) for
+runtime conformance, the exact oracle, the capture fault matrix, recovery, and
+upgrade behavior. Use [v0.105.2](../roadmap/v0.105.2.md) for package,
+performance, and field validation.
+
+Do not run the 72-hour mixed-workload soak or the longer-running longevity
+environment in this series. Keep both as future v1.0 qualification gates.
+Have independent operators exercise the install, diagnose, alter, upgrade,
+restore, and resnapshot runbooks during v0.105.2.
 
 **Exit criteria:**
 
 - No known correctness or security blocker in the supported surface.
 - All required results map to the candidate SHA and shipped artifact digests.
 - Upgrade support manifest includes the accepted post-0.98 path and explicitly classifies recreation boundaries.
-- No unexplained long-term memory, catalog, buffer, output-log, or disk growth.
+- No unexplained growth appears in the measured qualification workloads.
 - Supported-platform package tests maintain real data and exercise the advertised upgrade procedure.
 - All remaining limitations have a stable diagnostic and a documented supported response.
 
-Then publish `1.0.0-rc.1`, subsequent candidates as needed, and `1.0.0` when the gates hold. A material change to capture, finalization, or recovery invalidates the corresponding qualification evidence and requires rerunning it.
+Do not publish `1.0.0-rc.1` or `1.0.0` from this series. Both remain
+indefinitely deferred. A material change to capture, finalization, or recovery
+invalidates the corresponding qualification evidence and requires rerunning it.
 
 ## 11. Programme priorities and scope discipline
 
@@ -617,7 +633,10 @@ The sequence must not become another open-ended “final hardening” arc. Use t
 5. **Allocate most engineering effort to the core.** A reasonable planning target is roughly 80% for IVM/correctness/performance/operations and at most 20% for public integration boundaries and examples. This is a proposed allocation, not a claim about current staffing.
 6. **Do not add releases to justify existing plans.** If a proposed milestone is already satisfied, record the evidence and move on. If an optional feature misses its gate, defer it beyond 1.0.
 
-The first concrete work packages should be F01’s durable-receipt fault test and fix, F02/F03’s live graph conformance and strategy-policy enforcement, and F06/F07’s executable support and release-evidence contract. They reduce the chance that later optimization work builds on an incorrect premise.
+The first concrete work packages are v0.105.0's qualification contract,
+v0.105.1's live conformance and recovery evidence, and v0.105.2's package and
+field validation. The 72-hour soak and longevity environment are deliberately
+deferred until v1.0 qualification resumes.
 
 ## 12. Suggested investigation and acceptance scenarios
 

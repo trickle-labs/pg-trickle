@@ -391,7 +391,7 @@ and durability foundations that must be proven before v1.0.
 | [v0.79.0](roadmap/v0.79.0.md) | Code Quality, API Ergonomics & Security: remove unused-import suppressions in src/refresh/codegen.rs and src/refresh/merge/mod.rs module-by-module (Q-1), convert internal create/alter API implementations to typed parameter structs eliminating too-many-arguments in business logic (Q-2), replace global #![allow(dead_code)] with narrower per-module allowances on pgrx/export boundaries (Q-3), remove or #[deprecated] consume_slot_changes() replacing with clearly named status function (Q-4), add SQL convenience helpers create_stream_table_fast_append_only/set_stream_table_refresh_policy/set_stream_table_storage_policy (A-1), add first-class pause_stream_table/resume_stream_table wrappers (A-2), add/strengthen semgrep CI rules for dynamic SQL distinguishing identifier/literal/OID boundaries (S-1), emit runtime WARNING when source has RLS enabled at create_stream_table time (S-2), CI test inspecting SECURITY DEFINER trigger functions for SET search_path (S-3), cleanup chaos test forcing three consecutive DELETE failures with alert and status verification (D-3), dbt adapter compatibility matrix with alter/drop/rebuild flow and version matrix tests (T-5) | ✅ Released | Large | [Full details](roadmap/v0.79.0.md-full.md) |
 | [v0.80.0](roadmap/v0.80.0.md) | Operational Excellence, Documentation Completeness & Final v1.0 Gate: add DVM fallback/performance reason codes to refresh history and health output — CORRELATED_SUBQUERY_DELTA_QUADRATIC, CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK, REGEX_COMPLEXITY_CLASSIFIER_UNCERTAIN (O-1), add health_check() threshold alert when invalidation ring overflow count increases in recent time window (O-2), add cleanup backlog trend metrics integrated into pgt_metrics_summary (O-3), docs lint comparing #[pg_extern] exports with SQL_REFERENCE.md entries (DOC-1), create docs/DVM_SUPPORT_MATRIX.md with every query pattern, fallback behavior, IMMEDIATE restrictions, and known-unsupported forms including q12/q20 entries (DOC-2), operational rollback runbook (backup requirements, snapshot recommendation, restore path, why downgrades are unsafe) (U-1), document upgrade E2E cutoff policy prominently in CHANGELOG and release notes (U-2), CI gate documentation in CONTRIBUTING.md describing which workflows gate PRs (B-1), review-by dates on cargo-deny advisory suppressions and require cargo-deny in PR gates (B-2), fuzz test for DVM snapshot fingerprint cache stability under OpTree refactoring (P-5), document internal event trigger functions in ARCHITECTURE comments (A-3) | ✅ Released | Large | [Full details](roadmap/v0.80.0.md-full.md) |
 
-### Product Arc & Hardening Gate (v0.81.0 - v0.105.x)
+### Product Arc & Hardening Gate (v0.81.0 - v0.105.2)
 
 The core thing users are buying is not "distributed incremental computation".
 It is:
@@ -487,7 +487,7 @@ PostgreSQL-native architecture and conservative fallbacks. A follow-up
 [assessment of v0.93.0 through v0.97.0](roadmap/v0.98.x.md) identifies release
 blockers that must close first. v0.98.0 contains those risks, and v0.98.1
 qualifies the corrected baseline. v0.99.0 through v0.104.0 then improve and
-freeze the core IVM engine. v0.105.x performs final qualification.
+freeze the core IVM engine. v0.105.0 through v0.105.2 perform qualification.
 
 | Version | Theme | User promise | Status | Scope | Full details |
 |---------|-------|--------------|--------|-------|--------------|
@@ -533,14 +533,16 @@ freeze the core IVM engine. v0.105.x performs final qualification.
 | [v0.102.0](roadmap/v0.102.0.md) | Output-Sensitive Delta Performance: measured operator locality, better delta statistics, and evidence-gated rewrites | "Small relevant changes avoid unnecessary scans, and expensive refreshes explain their cost." | ✅ Released | Large | [Full details](roadmap/v0.102.0.md) |
 | [v0.103.0](roadmap/v0.103.0.md) | Low-Interference Capture and Workload Control: economical capture, proven lock reductions, fair resource admission, and bounded controller authority | "IVM stays within a visible database budget while pursuing an achievable freshness target." | ✅ Released | Large | [Full details](roadmap/v0.103.0.md) |
 | [v0.104.0](roadmap/v0.104.0.md) | Extension Conformance and Final Feature Freeze: packaged Graph V1 and Delta V1 suites, reference clients, and frozen public contracts | "Other PostgreSQL tools can build on a small, stable contract." | ✅ Released | Medium | [Full details](roadmap/v0.104.0.md) |
-| [v0.105.x](roadmap/v0.105.x.md) | Qualification, Longevity, and 1.0 Candidates: candidate-bound evidence, upgrades, soak, package maintenance, and field validation | "The documented build has passed the documented release conditions." | Planned | Variable | [Full details](roadmap/v0.105.x.md) |
+| [v0.105.0](roadmap/v0.105.0.md) | Qualification contract and release evidence: candidate metadata, conformance wiring, package evidence, and deferred long-running gates | "Every qualification result identifies the build it tested." | Planned | Medium | [Full details](roadmap/v0.105.0.md) |
+| [v0.105.1](roadmap/v0.105.1.md) | Runtime conformance and recovery: Graph V1, Delta V1, DVM correctness, WAL fault handling, rollback, and upgrade behavior | "Supported contracts behave correctly under failure and replay." | Planned | Large | [Full details](roadmap/v0.105.1.md) |
+| [v0.105.2](roadmap/v0.105.2.md) | Package, upgrade, performance, and field validation: supported artifacts, active-data upgrades, workload budgets, and operator procedures | "The released build works in the environments we support." | Planned | Large | [Full details](roadmap/v0.105.2.md) |
 
 ### Toward v1.0
 
 The mandatory lifecycle path is v0.87.17 → v0.88.0 → v0.91.0 → v0.92.0
 → v0.93.0 → v0.94.0 → v0.95.0 → v0.96.0 → v0.97.0 → v0.98.0 → v0.98.1
 → v0.99.0 → v0.100.0 → v0.101.0 → v0.102.0 → v0.103.0 → v0.104.0
-→ v0.105.x → release candidate → v1.0.0.
+→ v0.105.0 → v0.105.1 → v0.105.2 → deferred v1.0 qualification.
 v0.89.0 and v0.90.0 form a parallel performance and product track after
 v0.88.0. Their research and unproven automation do not block lifecycle work.
 
@@ -548,13 +550,15 @@ v0.98.0 resolves known correctness and contract risks or disables the affected
 behavior. v0.98.1 freezes that result and qualifies one exact candidate. The
 [series assessment](roadmap/v0.98.x.md) defines the boundary. v0.99.0 through
 v0.104.0 then execute the finite IVM program defined by the September 2026
-assessment. The final feature freeze begins after v0.104.0. v0.105.x accepts
-only qualification work and release-blocking fixes.
+assessment. The final feature freeze begins after v0.104.0. v0.105.0 through
+v0.105.2 accept only qualification work and release-blocking fixes.
 
-The release-candidate series follows v0.105.x. `v1.0.0-rc.N` ships first, and
-1.0.0 is tagged only after a candidate has been in the field without a new
-blocker. PostgreSQL 19 support is not a 1.0 blocker. PG 19 GA and pgrx support
-are outside this project's control and do not delay the finished PG 18 contract.
+The release-candidate series and `v1.0.0` are deferred indefinitely. When that
+work resumes, `v1.0.0-rc.N` will follow the latest qualified v0.105 release,
+and 1.0.0 will be tagged only after a candidate has been in the field without
+a new blocker. PostgreSQL 19 support is not a 1.0 blocker. PG 19 GA and pgrx
+support are outside this project's control and do not delay the finished PG 18
+contract.
 
 > **On the version count.** The six v0.87.x correctness releases add about 42
 > person-weeks before v0.88.0, and v0.87.14 adds a further 6-7 to finish what
@@ -571,12 +575,13 @@ are outside this project's control and do not delay the finished PG 18 contract.
 > that lack proof, and v0.98.1 qualifies the corrected baseline. v0.99.0 through
 > v0.104.0 close the assessed contract,
 > execution, state, performance, workload-control, and extension gaps.
-> v0.105.x qualifies the frozen result.
+> v0.105.0 through v0.105.2 qualify the frozen result. Long-running soak and
+> longevity gates remain deferred until 1.0 qualification resumes.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
-| v1.0.0-rc.N | Release candidates: no new features, only blockers found by rc users | Planned | — | [Full details](roadmap/v1.0.0.md-full.md) |
-| [v1.0.0](roadmap/v1.0.0.md-full.md) | Stability contract — no known correctness issues, boring upgrades, stable API/catalog/GUC surface, package registries, signed artifacts, SBOMs | Planned | Large | [Full details](roadmap/v1.0.0.md-full.md) |
+| v1.0.0-rc.N | Release candidates: no new features, only blockers found by rc users | Deferred indefinitely | — | [Full details](roadmap/v1.0.0.md-full.md) |
+| [v1.0.0](roadmap/v1.0.0.md-full.md) | Stability contract — no known correctness issues, boring upgrades, stable API/catalog/GUC surface, package registries, signed artifacts, SBOMs | Deferred indefinitely | Large | [Full details](roadmap/v1.0.0.md-full.md) |
 
 ### Beyond v1.0
 
@@ -766,11 +771,15 @@ v0.88    ─── Safe engine optimization: DiffContext split, narrow vector pa
     │   │
     │   v0.104   ─── Extension conformance and final feature freeze
     │   │
-    │   v0.105.x ─── Qualification: candidate-bound evidence, longevity, upgrades, packages, field validation
+    │   v0.105.0 ─── Qualification contract and release evidence
     │   │
-    │   v1.0-rc  ─── Release candidates: blockers only, no new features
+    │   v0.105.1 ─── Runtime conformance and recovery qualification
     │   │
-    │   v1.0.0   ─── Stability contract: no known correctness issues, boring upgrades, package registries, signed artifacts, SBOMs
+    │   v0.105.2 ─── Package, upgrade, performance, and field validation
+    │   │
+    │   v1.0-rc  ─── Deferred indefinitely: blockers only, no new features
+    │   │
+    │   v1.0.0   ─── Deferred indefinitely: stability contract and signed artifacts
     │
     └── Parallel performance and product track that does not gate lifecycle work
         │
@@ -1075,7 +1084,7 @@ Operational runbooks for upgrade rollback and the upgrade E2E cutoff policy,
 CI gate documentation for contributors, and cargo-deny advisory review-by
 dates complete the pre-v1.0 checklist.
 
-**v0.81.0 through v0.105.x form the Product Arc.** The engine is sound after 16
+**v0.81.0 through v0.105.2 form the Product Arc.** The engine is sound after 16
 assessment arcs, though the post-v0.81.0 implementation audit found correctness
 and resilience gaps that require explicit closure first. What is missing beyond
 those gaps is not capability but product: the machinery is broad, and the
@@ -1160,9 +1169,10 @@ diagnostics, and roles. v0.97.0 adds monitoring, package, and release-evidence
 machinery, but its required qualification is incomplete. v0.98.0 resolves or
 disables the known unsafe contracts. v0.98.1 then runs the release gates on
 one frozen candidate. The September 2026 assessment drives v0.99.0 through
-v0.105.x: align capabilities with public claims, unify refresh execution, close
-relational-state gaps, improve delta locality and workload coexistence, freeze
-the extension contracts, and qualify the exact release artifacts.
+v0.105.2. These releases qualify the frozen contracts, runtime behavior,
+supported packages, upgrades, and field procedures. The 72-hour mixed-workload
+soak, longevity environment, release candidates, and v1.0 release remain
+deferred indefinitely.
 
 **The distributed work has moved past 1.0.** External workers, external CDC
 consumers, Kubernetes operators, distributed delta computation, cross-cluster
