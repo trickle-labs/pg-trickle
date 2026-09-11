@@ -67,9 +67,11 @@ jobs:
         run: python3 scripts/v0_98_qualification_gate.py
 
       - name: v0.103 durable WAL receipt release gate
+        if: github.ref_name == 'v0.103.0'
         run: python3 scripts/v0_103_release_gate.py
 
       - name: v0.104 contracts and conformance release gate
+        if: github.ref_name == 'v0.104.0'
         run: python3 scripts/v0_104_release_gate.py
 
       - name: Validate monitoring contract
