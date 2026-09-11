@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.105.1 — Runtime conformance and recovery qualification](#01051--runtime-conformance-and-recovery-qualification)
 - [0.105.0 — Qualification contract and release evidence](#01050--qualification-contract-and-release-evidence)
 - [0.104.0 — Extension conformance and final feature freeze](#01040--extension-conformance-and-final-feature-freeze)
 - [0.103.0 — Durable WAL receipts and workload budgets](#01030--durable-wal-receipts-and-workload-budgets)
@@ -215,6 +216,28 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.105.1] — Runtime conformance and recovery qualification
+
+v0.105.1 qualifies the frozen Graph V1 and Delta V1 contracts through real
+PostgreSQL execution, including delegated source coordination, recovery, DVM
+equivalence, WAL admission, and upgrade validation.
+
+- Allows a coordinator to use a base-table source with schema `USAGE` and
+  table `SELECT` plus `MAINTAIN`; graph members still require owner-equivalent
+  authority.
+- Adds public-SQL conformance coverage for delegated authorization and
+  fail-closed privilege revocation.
+- Runs DVM exact-result, rollback/recovery, WAL-admission, and upgrade-chain
+  qualification against the v0.105.1 candidate.
+- Adds the v0.105.0 to v0.105.1 metadata-only upgrade path and full-install
+  archive.
+- Defers the 72-hour soak and seven-day longevity run to later v1.0
+  qualification.
+
+See the [v0.105.1 roadmap](roadmap/v0.105.1.md), the
+[v0.105.1 implementation plan](plans/PLAN_0_105_1.md), and the
+[qualification contract](tests/release/v0.105.1-qualification.json).
 
 ## [0.105.0] — Qualification contract and release evidence
 
