@@ -61,7 +61,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
 | `pg_trickle.enforce_backpressure` | `bool` | `false` | Default: `false` (alerts only, no throttling). |
-| `pg_trickle.experimental_graph_v1` | `bool` | `false` | Deprecated compatibility setting. Graph V1 is stable in v0.104 and this setting has no effect. |
+| `pg_trickle.experimental_graph_v1` | `bool` | `false` | Deprecated compatibility setting. |
 | `pg_trickle.explain_annotations` | `bool` | `false` | Add pg_trickle properties to PostgreSQL EXPLAIN output. |
 | `pg_trickle.force_full_refresh` | `bool` | `false` | Useful for SRE diagnosis when a cluster-wide `refresh_strategy = 'full'` still has DIFFERENTIAL STs due to explicit per-ST row values. |
 | `pg_trickle.foreign_table_polling` | `bool` | `false` | When enabled, foreign tables used in DIFFERENTIAL / IMMEDIATE mode defining queries will be supported via a snapshot-comparison approach: before each refresh cycle the scheduler materializes a snapshot of the foreign table into a local shadow table, then computes EXCEPT ALL deltas against the previous snapshot. |
