@@ -52,9 +52,9 @@ pub static PGS_CLEANUP_USE_TRUNCATE: GucSetting<bool> = GucSetting::<bool>::new(
 /// CDC mechanism selection.
 ///
 /// - `"trigger"` (default): Use trigger-based CDC.
-/// - `"auto"`: Compatibility spelling for trigger-based CDC in v0.98.x.
-/// - `"wal"`: Rejected as unavailable until durable WAL receipt is shipped in
-///   v0.103.0.
+/// - `"auto"`: Start with triggers and transition to receipt-backed WAL when eligible.
+/// - `"wal"`: Use receipt-backed logical decoding when PostgreSQL logical WAL
+///   prerequisites are available; otherwise fall back to trigger capture.
 pub static PGS_CDC_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"trigger"));
 
@@ -662,7 +662,7 @@ pub fn register_cdc_gucs() {
     GucRegistry::define_int_guc(
         c"pg_trickle.wal_max_changes_per_poll",
         c"A44-3: Maximum WAL changes fetched per poll cycle.",
-        c"Controls the max_changes argument to pg_logical_slot_get_changes(). \
+        c"Controls the max_changes argument to pg_logical_slot_peek_changes(). \
           Higher values increase throughput at the cost of larger per-tick memory \
           usage. Lower values reduce per-change latency for high-volume sources. \
           Default: 10000.",

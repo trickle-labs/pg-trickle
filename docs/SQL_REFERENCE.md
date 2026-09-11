@@ -261,7 +261,7 @@ pgtrickle.create_stream_table(
 | `initialize` | `bool` | `true` | If `true`, populates the table immediately via a full refresh. If `false`, creates the table empty. |
 | `diamond_consistency` | `text` | `NULL` (defaults to `'atomic'`) | Diamond dependency consistency mode: `'atomic'` (SAVEPOINT-based atomic group refresh) or `'none'` (independent refresh). |
 | `diamond_schedule_policy` | `text` | `NULL` (defaults to `'fastest'`) | Schedule policy for atomic diamond groups: `'fastest'` (fire when any member is due) or `'slowest'` (fire when all are due). Set on the convergence node. |
-| `cdc_mode` | `text` | `NULL` (use `pg_trickle.cdc_mode`) | Optional per-stream-table CDC override: `'auto'`, `'trigger'`, or `'wal'`. In v0.98, `auto` aliases `trigger` and `wal` is rejected as unavailable. |
+| `cdc_mode` | `text` | `NULL` (use `pg_trickle.cdc_mode`) | Optional per-stream-table CDC override: `'auto'`, `'trigger'`, or receipt-backed `'wal'`. WAL falls back to triggers when logical decoding prerequisites are unavailable. |
 | `append_only` | `bool` | `false` | When `true`, differential refreshes use a fast INSERT path instead of MERGE. Skips DELETE/UPDATE/IS DISTINCT FROM checks. If a DELETE or Update is later detected in the change buffer, the flag is automatically reverted to `false`. Not compatible with `FULL`, `IMMEDIATE`, or keyless sources. |
 | `pooler_compatibility_mode` | `bool` | `false` | When `true`, the refresh engine uses inline SQL instead of `PREPARE`/`EXECUTE` and suppresses all `NOTIFY` emissions for this stream table. Enable this when the stream table is accessed through a transaction-mode connection pooler (e.g. PgBouncer). |
 | `partition_by` | `text` | `NULL` | Partition key column. When set, the storage table is created with `PARTITION BY RANGE (column)`. Only effective at creation time. |
@@ -352,7 +352,7 @@ SELECT pgtrickle.create_stream_table(
     refresh_mode => 'IMMEDIATE'
 );
 
--- WAL CDC is unavailable in v0.98; use trigger capture
+-- WAL CDC persists decoded rows before slot acknowledgement; trigger capture remains the fallback
 SELECT pgtrickle.create_stream_table(
     name         => 'orders_capture',
     query        => 'SELECT id, amount FROM orders',
@@ -3495,9 +3495,10 @@ marks affected stream tables for reinitialize. This ensures pre-existing rows
 in the newly attached partition are included on the next refresh. DETACH
 PARTITION is also detected and triggers reinitialization.
 
-**WAL mode:** unavailable in v0.98. `cdc_mode = 'wal'` is rejected with
-`PGT_EXT_CDC_UNAVAILABLE`; use trigger capture. Durable WAL receipt is planned
-for v0.103.0.
+**WAL mode:** receipt-backed in v0.103.0. `cdc_mode = 'wal'` uses logical
+decoding only when PostgreSQL prerequisites are available; otherwise the source
+stays on trigger capture. The scheduler persists complete decoded transactions
+in `pgtrickle.pgt_wal_receipts` before acknowledging the replication slot.
 
 > **Note:** pg_trickle targets PostgreSQL 18. On PostgreSQL 12 or earlier (not supported), parent triggers do **not** fire for partition-routed rows, which would cause silent data loss.
 
@@ -3585,7 +3586,7 @@ Tables that receive data via **logical replication** require special considerati
 pg_trickle emits a **WARNING** at stream table creation time if any source table is detected as a logical replication target (via `pg_subscription_rel`).
 
 **Workarounds:**
-- WAL CDC is unavailable in v0.98; use `FULL` refresh mode for logical-replication targets.
+- WAL CDC is asynchronous; use `FULL` refresh mode for logical-replication targets when the source is not eligible for receipt-backed capture.
 - Use `FULL` refresh mode, which recomputes entirely from the current table state.
 - Set a frequent refresh schedule with FULL mode to limit staleness.
 
@@ -3829,7 +3830,7 @@ SELECT * FROM pgtrickle.pg_stat_progress_pgtrickle;
 ```
 
 Each row has a stable `operation_id` (the refresh-history identifier), phase,
-processed and estimated rows, elapsed time, and `last_progress_at`. In v0.98
+processed and estimated rows, elapsed time, and `last_progress_at`. In v0.103
 the view does not emit a live heartbeat, so `last_progress_at` is `NULL` while
 an operation is running. The view is empty when no refresh is currently running.
 

@@ -821,12 +821,6 @@ fn enforce_cdc_refresh_mode_interaction(
     requested_cdc_mode: &str,
     source: CdcModeRequestSource,
 ) -> Result<(), PgTrickleError> {
-    if requested_cdc_mode.eq_ignore_ascii_case("wal") {
-        return Err(PgTrickleError::IntegrationError {
-            code: "PGT_EXT_CDC_UNAVAILABLE",
-            detail: "WAL-based CDC is unavailable in v0.98.x; use trigger-based CDC. Durable WAL receipt is scheduled for v0.103.0".to_string(),
-        });
-    }
     match classify_cdc_refresh_mode_interaction(refresh_mode, requested_cdc_mode, source) {
         CdcRefreshModeInteraction::None => Ok(()),
         CdcRefreshModeInteraction::IgnoreWalForImmediate => {
@@ -897,15 +891,9 @@ fn resolve_requested_cdc_mode_for_st(
 }
 
 fn validate_requested_cdc_mode_requirements(
-    requested_cdc_mode: &str,
+    _requested_cdc_mode: &str,
 ) -> Result<(), PgTrickleError> {
-    if requested_cdc_mode != "wal" {
-        return Ok(());
-    }
-    Err(PgTrickleError::IntegrationError {
-        code: "PGT_EXT_CDC_UNAVAILABLE",
-        detail: "WAL-based CDC is unavailable in v0.98.x; use trigger-based CDC. Durable WAL receipt is scheduled for v0.103.0".to_string(),
-    })
+    Ok(())
 }
 
 /// A warning produced by the shared create/preview analysis path.

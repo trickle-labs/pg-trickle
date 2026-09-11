@@ -719,6 +719,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     source_relid        OID PRIMARY KEY,
     slot_name           TEXT NOT NULL,
     last_consumed_lsn   PG_LSN,
+    receipt_high_water_lsn PG_LSN,
+    acknowledged_high_water_lsn PG_LSN,
     tracked_by_pgt_ids   BIGINT[],
     -- CITUS-3: Stable hash name used for all pg_trickle-managed objects (v0.32.0+).
     -- NULL = pre-upgrade row using OID-based object names (STAB-1 fallback).
@@ -728,6 +730,30 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     -- CITUS-7: Per-node WAL frontier for distributed sources. NULL for local sources.
     frontier_per_node   JSONB
 );
+
+-- v0.103.0: WAL rows are durably received before the logical slot is
+-- acknowledged. Keeping the raw decoder payload makes replay possible after
+-- a worker crash or a failed buffer write.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_wal_receipts (
+    receipt_id       BIGSERIAL PRIMARY KEY,
+    source_relid     OID NOT NULL,
+    slot_name        TEXT NOT NULL,
+    lsn              PG_LSN NOT NULL,
+    source_xid       XID,
+    data             TEXT NOT NULL,
+    source_change    BOOLEAN NOT NULL DEFAULT false,
+    status           TEXT NOT NULL DEFAULT 'RECEIVED'
+                     CHECK (status IN ('RECEIVED', 'APPLIED', 'ACKNOWLEDGED')),
+    received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    acknowledged_at  TIMESTAMPTZ,
+    UNIQUE (source_relid, lsn, data)
+);
+
+CREATE INDEX IF NOT EXISTS pgt_wal_receipts_pending_idx
+    ON pgtrickle.pgt_wal_receipts (source_relid, status, lsn, receipt_id);
+
+REVOKE ALL ON TABLE pgtrickle.pgt_wal_receipts FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_wal_receipts', '');
 
 -- v0.92.0: durable capture ownership and upgrade quiescence state.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_capture_instance (
@@ -893,6 +919,12 @@ INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES (
     '0.98.0',
     'Risk containment, trigger-only capture, and fail-closed integration contracts'
+)
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES (
+    '0.103.0',
+    'Durable WAL receipts, replay watermarks, and bounded capture admission'
 )
 ON CONFLICT (version) DO NOTHING;
 

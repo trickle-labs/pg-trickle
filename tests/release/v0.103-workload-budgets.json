@@ -1,0 +1,19 @@
+{
+  "release_version": "0.103.0",
+  "workloads": [
+    {
+      "id": "single-source-trigger-baseline",
+      "hardware_class": "ci-standard",
+      "sample_count": 5,
+      "max_foreground_write_regression": 0.2,
+      "max_decoding_amplification_ratio": 1.0
+    },
+    {
+      "id": "many-source-wal-receipt",
+      "hardware_class": "ci-standard",
+      "sample_count": 5,
+      "max_foreground_write_regression": 0.2,
+      "max_decoding_amplification_ratio": 1.25
+    }
+  ]
+}

@@ -1201,6 +1201,22 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             }));
         }
 
+        // v0.103.0: replay durable WAL receipts and acknowledge the exact
+        // slot sequence in separate transactions. A worker crash between
+        // these phases leaves a receipt available for replay.
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            let change_schema = config::pg_trickle_change_buffer_schema();
+            if let Err(e) = wal_decoder::replay_pending_wal_receipts(&change_schema) {
+                warning!("pg_trickle: WAL receipt replay failed: {}", e);
+            }
+        }));
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            let change_schema = config::pg_trickle_change_buffer_schema();
+            if let Err(e) = wal_decoder::acknowledge_pending_wal_receipts(&change_schema) {
+                warning!("pg_trickle: WAL receipt acknowledgement failed: {}", e);
+            }
+        }));
+
         // Collect jobs to spawn (populated inside the transaction, spawned after).
         let mut pending_spawns: Vec<(String, i64, u64)> = Vec::new();
 

@@ -134,7 +134,7 @@ In `postgresql.conf`:
 ```
 pg_trickle.cdc_mode = 'auto'     # default: start with triggers, upgrade to WAL
 pg_trickle.cdc_mode = 'trigger'  # always use triggers; never create replication slots
-pg_trickle.cdc_mode = 'wal'      # require WAL; error if wal_level != logical
+pg_trickle.cdc_mode = 'wal'      # receipt-backed WAL; fall back to triggers if unavailable
 ```
 
 Apply without restart:
@@ -222,8 +222,9 @@ SELECT pg_reload_conf();
 ```
 
 pg_trickle will automatically begin transitioning existing stream tables to
-WAL-based CDC over the next few scheduler ticks. No manual intervention is
-needed per stream table.
+receipt-backed WAL CDC over the next few scheduler ticks. No manual intervention
+is needed per stream table. Each decoded row is persisted before the slot is
+acknowledged, and trigger capture remains the fallback on decoder failure.
 
 ### Step 3 — Monitor the transition
 

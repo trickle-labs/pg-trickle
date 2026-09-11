@@ -1,4 +1,4 @@
-//! v0.98 stability contract: unsafe integrations fail closed before side effects.
+//! v0.103 stability contract: WAL admission is receipt-backed and replayable.
 
 mod common;
 mod e2e;
@@ -6,7 +6,7 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
-async fn test_v098_wal_admission_rejects_before_catalog_or_slot_side_effects() {
+async fn test_v103_wal_admission_is_receipt_backed() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE v098_wal_src (id INT PRIMARY KEY, value TEXT)")
         .await;
@@ -23,10 +23,9 @@ async fn test_v098_wal_admission_rejects_before_catalog_or_slot_side_effects() {
             )",
         )
         .await;
-    let error = format!("{}", result.unwrap_err());
     assert!(
-        error.contains("PGT_EXT_CDC_UNAVAILABLE"),
-        "unexpected error: {error}"
+        result.is_ok(),
+        "receipt-backed WAL admission should succeed: {result:?}"
     );
 
     let stream_exists: bool = db
@@ -36,8 +35,8 @@ async fn test_v098_wal_admission_rejects_before_catalog_or_slot_side_effects() {
         )
         .await;
     assert!(
-        !stream_exists,
-        "WAL admission must fail before catalog creation"
+        stream_exists,
+        "WAL admission must create the catalog entry before asynchronous slot setup"
     );
 
     let slot_count: i64 = db

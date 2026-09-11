@@ -53,7 +53,7 @@ GUC_CATALOG.md for its default and a brief description.
 |----------|-----------------|-----------------------------|
 | Scheduler / timing | ✅ | ✅ |
 | CDC mode | ✅ | ✅ |
-| WAL CDC | ❌ unavailable in v0.98 | ✅ historical/reference |
+| WAL CDC | ✅ receipt-backed in v0.103 | ✅ |
 | Refresh performance | ✅ | ✅ |
 | Parallel refresh | ✅ | ✅ |
 | Change buffer durability | ✅ see [`pg_trickle.change_buffer_durability`](#pg_tricklechange_buffer_durability) | ✅ |
@@ -78,7 +78,7 @@ Not sure which GUC to change? Start here.
 | **Connection-pooler compatibility (PgBouncer)** | `connection_pooler_mode`, `use_prepared_statements` |
 | **Lower memory usage during refresh** | `merge_work_mem_mb`, `max_delta_estimate_rows` |
 | **Improve cost-model accuracy** | `cost_model_safety_margin`, `planner_aggressive`, `differential_max_change_ratio` |
-| **WAL CDC (future)** | `cdc_mode` (rejected in v0.100); WAL tuning settings are retained for compatibility |
+| **WAL CDC** | `cdc_mode`; receipt-backed logical decoding with trigger fallback |
 | **Prevent a runaway stream table** | `max_consecutive_errors`, `fuse_threshold`, `buffer_alert_threshold` |
 | **Make diagnostics explainable** | `explain_annotations`, `warn_join_sources`, `warn_write_path_overhead_us` |
 
@@ -221,9 +221,9 @@ shared_preload_libraries = 'pg_trickle'
 
 The extension **must** be loaded via `shared_preload_libraries` because it registers GUC variables, shared memory, and the launcher background worker at startup.
 
-> **Note:** v0.98 uses trigger-based CDC only. `auto` is a compatibility alias for
-> `trigger`; it never creates a logical-replication slot or consumes WAL. WAL
-> capture is unavailable until the durable receipt work targeted for v0.103.0.
+> **Note:** v0.103 persists decoded WAL rows before acknowledging the logical
+> replication slot. `auto` starts with triggers and transitions when prerequisites
+> are available; `trigger` disables transitions.
 
 ---
 
@@ -302,7 +302,7 @@ SET pg_trickle.cdc_mode = 'auto';
 -- Force trigger-only CDC (disable WAL transitions)
 SET pg_trickle.cdc_mode = 'trigger';
 
--- Rejected in v0.98 (WAL CDC is unavailable)
+-- Receipt-backed WAL CDC with automatic trigger fallback when prerequisites are absent
 SET pg_trickle.cdc_mode = 'wal';
 ```
 
@@ -435,21 +435,20 @@ SET pg_trickle.max_consecutive_errors = 5;
 
 ---
 
-### WAL CDC (unavailable in v0.98)
+### WAL CDC (receipt-backed in v0.103)
 
-WAL capture is disabled in v0.98. The settings below remain catalog-compatible
-for upgrades, but changing them has no effect until WAL receipt is reintroduced.
+WAL capture stores complete decoded transactions in `pgt_wal_receipts` before
+the replication slot advances. Sources that cannot satisfy the PostgreSQL
+logical-decoding prerequisites remain on trigger capture.
 
 ---
 
 ### pg_trickle.wal_transition_timeout
 
-> **Note:** `pg_trickle.wal_transition_timeout` is retained for compatibility
-> and is not used in v0.98. See [ARCHITECTURE.md](ARCHITECTURE.md) for the
-> planned CDC transition lifecycle.
+> **Note:** `pg_trickle.wal_transition_timeout` bounds the receipt-backed CDC
+> transition. See [ARCHITECTURE.md](ARCHITECTURE.md) for the lifecycle.
 
-Reserved transition timeout. WAL capture and automatic transitions are disabled
-in v0.98, so this setting is not evaluated.
+Maximum transition time before pg_trickle falls back to trigger capture.
 
 **Default:** `300` (5 minutes)  
 **Range:** `10` – `3600`
@@ -2859,8 +2858,8 @@ documents these cross-dependencies to help avoid misconfiguration.
 | `max_dynamic_refresh_workers` | `per_database_worker_quota` | When `per_database_worker_quota > 0`, each database claims at most that many workers from the shared `max_dynamic_refresh_workers` pool. Set `per_database_worker_quota` to `max_dynamic_refresh_workers / n_databases` for equal sharing. Burst to 150% is allowed when the cluster is < 80% loaded. |
 | `differential_max_change_ratio` | `fuse_default_ceiling` | Both guard against large change batches but at different levels: `differential_max_change_ratio` triggers a FULL refresh fallback (proportional to table size), while `fuse_default_ceiling` halts refresh entirely (absolute row count). The fuse fires first if the change count exceeds it, regardless of the ratio. |
 | `block_source_ddl` | DDL operations | When `true`, DDL on source tables (ALTER TABLE, DROP COLUMN) is blocked by an event trigger. Disable temporarily with `SET pg_trickle.block_source_ddl = false` before schema migrations, then re-enable. |
-| `cdc_mode` | `cdc_trigger_mode` | `cdc_trigger_mode` (`'statement'` / `'row'`) applies to the trigger-only CDC path used in v0.98. |
-| `cdc_mode` | `wal_transition_timeout` | WAL transitions are disabled in v0.98; this setting is retained for compatibility. |
+| `cdc_mode` | `cdc_trigger_mode` | `cdc_trigger_mode` (`'statement'` / `'row'`) applies while a source uses trigger capture. |
+| `cdc_mode` | `wal_transition_timeout` | WAL transition timeouts return a source to trigger capture. |
 | `cleanup_use_truncate` | `compact_threshold` | `cleanup_use_truncate = true` uses TRUNCATE to clear consumed change buffers (fastest, acquires AccessExclusiveLock briefly). `compact_threshold` controls when fully-consumed buffers are compacted via DELETE — only relevant when TRUNCATE is disabled. |
 | `buffer_partitioning` | `compact_threshold` | In `'auto'` mode, `compact_threshold` serves as the promotion trigger: if a buffer exceeds this many rows in a single refresh cycle, it is promoted to RANGE(lsn) partitioned mode. Lowering `compact_threshold` makes auto-promotion more sensitive. |
 | `allow_circular` | `max_fixpoint_iterations` | `max_fixpoint_iterations` is only evaluated when `allow_circular = true`. It caps the number of convergence iterations for circular dependency chains. |
@@ -2981,7 +2980,7 @@ pg_trickle.min_schedule_seconds = 1
 pg_trickle.default_schedule_seconds = 1
 pg_trickle.max_consecutive_errors = 3
 
-# WAL CDC (unavailable in v0.98; settings retained for compatibility)
+# WAL CDC (receipt-backed in v0.103; trigger fallback on failure)
 pg_trickle.wal_transition_timeout = 300
 pg_trickle.slot_lag_warning_threshold_mb = 100
 pg_trickle.slot_lag_critical_threshold_mb = 1024
@@ -3172,8 +3171,8 @@ SELECT pg_reload_conf();
 | **Type** | `int4` |
 | **Default** | `10000` |
 
-Reserved WAL polling limit. WAL capture is disabled in v0.98, so this setting is
-not evaluated. It remains for configuration compatibility with older installs.
+Maximum number of decoded WAL messages peeked into the durable receipt table per
+source and scheduler cycle.
 
 ### pg_trickle.wal_max_lag_bytes
 
@@ -3182,11 +3181,10 @@ not evaluated. It remains for configuration compatibility with older installs.
 | **Type** | `int4` |
 | **Default** | `65536` (64 KiB) |
 
-Reserved WAL lag limit. WAL capture is disabled in v0.98, so this setting is not
-evaluated. It remains for configuration compatibility with older installs.
+Maximum tolerated decoder lag before the source is returned to trigger capture.
 
 ```
--- Retained for compatibility; not evaluated in v0.98.
+-- Receipt-backed WAL settings are evaluated by the scheduler.
 ```
 
 ---
