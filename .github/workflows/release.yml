@@ -69,6 +69,9 @@ jobs:
       - name: v0.103 durable WAL receipt release gate
         run: python3 scripts/v0_103_release_gate.py
 
+      - name: v0.104 contracts and conformance release gate
+        run: python3 scripts/v0_104_release_gate.py
+
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 

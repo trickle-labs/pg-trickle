@@ -85,6 +85,8 @@ pub(crate) enum FullPolicy {
 pub(crate) struct RefreshContext {
     pub(crate) safe_bound: Option<String>,
     pub(crate) full_policy: FullPolicy,
+    pub(crate) graph_refresh_id: Option<i64>,
+    pub(crate) source_boundary_digest: Option<Vec<u8>>,
 }
 
 impl RefreshContext {
@@ -92,6 +94,8 @@ impl RefreshContext {
         Self {
             safe_bound: None,
             full_policy: FullPolicy::Allow,
+            graph_refresh_id: None,
+            source_boundary_digest: None,
         }
     }
 
@@ -99,6 +103,22 @@ impl RefreshContext {
         Self {
             safe_bound: Some(safe_bound.to_string()),
             full_policy,
+            graph_refresh_id: None,
+            source_boundary_digest: None,
+        }
+    }
+
+    pub(crate) fn graph_result(
+        safe_bound: &str,
+        full_policy: FullPolicy,
+        graph_refresh_id: i64,
+        source_boundary_digest: Vec<u8>,
+    ) -> Self {
+        Self {
+            safe_bound: Some(safe_bound.to_string()),
+            full_policy,
+            graph_refresh_id: Some(graph_refresh_id),
+            source_boundary_digest: Some(source_boundary_digest),
         }
     }
 }
@@ -142,6 +162,23 @@ pub(crate) fn current_full_policy() -> FullPolicy {
             .as_ref()
             .map_or(FullPolicy::Allow, |context| context.full_policy)
     })
+}
+
+pub(crate) fn current_graph_refresh_id() -> Option<i64> {
+    ACTIVE_CONTEXT.with(|context| context.borrow().as_ref().and_then(|c| c.graph_refresh_id))
+}
+
+pub(crate) fn current_source_boundary_digest() -> Option<Vec<u8>> {
+    ACTIVE_CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.source_boundary_digest.clone())
+    })
+}
+
+pub(crate) fn current_initiated_by() -> Option<&'static str> {
+    current_graph_refresh_id().map(|_| "EXTERNAL_GRAPH")
 }
 
 /// Reject a whole-query FULL transition when the active graph forbids it.

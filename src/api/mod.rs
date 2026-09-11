@@ -33,26 +33,14 @@ pub(crate) mod validation;
 pub(crate) const GRAPH_V1_CAPABILITY: &str = "external_graph_refresh";
 pub(crate) const DELTA_V1_CAPABILITY: &str = "output_delta_consumer";
 
-fn v098_capability_target(capability: &str) -> &'static str {
-    if capability == GRAPH_V1_CAPABILITY {
-        "v0.100.0"
-    } else {
-        "v0.104.0"
-    }
-}
-
-/// Keep Graph V1 explicitly experimental while allowing a superuser to opt in
-/// after the common transactional refresh path has been validated.
+/// Admit the stable V1 integration contracts.
 pub(crate) fn require_v098_capability(capability: &str) -> Result<(), PgTrickleError> {
-    if capability == GRAPH_V1_CAPABILITY && config::pg_trickle_experimental_graph_v1() {
+    if matches!(capability, GRAPH_V1_CAPABILITY | DELTA_V1_CAPABILITY) {
         return Ok(());
     }
     Err(PgTrickleError::IntegrationError {
         code: "PGT_EXT_CAPABILITY_DISABLED",
-        detail: format!(
-            "{capability} is experimental and disabled by default; enable pg_trickle.experimental_graph_v1 for v0.100.0 Graph V1 testing, or wait for stable conformance in {}",
-            v098_capability_target(capability)
-        ),
+        detail: format!("unsupported integration capability: {capability}"),
     })
 }
 
@@ -3472,9 +3460,11 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn test_v098_capability_admission() {
+    fn test_v104_capability_admission() {
+        assert!(require_v098_capability(GRAPH_V1_CAPABILITY).is_ok());
+        assert!(require_v098_capability(DELTA_V1_CAPABILITY).is_ok());
         assert!(matches!(
-            require_v098_capability(GRAPH_V1_CAPABILITY),
+            require_v098_capability("unknown"),
             Err(PgTrickleError::IntegrationError {
                 code: "PGT_EXT_CAPABILITY_DISABLED",
                 ..

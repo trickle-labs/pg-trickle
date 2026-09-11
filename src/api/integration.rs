@@ -135,33 +135,33 @@ pub fn integration_capabilities() -> TableIterator<
         name!(details, JsonB),
     ),
 > {
-    let graph_enabled = crate::config::pg_trickle_experimental_graph_v1();
     TableIterator::new(vec![
         (
             super::GRAPH_V1_CAPABILITY.to_string(),
             1,
             0,
-            graph_enabled,
+            true,
             JsonB(serde_json::json!({
-                "status": "experimental",
-                "enabled": graph_enabled,
-                "phase": "v0.100_scoped_opt_in",
-                "unavailable_reason": if graph_enabled { serde_json::Value::Null } else { serde_json::json!("enable pg_trickle.experimental_graph_v1 for experimental use") },
+                "status": "stable",
+                "enabled": true,
+                "phase": "v0.104_conformance",
+                "unavailable_reason": null,
                 "refresh_api": "refresh_graph_strict",
                 "max_graph_members": 1024,
-                "source_boundary": "local_trigger"
+                "source_boundary": "local_trigger_or_wal"
             })),
         ),
         (
             super::DELTA_V1_CAPABILITY.to_string(),
             1,
             0,
-            false,
+            true,
             JsonB(serde_json::json!({
-                "status": "experimental",
-                "enabled": false,
-                "phase": "v0.98_fail_closed",
-                "unavailable_reason": "disabled until v0.104.0 Delta V1 implementation and conformance"
+                "status": "stable",
+                "enabled": true,
+                "phase": "v0.104_conformance",
+                "graph_dependency": "external_graph_refresh",
+                "typed_delta_encoding_version": 1
             })),
         ),
     ])
@@ -533,6 +533,9 @@ pub fn stream_table_contract(
         name!(contract, JsonB),
     ),
 > {
+    if let Err(error) = crate::api::recovery::assert_capture_ready() {
+        raise(error);
+    }
     if let Err(error) = super::require_v098_capability(super::GRAPH_V1_CAPABILITY) {
         raise(error);
     }
@@ -750,6 +753,9 @@ pub fn graph_contract(
         name!(contract, JsonB),
     ),
 > {
+    if let Err(error) = crate::api::recovery::assert_capture_ready() {
+        raise(error);
+    }
     if let Err(error) = super::require_v098_capability(super::GRAPH_V1_CAPABILITY) {
         raise(error);
     }
@@ -991,7 +997,12 @@ pub fn refresh_graph_strict(
             }
             let source_oids = super::refresh_ops::get_source_oids_for_manual_refresh(meta.pgt_id)?;
             let refresh = crate::refresh::with_refresh_context(
-                crate::refresh::RefreshContext::graph(&safe_bound, full_policy),
+                crate::refresh::RefreshContext::graph_result(
+                    &safe_bound,
+                    full_policy,
+                    graph_refresh_id,
+                    boundary_digest.to_vec(),
+                ),
                 || {
                     super::refresh_ops::execute_manual_refresh(
                         &meta,

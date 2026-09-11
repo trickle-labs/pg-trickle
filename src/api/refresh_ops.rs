@@ -281,7 +281,7 @@ pub(crate) fn execute_manual_refresh(
         0,
         0,
         None,
-        Some("MANUAL"),
+        Some(crate::refresh::current_initiated_by().unwrap_or("MANUAL")),
         None, // no freshness_deadline for manual refreshes
         0,
         None,

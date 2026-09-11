@@ -227,7 +227,7 @@ async fn test_event_triggers_installed() {
 }
 
 #[tokio::test]
-async fn test_v098_capabilities_are_fail_closed() {
+async fn test_v104_capabilities_are_stable() {
     let db = E2eDb::new().await.with_extension().await;
 
     let capability_count: i64 = db
@@ -259,14 +259,14 @@ async fn test_v098_capabilities_are_fail_closed() {
              WHERE capability = 'output_delta_consumer'",
         )
         .await;
-    assert!(!graph_enabled);
-    assert_eq!(graph_status, "experimental");
-    assert!(!delta_enabled);
-    assert_eq!(delta_status, "experimental");
+    assert!(graph_enabled);
+    assert_eq!(graph_status, "stable");
+    assert!(delta_enabled);
+    assert_eq!(delta_status, "stable");
 }
 
 #[tokio::test]
-async fn test_v098_graph_admission_rejects_orchestration_mutation() {
+async fn test_v104_external_graph_can_change_orchestration_mode() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE v093_source (id INT PRIMARY KEY, val TEXT)")
@@ -306,11 +306,19 @@ async fn test_v098_graph_admission_rejects_orchestration_mutation() {
          )",
         )
         .await;
-    assert!(mode_change.is_err());
+    assert!(mode_change.is_ok());
+
+    let mode: String = db
+        .query_scalar(
+            "SELECT orchestration_mode FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'v093_external'",
+        )
+        .await;
+    assert_eq!(mode, "MANAGED");
 }
 
 #[tokio::test]
-async fn test_v098_graph_contract_admission_rejects_before_work() {
+async fn test_v104_graph_contract_rejects_duplicate_roots() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE v093_graph_source (id INT PRIMARY KEY, val TEXT)")
@@ -337,15 +345,7 @@ async fn test_v098_graph_contract_admission_rejects_before_work() {
                 'public.v093_graph_a'::regclass)",
         )
         .await;
-    assert!(contract.is_err());
-
-    let graph = db
-        .try_execute(
-            "SELECT * FROM pgtrickle.graph_contract(ARRAY[\
-                 'public.v093_graph_b'::regclass])",
-        )
-        .await;
-    assert!(graph.is_err());
+    assert!(contract.is_ok());
 
     let duplicate_roots = db
         .try_execute(
@@ -356,6 +356,6 @@ async fn test_v098_graph_contract_admission_rejects_before_work() {
         .await;
     assert!(
         duplicate_roots.is_err(),
-        "disabled graph admission must reject"
+        "duplicate graph roots must reject"
     );
 }

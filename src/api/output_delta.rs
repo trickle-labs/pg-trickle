@@ -323,16 +323,20 @@ pub(crate) fn finalize(
     } else {
         (0, 0, 0)
     };
+    let graph_refresh_id = crate::refresh::current_graph_refresh_id();
+    let source_boundary_digest = crate::refresh::current_source_boundary_digest();
     Spi::run_with_args(
-        "INSERT INTO pgtrickle.pgt_output_delta_batches (pgt_id, database_instance_id, batch_token, producing_refresh_id, mode, row_count, rows_inserted, rows_deleted, output_contract_digest, row_identity_version) SELECT $1, database_instance_id, $2, $3, $4, $5, $6, $7, output_contract_digest, row_identity_version FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
+        "INSERT INTO pgtrickle.pgt_output_delta_batches (pgt_id, database_instance_id, batch_token, producing_refresh_id, graph_refresh_id, mode, row_count, rows_inserted, rows_deleted, output_contract_digest, row_identity_version, source_boundary_digest) SELECT $1, database_instance_id, $2, $3, $4, $5, $6, $7, $8, output_contract_digest, row_identity_version, $9 FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
         &[
             meta.pgt_id.into(),
             token.into(),
             refresh_id.into(),
+            graph_refresh_id.into(),
             mode.into(),
             payload_rows.into(),
             inserted.into(),
             deleted.into(),
+            source_boundary_digest.into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -393,6 +397,7 @@ pub fn register_output_delta_consumer(
 > {
     let result = (|| -> Result<_, PgTrickleError> {
         super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
+        crate::api::recovery::assert_capture_ready()?;
         let meta = StreamTableMeta::get_by_relid(stream_table)?;
         authorized_stream(&meta)?;
         if !meta.orchestration_mode.eq_ignore_ascii_case("EXTERNAL") {
@@ -457,11 +462,23 @@ pub fn register_output_delta_consumer(
                 "could not allocate consumer identity",
             )
         })?;
-        let existing = spi(Spi::get_one_with_args::<pgrx::Uuid>(
-            "SELECT consumer_id FROM pgtrickle.pgt_output_delta_consumers WHERE pgt_id = $1 AND owner_oid = $2 AND consumer_name = $3",
-            &[meta.pgt_id.into(), owner.into(), consumer_name.into()],
-        ))?;
-        let id = if let Some(existing) = existing {
+        let existing = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT consumer_id FROM pgtrickle.pgt_output_delta_consumers \
+                     WHERE pgt_id = $1 AND owner_oid = $2 AND consumer_name = $3",
+                    None,
+                    &[meta.pgt_id.into(), owner.into(), consumer_name.into()],
+                )
+                .map_err(|error| PgTrickleError::SpiError(error.to_string()))?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            rows.first()
+                .get::<pgrx::Uuid>(1)
+                .map_err(|error| PgTrickleError::SpiError(error.to_string()))
+        })?;
+        let (id, state, reason, ack) = if let Some(existing) = existing {
             let existing_digest = spi(Spi::get_one_with_args::<Vec<u8>>("SELECT output_contract_digest FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1", &[existing.into()]))?.unwrap_or_default();
             if existing_digest != digest {
                 return Err(delta_error(
@@ -469,7 +486,26 @@ pub fn register_output_delta_consumer(
                     "consumer already exists with a different contract",
                 ));
             }
-            existing
+            let state = spi(Spi::get_one_with_args::<String>(
+                "SELECT state FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1",
+                &[existing.into()],
+            ))?
+            .ok_or_else(|| {
+                delta_error(
+                    "PGT_EXT_TOKEN_INVALID",
+                    "consumer disappeared during registration",
+                )
+            })?;
+            let reason = spi(Spi::get_one_with_args::<String>(
+                "SELECT state_reason FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1",
+                &[existing.into()],
+            ))?;
+            let ack = spi(Spi::get_one_with_args::<i64>(
+                "SELECT acknowledged_batch_token FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1",
+                &[existing.into()],
+            ))?
+            .unwrap_or(0);
+            (existing, state, reason, ack)
         } else {
             let (state, reason) = if start == "CURRENT" {
                 (ACTIVE, None)
@@ -490,17 +526,8 @@ pub fn register_output_delta_consumer(
                     reason.into(),
                 ],
             ))?;
-            id
+            (id, state.to_string(), reason.map(str::to_string), 0)
         };
-        let (state, reason, ack) = spi(Spi::connect(|client| {
-            let rows = client.select("SELECT state, state_reason, acknowledged_batch_token FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1", None, &[id.into()])?;
-            let row = rows.first();
-            Ok::<_, pgrx::spi::SpiError>((
-                row.get::<String>(1)?.unwrap_or_default(),
-                row.get::<String>(2)?,
-                row.get::<i64>(3)?.unwrap_or(0),
-            ))
-        }))?;
         Ok(TableIterator::once((
             id,
             format!("{}.{}", meta.pgt_schema, meta.pgt_name),
