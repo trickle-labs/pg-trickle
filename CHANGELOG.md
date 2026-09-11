@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.105.2 — Package, upgrade, performance, and field validation](#01052--package-upgrade-performance-and-field-validation)
 - [0.105.1 — Runtime conformance and recovery qualification](#01051--runtime-conformance-and-recovery-qualification)
 - [0.105.0 — Qualification contract and release evidence](#01050--qualification-contract-and-release-evidence)
 - [0.104.0 — Extension conformance and final feature freeze](#01040--extension-conformance-and-final-feature-freeze)
@@ -216,6 +217,24 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.105.2] — Package, upgrade, performance, and field validation
+
+v0.105.2 validates the released PostgreSQL 18 packages with active stream-table
+data, upgrade coverage, operational checks, and release benchmark smoke tests.
+
+- Adds the v0.105.1 to v0.105.2 metadata-only upgrade path and full-install
+  archive.
+- Runs packaged runtime, snapshot, diagnostics, upgrade, and benchmark
+  qualification before release publication.
+- Records supported package metadata, checksums, retained logs, and the exact
+  candidate commit in release evidence.
+- Keeps the 72-hour soak and seven-day longevity run deferred to later v1.0
+  qualification.
+
+See the [v0.105.2 roadmap](roadmap/v0.105.2.md), the
+[v0.105.2 implementation plan](plans/PLAN_0_105_2.md), and the
+[qualification contract](tests/release/v0.105.2-qualification.json).
 
 ## [0.105.1] — Runtime conformance and recovery qualification
 

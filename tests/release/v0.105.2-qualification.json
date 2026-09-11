@@ -1,0 +1,155 @@
+{
+  "contract_version": 1,
+  "release_version": "0.105.2",
+  "source_versions": ["0.105.1"],
+  "required_suites": [
+    {
+      "id": "graph-v1",
+      "command": "just test-v104-conformance",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.104.0",
+      "workload": "packaged Graph V1 public-SQL coordinator with rollback"
+    },
+    {
+      "id": "delta-v1",
+      "command": "just test-v104-conformance",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.104.0",
+      "workload": "packaged Delta V1 public-SQL consumer and acknowledgement"
+    },
+    {
+      "id": "dvm-oracle",
+      "command": "just test-light-e2e --test e2e_diff_full_equivalence_tests",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "exact result, schema, multiplicity, and effective-strategy oracle"
+    },
+    {
+      "id": "recovery",
+      "command": "just test-light-e2e --test e2e_failure_recovery_tests",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "rollback, exception, invalidation, clone, and connection recovery"
+    },
+    {
+      "id": "wal-admission",
+      "command": "just test-light-e2e --test e2e_v098_stability_tests",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "receipt-backed WAL admission and fail-closed slot behavior"
+    },
+    {
+      "id": "upgrade-chain",
+      "command": "just check-upgrade-all",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "metadata-only upgrade chain and current catalog completeness"
+    },
+    {
+      "id": "version-sync",
+      "command": "just check-version-sync",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "release metadata, archive, upgrade, and package layout validation"
+    },
+    {
+      "id": "package-smoke",
+      "command": "just test-package-smoke",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "packaged extension installation and version smoke test"
+    },
+    {
+      "id": "monitoring-contract",
+      "command": "python3 scripts/check_monitoring_contract.py",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "monitoring views, metrics, and documented contract validation"
+    },
+    {
+      "id": "release-artifact-smoke",
+      "command": "release workflow artifact smoke test",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "installed release artifact, extension load, and stream-table smoke test"
+    },
+    {
+      "id": "operations",
+      "command": "just test-light-e2e --test e2e_v08711_snapshot_security_tests",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "packaged snapshot, restore, clone, and resnapshot operator procedures"
+    },
+    {
+      "id": "performance",
+      "command": "BENCH_QUICK=1 ./scripts/run_benchmarks.sh",
+      "required": true,
+      "enabled": true,
+      "expected_status": "passed",
+      "suite_version": "0.105.2",
+      "workload": "quick Criterion refresh and differential operator benchmark smoke"
+    }
+  ],
+  "deferred_suites": [
+    {
+      "id": "soak-72h",
+      "required": false,
+      "enabled": false,
+      "status": "deferred",
+      "reason": "Deferred to post-v0.105.2 v1.0 qualification."
+    },
+    {
+      "id": "longevity-7d",
+      "required": false,
+      "enabled": false,
+      "status": "deferred",
+      "reason": "Deferred to post-v0.105.2 v1.0 qualification."
+    }
+  ],
+  "artifacts": [
+    {"id": "linux-amd64", "platform": "linux-amd64", "postgresql_major": 18, "version": "0.105.2"},
+    {"id": "linux-arm64", "platform": "linux-arm64", "postgresql_major": 18, "version": "0.105.2"},
+    {"id": "macos-arm64", "platform": "macos-arm64", "postgresql_major": 18, "version": "0.105.2"},
+    {"id": "windows-amd64", "platform": "windows-amd64", "postgresql_major": 18, "version": "0.105.2"}
+  ],
+  "performance_budgets": [
+    {"id": "dvm-oracle", "threshold": 1.0, "unit": "correctness"},
+    {"id": "recovery", "threshold": 1.0, "unit": "correctness"},
+    {"id": "criterion-regression", "threshold": 10.0, "unit": "percent", "comparison": "max"},
+    {"id": "foreground-write-overhead", "threshold": 15.0, "unit": "percent", "comparison": "max"}
+  ],
+  "evidence": {
+    "schema_version": 2,
+    "required_fields": [
+      "candidate_commit",
+      "artifact_digest",
+      "postgresql_version",
+      "suite_version",
+      "workload",
+      "retained_logs"
+    ],
+    "allowed_result_states": ["passed", "failed", "skipped", "unavailable", "stale", "historical"]
+  }
+}
