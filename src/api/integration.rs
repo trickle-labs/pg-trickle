@@ -234,7 +234,7 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn authorize_relation(info: &RelationInfo) -> Result<(), PgTrickleError> {
+fn authorize_graph_member(info: &RelationInfo) -> Result<(), PgTrickleError> {
     if crate::api::helpers::role_owns_relation_or_is_superuser(
         crate::api::helpers::outer_user_id(),
         info.oid,
@@ -242,7 +242,31 @@ fn authorize_relation(info: &RelationInfo) -> Result<(), PgTrickleError> {
         Ok(())
     } else {
         Err(PgTrickleError::PermissionDenied(
-            "owner-equivalent authority is required for every graph member and source".to_string(),
+            "owner-equivalent authority is required for every graph member".to_string(),
+        ))
+    }
+}
+
+fn authorize_graph_source(info: &RelationInfo) -> Result<(), PgTrickleError> {
+    let caller = crate::api::helpers::outer_user_id();
+    if crate::api::helpers::role_owns_relation_or_is_superuser(caller, info.oid)? {
+        return Ok(());
+    }
+    let delegated = Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.has_table_privilege($1, $2, 'SELECT') \
+                AND pg_catalog.has_table_privilege($1, $2, 'MAINTAIN') \
+                AND pg_catalog.has_schema_privilege($1, c.relnamespace, 'USAGE') \
+           FROM pg_catalog.pg_class c WHERE c.oid = $2",
+        &[caller.into(), info.oid.into()],
+    )
+    .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
+    .unwrap_or(false);
+    if delegated {
+        Ok(())
+    } else {
+        Err(PgTrickleError::PermissionDenied(
+            "owner-equivalent authority or SELECT and MAINTAIN privileges with schema USAGE are required for every graph source"
+                .to_string(),
         ))
     }
 }
@@ -311,11 +335,11 @@ fn source_payload(dep: &StDependency) -> Result<Value, PgTrickleError> {
                     ),
                 ));
             }
-            authorize_relation(&info)?;
+            authorize_graph_source(&info)?;
         }
         "STREAM_TABLE" => {
             StreamTableMeta::get_by_relid(info.oid)?;
-            authorize_relation(&info)?;
+            authorize_graph_member(&info)?;
         }
         other => {
             return Err(integration_error(
@@ -355,7 +379,7 @@ fn build_stream_contract(meta: &StreamTableMeta) -> Result<BuiltContract, PgTric
             format!("could not inspect stream-table relation: {error}"),
         )
     })?;
-    authorize_relation(&info).map_err(|error| {
+    authorize_graph_member(&info).map_err(|error| {
         integration_error(
             "PGT_EXT_GRAPH_INVALID",
             format!(

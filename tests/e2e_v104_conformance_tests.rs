@@ -7,6 +7,9 @@ mod reference_clients;
 use e2e::E2eDb;
 use sqlx::Row;
 
+const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
+     text, integer, double precision, text, boolean, text, integer, text, text";
+
 #[tokio::test]
 async fn test_v104_capabilities_are_stable_by_default() {
     let db = E2eDb::new().await.with_extension().await;
@@ -86,6 +89,94 @@ async fn test_v104_graph_reference_coordinator_commits_publication() {
 
     assert_eq!(db.count("public.v104_graph_st").await, 1);
     assert_eq!(db.count("public.v104_graph_publication").await, 1);
+}
+
+#[tokio::test]
+async fn test_v104_graph_source_owner_can_delegate_coordinator() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "DO $$ BEGIN CREATE ROLE v104_graph_coordinator LOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$",
+    )
+    .await;
+    db.execute("GRANT USAGE ON SCHEMA public, pgtrickle TO v104_graph_coordinator")
+        .await;
+    db.execute("GRANT CREATE ON SCHEMA public TO v104_graph_coordinator")
+        .await;
+    for function in [
+        format!("create_stream_table({CREATE_STREAM_ARGS})"),
+        "graph_contract(regclass[])".to_string(),
+        "refresh_graph_strict(regclass[], bytea, text)".to_string(),
+    ] {
+        db.execute(&format!(
+            "GRANT EXECUTE ON FUNCTION pgtrickle.{function} TO v104_graph_coordinator"
+        ))
+        .await;
+    }
+    db.execute("CREATE TABLE v104_delegated_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO v104_delegated_source VALUES (1)")
+        .await;
+    db.execute("GRANT SELECT ON v104_delegated_source TO v104_graph_coordinator")
+        .await;
+
+    db.try_execute_with_role(
+        "SET ROLE v104_graph_coordinator",
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v104_delegated_st',\
+             query => 'SELECT id FROM v104_delegated_source',\
+             schedule => '1h',\
+             refresh_mode => 'DIFFERENTIAL',\
+             initialize => false,\
+             orchestration_mode => 'EXTERNAL'\
+         )",
+        "RESET ROLE",
+    )
+    .await
+    .expect("the coordinator should create its graph member");
+
+    let contract_sql = "SELECT graph_digest FROM pgtrickle.graph_contract(\
+        ARRAY['public.v104_delegated_st'::regclass])";
+    let denied = db
+        .try_execute_with_role(
+            "SET ROLE v104_graph_coordinator",
+            contract_sql,
+            "RESET ROLE",
+        )
+        .await
+        .expect_err("SELECT alone must not delegate source coordination");
+    assert!(
+        denied.to_string().contains("SELECT and MAINTAIN"),
+        "delegation error should name the required grants: {denied}"
+    );
+
+    db.execute("GRANT MAINTAIN ON v104_delegated_source TO v104_graph_coordinator")
+        .await;
+    db.try_execute_with_role(
+        "SET ROLE v104_graph_coordinator",
+        "SELECT * FROM pgtrickle.refresh_graph_strict(\
+             ARRAY['public.v104_delegated_st'::regclass],\
+             (SELECT graph_digest FROM pgtrickle.graph_contract(\
+                 ARRAY['public.v104_delegated_st'::regclass]))\
+         )",
+        "RESET ROLE",
+    )
+    .await
+    .expect("the delegated coordinator should refresh its graph");
+    assert_eq!(db.count("public.v104_delegated_st").await, 1);
+
+    db.execute("REVOKE MAINTAIN ON v104_delegated_source FROM v104_graph_coordinator")
+        .await;
+    assert!(
+        db.try_execute_with_role(
+            "SET ROLE v104_graph_coordinator",
+            contract_sql,
+            "RESET ROLE",
+        )
+        .await
+        .is_err(),
+        "revoking MAINTAIN must revoke source coordination"
+    );
 }
 
 #[tokio::test]

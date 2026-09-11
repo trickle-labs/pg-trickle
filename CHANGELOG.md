@@ -213,7 +213,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
-Future changes will be listed here.
+- Allow source owners to delegate Graph V1 coordination with PostgreSQL's
+  native `SELECT` and `MAINTAIN` table privileges while retaining
+  owner-equivalent authority for graph members.
 
 ## [0.104.0] — Extension conformance and final feature freeze
 
