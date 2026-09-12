@@ -746,34 +746,21 @@ pub struct VpPromotedPayload {
 ///
 /// Returns `None` when the JSON is malformed or a required field is absent.
 pub fn parse_vp_promoted_payload(payload: &str) -> Option<VpPromotedPayload> {
-    // Minimal JSON parser using SPI — avoids adding a serde_json dep.
-    let table = Spi::get_one_with_args::<String>("SELECT $1::jsonb ->> 'table'", &[payload.into()])
-        .ok()
-        .flatten()?;
-
-    let shard_count = Spi::get_one_with_args::<i64>(
-        "SELECT ($1::jsonb ->> 'shard_count')::bigint",
-        &[payload.into()],
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(0);
-
-    let shard_table_prefix = Spi::get_one_with_args::<String>(
-        "SELECT $1::jsonb ->> 'shard_table_prefix'",
-        &[payload.into()],
-    )
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| format!("{table}_"));
-
-    let predicate_id = Spi::get_one_with_args::<i64>(
-        "SELECT ($1::jsonb ->> 'predicate_id')::bigint",
-        &[payload.into()],
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(0);
+    let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let table = payload.get("table")?.as_str()?.to_owned();
+    let integer = |key| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+            .unwrap_or(0)
+    };
+    let shard_count = integer("shard_count");
+    let shard_table_prefix = payload
+        .get("shard_table_prefix")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{table}_"));
+    let predicate_id = integer("predicate_id");
 
     Some(VpPromotedPayload {
         table,
@@ -1224,5 +1211,19 @@ mod tests {
             topology_sets_differ(&live, &recorded),
             "port change must trigger topology change"
         );
+    }
+
+    #[test]
+    fn test_vp_promoted_payload_parses_defaults_and_numeric_strings() {
+        let payload = parse_vp_promoted_payload(
+            r#"{"table":"_pg_ripple.vp_42_delta","shard_count":"4","predicate_id":7}"#,
+        )
+        .unwrap();
+
+        assert_eq!(payload.table, "_pg_ripple.vp_42_delta");
+        assert_eq!(payload.shard_count, 4);
+        assert_eq!(payload.predicate_id, 7);
+        assert_eq!(payload.shard_table_prefix, "_pg_ripple.vp_42_delta_");
+        assert!(parse_vp_promoted_payload("{").is_none());
     }
 }
