@@ -58,10 +58,9 @@ fn current_database_oid() -> Result<u32, PgTrickleError> {
 ///
 /// Marks each node as paused in shared memory so that the scheduler skips
 /// dispatching refreshes for it. After setting all pause flags, the call
-/// polls `ACTIVE_REFRESH_WORKERS` every 100 ms up to
-/// `pg_trickle.scheduler_drain_timeout` seconds.  If refresh workers are
-/// still running at the timeout, a WARNING is logged and the function returns
-/// (the nodes remain paused for future ticks).
+/// checks matching scheduler jobs and inline worker slots every 100 ms up to
+/// `pg_trickle.scheduler_drain_timeout` seconds. If matching work remains at
+/// the timeout, the call errors and the nodes remain paused for future ticks.
 ///
 /// Example:
 /// ```sql

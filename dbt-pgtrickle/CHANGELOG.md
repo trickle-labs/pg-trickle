@@ -14,6 +14,7 @@ All notable changes to the dbt-pgtrickle package will be documented in this file
 
 ### Changed
 - `stream_table` materialization now uses `create_or_replace_stream_table()` when pg_trickle ≥ 0.6.0 is detected, with automatic fallback to the legacy check-then-decide pattern for older versions
+- Consolidated the legacy materialization's query-changed and query-unchanged branches into one adapter call
 - Integration test suite expanded: tests `stream_table_healthy` generic test, `refresh_all_stream_tables` operation, idempotent no-op re-run, and multiple stream table models
 
 ## [0.1.0] - 2026-XX-XX

@@ -9,9 +9,9 @@ quota allocation, per-database observability, and Grafana dashboard configuratio
 ## Architecture Overview
 
 In a multi-tenant setup, each PostgreSQL database gets its own pg_trickle
-background worker scheduler. All schedulers share a single worker pool via
-PostgreSQL shared memory (`ACTIVE_REFRESH_WORKERS` counter). The total number
-of concurrent refresh workers is bounded by `pg_trickle.max_dynamic_refresh_workers`.
+background worker scheduler. Schedulers coordinate through a shared-memory
+worker-slot table that tracks reserved and live workers. The total number of
+concurrent refresh workers is bounded by `pg_trickle.max_dynamic_refresh_workers`.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -24,8 +24,8 @@ of concurrent refresh workers is bounded by `pg_trickle.max_dynamic_refresh_work
 │         │                 │                  │
 │         └────────┬────────┘                  │
 │                  ▼                           │
-│       Shared worker pool (shmem)             │
-│       ACTIVE_REFRESH_WORKERS atomic          │
+│       Shared worker-slot table (shmem)       │
+│       reserved + live worker slots           │
 └─────────────────────────────────────────────┘
 ```
 

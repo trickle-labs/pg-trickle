@@ -125,39 +125,19 @@ fn recommend_schedule_impl(name: &str) -> Result<pgrx::JsonB, PgTrickleError> {
     let current_secs = parse_schedule_seconds(meta.schedule.as_deref());
     let (recommended_secs, confidence, reasoning) = compute_recommendation(&meta);
 
-    let json_str = format!(
-        r#"{{"recommended_interval_seconds":{:.1},"peak_window_cron":null,"confidence":{:.3},"reasoning":"{}"}}"#,
-        recommended_secs,
-        confidence,
-        reasoning.replace('"', r#"\""#)
-    );
-
-    let val: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
-
-    // Add delta_pct relative to current schedule
-    let mut obj = val
-        .as_object()
-        .cloned()
-        .ok_or_else(|| PgTrickleError::InternalError("json not object".into()))?;
-
     let delta_pct = if current_secs > 0.0 {
         (recommended_secs - current_secs) / current_secs * 100.0
     } else {
         0.0
     };
-    obj.insert(
-        "current_interval_seconds".to_string(),
-        serde_json::json!(current_secs),
-    );
-    obj.insert("delta_pct".to_string(), serde_json::json!(delta_pct));
-
-    let final_str =
-        serde_json::to_string(&obj).map_err(|e| PgTrickleError::InternalError(e.to_string()))?;
-
-    Ok(pgrx::JsonB(serde_json::from_str(&final_str).map_err(
-        |e| PgTrickleError::InternalError(e.to_string()),
-    )?))
+    Ok(pgrx::JsonB(serde_json::json!({
+        "recommended_interval_seconds": recommended_secs,
+        "peak_window_cron": null,
+        "confidence": confidence,
+        "reasoning": reasoning,
+        "current_interval_seconds": current_secs,
+        "delta_pct": delta_pct,
+    })))
 }
 
 /// Parse a schedule string like `"30s"`, `"1m"`, `"calculated"` into seconds.

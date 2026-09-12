@@ -1279,31 +1279,6 @@ mod tests {
         assert!(!is_star_only(&[]));
     }
 
-    // ── RowIdStrategy (from row_id.rs, tested here for convenience) ─
-
-    #[test]
-    fn test_row_id_strategy_debug() {
-        use crate::dvm::row_id::RowIdStrategy;
-        let pk = RowIdStrategy::PrimaryKey {
-            pk_columns: vec!["id".to_string()],
-        };
-        let debug = format!("{:?}", pk);
-        assert!(debug.contains("PrimaryKey"));
-        assert!(debug.contains("id"));
-    }
-
-    #[test]
-    fn test_row_id_strategy_clone() {
-        use crate::dvm::row_id::RowIdStrategy;
-        let original = RowIdStrategy::GroupByKey {
-            group_columns: vec!["region".to_string(), "year".to_string()],
-        };
-        let cloned = original.clone();
-        let debug_orig = format!("{:?}", original);
-        let debug_clone = format!("{:?}", cloned);
-        assert_eq!(debug_orig, debug_clone);
-    }
-
     // ── Subquery / CTE OpTree tests ─────────────────────────────────
 
     #[test]
