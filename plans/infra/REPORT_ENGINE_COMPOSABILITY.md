@@ -64,7 +64,7 @@ internal C parse tree. Two-phase approach:
 2. **Phase 2 — Extract `pg-query-diff` crate** containing:
    - `OpTree` and all operator types
    - `DiffContext` and delta SQL generation
-   - `RowIdStrategy` and row ID generation
+   - row ID schema inference and generation
    - `CteRegistry` and CTE handling
    - The `ParseFrontend` trait (but not the pgrx implementation)
    - All auto-rewrite passes (they operate on SQL strings, not parse trees)

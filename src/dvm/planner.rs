@@ -717,60 +717,6 @@ pub fn statistics_epoch_for_sources(source_oids: &[u32]) -> String {
     result.unwrap_or_else(|_| "unknown".into())
 }
 
-pub fn equality_selectivity(null_fraction: Option<f64>, distinct_count: Option<f64>) -> Estimate {
-    match (finite(null_fraction), finite(distinct_count)) {
-        (Some(nulls), Some(distinct)) if distinct > 0.0 => Estimate::known(
-            ((1.0 - nulls.clamp(0.0, 1.0)) / distinct.max(1.0)).clamp(0.0, 1.0),
-            "(1-null_fraction)/max(n_distinct,1)",
-            "n_distinct",
-        ),
-        _ => Estimate::unknown("(1-null_fraction)/max(n_distinct,1)"),
-    }
-}
-
-pub fn null_selectivity(null_fraction: Option<f64>, is_null: bool) -> Estimate {
-    match finite(null_fraction) {
-        Some(value) => Estimate::known(
-            if is_null {
-                value.clamp(0.0, 1.0)
-            } else {
-                1.0 - value.clamp(0.0, 1.0)
-            },
-            if is_null {
-                "null_fraction"
-            } else {
-                "1-null_fraction"
-            },
-            "null_fraction",
-        ),
-        None => Estimate::unknown(if is_null {
-            "null_fraction"
-        } else {
-            "1-null_fraction"
-        }),
-    }
-}
-
-pub fn and_selectivity(left: &Estimate, right: &Estimate) -> Estimate {
-    match (left.rows, right.rows) {
-        (Some(left), Some(right)) => {
-            Estimate::known((left * right).clamp(0.0, 1.0), "left*right", "independence")
-        }
-        _ => Estimate::unknown("left*right"),
-    }
-}
-
-pub fn or_selectivity(left: &Estimate, right: &Estimate) -> Estimate {
-    match (left.rows, right.rows) {
-        (Some(left), Some(right)) => Estimate::known(
-            (left + right - left * right).clamp(0.0, 1.0),
-            "left+right-left*right",
-            "inclusion_exclusion",
-        ),
-        _ => Estimate::unknown("left+right-left*right"),
-    }
-}
-
 fn finite(value: Option<f64>) -> Option<f64> {
     value.filter(|value| value.is_finite())
 }
@@ -1378,17 +1324,6 @@ mod tests {
             }),
             right: Box::new(scan(3, "c")),
         }
-    }
-
-    #[test]
-    fn selectivity_formulas_preserve_unknown_and_clamp() {
-        assert_eq!(equality_selectivity(Some(0.2), Some(4.0)).rows, Some(0.2));
-        assert_eq!(equality_selectivity(None, Some(4.0)).rows, None);
-        assert_eq!(null_selectivity(Some(1.4), false).rows, Some(0.0));
-        let left = Estimate::known(0.8, "test", "test");
-        let right = Estimate::known(0.5, "test", "test");
-        assert_eq!(and_selectivity(&left, &right).rows, Some(0.4));
-        assert!((or_selectivity(&left, &right).rows.unwrap() - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]

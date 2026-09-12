@@ -148,27 +148,16 @@
       {% if current_info and current_info.defining_query != defining_query %}
         {# Query changed: use ALTER ... query => to migrate in place #}
         {{ log("pg_trickle: query changed — altering '" ~ qualified_name ~ "' in place", info=true) }}
-        {{ dbt_pgtrickle.pgtrickle_alter_stream_table(
-             qualified_name, schedule, refresh_mode,
-             status=status, current_info=current_info,
-             cdc_mode=cdc_mode,
-             query=defining_query,
-             fuse=fuse, fuse_ceiling=fuse_ceiling, fuse_sensitivity=fuse_sensitivity,
-             append_only=append_only, max_differential_joins=max_differential_joins,
-             max_delta_fraction=max_delta_fraction
-           ) }}
-      {% else %}
-        {# Query unchanged: update schedule/mode/status/fuse if they differ.
-           Pass current_info to avoid redundant catalog lookup. #}
-        {{ dbt_pgtrickle.pgtrickle_alter_stream_table(
-             qualified_name, schedule, refresh_mode,
-             status=status, current_info=current_info,
-             cdc_mode=cdc_mode,
-             fuse=fuse, fuse_ceiling=fuse_ceiling, fuse_sensitivity=fuse_sensitivity,
-             append_only=append_only, max_differential_joins=max_differential_joins,
-             max_delta_fraction=max_delta_fraction
-           ) }}
       {% endif %}
+      {# The adapter compares the supplied query with current_info and alters only changed values. #}
+      {{ dbt_pgtrickle.pgtrickle_alter_stream_table(
+           qualified_name, schedule, refresh_mode,
+           status=status, current_info=current_info,
+           cdc_mode=cdc_mode, query=defining_query,
+           fuse=fuse, fuse_ceiling=fuse_ceiling, fuse_sensitivity=fuse_sensitivity,
+           append_only=append_only, max_differential_joins=max_differential_joins,
+           max_delta_fraction=max_delta_fraction
+         ) }}
     {% endif %}
   {% endif %}
 

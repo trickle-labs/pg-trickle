@@ -654,41 +654,6 @@ impl E2eDb {
         Self::connect_with_retry(&connection_string(port, db_name), 30).await
     }
 
-    /// Execute SQL on a dedicated connection and collect PostgreSQL notices.
-    pub async fn try_execute_with_notices(
-        &self,
-        sql: &str,
-    ) -> Result<Vec<String>, tokio_postgres::Error> {
-        let (client, mut connection) =
-            tokio_postgres::connect(&self.connection_string, tokio_postgres::NoTls).await?;
-
-        let notices = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let notices_task = notices.clone();
-
-        let connection_task = tokio::spawn(async move {
-            while let Some(message) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
-                match message {
-                    Ok(tokio_postgres::AsyncMessage::Notice(notice)) => {
-                        notices_task.lock().await.push(notice.to_string());
-                    }
-                    Ok(_) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-            Ok::<(), tokio_postgres::Error>(())
-        });
-
-        let execute_result = client.batch_execute(sql).await;
-        drop(client);
-
-        connection_task
-            .await
-            .unwrap_or_else(|e| panic!("notice collector task failed: {e}"))?;
-        execute_result?;
-
-        Ok(notices.lock().await.clone())
-    }
-
     /// Internal: start a container using the given database name.
     async fn new_with_db(db_name: &str) -> Self {
         let (img_name, img_tag) = e2e_image();
@@ -935,100 +900,6 @@ impl E2eDb {
 
     // ── SQL Execution Helpers ──────────────────────────────────────────
 
-    /// Execute a SQL statement (panics on error).
-    pub async fn execute(&self, sql: &str) {
-        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
-            .execute(&self.pool)
-            .await
-            .unwrap_or_else(|e| panic!("SQL failed: {}\nSQL: {}", e, sql));
-    }
-
-    /// Execute a SQL statement, returning Ok/Err instead of panicking.
-    pub async fn try_execute(&self, sql: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
-    }
-
-    /// Execute multiple SQL statements sequentially on the **same** connection.
-    ///
-    /// Use this whenever one statement sets session state (e.g. a GUC via
-    /// `SET`) that must be visible to the next statement — a connection pool
-    /// may dispatch each `execute()` call to a different backend connection.
-    pub async fn execute_seq(&self, stmts: &[&str]) {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .expect("Failed to acquire DB connection for execute_seq");
-        for sql in stmts {
-            sqlx::query(sqlx::AssertSqlSafe((*sql).to_owned()))
-                .execute(&mut *conn)
-                .await
-                .unwrap_or_else(|e| panic!("SQL failed: {}\nSQL: {}", e, sql));
-        }
-    }
-
-    /// Run `config` statements on a dedicated connection (all must succeed),
-    /// then run `sql` on the same connection and return Ok/Err.
-    ///
-    /// Use this when `sql` depends on session-local GUC values set by `config`.
-    pub async fn try_execute_with_config(
-        &self,
-        config: &[&str],
-        sql: &str,
-    ) -> Result<(), sqlx::Error> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .expect("Failed to acquire DB connection for try_execute_with_config");
-        for stmt in config {
-            sqlx::query(sqlx::AssertSqlSafe((*stmt).to_owned()))
-                .execute(&mut *conn)
-                .await
-                .unwrap_or_else(|e| panic!("Config SQL failed: {}\nSQL: {}", e, stmt));
-        }
-        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
-            .execute(&mut *conn)
-            .await
-            .map(|_| ())
-    }
-
-    /// Execute `setup_sql` on a connection, then try `target_sql` and return its
-    /// result, then run `teardown_sql` unconditionally.  All three statements use
-    /// the **same** connection so session state (e.g. `SET ROLE`) is preserved.
-    ///
-    /// Use this instead of multi-statement strings passed to `try_execute`,
-    /// which sqlx rejects with "cannot insert multiple commands into a prepared
-    /// statement".
-    pub async fn try_execute_with_role(
-        &self,
-        setup_sql: &str,
-        target_sql: &str,
-        teardown_sql: &str,
-    ) -> Result<(), sqlx::Error> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .expect("Failed to acquire DB connection for try_execute_with_role");
-        sqlx::query(sqlx::AssertSqlSafe(setup_sql.to_owned()))
-            .execute(&mut *conn)
-            .await
-            .unwrap_or_else(|e| panic!("setup SQL failed: {}\nSQL: {}", e, setup_sql));
-        let result = sqlx::query(sqlx::AssertSqlSafe(target_sql.to_owned()))
-            .execute(&mut *conn)
-            .await
-            .map(|_| ());
-        // Always reset, even if target failed.
-        let _ = sqlx::query(sqlx::AssertSqlSafe(teardown_sql.to_owned()))
-            .execute(&mut *conn)
-            .await;
-        result
-    }
-
     /// Reload PostgreSQL configuration and wait briefly for SIGHUP settings to apply.
     pub async fn reload_config_and_wait(&self) {
         self.execute("SELECT pg_reload_conf()").await;
@@ -1104,252 +975,9 @@ impl E2eDb {
         self.wait_for_setting(setting, expected).await;
     }
 
-    /// Get a single scalar value from a query.
-    pub async fn query_scalar<T>(&self, sql: &str) -> T
-    where
-        T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
-        (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
-    {
-        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
-    }
-
-    /// Get an optional scalar value from a query.
-    ///
-    /// Returns `None` both when no rows are returned *and* when the single
-    /// returned value is `NULL` (e.g. `max()` / `min()` over an empty set).
-    pub async fn query_scalar_opt<T>(&self, sql: &str) -> Option<T>
-    where
-        T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
-        (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
-    {
-        sqlx::query_scalar::<_, Option<T>>(sqlx::AssertSqlSafe(sql.to_owned()))
-            .fetch_optional(&self.pool)
-            .await
-            .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
-            .flatten()
-    }
-
-    /// Count rows in a table.
-    pub async fn count(&self, table: &str) -> i64 {
-        self.query_scalar::<i64>(&format!("SELECT count(*) FROM {}", table))
-            .await
-    }
-
-    /// Return the qualified change buffer table name for a source OID.
-    ///
-    /// v0.32.0+: buffer tables are named `changes_{stable_name}` (not `changes_{oid}`).
-    /// Queries `pgt_change_tracking.source_stable_name` to get the correct name.
-    pub async fn change_buffer_table(&self, source_oid: i64) -> String {
-        let stable_name: String = self
-            .query_scalar(&format!(
-                "SELECT source_stable_name \
-                 FROM pgtrickle.pgt_change_tracking \
-                 WHERE source_relid = {}",
-                source_oid
-            ))
-            .await;
-        format!("pgtrickle_changes.changes_{}", stable_name)
-    }
-
-    /// Return the CDC INSERT trigger name for a source OID.
-    ///
-    /// v0.32.0+: triggers are named `pg_trickle_cdc_ins_{stable_name}`
-    /// (stable 16-char xxhash64 hex) rather than `pg_trickle_cdc_ins_{oid}`.
-    pub async fn cdc_trigger_name(&self, source_oid: i64) -> String {
-        let stable_name: String = self
-            .query_scalar(&format!(
-                "SELECT pgtrickle.source_stable_name({}::oid)",
-                source_oid
-            ))
-            .await;
-        format!("pg_trickle_cdc_ins_{}", stable_name)
-    }
-
-    /// Execute a query and return all result rows as a single text string.
-    ///
-    /// Useful for capturing EXPLAIN output where each row is a text line.
-    pub async fn query_text(&self, sql: &str) -> Option<String> {
-        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.to_owned()))
-            .fetch_all(&self.pool)
-            .await
-            .ok()?;
-        if rows.is_empty() {
-            return None;
-        }
-        Some(
-            rows.into_iter()
-                .map(|(line,)| line)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-    }
-
     // ── Extension API Helpers ──────────────────────────────────────────
 
-    /// Create a stream table via `pgtrickle.create_stream_table()`.
-    pub async fn create_st(&self, name: &str, query: &str, schedule: &str, refresh_mode: &str) {
-        let sql = format!(
-            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
-             '{schedule}', '{refresh_mode}')"
-        );
-        self.execute(&sql).await;
-    }
-
-    /// Create a partitioned stream table (A1-1: `partition_by` parameter).
-    ///
-    /// The storage table is created as `PARTITION BY RANGE (partition_key)` with a
-    /// default catch-all partition. Partition pruning during MERGE is enabled
-    /// automatically by the A1-3 predicate injection path.
-    pub async fn create_st_partitioned(
-        &self,
-        name: &str,
-        query: &str,
-        schedule: &str,
-        refresh_mode: &str,
-        partition_key: &str,
-    ) {
-        let sql = format!(
-            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
-             '{schedule}', '{refresh_mode}', partition_by => '{partition_key}')"
-        );
-        self.execute(&sql).await;
-    }
-
-    /// Create a stream table with explicit `initialize` parameter.
-    pub async fn create_st_with_init(
-        &self,
-        name: &str,
-        query: &str,
-        schedule: &str,
-        refresh_mode: &str,
-        initialize: bool,
-    ) {
-        let sql = format!(
-            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
-             '{schedule}', '{refresh_mode}', {initialize})"
-        );
-        self.execute(&sql).await;
-    }
-
-    /// Refresh a stream table via `pgtrickle.refresh_stream_table()`.
-    pub async fn refresh_st(&self, name: &str) {
-        self.execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
-            .await;
-    }
-
-    /// Refresh a stream table, retrying when a concurrent background refresh holds the lock.
-    ///
-    /// The background scheduler may race with a manual refresh of a downstream ST
-    /// (e.g. after the test manually refreshes an upstream ST, the scheduler detects
-    /// staleness within its polling interval and acquires the session-level advisory
-    /// lock on the same `pgt_id`). When `refresh_stream_table` returns
-    /// "another refresh is already in progress", this helper sleeps 100 ms and retries
-    /// until the lock clears or 10 seconds elapse.
-    pub async fn refresh_st_with_retry(&self, name: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match self
-                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
-                .await
-            {
-                Ok(_) => return,
-                Err(e) if e.to_string().contains("already in progress") => {
-                    if std::time::Instant::now() >= deadline {
-                        panic!(
-                            "refresh_st_with_retry: timed out waiting for \
-                             concurrent refresh of '{name}' to complete"
-                        );
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                Err(e) => panic!("refresh_stream_table('{name}') failed: {e:?}"),
-            }
-        }
-    }
-
-    /// Drop a stream table via `pgtrickle.drop_stream_table()`.
-    pub async fn drop_st(&self, name: &str) {
-        self.execute(&format!("SELECT pgtrickle.drop_stream_table('{name}')"))
-            .await;
-    }
-
-    /// Drop a stream table with cascade.
-    pub async fn drop_st_cascade(&self, name: &str) {
-        self.execute(&format!(
-            "SELECT pgtrickle.drop_stream_table('{name}', cascade => true)"
-        ))
-        .await;
-    }
-
-    /// Alter a stream table via `pgtrickle.alter_stream_table()`.
-    ///
-    /// `args` should be the named arguments after the name, e.g.:
-    /// `"schedule => '5m'"` or
-    /// `"status => 'SUSPENDED'"`.
-    pub async fn alter_st(&self, name: &str, args: &str) {
-        self.execute(&format!(
-            "SELECT pgtrickle.alter_stream_table('{name}', {args})"
-        ))
-        .await;
-    }
-
-    // ── Catalog Query Helpers ──────────────────────────────────────────
-
-    /// Get the status tuple for a specific ST from the catalog.
-    ///
-    /// Returns `(status, refresh_mode, is_populated, consecutive_errors)`.
-    pub async fn pgt_status(&self, name: &str) -> (String, String, bool, i32) {
-        sqlx::query_as(
-            "SELECT status, refresh_mode, is_populated, consecutive_errors \
-             FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_schema || '.' || pgt_name = $1 OR pgt_name = $1",
-        )
-        .bind(name)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or_else(|e| panic!("pgt_status query failed for '{}': {}", name, e))
-    }
-
-    /// Verify a ST's contents match its defining query exactly (multiset equality).
-    pub async fn assert_st_matches_query(&self, st_table: &str, defining_query: &str) {
-        oracle::assert_st_query_exact(self, st_table, defining_query, "assert_st_matches_query")
-            .await;
-    }
-
     // ── Infrastructure Query Helpers ───────────────────────────────────
-
-    /// Check if a trigger exists on a table.
-    pub async fn trigger_exists(&self, trigger_name: &str, table: &str) -> bool {
-        self.query_scalar::<bool>(&format!(
-            "SELECT EXISTS(\
-                SELECT 1 FROM pg_trigger t \
-                JOIN pg_class c ON t.tgrelid = c.oid \
-                WHERE t.tgname = '{trigger_name}' \
-                AND c.relname = '{table}'\
-            )"
-        ))
-        .await
-    }
-
-    /// Check if a table exists in a given schema.
-    pub async fn table_exists(&self, schema: &str, table: &str) -> bool {
-        self.query_scalar::<bool>(&format!(
-            "SELECT EXISTS(\
-                SELECT 1 FROM information_schema.tables \
-                WHERE table_schema = '{schema}' AND table_name = '{table}'\
-            )"
-        ))
-        .await
-    }
-
-    /// Get the OID of a table (as i32).
-    pub async fn table_oid(&self, table: &str) -> i32 {
-        self.query_scalar::<i32>(&format!("SELECT '{table}'::regclass::oid::int"))
-            .await
-    }
 
     /// Wait for any pg_trickle scheduler background worker to appear in
     /// `pg_stat_activity` for the current database.
@@ -1429,43 +1057,6 @@ impl E2eDb {
             if current_ts != initial_ts && current_ts.is_some() {
                 return true;
             }
-        }
-    }
-
-    /// General-purpose async polling helper with exponential backoff.
-    ///
-    /// Evaluates `condition_sql` (must return a single `BOOLEAN`) repeatedly
-    /// until it returns `true` or `timeout` expires.  The polling interval
-    /// starts at `initial_backoff` and doubles on each iteration up to
-    /// `max_backoff` (default: 2 s).
-    ///
-    /// Returns `true` if the condition was met, `false` on timeout.
-    /// The `label` is used only in timeout log messages for diagnostics.
-    #[must_use]
-    pub async fn wait_for_condition(
-        &self,
-        label: &str,
-        condition_sql: &str,
-        timeout: std::time::Duration,
-        initial_backoff: std::time::Duration,
-    ) -> bool {
-        let max_backoff = std::time::Duration::from_secs(2);
-        let start = std::time::Instant::now();
-        let mut backoff = initial_backoff;
-        loop {
-            let met: bool = self.query_scalar(condition_sql).await;
-            if met {
-                return true;
-            }
-            if start.elapsed() >= timeout {
-                eprintln!(
-                    "wait_for_condition({label}): timed out after {:.1}s",
-                    timeout.as_secs_f64()
-                );
-                return false;
-            }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(max_backoff);
         }
     }
 }
@@ -1602,4 +1193,413 @@ pub fn parse_profile_line(line: &str) -> Option<ProfileData> {
         affected: extract_int("affected")?,
         path: extract_str("path")?,
     })
+}
+
+#[allow(dead_code)]
+impl E2eDb {
+    /// Execute SQL on a dedicated connection and collect PostgreSQL notices.
+    pub async fn try_execute_with_notices(
+        &self,
+        sql: &str,
+    ) -> Result<Vec<String>, tokio_postgres::Error> {
+        let (client, mut connection) =
+            tokio_postgres::connect(self.connection_string(), tokio_postgres::NoTls).await?;
+
+        let notices = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let notices_task = notices.clone();
+
+        let connection_task = tokio::spawn(async move {
+            while let Some(message) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                match message {
+                    Ok(tokio_postgres::AsyncMessage::Notice(notice)) => {
+                        notices_task.lock().await.push(notice.to_string());
+                    }
+                    Ok(_) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok::<(), tokio_postgres::Error>(())
+        });
+
+        let execute_result = client.batch_execute(sql).await;
+        drop(client);
+
+        connection_task
+            .await
+            .unwrap_or_else(|e| panic!("notice collector task failed: {e}"))?;
+        execute_result?;
+
+        Ok(notices.lock().await.clone())
+    }
+
+    /// Execute a SQL statement (panics on error).
+    pub async fn execute(&self, sql: &str) {
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&self.pool)
+            .await
+            .unwrap_or_else(|e| panic!("SQL failed: {}\nSQL: {}", e, sql));
+    }
+
+    /// Execute a SQL statement, returning Ok/Err instead of panicking.
+    pub async fn try_execute(&self, sql: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+    }
+
+    /// Execute multiple SQL statements sequentially on the **same** connection.
+    ///
+    /// Use this whenever one statement sets session state (e.g. a GUC via
+    /// `SET`) that must be visible to the next statement — a connection pool
+    /// may dispatch each `execute()` call to a different backend connection.
+    pub async fn execute_seq(&self, stmts: &[&str]) {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .expect("Failed to acquire DB connection for execute_seq");
+        for sql in stmts {
+            sqlx::query(sqlx::AssertSqlSafe((*sql).to_owned()))
+                .execute(&mut *conn)
+                .await
+                .unwrap_or_else(|e| panic!("SQL failed: {}\nSQL: {}", e, sql));
+        }
+    }
+
+    /// Run `config` statements on a dedicated connection (all must succeed),
+    /// then run `sql` on the same connection and return Ok/Err.
+    ///
+    /// Use this when `sql` depends on session-local GUC values set by `config`.
+    pub async fn try_execute_with_config(
+        &self,
+        config: &[&str],
+        sql: &str,
+    ) -> Result<(), sqlx::Error> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .expect("Failed to acquire DB connection for try_execute_with_config");
+        for stmt in config {
+            sqlx::query(sqlx::AssertSqlSafe((*stmt).to_owned()))
+                .execute(&mut *conn)
+                .await
+                .unwrap_or_else(|e| panic!("Config SQL failed: {}\nSQL: {}", e, stmt));
+        }
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+    }
+
+    /// Execute `setup_sql` on a connection, then try `target_sql` and return its
+    /// result, then run `teardown_sql` unconditionally.  All three statements use
+    /// the **same** connection so session state (e.g. `SET ROLE`) is preserved.
+    ///
+    /// Use this instead of multi-statement strings passed to `try_execute`,
+    /// which sqlx rejects with "cannot insert multiple commands into a prepared
+    /// statement".
+    pub async fn try_execute_with_role(
+        &self,
+        setup_sql: &str,
+        target_sql: &str,
+        teardown_sql: &str,
+    ) -> Result<(), sqlx::Error> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .expect("Failed to acquire DB connection for try_execute_with_role");
+        sqlx::query(sqlx::AssertSqlSafe(setup_sql.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|e| panic!("setup SQL failed: {}\nSQL: {}", e, setup_sql));
+        let result = sqlx::query(sqlx::AssertSqlSafe(target_sql.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .map(|_| ());
+        // Always reset, even if target failed.
+        let _ = sqlx::query(sqlx::AssertSqlSafe(teardown_sql.to_owned()))
+            .execute(&mut *conn)
+            .await;
+        result
+    }
+
+    /// Get a single scalar value from a query.
+    pub async fn query_scalar<T>(&self, sql: &str) -> T
+    where
+        T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
+        (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
+    {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
+    }
+
+    /// Get an optional scalar value from a query.
+    ///
+    /// Returns `None` both when no rows are returned *and* when the single
+    /// returned value is `NULL` (e.g. `max()` / `min()` over an empty set).
+    pub async fn query_scalar_opt<T>(&self, sql: &str) -> Option<T>
+    where
+        T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Send + Unpin,
+        (T,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
+    {
+        sqlx::query_scalar::<_, Option<T>>(sqlx::AssertSqlSafe(sql.to_owned()))
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
+            .flatten()
+    }
+
+    /// Count rows in a table.
+    pub async fn count(&self, table: &str) -> i64 {
+        self.query_scalar::<i64>(&format!("SELECT count(*) FROM {}", table))
+            .await
+    }
+
+    /// Return the qualified change buffer table name for a source OID.
+    ///
+    /// v0.32.0+: buffer tables are named `changes_{stable_name}` (not `changes_{oid}`).
+    /// Queries `pgt_change_tracking.source_stable_name` to get the correct name.
+    pub async fn change_buffer_table(&self, source_oid: i64) -> String {
+        let stable_name: String = self
+            .query_scalar(&format!(
+                "SELECT source_stable_name \
+                 FROM pgtrickle.pgt_change_tracking \
+                 WHERE source_relid = {}",
+                source_oid
+            ))
+            .await;
+        format!("pgtrickle_changes.changes_{}", stable_name)
+    }
+
+    /// Return the CDC INSERT trigger name for a source OID.
+    ///
+    /// v0.32.0+: triggers are named `pg_trickle_cdc_ins_{stable_name}`
+    /// (stable 16-char xxhash64 hex) rather than `pg_trickle_cdc_ins_{oid}`.
+    pub async fn cdc_trigger_name(&self, source_oid: i64) -> String {
+        let stable_name: String = self
+            .query_scalar(&format!(
+                "SELECT pgtrickle.source_stable_name({}::oid)",
+                source_oid
+            ))
+            .await;
+        format!("pg_trickle_cdc_ins_{}", stable_name)
+    }
+
+    /// Create a stream table via `pgtrickle.create_stream_table()`.
+    pub async fn create_st(&self, name: &str, query: &str, schedule: &str, refresh_mode: &str) {
+        let sql = format!(
+            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
+             '{schedule}', '{refresh_mode}')"
+        );
+        self.execute(&sql).await;
+    }
+
+    /// Create a stream table with explicit `initialize` parameter.
+    pub async fn create_st_with_init(
+        &self,
+        name: &str,
+        query: &str,
+        schedule: &str,
+        refresh_mode: &str,
+        initialize: bool,
+    ) {
+        let sql = format!(
+            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
+             '{schedule}', '{refresh_mode}', {initialize})"
+        );
+        self.execute(&sql).await;
+    }
+
+    /// Create a partitioned stream table (A1-1: `partition_by` parameter).
+    ///
+    /// The storage table is created as `PARTITION BY RANGE (partition_key)` with a
+    /// default catch-all partition. Partition pruning during MERGE is enabled
+    /// automatically by the A1-3 predicate injection path.
+    pub async fn create_st_partitioned(
+        &self,
+        name: &str,
+        query: &str,
+        schedule: &str,
+        refresh_mode: &str,
+        partition_key: &str,
+    ) {
+        let sql = format!(
+            "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
+             '{schedule}', '{refresh_mode}', partition_by => '{partition_key}')"
+        );
+        self.execute(&sql).await;
+    }
+
+    /// Execute a query and return all result rows as a single text string.
+    ///
+    /// Useful for capturing EXPLAIN output where each row is a text line.
+    pub async fn query_text(&self, sql: &str) -> Option<String> {
+        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.to_owned()))
+            .fetch_all(&self.pool)
+            .await
+            .ok()?;
+        if rows.is_empty() {
+            return None;
+        }
+        Some(
+            rows.into_iter()
+                .map(|(line,)| line)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// Refresh a stream table via `pgtrickle.refresh_stream_table()`.
+    pub async fn refresh_st(&self, name: &str) {
+        self.execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
+            .await;
+    }
+
+    /// Refresh a stream table, retrying when a concurrent background refresh holds the lock.
+    ///
+    /// The background scheduler may race with a manual refresh of a downstream ST
+    /// (e.g. after the test manually refreshes an upstream ST, the scheduler detects
+    /// staleness within its polling interval and acquires the session-level advisory
+    /// lock on the same `pgt_id`). When `refresh_stream_table` returns
+    /// "another refresh is already in progress", this helper sleeps 100 ms and retries
+    /// until the lock clears or 10 seconds elapse.
+    pub async fn refresh_st_with_retry(&self, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match self
+                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
+                .await
+            {
+                Ok(_) => return,
+                Err(e) if e.to_string().contains("already in progress") => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!(
+                            "refresh_st_with_retry: timed out waiting for \
+                             concurrent refresh of '{name}' to complete"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("refresh_stream_table('{name}') failed: {e:?}"),
+            }
+        }
+    }
+
+    /// Drop a stream table via `pgtrickle.drop_stream_table()`.
+    pub async fn drop_st(&self, name: &str) {
+        self.execute(&format!("SELECT pgtrickle.drop_stream_table('{name}')"))
+            .await;
+    }
+
+    /// Drop a stream table with cascade.
+    pub async fn drop_st_cascade(&self, name: &str) {
+        self.execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{name}', cascade => true)"
+        ))
+        .await;
+    }
+
+    /// Alter a stream table via `pgtrickle.alter_stream_table()`.
+    ///
+    /// `args` should be the named arguments after the name, e.g.:
+    /// `"schedule => '5m'"` or
+    /// `"status => 'SUSPENDED'"`.
+    pub async fn alter_st(&self, name: &str, args: &str) {
+        self.execute(&format!(
+            "SELECT pgtrickle.alter_stream_table('{name}', {args})"
+        ))
+        .await;
+    }
+
+    /// Get the status tuple for a specific ST from the catalog.
+    ///
+    /// Returns `(status, refresh_mode, is_populated, consecutive_errors)`.
+    pub async fn pgt_status(&self, name: &str) -> (String, String, bool, i32) {
+        sqlx::query_as(
+            "SELECT status, refresh_mode, is_populated, consecutive_errors \
+             FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema || '.' || pgt_name = $1 OR pgt_name = $1",
+        )
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or_else(|e| panic!("pgt_status query failed for '{}': {}", name, e))
+    }
+
+    /// Verify a ST's contents match its defining query exactly (multiset equality).
+    pub async fn assert_st_matches_query(&self, st_table: &str, defining_query: &str) {
+        oracle::assert_st_query_exact(self, st_table, defining_query, "assert_st_matches_query")
+            .await;
+    }
+
+    /// Check if a trigger exists on a table.
+    pub async fn trigger_exists(&self, trigger_name: &str, table: &str) -> bool {
+        self.query_scalar::<bool>(&format!(
+            "SELECT EXISTS(\
+                SELECT 1 FROM pg_trigger t \
+                JOIN pg_class c ON t.tgrelid = c.oid \
+                WHERE t.tgname = '{trigger_name}' \
+                AND c.relname = '{table}'\
+            )"
+        ))
+        .await
+    }
+
+    /// Check if a table exists in a given schema.
+    pub async fn table_exists(&self, schema: &str, table: &str) -> bool {
+        self.query_scalar::<bool>(&format!(
+            "SELECT EXISTS(\
+                SELECT 1 FROM information_schema.tables \
+                WHERE table_schema = '{schema}' AND table_name = '{table}'\
+            )"
+        ))
+        .await
+    }
+
+    /// Get the OID of a table (as i32).
+    pub async fn table_oid(&self, table: &str) -> i32 {
+        self.query_scalar::<i32>(&format!("SELECT '{table}'::regclass::oid::int"))
+            .await
+    }
+
+    /// Poll a boolean SQL condition with exponential backoff.
+    ///
+    /// `condition_sql` must return a single `bool` column. Backoff
+    /// starts at `initial_backoff` and doubles on each iteration up to
+    /// `max_backoff` (default: 2 s).
+    ///
+    /// Returns `true` if the condition was met, `false` on timeout.
+    /// The `label` is used only in timeout log messages for diagnostics.
+    #[must_use]
+    pub async fn wait_for_condition(
+        &self,
+        label: &str,
+        condition_sql: &str,
+        timeout: std::time::Duration,
+        initial_backoff: std::time::Duration,
+    ) -> bool {
+        let max_backoff = std::time::Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        let mut backoff = initial_backoff;
+        loop {
+            let met: bool = self.query_scalar(condition_sql).await;
+            if met {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                eprintln!(
+                    "wait_for_condition({label}): timed out after {:.1}s",
+                    timeout.as_secs_f64()
+                );
+                return false;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
 }

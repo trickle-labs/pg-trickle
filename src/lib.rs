@@ -60,7 +60,6 @@ mod hooks;
 pub(crate) mod integration_contract;
 #[allow(dead_code)]
 mod ivm;
-pub mod logging;
 #[allow(dead_code)]
 pub(crate) mod metrics_server;
 #[allow(dead_code)]
