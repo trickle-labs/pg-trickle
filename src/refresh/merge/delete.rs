@@ -66,60 +66,6 @@ pub(crate) fn execute_hash_partitioned_merge(
     })
 }
 
-/// Build a MERGE SQL statement targeting a specific HASH child partition.
-///
-/// The delta is filtered to only rows whose partition key hashes to this child
-/// using PostgreSQL's `satisfies_hash_partition()` function.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_hash_child_merge(
-    child_target: &str,
-    temp_delta: &str,
-    quoted_partition_col: &str,
-    parent_oid: pg_sys::Oid,
-    modulus: i32,
-    remainder: i32,
-    original_merge: &str,
-    parent_target: &str,
-) -> String {
-    // The original MERGE has a USING clause that references the delta.
-    // We replace the entire MERGE to target the child with a filtered delta.
-    //
-    // Strategy: rewrite the original merge_sql by:
-    // 1. Replacing the parent target with ONLY child_target
-    // 2. Wrapping the USING subquery to filter through satisfies_hash_partition
-    // 3. Removing the __PGT_PART_PRED__ placeholder
-
-    // Find and replace "USING (...) AS d" with filtered version that reads
-    // from the materialized temp table.
-    let using_start = original_merge.find("USING (");
-    let on_clause = original_merge.find(" ON st.");
-
-    if let (Some(us), Some(on)) = (using_start, on_clause) {
-        // Reconstruct: everything before USING + filtered USING + everything from ON
-        let before_using = &original_merge[..us];
-        let from_on = &original_merge[on..];
-
-        // Build filtered USING clause
-        let filtered_using = format!(
-            "USING (SELECT * FROM {temp_delta} WHERE \
-             satisfies_hash_partition({parent_oid}::oid, {modulus}, {remainder}, {quoted_partition_col})) AS d",
-            parent_oid = parent_oid.to_u32(),
-        );
-
-        let result = format!("{before_using}{filtered_using}{from_on}",);
-
-        // Replace parent target with ONLY child_target and strip predicate placeholder
-        result
-            .replace(parent_target, &format!("ONLY {child_target}"))
-            .replace("__PGT_PART_PRED__", "")
-    } else {
-        // Fallback: simple replacement (shouldn't happen in practice)
-        original_merge
-            .replace(parent_target, &format!("ONLY {child_target}"))
-            .replace("__PGT_PART_PRED__", "")
-    }
-}
-
 // ── DAG-3: Delta amplification detection ────────────────────────────
 
 /// Compute the amplification ratio between input delta and output delta.

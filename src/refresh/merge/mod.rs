@@ -2802,15 +2802,15 @@ pub fn execute_differential_refresh_with_tuning(
     // pruning: only partitions overlapping [min, max] are visited, reducing
     // MERGE I/O proportionally to the number of affected partitions.
     //
-    // A1-3b: HASH partitions use a per-partition MERGE loop instead of
-    // predicate injection (hash functions are not range-invertible).
+    // HASH partitions use a parent-level MERGE; PostgreSQL routes rows to
+    // the correct child, and hash functions cannot provide range predicates.
     //
     // If the delta is empty (all changes cancel out), return early —
     // there is nothing to MERGE.
     let hash_merge_result: Option<(usize, &str)> = if let Some(ref pk) = st.st_partition_key {
         let method = crate::api::parse_partition_method(pk);
         if method == crate::api::PartitionMethod::Hash {
-            // A1-3b: Per-partition MERGE for HASH partitioned STs.
+            // A1-3b: Parent-level MERGE for HASH partitioned STs.
             let count = with_stream_owner(st, || {
                 execute_hash_partitioned_merge(
                     &resolved.merge_sql,
@@ -3051,7 +3051,7 @@ pub fn execute_differential_refresh_with_tuning(
                 "vector_agg",
             )
         } else if let Some(result) = hash_merge_result {
-            // A1-3b: HASH per-partition MERGE already executed above.
+            // A1-3b: HASH parent-level MERGE already executed above.
             result
         } else if use_pipeline {
             let (count, stats) = crate::refresh::pipeline::execute_merge_pipeline(

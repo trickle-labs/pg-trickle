@@ -100,46 +100,9 @@ if command -v cargo-nextest >/dev/null 2>&1; then
         return $?
     fi
 
-    local cargo_output
-    cargo_output=$(cargo test --test "$test_name" --features "$FEATURES" --no-run 2>&1)
-    echo "$cargo_output"
-
-    # Extract executable path from output.
-    # cargo prints: "Executable tests/foo.rs (target/debug/deps/foo-HASH)"
-    local test_bin
-    test_bin=$(echo "$cargo_output" \
-        | grep -oE "target/debug/deps/${test_name}-[a-f0-9]+" \
-        | head -1)
-
-    if [[ -n "$test_bin" ]]; then
-        test_bin="$CARGO_TARGET_DIR/${test_bin#target/}"
-    fi
-
-    if [[ -z "${test_bin:-}" ]] || [[ ! -x "$test_bin" ]]; then
-        # Fallback: pick the newest matching binary
-        if [[ "$OS" == "Darwin" ]]; then
-            test_bin=$(find "$CARGO_TARGET_DIR/debug/deps" \
-                            -maxdepth 1 -name "${test_name}-*" -type f -perm +111 \
-                            2>/dev/null \
-                       | xargs ls -t 2>/dev/null \
-                       | head -1)
-        else
-            test_bin=$(find "$CARGO_TARGET_DIR/debug/deps" \
-                            -maxdepth 1 -name "${test_name}-*" -type f -executable \
-                            2>/dev/null \
-                       | xargs ls -t 2>/dev/null \
-                       | head -1)
-        fi
-    fi
-
-    if [[ -z "${test_bin:-}" ]]; then
-        echo "ERROR: Could not find test binary for $test_name" >&2
-        return 1
-    fi
-
-    echo "Running: $(basename "$test_bin") (with $(basename "$STUB_LIB"))"
+    echo "Running $test_name with cargo (with $(basename "$STUB_LIB"))"
     export "$PRELOAD_VAR"="$STUB_LIB"
-    "$test_bin" --test-threads=1 "${@:2}"
+    cargo test --test "$test_name" --features "$FEATURES" -- --test-threads=1 "${@:2}"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────

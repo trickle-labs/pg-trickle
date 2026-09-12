@@ -1594,18 +1594,37 @@ fn generate_query_sql_with_change_buffers(
     op: &OpTree,
     st_table: &str,
 ) -> Result<Option<String>, PgTrickleError> {
+    generate_query_sql_with_change_buffer_source(ctx, op, st_table, generate_change_buffer_from)
+}
+
+/// Generate the recursive term SQL with self-ref replaced by `st_table`
+/// (existing storage) and base table scans reading from OLD change rows.
+/// Used by the DRed over-delete seed to find old recursive rows affected by
+/// DELETEs and UPDATEs in recursive-term source tables.
+fn generate_query_sql_with_old_change_buffers(
+    ctx: &DiffContext,
+    op: &OpTree,
+    st_table: &str,
+) -> Result<Option<String>, PgTrickleError> {
+    generate_query_sql_with_change_buffer_source(ctx, op, st_table, generate_old_change_buffer_from)
+}
+
+fn generate_query_sql_with_change_buffer_source(
+    ctx: &DiffContext,
+    op: &OpTree,
+    st_table: &str,
+    render_from: fn(&DiffContext, &OpTree, &str) -> Result<String, PgTrickleError>,
+) -> Result<Option<String>, PgTrickleError> {
     match op {
         OpTree::InnerJoin {
             condition,
             left,
             right,
         } => {
-            // The recursive term is typically a JOIN between a base table
-            // scan and the self-reference. We need to:
-            // - Replace self-ref with st_table (existing storage)
-            // - Replace base table with change buffer (INSERT + UPDATE new rows)
-            let left_from = generate_change_buffer_from(ctx, left, st_table)?;
-            let right_from = generate_change_buffer_from(ctx, right, st_table)?;
+            // Replace self-ref with st_table and scans with the selected
+            // changed-row source (NEW rows for inserts, OLD rows for deletes).
+            let left_from = render_from(ctx, left, st_table)?;
+            let right_from = render_from(ctx, right, st_table)?;
 
             let mut all_cols = Vec::new();
             collect_select_cols(left, &mut all_cols);
@@ -1645,8 +1664,8 @@ fn generate_query_sql_with_change_buffers(
                     left,
                     right,
                 } => {
-                    let left_from = generate_change_buffer_from(ctx, left, st_table)?;
-                    let right_from = generate_change_buffer_from(ctx, right, st_table)?;
+                    let left_from = render_from(ctx, left, st_table)?;
+                    let right_from = render_from(ctx, right, st_table)?;
                     Ok(Some(format!(
                         "SELECT {projs}\nFROM {left_from}\nJOIN {right_from}\n  ON {cond}",
                         projs = proj_exprs.join(", "),
@@ -1658,8 +1677,8 @@ fn generate_query_sql_with_change_buffers(
                     left,
                     right,
                 } => {
-                    let left_from = generate_change_buffer_from(ctx, left, st_table)?;
-                    let right_from = generate_change_buffer_from(ctx, right, st_table)?;
+                    let left_from = render_from(ctx, left, st_table)?;
+                    let right_from = render_from(ctx, right, st_table)?;
                     Ok(Some(format!(
                         "SELECT {projs}\nFROM {left_from}\nLEFT JOIN {right_from}\n  ON {cond}",
                         projs = proj_exprs.join(", "),
@@ -1667,7 +1686,12 @@ fn generate_query_sql_with_change_buffers(
                     )))
                 }
                 _ => {
-                    let child_sql = generate_query_sql_with_change_buffers(ctx, child, st_table)?;
+                    let child_sql = generate_query_sql_with_change_buffer_source(
+                        ctx,
+                        child,
+                        st_table,
+                        render_from,
+                    )?;
                     match child_sql {
                         Some(inner) => Ok(Some(format!(
                             "SELECT {projs}\nFROM (\n{inner}\n) __p",
@@ -1680,110 +1704,8 @@ fn generate_query_sql_with_change_buffers(
         }
 
         OpTree::Filter { predicate, child } => {
-            let child_sql = generate_query_sql_with_change_buffers(ctx, child, st_table)?;
-            match child_sql {
-                Some(inner) => Ok(Some(format!(
-                    "SELECT * FROM (\n{inner}\n) __f\nWHERE {pred}",
-                    pred = predicate.to_sql(),
-                ))),
-                None => Ok(None),
-            }
-        }
-
-        _ => Ok(None),
-    }
-}
-
-/// Generate the recursive term SQL with self-ref replaced by `st_table`
-/// (existing storage) and base table scans reading from OLD change rows.
-/// Used by the DRed over-delete seed to find old recursive rows affected by
-/// DELETEs and UPDATEs in recursive-term source tables.
-fn generate_query_sql_with_old_change_buffers(
-    ctx: &DiffContext,
-    op: &OpTree,
-    st_table: &str,
-) -> Result<Option<String>, PgTrickleError> {
-    match op {
-        OpTree::InnerJoin {
-            condition,
-            left,
-            right,
-        } => {
-            let left_from = generate_old_change_buffer_from(ctx, left, st_table)?;
-            let right_from = generate_old_change_buffer_from(ctx, right, st_table)?;
-
-            let mut all_cols = Vec::new();
-            collect_select_cols(left, &mut all_cols);
-            collect_select_cols(right, &mut all_cols);
-
-            Ok(Some(format!(
-                "SELECT {cols}\nFROM {left_from}\nJOIN {right_from}\n  ON {cond}",
-                cols = all_cols.join(", "),
-                cond = condition.to_sql(),
-            )))
-        }
-
-        OpTree::Project {
-            expressions,
-            aliases,
-            child,
-        } => {
-            let proj_exprs: Vec<String> = expressions
-                .iter()
-                .zip(aliases.iter())
-                .map(|(e, a)| {
-                    let esql = e.to_sql();
-                    if esql == *a {
-                        quote_ident(a)
-                    } else {
-                        format!("{esql} AS {}", quote_ident(a))
-                    }
-                })
-                .collect();
-
-            match child.as_ref() {
-                OpTree::InnerJoin {
-                    condition,
-                    left,
-                    right,
-                } => {
-                    let left_from = generate_old_change_buffer_from(ctx, left, st_table)?;
-                    let right_from = generate_old_change_buffer_from(ctx, right, st_table)?;
-                    Ok(Some(format!(
-                        "SELECT {projs}\nFROM {left_from}\nJOIN {right_from}\n  ON {cond}",
-                        projs = proj_exprs.join(", "),
-                        cond = condition.to_sql(),
-                    )))
-                }
-                OpTree::LeftJoin {
-                    condition,
-                    left,
-                    right,
-                } => {
-                    let left_from = generate_old_change_buffer_from(ctx, left, st_table)?;
-                    let right_from = generate_old_change_buffer_from(ctx, right, st_table)?;
-                    Ok(Some(format!(
-                        "SELECT {projs}\nFROM {left_from}\nLEFT JOIN {right_from}\n  ON {cond}",
-                        projs = proj_exprs.join(", "),
-                        cond = condition.to_sql(),
-                    )))
-                }
-                _ => {
-                    let child_sql =
-                        generate_query_sql_with_old_change_buffers(ctx, child, st_table)?;
-                    match child_sql {
-                        Some(inner) => Ok(Some(format!(
-                            "SELECT {projs}\nFROM (\n{inner}\n) __p",
-                            projs = proj_exprs.join(", "),
-                        ))),
-                        None => Ok(None),
-                    }
-                }
-            }
-        }
-
-        OpTree::Filter { predicate, child } => {
-            let child_sql = generate_query_sql_with_old_change_buffers(ctx, child, st_table)?;
+            let child_sql =
+                generate_query_sql_with_change_buffer_source(ctx, child, st_table, render_from)?;
             match child_sql {
                 Some(inner) => Ok(Some(format!(
                     "SELECT * FROM (\n{inner}\n) __f\nWHERE {pred}",

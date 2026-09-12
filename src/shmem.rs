@@ -1499,8 +1499,6 @@ pub fn init_shared_memory() {
     // OPS-10-02: Stale hash-mismatch evictions and DAG cycle counter.
     pg_shmem_init!(TEMPLATE_CACHE_STALE_EVICTIONS);
     pg_shmem_init!(DAG_CYCLES_DETECTED);
-    // CACHE-1: L0 cross-backend cache availability signal.
-    pg_shmem_init!(L0_POPULATED_VERSION);
     pg_shmem_init!(FRONTIER_HOLDBACK_LSN_BYTES);
     pg_shmem_init!(FRONTIER_HOLDBACK_AGE_SECS);
     pg_shmem_init!(HOLDBACK_PROBE_CALLS_TOTAL);
@@ -2409,121 +2407,6 @@ pub fn increment_dag_cycles_detected() {
     DAG_CYCLES_DETECTED
         .get()
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-// ── CACHE-1 (v0.25.0/v0.36.0): L0 cross-backend cache availability signal ──
-//
-// A09 (v0.36.0): The L0 cache is now implemented as a process-local
-// `RwLock<HashMap<u64, String>>` keyed by `(pgt_id << 32 | cache_generation)`.
-// This provides ~45 ms cold-start savings per backend for connection-pooler
-// workloads where the same OS process serves many short-lived connections.
-//
-// The `L0_POPULATED_VERSION` counter signals cross-backend availability via
-// shared memory: when `l0_populated_version() == current_cache_generation()`,
-// the L2 catalog table (`pgtrickle.pgt_template_cache`) has valid entries,
-// but this backend's process-local L0 map may also already have the template
-// cached (avoiding the SPI round-trip entirely).
-//
-// The L0 map is never persisted; it starts empty on each backend startup and
-// is invalidated when `CACHE_GENERATION` is bumped (via `invalidate_l0_cache()`).
-
-/// Atomic counter indicating the CACHE_GENERATION at which the L0/L2 shared
-/// cache was last populated.  Backends set this after writing a new template
-/// to the L2 catalog table.
-// SAFETY: PgAtomic::new requires a static CStr name.
-pub static L0_POPULATED_VERSION: PgAtomic<AtomicU64> =
-    unsafe { PgAtomic::new(c"pg_trickle_l0_populated") };
-
-/// A09 (v0.36.0): Process-local L0 template cache.
-///
-/// Keyed by `(pgt_id, cache_generation)` encoded as a `u64` pair.
-/// Stores compiled delta SQL template strings.
-static L0_TEMPLATE_CACHE: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<(i64, u64), String>>,
-> = std::sync::OnceLock::new();
-
-fn get_l0_cache() -> &'static std::sync::RwLock<std::collections::HashMap<(i64, u64), String>> {
-    L0_TEMPLATE_CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
-}
-
-/// A09 (v0.36.0): Look up a template in the process-local L0 cache.
-///
-/// Returns the cached delta SQL string when the entry exists at the current
-/// generation, or `None` on a miss. Does NOT call SPI or touch the L2 catalog.
-pub fn l0_cache_lookup(pgt_id: i64) -> Option<String> {
-    if !is_shmem_available() {
-        return None;
-    }
-    let generation = CACHE_GENERATION
-        .get()
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let cache = get_l0_cache();
-    let guard = cache.read().ok()?;
-    guard.get(&(pgt_id, generation)).cloned()
-}
-
-/// A09 (v0.36.0): Store a compiled template in the process-local L0 cache.
-///
-/// Associates `template_sql` with `pgt_id` at the current `CACHE_GENERATION`.
-/// The entry is automatically invalidated when the generation is bumped.
-pub fn l0_cache_store(pgt_id: i64, template_sql: String) {
-    if !is_shmem_available() {
-        return;
-    }
-    let generation = CACHE_GENERATION
-        .get()
-        .load(std::sync::atomic::Ordering::Relaxed);
-    if let Ok(mut cache) = get_l0_cache().write() {
-        cache.insert((pgt_id, generation), template_sql);
-    }
-}
-
-/// A09 (v0.36.0): Invalidate the process-local L0 cache.
-///
-/// Called when `CACHE_GENERATION` is incremented. Removes all entries at the
-/// previous generation by clearing the entire map (old generations are invalid
-/// after any generation bump).
-pub fn invalidate_l0_cache() {
-    if let Ok(mut cache) = get_l0_cache().write() {
-        cache.clear();
-    }
-}
-
-/// CACHE-1: Signal that the L0/L2 shared template cache has been populated
-/// at the current CACHE_GENERATION.
-///
-/// Called after successfully writing a compiled template to L2 storage.
-pub fn signal_l0_cache_populated() {
-    if !is_shmem_available() {
-        return;
-    }
-    let current_gen = CACHE_GENERATION
-        .get()
-        .load(std::sync::atomic::Ordering::Relaxed);
-    L0_POPULATED_VERSION
-        .get()
-        .store(current_gen, std::sync::atomic::Ordering::Release);
-}
-
-/// CACHE-1: Check whether the L0/L2 shared cache was populated at the
-/// current CACHE_GENERATION.
-///
-/// Returns `true` if another backend has populated the L2 cache at the
-/// current generation, meaning an L1 miss should try L2 before the DVM
-/// parser.  This is already the default behavior; this check allows the
-/// monitoring layer to distinguish "L2 hit avoided by L0 signal" from
-/// cold-start L2 lookups.
-pub fn is_l0_cache_available() -> bool {
-    if !is_shmem_available() {
-        return false;
-    }
-    let l0_ver = L0_POPULATED_VERSION
-        .get()
-        .load(std::sync::atomic::Ordering::Acquire);
-    let cache_gen = CACHE_GENERATION
-        .get()
-        .load(std::sync::atomic::Ordering::Relaxed);
-    l0_ver == cache_gen
 }
 
 // ── PERF-3 (v0.25.0): Shmem adaptive cost-model state ─────────────────────
