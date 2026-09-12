@@ -897,22 +897,6 @@ fn walk_node_for_volatility(
     Ok(())
 }
 
-/// Return the worst volatility found in an expression tree.
-pub fn worst_volatility(expr: &Expr) -> Result<char, PgTrickleError> {
-    let mut worst = 'i';
-    collect_volatilities(expr, &mut worst)?;
-    Ok(worst)
-}
-
-/// Walk an entire OpTree and return the worst volatility found in any
-/// expression (target list, WHERE, JOIN conditions, HAVING, aggregates,
-/// window functions).
-pub fn tree_worst_volatility(tree: &OpTree) -> Result<char, PgTrickleError> {
-    let mut worst = 'i';
-    tree_collect_volatility(tree, &mut worst)?;
-    Ok(worst)
-}
-
 /// Walk an entire [`ParseResult`] (tree + CTE registry) for volatility.
 pub fn tree_worst_volatility_with_registry(result: &ParseResult) -> Result<char, PgTrickleError> {
     let mut worst = 'i';

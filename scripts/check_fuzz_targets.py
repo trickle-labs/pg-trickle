@@ -3,22 +3,13 @@
 from pathlib import Path
 import re
 import sys
+from fuzz_targets import targets as cargo_targets
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = [
     ROOT / ".github" / "workflows" / "fuzz-smoke.yml",
     ROOT / ".github" / "workflows" / "fuzz-nightly.yml",
 ]
-
-
-def cargo_targets() -> list[str]:
-    text = (ROOT / "fuzz" / "Cargo.toml").read_text(encoding="utf-8")
-    bins = re.findall(r"\[\[bin\]\](.*?)(?=\[\[bin\]\]|\[dependencies\])", text, re.S)
-    return sorted(
-        name
-        for section in bins
-        for name in re.findall(r"^\s*name\s*=\s*\"([^\"]+)\"\s*$", section, re.M)
-    )
 
 
 def main() -> int:

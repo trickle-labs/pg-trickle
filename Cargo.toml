@@ -60,7 +60,6 @@ regex-lite = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh64", "xxh3"] }
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-tempfile = "3"
 
 [[bench]]
 name = "refresh_bench"

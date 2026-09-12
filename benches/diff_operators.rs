@@ -34,31 +34,7 @@ fn make_scan(alias: &str, oid: u32, cols: &[&str]) -> OpTree {
 
 /// Create a `DiffContext` with two pre-seeded source frontiers (OIDs 16384 & 16385).
 fn test_ctx() -> DiffContext {
-    let mut prev = Frontier::new();
-    prev.set_source(
-        16384,
-        "0/1000".to_string(),
-        "2024-01-01T00:00:00Z".to_string(),
-    );
-    prev.set_source(
-        16385,
-        "0/1000".to_string(),
-        "2024-01-01T00:00:00Z".to_string(),
-    );
-
-    let mut new = Frontier::new();
-    new.set_source(
-        16384,
-        "0/2000".to_string(),
-        "2024-01-01T01:00:00Z".to_string(),
-    );
-    new.set_source(
-        16385,
-        "0/2000".to_string(),
-        "2024-01-01T01:00:00Z".to_string(),
-    );
-
-    DiffContext::new_standalone(prev, new)
+    test_ctx_n(2)
 }
 
 /// Create a `DiffContext` with `n` source frontiers for multi-join benches.

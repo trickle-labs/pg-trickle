@@ -154,23 +154,11 @@ v0-95-release-gate:
 v0-96-release-gate:
     python3 scripts/v0_96_release_gate.py
 
-v0-97-release-gate:
-    python3 scripts/v0_97_release_gate.py
-
 v0-98-qualification-gate:
     python3 scripts/v0_98_qualification_gate.py
 
 check-capability-manifest:
     python3 scripts/generate_capability_manifest.py --check
-
-v0-99-release-gate:
-    python3 scripts/v0_99_release_gate.py
-
-v0-100-release-gate:
-    python3 scripts/v0_100_release_gate.py
-
-v0-101-release-gate:
-    python3 scripts/v0_101_release_gate.py
 
 v0-103-release-gate:
     python3 scripts/v0_103_release_gate.py

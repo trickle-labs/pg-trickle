@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Emit the cargo-fuzz target inventory in deterministic order."""
 from pathlib import Path
-import re
 import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -10,13 +10,8 @@ CARGO = ROOT / "fuzz" / "Cargo.toml"
 
 
 def targets() -> list[str]:
-    text = CARGO.read_text(encoding="utf-8")
-    bins = re.findall(r"\[\[bin\]\](.*?)(?=\[\[bin\]\]|\[dependencies\])", text, re.S)
-    return sorted(
-        name
-        for section in bins
-        for name in re.findall(r"^\s*name\s*=\s*\"([^\"]+)\"\s*$", section, re.M)
-    )
+    bins = tomllib.loads(CARGO.read_text(encoding="utf-8")).get("bin", [])
+    return sorted(item["name"] for item in bins if "name" in item)
 
 
 if __name__ == "__main__":
