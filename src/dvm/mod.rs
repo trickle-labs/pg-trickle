@@ -1046,11 +1046,7 @@ pub fn generate_delta_query_cached(
         },
     );
 
-    // CACHE-1: Signal that the L0/L2 shared cache has been populated at the
-    // current CACHE_GENERATION.  Other backends can check this before deciding
-    // whether to run the expensive DVM parse.
     if crate::shmem::is_shmem_available() {
-        crate::shmem::signal_l0_cache_populated();
         // M-6 (v0.55.0): Track delta SQL template size.
         crate::shmem::increment_delta_query_bytes(template_sql.len() as u64);
     }

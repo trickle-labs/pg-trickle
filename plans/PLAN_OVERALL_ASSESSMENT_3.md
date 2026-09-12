@@ -60,10 +60,10 @@ will misclassify localised Postgres builds. **(5)** The L2 template-cache
 catalog table has no size cap, no LRU/age eviction; over the lifetime of a
 high-DDL deployment it grows unbounded.
 
-The top three opportunities for v0.28.0+ are **(1)** completing the
-shared-memory dshash L0 template cache (today only the
-`L0_POPULATED_VERSION` signal is wired — see
-[`src/shmem.rs:680-710`](../src/shmem.rs)); **(2)** building the reactive
+The top three opportunities for v0.28.0+ are **(1)** considering a
+shared-memory dshash L0 template cache (today template caching uses a
+thread-local L1 and catalog-backed L2 — see
+[`src/dvm/mod.rs:898`](../src/dvm/mod.rs)); **(2)** building the reactive
 subscription primitive that v0.27.0's publication infrastructure now makes
 trivially achievable; and **(3)** starting the PGlite/WASM port investment
 ahead of the v1.4 milestone, since the recently-cleaned core (no more giant
@@ -463,22 +463,19 @@ rest of the WAL decoder.
 
 ## 4. Architecture Gaps
 
-### 4.1 The L0 shared-shmem template cache is a signal, not a store
+### 4.1 The unused L0 template cache was removed
 
-**Where:** [`src/shmem.rs:680-710`](../src/shmem.rs).
+**Where:** [`src/dvm/mod.rs:898`](../src/dvm/mod.rs).
 
-`L0_POPULATED_VERSION` and `signal_l0_cache_populated()` /
-`is_l0_cache_available()` only **broadcast** that *someone* populated the
-L2 catalog cache at the current generation. They do not actually store any
-delta SQL in shared memory. So a cold backend pays:
+The process-local L0 template cache and its shared-memory availability signal
+had no readers and were removed. A cold backend still pays:
 
 - L1 thread-local lookup → miss (cold backend)
 - L2 catalog SELECT → ~1 ms hit, cached by PG buffer cache
 
-The promised dshash-backed L0 cache from the
-[PLAN_OVERALL_ASSESSMENT_2.md](PLAN_OVERALL_ASSESSMENT_2.md) §4 design is
-not implemented. Building it would erase the remaining ~1 ms cold-path
-penalty and make a many-database deployment scale linearly.
+A dshash-backed L0 cache from the
+[PLAN_OVERALL_ASSESSMENT_2.md](PLAN_OVERALL_ASSESSMENT_2.md) §4 remains a
+possible optimization; measure the cold-path cost before implementing it.
 
 ### 4.2 Refresh sub-modules still reach into each other via `pub use codegen::*`
 

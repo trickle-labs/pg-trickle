@@ -168,7 +168,7 @@ Items not listed here remain open and are tracked in §3 onwards.
 | `classify_spi_error_retryable` is text-based | v3 §3.4 | **Partially resolved.** SQLSTATE-aware `classify_spi_sqlstate_retryable` shipped in v0.30.0 with locale-safe class matching (40, 23, 22, 28, 08); legacy text matcher kept as fallback. | [src/error.rs:312-380](../src/error.rs) (new); [src/error.rs:282-340](../src/error.rs) (legacy still in use — see §7.2) |
 | L2 template-cache catalog table unbounded | v3 §3.5 | **Resolved (size cap).** v0.30.0 added bounded eviction; LRU enforcement is per-tick. Catalog table still grows during DDL bursts but is capped. | [src/template_cache.rs:79-118](../src/template_cache.rs); [src/config.rs:332](../src/config.rs) `template_cache_max_entries` |
 | Catalog snapshot reload on every scheduler tick | v3 §4 | **Resolved.** `CATALOG_SNAPSHOT_CACHE` thread-local + DAG version cache; `rebuild_dag_copy_on_write` builds outside lock and atomically swaps. | [src/scheduler.rs:59-118](../src/scheduler.rs); [src/scheduler.rs:134-144](../src/scheduler.rs) |
-| L0 dshash signal exists but unpopulated | v3 §3 | **Still open.** `L0_POPULATED_VERSION` atomic is wired but no shared dshash table is constructed. v0.31.0 mitigated practical impact via L1 + CoW DAG. | [src/shmem.rs:680-710](../src/shmem.rs) |
+| L0 dshash cache is missing | v3 §3 | **Signal removed.** The unread process-local L0 cache and availability signal were deleted; caching still uses thread-local L1 and catalog-backed L2. A shared dshash cache remains a possible, unmeasured optimization. | [src/dvm/mod.rs:898](../src/dvm/mod.rs) |
 | `pgt_refresh_history` retention | v3 carry-over from v2 | **Resolved.** `pg_trickle.history_retention_days` GUC (default 90 days, [src/config.rs:2071](../src/config.rs)); prune runs from monitor module ([src/monitor.rs:571](../src/monitor.rs)). |
 | `IVM_DELTA_CACHE` unbounded | v3 §3.3 | **Resolved.** v0.31.0 added bounded eviction + generation counter invalidation; deferred-cleanup queue still drains at next access (§4 below). | [src/ivm.rs](../src/ivm.rs) `LOCAL_IVM_CACHE_GEN` |
 
@@ -363,18 +363,15 @@ rolling-back from a suspected DVM regression.
 
 ## 4. Architecture & Design Gaps
 
-### 4.1 L0 shared-memory dshash template cache still missing
+### 4.1 Shared-memory dshash template cache is not implemented
 
-[src/shmem.rs:680-710](../src/shmem.rs) wires
-`L0_POPULATED_VERSION: PgAtomic<AtomicU64>` and the cross-backend
-invalidation signal, but the actual dshash table holding compiled delta
-SQL templates is never constructed. This is documented as deferred in
+The unread process-local L0 cache and its availability signal were removed.
+Template caching still uses thread-local L1 and a bounded catalog-backed L2
+([src/dvm/mod.rs:898](../src/dvm/mod.rs),
+[src/template_cache.rs](../src/template_cache.rs)). A shared-memory dshash
+cache remains a possible optimization, documented as deferred in
 [plans/performance/RFC_SHARED_TEMPLATE_CACHE.md](performance/RFC_SHARED_TEMPLATE_CACHE.md).
-Practical impact is mitigated by the L2 catalog table
-([src/template_cache.rs](../src/template_cache.rs)) which still pays a
-cross-backend round-trip but is bounded; for connection-pooler workloads
-where every backend is short-lived the L0 win would be material
-(documented at ~45 ms cold-start).
+Measure cold-path latency for short-lived backends before implementing it.
 
 ### 4.2 Refresh history `INSERT` per refresh is the dominant catalog write at scale
 

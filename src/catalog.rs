@@ -416,6 +416,39 @@ pub struct RefreshRecord {
     pub plan_identity: Option<i64>,
 }
 
+const STREAM_TABLE_SELECT: &str = "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
+                     original_query, schedule, refresh_mode, status, is_populated, \
+                     data_timestamp, consecutive_errors, needs_reinit, frontier, \
+                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by, \
+                     topk_offset, diamond_consistency, diamond_schedule_policy, \
+                     has_keyless_source, function_hashes, requested_cdc_mode, is_append_only, \
+                     scc_id, last_fixpoint_iterations, pooler_compatibility_mode, \
+                     COALESCE(refresh_tier, 'hot') AS refresh_tier, \
+                     COALESCE(fuse_mode, 'off') AS fuse_mode, \
+                     COALESCE(fuse_state, 'armed') AS fuse_state, \
+                     fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
+                     st_partition_key, max_differential_joins, max_delta_fraction, \
+                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms, \
+                     COALESCE(st_placement, 'local') AS st_placement, \
+                     COALESCE(temporal_mode, FALSE) AS temporal_mode, \
+                     COALESCE(storage_backend, 'heap') AS storage_backend, \
+                     COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
+                     reindex_drift_threshold, \
+                     COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
+                     last_reindex_at, \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
+                     storage_fillfactor, \
+                     query_complexity_class, row_identity_version, \
+                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
+                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
+                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
+                     COALESCE(self_heal_success_streak, 0::smallint), \
+                     last_error_code, last_error_retryable, defining_search_path, \
+                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
+                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
+                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
+                     FROM pgtrickle.pgt_stream_tables st";
+
 // ── StreamTableMeta CRUD ──────────────────────────────────────────────────
 
 impl StreamTableMeta {
@@ -517,39 +550,7 @@ impl StreamTableMeta {
         Spi::connect(|client| {
             let table = client
                 .select(
-                    "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
-                     original_query, schedule, refresh_mode, status, is_populated, \
-                     data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by, \
-                     topk_offset, diamond_consistency, diamond_schedule_policy, \
-                     has_keyless_source, function_hashes, requested_cdc_mode, is_append_only, \
-                     scc_id, last_fixpoint_iterations, pooler_compatibility_mode, \
-                     COALESCE(refresh_tier, 'hot') AS refresh_tier, \
-                     COALESCE(fuse_mode, 'off') AS fuse_mode, \
-                     COALESCE(fuse_state, 'armed') AS fuse_state, \
-                     fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
-                     st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms, \
-                     COALESCE(st_placement, 'local') AS st_placement, \
-                     COALESCE(temporal_mode, FALSE) AS temporal_mode, \
-                     COALESCE(storage_backend, 'heap') AS storage_backend, \
-                     COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
-                     reindex_drift_threshold, \
-                     COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     storage_fillfactor, \
-                     query_complexity_class, row_identity_version, \
-                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
-                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
-                     COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
-                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
-                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
-                     FROM pgtrickle.pgt_stream_tables st \
-                     WHERE pgt_schema = $1 AND pgt_name = $2",
+                    &format!("{STREAM_TABLE_SELECT} WHERE pgt_schema = $1 AND pgt_name = $2"),
                     None,
                     &[schema.into(), name.into()],
                 )
@@ -559,7 +560,7 @@ impl StreamTableMeta {
                 return Err(PgTrickleError::NotFound(format!("{}.{}", schema, name)));
             }
 
-            Self::from_spi_table(&table.first())
+            Self::from_spi_table(table)
         })
     }
 
@@ -568,39 +569,7 @@ impl StreamTableMeta {
         Spi::connect(|client| {
             let table = client
                 .select(
-                    "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
-                     original_query, schedule, refresh_mode, status, is_populated, \
-                     data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by, \
-                     topk_offset, diamond_consistency, diamond_schedule_policy, \
-                     has_keyless_source, function_hashes, requested_cdc_mode, is_append_only, \
-                     scc_id, last_fixpoint_iterations, pooler_compatibility_mode, \
-                     COALESCE(refresh_tier, 'hot') AS refresh_tier, \
-                     COALESCE(fuse_mode, 'off') AS fuse_mode, \
-                     COALESCE(fuse_state, 'armed') AS fuse_state, \
-                     fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
-                     st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms, \
-                     COALESCE(st_placement, 'local') AS st_placement, \
-                     COALESCE(temporal_mode, FALSE) AS temporal_mode, \
-                     COALESCE(storage_backend, 'heap') AS storage_backend, \
-                     COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
-                     reindex_drift_threshold, \
-                     COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     storage_fillfactor, \
-                     query_complexity_class, row_identity_version, \
-                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
-                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
-                     COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
-                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
-                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
-                     FROM pgtrickle.pgt_stream_tables st \
-                     WHERE pgt_relid = $1",
+                    &format!("{STREAM_TABLE_SELECT} WHERE pgt_relid = $1"),
                     None,
                     &[relid.into()],
                 )
@@ -613,7 +582,7 @@ impl StreamTableMeta {
                 )));
             }
 
-            Self::from_spi_table(&table.first())
+            Self::from_spi_table(table)
         })
     }
 
@@ -624,39 +593,7 @@ impl StreamTableMeta {
         Spi::connect(|client| {
             let table = client
                 .select(
-                    "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
-                     original_query, schedule, refresh_mode, status, is_populated, \
-                     data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by, \
-                     topk_offset, diamond_consistency, diamond_schedule_policy, \
-                     has_keyless_source, function_hashes, requested_cdc_mode, is_append_only, \
-                     scc_id, last_fixpoint_iterations, pooler_compatibility_mode, \
-                     COALESCE(refresh_tier, 'hot') AS refresh_tier, \
-                     COALESCE(fuse_mode, 'off') AS fuse_mode, \
-                     COALESCE(fuse_state, 'armed') AS fuse_state, \
-                     fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
-                     st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms, \
-                     COALESCE(st_placement, 'local') AS st_placement, \
-                     COALESCE(temporal_mode, FALSE) AS temporal_mode, \
-                     COALESCE(storage_backend, 'heap') AS storage_backend, \
-                     COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
-                     reindex_drift_threshold, \
-                     COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     storage_fillfactor, \
-                     query_complexity_class, row_identity_version, \
-                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
-                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
-                     COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
-                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
-                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
-                     FROM pgtrickle.pgt_stream_tables st \
-                     WHERE pgt_id = $1",
+                    &format!("{STREAM_TABLE_SELECT} WHERE pgt_id = $1"),
                     None,
                     &[pgt_id.into()],
                 )
@@ -666,7 +603,7 @@ impl StreamTableMeta {
                 return Ok(None);
             }
 
-            Self::from_spi_table(&table.first()).map(Some)
+            Self::from_spi_table(table).map(Some)
         })
     }
 
@@ -674,42 +611,7 @@ impl StreamTableMeta {
     pub fn get_all() -> Result<Vec<Self>, PgTrickleError> {
         Spi::connect(|client| {
             let table = client
-                .select(
-                    "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
-                     original_query, schedule, refresh_mode, status, is_populated, \
-                     data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by, \
-                     topk_offset, diamond_consistency, diamond_schedule_policy, \
-                     has_keyless_source, function_hashes, requested_cdc_mode, is_append_only, \
-                     scc_id, last_fixpoint_iterations, pooler_compatibility_mode, \
-                     COALESCE(refresh_tier, 'hot') AS refresh_tier, \
-                     COALESCE(fuse_mode, 'off') AS fuse_mode, \
-                     COALESCE(fuse_state, 'armed') AS fuse_state, \
-                     fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
-                     st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms, \
-                     COALESCE(st_placement, 'local') AS st_placement, \
-                     COALESCE(temporal_mode, FALSE) AS temporal_mode, \
-                     COALESCE(storage_backend, 'heap') AS storage_backend, \
-                     COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
-                     reindex_drift_threshold, \
-                     COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     storage_fillfactor, \
-                     query_complexity_class, row_identity_version, \
-                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
-                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
-                     COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
-                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
-                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
-                     FROM pgtrickle.pgt_stream_tables st",
-                    None,
-                    &[],
-                )
+                .select(STREAM_TABLE_SELECT, None, &[])
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?;
 
             let mut results = Vec::new();
@@ -730,39 +632,7 @@ impl StreamTableMeta {
         Spi::connect(|client| {
             let table = client
                 .select(
-                    "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
-                     original_query, schedule, refresh_mode, status, is_populated, \
-                     data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by, \
-                     topk_offset, diamond_consistency, diamond_schedule_policy, \
-                     has_keyless_source, function_hashes, requested_cdc_mode, is_append_only, \
-                     scc_id, last_fixpoint_iterations, pooler_compatibility_mode, \
-                     COALESCE(refresh_tier, 'hot') AS refresh_tier, \
-                     COALESCE(fuse_mode, 'off') AS fuse_mode, \
-                     COALESCE(fuse_state, 'armed') AS fuse_state, \
-                     fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
-                     st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms, \
-                     COALESCE(st_placement, 'local') AS st_placement, \
-                     COALESCE(temporal_mode, FALSE) AS temporal_mode, \
-                     COALESCE(storage_backend, 'heap') AS storage_backend, \
-                     COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
-                     reindex_drift_threshold, \
-                     COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     storage_fillfactor, \
-                     query_complexity_class, row_identity_version, \
-                     NULLIF(to_jsonb(st)->>'row_probe_version', '')::smallint AS row_probe_version, \
-                     COALESCE(self_heal_work_mem_percent, 100::smallint), \
-                     COALESCE(self_heal_lock_backoff_exponent, 0::smallint), \
-                     COALESCE(self_heal_success_streak, 0::smallint), \
-                     last_error_code, last_error_retryable, defining_search_path, \
-                     NULLIF(to_jsonb(st)->'window_strategy', 'null'::jsonb) AS window_strategy, \
-                     COALESCE(to_jsonb(st)->>'contract_generation', '1')::bigint AS contract_generation, \
-                     COALESCE(to_jsonb(st)->>'orchestration_mode', 'MANAGED') AS orchestration_mode \
-                     FROM pgtrickle.pgt_stream_tables st \
-                     WHERE status = 'ACTIVE'",
+                    &format!("{STREAM_TABLE_SELECT} WHERE status = 'ACTIVE'"),
                     None,
                     &[],
                 )
@@ -1500,225 +1370,13 @@ impl StreamTableMeta {
 
     // ── Private helpers ────────────────────────────────────────────────
 
-    /// Extract a StreamTableMeta from a positioned SpiTupleTable (after first()).
-    fn from_spi_table(table: &SpiTupleTable<'_>) -> Result<Self, PgTrickleError> {
-        let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
-
-        let pgt_id = table
-            .get::<i64>(1)
-            .map_err(map_spi)?
-            .ok_or_else(|| PgTrickleError::InternalError("pgt_id is NULL".into()))?;
-
-        let pgt_relid = table
-            .get::<pg_sys::Oid>(2)
-            .map_err(map_spi)?
-            .ok_or_else(|| PgTrickleError::InternalError("pgt_relid is NULL".into()))?;
-
-        let pgt_name = table
-            .get::<String>(3)
-            .map_err(map_spi)?
-            .ok_or_else(|| PgTrickleError::InternalError("pgt_name is NULL".into()))?;
-
-        let pgt_schema = table
-            .get::<String>(4)
-            .map_err(map_spi)?
-            .ok_or_else(|| PgTrickleError::InternalError("pgt_schema is NULL".into()))?;
-
-        let defining_query = table
-            .get::<String>(5)
-            .map_err(map_spi)?
-            .ok_or_else(|| PgTrickleError::InternalError("defining_query is NULL".into()))?;
-
-        let original_query = table.get::<String>(6).map_err(map_spi)?;
-
-        let schedule = table.get::<String>(7).map_err(map_spi)?;
-
-        let refresh_mode_str = table
-            .get::<String>(8)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "DIFFERENTIAL".into());
-        let refresh_mode = RefreshMode::from_str(&refresh_mode_str)?;
-
-        let status_str = table
-            .get::<String>(9)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "INITIALIZING".into());
-        let status = StStatus::from_str(&status_str)?;
-
-        let is_populated = table.get::<bool>(10).map_err(map_spi)?.unwrap_or(false);
-
-        let data_timestamp = table.get::<TimestampWithTimeZone>(11).map_err(map_spi)?;
-
-        let consecutive_errors = table.get::<i32>(12).map_err(map_spi)?.unwrap_or(0);
-
-        let needs_reinit = table.get::<bool>(13).map_err(map_spi)?.unwrap_or(false);
-
-        let frontier_json = table.get::<pgrx::JsonB>(14).map_err(map_spi)?;
-        let frontier = frontier_json.and_then(|j| serde_json::from_value(j.0).ok());
-
-        let auto_threshold = table.get::<f64>(15).map_err(map_spi)?;
-        let last_full_ms = table.get::<f64>(16).map_err(map_spi)?;
-        let functions_used = table.get::<Vec<String>>(17).map_err(map_spi)?;
-        let topk_limit = table.get::<i32>(18).map_err(map_spi)?;
-        let topk_order_by = table.get::<String>(19).map_err(map_spi)?;
-        let topk_offset = table.get::<i32>(20).map_err(map_spi)?;
-
-        let diamond_consistency_str = table
-            .get::<String>(21)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "none".into());
-        let diamond_consistency = DiamondConsistency::from_sql_str(&diamond_consistency_str);
-
-        let diamond_schedule_policy_str = table
-            .get::<String>(22)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "fastest".into());
-        let diamond_schedule_policy =
-            DiamondSchedulePolicy::from_sql_str(&diamond_schedule_policy_str).unwrap_or_default();
-
-        let has_keyless_source = table.get::<bool>(23).map_err(map_spi)?.unwrap_or(false);
-        let function_hashes = table.get::<String>(24).map_err(map_spi)?;
-        let requested_cdc_mode = table.get::<String>(25).map_err(map_spi)?;
-        let is_append_only = table.get::<bool>(26).map_err(map_spi)?.unwrap_or(false);
-        let scc_id = table.get::<i32>(27).map_err(map_spi)?;
-        let last_fixpoint_iterations = table.get::<i32>(28).map_err(map_spi)?;
-        let pooler_compatibility_mode = table.get::<bool>(29).map_err(map_spi)?.unwrap_or(false);
-        let refresh_tier = table
-            .get::<String>(30)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "hot".into());
-        let fuse_mode = table
-            .get::<String>(31)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "off".into());
-        let fuse_state = table
-            .get::<String>(32)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "armed".into());
-        let fuse_ceiling = table.get::<i64>(33).map_err(map_spi)?;
-        let fuse_sensitivity = table.get::<i32>(34).map_err(map_spi)?;
-        let blown_at = table.get::<TimestampWithTimeZone>(35).map_err(map_spi)?;
-        let blow_reason = table.get::<String>(36).map_err(map_spi)?;
-        let st_partition_key = table.get::<String>(37).map_err(map_spi)?;
-        let max_differential_joins = table.get::<i32>(38).map_err(map_spi)?;
-        let max_delta_fraction = table.get::<f64>(39).map_err(map_spi)?;
-        let last_error_message = table.get::<String>(40).map_err(map_spi)?;
-        let last_error_at = table.get::<TimestampWithTimeZone>(41).map_err(map_spi)?;
-        let downstream_publication_name = table.get::<String>(42).map_err(map_spi)?;
-        let freshness_deadline_ms = table.get::<i64>(43).map_err(map_spi)?;
-        let st_placement = table
-            .get::<String>(44)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "local".into());
-        let temporal_mode = table.get::<bool>(45).map_err(map_spi)?.unwrap_or(false);
-        let storage_backend = table
-            .get::<String>(46)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "heap".into());
-        let post_refresh_action = table
-            .get::<String>(47)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "none".into());
-        let reindex_drift_threshold = table.get::<f64>(48).map_err(map_spi)?;
-        let rows_changed_since_last_reindex = table.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
-        let last_reindex_at = table.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
-        let defining_query_hash = table.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
-        let storage_fillfactor = table.get::<i32>(52).map_err(map_spi)?;
-        let query_complexity_class = table.get::<String>(53).map_err(map_spi)?;
-        let row_identity_version = table.get::<i16>(54).map_err(map_spi)?;
-        let row_probe_version = table.get::<i16>(55).map_err(map_spi)?;
-        let self_heal_work_mem_percent = table.get::<i16>(56).map_err(map_spi)?.unwrap_or(100);
-        let self_heal_lock_backoff_exponent = table.get::<i16>(57).map_err(map_spi)?.unwrap_or(0);
-        let self_heal_success_streak = table.get::<i16>(58).map_err(map_spi)?.unwrap_or(0);
-        let last_error_code = table.get::<String>(59).map_err(map_spi)?;
-        let last_error_retryable = table.get::<bool>(60).map_err(map_spi)?;
-        let defining_search_path = table
-            .get::<String>(61)
-            .map_err(map_spi)?
-            .ok_or_else(|| PgTrickleError::InternalError("defining_search_path is NULL".into()))?;
-        let window_strategy = table
-            .get::<pgrx::JsonB>(62)
-            .map_err(map_spi)?
-            .map(|json| WindowStrategyPlan::from_json(json.0))
-            .transpose()
-            .map_err(|reason| PgTrickleError::WindowStateInvalid {
-                pgt_id,
-                node_ordinal: -1,
-                spec_ordinal: -1,
-                reason,
-            })?;
-        let contract_generation = table.get::<i64>(63).map_err(map_spi)?.unwrap_or(1);
-        let orchestration_mode = table
-            .get::<String>(64)
-            .map_err(map_spi)?
-            .unwrap_or_else(|| "MANAGED".to_string());
-
-        Ok(StreamTableMeta {
-            pgt_id,
-            pgt_relid,
-            pgt_name,
-            pgt_schema,
-            defining_query,
-            original_query,
-            schedule,
-            refresh_mode,
-            status,
-            is_populated,
-            data_timestamp,
-            consecutive_errors,
-            needs_reinit,
-            auto_threshold,
-            last_full_ms,
-            functions_used,
-            frontier,
-            topk_limit,
-            topk_order_by,
-            topk_offset,
-            diamond_consistency,
-            diamond_schedule_policy,
-            has_keyless_source,
-            function_hashes,
-            requested_cdc_mode,
-            is_append_only,
-            scc_id,
-            last_fixpoint_iterations,
-            pooler_compatibility_mode,
-            refresh_tier,
-            fuse_mode,
-            fuse_state,
-            fuse_ceiling,
-            fuse_sensitivity,
-            blown_at,
-            blow_reason,
-            st_partition_key,
-            max_differential_joins,
-            max_delta_fraction,
-            last_error_message,
-            last_error_at,
-            downstream_publication_name,
-            freshness_deadline_ms,
-            st_placement,
-            temporal_mode,
-            storage_backend,
-            post_refresh_action,
-            reindex_drift_threshold,
-            rows_changed_since_last_reindex,
-            last_reindex_at,
-            defining_query_hash,
-            storage_fillfactor,
-            query_complexity_class,
-            row_identity_version,
-            row_probe_version,
-            self_heal_work_mem_percent,
-            self_heal_lock_backoff_exponent,
-            self_heal_success_streak,
-            last_error_code,
-            last_error_retryable,
-            defining_search_path,
-            window_strategy,
-            orchestration_mode,
-            contract_generation,
-        })
+    fn from_spi_table(table: SpiTupleTable<'_>) -> Result<Self, PgTrickleError> {
+        let row = table
+            .first()
+            .get_heap_tuple()
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .ok_or_else(|| PgTrickleError::InternalError("SPI query returned no row".into()))?;
+        Self::from_spi_heap_tuple(&row)
     }
 
     /// Extract a StreamTableMeta from an SpiHeapTupleData (from iteration).

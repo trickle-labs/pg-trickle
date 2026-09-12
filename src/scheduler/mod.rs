@@ -3066,33 +3066,6 @@ fn iterate_to_fixpoint(
     }
 }
 
-/// Read the rows_inserted and rows_deleted from the most recent completed
-/// refresh record for a stream table. Used by fixpoint iteration to detect
-/// convergence without modifying the `execute_scheduled_refresh` return type.
-fn last_refresh_row_counts(pgt_id: i64) -> (i64, i64) {
-    Spi::connect(|client| {
-        let table = client
-            .select(
-                "SELECT rows_inserted, rows_deleted \
-                 FROM pgtrickle.pgt_refresh_history \
-                 WHERE pgt_id = $1 AND status = 'COMPLETED' \
-                 ORDER BY refresh_id DESC LIMIT 1",
-                None,
-                &[pgt_id.into()],
-            )
-            .ok();
-        match table {
-            Some(t) if !t.is_empty() => {
-                let first = t.first();
-                let ins = first.get::<i64>(1).ok().flatten().unwrap_or(0);
-                let del = first.get::<i64>(2).ok().flatten().unwrap_or(0);
-                (ins, del)
-            }
-            _ => (0, 0),
-        }
-    })
-}
-
 // ── COORD-10/11/12/13/14 — moved to citus.rs sub-module ──────────────────
 
 /// Refresh a single (non-group) stream table with full retry handling.

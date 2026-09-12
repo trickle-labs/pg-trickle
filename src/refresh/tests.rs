@@ -16,7 +16,7 @@ use crate::refresh::merge::columns::{
     PartitionBounds, extract_keyword_int, inject_partition_predicate, parse_hash_bound_spec,
     pg_quote_literal,
 };
-use crate::refresh::merge::delete::{build_hash_child_merge, should_warn_amplification};
+use crate::refresh::merge::delete::should_warn_amplification;
 
 #[test]
 fn test_differential_cost_evidence_reports_output_amplification() {
@@ -1324,67 +1324,6 @@ fn test_has_non_monotonic_cte_intersect() {
 #[test]
 fn test_has_non_monotonic_cte_except() {
     assert!(has_non_monotonic_cte("... __pgt_cte_exct_1 ..."));
-}
-
-// ── TG2-MERGE: build_hash_child_merge() unit tests ──────────────
-
-#[test]
-fn test_build_hash_child_merge_replaces_target() {
-    let original = "MERGE INTO \"public\".\"parent\" AS st \
-                    USING (SELECT * FROM delta) AS d \
-                    ON st.__pgt_row_id = d.__pgt_row_id \
-                    WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE";
-    let result = build_hash_child_merge(
-        "\"public\".\"child_p0\"",
-        "__pgt_delta_mat_42",
-        "\"key\"",
-        pg_sys::Oid::from(12345u32),
-        4,
-        0,
-        original,
-        "\"public\".\"parent\"",
-    );
-    assert!(result.contains("ONLY \"public\".\"child_p0\""));
-    assert!(!result.contains("\"public\".\"parent\""));
-}
-
-#[test]
-fn test_build_hash_child_merge_filters_with_satisfies_hash() {
-    let original = "MERGE INTO \"public\".\"parent\" AS st \
-                    USING (SELECT * FROM delta) AS d \
-                    ON st.__pgt_row_id = d.__pgt_row_id \
-                    WHEN MATCHED THEN DELETE";
-    let result = build_hash_child_merge(
-        "\"public\".\"child_p1\"",
-        "__pgt_mat",
-        "\"hash_col\"",
-        pg_sys::Oid::from(99u32),
-        8,
-        3,
-        original,
-        "\"public\".\"parent\"",
-    );
-    assert!(result.contains("satisfies_hash_partition(99::oid, 8, 3, \"hash_col\")"));
-    assert!(result.contains("__pgt_mat"));
-}
-
-#[test]
-fn test_build_hash_child_merge_strips_part_pred() {
-    let original = "MERGE INTO \"public\".\"parent\" AS st \
-                    USING (SELECT * FROM delta) AS d \
-                    ON st.__pgt_row_id = d.__pgt_row_id __PGT_PART_PRED__ \
-                    WHEN MATCHED THEN DELETE";
-    let result = build_hash_child_merge(
-        "\"public\".\"child\"",
-        "__pgt_mat",
-        "\"k\"",
-        pg_sys::Oid::from(1u32),
-        2,
-        1,
-        original,
-        "\"public\".\"parent\"",
-    );
-    assert!(!result.contains("__PGT_PART_PRED__"));
 }
 
 // ── CORR-4: Z-set weight algebra property tests ─────────────────────────

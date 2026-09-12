@@ -32,11 +32,10 @@ pub(crate) fn extract_partition_bounds(
 
     match method {
         crate::api::PartitionMethod::Hash => {
-            // HASH partitions use per-partition MERGE loop — this function
-            // should never be called for HASH. The orchestration dispatches
-            // HASH before reaching extract_partition_bounds.
+            // HASH partitions use a parent-level MERGE, so this function
+            // should never be called for HASH.
             Err(PgTrickleError::SpiError(
-                "extract_partition_bounds called for HASH partition (should use per-partition MERGE)".to_string(),
+                "extract_partition_bounds called for HASH partition (should use parent-level MERGE)".to_string(),
             ))
         }
         crate::api::PartitionMethod::List => {
@@ -165,57 +164,7 @@ pub(crate) fn inject_partition_predicate(
     merge_sql.replace("__PGT_PART_PRED__", &pred)
 }
 
-// ── A1-3b: Per-partition MERGE for HASH partitioned stream tables ───
-
-/// Metadata for a HASH child partition.
-pub(crate) struct HashChild {
-    /// Fully-qualified name: `"schema"."child_name"`
-    pub(crate) qualified_name: String,
-    pub(crate) modulus: i32,
-    pub(crate) remainder: i32,
-}
-
-/// Discover HASH child partitions (modulus, remainder) for a parent table.
-pub(crate) fn get_hash_children(parent_oid: pg_sys::Oid) -> Result<Vec<HashChild>, PgTrickleError> {
-    Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT n.nspname::text, c.relname::text, \
-                        pg_get_expr(c.relpartbound, c.oid) \
-                 FROM pg_inherits i \
-                 JOIN pg_class c ON c.oid = i.inhrelid \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE i.inhparent = $1 \
-                 ORDER BY c.relname",
-                None,
-                &[parent_oid.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(format!("hash children: {e}")))?;
-
-        let mut children = Vec::new();
-        for row in rows {
-            let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
-            let schema = row.get::<String>(1).map_err(map_spi)?.unwrap_or_default();
-            let name = row.get::<String>(2).map_err(map_spi)?.unwrap_or_default();
-            let bound_spec = row.get::<String>(3).map_err(map_spi)?.unwrap_or_default();
-
-            // Parse "FOR VALUES WITH (modulus N, remainder M)"
-            let (modulus, remainder) = parse_hash_bound_spec(&bound_spec)?;
-
-            let qualified_name = format!(
-                "{}.{}",
-                crate::api::quote_identifier(&schema),
-                crate::api::quote_identifier(&name),
-            );
-            children.push(HashChild {
-                qualified_name,
-                modulus,
-                remainder,
-            });
-        }
-        Ok(children)
-    })
-}
+// ── HASH partition bound parsing ───────────────────────────────────
 
 /// Parse a PostgreSQL HASH partition bound spec.
 ///

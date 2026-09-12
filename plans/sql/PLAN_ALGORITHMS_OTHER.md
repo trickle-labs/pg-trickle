@@ -927,7 +927,7 @@ multiple diffs at the same logical time into a single diff. This is
 critical for keeping memory bounded in long-running computations.
 
 **Relevance to pg_trickle:** **Already implemented** as change buffer
-cleanup (`delete_consumed_changes()`). The additional optimization is
+cleanup in the refresh pipeline. The additional optimization is
 **pre-refresh consolidation**: before executing delta SQL, consolidate
 the change buffer to remove redundant changes (e.g., INSERT followed
 by DELETE of the same row). This reduces the delta size and hence the
