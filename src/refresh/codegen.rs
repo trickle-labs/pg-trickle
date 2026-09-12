@@ -2063,19 +2063,6 @@ pub fn flush_local_template_cache() {
     crate::dvm::flush_all_delta_caches();
 }
 
-/// CACHE-1: Check if the L1 cache has a valid entry for `pgt_id`.
-///
-/// The `cache_generation` parameter is the current `CACHE_GENERATION` shmem
-/// value.  An L1 entry is "valid" if it exists and its `defining_query_hash`
-/// is non-zero (i.e., the cache was populated by a previous refresh, not just
-/// a structural prewarm).  Full L0 (cross-backend) lookup is handled by the
-/// L2 catalog path in `execute_differential_refresh`.
-pub fn has_template_cache_entry(pgt_id: i64, _cache_generation: u64) -> bool {
-    // P-8: Use peek() (shared borrow, does not update LRU order) since this
-    // is purely a membership check with no actual cache use.
-    MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().peek(&pgt_id).is_some())
-}
-
 /// Wide-table MERGE hash threshold (F41: G4.6).
 ///
 /// When a table has more than this many user columns, the MERGE's

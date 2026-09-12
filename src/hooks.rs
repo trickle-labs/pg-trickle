@@ -278,24 +278,6 @@ fn collect_ddl_commands() -> Result<Vec<DdlCommand>, PgTrickleError> {
     })
 }
 
-/// Classification of a DDL event based on object type and command tag.
-/// Kept for internal use by unit tests; at runtime, `DdlCommandKind::from_event`
-/// is called at collection time and stored on `DdlCommand::kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // retained for test compatibility
-enum DdlEventKind {
-    AlterTable,
-    CreateTable,
-    ViewChange,
-    CreateTrigger,
-    FunctionChange,
-    TypeChange,
-    DomainChange,
-    PolicyChange,
-    ExtensionChange,
-    Ignored,
-}
-
 /// Process a single DDL command: check for upstream/ST impact and react.
 ///
 /// A17 (v0.36.0): dispatches on `cmd.kind` (pre-classified typed enum) rather

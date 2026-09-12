@@ -1499,18 +1499,6 @@ pub fn query_has_incomplete_join_pk(defining_query: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Extract GROUP BY column names from a defining query.
-///
-/// Returns `Some(["region", "category"])` for aggregate queries with
-/// GROUP BY, `None` for non-aggregate or scalar-aggregate queries.
-///
-/// Uses a lightweight parse — no SPI or database access required.
-pub fn extract_group_by_columns(defining_query: &str) -> Option<Vec<String>> {
-    parse_defining_query(defining_query)
-        .ok()
-        .and_then(|tree| tree.group_by_columns())
-}
-
 pub(crate) fn row_identity_domain(tree: &parser::OpTree) -> &'static str {
     match tree {
         parser::OpTree::Scan { pk_columns, .. } if pk_columns.is_empty() => "KEYLESS_ROW",

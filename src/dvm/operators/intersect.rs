@@ -17,10 +17,7 @@ use crate::error::PgTrickleError;
 
 /// Differentiate an Intersect node.
 pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
-    let OpTree::Intersect {
-        left, right, all, ..
-    } = op
-    else {
+    let OpTree::Intersect { left, right, .. } = op else {
         return Err(PgTrickleError::InternalError(
             "diff_intersect called on non-Intersect node".into(),
         ));
@@ -91,11 +88,9 @@ pub fn diff_intersect(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // CTE 3: Detect boundary crossings
     let final_cte = ctx.next_cte_name("isect_final");
 
-    let final_sql = if *all {
-        // INTERSECT ALL: emit rows based on LEAST(count_l, count_r) changes
-        format!(
-            "\
--- Row appears: min was 0, now positive
+    let final_sql = format!(
+        "\
+-- Rows are emitted whenever the effective intersection count crosses zero
 SELECT __pgt_row_id, 'I' AS __pgt_action,
        {col_list}, new_count_l AS __pgt_count_l, new_count_r AS __pgt_count_r
 FROM {merge_cte}
@@ -104,7 +99,6 @@ WHERE LEAST(old_count_l, old_count_r) <= 0
 
 UNION ALL
 
--- Row vanishes: min was positive, now 0
 SELECT __pgt_row_id, 'D' AS __pgt_action,
        {col_list}, 0 AS __pgt_count_l, 0 AS __pgt_count_r
 FROM {merge_cte}
@@ -113,45 +107,13 @@ WHERE LEAST(old_count_l, old_count_r) > 0
 
 UNION ALL
 
--- Counts changed but row still present
 SELECT __pgt_row_id, 'I' AS __pgt_action,
        {col_list}, new_count_l AS __pgt_count_l, new_count_r AS __pgt_count_r
 FROM {merge_cte}
 WHERE LEAST(old_count_l, old_count_r) > 0
   AND LEAST(new_count_l, new_count_r) > 0
   AND (new_count_l != old_count_l OR new_count_r != old_count_r)",
-        )
-    } else {
-        // INTERSECT (set): emit rows when min crosses the 0 boundary
-        format!(
-            "\
--- Row appears: was absent (min <= 0), now present (min > 0)
-SELECT __pgt_row_id, 'I' AS __pgt_action,
-       {col_list}, new_count_l AS __pgt_count_l, new_count_r AS __pgt_count_r
-FROM {merge_cte}
-WHERE LEAST(old_count_l, old_count_r) <= 0
-  AND LEAST(new_count_l, new_count_r) > 0
-
-UNION ALL
-
--- Row vanishes: was present (min > 0), now absent (min <= 0)
-SELECT __pgt_row_id, 'D' AS __pgt_action,
-       {col_list}, 0 AS __pgt_count_l, 0 AS __pgt_count_r
-FROM {merge_cte}
-WHERE LEAST(old_count_l, old_count_r) > 0
-  AND LEAST(new_count_l, new_count_r) <= 0
-
-UNION ALL
-
--- Counts changed but row still present (update stored counts)
-SELECT __pgt_row_id, 'I' AS __pgt_action,
-       {col_list}, new_count_l AS __pgt_count_l, new_count_r AS __pgt_count_r
-FROM {merge_cte}
-WHERE LEAST(old_count_l, old_count_r) > 0
-  AND LEAST(new_count_l, new_count_r) > 0
-  AND (new_count_l != old_count_l OR new_count_r != old_count_r)",
-        )
-    };
+    );
     ctx.add_cte(final_cte.clone(), final_sql);
 
     let mut output_cols = cols.clone();

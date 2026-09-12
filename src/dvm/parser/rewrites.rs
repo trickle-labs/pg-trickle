@@ -755,15 +755,6 @@ pub fn reject_materialized_views(query: &str) -> Result<(), PgTrickleError> {
     check_for_matviews_or_foreign(select)
 }
 
-/// Reject foreign tables in the defining query for DIFFERENTIAL mode.
-///
-/// Foreign tables do not support row-level triggers, so CDC cannot track them.
-pub fn reject_foreign_tables(query: &str) -> Result<(), PgTrickleError> {
-    // Uses the same implementation as reject_materialized_views;
-    // the check function handles both.
-    reject_materialized_views(query)
-}
-
 /// Recursively check a SelectStmt for materialized view or foreign table
 /// references in the FROM clause.
 ///

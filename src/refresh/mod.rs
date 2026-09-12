@@ -60,8 +60,8 @@ pub use codegen::{
     capture_delta_to_bypass_table, clear_all_st_bypass, clear_fallback_leaf_oids,
     flush_local_template_cache, flush_pending_cleanups_for_oids, get_fallback_leaf_oids,
     get_st_bypass_tables, get_st_user_columns, get_st_user_columns_typed,
-    has_downstream_st_consumers, has_template_cache_entry, invalidate_merge_cache,
-    prewarm_merge_cache, set_fallback_leaf_oids,
+    has_downstream_st_consumers, invalidate_merge_cache, prewarm_merge_cache,
+    set_fallback_leaf_oids,
 };
 pub(crate) use merge::compute_amplification_ratio;
 pub use merge::{

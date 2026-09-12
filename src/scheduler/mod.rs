@@ -91,7 +91,6 @@ fn emit_reminder_if_due(
 use crate::error::{PgTrickleError, RetryPolicy, RetryState};
 use crate::monitor;
 use crate::refresh::{self, RefreshAction};
-use crate::shmem;
 use crate::version;
 
 pub mod citus;
@@ -118,96 +117,6 @@ pub use tenancy::{
     pressure_ratio,
 };
 pub use tier::RefreshTier;
-
-// ── SCAL-1 (v0.25.0): Per-backend catalog snapshot cache ─────────────────
-//
-// Caches `StreamTableMeta` rows keyed by the DAG version number from shmem.
-// When the local snapshot matches `shmem::current_dag_version()`, we skip
-// the full SPI catalog reload (~20–200 ms at 100–1000 STs).
-//
-// The cache is invalidated whenever `current_dag_version()` advances, which
-// happens after any CREATE / ALTER / DROP STREAM TABLE DDL.
-
-thread_local! {
-    static CATALOG_SNAPSHOT_CACHE: RefCell<Option<(u64, Vec<StreamTableMeta>)>> =
-        const { RefCell::new(None) };
-}
-
-/// SCAL-1: Return active stream tables, using the per-backend snapshot cache.
-///
-/// If the cached DAG version matches shmem, returns the cached rows without
-/// touching SPI.  On a version mismatch, reloads from the catalog and updates
-/// the cache.
-pub(crate) fn get_cached_active_stream_tables()
--> Result<Vec<StreamTableMeta>, crate::error::PgTrickleError> {
-    let current_dag_version = shmem::current_dag_version();
-
-    // Try the cache first.
-    let hit = CATALOG_SNAPSHOT_CACHE.with(|c| {
-        if let Some((cached_version, ref rows)) = *c.borrow()
-            && cached_version == current_dag_version
-        {
-            return Some(rows.clone());
-        }
-        None
-    });
-
-    if let Some(rows) = hit {
-        // Cache hit — no SPI needed.
-        shmem::TEMPLATE_CACHE_L1_HITS
-            .get()
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Ok(rows);
-    }
-
-    // Cache miss — reload from catalog.
-    let rows = StreamTableMeta::get_all_active()?;
-    CATALOG_SNAPSHOT_CACHE.with(|c| {
-        *c.borrow_mut() = Some((current_dag_version, rows.clone()));
-    });
-    Ok(rows)
-}
-
-/// SCAL-1: Invalidate the per-backend catalog snapshot cache.
-///
-/// Called after DDL operations that modify stream table metadata.
-pub(crate) fn invalidate_catalog_snapshot_cache() {
-    CATALOG_SNAPSHOT_CACHE.with(|c| {
-        *c.borrow_mut() = None;
-    });
-}
-
-/// SCAL-4 (v0.25.0): Copy-on-write DAG rebuild.
-///
-/// Builds a new `StDag` from the catalog **without holding any shared-memory
-/// lock**.  The caller atomically replaces the current DAG pointer only after
-/// the build completes, so concurrent readers always observe a consistent view.
-///
-/// The "swap" is implicit: the caller assigns the returned `StDag` to its
-/// local `dag: Option<StDag>`.  Because the scheduler is the sole writer, no
-/// additional synchronization is needed beyond the local assignment.
-pub(crate) fn rebuild_dag_copy_on_write(
-    schedule_secs: i32,
-) -> Result<crate::dag::StDag, crate::error::PgTrickleError> {
-    // All catalog I/O happens here, outside any PGS_STATE / TICK_WATERMARK_STATE
-    // exclusive lock.  Once build_from_catalog() returns, the caller atomically
-    // swaps the new DAG into place.
-    crate::dag::StDag::build_from_catalog(schedule_secs)
-}
-
-/// CACHE-1: Per-backend L0 template cache key check.
-///
-/// Returns `true` if the local thread-local cache has an entry for `pgt_id`
-/// at the current CACHE_GENERATION, indicating no L2/DVM parse is needed.
-///
-/// The full L0 implementation uses the L2 catalog table
-/// (`pgtrickle.pgt_template_cache`) as the cross-backend shared cache.
-/// Backends that miss L1 check L2 before re-running the DVM parser.
-/// `CACHE_GENERATION` invalidation ensures stale entries are not used.
-pub(crate) fn has_l0_cache_entry(pgt_id: i64) -> bool {
-    let current_gen = shmem::current_cache_generation();
-    crate::refresh::has_template_cache_entry(pgt_id, current_gen)
-}
 
 // ── Sub-transaction RAII guard ─────────────────────────────────────────
 
