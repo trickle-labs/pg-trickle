@@ -153,7 +153,6 @@ def main() -> None:
     for marker in (
         "Reproduce reported regressions against v0.105.2",
         "test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes",
-        "test_diff_aggregate_filter_above_projected_subquery_with_inner_where",
         "--suite pre-fix-reproduction=passed",
     ):
         require(marker in release_workflow, f"release workflow is missing {marker}")

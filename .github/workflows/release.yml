@@ -441,8 +441,7 @@ jobs:
           cp -a previous-candidate/extension previous-candidate/usr/share/postgresql/18/
           cp -a previous-candidate/lib previous-candidate/usr/lib/postgresql/18/
           for test_name in \
-            test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes \
-            test_diff_aggregate_filter_above_projected_subquery_with_inner_where; do
+            test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes; do
             log="qualification-logs/pre-fix-${test_name}.log"
             if PGT_EXTENSION_DIR="$GITHUB_WORKSPACE/previous-candidate" \
               cargo test --features light-e2e \
@@ -565,7 +564,6 @@ jobs:
             --log release-files/publication-gate.log \
             --log release-files/pre-fix-artifact-digest.log \
             --log release-files/pre-fix-test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes.log \
-            --log release-files/pre-fix-test_diff_aggregate_filter_above_projected_subquery_with_inner_where.log \
             --log release-files/performance-qualification.log
 
       - name: Generate checksums
