@@ -2,6 +2,19 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.105.3 to 0.106.0
+
+Install the v0.106.0 library and extension files, then apply the metadata-only
+upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.106.0';
+```
+
+This release adds no SQL objects or catalog changes. The migration records
+version 0.106.0. Release qualification and workload measurements do not change
+database behavior.
+
 ## 0.105.2 to 0.105.3
 
 Install the v0.105.3 library and extension files, then apply the metadata-only

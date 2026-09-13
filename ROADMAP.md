@@ -549,14 +549,13 @@ contracts.
 | Version | Theme | User promise | Status | Scope | Full details |
 |---------|-------|--------------|--------|-------|--------------|
 | [v0.105.3](roadmap/v0.105.3.md) | DVM corrections, affected-state recovery, and qualification required for every publication channel | "Known wrong-result cases are fixed, and every release channel waits for qualification." | ✅ Released | Patch | [Full details](roadmap/v0.105.3.md) |
-| [v0.106.0](roadmap/v0.106.0.md) | Executed package evidence, live pending-data upgrades, platform tiers, and measured database budgets | "Package support and performance claims identify the tests and measurements behind them." | Planned | Large | [Full details](roadmap/v0.106.0.md) |
+| [v0.106.0](roadmap/v0.106.0.md) | Executed package evidence, live pending-data upgrades, platform tiers, and measured database budgets | "Package support and performance claims identify the tests and measurements behind them." | In progress | Large | [Full details](roadmap/v0.106.0.md) |
 | [v0.107.0](roadmap/v0.107.0.md) | Runtime-backed support summary, semantic and lifecycle depth, and independently tested operator procedures | "The documentation explains what my query will do and how to recover it." | Planned | Medium | [Full details](roadmap/v0.107.0.md) |
 | [v0.108.0](roadmap/v0.108.0.md) | At most two internal changes selected by reproduced defects or workload measurements | "Core changes fix proven defects or reduce measured database cost while preserving incremental results." | Planned, conditional on measurements | Small | [Full details](roadmap/v0.108.0.md) |
 
-Release v0.105.3 first. Qualification and documentation work can proceed
-alongside the patch, but cannot delay the known correction. v0.106.0 supplies
-the evidence used by v0.107.0 and any v0.108.0 optimization. If profiling finds
-no justified change, defer v0.108.0 and retain the measurements.
+v0.105.3 is complete. v0.106.0 supplies the evidence used by v0.107.0 and any
+v0.108.0 optimization. If profiling finds no justified change, defer v0.108.0
+and retain the measurements.
 
 This phase adds no SQL families, public contract versions, capture backends,
 integrations, or autonomous controller actions. Preserve committed changes and

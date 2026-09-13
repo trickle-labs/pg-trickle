@@ -14,7 +14,13 @@
 mod e2e;
 
 use e2e::E2eDb;
-use std::time::Instant;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 // ── Configuration ──────────────────────────────────────────────────────
 
@@ -2518,4 +2524,786 @@ async fn bench_b2_predicate_pushdown() {
         median_full,
         median_filt / median_full
     );
+}
+
+// ── v0.106.0 packaged source-write, freshness, and resource qualification ──
+
+const RELEASE_WARMUP_BATCHES: usize = 3;
+const RELEASE_MEASURED_BATCHES: usize = 60;
+const RELEASE_REPETITIONS: usize = 3;
+const RELEASE_BATCH_INTERVAL: Duration = Duration::from_millis(25);
+const RELEASE_REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
+const RELEASE_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+const RELEASE_BATCH_ROWS: usize = 120;
+
+#[path = "conformance/reference_clients.rs"]
+#[allow(dead_code)]
+mod release_clients;
+
+struct ReleaseCaseSetup {
+    source: String,
+    root: String,
+    root_query: String,
+    stream_tables: Vec<String>,
+    graph: bool,
+    graph_digest: Vec<u8>,
+    consumer_id: Option<String>,
+    consumer_relation: Option<String>,
+}
+
+fn release_percentile(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let index = ((sorted.len() as f64 * percentile / 100.0).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len() - 1);
+    sorted[index]
+}
+
+fn parse_release_container_metrics(output: &str) -> Option<(f64, u64)> {
+    let (cpu, memory) = output.trim().split_once('|')?;
+    let cpu_percent = cpu.trim().trim_end_matches('%').parse().ok()?;
+    let memory_usage = memory.split('/').next()?.trim();
+    let unit_start = memory_usage.find(|ch: char| !ch.is_ascii_digit() && ch != '.')?;
+    let (number, unit) = memory_usage.split_at(unit_start);
+    let multiplier = match unit.trim() {
+        "B" => 1.0,
+        "kB" | "KB" => 1_000.0,
+        "KiB" => 1_024.0,
+        "MB" => 1_000_000.0,
+        "MiB" => 1_048_576.0,
+        "GB" => 1_000_000_000.0,
+        "GiB" => 1_073_741_824.0,
+        _ => return None,
+    };
+    Some((
+        cpu_percent,
+        (number.parse::<f64>().ok()? * multiplier) as u64,
+    ))
+}
+
+async fn release_container_metrics(container_id: &str) -> Option<(f64, u64)> {
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.CPUPerc}}|{{.MemUsage}}",
+            container_id,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_release_container_metrics(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[test]
+fn test_release_container_metrics_parses_docker_stats() {
+    assert_eq!(
+        parse_release_container_metrics("6.67%|55.46MiB / 7.748GiB\n"),
+        Some((6.67, (55.46_f64 * 1_048_576.0) as u64))
+    );
+}
+
+type ReleaseResourceSampler = (
+    Arc<AtomicBool>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    tokio::task::JoinHandle<()>,
+);
+
+fn start_release_resource_sampler(container_id: String) -> ReleaseResourceSampler {
+    let stop = Arc::new(AtomicBool::new(false));
+    let cpu_peak = Arc::new(AtomicU64::new(0.0_f64.to_bits()));
+    let memory_peak = Arc::new(AtomicU64::new(0));
+    let samples = Arc::new(AtomicU64::new(0));
+    let task_stop = Arc::clone(&stop);
+    let task_cpu_peak = Arc::clone(&cpu_peak);
+    let task_memory_peak = Arc::clone(&memory_peak);
+    let task_samples = Arc::clone(&samples);
+    let task = tokio::spawn(async move {
+        while !task_stop.load(Ordering::Relaxed) {
+            if let Some((cpu, memory)) = release_container_metrics(&container_id).await {
+                task_cpu_peak.fetch_max(cpu.to_bits(), Ordering::Relaxed);
+                task_memory_peak.fetch_max(memory, Ordering::Relaxed);
+                task_samples.fetch_add(1, Ordering::Relaxed);
+            }
+            tokio::time::sleep(RELEASE_RESOURCE_SAMPLE_INTERVAL).await;
+        }
+    });
+    (stop, cpu_peak, memory_peak, samples, task)
+}
+
+async fn release_graph_refresh(
+    pool: &sqlx::PgPool,
+    root: &str,
+    digest: &[u8],
+    consumer_id: Option<&str>,
+) {
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin Graph V1 refresh transaction");
+    sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
+        .execute(&mut *tx)
+        .await
+        .expect("force differential Graph V1 refresh");
+    release_clients::refresh_graph(&mut *tx, root, digest).await;
+    if let Some(consumer_id) = consumer_id {
+        let next_batch: Option<i64> = sqlx::query_scalar(
+            "SELECT batch_token FROM pgtrickle.output_delta_batches($1::uuid, NULL::bigint) \
+             ORDER BY batch_token LIMIT 1",
+        )
+        .bind(consumer_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .expect("read pending output batch");
+        if let Some(batch_token) = next_batch {
+            assert_eq!(
+                release_clients::ack(&mut *tx, consumer_id, batch_token).await,
+                "APPLIED"
+            );
+        }
+    }
+    tx.commit().await.expect("commit Graph V1 refresh");
+}
+
+async fn setup_release_case(
+    db: &E2eDb,
+    workload: &str,
+    case_id: &str,
+    sequence: usize,
+) -> ReleaseCaseSetup {
+    let source = format!("release_{sequence}_source");
+    db.execute(&format!(
+        "CREATE TABLE {source} (id bigint PRIMARY KEY, grp integer NOT NULL, \
+         val bigint NOT NULL, payload text NOT NULL)"
+    ))
+    .await;
+    let group_expr = if workload == "join-skew-aggregate" {
+        "CASE WHEN i % 10 < 8 THEN 0 ELSE (i % 20)::integer END"
+    } else {
+        "(i % 20)::integer"
+    };
+    db.execute(&format!(
+        "INSERT INTO {source} (id, grp, val, payload) \
+         SELECT i, {group_expr}, ((i * 31 + 17) % 10000)::bigint, \
+                'release-wide-' || repeat('x', 256) \
+         FROM generate_series(1, 10000) AS rows(i)"
+    ))
+    .await;
+
+    if workload == "small-dependency-graph" && case_id == "no-maintenance" {
+        return ReleaseCaseSetup {
+            source,
+            root: String::new(),
+            root_query: String::new(),
+            stream_tables: Vec::new(),
+            graph: false,
+            graph_digest: Vec::new(),
+            consumer_id: None,
+            consumer_relation: None,
+        };
+    }
+
+    let query = if workload == "join-skew-aggregate" {
+        let dim = format!("release_{sequence}_dim");
+        db.execute(&format!(
+            "CREATE TABLE {dim} (grp integer PRIMARY KEY, multiplier integer NOT NULL)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {dim} SELECT i, i + 1 FROM generate_series(0, 19) AS rows(i)"
+        ))
+        .await;
+        format!(
+            "SELECT s.grp, SUM(s.val)::bigint AS total, COUNT(*)::bigint AS n \
+             FROM {source} s JOIN {dim} d ON d.grp = s.grp GROUP BY s.grp"
+        )
+    } else if workload == "small-dependency-graph" {
+        let middle = format!("release_{sequence}_middle");
+        let leaf = format!("release_{sequence}_leaf");
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table( \
+                 name => '{middle}', \
+                 query => 'SELECT grp, SUM(val)::bigint AS total, \
+                           COUNT(*)::bigint AS n \
+                           FROM {source} GROUP BY grp', \
+                 schedule => '1h', refresh_mode => 'DIFFERENTIAL', \
+                 initialize => false, orchestration_mode => 'EXTERNAL')"
+        ))
+        .await;
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table( \
+                 name => '{leaf}', \
+                 query => 'SELECT grp, total, n FROM {middle}', \
+                 schedule => '1h', refresh_mode => 'DIFFERENTIAL', \
+                 initialize => false, orchestration_mode => 'EXTERNAL')"
+        ))
+        .await;
+        let root = format!("public.{leaf}");
+        let digest = release_clients::graph_digest(&db.pool, &root).await;
+        let consumer = if case_id == "active-refresh-consumers-active" {
+            Some(
+                release_clients::register(
+                    &db.pool,
+                    &root,
+                    &format!("release_consumer_{sequence}"),
+                    &release_clients::stream_contract_digest(&db.pool, &root).await,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        release_graph_refresh(&db.pool, &root, &digest, None).await;
+        let consumer_id = if let Some(consumer) = consumer {
+            let mut tx = db.pool.begin().await.expect("begin output resnapshot");
+            let (token, _) =
+                release_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+            assert_eq!(
+                release_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await,
+                "ACTIVE"
+            );
+            tx.commit().await.expect("commit output resnapshot");
+            Some((consumer.consumer_id, consumer.delta_relation))
+        } else {
+            None
+        };
+        let (consumer_id, consumer_relation) = consumer_id
+            .map(|(id, relation)| (Some(id), Some(relation)))
+            .unwrap_or((None, None));
+        return ReleaseCaseSetup {
+            source: source.clone(),
+            root,
+            root_query: format!(
+                "SELECT grp, SUM(val)::bigint AS total, COUNT(*)::bigint AS n \
+                 FROM {source} GROUP BY grp"
+            ),
+            stream_tables: vec![middle, leaf],
+            graph: true,
+            graph_digest: digest,
+            consumer_id,
+            consumer_relation,
+        };
+    } else {
+        format!(
+            "SELECT grp, SUM(val)::bigint AS total, \
+             COUNT(*)::bigint AS n FROM {source} GROUP BY grp"
+        )
+    };
+
+    let view = format!("release_{sequence}_view");
+    if case_id != "no-maintenance" {
+        db.create_st(&view, &query, "1h", "DIFFERENTIAL").await;
+    }
+    ReleaseCaseSetup {
+        source,
+        root: format!("public.{view}"),
+        root_query: query,
+        stream_tables: if case_id == "no-maintenance" {
+            Vec::new()
+        } else {
+            vec![view]
+        },
+        graph: false,
+        graph_digest: Vec::new(),
+        consumer_id: None,
+        consumer_relation: None,
+    }
+}
+
+async fn apply_release_write_batch(db: &E2eDb, source: &str, cycle: usize) -> f64 {
+    let update_start = (cycle % 40) * 100 + 1;
+    let delete_start = 5001 + cycle * 10;
+    let insert_start = 10001 + cycle * 10;
+    let started = Instant::now();
+    let mut tx = db.pool.begin().await.expect("begin source write batch");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {source} SET val = val + 1 WHERE id BETWEEN {update_start} AND {}",
+        update_start + 99
+    )))
+    .execute(&mut *tx)
+    .await
+    .expect("update source rows");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM {source} WHERE id BETWEEN {delete_start} AND {}",
+        delete_start + 9
+    )))
+    .execute(&mut *tx)
+    .await
+    .expect("delete source rows");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {source} (id, grp, val, payload) \
+         SELECT i, (i % 20)::integer, ((i * 31 + 17) % 10000)::bigint, \
+                'release-wide-' || repeat('x', 256) \
+         FROM generate_series({insert_start}, {}) AS rows(i)",
+        insert_start + 9
+    )))
+    .execute(&mut *tx)
+    .await
+    .expect("insert source rows");
+    tx.commit().await.expect("commit source write batch");
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
+async fn run_release_batches(
+    db: &E2eDb,
+    source: &str,
+    first_cycle: usize,
+    count: usize,
+) -> Vec<f64> {
+    let started = Instant::now();
+    let mut timings = Vec::with_capacity(count);
+    for index in 0..count {
+        let due = started + RELEASE_BATCH_INTERVAL * (index as u32 + 1);
+        tokio::time::sleep_until(due.into()).await;
+        timings.push(apply_release_write_batch(db, source, first_cycle + index).await);
+    }
+    timings
+}
+
+async fn release_refresh_once(db: &E2eDb, setup: &ReleaseCaseSetup) {
+    if setup.graph {
+        release_graph_refresh(
+            &db.pool,
+            &setup.root,
+            &setup.graph_digest,
+            setup.consumer_id.as_deref(),
+        )
+        .await;
+    } else {
+        release_single_refresh(&db.pool, &setup.root).await;
+    }
+}
+
+async fn release_single_refresh(pool: &sqlx::PgPool, root: &str) {
+    let mut tx = pool.begin().await.expect("begin differential refresh");
+    sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
+        .execute(&mut *tx)
+        .await
+        .expect("force differential stream-table refresh");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+        .bind(root)
+        .execute(&mut *tx)
+        .await
+        .expect("run active stream-table refresh");
+    tx.commit().await.expect("commit differential refresh");
+}
+
+async fn release_backlog_rows(pool: &sqlx::PgPool, source: &str) -> i64 {
+    let stable_name: String =
+        sqlx::query_scalar("SELECT pgtrickle.source_stable_name($1::regclass)")
+            .bind(source)
+            .fetch_one(pool)
+            .await
+            .expect("read CDC buffer name");
+    assert!(
+        stable_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    );
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*)::bigint FROM pgtrickle_changes.\"changes_{stable_name}\""
+    )))
+    .fetch_one(pool)
+    .await
+    .expect("read CDC buffer row count")
+}
+
+async fn run_release_database_case(
+    db: &E2eDb,
+    workload: &str,
+    case_id: &str,
+    sequence: usize,
+) -> serde_json::Value {
+    let active = case_id.starts_with("active-refresh");
+    let maintained = case_id != "no-maintenance";
+    let setup = setup_release_case(db, workload, case_id, sequence).await;
+    let mut refresh_task = None;
+    let refresh_stop = Arc::new(AtomicBool::new(false));
+    if active {
+        let pool = db.pool.clone();
+        let root = setup.root.clone();
+        let digest = setup.graph_digest.clone();
+        let consumer = setup.consumer_id.clone();
+        let graph = setup.graph;
+        let stop = Arc::clone(&refresh_stop);
+        refresh_task = Some(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                if graph {
+                    release_graph_refresh(&pool, &root, &digest, consumer.as_deref()).await;
+                } else {
+                    release_single_refresh(&pool, &root).await;
+                }
+                tokio::time::sleep(RELEASE_REFRESH_INTERVAL).await;
+            }
+        }));
+    }
+
+    let backlog_stop = Arc::new(AtomicBool::new(false));
+    let backlog_peak = Arc::new(AtomicI64::new(0));
+    let backlog_task = if maintained {
+        let source = setup.source.clone();
+        let pool = db.pool.clone();
+        let stop = Arc::clone(&backlog_stop);
+        let peak = Arc::clone(&backlog_peak);
+        Some(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                peak.fetch_max(
+                    release_backlog_rows(&pool, &source).await,
+                    Ordering::Relaxed,
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }))
+    } else {
+        None
+    };
+
+    let temp_bytes_before: i64 = db
+        .query_scalar(
+            "SELECT temp_bytes::bigint FROM pg_stat_database WHERE datname = current_database()",
+        )
+        .await;
+    let database_bytes_before: i64 = db
+        .query_scalar("SELECT pg_database_size(current_database())::bigint")
+        .await;
+    let wal_lsn_before: String = db.query_scalar("SELECT pg_current_wal_lsn()::text").await;
+    let consumer_bytes_before: i64 = if let Some(relation) = &setup.consumer_relation {
+        sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
+            .bind(relation)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read initial output log size")
+    } else {
+        0
+    };
+    let (resource_stop, cpu_peak, memory_peak, resource_samples, resource_task) =
+        start_release_resource_sampler(db.container_id().into());
+    let measurement_start: String = db.query_scalar("SELECT clock_timestamp()::text").await;
+
+    let mut all_write_times = Vec::with_capacity(RELEASE_REPETITIONS * RELEASE_MEASURED_BATCHES);
+    let mut cycle = 0_usize;
+    for _ in 0..RELEASE_REPETITIONS {
+        let _ = run_release_batches(db, &setup.source, cycle, RELEASE_WARMUP_BATCHES).await;
+        cycle += RELEASE_WARMUP_BATCHES;
+        if case_id == "capture-only" {
+            release_refresh_once(db, &setup).await;
+        }
+        let times = run_release_batches(db, &setup.source, cycle, RELEASE_MEASURED_BATCHES).await;
+        cycle += RELEASE_MEASURED_BATCHES;
+        all_write_times.extend(times);
+        if case_id == "capture-only" {
+            release_refresh_once(db, &setup).await;
+        }
+    }
+
+    refresh_stop.store(true, Ordering::Relaxed);
+    if let Some(task) = refresh_task {
+        task.await.expect("Graph V1 refresh worker task");
+    }
+    if maintained {
+        release_refresh_once(db, &setup).await;
+    }
+    backlog_stop.store(true, Ordering::Relaxed);
+    if let Some(task) = backlog_task {
+        task.await.expect("CDC backlog sampler task");
+    }
+    let measurement_end: String = db.query_scalar("SELECT clock_timestamp()::text").await;
+    resource_stop.store(true, Ordering::Relaxed);
+    resource_task
+        .await
+        .expect("container resource sampler task");
+    assert!(
+        resource_samples.load(Ordering::Relaxed) > 0,
+        "container sampler collected no samples"
+    );
+    let cpu_percent_peak = f64::from_bits(cpu_peak.load(Ordering::Relaxed));
+    if maintained {
+        if setup.graph {
+            let middle = setup.root.replace("_leaf", "_middle");
+            let middle_query = format!(
+                "SELECT grp, SUM(val)::bigint AS total, COUNT(*)::bigint AS n \
+                 FROM {} GROUP BY grp",
+                setup.source
+            );
+            db.assert_st_matches_query(&middle, &middle_query).await;
+        }
+        db.assert_st_matches_query(&setup.root, &setup.root_query)
+            .await;
+    }
+
+    let refresh_latency_ms: Vec<f64> = if maintained {
+        sqlx::query_scalar(
+            "SELECT duration_ms FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = ANY($1) AND h.status = 'COMPLETED' \
+               AND h.duration_ms IS NOT NULL \
+               AND h.end_time BETWEEN $2::timestamptz AND $3::timestamptz \
+             ORDER BY h.refresh_id",
+        )
+        .bind(&setup.stream_tables)
+        .bind(&measurement_start)
+        .bind(&measurement_end)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read refresh latency samples")
+    } else {
+        Vec::new()
+    };
+    let freshness_ms: Vec<f64> = if maintained {
+        sqlx::query_scalar(
+            "SELECT COALESCE(h.commit_to_visible_ms, \
+                    GREATEST(0, EXTRACT(EPOCH FROM (h.end_time - h.data_timestamp)) * 1000))::float8 \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = ANY($1) AND h.status = 'COMPLETED' \
+               AND h.end_time BETWEEN $2::timestamptz AND $3::timestamptz \
+               AND h.data_timestamp IS NOT NULL \
+             ORDER BY h.refresh_id",
+        )
+        .bind(&setup.stream_tables)
+        .bind(&measurement_start)
+        .bind(&measurement_end)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read end-to-end freshness samples")
+    } else {
+        Vec::new()
+    };
+    let differential_count: i64 = if maintained {
+        sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = ANY($1) AND h.action = 'DIFFERENTIAL' \
+               AND h.was_full_fallback = false \
+               AND h.end_time BETWEEN $2::timestamptz AND $3::timestamptz",
+        )
+        .bind(&setup.stream_tables)
+        .bind(&measurement_start)
+        .bind(&measurement_end)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read effective refresh strategy")
+    } else {
+        0
+    };
+    let full_fallback_count: i64 = if maintained {
+        sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = ANY($1) \
+               AND (h.action = 'FULL' OR h.was_full_fallback) \
+               AND h.end_time BETWEEN $2::timestamptz AND $3::timestamptz",
+        )
+        .bind(&setup.stream_tables)
+        .bind(&measurement_start)
+        .bind(&measurement_end)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read full-refresh fallback count")
+    } else {
+        0
+    };
+    if maintained
+        && (differential_count == 0 || full_fallback_count > 0 || refresh_latency_ms.is_empty())
+    {
+        type RefreshHistoryDiagnosticRow = (String, String, bool, Option<String>, Option<String>);
+        let history: Vec<RefreshHistoryDiagnosticRow> = sqlx::query_as(
+            "SELECT h.action, h.status, h.was_full_fallback, \
+                    h.refresh_reason, h.refresh_reason_detail \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = ANY($1) ORDER BY h.refresh_id",
+        )
+        .bind(&setup.stream_tables)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read refresh diagnostic history");
+        panic!("{workload}/{case_id} did not execute a differential refresh; history={history:?}");
+    }
+    assert!(
+        !maintained || (differential_count > 0 && !refresh_latency_ms.is_empty()),
+        "{workload}/{case_id} did not execute a differential refresh"
+    );
+    let effective_strategy = if !maintained || (differential_count > 0 && full_fallback_count == 0)
+    {
+        if maintained { "DIFFERENTIAL" } else { "NONE" }
+    } else {
+        "FULL"
+    };
+
+    let write_total_ms = all_write_times.iter().sum::<f64>();
+    let source_write_p95_ms = release_percentile(&all_write_times, 95.0);
+    let rows_written = (all_write_times.len() * RELEASE_BATCH_ROWS) as f64;
+    let throughput_rows_per_second = rows_written / (write_total_ms / 1000.0);
+    let temp_bytes_after: i64 = db
+        .query_scalar(
+            "SELECT temp_bytes::bigint FROM pg_stat_database WHERE datname = current_database()",
+        )
+        .await;
+    let temp_spill_bytes = temp_bytes_after.saturating_sub(temp_bytes_before).max(0) as u64;
+    let database_bytes_after: i64 = db
+        .query_scalar("SELECT pg_database_size(current_database())::bigint")
+        .await;
+    let wal_bytes: i64 = db
+        .query_scalar(&format!(
+            "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '{wal_lsn_before}'::pg_lsn)::bigint"
+        ))
+        .await;
+    let consumer_bytes_after: i64 = if let Some(relation) = &setup.consumer_relation {
+        sqlx::query_scalar("SELECT pg_total_relation_size($1::regclass)::bigint")
+            .bind(relation)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read typed output log size")
+    } else {
+        0
+    };
+    let memory_peak = memory_peak.load(Ordering::Relaxed);
+    assert!(memory_peak > 0, "container memory use was not recorded");
+    let measurement_window_ms: f64 = sqlx::query_scalar(
+        "SELECT greatest(0, extract(epoch FROM ($2::timestamptz - $1::timestamptz)) * 1000)::float8",
+    )
+    .bind(&measurement_start)
+    .bind(&measurement_end)
+    .fetch_one(&db.pool)
+    .await
+    .expect("measure workload duration");
+    serde_json::json!({
+        "source_write_p50_ms": release_percentile(&all_write_times, 50.0),
+        "source_write_p95_ms": source_write_p95_ms,
+        "source_write_p99_ms": release_percentile(&all_write_times, 99.0),
+        "throughput_rows_per_second": throughput_rows_per_second,
+        "write_errors": 0,
+        "writer_concurrency": 1,
+        "batch_interval_ms": RELEASE_BATCH_INTERVAL.as_millis(),
+        "refresh_interval_ms": RELEASE_REFRESH_INTERVAL.as_millis(),
+        "resource_sample_interval_ms": RELEASE_RESOURCE_SAMPLE_INTERVAL.as_millis(),
+        "warmup_batches_per_repetition": RELEASE_WARMUP_BATCHES,
+        "measured_batches_per_repetition": RELEASE_MEASURED_BATCHES,
+        "repetitions": RELEASE_REPETITIONS,
+        "refresh_p50_ms": release_percentile(&refresh_latency_ms, 50.0),
+        "refresh_p95_ms": release_percentile(&refresh_latency_ms, 95.0),
+        "refresh_p99_ms": release_percentile(&refresh_latency_ms, 99.0),
+        "freshness_p50_ms": release_percentile(&freshness_ms, 50.0),
+        "freshness_p95_ms": release_percentile(&freshness_ms, 95.0),
+        "freshness_p99_ms": release_percentile(&freshness_ms, 99.0),
+        "cpu_percent_peak": cpu_percent_peak,
+        "memory_peak_bytes": memory_peak,
+        "wal_bytes": wal_bytes.max(0),
+        "change_backlog_rows": backlog_peak.load(Ordering::Relaxed),
+        "temp_spill_bytes": temp_spill_bytes,
+        "output_log_bytes": consumer_bytes_after.saturating_sub(consumer_bytes_before).max(0),
+        "storage_growth_bytes": database_bytes_after.saturating_sub(database_bytes_before).max(0),
+        "exact_result": maintained,
+        "effective_strategy": effective_strategy,
+        "full_fallback_count": full_fallback_count,
+        "measurement_started_at": measurement_start,
+        "measurement_ended_at": measurement_end,
+        "measurement_window_ms": measurement_window_ms,
+    })
+}
+
+#[tokio::test]
+#[ignore = "v0.106.0 package qualification; runs against the candidate PostgreSQL image"]
+async fn bench_release_database_workloads() {
+    let workload_cases = [
+        (
+            "keyed-scan-aggregate",
+            vec!["no-maintenance", "capture-only", "active-refresh"],
+        ),
+        (
+            "join-skew-aggregate",
+            vec!["no-maintenance", "capture-only", "active-refresh"],
+        ),
+        (
+            "small-dependency-graph",
+            vec![
+                "no-maintenance",
+                "capture-only",
+                "active-refresh-consumers-disabled",
+                "active-refresh-consumers-active",
+            ],
+        ),
+    ];
+    let mut workloads = Vec::new();
+    let mut postgres_version = None;
+    let mut durability_settings = None;
+    let mut sequence = 0;
+    for (workload, cases) in workload_cases {
+        let mut measured_cases = serde_json::Map::new();
+        for case_id in cases {
+            sequence += 1;
+            let db = E2eDb::new_bench().await.with_extension().await;
+            db.execute("ALTER SYSTEM SET synchronous_commit = 'on'")
+                .await;
+            db.reload_config_and_wait().await;
+            let case_postgres_version: String = db.query_scalar("SHOW server_version").await;
+            if postgres_version.is_none() {
+                eprintln!("PGT_ACTUAL_POSTGRESQL_VERSION={case_postgres_version}");
+                postgres_version = Some(case_postgres_version.clone());
+            } else {
+                assert_eq!(
+                    postgres_version.as_deref(),
+                    Some(case_postgres_version.as_str())
+                );
+            }
+            let case_durability_settings: serde_json::Value = sqlx::query_scalar(
+                "SELECT jsonb_build_object(\
+                     'fsync', current_setting('fsync'), \
+                     'synchronous_commit', current_setting('synchronous_commit'), \
+                     'full_page_writes', current_setting('full_page_writes'))",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .expect("read PostgreSQL durability settings");
+            if let Some(expected) = &durability_settings {
+                assert_eq!(expected, &case_durability_settings);
+            } else {
+                durability_settings = Some(case_durability_settings);
+            }
+            measured_cases.insert(
+                case_id.to_string(),
+                run_release_database_case(&db, workload, case_id, sequence).await,
+            );
+        }
+        workloads.push(serde_json::json!({
+            "id": workload,
+            "population_rows": 10000,
+            "batch_rows": RELEASE_BATCH_ROWS,
+            "offered_load": {
+                "writer_concurrency": 1,
+                "batch_interval_ms": RELEASE_BATCH_INTERVAL.as_millis(),
+                "refresh_interval_ms": RELEASE_REFRESH_INTERVAL.as_millis(),
+                "resource_sample_interval_ms": RELEASE_RESOURCE_SAMPLE_INTERVAL.as_millis(),
+                "warmup_batches_per_repetition": RELEASE_WARMUP_BATCHES,
+                "measured_batches_per_repetition": RELEASE_MEASURED_BATCHES,
+                "repetitions": RELEASE_REPETITIONS
+            },
+            "cases": measured_cases,
+        }));
+    }
+    let measurement = serde_json::json!({
+        "kind": "database-workloads",
+        "postgresql_version": postgres_version.expect("at least one workload case ran"),
+        "durability_settings": durability_settings.expect("workload settings were recorded"),
+        "workloads": workloads,
+    });
+    let output = std::env::var("PGS_RELEASE_MEASUREMENT_JSON")
+        .expect("release runner must set PGS_RELEASE_MEASUREMENT_JSON");
+    std::fs::write(
+        &output,
+        serde_json::to_vec_pretty(&measurement).expect("serialize workload evidence"),
+    )
+    .expect("write raw workload evidence");
+    eprintln!("[PGS_RELEASE_WORKLOADS] {measurement}");
 }

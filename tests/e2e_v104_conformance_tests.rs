@@ -246,3 +246,76 @@ async fn test_v104_delta_reference_consumer_reads_and_acknowledges() {
         0
     );
 }
+
+#[tokio::test]
+async fn test_v106_graph_refresh_propagates_same_pass_with_active_consumer() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE v106_graph_source (id INT PRIMARY KEY, grp INT NOT NULL, val INT NOT NULL)",
+    )
+    .await;
+    db.execute("INSERT INTO v106_graph_source VALUES (1, 0, 10), (2, 0, 20), (3, 1, 30)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v106_graph_middle',\
+             query => 'SELECT grp, SUM(val)::bigint AS total, COUNT(*)::bigint AS n \
+                       FROM v106_graph_source GROUP BY grp',\
+             schedule => '1h',\
+             refresh_mode => 'DIFFERENTIAL',\
+             initialize => false,\
+             orchestration_mode => 'EXTERNAL'\
+         )",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v106_graph_leaf',\
+             query => 'SELECT grp, total, n FROM v106_graph_middle',\
+             schedule => '1h',\
+             refresh_mode => 'DIFFERENTIAL',\
+             initialize => false,\
+             orchestration_mode => 'EXTERNAL'\
+         )",
+    )
+    .await;
+
+    let root = "public.v106_graph_leaf";
+    let contract_digest = reference_clients::stream_contract_digest(&db.pool, root).await;
+    let consumer =
+        reference_clients::register(&db.pool, root, "v106_graph_consumer", &contract_digest).await;
+    let graph_digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &graph_digest).await;
+
+    let mut tx = db.pool.begin().await.expect("begin graph resnapshot");
+    let (token, _) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await,
+        "ACTIVE"
+    );
+    tx.commit().await.expect("commit graph resnapshot");
+
+    db.execute("UPDATE v106_graph_source SET val = val + 5 WHERE id = 1")
+        .await;
+    db.execute("INSERT INTO v106_graph_source VALUES (4, 1, 7)")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin graph update");
+    let refresh_id = reference_clients::refresh_graph(&mut *tx, root, &graph_digest).await;
+    let batch = reference_clients::pending_batch(&mut *tx, &consumer.consumer_id).await;
+    assert_eq!(batch.graph_refresh_id, Some(refresh_id));
+    assert_eq!(batch.mode, "EXACT");
+    assert_eq!(
+        reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await,
+        "APPLIED"
+    );
+    tx.commit().await.expect("commit graph refresh and ack");
+
+    db.assert_st_matches_query(
+        "public.v106_graph_middle",
+        "SELECT grp, SUM(val)::bigint AS total, COUNT(*)::bigint AS n \
+         FROM v106_graph_source GROUP BY grp",
+    )
+    .await;
+    db.assert_st_matches_query(root, "SELECT grp, total, n FROM public.v106_graph_middle")
+        .await;
+}

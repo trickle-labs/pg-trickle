@@ -1,0 +1,14 @@
+FROM postgres:18.3
+
+COPY candidate/lib/ /usr/lib/postgresql/18/lib/
+COPY candidate/extension/ /usr/share/postgresql/18/extension/
+
+RUN printf '%s\n' \
+      "shared_preload_libraries = 'pg_trickle'" \
+      "track_commit_timestamp = on" \
+      "wal_level = logical" \
+      "max_replication_slots = 10" \
+      "max_worker_processes = 32" \
+      >> /usr/share/postgresql/postgresql.conf.sample && \
+    printf '%s\n' "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;" \
+      > /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
