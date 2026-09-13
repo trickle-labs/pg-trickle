@@ -49,6 +49,13 @@ def suite_specs(qualification: Path | None) -> dict[str, dict[str, str]]:
     }
 
 
+def artifact_specs(qualification: Path | None) -> list[dict[str, object]]:
+    if qualification is None:
+        return []
+    contract = json.loads(qualification.read_text(encoding="utf-8"))
+    return [item for item in contract.get("artifacts", []) if isinstance(item, dict)]
+
+
 def parse_logs(entries: list[str]) -> list[dict[str, str | int]]:
     logs: list[dict[str, str | int]] = []
     for entry in entries:
@@ -89,6 +96,7 @@ def main() -> None:
         if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_commit):
             raise ValueError("candidate commit must be a 40-character lowercase hexadecimal SHA")
         specs = suite_specs(args.qualification)
+        platform_specs = artifact_specs(args.qualification)
         if args.qualification is not None:
             contract = json.loads(args.qualification.read_text(encoding="utf-8"))
             if contract.get("release_version") != args.version:
@@ -99,11 +107,40 @@ def main() -> None:
                 )
 
         artifacts = []
+        observed_artifact_ids: set[str] = set()
         for path_string in (path for group in args.artifact for path in group):
             path = Path(path_string)
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            artifacts.append(
-                {"path": path.as_posix(), "bytes": path.stat().st_size, "sha256": digest}
+            artifact = {"path": path.as_posix(), "bytes": path.stat().st_size, "sha256": digest}
+            matches = [item for item in platform_specs if item.get("platform") in path.name]
+            if platform_specs and len(matches) != 1:
+                raise ValueError(f"artifact {path.name!r} must match exactly one qualified platform")
+            if matches:
+                spec = matches[0]
+                artifact_id = spec.get("id")
+                if not isinstance(artifact_id, str) or artifact_id in observed_artifact_ids:
+                    raise ValueError("qualified artifact identifiers must be unique")
+                observed_artifact_ids.add(artifact_id)
+                artifact.update(
+                    {
+                        "artifact_id": artifact_id,
+                        "platform": spec.get("platform"),
+                        "build_status": "passed",
+                        "runtime_status": spec.get("runtime_status", "not_recorded"),
+                        "runtime_suites": spec.get("runtime_suites", []),
+                        "control_suites": spec.get("control_suites", []),
+                    }
+                )
+            artifacts.append(artifact)
+
+        expected_artifact_ids = {
+            item["id"] for item in platform_specs if isinstance(item.get("id"), str)
+        }
+        if platform_specs and observed_artifact_ids != expected_artifact_ids:
+            raise ValueError(
+                "release artifacts do not match the qualification contract: "
+                f"missing={sorted(expected_artifact_ids - observed_artifact_ids)}, "
+                f"unexpected={sorted(observed_artifact_ids - expected_artifact_ids)}"
             )
 
         results = [parse_result(entry) for entry in args.suite]

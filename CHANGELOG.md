@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.105.3 — Differential correctness and release qualification](#01053--differential-correctness-and-release-qualification)
 - [0.105.2 — Package, upgrade, performance, and field validation](#01052--package-upgrade-performance-and-field-validation)
 - [0.105.1 — Runtime conformance and recovery qualification](#01051--runtime-conformance-and-recovery-qualification)
 - [0.105.0 — Qualification contract and release evidence](#01050--qualification-contract-and-release-evidence)
@@ -217,6 +218,26 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.105.3] — Differential correctness and release qualification
+
+v0.105.3 adds differential regressions for the DVM fixes already merged in
+PR #1011, plus a documented repair path for potentially affected stream-table
+results. It also requires successful candidate qualification before any
+release artifact or mutable container alias is published.
+
+- Exercises simultaneous source changes in `EXISTS` and `NOT EXISTS`,
+  duplicate rows, nullable keys, downstream aggregation, and exact output
+  deltas; asserts differential mode remains active.
+- Covers the aggregate predicate rewrite and targeted reinitialization of one
+  inconsistent stream table without rebuilding unrelated tables.
+- Adds candidate-bound qualification evidence and makes GitHub Release,
+  CNPG/GHCR images, mutable GHCR aliases, and PGXN wait for qualification.
+- Documents the potentially affected query shapes and how to compare and
+  repair existing state without discarding committed source changes.
+
+See the [v0.105.3 roadmap](roadmap/v0.105.3.md) and the
+[qualification contract](tests/release/v0.105.3-qualification.json).
 
 ## [0.105.2] — Package, upgrade, performance, and field validation
 

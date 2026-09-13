@@ -4,17 +4,26 @@ This document describes how to create a release of **pg_trickle**.
 
 ## Overview
 
-Releases are fully automated via GitHub Actions. Pushing a version tag (`v*`)
+Releases are automated via GitHub Actions. Pushing a version tag (`v*`)
 triggers the [Release workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/release.yml), which:
 
-1. Runs a preflight version-sync check to ensure all version references match the tag
-2. Builds extension packages for Linux (amd64), macOS (arm64), and Windows (amd64)
-3. Smoke-tests the Linux artifact against a live PostgreSQL 18 instance
-4. Creates a GitHub Release with archives and SHA256 checksums
-5. Builds and pushes a multi-arch extension image to GHCR (for CNPG Image Volumes)
+1. Runs version-sync and release qualification checks for the exact tag.
+2. Builds extension packages for Linux (amd64 and arm64), macOS (arm64), and Windows (amd64).
+3. Smoke-tests and qualifies the packaged Linux amd64 candidate against PostgreSQL 18.
+4. Creates the GitHub Release and publishes the CNPG extension image only after qualification succeeds.
 
-A separate [PGXN workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/pgxn.yml) also fires on the same
-`v*` tag and publishes the source archive to the [PostgreSQL Extension Network](https://pgxn.org/).
+The release evidence binds each archive digest to the candidate commit. The
+Linux amd64 archive receives the packaged live-runtime suites; Linux arm64,
+macOS arm64, and Windows amd64 are reported as build-only unless their own
+runtime suites are added and executed. v0.105.3 also reruns both DVM
+regressions against the published v0.105.2 Linux package and requires those
+negative controls to fail before it qualifies the new package.
+
+The separate [GHCR image workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/ghcr.yml)
+and [PGXN workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/pgxn.yml)
+start only after the Release workflow succeeds for that tag. That workflow
+publishes the main PostgreSQL image, including mutable `pg18` and `latest`
+aliases, while PGXN publishes the source archive.
 
 ## Prerequisites
 
@@ -135,18 +144,21 @@ Watch the [Actions tab](https://github.com/trickle-labs/pg-trickle/actions/workf
 The release workflow runs these jobs in order:
 
 ```
-preflight  ──►  build-release (linux, macos, windows)
-                      │
-                      ▼
-                test-release  ──►  publish-release
-                              ──►  publish-docker-arch (linux/amd64 + linux/arm64)
-                                         │
-                                         ▼
-                                   publish-docker (merge manifest + push :latest)
+preflight  ──►  build-release ──► test-release ──┐
+                      └────────► qualification ──┼─► publish-release
+                                                └─► publish-docker-arch ─► publish-docker
+                                                       \
+                                  publication-result ◄──┘
+
+successful Release completion ──► GHCR aliases + PGXN source archive
 ```
 
-The PGXN workflow (`pgxn.yml`) runs independently and publishes the source
-archive to pgxn.org in parallel with the release workflow.
+The release workflow's `publish-release` and `publish-docker-arch` jobs both
+require successful qualification. `publication-result` fails the workflow if
+any required stage failed, was cancelled, or was skipped. Its successful
+completion triggers the GHCR and PGXN workflows, which check out the exact tag
+commit. A failed, skipped, or cancelled qualification therefore cannot
+promote any official release channel.
 
 ### 7. Make the GHCR package public (first release only)
 
@@ -171,8 +183,9 @@ After that first change:
 Once both workflows complete:
 
 - [ ] Check the [GitHub Releases](https://github.com/trickle-labs/pg-trickle/releases) page for the new release
-- [ ] Verify all three platform archives are attached (`.tar.gz` for Linux/macOS, `.zip` for Windows)
+- [ ] Verify all four platform archives are attached: Linux amd64/arm64 and macOS arm64 (`.tar.gz`), plus Windows amd64 (`.zip`)
 - [ ] Verify `SHA256SUMS.txt` is present
+- [ ] Verify `RELEASE-EVIDENCE.json` reports the test tier for each artifact
 - [ ] Verify the extension image is available at `ghcr.io/trickle-labs/pg_trickle-ext:<version>`
 - [ ] Verify the PGXN upload succeeded: `pgxn info pg_trickle` should show the new version
 - [ ] Optionally verify the extension image layout:
