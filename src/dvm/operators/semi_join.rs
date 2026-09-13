@@ -195,19 +195,16 @@ pub fn diff_semi_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .map(|c| quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    // Part 2 must inspect the pre-change left state. The live snapshot also
-    // contains left INSERTs, which would otherwise be emitted a second time
-    // when the same mutation changes the right-side match status.
-    let left_old_snapshot = format!(
+    // Part 2 handles only left rows unchanged in this cycle. Remove INSERTs
+    // from the live snapshot; deleted rows are absent and Part 1 handles them.
+    let left_unchanged_snapshot = format!(
         "(SELECT {left_col_list} FROM {left_snapshot_raw} __left_current \
          EXCEPT ALL \
-         SELECT {left_col_list} FROM {delta_left} WHERE __pgt_action = 'I' \
-         UNION ALL \
-         SELECT {left_col_list} FROM {delta_left} WHERE __pgt_action = 'D')",
+         SELECT {left_col_list} FROM {delta_left} WHERE __pgt_action = 'I')",
         delta_left = left_result.cte_name,
     );
     let left_snapshot_filtered = if equi_keys.is_empty() {
-        left_old_snapshot
+        left_unchanged_snapshot
     } else {
         let filters: Vec<String> = equi_keys
             .iter()
@@ -219,7 +216,7 @@ pub fn diff_semi_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             })
             .collect();
         format!(
-            "(SELECT * FROM {left_old_snapshot} \"__pgt_pre\" WHERE {filters})",
+            "(SELECT * FROM {left_unchanged_snapshot} \"__pgt_pre\" WHERE {filters})",
             filters = filters.join(" AND "),
         )
     };

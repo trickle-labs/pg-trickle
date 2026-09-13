@@ -371,6 +371,10 @@ fn child_to_from_sql(
     }
 }
 
+fn child_from_has_outer_where(child: &OpTree) -> bool {
+    matches!(child, OpTree::Filter { .. })
+}
+
 /// Reconstruct an aggregate function call as SQL text for the rescan CTE.
 ///
 /// Handles regular aggregates (`BIT_AND(flags)`), aggregates with DISTINCT,
@@ -619,10 +623,9 @@ fn build_intermediate_agg_delta(
         build_group_filter(delta_cte, group_by, group_output)
     };
 
-    // Determine WHERE/AND connector based on existing WHERE in from_sql.
-    // Only check for WHERE at the outer level — if from_sql is a subquery
-    // (starts with '('), any WHERE inside is internal to the subquery.
-    let has_outer_where = from_sql.contains(" WHERE ") && !from_sql.starts_with('(');
+    // A root Filter adds WHERE after the reconstructed FROM fragment, even
+    // when that fragment starts with a projected subquery.
+    let has_outer_where = child_from_has_outer_where(child);
     let where_connector = if group_filter.is_empty() {
         String::new()
     } else if has_outer_where {
@@ -1034,11 +1037,8 @@ fn build_rescan_cte(
             build_group_filter(delta_cte, group_by, group_output)
         };
 
-        // If the child is a Filter, the FROM already includes WHERE.
-        // We need to use AND instead of WHERE for the group filter.
-        // Only check for WHERE at the outer level — if from_sql is a
-        // subquery (starts with '('), any WHERE inside is internal.
-        let has_outer_where = from_sql.contains(" WHERE ") && !from_sql.starts_with('(');
+        // A root Filter already added WHERE to the reconstructed FROM clause.
+        let has_outer_where = child_from_has_outer_where(child);
         if group_filter.is_empty() {
             format!(
                 "SELECT {selects}\nFROM {from_sql}{group_by}",
