@@ -537,12 +537,41 @@ freeze the core IVM engine. v0.105.0 through v0.105.2 perform qualification.
 | [v0.105.1](roadmap/v0.105.1.md) | Runtime conformance and recovery: delegated Graph V1 source authorization, Graph V1 and Delta V1 conformance, DVM correctness, WAL fault handling, rollback, and upgrade behavior | "Supported contracts behave correctly under delegated access, failure, and replay." | ✅ Released | Large | [Full details](roadmap/v0.105.1.md) |
 | [v0.105.2](roadmap/v0.105.2.md) | Package, upgrade, performance, and field validation: supported artifacts, active-data upgrades, workload budgets, and operator procedures | "The released build works in the environments we support." | ✅ Released | Large | [Full details](roadmap/v0.105.2.md) |
 
+### Correctness and consolidation after v0.105.2
+
+The [post-v0.105.2 assessment](pg-trickle-v0.105.2-assessment.md) identifies
+a known DVM correction and gaps between qualification plans and executed
+release evidence. The v0.105.2 release status records publication, not proof
+that every planned qualification ran. The next releases close those gaps
+within the existing PostgreSQL-native product and frozen Graph V1 and Delta V1
+contracts.
+
+| Version | Theme | User promise | Status | Scope | Full details |
+|---------|-------|--------------|--------|-------|--------------|
+| [v0.105.3](roadmap/v0.105.3.md) | DVM corrections, affected-state recovery, and qualification required for every publication channel | "Known wrong-result cases are fixed, and every release channel waits for qualification." | Planned | Patch | [Full details](roadmap/v0.105.3.md) |
+| [v0.106.0](roadmap/v0.106.0.md) | Executed package evidence, live pending-data upgrades, platform tiers, and measured database budgets | "Package support and performance claims identify the tests and measurements behind them." | Planned | Large | [Full details](roadmap/v0.106.0.md) |
+| [v0.107.0](roadmap/v0.107.0.md) | Runtime-backed support summary, semantic and lifecycle depth, and independently tested operator procedures | "The documentation explains what my query will do and how to recover it." | Planned | Medium | [Full details](roadmap/v0.107.0.md) |
+| [v0.108.0](roadmap/v0.108.0.md) | At most two internal changes selected by reproduced defects or workload measurements | "Core changes fix proven defects or reduce measured database cost while preserving incremental results." | Planned, conditional on measurements | Small | [Full details](roadmap/v0.108.0.md) |
+
+Release v0.105.3 first. Qualification and documentation work can proceed
+alongside the patch, but cannot delay the known correction. v0.106.0 supplies
+the evidence used by v0.107.0 and any v0.108.0 optimization. If profiling finds
+no justified change, defer v0.108.0 and retain the measurements.
+
+This phase adds no SQL families, public contract versions, capture backends,
+integrations, or autonomous controller actions. Preserve committed changes and
+prefer differential maintenance wherever supported. Whole-query `FULL` remains
+a visible fallback of last resort. The 72-hour soak, longevity environment,
+release candidates, and v1.0 release remain deferred indefinitely.
+
 ### Toward v1.0
 
 The mandatory lifecycle path is v0.87.17 → v0.88.0 → v0.91.0 → v0.92.0
 → v0.93.0 → v0.94.0 → v0.95.0 → v0.96.0 → v0.97.0 → v0.98.0 → v0.98.1
 → v0.99.0 → v0.100.0 → v0.101.0 → v0.102.0 → v0.103.0 → v0.104.0
-→ v0.105.0 → v0.105.1 → v0.105.2 → deferred v1.0 qualification.
+→ v0.105.0 → v0.105.1 → v0.105.2 → v0.105.3 → v0.106.0 → v0.107.0
+→ deferred v1.0 qualification. v0.108.0 follows only if measurements justify
+an internal change and does not add a mandatory v1.0 gate.
 v0.89.0 and v0.90.0 form a parallel performance and product track after
 v0.88.0. Their research and unproven automation do not block lifecycle work.
 
@@ -551,10 +580,13 @@ behavior. v0.98.1 freezes that result and qualifies one exact candidate. The
 [series assessment](roadmap/v0.98.x.md) defines the boundary. v0.99.0 through
 v0.104.0 then execute the finite IVM program defined by the September 2026
 assessment. The final feature freeze begins after v0.104.0. v0.105.0 through
-v0.105.2 accept only qualification work and release-blocking fixes.
+v0.105.3 accept only qualification work and release-blocking fixes.
+v0.106.0 and v0.107.0 close the evidence and support-contract gaps identified
+after v0.105.2. v0.108.0 permits only measured internal improvements within
+that same feature freeze.
 
 The release-candidate series and `v1.0.0` are deferred indefinitely. When that
-work resumes, `v1.0.0-rc.N` will follow the latest qualified v0.105 release,
+work resumes, `v1.0.0-rc.N` will follow the latest qualified pre-1.0 release,
 and 1.0.0 will be tagged only after a candidate has been in the field without
 a new blocker. PostgreSQL 19 support is not a 1.0 blocker. PG 19 GA and pgrx
 support are outside this project's control and do not delay the finished PG 18
@@ -575,8 +607,11 @@ contract.
 > that lack proof, and v0.98.1 qualifies the corrected baseline. v0.99.0 through
 > v0.104.0 close the assessed contract,
 > execution, state, performance, workload-control, and extension gaps.
-> v0.105.0 through v0.105.2 qualify the frozen result. Long-running soak and
-> longevity gates remain deferred until 1.0 qualification resumes.
+> v0.105.0 through v0.105.2 establish the qualification machinery.
+> v0.105.3 through v0.107.0 address the assessed correctness, execution-evidence,
+> and operator-validation gaps. v0.108.0 is conditional on measured benefit.
+> Long-running soak and longevity gates remain deferred until 1.0
+> qualification resumes.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
@@ -776,6 +811,13 @@ v0.88    ─── Safe engine optimization: DiffContext split, narrow vector pa
     │   v0.105.1 ─── Runtime conformance and recovery qualification
     │   │
     │   v0.105.2 ─── Package, upgrade, performance, and field validation
+    │   │
+    │   v0.105.3 ─── DVM corrections and release publication safety
+    │   │
+    │   v0.106.0 ─── Executed package qualification and database cost
+    │   │
+    │   v0.107.0 ─── Verified support and operator procedures
+    │   │   └── v0.108.0: measured core improvements, only if justified
     │   │
     │   v1.0-rc  ─── Deferred indefinitely: blockers only, no new features
     │   │
@@ -1172,10 +1214,16 @@ one frozen candidate. The September 2026 assessment drives v0.99.0 through
 v0.105.2. v0.105.1 also qualifies delegated Graph V1 source authorization
 without changing the frozen SQL signatures or contract versions. An authorized
 `pg-mdm` execution role owns its graph members while source owners grant schema
-`USAGE` and table `SELECT` plus `MAINTAIN`. These releases qualify the frozen
-contracts, runtime behavior, supported packages, upgrades, and field procedures.
-The 72-hour mixed-workload soak, longevity environment, release candidates, and
-v1.0 release remain deferred indefinitely.
+`USAGE` and table `SELECT` plus `MAINTAIN`. These releases establish machinery
+for qualifying frozen contracts, runtime behavior, packages, upgrades, and
+field procedures. The post-v0.105.2 assessment identifies checks that this
+machinery does not yet execute. v0.105.3 ships the known DVM correction and
+blocks every publication channel on qualification. v0.106.0 binds support and
+budget claims to package execution. v0.107.0 verifies support documentation and
+operator procedures. v0.108.0 permits at most two measured internal improvements
+and can be deferred if profiling justifies no change. The 72-hour mixed-workload
+soak, longevity environment, release candidates, and v1.0 release remain
+deferred indefinitely.
 
 **The distributed work has moved past 1.0.** External workers, external CDC
 consumers, Kubernetes operators, distributed delta computation, cross-cluster
