@@ -17,19 +17,14 @@
 #   2. smoke-test     — validate the amd64 image
 #   3. merge          — combine digests into a multi-arch manifest & push tags
 #
-# Triggers:
-#   - push tags v* (production releases)
-#   - workflow_dispatch (manual run)
-#   - schedule: weekly on Sundays (catch upstream base-image regressions)
+# Triggered only after the Release workflow completes successfully for a tag.
 # =============================================================================
 name: GHCR image (build + publish)
 
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
-  schedule:
-    - cron: '0 5 * * 0'   # Every Sunday at 05:00 UTC
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,13 +43,20 @@ permissions:
 jobs:
   preflight:
     name: Version sync check
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Check version references are in sync
-        run: ./scripts/check_version_sync.sh
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: ./scripts/check_version_sync.sh --expected-tag "$RELEASE_TAG"
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 1: Build each platform natively and push by digest
@@ -78,16 +80,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Derive version
         id: version
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-            VERSION="${VERSION}-dev"
-          fi
+          VERSION="${RELEASE_TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
 
@@ -145,6 +146,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Download amd64 digest
         uses: actions/download-artifact@v8
@@ -257,22 +260,24 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   merge:
     name: Merge + publish manifest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
     needs: [build, smoke-test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Derive version
         id: version
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-            VERSION="${VERSION}-dev"
-          fi
+          VERSION="${RELEASE_TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
@@ -283,7 +288,7 @@ jobs:
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}-pg${{ env.PG_MINOR }}
             type=raw,value=pg18
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest
           labels: |
             org.opencontainers.image.title=pg_trickle
             org.opencontainers.image.description=PostgreSQL ${{ env.PG_MINOR }} with pg_trickle streaming tables and incremental view maintenance

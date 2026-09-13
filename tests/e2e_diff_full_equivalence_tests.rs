@@ -15,6 +15,9 @@
 //! Prerequisites: `./tests/build_e2e_image.sh` or `just test-e2e`
 
 mod e2e;
+#[allow(dead_code)]
+#[path = "conformance/reference_clients.rs"]
+mod reference_clients;
 
 use e2e::E2eDb;
 
@@ -863,4 +866,226 @@ async fn test_diff_full_equivalence_topk() {
     db.refresh_st("dfe_topk_st").await;
     db.assert_st_matches_query("dfe_topk_st", q).await;
     assert_differential_mode(&db, "dfe_topk_st").await;
+}
+
+#[tokio::test]
+async fn test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE dfe_exists_left (\
+             id INT PRIMARY KEY, join_key INT, grp TEXT, amount INT\
+         )",
+    )
+    .await;
+    db.execute("CREATE TABLE dfe_exists_right (id INT PRIMARY KEY, join_key INT)")
+        .await;
+    db.execute(
+        "INSERT INTO dfe_exists_left VALUES \
+         (1, 1, 'duplicate', 10), (2, 1, 'duplicate', 10), \
+         (3, 2, 'last', 7), (4, 3, 'gone', 9), (5, NULL, 'null-key', 11)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO dfe_exists_right VALUES \
+         (101, 1), (102, 1), (201, 2), (301, 3)",
+    )
+    .await;
+
+    let exists_query = "SELECT l.grp, l.amount \
+                        FROM dfe_exists_left l \
+                        WHERE EXISTS (SELECT 1 FROM dfe_exists_right r \
+                                      WHERE r.join_key = l.join_key)";
+    let exists_aggregate_query = "SELECT grp, COUNT(*) AS row_count, \
+                                  SUM(amount) AS total_amount \
+                                  FROM dfe_exists_output_st GROUP BY grp";
+    let not_exists_query = "SELECT l.grp, COUNT(*) AS row_count, \
+                            SUM(l.amount) AS total_amount \
+                            FROM dfe_exists_left l \
+                            WHERE NOT EXISTS (SELECT 1 FROM dfe_exists_right r \
+                                              WHERE r.join_key = l.join_key) \
+                            GROUP BY l.grp";
+
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'dfe_exists_output_st',\
+             query => $query${exists_query}$query$,\
+             schedule => '1h',\
+             refresh_mode => 'DIFFERENTIAL',\
+             initialize => false,\
+             orchestration_mode => 'EXTERNAL'\
+         )"
+    ))
+    .await;
+    db.create_st("dfe_not_exists_st", not_exists_query, "1h", "DIFFERENTIAL")
+        .await;
+
+    let exists_root = "public.dfe_exists_output_st";
+    let contract_digest = reference_clients::stream_contract_digest(&db.pool, exists_root).await;
+    let consumer = reference_clients::register(
+        &db.pool,
+        exists_root,
+        "dfe_exists_regression_consumer",
+        &contract_digest,
+    )
+    .await;
+    let graph_digest = reference_clients::graph_digest(&db.pool, exists_root).await;
+    reference_clients::refresh_graph(&db.pool, exists_root, &graph_digest).await;
+    db.assert_st_matches_query("dfe_exists_output_st", exists_query)
+        .await;
+    db.assert_st_matches_query("dfe_not_exists_st", not_exists_query)
+        .await;
+    // EXTERNAL tables are intentionally created unpopulated; this first graph
+    // refresh bootstraps their snapshot and is therefore a FULL refresh.
+    assert_differential_mode(&db, "dfe_not_exists_st").await;
+    db.create_st(
+        "dfe_exists_aggregate_st",
+        exists_aggregate_query,
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("dfe_exists_aggregate_st", exists_aggregate_query)
+        .await;
+    assert_differential_mode(&db, "dfe_exists_aggregate_st").await;
+
+    let mut tx = db.pool.begin().await.expect("begin baseline resnapshot");
+    let (resnapshot_token, log_head) =
+        reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    assert!(log_head > 0, "initial refresh must publish a baseline");
+    assert_eq!(
+        reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &resnapshot_token).await,
+        "ACTIVE"
+    );
+    tx.commit().await.expect("commit baseline resnapshot");
+
+    // Both inputs change before refresh. This includes a deleted left row and
+    // its last right match, plus duplicate left and right matches.
+    db.execute("DELETE FROM dfe_exists_left WHERE id = 4").await;
+    db.execute("INSERT INTO dfe_exists_left VALUES (6, 4, 'first', 5)")
+        .await;
+    db.execute("DELETE FROM dfe_exists_right WHERE id IN (101, 201, 301)")
+        .await;
+    db.execute("INSERT INTO dfe_exists_right VALUES (401, 4)")
+        .await;
+
+    let graph_digest = reference_clients::graph_digest(&db.pool, exists_root).await;
+    reference_clients::refresh_graph(&db.pool, exists_root, &graph_digest).await;
+    db.refresh_st("dfe_not_exists_st").await;
+    db.refresh_st("dfe_exists_aggregate_st").await;
+    db.assert_st_matches_query("dfe_exists_output_st", exists_query)
+        .await;
+    db.assert_st_matches_query("dfe_not_exists_st", not_exists_query)
+        .await;
+    db.assert_st_matches_query("dfe_exists_aggregate_st", exists_aggregate_query)
+        .await;
+    assert_differential_mode(&db, "dfe_exists_output_st").await;
+    assert_differential_mode(&db, "dfe_not_exists_st").await;
+    assert_differential_mode(&db, "dfe_exists_aggregate_st").await;
+
+    let batch = reference_clients::pending_batch(&db.pool, &consumer.consumer_id).await;
+    assert_eq!(batch.mode, "EXACT");
+    assert_eq!(batch.row_count, 3);
+    let delta_sql = format!(
+        "SELECT action, grp, amount FROM {} \
+         ORDER BY action, grp",
+        consumer.delta_relation
+    );
+    let deltas: Vec<(String, String, i32)> = sqlx::query_as(sqlx::AssertSqlSafe(delta_sql))
+        .fetch_all(&db.pool)
+        .await
+        .expect("read exact output-delta rows");
+    assert_eq!(
+        deltas,
+        vec![
+            ("DELETE".into(), "gone".into(), 9),
+            ("DELETE".into(), "last".into(), 7),
+            ("INSERT".into(), "first".into(), 5),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_filter_above_projected_subquery_with_inner_where() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_projected_filter (id INT PRIMARY KEY, grp TEXT, amount INT)")
+        .await;
+    db.execute(
+        "INSERT INTO dfe_projected_filter VALUES \
+         (1, 'a', 10), (2, 'a', -5), (3, 'b', 0)",
+    )
+    .await;
+
+    let query = "SELECT projected.grp, COUNT(*) AS row_count, \
+                 SUM(projected.amount) AS total_amount \
+                 FROM (SELECT grp, amount FROM dfe_projected_filter \
+                       WHERE amount <> 0) projected \
+                 WHERE projected.amount > 0 \
+                 GROUP BY projected.grp";
+    db.create_st("dfe_projected_filter_st", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("dfe_projected_filter_st", query)
+        .await;
+    assert_differential_mode(&db, "dfe_projected_filter_st").await;
+
+    db.execute("UPDATE dfe_projected_filter SET amount = 0 WHERE id = 1")
+        .await;
+    db.execute("UPDATE dfe_projected_filter SET amount = 8 WHERE id = 2")
+        .await;
+    db.execute("UPDATE dfe_projected_filter SET amount = 9 WHERE id = 3")
+        .await;
+    db.refresh_st("dfe_projected_filter_st").await;
+
+    db.assert_st_matches_query("dfe_projected_filter_st", query)
+        .await;
+    assert_differential_mode(&db, "dfe_projected_filter_st").await;
+}
+
+#[tokio::test]
+async fn test_diff_reinitialize_repairs_one_table_after_committed_source_change() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE dfe_repair_source (id INT PRIMARY KEY, value TEXT)")
+        .await;
+    db.execute("CREATE TABLE dfe_repair_unrelated_source (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO dfe_repair_source VALUES (1, 'before')")
+        .await;
+    db.execute("INSERT INTO dfe_repair_unrelated_source VALUES (10)")
+        .await;
+    db.create_st(
+        "dfe_repair_st",
+        "SELECT id, value FROM dfe_repair_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "dfe_repair_unrelated_st",
+        "SELECT id FROM dfe_repair_unrelated_source",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Simulate an inconsistent stored snapshot while bypassing the direct-DML
+    // guard; reinitialize must rebuild it from the committed source data.
+    db.execute_seq(&[
+        "SET pg_trickle.internal_refresh = 'true'",
+        "DELETE FROM dfe_repair_st WHERE id = 1",
+        "RESET pg_trickle.internal_refresh",
+    ])
+    .await;
+    db.execute("INSERT INTO dfe_repair_source VALUES (2, 'committed')")
+        .await;
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('dfe_repair_st')")
+        .await;
+    db.refresh_st("dfe_repair_st").await;
+
+    db.assert_st_matches_query("dfe_repair_st", "SELECT id, value FROM dfe_repair_source")
+        .await;
+    db.assert_st_matches_query(
+        "dfe_repair_unrelated_st",
+        "SELECT id FROM dfe_repair_unrelated_source",
+    )
+    .await;
+    assert_eq!(db.count("public.dfe_repair_st").await, 2);
 }

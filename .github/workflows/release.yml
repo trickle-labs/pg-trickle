@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Check version references are in sync
-        run: ./scripts/check_version_sync.sh
+        run: ./scripts/check_version_sync.sh --expected-tag "$GITHUB_REF_NAME"
 
       - name: Setup pgrx environment (for the DVM release gate's build-dependent checks)
         uses: ./.github/actions/setup-pgrx
@@ -87,6 +87,10 @@ jobs:
       - name: v0.105.2 package and field qualification release gate
         if: github.ref_name == 'v0.105.2'
         run: python3 scripts/v0_105_2_release_gate.py
+
+      - name: v0.105.3 DVM and publication qualification release gate
+        if: github.ref_name == 'v0.105.3'
+        run: python3 scripts/v0_105_3_release_gate.py
 
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
@@ -375,7 +379,7 @@ jobs:
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
   qualification:
-    name: Packaged v0.105.2 package and field qualification
+    name: Packaged v0.105.3 correctness and release qualification
     needs: build-release
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -401,13 +405,15 @@ jobs:
           test -f candidate/usr/share/postgresql/18/extension/pg_trickle.control
           test -f candidate/usr/lib/postgresql/18/lib/pg_trickle.so
 
-      - name: Run packaged v0.105.2 package and field qualification
+      - name: Run packaged v0.105.3 correctness and release qualification
         env:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/candidate
         run: |
           mkdir -p qualification-logs
           set -o pipefail
           : > qualification-logs/runtime-qualification.log
+          python3 scripts/v0_105_3_release_gate.py 2>&1 | \
+            tee qualification-logs/publication-gate.log
           for test_target in \
             e2e_v104_conformance_tests \
             e2e_dvm_composition_tests \
@@ -419,6 +425,40 @@ jobs:
             e2e_diagnostics_tests; do
             bash ./scripts/run_light_e2e_tests.sh --test "$test_target" 2>&1 | \
               tee -a qualification-logs/runtime-qualification.log
+          done
+          echo "Reproduce reported regressions against v0.105.2"
+          PRE_FIX_ARCHIVE="pg_trickle-0.105.2-pg18-linux-amd64.tar.gz"
+          curl --fail --location --retry 3 \
+            "https://github.com/trickle-labs/pg-trickle/releases/download/v0.105.2/${PRE_FIX_ARCHIVE}" \
+            --output "qualification-logs/${PRE_FIX_ARCHIVE}"
+          sha256sum "qualification-logs/${PRE_FIX_ARCHIVE}" \
+            | tee qualification-logs/pre-fix-artifact-digest.log
+          mkdir -p previous-candidate
+          tar xzf "qualification-logs/${PRE_FIX_ARCHIVE}" \
+            -C previous-candidate --strip-components=1
+          mkdir -p previous-candidate/usr/share/postgresql/18 \
+            previous-candidate/usr/lib/postgresql/18
+          cp -a previous-candidate/extension previous-candidate/usr/share/postgresql/18/
+          cp -a previous-candidate/lib previous-candidate/usr/lib/postgresql/18/
+          for test_name in \
+            test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes \
+            test_diff_aggregate_filter_above_projected_subquery_with_inner_where; do
+            log="qualification-logs/pre-fix-${test_name}.log"
+            if PGT_EXTENSION_DIR="$GITHUB_WORKSPACE/previous-candidate" \
+              cargo test --features light-e2e \
+                --test e2e_diff_full_equivalence_tests "$test_name" \
+                -- --exact --nocapture > "$log" 2>&1; then
+              cat "$log"
+              echo "ERROR: ${test_name} unexpectedly passed on v0.105.2"
+              exit 1
+            fi
+            if ! grep -Fq "test ${test_name} ... FAILED" "$log" || \
+               grep -Eiq 'docker.*(permission denied|unavailable)|failed to get mapped port|timed out waiting for PostgreSQL|connection refused' "$log"; then
+              cat "$log"
+              echo "ERROR: ${test_name} did not produce a usable v0.105.2 regression result"
+              exit 1
+            fi
+            echo "Confirmed expected regression on v0.105.2: ${test_name}"
           done
           # Release runners do not install `just`; keep this equivalent to
           # the repository's upgrade-check CI job.
@@ -500,15 +540,18 @@ jobs:
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
             --candidate-commit "$GITHUB_SHA" \
-            --qualification tests/release/v0.105.2-qualification.json \
+            --qualification tests/release/v0.105.3-qualification.json \
             --capability-manifest docs/capability-manifest.json \
             --postgresql-version "$POSTGRESQL_VERSION" \
-            --suite-version "0.105.2" \
-            --workload "packaged v0.105.2 package and field qualification" \
+            --suite-version "0.105.3" \
+            --workload "packaged v0.105.3 correctness and release qualification" \
             --artifact release-files/*.tar.gz release-files/*.zip \
             --suite graph-v1=passed \
             --suite delta-v1=passed \
             --suite dvm-oracle=passed \
+            --suite pre-fix-reproduction=passed \
+            --suite affected-state-repair=passed \
+            --suite publication-gate=passed \
             --suite recovery=passed \
             --suite wal-admission=passed \
             --suite upgrade-chain=passed \
@@ -519,6 +562,10 @@ jobs:
             --suite monitoring-contract=passed \
             --suite release-artifact-smoke=passed \
             --log release-files/runtime-qualification.log \
+            --log release-files/publication-gate.log \
+            --log release-files/pre-fix-artifact-digest.log \
+            --log release-files/pre-fix-test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes.log \
+            --log release-files/pre-fix-test_diff_aggregate_filter_above_projected_subquery_with_inner_where.log \
             --log release-files/performance-qualification.log
 
       - name: Generate checksums
@@ -558,7 +605,7 @@ jobs:
   # amd64 and arm64 run in parallel, then a manifest is merged.
   publish-docker-arch:
     name: Docker image (${{ matrix.arch }})
-    needs: [build-release, test-release]
+    needs: [build-release, test-release, qualification]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
@@ -670,3 +717,28 @@ jobs:
 
           echo "Multi-arch manifest created for ${IMAGE}:${VERSION}"
           docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+  # A skipped qualification job does not necessarily make the workflow itself
+  # fail. Make the workflow conclusion fail closed so workflow_run publishers
+  # cannot mistake skipped release gates for a successful release.
+  publication-result:
+    name: Require every release stage to succeed
+    if: always()
+    needs: [build-release, test-release, qualification, publish-release, publish-docker-arch, publish-docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject failed or skipped release stages
+        env:
+          BUILD: ${{ needs.build-release.result }}
+          SMOKE: ${{ needs.test-release.result }}
+          QUALIFICATION: ${{ needs.qualification.result }}
+          GITHUB_RELEASE: ${{ needs.publish-release.result }}
+          CNPG_IMAGES: ${{ needs.publish-docker-arch.result }}
+          CNPG_MANIFEST: ${{ needs.publish-docker.result }}
+        run: |
+          for stage in "$BUILD" "$SMOKE" "$QUALIFICATION" "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
+            if [[ "$stage" != "success" ]]; then
+              echo "Release stage ended as $stage; release workflow must not be successful."
+              exit 1
+            fi
+          done

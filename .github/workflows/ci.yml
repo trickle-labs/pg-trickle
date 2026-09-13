@@ -629,6 +629,12 @@ jobs:
       - name: Validate capability manifest
         run: python3 scripts/generate_capability_manifest.py --check
 
+      - name: Validate v0.105.3 qualification and publication gates
+        run: |
+          if grep -q '^version = "0.105.3"$' Cargo.toml; then
+            python3 scripts/v0_105_3_release_gate.py
+          fi
+
       - name: Check SQL reference completeness (DX-2)
         run: python3 scripts/gen_sql_reference.py
 

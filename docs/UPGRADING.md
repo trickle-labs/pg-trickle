@@ -2,6 +2,73 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.105.2 to 0.105.3
+
+Install the v0.105.3 library and extension files, then apply the metadata-only
+upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.105.3';
+```
+
+This patch includes the DVM corrections from PR #1011; it does not change
+catalog shape or automatically repair rows materialized by an older release.
+The following query shapes may have produced incorrect results:
+
+- Aggregate plans with an outer filter above a projected subquery that also
+  contains a `WHERE`: potentially affected from v0.87.14 through v0.105.2.
+- `EXISTS` / `NOT EXISTS` plans when a left row is deleted in the same refresh
+  as a right-side change: potentially affected from v0.87.16 through v0.105.2.
+
+These ranges identify where the relevant implementations were present, not
+that every query in the range is wrong. Review the defining queries of
+differential stream tables with those shapes. At a stable committed boundary,
+compare each candidate with its defining query using bag semantics; run the
+comparison in one repeatable-read snapshot and substitute the actual output
+columns and defining query:
+
+```sql
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+
+WITH expected AS MATERIALIZED (
+    <defining query>
+),
+actual AS MATERIALIZED (
+    TABLE public.my_stream_table
+)
+SELECT 'extra in stream table' AS difference, diff.*
+FROM (
+    SELECT * FROM actual
+    EXCEPT ALL
+    SELECT * FROM expected
+) AS diff
+UNION ALL
+SELECT 'missing from stream table' AS difference, diff.*
+FROM (
+    SELECT * FROM expected
+    EXCEPT ALL
+    SELECT * FROM actual
+) AS diff;
+
+COMMIT;
+```
+
+An empty result means the stream table matches at that snapshot. For each
+mismatch, reinitialize only that stream table and let its protected full
+refresh rebuild the materialization from committed source data:
+
+```sql
+SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
+SELECT pgtrickle.refresh_stream_table('public.my_stream_table');
+```
+
+This does not discard committed source changes or require rebuilding unrelated
+stream tables. Recheck downstream stream tables if they consume the repaired
+table. Delta V1 consumers must honor `INVALIDATED` / `RESNAPSHOT_REQUIRED`
+state; capture a new snapshot with `begin_output_delta_resnapshot`, read the
+stream table at that boundary, and complete it with
+`ack_output_delta_resnapshot` before applying further deltas.
+
 ## 0.103.0 to 0.104.0
 
 Install the v0.104.0 shared library and extension files, then run the upgrade
