@@ -916,31 +916,32 @@ jobs:
           restore-keys: |
             v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
-      - name: Restore Criterion baseline
-        id: restore-baseline
-        uses: actions/cache/restore@v6
-        with:
-          path: target/criterion
-          key: criterion-baseline-${{ github.event.pull_request.base.sha }}
-
-      - name: Run benchmarks
-        if: steps.restore-baseline.outputs.cache-hit == 'true'
+      - name: Fetch PR base for a same-run benchmark baseline
         run: |
-          find target/criterion -type d -name new -prune -exec rm -rf {} +
-          ./scripts/run_benchmarks.sh
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git worktree add --detach "$RUNNER_TEMP/benchmark-base" FETCH_HEAD
+
+      - name: Measure PR base
+        run: |
+          BENCH_PROJECT_DIR="$RUNNER_TEMP/benchmark-base" ./scripts/run_benchmarks.sh -- --save-baseline base
         env:
           BENCH_QUICK: "1"
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+      - name: Clear PR base's current estimates
+        run: find target/criterion -type d -name new -prune -exec rm -rf {} +
+
+      - name: Measure PR candidate
+        run: ./scripts/run_benchmarks.sh -- --baseline base
+        env:
+          BENCH_QUICK: "1"
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
       - name: Check for regressions
-        if: steps.restore-baseline.outputs.cache-hit == 'true'
         run: |
-          python3 scripts/criterion_regression_check.py --baseline main --require-pairs
+          python3 scripts/criterion_regression_check.py --baseline base --require-pairs
         env:
           PGT_BENCH_REGRESSION_THRESHOLD: "0.10"
-
-      - name: Explain skipped benchmark comparison
-        if: steps.restore-baseline.outputs.cache-hit != 'true'
-        run: echo "No Criterion baseline is cached for base commit ${{ github.event.pull_request.base.sha }}; comparison skipped."
 
   # ── Benchmarks (non-blocking, Linux only) ───────────────────────────────
   # Expensive; run on weekly schedule and manual dispatch only.

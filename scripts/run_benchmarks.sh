@@ -21,23 +21,25 @@
 #                      warm-up time (1s) for CI regression gates. Still sufficient
 #                      for detecting >10% regressions while cutting run time ~70%.
 #   BENCH_FEATURES   — Cargo features (default: pg18)
+#   BENCH_PROJECT_DIR — Project checkout to benchmark (default: this script's repo)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-STUB_SRC="$SCRIPT_DIR/pg_stub.c"
+PROJECT_DIR="${BENCH_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+STUB_SRC="$PROJECT_DIR/scripts/pg_stub.c"
 FEATURES="${BENCH_FEATURES:-pg18}"
 
 OS="$(uname)"
 case "$OS" in
     Darwin)
-        STUB_LIB="$PROJECT_DIR/target/libpg_stub.dylib"
+        STUB_LIB="$TARGET_DIR/libpg_stub.dylib"
         STUB_CC_FLAGS="-shared -install_name @rpath/libpg_stub.dylib"
         PRELOAD_VAR="DYLD_INSERT_LIBRARIES"
         ;;
     *)
-        STUB_LIB="$PROJECT_DIR/target/libpg_stub.so"
+        STUB_LIB="$TARGET_DIR/libpg_stub.so"
         STUB_CC_FLAGS="-shared -fPIC"
         PRELOAD_VAR="LD_PRELOAD"
         ;;
@@ -89,7 +91,7 @@ ensure_stub() {
 # ── Helper: find bench binary ────────────────────────────────────────────
 find_bench_binary() {
     local bench_name="$1"
-    local profile_dir="$PROJECT_DIR/target/release"
+    local profile_dir="$TARGET_DIR/release"
 
     # Look for the exact benchmark binary in release/deps
     if [[ "$OS" == "Darwin" ]]; then
