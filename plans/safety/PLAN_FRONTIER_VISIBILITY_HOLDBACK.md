@@ -3,7 +3,7 @@
 **Status:** Implemented
 **Owner:** TBD
 **Tracking issue:** [#536](https://github.com/trickle-labs/pg-trickle/issues/536)
-**Related:** [PLAN_OVERALL_ASSESSMENT_2.md](../PLAN_OVERALL_ASSESSMENT_2.md) (frontier/buffer non-atomic commit), ADR-001 / ADR-002 in [plans/adrs/PLAN_ADRS.md](../adrs/PLAN_ADRS.md)
+**Related:** [PLAN_OVERALL_ASSESSMENT_2.md](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_2.md) (frontier/buffer non-atomic commit), ADR-001 / ADR-002 in [plans/adrs/PLAN_ADRS.md](../adrs/PLAN_ADRS.md)
 
 ---
 
@@ -48,7 +48,7 @@ This is silent data loss, and there are currently **zero safeguards**:
 - The `BIGSERIAL` cache-1 contention claim — real but a separate tuning
   topic; tracked elsewhere
 - The non-atomic frontier-vs-buffer commit window already covered in
-  [PLAN_OVERALL_ASSESSMENT_2.md](../PLAN_OVERALL_ASSESSMENT_2.md)
+  [PLAN_OVERALL_ASSESSMENT_2.md](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_2.md)
 
 ---
 
@@ -225,6 +225,6 @@ known-clean OLTP workloads.
    WAL/logical-decoding backend can eliminate.  See issue #536 (last
    comment by @Teletele-Lin) for the full analysis.
 2. **Atomic frontier+buffer commit** — covered by
-   [PLAN_OVERALL_ASSESSMENT_2.md](../PLAN_OVERALL_ASSESSMENT_2.md).
+   [PLAN_OVERALL_ASSESSMENT_2.md](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_2.md).
 3. **WAL/logical-decoding CDC as default** — already on roadmap; this fix
    is for the trigger path that will remain the fallback.

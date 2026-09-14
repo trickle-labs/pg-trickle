@@ -342,34 +342,17 @@ If all exit criteria in the full details file's checklist are met, add:
 
 ---
 
-## Step 7 — Maintain PLAN_OVERALL_ASSESSMENT.md
+## Step 7 — Close out the release record
 
-After the version implementation is complete (all items ✅ Done or ⏭ Skipped):
+After the version implementation is complete:
 
-1. **Verify cross-references are still valid:**
-   - Open `plans/PLAN_OVERALL_ASSESSMENT.md`
-   - Scan all `→ Roadmap:` pointers (§2–§9 and tables §10)
-   - If any roadmap items were renamed, moved between milestones, or had their
-     IDs change (e.g. `EC01-1` → `EC01-2`), update the corresponding links
-   - Run this check: `grep -n "→ Roadmap:" plans/PLAN_OVERALL_ASSESSMENT.md`
-     and verify each link matches the current ROADMAP.md
-
-2. **After the version ships, create a post-mortem assessment:**
-   - Once v<VERSION> is released, document what was delivered vs. what slipped
-   - Create or update `plans/POSTMORTEM_0_<VERSION>.md` with:
-     - Which items were completed on schedule vs. late vs. skipped
-     - Why items slipped (if any) — blockers, scope underestimation, etc.
-     - Impact on downstream P1/P2 items (if the v<VERSION+1> roadmap needs
-       rebalancing)
-   - This informs prioritization of subsequent releases
-
-3. **Note status drift:**
-   - Items marked "Draft" in assessment (e.g. `PLAN_MULTI_DATABASE`,
-     `PLAN_PARALLELISM`) may be promoted or deprioritized
-   - After a major roadmap change, scan `plans/PLAN_OVERALL_ASSESSMENT.md`
-     for references to draft plans and update them if the plans changed status
-   - Example: if `PLAN_PARALLELISM` was Draft and is now actively being
-     implemented in v0.22, update the assessment to reflect that
+1. Mark the release plan's acceptance criteria as complete, deferred, or
+   rejected. Link deferred work to its current owner in `ROADMAP.md` or a
+   focused plan.
+2. Update `ROADMAP.md` and the release companion so their status and links
+   match the shipped result.
+3. Record durable design decisions in the relevant ADR or architecture
+   document. Do not create another overall assessment snapshot.
 
 ---
 
@@ -382,5 +365,5 @@ After the version implementation is complete (all items ✅ Done or ⏭ Skipped)
 - **Never skip lint** — `just lint` must pass with zero warnings before
   marking any item done
 - **Never mark an item done** if its associated tests are failing
-- **Keep PLAN_OVERALL_ASSESSMENT.md in sync** — after major roadmap edits,
-  verify all cross-references and status notes are still accurate
+- **Keep current plans in sync** — after major roadmap edits, verify that each
+  open item has a current owner and each release link resolves

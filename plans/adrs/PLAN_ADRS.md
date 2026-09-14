@@ -504,7 +504,7 @@ than full recomputation at high change rates.
 |-------|-------|
 | **Status** | Accepted |
 | **Category** | Scheduling & Runtime |
-| **Sources** | `src/scheduler/mod.rs`, `plans/PLAN_OVERALL_ASSESSMENT_13.md` |
+| **Sources** | `src/scheduler/mod.rs`, [Assessment 13 at the v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_13.md) |
 | **Decided** | v0.68.0 (SCAL-001) |
 
 **Decision:** Remove the persistent worker pool (`pool.rs`) and adopt
@@ -580,7 +580,7 @@ pg_trickle repository, not in a separate repo.
 |-------|-------|
 | **Status** | Accepted |
 | **Category** | Testing |
-| **Sources** | `AGENTS.md`, `plans/testing/STATUS_TESTING.md`, `tests/common/mod.rs` |
+| **Sources** | `AGENTS.md`, `CONTRIBUTING.md`, `tests/common/mod.rs` |
 
 **Decision:** All integration and E2E tests use Docker containers via
 testcontainers-rs and a custom E2E Docker image. Tests never assume a local

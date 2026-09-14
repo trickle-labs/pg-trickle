@@ -78,10 +78,6 @@
 
 | Post | Summary |
 |------|---------|
-| [Streaming to Kafka Without Kafka Expertise](streaming-to-kafka-without-kafka.md) | pgtrickle-relay bridges stream table deltas to Kafka, NATS, SQS, and webhooks — a single binary with TOML config, advisory-lock HA, subject routing, and Prometheus metrics. |
-| [The Relay Deep Dive: NATS, Redis Streams, and RabbitMQ](relay-deep-dive.md) | Beyond Kafka: per-backend architecture for NATS JetStream, Redis Streams, RabbitMQ, SQS, and HTTP webhooks. Subject templates, consumer groups, multi-sink pipelines, and a decision tree for choosing a backend. |
-| [The Inbox Pattern: Receiving Events from Kafka into PostgreSQL](inbox-pattern-kafka.md) | Idempotent, ordered event ingestion via the inbox table — deduplication by event ID, dead-letter queue, and stream tables that aggregate incoming events incrementally. |
-| [The Outbox You Don't Have to Build](built-in-outbox.md) | pg_trickle's built-in outbox API: `enable_outbox()`, consumer groups, `poll_outbox()`, offset tracking, exactly-once delivery, consumer lag monitoring, and cleanup. |
 | [dbt + pg_trickle: The Analytics Engineer's Stack](dbt-analytics-stack.md) | The `pgtrickle` dbt materialization: continuously-fresh models that are also version-controlled, tested, and documented. DAG alignment, freshness checks, and mixing materializations. |
 | [Distributed IVM with Citus](distributed-ivm-citus.md) | Incremental view maintenance across sharded PostgreSQL: per-worker CDC, shard-aware delta routing, co-located join push-down, and automatic recovery after shard rebalances. |
 | [pg_trickle on CloudNativePG](pg-trickle-cloudnativepg-kubernetes.md) | Production Kubernetes deployment using the CloudNativePG operator: Dockerfile, Cluster manifest, GUC configuration, HA failover behaviour, Prometheus metrics ConfigMap, alerting rules, upgrade procedure, and sizing guidance. |

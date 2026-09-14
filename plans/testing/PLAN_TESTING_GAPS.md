@@ -76,6 +76,7 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 | # | Gap | Description | Effort | Risk |
 |---|-----|-------------|--------|------|
 | 1 | J  | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
+| 2 | C4 | Prove overlap in `test_concurrent_inserts_during_refresh`; fail when the activity poll times out instead of continuing after 20 ms | 1–2h | Medium |
 
 ---
 

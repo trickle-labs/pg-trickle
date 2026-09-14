@@ -680,6 +680,6 @@ engine semantics for non-vector users; it is purely additive.
 - pgvectorscale: <https://github.com/timescale/pgvectorscale>
 - [docs/FAQ.md — Does pg_trickle work with pgvector?](../../docs/FAQ.md)
 - [roadmap/v0.37.0.md — pgVectorMV](../../roadmap/v0.37.0.md)
-- [plans/PLAN_OVERALL_ASSESSMENT_7.md — F4 pgVectorMV brief](../PLAN_OVERALL_ASSESSMENT_7.md)
+- [plans/PLAN_OVERALL_ASSESSMENT_7.md — F4 pgVectorMV brief](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_7.md)
 - [plans/patterns/PLAN_CQRS.md — pgvector as semantic read model](../patterns/PLAN_CQRS.md)
 - [plans/ecosystem/PLAN_PG_SEARCH.md — companion ParadeDB synergy report](PLAN_PG_SEARCH.md)

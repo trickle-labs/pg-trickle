@@ -27,7 +27,7 @@
 | [docs/GUC_CATALOG.md](../docs/GUC_CATALOG.md) | Generated GUC reference |
 | [docs/LIMITATIONS.md](../docs/LIMITATIONS.md) | Known limitations and unsupported SQL patterns |
 | [docs/COMPARISONS.md](../docs/COMPARISONS.md) | pg_trickle vs pg_ivm, Materialize, Feldera, DuckDB/DuckLake |
-| [plans/PLAN_OVERALL_ASSESSMENT_14.md](PLAN_OVERALL_ASSESSMENT_14.md) | v0.74.0 deep-assessment findings (drives v0.72–v0.75 arc) |
+| [plans/PLAN_OVERALL_ASSESSMENT_14.md](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_14.md) | v0.74.0 deep-assessment findings (drives v0.72–v0.75 arc) |
 
 ## Historical Archive
 

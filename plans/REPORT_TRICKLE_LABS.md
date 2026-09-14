@@ -178,7 +178,7 @@ user-facing files but should be updated for consistency:
 | File | Notes |
 |---|---|
 | `plans/PLAN_RELAY_STANDALONE.md` (lines 164, 182, 244) | References `grove/pg-trickle-relay` (see §3.4) |
-| `plans/REPORT_SUPERFLOUS_FEATURES.md` (lines 264, 286, 320) | References `grove/pg-trickle-dbt`, `grove/pg-trickle-relay`, `grove/pg-trickle-observability` |
+| [Historical pruning report at the v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md) | References `grove/pg-trickle-dbt`, `grove/pg-trickle-relay`, `grove/pg-trickle-observability` |
 | `plans/ecosystem/PLAN_CLOUDNATIVEPG.md` (lines 6, 210, 514, 546) | PR link, ARG REPO_URL example, image refs |
 | `plans/ecosystem/GAP_PG_IVM_COMPARISON.md` (lines 58, 919) | Comparison table repository column |
 | `plans/ecosystem/REPORT_READYSET.md` (line 37) | Comparison table |
@@ -301,7 +301,8 @@ new `trickle-labs` organisation.
 
 ### 3.4 Related planned repositories
 
-`plans/PLAN_RELAY_STANDALONE.md` and `plans/REPORT_SUPERFLOUS_FEATURES.md`
+`plans/PLAN_RELAY_STANDALONE.md` and the [historical pruning report at the
+v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md)
 reference future spin-off repositories:
 
 - `grove/pg-trickle-relay`
