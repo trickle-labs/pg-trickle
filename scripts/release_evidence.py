@@ -273,11 +273,27 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
         if measurement.get("kind") == "criterion":
             spec = next(item for item in contract["performance_budgets"] if item["id"] == "criterion-regression")
             value = measurement.get("maximum_mean_regression_pct")
+            raw_value = measurement.get("maximum_raw_mean_regression_pct")
             count = measurement.get("compared_benchmarks")
-            if not isinstance(value, (int, float)) or not math.isfinite(value) or not isinstance(count, int) or count < 1:
+            minimum_delta_ns = measurement.get("minimum_absolute_delta_ns")
+            subfloor_regressions = measurement.get("subfloor_regressions")
+            if (
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not isinstance(raw_value, (int, float))
+                or not math.isfinite(raw_value)
+                or raw_value < value
+                or not isinstance(count, int)
+                or count < 1
+                or not isinstance(minimum_delta_ns, (int, float))
+                or not math.isfinite(minimum_delta_ns)
+                or not isinstance(subfloor_regressions, list)
+            ):
                 raise ValueError("Criterion evidence must include compared benchmarks and maximum regression")
             if measurement.get("baseline_version") != contract.get("source_versions", [None])[0]:
                 raise ValueError("Criterion baseline does not match the previous published version")
+            if minimum_delta_ns != spec.get("minimum_absolute_delta_ns"):
+                raise ValueError("Criterion materiality floor differs from the qualification contract")
             budget_results.append({
                 "id": spec["id"],
                 "metric": spec["metric"],
@@ -287,6 +303,9 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
                 "threshold": spec["threshold"],
                 "unit": spec["unit"],
                 "compared_benchmarks": count,
+                "maximum_raw_mean_regression_pct": raw_value,
+                "minimum_absolute_delta_ns": minimum_delta_ns,
+                "subfloor_regressions": subfloor_regressions,
                 "verdict": "passed" if value <= spec["threshold"] else "failed",
             })
             continue

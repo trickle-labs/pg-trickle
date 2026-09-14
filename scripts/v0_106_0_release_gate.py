@@ -53,6 +53,7 @@ def synthetic_contract() -> dict[str, object]:
     return {
         "release_version": VERSION,
         "postgresql_major": 18,
+        "source_versions": ["0.105.3"],
         "database_settings": {
             "fsync": "on", "synchronous_commit": "on", "full_page_writes": "on",
         },
@@ -61,12 +62,20 @@ def synthetic_contract() -> dict[str, object]:
             "id": "linux-amd64", "platform": "linux-amd64",
             "support_tier": "build-only", "required": True,
         }],
-        "required_suites": [{
-            "id": "database-workloads", "kind": "measurement", "required": True,
-            "artifact_id": "linux-amd64", "runtime": True, "upgrade": False,
-            "requires_postgresql": True, "suite_version": VERSION,
-            "command": "run smoke", "workload": "single smoke workload",
-        }],
+        "required_suites": [
+            {
+                "id": "database-workloads", "kind": "measurement", "required": True,
+                "artifact_id": "linux-amd64", "runtime": True, "upgrade": False,
+                "requires_postgresql": True, "suite_version": VERSION,
+                "command": "run smoke", "workload": "single smoke workload",
+            },
+            {
+                "id": "criterion-regression", "kind": "measurement", "required": True,
+                "artifact_id": "linux-amd64", "runtime": False, "upgrade": False,
+                "requires_postgresql": False, "suite_version": VERSION,
+                "command": "run Criterion", "workload": "small Criterion comparison",
+            },
+        ],
         "workloads": [{
             "id": "demo", "population_rows": 1, "batch_rows": 120,
             "offered_load": {
@@ -93,7 +102,7 @@ def synthetic_contract() -> dict[str, object]:
             },
         }],
         "performance_budgets": [
-            {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "unit": "percent"},
+            {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "minimum_absolute_delta_ns": 50, "unit": "percent"},
             {"id": "foreground-write-overhead", "metric": "source_write_p95_overhead_pct", "threshold": 15, "unit": "percent"},
         ],
     }
@@ -216,11 +225,60 @@ def invoke_writer(case: str) -> tuple[int, str]:
             "attachments": [],
         }
         result_path.write_text(json.dumps(record), encoding="utf-8")
+        criterion_measurement = {
+            "kind": "criterion",
+            "candidate_commit": CANDIDATE,
+            "artifact_digest": artifact_digest,
+            "baseline_version": "v0.105.3" if case == "criterion-baseline-mismatch" else "0.105.3",
+            "compared_benchmarks": 113,
+            "minimum_absolute_delta_ns": 49.0 if case == "criterion-floor-mismatch" else 50.0,
+            "maximum_mean_regression_pct": 0.0,
+            "maximum_raw_mean_regression_pct": 13.3,
+            "subfloor_regressions": [{
+                "label": "frontier_json/serialize/1",
+                "baseline_ns": 121.873,
+                "candidate_ns": 138.091,
+                "delta_ns": 16.218,
+                "regression_pct": 13.307,
+            }],
+        }
+        criterion_measurement_path = temp / "criterion.json"
+        criterion_measurement_path.write_text(json.dumps(criterion_measurement), encoding="utf-8")
+        criterion_measurement_bytes = criterion_measurement_path.read_bytes()
+        criterion_log = {
+            "path": log_path.relative_to(ROOT).as_posix(),
+            "bytes": log_path.stat().st_size,
+            "sha256": hashlib.sha256(log_path.read_bytes()).hexdigest(),
+        }
+        criterion_record = {
+            "suite_id": "criterion-regression",
+            "candidate_commit": CANDIDATE,
+            "artifact_id": "linux-amd64",
+            "artifact_digest": artifact_digest,
+            "platform": "linux-amd64",
+            "postgresql_version": None,
+            "suite_version": VERSION,
+            "command": "run Criterion",
+            "effective_workload": "small Criterion comparison",
+            "executed_tests": 113,
+            "skipped_tests": 0,
+            "status": "passed",
+            "log": criterion_log,
+            "measurement": criterion_measurement,
+            "measurement_evidence": {
+                "path": criterion_measurement_path.relative_to(ROOT).as_posix(),
+                "bytes": len(criterion_measurement_bytes),
+                "sha256": hashlib.sha256(criterion_measurement_bytes).hexdigest(),
+                "attachments": [],
+            },
+        }
+        criterion_result_path = temp / "criterion-suite.json"
+        criterion_result_path.write_text(json.dumps(criterion_record), encoding="utf-8")
         command = [
             sys.executable, str(ROOT / "scripts/release_evidence.py"),
             "--output", str(temp / "evidence.json"), "--version", VERSION,
             "--candidate-commit", CANDIDATE, "--qualification", str(contract_path),
-            "--suite-result", str(result_path),
+            "--suite-result", str(result_path), "--suite-result", str(criterion_result_path),
         ]
         if case != "missing-artifact":
             command.extend(["--artifact", str(artifact_path)])
@@ -276,6 +334,8 @@ def check_negative_controls() -> None:
         ("zero-tests", "executed zero tests"),
         ("empty-log", "retained log is empty"),
         ("candidate-mismatch", "different candidate commit"),
+        ("criterion-baseline-mismatch", "Criterion baseline does not match"),
+        ("criterion-floor-mismatch", "Criterion materiality floor differs"),
         ("out-of-budget", "qualification is incomplete"),
     ):
         code, output = invoke_writer(case)
@@ -301,7 +361,12 @@ def main() -> None:
     require(any(suite.get("workload", "").startswith("logical database restore") for suite in suites), "logical restore suite is missing")
     require(any(suite.get("workload", "").startswith("database clone identity") for suite in suites), "clone-isolation suite is missing")
     require(all("offered_load" in workload for workload in contract.get("workloads", [])), "fixed workload dimensions are missing")
-    require("criterion-regression" in {item.get("id") for item in contract.get("performance_budgets", [])}, "Criterion regression budget is missing")
+    criterion_budget = next(
+        (item for item in contract.get("performance_budgets", []) if item.get("id") == "criterion-regression"),
+        None,
+    )
+    require(criterion_budget is not None, "Criterion regression budget is missing")
+    require(criterion_budget.get("minimum_absolute_delta_ns") == 50.0, "Criterion materiality floor must remain 50 ns")
     require(all(item.get("limits", {}).get("source_write_p95_overhead_pct") == 15.0 for item in contract.get("workloads", [])), "source-write p95 budget must remain 15%")
 
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
