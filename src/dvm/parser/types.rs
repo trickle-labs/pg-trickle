@@ -101,11 +101,9 @@ impl Expr {
                 column_name,
             } => match table_alias {
                 Some(alias) => {
-                    buf.push('"');
-                    buf.push_str(&alias.replace('"', "\"\""));
-                    buf.push_str("\".\"");
-                    buf.push_str(&column_name.replace('"', "\"\""));
-                    buf.push('"');
+                    append_quoted_ident(buf, alias);
+                    buf.push('.');
+                    append_quoted_ident(buf, column_name);
                 }
                 None => buf.push_str(column_name),
             },
@@ -220,6 +218,32 @@ impl Expr {
             },
             _ => self.clone(),
         }
+    }
+}
+
+fn append_quoted_ident(buf: &mut String, name: &str) {
+    buf.push('"');
+    for (index, part) in name.split('"').enumerate() {
+        if index > 0 {
+            buf.push_str("\"\"");
+        }
+        buf.push_str(part);
+    }
+    buf.push('"');
+}
+
+#[cfg(test)]
+mod expr_sql_tests {
+    use super::*;
+
+    #[test]
+    fn to_sql_escapes_quoted_alias_and_column_without_changing_sql() {
+        let expression = Expr::ColumnRef {
+            table_alias: Some("t\"x".into()),
+            column_name: "c\"y".into(),
+        };
+
+        assert_eq!(expression.to_sql(), "\"t\"\"x\".\"c\"\"y\"");
     }
 }
 
@@ -2457,70 +2481,85 @@ impl OpTree {
 
     /// Get the output columns of this operator node.
     pub fn output_columns(&self) -> Vec<String> {
+        let mut columns = Vec::new();
+        self.append_output_columns(&mut columns);
+        columns
+    }
+
+    fn append_output_columns(&self, columns: &mut Vec<String>) {
         match self {
-            OpTree::Scan { columns, .. } => columns.iter().map(|c| c.name.clone()).collect(),
-            OpTree::Project { aliases, .. } => aliases.clone(),
-            OpTree::Filter { child, .. } => child.output_columns(),
+            OpTree::Scan {
+                columns: scan_columns,
+                ..
+            } => {
+                columns.extend(scan_columns.iter().map(|column| column.name.clone()));
+            }
+            OpTree::Project { aliases, .. } => columns.extend(aliases.iter().cloned()),
+            OpTree::Filter { child, .. } => child.append_output_columns(columns),
             OpTree::InnerJoin { left, right, .. }
             | OpTree::LeftJoin { left, right, .. }
             | OpTree::FullJoin { left, right, .. } => {
-                let mut cols = left.output_columns();
-                cols.extend(right.output_columns());
-                cols
+                left.append_output_columns(columns);
+                right.append_output_columns(columns);
             }
             OpTree::Aggregate {
                 group_by,
                 aggregates,
                 ..
             } => {
-                let mut cols: Vec<String> = group_by.iter().map(|e| e.output_name()).collect();
-                cols.extend(aggregates.iter().map(|a| a.alias.clone()));
-                cols
+                columns.reserve(group_by.len() + aggregates.len());
+                columns.extend(group_by.iter().map(Expr::output_name));
+                columns.extend(aggregates.iter().map(|aggregate| aggregate.alias.clone()));
             }
-            OpTree::Distinct { child } => child.output_columns(),
-            OpTree::UnionAll { children } => children
-                .first()
-                .map(|c| c.output_columns())
-                .unwrap_or_default(),
-            OpTree::Intersect { left, .. } | OpTree::Except { left, .. } => left.output_columns(),
+            OpTree::Distinct { child } => child.append_output_columns(columns),
+            OpTree::UnionAll { children } => {
+                if let Some(child) = children.first() {
+                    child.append_output_columns(columns);
+                }
+            }
+            OpTree::Intersect { left, .. } | OpTree::Except { left, .. } => {
+                left.append_output_columns(columns);
+            }
             OpTree::Subquery {
                 column_aliases,
                 child,
                 ..
             } => {
                 if column_aliases.is_empty() {
-                    child.output_columns()
+                    child.append_output_columns(columns);
                 } else {
-                    column_aliases.clone()
+                    columns.extend(column_aliases.iter().cloned());
                 }
             }
             OpTree::CteScan {
-                columns,
+                columns: cte_columns,
                 cte_def_aliases,
                 column_aliases,
                 ..
             } => {
                 if !column_aliases.is_empty() {
-                    column_aliases.clone()
+                    columns.extend(column_aliases.iter().cloned());
                 } else if !cte_def_aliases.is_empty() {
-                    cte_def_aliases.clone()
+                    columns.extend(cte_def_aliases.iter().cloned());
                 } else {
-                    columns.clone()
+                    columns.extend(cte_columns.iter().cloned());
                 }
             }
-            OpTree::RecursiveCte { columns, .. } => columns.clone(),
-            OpTree::RecursiveSelfRef { columns, .. } => columns.clone(),
+            OpTree::RecursiveCte {
+                columns: cte_columns,
+                ..
+            }
+            | OpTree::RecursiveSelfRef {
+                columns: cte_columns,
+                ..
+            } => columns.extend(cte_columns.iter().cloned()),
             OpTree::Window {
                 window_exprs,
                 pass_through,
                 ..
             } => {
-                let mut cols: Vec<String> = pass_through
-                    .iter()
-                    .map(|(_, alias)| alias.clone())
-                    .collect();
-                cols.extend(window_exprs.iter().map(|w| w.alias.clone()));
-                cols
+                columns.extend(pass_through.iter().map(|(_, alias)| alias.clone()));
+                columns.extend(window_exprs.iter().map(|window| window.alias.clone()));
             }
             OpTree::LateralFunction {
                 func_sql,
@@ -2531,16 +2570,15 @@ impl OpTree {
                 ..
             } => {
                 // Output = child columns + SRF result columns + optional ordinality
-                let mut cols = child.output_columns();
-                cols.extend(lateral_function_output_columns(
+                child.append_output_columns(columns);
+                columns.extend(lateral_function_output_columns(
                     func_sql,
                     alias,
                     column_aliases,
                 ));
                 if *with_ordinality {
-                    cols.push("ordinality".to_string());
+                    columns.push("ordinality".to_string());
                 }
-                cols
             }
             OpTree::LateralSubquery {
                 column_aliases,
@@ -2549,25 +2587,26 @@ impl OpTree {
                 ..
             } => {
                 // Output = child columns + subquery result columns
-                let mut cols = child.output_columns();
+                child.append_output_columns(columns);
                 if column_aliases.is_empty() {
-                    cols.extend(output_cols.clone());
+                    columns.extend(output_cols.iter().cloned());
                 } else {
-                    cols.extend(column_aliases.clone());
+                    columns.extend(column_aliases.iter().cloned());
                 }
-                cols
             }
             OpTree::SemiJoin { left, .. } | OpTree::AntiJoin { left, .. } => {
                 // Semi/anti-join only emits left-side columns
-                left.output_columns()
+                left.append_output_columns(columns);
             }
             OpTree::ScalarSubquery { alias, child, .. } => {
                 // Outer columns + scalar result column
-                let mut cols = child.output_columns();
-                cols.push(alias.clone());
-                cols
+                child.append_output_columns(columns);
+                columns.push(alias.clone());
             }
-            OpTree::ConstantSelect { columns, .. } => columns.clone(),
+            OpTree::ConstantSelect {
+                columns: select_columns,
+                ..
+            } => columns.extend(select_columns.iter().cloned()),
         }
     }
 
@@ -2641,7 +2680,15 @@ impl OpTree {
                 oids
             }
             OpTree::UnionAll { children } => {
-                children.iter().flat_map(|c| c.source_oids()).collect()
+                let mut oids = Vec::with_capacity(children.len());
+                for child in children {
+                    if let OpTree::Scan { table_oid, .. } = child {
+                        oids.push(*table_oid);
+                    } else {
+                        oids.extend(child.source_oids());
+                    }
+                }
+                oids
             }
             OpTree::Subquery { child, .. } => child.source_oids(),
             // CteScan OIDs are resolved via the CteRegistry at diff time

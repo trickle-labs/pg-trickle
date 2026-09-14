@@ -1122,31 +1122,45 @@ impl DiffContext {
 
 /// Helper: quote a SQL identifier.
 pub fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    let mut out =
+        String::with_capacity(name.len() + 2 + name.bytes().filter(|&byte| byte == b'"').count());
+    push_quoted_ident(&mut out, name);
+    out
+}
+
+fn push_quoted_ident(out: &mut String, name: &str) {
+    out.push('"');
+    for (index, part) in name.split('"').enumerate() {
+        if index > 0 {
+            out.push_str("\"\"");
+        }
+        out.push_str(part);
+    }
+    out.push('"');
 }
 
 /// Helper: build a comma-separated list of quoted column references.
 pub fn col_list(cols: &[String]) -> String {
-    use std::fmt::Write;
     let mut out = String::with_capacity(cols.len() * 16);
     for (i, c) in cols.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        let _ = write!(out, "{}", quote_ident(c));
+        push_quoted_ident(&mut out, c);
     }
     out
 }
 
 /// Helper: build a comma-separated list of prefixed column references.
 pub fn prefixed_col_list(prefix: &str, cols: &[String]) -> String {
-    use std::fmt::Write;
     let mut out = String::with_capacity(cols.len() * (prefix.len() + 18));
     for (i, c) in cols.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        let _ = write!(out, "{prefix}.{}", quote_ident(c));
+        out.push_str(prefix);
+        out.push('.');
+        push_quoted_ident(&mut out, c);
     }
     out
 }
