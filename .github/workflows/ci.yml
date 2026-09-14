@@ -900,6 +900,9 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      - name: Clear Criterion data restored with Cargo artifacts
+        run: rm -rf target/criterion
+
       # Separate release-mode build cache for bench binaries.
       # Other CI jobs use debug mode, so setup-pgrx's target/ cache never
       # contains target/release artifacts — without this the bench job does a
@@ -953,6 +956,9 @@ jobs:
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
+
+      - name: Clear Criterion data restored with Cargo artifacts
+        run: rm -rf target/criterion
 
       - name: Cache bench release build artifacts
         uses: actions/cache@v6
