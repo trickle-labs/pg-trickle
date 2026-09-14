@@ -225,7 +225,7 @@ else
 fi
 
 # 11. Dockerfile VERSION ARG defaults must match Cargo.toml
-for dfile in Dockerfile.hub Dockerfile.ghcr; do
+for dfile in Dockerfile.ghcr; do
     if [[ -f "$dfile" ]]; then
         bad_df="$(grep 'ARG VERSION=' "$dfile" | grep -v "=${VERSION}$" || true)"
         if [[ -z "$bad_df" ]]; then

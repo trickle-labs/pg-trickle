@@ -29,6 +29,7 @@ clippy_output.txt
 # Dev/CI artifacts that must not be distributed via PGXN
 test_output.txt
 staged_files.txt
+tests/generated/schema.rs
 __pycache__/
 *.py[cod]
 

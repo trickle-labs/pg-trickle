@@ -4,9 +4,10 @@
 > **Target version:** v1.0.0 (push to Docker Hub)
 > **Author:** pg_trickle project
 >
-> **Implemented in v0.7.0:** `Dockerfile.hub` (end-user image based on
-> `postgres:18-bookworm`) and `.github/workflows/docker-hub.yml` (weekly
-> build + smoke test, no push). At v1.0.0 set `push: true` and add
+> **Implemented in v0.7.0:** `Dockerfile.ghcr` (end-user image pinned to a
+> PostgreSQL 18.3 digest), `.github/workflows/ghcr.yml`, and
+> `.github/workflows/docker-hub.yml` (weekly build + smoke test, no push).
+> At v1.0.0 set `push: true` and add
 > `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets.
 
 ---

@@ -49,7 +49,7 @@ Available verification:
 | Check | Result | What it establishes |
 |---|---|---|
 | Local revision check | Matched the pinned commit | All local source findings refer to one baseline. |
-| `python3 scripts/v0_94_release_gate.py` | Passed | Required v0.94 artifacts, source markers, and named tests exist. It does not prove graph correctness. |
+| [v0.94 release gate][gate094] | Passed | Required v0.94 artifacts, source markers, and named tests exist. It does not prove graph correctness. |
 | `python3 scripts/v0_89_release_gate.py` | Passed | The checked-in window admission artifacts satisfy the offline contract. Timings were not rerun. |
 | `python3 scripts/check_docs_truth.py` | Failed with 9 findings | The documentation/catalog checking path currently reports unresolved drift. Some findings are missing catalog entries for implemented APIs. |
 | GitHub CI for the pinned commit | Overall success | Unit, integration, light E2E, smoke, and other listed jobs succeeded; several broader suites were skipped for this trigger. |

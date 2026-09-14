@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# pg_trickle GHCR image — PostgreSQL 18.3 + pg_trickle pre-installed.
+# Shared production image — PostgreSQL 18.3 + pg_trickle pre-installed.
 #
-# Published to: ghcr.io/trickle-labs/pg_trickle
+# Published to GHCR. The Docker Hub workflow builds and smoke-tests this file.
 #
 # Suitable for:
 #   - Quick local evaluation:  docker run --rm -e POSTGRES_PASSWORD=pass ...

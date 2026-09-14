@@ -8,7 +8,7 @@
     "pg_trickle": {
       "abstract": "Streaming tables with differential (incremental) view maintenance for PostgreSQL 18. Captures row-level changes via after-row triggers, propagates only the delta through a dependency DAG, and applies differential updates to downstream materialized views — all inside a single transaction, with zero external dependencies.",
       "file": "pg_trickle.control",
-      "docfile": "doc/pg_trickle.md",
+      "docfile": "README.md",
       "version": "0.106.0"
     }
   },
