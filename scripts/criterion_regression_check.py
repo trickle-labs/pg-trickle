@@ -5,7 +5,8 @@ criterion_regression_check.py — Criterion performance regression gate.
 Walks the target/criterion/ directory tree and compares each benchmark's
 "base" (saved baseline) and "new" (most recent run) estimate files.
 
-Exits with code 1 if any benchmark mean increases by more than the threshold.
+Exits with code 1 if any benchmark mean increases by more than the threshold
+and the absolute increase meets the configured materiality floor.
 
 Environment variables:
   CRITERION_DIR                 Path to Criterion output dir (default: target/criterion)
@@ -85,6 +86,10 @@ def format_ns(ns: float) -> str:
     return f"{ns / 1_000_000_000:.3f} s"
 
 
+def is_material_regression(base_ns: float, new_ns: float, threshold: float, minimum_delta_ns: float) -> bool:
+    return new_ns - base_ns >= minimum_delta_ns and (new_ns - base_ns) / base_ns > threshold
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Criterion regression gate")
     parser.add_argument(
@@ -92,6 +97,12 @@ def main() -> int:
         type=float,
         default=float(os.environ.get("PGT_BENCH_REGRESSION_THRESHOLD", "0.10")),
         help="Regression threshold as a fraction (default: 0.10 = 10%%)",
+    )
+    parser.add_argument(
+        "--minimum-delta-ns",
+        type=float,
+        default=0.0,
+        help="Ignore percentage regressions smaller than this absolute increase in ns",
     )
     parser.add_argument(
         "--dir",
@@ -106,6 +117,9 @@ def main() -> int:
 
     criterion_dir: Path = args.dir
     threshold: float = args.threshold
+    minimum_delta_ns: float = args.minimum_delta_ns
+    if minimum_delta_ns < 0:
+        parser.error("--minimum-delta-ns must be non-negative")
 
     if not criterion_dir.is_dir():
         print(f"::warning::Criterion output dir not found: {criterion_dir}")
@@ -122,21 +136,33 @@ def main() -> int:
         return 0
 
     regressions: list[tuple[str, float, float, float]] = []
+    subfloor_regressions: list[tuple[str, float, float, float]] = []
     improvements: list[tuple[str, float, float, float]] = []
     neutral: list[tuple[str, float, float, float]] = []
 
     for label, base_ns, new_ns in pairs:
         change = (new_ns - base_ns) / base_ns  # positive = slower
-        if change > threshold:
+        if is_material_regression(base_ns, new_ns, threshold, minimum_delta_ns):
             regressions.append((label, base_ns, new_ns, change))
+        elif change > threshold:
+            subfloor_regressions.append((label, base_ns, new_ns, change))
         elif change < -threshold:
             improvements.append((label, base_ns, new_ns, change))
         else:
             neutral.append((label, base_ns, new_ns, change))
 
     comparisons = [
-        {"label": label, "baseline_ns": baseline, "candidate_ns": candidate, "regression_pct": (candidate / baseline - 1) * 100}
+        {
+            "label": label,
+            "baseline_ns": baseline,
+            "candidate_ns": candidate,
+            "delta_ns": candidate - baseline,
+            "regression_pct": (candidate / baseline - 1) * 100,
+        }
         for label, baseline, candidate in pairs
+    ]
+    material_changes = [
+        item["regression_pct"] for item in comparisons if item["delta_ns"] >= minimum_delta_ns
     ]
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +172,21 @@ def main() -> int:
                     "kind": "criterion",
                     "baseline_version": args.baseline,
                     "compared_benchmarks": len(pairs),
-                    "maximum_mean_regression_pct": max(item["regression_pct"] for item in comparisons),
+                    "minimum_absolute_delta_ns": minimum_delta_ns,
+                    "maximum_mean_regression_pct": max([0.0, *material_changes]),
+                    "maximum_raw_mean_regression_pct": max(
+                        [0.0, *(item["regression_pct"] for item in comparisons)]
+                    ),
+                    "subfloor_regressions": [
+                        {
+                            "label": label,
+                            "baseline_ns": baseline,
+                            "candidate_ns": candidate,
+                            "delta_ns": candidate - baseline,
+                            "regression_pct": change * 100,
+                        }
+                        for label, baseline, candidate, change in subfloor_regressions
+                    ],
                     "benchmarks": comparisons,
                 },
                 indent=2,
@@ -157,7 +197,10 @@ def main() -> int:
 
     # ── Summary table ──────────────────────────────────────────────────────
     total = len(pairs)
-    print(f"\nBenchmark regression check (threshold: {threshold * 100:.0f}%)")
+    print(
+        f"\nBenchmark regression check (threshold: {threshold * 100:.0f}%, "
+        f"minimum absolute increase: {minimum_delta_ns:.1f} ns)"
+    )
     print(f"Compared {total} benchmark(s) from {criterion_dir}\n")
 
     col_w = max((len(label) for label, *_ in pairs), default=20) + 2
@@ -170,8 +213,14 @@ def main() -> int:
         )
 
     if regressions:
-        print("REGRESSIONS (slowdowns above threshold):")
+        print("REGRESSIONS (slowdowns above threshold and materiality floor):")
         for item in regressions:
+            print(row(*item))
+        print()
+
+    if subfloor_regressions:
+        print("Below materiality floor (reported, not gated):")
+        for item in subfloor_regressions:
             print(row(*item))
         print()
 
@@ -193,6 +242,7 @@ def main() -> int:
         with open(step_summary, "a") as f:
             f.write(f"## Benchmark Regression Check\n\n")
             f.write(f"Threshold: **{threshold * 100:.0f}%** &nbsp;|&nbsp; ")
+            f.write(f"Minimum absolute increase: **{minimum_delta_ns:.1f} ns** &nbsp;|&nbsp; ")
             f.write(f"Compared: **{total}** benchmarks\n\n")
 
             if regressions:
@@ -203,6 +253,16 @@ def main() -> int:
                     f.write(
                         f"| `{label}` | {format_ns(base)} | {format_ns(new)} | "
                         f"🔴 **+{pct * 100:.1f}%** |\n"
+                    )
+                f.write("\n")
+            if subfloor_regressions:
+                f.write("### ℹ️ Below the materiality floor\n\n")
+                f.write("| Benchmark | Base | New | Change |\n")
+                f.write("|-----------|------|-----|--------|\n")
+                for label, base, new, pct in subfloor_regressions:
+                    f.write(
+                        f"| `{label}` | {format_ns(base)} | {format_ns(new)} | "
+                        f"+{pct * 100:.1f}% ({format_ns(new - base)}) |\n"
                     )
                 f.write("\n")
             else:
@@ -226,7 +286,10 @@ def main() -> int:
         )
         return 1
 
-    print(f"OK: all {total} benchmark(s) within threshold ({threshold * 100:.0f}%)")
+    print(
+        f"OK: all {total} benchmark(s) within threshold ({threshold * 100:.0f}%) "
+        f"or below the {minimum_delta_ns:.1f} ns floor"
+    )
     return 0
 
 

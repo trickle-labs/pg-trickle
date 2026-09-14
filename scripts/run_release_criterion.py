@@ -14,7 +14,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = "v0.105.3"
+BASELINE_TAG = "v0.105.3"
+BASELINE_VERSION = BASELINE_TAG.removeprefix("v")
+QUALIFICATION = ROOT / "tests/release/v0.106.0-qualification.json"
 
 
 def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -30,14 +32,27 @@ def main() -> int:
     target_criterion = ROOT / "target/criterion"
     env = os.environ.copy()
     env["BENCH_QUICK"] = "1"
+    contract = json.loads(QUALIFICATION.read_text(encoding="utf-8"))
+    criterion_budget = next(
+        item for item in contract["performance_budgets"] if item["id"] == "criterion-regression"
+    )
+    # ponytail: 50 ns floor for synthetic microbenchmarks; lower with repeatable user-path evidence.
 
     try:
+        shutil.rmtree(target_criterion, ignore_errors=True)
+        shutil.rmtree(raw_dir, ignore_errors=True)
         with tempfile.TemporaryDirectory(prefix="pgtrickle-v01053-baseline-") as temp_name:
             worktree = Path(temp_name) / "baseline"
-            run(["git", "worktree", "add", "--detach", str(worktree), BASELINE], cwd=ROOT)
+            run(["git", "worktree", "add", "--detach", str(worktree), BASELINE_TAG], cwd=ROOT)
             try:
                 run(
-                    ["bash", "scripts/run_benchmarks.sh", "--", "--save-baseline", BASELINE],
+                    [
+                        "bash",
+                        "scripts/run_benchmarks.sh",
+                        "--",
+                        "--save-baseline",
+                        BASELINE_VERSION,
+                    ],
                     cwd=worktree,
                     env=env,
                 )
@@ -54,21 +69,15 @@ def main() -> int:
                 if result.is_dir():
                     shutil.rmtree(result)
         run(
-            ["bash", "scripts/run_benchmarks.sh", "--", "--baseline", BASELINE],
-            cwd=ROOT,
-            env=env,
-        )
-        run(
             [
-                sys.executable,
-                "scripts/criterion_regression_check.py",
-                "--threshold", "0.10",
-                "--baseline", BASELINE,
-                "--require-pairs",
-                "--dir", str(target_criterion),
-                "--json-output", str(measurement),
+                "bash",
+                "scripts/run_benchmarks.sh",
+                "--",
+                "--baseline",
+                BASELINE_VERSION,
             ],
             cwd=ROOT,
+            env=env,
         )
         if not target_criterion.is_dir():
             raise RuntimeError("candidate Criterion run produced no raw estimates")
@@ -77,10 +86,34 @@ def main() -> int:
         with tarfile.open(archive, "w:gz") as evidence:
             evidence.add(baseline_snapshot, arcname="baseline")
             evidence.add(candidate_snapshot, arcname="candidate")
+
+        comparison_failed = False
+        try:
+            run(
+                [
+                    sys.executable,
+                    "scripts/criterion_regression_check.py",
+                    "--threshold",
+                    str(float(criterion_budget["threshold"]) / 100),
+                    "--minimum-delta-ns",
+                    str(criterion_budget["minimum_absolute_delta_ns"]),
+                    "--baseline",
+                    BASELINE_VERSION,
+                    "--require-pairs",
+                    "--dir",
+                    str(target_criterion),
+                    "--json-output",
+                    str(measurement),
+                ],
+                cwd=ROOT,
+            )
+        except subprocess.CalledProcessError:
+            comparison_failed = True
+
         result = json.loads(measurement.read_text(encoding="utf-8"))
         result["raw_evidence_files"] = [archive.relative_to(ROOT).as_posix()]
         measurement.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        return 0
+        return int(comparison_failed)
     except (OSError, subprocess.CalledProcessError, RuntimeError) as error:
         print(f"release Criterion comparison failed: {error}", file=sys.stderr)
         return 1

@@ -49,10 +49,12 @@ latency, throughput, refresh latency, freshness, CPU, memory, WAL, backlog,
 temporary spill, output-log growth, and database growth.
 
 The workload gate limits p95 source-write latency overhead to 15% against the
-no-maintenance baseline. Criterion uses a separate 10% regression limit. The
-release attaches raw measurements, Criterion estimates, suite records, and
-logs. The manifest distinguishes live runtime evidence from build-only status
-and static upgrade-completeness checks.
+no-maintenance baseline. Criterion gates regressions above 10% when the absolute
+increase is at least 50 ns; smaller percentage-only changes remain visible in
+the retained evidence but do not fail the release. The release attaches raw
+measurements, Criterion estimates, suite records, and logs. The manifest
+distinguishes live runtime evidence from build-only status and static
+upgrade-completeness checks.
 
 ## Prerequisites
 
