@@ -65,6 +65,7 @@ def main() -> int:
                 "--threshold", "0.10",
                 "--baseline", BASELINE,
                 "--require-pairs",
+                "--dir", str(target_criterion),
                 "--json-output", str(measurement),
             ],
             cwd=ROOT,
