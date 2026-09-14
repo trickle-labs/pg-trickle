@@ -13,6 +13,7 @@ CONTAINER_ID=""
 cleanup() {
     if [[ -n "$CONTAINER_ID" ]]; then
         docker stop "$CONTAINER_ID" >/dev/null 2>&1 || true
+        docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
     fi
     rm -rf "$WORK_DIR"
 }
@@ -28,15 +29,16 @@ fi
 mkdir "$WORK_DIR/previous"
 tar xzf "$WORK_DIR/$ARCHIVE_NAME" -C "$WORK_DIR/previous" --strip-components=1
 
-CONTAINER_ID="$(docker run -d --rm \
-    --mount "type=bind,src=$WORK_DIR/previous/lib,dst=/usr/lib/postgresql/18/lib" \
-    --mount "type=bind,src=$WORK_DIR/previous/extension,dst=/usr/share/postgresql/18/extension" \
+CONTAINER_ID="$(docker create \
     -e POSTGRES_PASSWORD=postgres postgres:18.3 \
     -c shared_preload_libraries=pg_trickle \
     -c track_commit_timestamp=on \
     -c wal_level=logical \
     -c max_replication_slots=10 \
     -c max_worker_processes=32)"
+docker cp "$WORK_DIR/previous/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
+docker cp "$WORK_DIR/previous/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"
+docker start "$CONTAINER_ID" >/dev/null
 for attempt in $(seq 1 60); do
     if docker exec "$CONTAINER_ID" pg_isready -U postgres >/dev/null 2>&1; then
         break
@@ -55,7 +57,8 @@ psql() {
     docker exec "$CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -Atc "$1"
 }
 
-OLD_VERSION="$(psql 'CREATE EXTENSION pg_trickle CASCADE; SELECT pgtrickle.version();')"
+psql 'CREATE EXTENSION pg_trickle CASCADE' >/dev/null
+OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
 [[ "$OLD_VERSION" == "$FROM_VERSION" ]] || {
     echo "previous package reports $OLD_VERSION, expected $FROM_VERSION" >&2
     exit 1
@@ -110,9 +113,6 @@ PENDING_BEFORE="$(psql "SELECT count(*) FROM ${BUFFER}")"
 
 PREFLIGHT="$(psql 'SELECT pgtrickle.preflight_upgrade()::text')"
 echo "Upgrade preflight: ${PREFLIGHT}"
-QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
-[[ "$QUIESCED" == "t" ]] || { echo "upgrade quiesce failed" >&2; exit 1; }
-
 GRAPH_BEFORE="$(psql "SELECT encode(graph_digest, 'hex') FROM \
     pgtrickle.graph_contract(ARRAY['public.v106_upgrade_st'::regclass])")"
 STREAM_STATE_BEFORE="$(psql "SELECT pgt_id || ':' || status || ':' || orchestration_mode \
@@ -122,6 +122,8 @@ DEPENDENCIES_BEFORE="$(psql "SELECT count(*) FROM pgtrickle.pgt_dependencies \
                     WHERE pgt_name = 'v106_upgrade_st')")"
 CURSOR_BEFORE="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
     pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '${CONSUMER_ID}'::uuid")"
+QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
+[[ "$QUIESCED" == "t" ]] || { echo "upgrade quiesce failed" >&2; exit 1; }
 
 test -f "$CANDIDATE_DIR/usr/share/postgresql/18/extension/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql"
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
@@ -144,14 +146,15 @@ LOADED_VERSION="$(psql 'SELECT pgtrickle.version()')"
     echo "candidate binary reports $LOADED_VERSION, expected $TO_VERSION" >&2
     exit 1
 }
-UPDATED_VERSION="$(psql "ALTER EXTENSION pg_trickle UPDATE TO '${TO_VERSION}'; \
-                          SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")"
+psql "ALTER EXTENSION pg_trickle UPDATE TO '${TO_VERSION}'" >/dev/null
+UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")"
 [[ "$UPDATED_VERSION" == "$TO_VERSION" ]] || {
     echo "extension update reported $UPDATED_VERSION, expected $TO_VERSION" >&2
     exit 1
 }
-RESUMED="$(psql 'SELECT pgtrickle.resume_all()')"
-[[ "$RESUMED" == "t" ]] || { echo "capture did not resume after update" >&2; exit 1; }
+psql 'SELECT pgtrickle.resume_all()' >/dev/null
+CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton')"
+[[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
 
 PENDING_AFTER="$(psql "SELECT count(*) FROM ${BUFFER}")"
 GRAPH_AFTER="$(psql "SELECT encode(graph_digest, 'hex') FROM \
@@ -171,8 +174,8 @@ CURSOR_AFTER="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
 
 refresh_graph
 psql "SELECT NOT EXISTS ( \
-    (SELECT * FROM public.v106_upgrade_st EXCEPT ALL \
-     SELECT * FROM public.v106_upgrade_source) UNION ALL \
-    (SELECT * FROM public.v106_upgrade_source EXCEPT ALL \
-     SELECT * FROM public.v106_upgrade_st))" | grep -qx t
+    (SELECT id, value FROM public.v106_upgrade_st EXCEPT ALL \
+     SELECT id, value FROM public.v106_upgrade_source) UNION ALL \
+    (SELECT id, value FROM public.v106_upgrade_source EXCEPT ALL \
+     SELECT id, value FROM public.v106_upgrade_st))" | grep -qx t
 echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION} with pending changes, graph bindings, publication state, and consumer cursor preserved."

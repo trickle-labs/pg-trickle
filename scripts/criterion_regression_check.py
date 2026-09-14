@@ -27,8 +27,10 @@ def load_estimate(path: Path) -> float | None:
     try:
         with open(path) as f:
             data = json.load(f)
-        return float(data["mean"]["estimate"])
-    except (KeyError, ValueError, json.JSONDecodeError, OSError):
+        mean = data["mean"]
+        estimate = mean.get("estimate", mean.get("point_estimate"))
+        return float(estimate) if estimate is not None else None
+    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
         return None
 
 

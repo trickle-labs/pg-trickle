@@ -885,9 +885,9 @@ jobs:
           cargo nextest run --profile ci --test e2e_upgrade_tests --run-ignored all
 
   # ── Benchmark regression gate (PRs targeting main only) ─────────────────
-  # Restores the Criterion baseline saved by the main-branch benchmarks job,
-  # runs all Criterion benches, then fails if any mean regresses > 10%.
-  # Non-fatal on cache miss (first run has no baseline to compare against).
+  # Restores the exact Criterion baseline for the PR's base commit, runs all
+  # benches, then fails if any mean regresses > 10%. A missing baseline skips
+  # the comparison, as on the first run after enabling commit-keyed caches.
   bench-regression:
     name: Benchmark regression check
     runs-on: ubuntu-latest
@@ -899,6 +899,9 @@ jobs:
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
+
+      - name: Clear Criterion data restored with Cargo artifacts
+        run: rm -rf target/criterion
 
       # Separate release-mode build cache for bench binaries.
       # Other CI jobs use debug mode, so setup-pgrx's target/ cache never
@@ -918,26 +921,26 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: target/criterion
-          key: criterion-baseline-main
-          restore-keys: criterion-baseline-
+          key: criterion-baseline-${{ github.event.pull_request.base.sha }}
 
-      - name: Run benchmarks (create new/ data)
-        # continue-on-error so that Criterion's own statistical regression
-        # detection (exit code 1) does not skip the Python gate step below.
-        # The Python script is the authoritative 10% threshold gate.
-        continue-on-error: true
-        run: ./scripts/run_benchmarks.sh -- --baseline main
+      - name: Run benchmarks
+        if: steps.restore-baseline.outputs.cache-hit == 'true'
+        run: |
+          find target/criterion -type d -name new -prune -exec rm -rf {} +
+          ./scripts/run_benchmarks.sh
         env:
           BENCH_QUICK: "1"
 
       - name: Check for regressions
-        # Always run so the Python script can make the final pass/fail
-        # decision even if Criterion flagged a statistical regression above.
-        if: always()
+        if: steps.restore-baseline.outputs.cache-hit == 'true'
         run: |
-          python3 scripts/criterion_regression_check.py
+          python3 scripts/criterion_regression_check.py --baseline main --require-pairs
         env:
           PGT_BENCH_REGRESSION_THRESHOLD: "0.10"
+
+      - name: Explain skipped benchmark comparison
+        if: steps.restore-baseline.outputs.cache-hit != 'true'
+        run: echo "No Criterion baseline is cached for base commit ${{ github.event.pull_request.base.sha }}; comparison skipped."
 
   # ── Benchmarks (non-blocking, Linux only) ───────────────────────────────
   # Expensive; run on weekly schedule and manual dispatch only.
@@ -954,6 +957,9 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      - name: Clear Criterion data restored with Cargo artifacts
+        run: rm -rf target/criterion
+
       - name: Cache bench release build artifacts
         uses: actions/cache@v6
         with:
@@ -962,24 +968,17 @@ jobs:
           restore-keys: |
             v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
-      - name: Restore existing baseline (for comparison output)
-        uses: actions/cache/restore@v6
-        with:
-          path: target/criterion
-          key: criterion-baseline-main
-          restore-keys: criterion-baseline-
-
       - name: Run benchmarks and save baseline
         run: ./scripts/run_benchmarks.sh -- --save-baseline main
         env:
           BENCH_QUICK: "1"
 
       - name: Save Criterion baseline to cache
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         uses: actions/cache/save@v6
         with:
           path: target/criterion
-          key: criterion-baseline-main
+          key: criterion-baseline-${{ github.sha }}
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7
