@@ -1079,6 +1079,18 @@ pub fn build_content_hash_expr_for_domain(
     }
 }
 
+/// Graph members publish their transactional deltas at the shared graph bound
+/// so later topological members can consume them in the same graph pass.
+fn graph_change_capture_lsn() -> Option<String> {
+    crate::refresh::current_graph_refresh_id().and_then(|_| crate::refresh::current_safe_bound())
+}
+
+fn change_capture_lsn_expr(lsn_override: Option<&str>) -> String {
+    lsn_override
+        .map(|lsn| format!("'{lsn}'::pg_lsn"))
+        .unwrap_or_else(|| "pg_current_wal_lsn()".to_string())
+}
+
 /// Capture delta rows from a materialized delta temp table into the ST's
 /// change buffer for downstream ST consumption.
 ///
@@ -1094,6 +1106,8 @@ pub(crate) fn capture_delta_to_st_buffer(
 ) -> Result<i64, PgTrickleError> {
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let pgt_id = st.pgt_id;
+    let graph_lsn = graph_change_capture_lsn();
+    let lsn_expr = change_capture_lsn_expr(graph_lsn.as_deref());
 
     crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
 
@@ -1122,7 +1136,7 @@ pub(crate) fn capture_delta_to_st_buffer(
         format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
              (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), \
+             SELECT {lsn_expr}, \
                     CASE WHEN ins.__pgt_row_id IS NOT NULL \
                               AND del.__pgt_row_id IS NOT NULL \
                          THEN 'U' ELSE COALESCE(ins.__pgt_action, del.__pgt_action) \
@@ -1151,7 +1165,7 @@ pub(crate) fn capture_delta_to_st_buffer(
         format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
              (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), d.__pgt_action, d.__pgt_row_id, \
+             SELECT {lsn_expr}, d.__pgt_action, d.__pgt_row_id, \
                     NULL::xid, {source_commit_at}, {d_col_list} \
              FROM __pgt_delta_{pgt_id} d \
              WHERE d.__pgt_action IN ('I', 'D')",
@@ -1312,11 +1326,10 @@ pub fn capture_delta_to_bypass_table(
 /// Reads the pre-snapshot from `__pgt_pre_{pgt_id}` and compares with the
 /// current state of the ST backing table.
 ///
-/// `lsn_override`: when `Some("0/1A2B3C")`, the given literal LSN is used
-/// instead of `pg_current_wal_lsn()`.  This is required for bypass tables
-/// (DAG-4) where WAL-generating catalog DMLs between the persistent buffer
-/// capture and the bypass capture advance `pg_current_wal_lsn()` past the
-/// downstream ST's frontier upper bound.
+/// `lsn_override`: when present, the given LSN is used instead of
+/// `pg_current_wal_lsn()`. Bypass capture needs it because catalog writes can
+/// advance the current LSN past the downstream frontier; Graph V1 needs it so
+/// later members can consume deltas produced earlier in the same graph pass.
 pub(crate) fn capture_diff_to_table(
     st: &StreamTableMeta,
     user_cols: &[String],
@@ -1508,12 +1521,13 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
 ) -> Result<i64, PgTrickleError> {
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let pgt_id = st.pgt_id;
+    let graph_lsn = graph_change_capture_lsn();
 
     crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
     crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
 
     let target_table = format!("\"{change_schema}\".changes_pgt_{pgt_id}");
-    let total = capture_diff_to_table(st, user_cols, &target_table, pgt_id, None)?;
+    let total = capture_diff_to_table(st, user_cols, &target_table, pgt_id, graph_lsn.as_deref())?;
 
     if total > 0 {
         pgrx::debug1!(
@@ -1538,6 +1552,8 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
 ) -> Result<i64, PgTrickleError> {
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let pgt_id = st.pgt_id;
+    let graph_lsn = graph_change_capture_lsn();
+    let lsn_expr = change_capture_lsn_expr(graph_lsn.as_deref());
 
     crate::cdc::set_sync_commit_for_buffer(&format!("changes_pgt_{pgt_id}"))?;
     crate::cdc::validate_st_change_buffer(pgt_id, &change_schema)?;
@@ -1592,7 +1608,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
     let deleted_sql = format!(
         "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
          (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-         SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
+         SELECT {lsn_expr}, 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
          FROM __pgt_pre_{pgt_id} pre \
          LEFT JOIN {quoted_table} post ON {pre_post_match} \
          WHERE post.__pgt_row_id IS NULL"
@@ -1609,7 +1625,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
     let inserted_sql = format!(
         "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
          (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-         SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
+         SELECT {lsn_expr}, 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
          FROM {quoted_table} post \
          LEFT JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
          WHERE pre.__pgt_row_id IS NULL"
@@ -1635,7 +1651,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         let changed_del_sql = format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
              (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
+             SELECT {lsn_expr}, 'D', {pre_pk_hash}, NULL::xid, {source_commit_at}, {pre_col_refs} \
              FROM __pgt_pre_{pgt_id} pre \
              JOIN {quoted_table} post ON {pre_post_match} \
              WHERE {is_distinct_pairs}"
@@ -1652,7 +1668,7 @@ pub(crate) fn capture_full_refresh_diff_to_st_buffer(
         let changed_ins_sql = format!(
             "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
              (lsn, action, __pgt_row_id, source_xid, source_commit_at, {flat_col_list}) \
-             SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
+             SELECT {lsn_expr}, 'I', {post_pk_hash}, NULL::xid, {source_commit_at}, {post_col_refs} \
              FROM {quoted_table} post \
              JOIN __pgt_pre_{pgt_id} pre ON {pre_post_match} \
              WHERE {is_distinct_pairs}"

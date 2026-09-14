@@ -141,6 +141,7 @@ LIGHT_E2E_TESTS=(
     e2e_dvm_composition_tests
     e2e_failure_recovery_tests
     e2e_publication_crash_recovery_tests
+    e2e_pg_dump_tests
 )
 
 usage() {
@@ -151,6 +152,7 @@ Options:
   --package                 Run cargo pgrx package before tests
   --package-only            Run cargo pgrx package and exit
   --test <name>             Run only the named light-E2E test target
+  --filter <name>           Run only one Rust test function in the selected target
   --ignored                 Run only ignored tests
   --list                    Print selected test targets and exit
   --shard-index <n>         1-based shard index
@@ -290,6 +292,7 @@ ignored_only=false
 shard_index=1
 shard_count=1
 requested_tests=()
+test_filter=""
 
 while (($# > 0)); do
     case "$1" in
@@ -303,6 +306,10 @@ while (($# > 0)); do
         --test)
             shift
             requested_tests+=("${1:-}")
+            ;;
+        --filter)
+            shift
+            test_filter="${1:-}"
             ;;
         --list)
             list_only=true
@@ -431,6 +438,10 @@ start_shared_light_e2e_container() {
         sleep 1
     done
 
+    local pg_version
+    pg_version=$(docker exec "$cid" psql -U postgres -d postgres -Atc 'SHOW server_version')
+    echo "PGT_ACTUAL_POSTGRESQL_VERSION=${pg_version}"
+
     # Install pg_trickle into the container
     docker exec "$cid" sh -c \
         "cp /tmp/pg_ext/usr/share/postgresql/18/extension/pg_trickle* \
@@ -454,9 +465,12 @@ cargo_args=(--features light-e2e)
 for test_name in "${selected_tests[@]}"; do
     cargo_args+=(--test "$test_name")
 done
+if [[ -n "$test_filter" ]]; then
+    cargo_args+=("$test_filter")
+fi
 
 
-if command -v cargo-nextest >/dev/null 2>&1; then
+if command -v cargo-nextest >/dev/null 2>&1 && [[ "${PGT_DISABLE_NEXTEST:-0}" != "1" ]]; then
     if [[ "$ignored_only" == true ]]; then
         cargo nextest run "${cargo_args[@]}" --run-ignored only --nocapture
     else

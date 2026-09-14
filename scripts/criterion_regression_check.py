@@ -32,7 +32,7 @@ def load_estimate(path: Path) -> float | None:
         return None
 
 
-def find_bench_pairs(criterion_dir: Path) -> list[tuple[str, float, float]]:
+def find_bench_pairs(criterion_dir: Path, baseline_name: str | None = None) -> list[tuple[str, float, float]]:
     """
     Return all (bench_label, base_ns, new_ns) triples where both base and
     new estimate files exist below criterion_dir.
@@ -45,8 +45,8 @@ def find_bench_pairs(criterion_dir: Path) -> list[tuple[str, float, float]]:
 
     for new_file in sorted(criterion_dir.rglob("new/estimates.json")):
         bench_dir = new_file.parent.parent
-        base_file = bench_dir / "base" / "estimates.json"
-        if not base_file.exists():
+        base_file = bench_dir / baseline_name / "estimates.json" if baseline_name else bench_dir / "base" / "estimates.json"
+        if baseline_name is None and not base_file.exists():
             # Criterion --save-baseline <name> stores under <name>/ not base/
             base_file = bench_dir / "main" / "estimates.json"
         if not base_file.exists():
@@ -97,6 +97,9 @@ def main() -> int:
         default=Path(os.environ.get("CRITERION_DIR", "target/criterion")),
         help="Path to Criterion output directory",
     )
+    parser.add_argument("--baseline", help="Criterion baseline name to compare with the latest run")
+    parser.add_argument("--require-pairs", action="store_true", help="Fail if there are no comparable benchmarks")
+    parser.add_argument("--json-output", type=Path, help="Write machine-readable comparison results")
     args = parser.parse_args()
 
     criterion_dir: Path = args.dir
@@ -107,8 +110,11 @@ def main() -> int:
         print("  No baseline to compare against — skipping regression check.")
         return 0
 
-    pairs = find_bench_pairs(criterion_dir)
+    pairs = find_bench_pairs(criterion_dir, args.baseline)
     if not pairs:
+        if args.require_pairs:
+            print("ERROR: no baseline/new pairs found — refusing an unmeasured pass")
+            return 1
         print("::warning::No baseline/new pairs found — skipping regression check.")
         print(f"  (Searched: {criterion_dir})")
         return 0
@@ -125,6 +131,27 @@ def main() -> int:
             improvements.append((label, base_ns, new_ns, change))
         else:
             neutral.append((label, base_ns, new_ns, change))
+
+    comparisons = [
+        {"label": label, "baseline_ns": baseline, "candidate_ns": candidate, "regression_pct": (candidate / baseline - 1) * 100}
+        for label, baseline, candidate in pairs
+    ]
+    if args.json_output:
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(
+            json.dumps(
+                {
+                    "kind": "criterion",
+                    "baseline_version": args.baseline,
+                    "compared_benchmarks": len(pairs),
+                    "maximum_mean_regression_pct": max(item["regression_pct"] for item in comparisons),
+                    "benchmarks": comparisons,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     # ── Summary table ──────────────────────────────────────────────────────
     total = len(pairs)

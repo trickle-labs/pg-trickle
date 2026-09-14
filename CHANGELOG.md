@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.106.0 — Executed package qualification and database cost](#01060--executed-package-qualification-and-database-cost)
 - [0.105.3 — Differential correctness and release qualification](#01053--differential-correctness-and-release-qualification)
 - [0.105.2 — Package, upgrade, performance, and field validation](#01052--package-upgrade-performance-and-field-validation)
 - [0.105.1 — Runtime conformance and recovery qualification](#01051--runtime-conformance-and-recovery-qualification)
@@ -218,6 +219,28 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.106.0] — Executed package qualification and database cost
+
+v0.106.0 ties package support and performance claims to evidence from the exact
+release candidate. The manifest records the commit and package digest for each
+suite, the actual PostgreSQL version, test counts, result, and retained log.
+
+- Qualifies Linux amd64 through package install, active refresh, upgrade with
+  pending changes, recreation, logical restore, and clone isolation checks.
+- Declares Linux arm64 and macOS arm64 build-only, and Windows amd64 best-effort.
+  Evidence from one platform does not qualify another platform.
+- Measures keyed aggregation, skewed joins, and Graph V1 workloads with source
+  capture paused or active, including output consumers on and off.
+- Sets a 15% p95 source-write overhead limit and keeps the 10% Criterion
+  regression limit. Raw measurements and resource budgets ship with the release.
+
+The release adds no public SQL objects or catalog changes. The upgrade records
+the new release version.
+
+See the [v0.106.0 roadmap](roadmap/v0.106.0.md), the
+[qualification contract](tests/release/v0.106.0-qualification.json), and the
+[release evidence guide](docs/RELEASE.md#v01060-evidence-and-support-tiers).
 
 ## [0.105.3] — Differential correctness and release qualification
 

@@ -51,6 +51,18 @@ env:
   PG_VERSION: "18"
 
 jobs:
+  # The v0.106.0 release contract runs on every PR so publication cannot
+  # introduce untested suite claims or manually asserted passing results.
+  release-qualification-contract:
+    name: v0.106.0 release evidence contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate release evidence and rejection controls
+        run: python3 scripts/v0_106_0_release_gate.py
+
   # ── Unit tests (Linux PR gate) ──────────────────────────────────────────
   unit-tests:
     name: Unit tests (PR gate, linux-amd64)

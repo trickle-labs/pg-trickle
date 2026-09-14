@@ -20,6 +20,13 @@ async fn test_pg_dump_restore_fails_closed() {
     .await;
 
     assert_eq!(db.count("public.dump_test_st").await, 2);
+    let source_recovery: String = db
+        .query_scalar("SELECT pgtrickle.validate_recovery()")
+        .await;
+    assert!(
+        source_recovery.contains("\"status\":\"SAFE\""),
+        "source capture identity must be initialized before dump: {source_recovery}"
+    );
 
     // A logical restore must run with the scheduler stopped. Otherwise the
     // restored catalog can be initialized before pg_restore loads its data.
