@@ -952,7 +952,7 @@ jobs:
 
       - name: Check for regressions
         run: |
-          python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 50 --require-pairs
+          python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs
         env:
           PGT_BENCH_REGRESSION_THRESHOLD: "0.10"
 

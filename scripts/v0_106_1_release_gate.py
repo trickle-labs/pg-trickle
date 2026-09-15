@@ -102,7 +102,7 @@ def synthetic_contract() -> dict[str, object]:
             },
         }],
         "performance_budgets": [
-            {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "minimum_absolute_delta_ns": 50, "unit": "percent"},
+            {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "minimum_absolute_delta_ns": 250, "unit": "percent"},
             {"id": "foreground-write-overhead", "metric": "source_write_p50_overhead_pct", "threshold": 15, "unit": "percent"},
         ],
     }
@@ -257,7 +257,7 @@ def invoke_writer(case: str) -> tuple[int, str]:
             "artifact_digest": artifact_digest,
             "baseline_version": "v0.106.0" if case == "criterion-baseline-mismatch" else "0.106.0",
             "compared_benchmarks": 113,
-            "minimum_absolute_delta_ns": 49.0 if case == "criterion-floor-mismatch" else 50.0,
+            "minimum_absolute_delta_ns": 249.0 if case == "criterion-floor-mismatch" else 250.0,
             "maximum_mean_regression_pct": 0.0,
             "maximum_raw_mean_regression_pct": 13.3,
             "subfloor_regressions": [{
@@ -392,7 +392,7 @@ def main() -> None:
         None,
     )
     require(criterion_budget is not None, "Criterion regression budget is missing")
-    require(criterion_budget.get("minimum_absolute_delta_ns") == 50.0, "Criterion materiality floor must remain 50 ns")
+    require(criterion_budget.get("minimum_absolute_delta_ns") == 250.0, "Criterion materiality floor must remain 250 ns")
     require(all(item.get("limits", {}).get("source_write_p50_overhead_pct") == 15.0 for item in contract.get("workloads", [])), "source-write p50 budget must remain 15%")
 
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

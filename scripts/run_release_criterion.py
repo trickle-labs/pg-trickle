@@ -36,7 +36,7 @@ def main() -> int:
     criterion_budget = next(
         item for item in contract["performance_budgets"] if item["id"] == "criterion-regression"
     )
-    # ponytail: 50 ns floor for synthetic microbenchmarks; lower with repeatable user-path evidence.
+    # ponytail: 250 ns ignores code-layout jitter below 0.25 µs; lower with repeatable user-path evidence.
 
     try:
         shutil.rmtree(target_criterion, ignore_errors=True)

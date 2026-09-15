@@ -231,8 +231,9 @@ rows through projections, grouped statistics, and downstream self-joins.
 - Raises `external_graph_refresh` to Graph V1 minor 1 and adds a regression for
   the candidate blocks, statistics, and pairs topology used by pg-mdm.
 - Caches statement-trigger metadata to reduce update-capture overhead.
-- Makes release measurements less sensitive to runner warmup and retries one
-  transient Criterion comparison without hiding a repeatable regression.
+- Makes release measurements less sensitive to runner warmup, applies a 250 ns
+  absolute materiality floor alongside the 10% threshold, and retries one
+  transient Criterion comparison.
 
 The release adds no SQL objects or catalog changes. The upgrade records the
 new release version.

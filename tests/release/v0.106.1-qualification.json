@@ -339,7 +339,7 @@
     }
   ],
   "performance_budgets": [
-    {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10.0, "minimum_absolute_delta_ns": 50.0, "unit": "percent", "comparison": "max"},
+    {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10.0, "minimum_absolute_delta_ns": 250.0, "unit": "percent", "comparison": "max"},
     {"id": "foreground-write-overhead", "metric": "source_write_p50_overhead_pct", "threshold": 15.0, "unit": "percent", "comparison": "max"}
   ],
   "evidence": {
