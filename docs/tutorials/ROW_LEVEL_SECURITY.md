@@ -129,6 +129,12 @@ same stored owner and defining path. This ensures:
 - A `refresh_stream_table()` call produces the same result regardless of its caller.
 - IMMEDIATE trigger bookkeeping stays privileged while defining SQL runs as the owner.
 
+`DIFFERENTIAL` is safe for an RLS-enabled source when the stream-table owner is
+a superuser or has `BYPASSRLS`. Those roles bypass RLS even when the source uses
+`FORCE ROW LEVEL SECURITY`. pg_trickle checks the current stream-table owner
+before each differential refresh. If the owner is subject to RLS, explicit
+`DIFFERENTIAL` is rejected and `AUTO` falls back to `FULL`.
+
 ## Policy Change Detection
 
 pg_trickle automatically detects RLS-related DDL on source tables:
