@@ -14,9 +14,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_TAG = "v0.105.3"
+BASELINE_TAG = "v0.106.0"
 BASELINE_VERSION = BASELINE_TAG.removeprefix("v")
-QUALIFICATION = ROOT / "tests/release/v0.106.0-qualification.json"
+QUALIFICATION = ROOT / "tests/release/v0.106.1-qualification.json"
 MAX_COMPARISON_ATTEMPTS = 2
 
 
@@ -61,7 +61,7 @@ def main() -> int:
         shutil.copytree(target_criterion, candidate_snapshot, dirs_exist_ok=True)
         candidate_snapshots.append(candidate_snapshot)
 
-        with tempfile.TemporaryDirectory(prefix="pgtrickle-v01053-baseline-") as temp_name:
+        with tempfile.TemporaryDirectory(prefix="pgtrickle-v01060-baseline-") as temp_name:
             worktree = Path(temp_name) / "baseline"
             run(["git", "worktree", "add", "--detach", str(worktree), BASELINE_TAG], cwd=ROOT)
             try:

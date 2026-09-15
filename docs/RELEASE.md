@@ -25,9 +25,9 @@ start only after the Release workflow succeeds for that tag. That workflow
 publishes the main PostgreSQL image, including mutable `pg18` and `latest`
 aliases, while PGXN publishes the source archive.
 
-### v0.106.0 evidence and support tiers
+### v0.106.1 evidence and support tiers
 
-The [v0.106.0 qualification contract](../tests/release/v0.106.0-qualification.json)
+The [v0.106.1 qualification contract](../tests/release/v0.106.1-qualification.json)
 declares each required artifact and suite. The evidence writer accepts suite
 records emitted by the release runner. It checks the candidate commit, package
 digest, suite command, workload, test counts, PostgreSQL version, and retained

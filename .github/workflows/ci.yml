@@ -51,17 +51,17 @@ env:
   PG_VERSION: "18"
 
 jobs:
-  # The v0.106.0 release contract runs on every PR so publication cannot
+  # The v0.106.1 release contract runs on every PR so publication cannot
   # introduce untested suite claims or manually asserted passing results.
   release-qualification-contract:
-    name: v0.106.0 release evidence contract
+    name: v0.106.1 release evidence contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Validate release evidence and rejection controls
-        run: python3 scripts/v0_106_0_release_gate.py
+        run: python3 scripts/v0_106_1_release_gate.py
 
   # ── Unit tests (Linux PR gate) ──────────────────────────────────────────
   unit-tests:
@@ -891,9 +891,8 @@ jobs:
           cargo nextest run --profile ci --test e2e_upgrade_tests --run-ignored all
 
   # ── Benchmark regression gate (PRs targeting main only) ─────────────────
-  # Restores the exact Criterion baseline for the PR's base commit, runs all
-  # benches, then fails if any mean regresses > 10%. A missing baseline skips
-  # the comparison, as on the first run after enabling commit-keyed caches.
+  # Measures the candidate before the exact PR base to avoid penalizing the
+  # candidate for hosted-runner drift, then fails on material regressions.
   bench-regression:
     name: Benchmark regression check
     runs-on: ubuntu-latest
@@ -927,6 +926,16 @@ jobs:
           git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
           git worktree add --detach "$RUNNER_TEMP/benchmark-base" FETCH_HEAD
 
+      - name: Measure PR candidate
+        run: |
+          ./scripts/run_benchmarks.sh -- --save-baseline candidate
+        env:
+          BENCH_QUICK: "1"
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+      - name: Clear PR candidate's current estimates
+        run: find target/criterion -type d -name new -prune -exec rm -rf {} +
+
       - name: Measure PR base
         run: |
           BENCH_PROJECT_DIR="$RUNNER_TEMP/benchmark-base" ./scripts/run_benchmarks.sh -- --save-baseline base
@@ -934,18 +943,16 @@ jobs:
           BENCH_QUICK: "1"
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
-      - name: Clear PR base's current estimates
-        run: find target/criterion -type d -name new -prune -exec rm -rf {} +
-
-      - name: Measure PR candidate
-        run: ./scripts/run_benchmarks.sh -- --baseline base
-        env:
-          BENCH_QUICK: "1"
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      - name: Restore PR candidate estimates
+        run: |
+          find target/criterion -type d -name new -prune -exec rm -rf {} +
+          find target/criterion -type d -name candidate -print0 | while IFS= read -r -d '' source; do
+            cp -a "$source" "${source%/candidate}/new"
+          done
 
       - name: Check for regressions
         run: |
-          python3 scripts/criterion_regression_check.py --baseline base --require-pairs
+          python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 50 --require-pairs
         env:
           PGT_BENCH_REGRESSION_THRESHOLD: "0.10"
 

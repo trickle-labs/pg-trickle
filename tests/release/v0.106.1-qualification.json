@@ -1,0 +1,363 @@
+{
+  "contract_version": 2,
+  "release_version": "0.106.1",
+  "source_versions": ["0.106.0"],
+  "postgresql_major": 18,
+  "database_settings": {
+    "fsync": "on",
+    "synchronous_commit": "on",
+    "full_page_writes": "on"
+  },
+  "required_suites": [
+    {
+      "id": "release-gate",
+      "kind": "check",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": false,
+      "upgrade": false,
+      "requires_postgresql": false,
+      "suite_version": "0.106.1",
+      "command": "python3 scripts/v0_106_1_release_gate.py",
+      "command_argv": ["python3", "scripts/v0_106_1_release_gate.py"],
+      "workload": "qualification contract, workflow publication dependencies, and failed-evidence negative controls"
+    },
+    {
+      "id": "graph-v1",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.104.0",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_v104_conformance_tests --filter test_v104_graph_reference_coordinator_commits_publication",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_v104_conformance_tests", "--filter", "test_v104_graph_reference_coordinator_commits_publication"],
+      "workload": "packaged Graph V1 public-SQL coordinator with rollback"
+    },
+    {
+      "id": "delta-v1",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.104.0",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_v104_conformance_tests --filter test_v104_delta_reference_consumer_reads_and_acknowledges",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_v104_conformance_tests", "--filter", "test_v104_delta_reference_consumer_reads_and_acknowledges"],
+      "workload": "packaged Delta V1 public-SQL consumer and acknowledgement"
+    },
+    {
+      "id": "dvm-oracle",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_diff_full_equivalence_tests --filter test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_diff_full_equivalence_tests", "--filter", "test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes"],
+      "workload": "exact bag equality, duplicates, simultaneous changes, and effective differential strategy"
+    },
+    {
+      "id": "recovery",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_failure_recovery_tests",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_failure_recovery_tests"],
+      "workload": "rollback, exception, invalidation, clone, and connection recovery"
+    },
+    {
+      "id": "wal-admission",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_v098_stability_tests",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_v098_stability_tests"],
+      "workload": "receipt-backed WAL admission and fail-closed slot behavior"
+    },
+    {
+      "id": "pending-data-upgrade",
+      "kind": "check",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": true,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/qualify_live_package_upgrade.sh 0.106.0 0.106.1",
+      "command_argv": ["bash", "scripts/qualify_live_package_upgrade.sh", "0.106.0", "0.106.1"],
+      "workload": "published v0.106.0 binary upgraded to the candidate with pending committed changes"
+    },
+    {
+      "id": "recreation",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_upgrade_tests --filter test_upgrade_drop_recreate_roundtrip",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_upgrade_tests", "--filter", "test_upgrade_drop_recreate_roundtrip"],
+      "workload": "supported drop-and-recreate extension path with the packaged candidate"
+    },
+    {
+      "id": "logical-restore",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_pg_dump_tests",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_pg_dump_tests"],
+      "workload": "logical database restore, local identity validation, and quarantine"
+    },
+    {
+      "id": "clone-isolation",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_failure_recovery_tests --filter test_recovery_clone_isolation_requires_explicit_adoption --ignored",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_failure_recovery_tests", "--filter", "test_recovery_clone_isolation_requires_explicit_adoption", "--ignored"],
+      "workload": "database clone identity mismatch, quarantine, and explicit local adoption"
+    },
+    {
+      "id": "package-smoke",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_smoke_tests",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_smoke_tests"],
+      "workload": "installed release package, extension load, differential create, refresh, and exact result"
+    },
+    {
+      "id": "upgrade-chain",
+      "kind": "check",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": false,
+      "upgrade": true,
+      "requires_postgresql": false,
+      "suite_version": "0.106.1",
+      "command": "scripts/check_upgrade_completeness.sh 0.106.0 0.106.1",
+      "command_argv": ["scripts/check_upgrade_completeness.sh", "0.106.0", "0.106.1"],
+      "workload": "supported prior-package migration path and catalog completeness"
+    },
+    {
+      "id": "version-sync",
+      "kind": "check",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": false,
+      "upgrade": false,
+      "requires_postgresql": false,
+      "suite_version": "0.106.1",
+      "command": "scripts/check_version_sync.sh --expected-tag v0.106.1",
+      "command_argv": ["scripts/check_version_sync.sh", "--expected-tag", "v0.106.1"],
+      "workload": "release metadata, archive, upgrade, and package layout validation"
+    },
+    {
+      "id": "monitoring-contract",
+      "kind": "check",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": false,
+      "upgrade": false,
+      "requires_postgresql": false,
+      "suite_version": "0.106.1",
+      "command": "python3 scripts/check_monitoring_contract.py",
+      "command_argv": ["python3", "scripts/check_monitoring_contract.py"],
+      "workload": "monitoring views, metrics, and documented contract validation"
+    },
+    {
+      "id": "criterion-regression",
+      "kind": "measurement",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": false,
+      "upgrade": false,
+      "requires_postgresql": false,
+      "suite_version": "0.106.1",
+      "command": "python3 scripts/run_release_criterion.py",
+      "command_argv": ["python3", "scripts/run_release_criterion.py"],
+      "measurement_file": "qualification-logs/raw/criterion.json",
+      "workload": "same-runner v0.106.0 and candidate Criterion microbenchmarks"
+    },
+    {
+      "id": "database-workloads",
+      "kind": "measurement",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.106.1",
+      "command": "cargo test --features pg18 --test e2e_bench_tests bench_release_database_workloads -- --ignored --exact --nocapture",
+      "command_argv": ["cargo", "test", "--features", "pg18", "--test", "e2e_bench_tests", "bench_release_database_workloads", "--", "--ignored", "--exact", "--nocapture"],
+      "measurement_file": "qualification-logs/raw/database-workloads.json",
+      "e2e_image": "pg_trickle_release_candidate:local",
+      "workload": "keyed scan/aggregate, skewed join/aggregate, and small Graph V1 dependency graph"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "linux-amd64",
+      "platform": "linux-amd64",
+      "support_tier": "runtime-qualified",
+      "required": true,
+      "postgresql_major": 18,
+      "version": "0.106.1"
+    },
+    {
+      "id": "linux-arm64",
+      "platform": "linux-arm64",
+      "support_tier": "build-only",
+      "required": true,
+      "postgresql_major": 18,
+      "version": "0.106.1"
+    },
+    {
+      "id": "macos-arm64",
+      "platform": "macos-arm64",
+      "support_tier": "build-only",
+      "required": true,
+      "postgresql_major": 18,
+      "version": "0.106.1"
+    },
+    {
+      "id": "windows-amd64",
+      "platform": "windows-amd64",
+      "support_tier": "best-effort",
+      "required": false,
+      "postgresql_major": 18,
+      "version": "0.106.1"
+    }
+  ],
+  "workloads": [
+    {
+      "id": "keyed-scan-aggregate",
+      "population_rows": 10000,
+      "batch_rows": 120,
+      "offered_load": {
+        "writer_concurrency": 1,
+        "batch_interval_ms": 25,
+        "refresh_interval_ms": 1000,
+        "resource_sample_interval_ms": 250,
+        "warmup_batches_per_repetition": 3,
+        "measured_batches_per_repetition": 60,
+        "repetitions": 3
+      },
+      "required_cases": ["no-maintenance", "capture-only", "active-refresh"],
+      "limits": {
+        "source_write_p50_overhead_pct": 15.0,
+        "refresh_p95_ms": 30000.0,
+        "freshness_p95_ms": 60000.0,
+        "cpu_percent_peak": 400.0,
+        "memory_peak_bytes": 2147483648,
+        "wal_bytes": 536870912,
+        "change_backlog_rows": 100000,
+        "temp_spill_bytes": 536870912,
+        "output_log_bytes": 67108864,
+        "storage_growth_bytes": 536870912
+      }
+    },
+    {
+      "id": "join-skew-aggregate",
+      "population_rows": 10000,
+      "batch_rows": 120,
+      "offered_load": {
+        "writer_concurrency": 1,
+        "batch_interval_ms": 25,
+        "refresh_interval_ms": 1000,
+        "resource_sample_interval_ms": 250,
+        "warmup_batches_per_repetition": 3,
+        "measured_batches_per_repetition": 60,
+        "repetitions": 3
+      },
+      "required_cases": ["no-maintenance", "capture-only", "active-refresh"],
+      "limits": {
+        "source_write_p50_overhead_pct": 15.0,
+        "refresh_p95_ms": 30000.0,
+        "freshness_p95_ms": 60000.0,
+        "cpu_percent_peak": 400.0,
+        "memory_peak_bytes": 2147483648,
+        "wal_bytes": 536870912,
+        "change_backlog_rows": 100000,
+        "temp_spill_bytes": 536870912,
+        "output_log_bytes": 67108864,
+        "storage_growth_bytes": 536870912
+      }
+    },
+    {
+      "id": "small-dependency-graph",
+      "population_rows": 10000,
+      "batch_rows": 120,
+      "offered_load": {
+        "writer_concurrency": 1,
+        "batch_interval_ms": 25,
+        "refresh_interval_ms": 1000,
+        "resource_sample_interval_ms": 250,
+        "warmup_batches_per_repetition": 3,
+        "measured_batches_per_repetition": 60,
+        "repetitions": 3
+      },
+      "required_cases": ["no-maintenance", "capture-only", "active-refresh-consumers-disabled", "active-refresh-consumers-active"],
+      "limits": {
+        "source_write_p50_overhead_pct": 15.0,
+        "refresh_p95_ms": 30000.0,
+        "freshness_p95_ms": 60000.0,
+        "cpu_percent_peak": 400.0,
+        "memory_peak_bytes": 2147483648,
+        "wal_bytes": 536870912,
+        "change_backlog_rows": 100000,
+        "temp_spill_bytes": 536870912,
+        "output_log_bytes": 67108864,
+        "storage_growth_bytes": 536870912
+      }
+    }
+  ],
+  "performance_budgets": [
+    {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10.0, "minimum_absolute_delta_ns": 50.0, "unit": "percent", "comparison": "max"},
+    {"id": "foreground-write-overhead", "metric": "source_write_p50_overhead_pct", "threshold": 15.0, "unit": "percent", "comparison": "max"}
+  ],
+  "evidence": {
+    "schema_version": 3,
+    "allowed_result_states": ["passed", "failed", "skipped", "unavailable", "stale", "historical"],
+    "required_suite_fields": [
+      "candidate_commit",
+      "artifact_digest",
+      "platform",
+      "postgresql_version",
+      "suite_id",
+      "suite_version",
+      "command",
+      "effective_workload",
+      "executed_tests",
+      "skipped_tests",
+      "status",
+      "log"
+    ]
+  }
+}
