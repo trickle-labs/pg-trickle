@@ -2380,6 +2380,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2387,8 +2390,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -2409,6 +2411,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2417,14 +2422,12 @@ fn build_stmt_trigger_fn_sql(
              -- D-row (OLD values) — must be emitted before I-row.
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'D', {pko}{ocr}, trace_context
              FROM __pgt_old o;
              -- I-row (NEW values).
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -2469,6 +2472,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2485,13 +2491,11 @@ fn build_stmt_trigger_fn_sql(
              )
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{uccd}{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', p.__pgt_row_id{event_changed_cols}{old_event_cols},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'D', p.__pgt_row_id{event_changed_cols}{old_event_cols}, trace_context
              FROM pair_rows p
              WHERE p.__pgt_old_present
              UNION ALL
-             SELECT pg_current_wal_insert_lsn(), 'I', p.__pgt_row_id{event_changed_cols}{new_event_cols},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'I', p.__pgt_row_id{event_changed_cols}{new_event_cols}, trace_context
              FROM pair_rows p
              WHERE p.__pgt_new_present;
              PERFORM pg_notify('pgtrickle_wake', '');
@@ -2511,6 +2515,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2518,8 +2525,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'D', {pko}{ocr}, trace_context
              FROM __pgt_old o;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -3517,11 +3523,11 @@ mod tests {
             "{update}"
         );
         let d_row = update
-            .find("SELECT pg_current_wal_insert_lsn(), 'D'")
+            .find("SELECT statement_lsn, 'D'")
             .expect("D event query");
         let union = update[d_row..].find("UNION ALL").expect("D/I union") + d_row;
         let i_row = update[union..]
-            .find("SELECT pg_current_wal_insert_lsn(), 'I'")
+            .find("SELECT statement_lsn, 'I'")
             .expect("I event query")
             + union;
         assert!(
