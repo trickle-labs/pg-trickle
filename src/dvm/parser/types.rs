@@ -2375,6 +2375,15 @@ impl OpTree {
                         let mapped: Vec<String> = keys
                             .iter()
                             .map(|k| {
+                                if let Some(pos) = expressions.iter().position(|expr| {
+                                    matches!(
+                                        expr,
+                                        Expr::ColumnRef { column_name, .. }
+                                            if column_name == k
+                                    )
+                                }) {
+                                    return aliases.get(pos).cloned().unwrap_or_else(|| k.clone());
+                                }
                                 if let Some(pos) = child_out.iter().position(|c| c == k) {
                                     aliases.get(pos).cloned().unwrap_or_else(|| k.clone())
                                 } else {

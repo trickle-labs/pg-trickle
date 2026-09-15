@@ -2670,6 +2670,49 @@ mod tests {
     }
 
     #[test]
+    fn test_row_id_key_columns_project_maps_reordered_composite_key() {
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "source".to_string(),
+            schema: "public".to_string(),
+            columns: vec![
+                make_column("source_record_id"),
+                make_column("field_name"),
+                make_column("state"),
+                make_column("canonical_bytes"),
+                make_column("source_sort_key"),
+            ],
+            pk_columns: vec!["source_record_id".to_string(), "field_name".to_string()],
+            alias: "source".to_string(),
+        };
+        let tree = OpTree::Project {
+            expressions: vec![
+                col("state"),
+                col("canonical_bytes"),
+                col("source_record_id"),
+                col("source_sort_key"),
+                col("field_name"),
+            ],
+            aliases: vec![
+                "channel_id".to_string(),
+                "block_key".to_string(),
+                "source_record_id".to_string(),
+                "source_sort_key".to_string(),
+                "field_name".to_string(),
+            ],
+            child: Box::new(scan),
+        };
+
+        assert_eq!(
+            tree.row_id_key_columns(),
+            Some(vec![
+                "source_record_id".to_string(),
+                "field_name".to_string()
+            ])
+        );
+    }
+
+    #[test]
     fn test_row_id_key_columns_project_filter_keyless_scan_uses_output() {
         let scan = OpTree::Scan {
             table_oid: 1,

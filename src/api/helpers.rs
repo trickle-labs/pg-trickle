@@ -2989,9 +2989,12 @@ pub fn inject_pgt_count(query: &str) -> String {
         if let Some(from_pos) = find_top_level_keyword(&distinct_info.stripped, "FROM") {
             let select_part = distinct_info.stripped[..from_pos].trim_end();
             let from_part = &distinct_info.stripped[from_pos..];
-            let col_list = distinct_info.columns.join(", ");
+            let group_positions = (1..=distinct_info.columns.len())
+                .map(|position| position.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return format!(
-                "{select_part}, COUNT(*) AS __pgt_count {from_part} GROUP BY {col_list}",
+                "{select_part}, COUNT(*) AS __pgt_count {from_part} GROUP BY {group_positions}",
             );
         }
         // Fallback if FROM not found after stripping DISTINCT

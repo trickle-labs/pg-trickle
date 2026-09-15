@@ -17,7 +17,7 @@
       "id": "graph-v1",
       "capability": "external_graph_refresh",
       "major_version": 1,
-      "minor_version": 0,
+      "minor_version": 1,
       "status": "stable",
       "enabled": true,
       "strategy": "public_sql",
