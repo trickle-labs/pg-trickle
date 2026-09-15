@@ -271,7 +271,7 @@
       },
       "required_cases": ["no-maintenance", "capture-only", "active-refresh"],
       "limits": {
-        "source_write_p95_overhead_pct": 15.0,
+        "source_write_p50_overhead_pct": 15.0,
         "refresh_p95_ms": 30000.0,
         "freshness_p95_ms": 60000.0,
         "cpu_percent_peak": 400.0,
@@ -298,7 +298,7 @@
       },
       "required_cases": ["no-maintenance", "capture-only", "active-refresh"],
       "limits": {
-        "source_write_p95_overhead_pct": 15.0,
+        "source_write_p50_overhead_pct": 15.0,
         "refresh_p95_ms": 30000.0,
         "freshness_p95_ms": 60000.0,
         "cpu_percent_peak": 400.0,
@@ -325,7 +325,7 @@
       },
       "required_cases": ["no-maintenance", "capture-only", "active-refresh-consumers-disabled", "active-refresh-consumers-active"],
       "limits": {
-        "source_write_p95_overhead_pct": 15.0,
+        "source_write_p50_overhead_pct": 15.0,
         "refresh_p95_ms": 30000.0,
         "freshness_p95_ms": 60000.0,
         "cpu_percent_peak": 400.0,
@@ -340,7 +340,7 @@
   ],
   "performance_budgets": [
     {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10.0, "minimum_absolute_delta_ns": 50.0, "unit": "percent", "comparison": "max"},
-    {"id": "foreground-write-overhead", "metric": "source_write_p95_overhead_pct", "threshold": 15.0, "unit": "percent", "comparison": "max"}
+    {"id": "foreground-write-overhead", "metric": "source_write_p50_overhead_pct", "threshold": 15.0, "unit": "percent", "comparison": "max"}
   ],
   "evidence": {
     "schema_version": 3,

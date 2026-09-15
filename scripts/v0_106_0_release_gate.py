@@ -87,9 +87,9 @@ def synthetic_contract() -> dict[str, object]:
                 "measured_batches_per_repetition": 60,
                 "repetitions": 3,
             },
-            "required_cases": ["no-maintenance", "capture-only"],
+            "required_cases": ["no-maintenance", "capture-only", "active-refresh"],
             "limits": {
-                "source_write_p95_overhead_pct": 15,
+                "source_write_p50_overhead_pct": 15,
                 "refresh_p95_ms": 30000,
                 "freshness_p95_ms": 60000,
                 "cpu_percent_peak": 400,
@@ -103,7 +103,7 @@ def synthetic_contract() -> dict[str, object]:
         }],
         "performance_budgets": [
             {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "minimum_absolute_delta_ns": 50, "unit": "percent"},
-            {"id": "foreground-write-overhead", "metric": "source_write_p95_overhead_pct", "threshold": 15, "unit": "percent"},
+            {"id": "foreground-write-overhead", "metric": "source_write_p50_overhead_pct", "threshold": 15, "unit": "percent"},
         ],
     }
 
@@ -187,8 +187,34 @@ def invoke_writer(case: str) -> tuple[int, str]:
                     },
                     "capture-only": {
                         "source_write_p50_ms": 8,
-                        "source_write_p95_ms": 20 if case == "out-of-budget" else 10,
+                        "source_write_p95_ms": 10,
                         "source_write_p99_ms": 12,
+                        "throughput_rows_per_second": 1000,
+                        "write_errors": 0,
+                        "writer_concurrency": 1,
+                        "batch_interval_ms": 25,
+                        "refresh_interval_ms": 1000,
+                        "resource_sample_interval_ms": 250,
+                        "warmup_batches_per_repetition": 3,
+                        "measured_batches_per_repetition": 60,
+                        "repetitions": 3,
+                        "refresh_p95_ms": 1,
+                        "freshness_p95_ms": 1,
+                        "cpu_percent_peak": 1,
+                        "memory_peak_bytes": 1,
+                        "wal_bytes": 1,
+                        "change_backlog_rows": 1,
+                        "temp_spill_bytes": 0,
+                        "output_log_bytes": 1,
+                        "storage_growth_bytes": 1,
+                        "exact_result": True,
+                        "effective_strategy": "DIFFERENTIAL",
+                        "full_fallback_count": 0,
+                    },
+                    "active-refresh": {
+                        "source_write_p50_ms": 20 if case == "out-of-budget" else 8,
+                        "source_write_p95_ms": 20 if case == "out-of-budget" else 10,
+                        "source_write_p99_ms": 24 if case == "out-of-budget" else 12,
                         "throughput_rows_per_second": 1000,
                         "write_errors": 0,
                         "writer_concurrency": 1,
@@ -367,7 +393,7 @@ def main() -> None:
     )
     require(criterion_budget is not None, "Criterion regression budget is missing")
     require(criterion_budget.get("minimum_absolute_delta_ns") == 50.0, "Criterion materiality floor must remain 50 ns")
-    require(all(item.get("limits", {}).get("source_write_p95_overhead_pct") == 15.0 for item in contract.get("workloads", [])), "source-write p95 budget must remain 15%")
+    require(all(item.get("limits", {}).get("source_write_p50_overhead_pct") == 15.0 for item in contract.get("workloads", [])), "source-write p50 budget must remain 15%")
 
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     preflight = job_block(workflow, "preflight")

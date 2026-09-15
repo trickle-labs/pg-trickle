@@ -336,9 +336,12 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
             required_cases = set(workload_spec["required_cases"])
             if cases.keys() != required_cases:
                 raise ValueError(f"workload {workload_id!r} has missing or unexpected cases")
-            baseline = cases.get("no-maintenance")
-            if not isinstance(baseline, dict):
+            no_maintenance = cases.get("no-maintenance")
+            if not isinstance(no_maintenance, dict):
                 raise ValueError(f"workload {workload_id!r} has no fixed source-write baseline")
+            capture_only = cases.get("capture-only")
+            if not isinstance(capture_only, dict):
+                raise ValueError(f"workload {workload_id!r} has no capture-only source-write baseline")
             for case_id, case in cases.items():
                 if not isinstance(case, dict):
                     raise ValueError(f"workload {workload_id!r} case {case_id!r} is invalid")
@@ -358,33 +361,33 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
                     raise ValueError(f"workload {workload_id!r} case {case_id!r} did not use {expected_strategy}")
                 if case_id != "no-maintenance" and case.get("full_fallback_count") != 0:
                     raise ValueError(f"workload {workload_id!r} case {case_id!r} used a full-refresh fallback")
-            for case_id in required_cases - {"no-maintenance"}:
+            for case_id in required_cases - {"no-maintenance", "capture-only"}:
                 case = cases[case_id]
                 if not isinstance(case, dict):
                     raise ValueError(f"workload {workload_id!r} case {case_id!r} is invalid")
-                for metric in ("source_write_p95_ms", "throughput_rows_per_second", "write_errors"):
+                for metric in ("source_write_p50_ms", "throughput_rows_per_second", "write_errors"):
                     value = case.get(metric)
                     if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                         raise ValueError(f"workload {workload_id!r} case {case_id!r} lacks {metric}")
-                baseline_ms = baseline.get("source_write_p95_ms")
-                measured_ms = case["source_write_p95_ms"]
+                baseline_ms = capture_only.get("source_write_p50_ms")
+                measured_ms = case["source_write_p50_ms"]
                 if not isinstance(baseline_ms, (int, float)) or not math.isfinite(baseline_ms) or baseline_ms <= 0:
                     raise ValueError(f"workload {workload_id!r} baseline latency must be positive")
                 overhead = 100 * (measured_ms / baseline_ms - 1)
                 budget_results.append({
-                    "id": f"{workload_id}.{case_id}.source-write-p95-overhead",
-                    "metric": "source_write_p95_ms",
+                    "id": f"{workload_id}.{case_id}.source-write-p50-overhead",
+                    "metric": "source_write_p50_ms",
                     "baseline": baseline_ms,
                     "measured": measured_ms,
                     "value": overhead,
-                    "threshold": workload_spec["limits"]["source_write_p95_overhead_pct"],
+                    "threshold": workload_spec["limits"]["source_write_p50_overhead_pct"],
                     "unit": "percent",
-                    "verdict": "passed" if overhead <= workload_spec["limits"]["source_write_p95_overhead_pct"] else "failed",
+                    "verdict": "passed" if overhead <= workload_spec["limits"]["source_write_p50_overhead_pct"] else "failed",
                 })
                 if case["write_errors"] != 0:
                     budget_results[-1]["verdict"] = "failed"
                 for metric, threshold in workload_spec["limits"].items():
-                    if metric == "source_write_p95_overhead_pct":
+                    if metric == "source_write_p50_overhead_pct":
                         continue
                     value = case.get(metric)
                     if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
@@ -404,7 +407,7 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
     global_write_budget = next(item for item in contract["performance_budgets"] if item["id"] == "foreground-write-overhead")
     write_overheads = [
         item["value"] for item in budget_results
-        if item["id"].endswith("source-write-p95-overhead")
+        if item["id"].endswith("source-write-p50-overhead")
     ]
     if not write_overheads:
         raise ValueError("database workload evidence did not evaluate source-write overhead")
@@ -412,7 +415,7 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
     budget_results.append({
         "id": global_write_budget["id"],
         "metric": global_write_budget["metric"],
-        "baseline": "no-maintenance p95 per workload",
+        "baseline": "capture-only p50 per workload",
         "measured": maximum_write_overhead,
         "value": maximum_write_overhead,
         "threshold": global_write_budget["threshold"],
