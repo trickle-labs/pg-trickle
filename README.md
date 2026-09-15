@@ -143,7 +143,7 @@ See [DuckLake Integration Plan](plans/ecosystem/PLAN_DUCKLAKE.md) and [ROADMAP.m
 - **Self-healing repair** — `pgtrickle.repair_stream_table(name)` rebuilds any missing CDC triggers and change buffer tables, resets the refresh frontier, and clears fuse state — use after PITR restores or operator-level DDL.
 - **CNPG / Kubernetes ready** — purpose-built Docker images and CloudNativePG manifests included; a `lifecycle.preStop` drain hook (`pgtrickle.drain(timeout_s => 120)`) ensures clean rolling upgrades.
 - **SQL-injection safe Citus paths** — all `dblink` call sites escape connection strings and queries via `pg_catalog.quote_literal`, eliminating injection risk through attacker-controlled hostnames or slot names.
-- **Supply-chain hardened Docker images** — all Dockerfiles pin `postgres:18.4-bookworm` to an exact SHA256 digest for reproducible builds; `scripts/update_base_image_digests.sh` automates quarterly refreshes.
+- **Reproducible production image.** GHCR and Docker Hub builds share `Dockerfile.ghcr`, which pins the PostgreSQL 18.3 base image to an exact SHA256 digest. `scripts/update_base_image_digests.sh` refreshes the pin.
 
 ### Observability
 

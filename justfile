@@ -26,12 +26,12 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.106.0-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.106.0-pg18 -f Dockerfile.ghcr .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
 build-hub-latest:
-    docker build -t pgtrickle/pg_trickle:latest -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:latest -f Dockerfile.ghcr .
 
 # Build pg_trickle from source for demo use
 [group: "build"]
@@ -120,10 +120,6 @@ lint-ci: lint check-version-sync check-meta-version check-stale-versions check-c
 row-id-v2-release-gate:
     python3 scripts/row_id_v2_release_gate.py
 
-# Keep engine code, SQL, benchmarks, and docs aligned.
-v0-88-release-gate:
-    python3 scripts/v0_88_release_gate.py
-
 # Keep the v0.89 fail-closed window admission contract aligned.
 v0-89-release-gate:
     python3 scripts/v0_89_release_gate.py
@@ -143,13 +139,6 @@ v0-92-release-gate:
 # Keep v0.93 capability, contract, and orchestration artifacts aligned.
 v0-93-release-gate:
     python3 scripts/v0_93_release_gate.py
-
-[group: "release"]
-v0-94-release-gate:
-    python3 scripts/v0_94_release_gate.py
-
-v0-95-release-gate:
-    python3 scripts/v0_95_release_gate.py
 
 v0-96-release-gate:
     python3 scripts/v0_96_release_gate.py

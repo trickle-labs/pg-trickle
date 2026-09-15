@@ -1,2 +1,0 @@
-demo/dashboard/app.py
-demo/postgres/02_stream_tables.sql

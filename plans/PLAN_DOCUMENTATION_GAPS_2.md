@@ -11,8 +11,8 @@ code in `src/api/`, `src/config.rs`, and `src/error.rs`.
 **Author audience:** maintainers and documentation owners.
 **Reader target:** application developers, data engineers, DBAs, SREs,
 evaluators — ranging from SQL-literate analysts to senior platform engineers.
-**Predecessor:** [plans/PLAN_DOCUMENTATION_GAPS_1.md](PLAN_DOCUMENTATION_GAPS_1.md)
-(Round 1, 2026-04-27 — addressed structural stubs, SUMMARY.md, glossary, and
+**Predecessor:** [Round 1 report at the v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_DOCUMENTATION_GAPS_1.md)
+(2026-04-27; it covered structural stubs, SUMMARY.md, the glossary, and the
 use-case gallery).
 
 ---

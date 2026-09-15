@@ -650,6 +650,12 @@ jobs:
       - name: Check SQL reference completeness (DX-2)
         run: python3 scripts/gen_sql_reference.py
 
+      - name: Validate saved vector aggregate benchmark evidence
+        run: python3 scripts/check_vector_aggregate_benchmark.py
+
+      - name: Generate test schema (TEST-005)
+        run: mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs
+
       - name: Check test schema is up to date (TEST-005)
         run: python3 scripts/gen_test_schema.py --check
 

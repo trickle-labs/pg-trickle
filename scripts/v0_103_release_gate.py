@@ -72,8 +72,6 @@ def main() -> None:
 
     roadmap = (ROOT / "roadmap/v0.103.0.md").read_text(encoding="utf-8")
     require("> **Status:** Released" in roadmap, "roadmap release status is stale")
-    roadmap_index = (ROOT / "ROADMAP.md").read_text(encoding="utf-8")
-    require("[v0.103.0]" in roadmap_index and "✅ Released" in roadmap_index, "roadmap index is stale")
     require("0.103.0" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), "CHANGELOG.md is missing the release entry")
 
     subprocess.run(

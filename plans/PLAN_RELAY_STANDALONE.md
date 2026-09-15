@@ -2,7 +2,7 @@
 
 **Date:** 1 May 2026
 **Status:** ✅ DECIDED — Option C: extract `pg_tide` into a new repository `trickle-labs/pg-tide`
-**Related:** [REPORT_SUPERFLOUS_FEATURES.md §7.2](REPORT_SUPERFLOUS_FEATURES.md)
+**Related:** [REPORT_SUPERFLOUS_FEATURES.md §7.2](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md)
 
 > **Reader's note (1 May 2026, revision 4):** the relay binary, outbox, and
 > inbox features have no known users yet — no bug reports, no support
@@ -226,7 +226,7 @@ core extension exactly where they are.
   b. Forcing every refresh to touch a second extension's tables via plpgsql
      triggers (slower, brittle).
 - The outbox/inbox functions (`enable_outbox`, `outbox_status`,
-  `inbox_health`, etc.) are listed in [REPORT_SUPERFLOUS_FEATURES.md §11](REPORT_SUPERFLOUS_FEATURES.md)
+  `inbox_health`, etc.) are listed in [REPORT_SUPERFLOUS_FEATURES.md §11](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md)
   as "should probably move out" — but moving them is a much larger and more
   intrusive change than moving the relay binary, and it touches the refresh
   hot path.
@@ -403,7 +403,7 @@ touch any of the code being moved.
 
 **Yes, for these reasons:**
 
-1. **Alignment with 1.0 framing.** [REPORT_SUPERFLOUS_FEATURES.md §7.2](REPORT_SUPERFLOUS_FEATURES.md)
+1. **Alignment with 1.0 framing.** [REPORT_SUPERFLOUS_FEATURES.md §7.2](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md)
    already identifies the relay as a P2 candidate for extraction. This plan
    is the concrete how.
 2. **Low cost.** The crate is already separate at the Rust level; the
@@ -856,14 +856,11 @@ not assume any of these "just work" after the cut.
 | [roadmap/v0.29.0.md](roadmap/v0.29.0.md), [roadmap/v0.29.0.md-full.md](roadmap/v0.29.0.md-full.md) | Same footnote. |
 | [ROADMAP.md](ROADMAP.md) line ~130 ("v0.28–29 ─── Reliable event messaging…"), line 200 (test coverage), line 223 (embedding outbox) | Annotate each line: outbox/inbox/relay history now lives at `pg-tide`. The v0.47.0 "embedding outbox" item (line 100) needs a decision: stays in `pg_trickle` as a `pg_tide.attach_outbox()` consumer, or moves to `pg-tide`? Recommend keeping in `pg_trickle` since it's an embedding-pipeline feature that *uses* the outbox primitive. |
 
-#### Blog posts (move to `pg-tide` repo's blog)
+#### Blog posts
 
-The four most directly relay/outbox/inbox-centric posts move:
-
-- [blog/built-in-outbox.md](blog/built-in-outbox.md)
-- [blog/outbox-pattern-turbocharged.md](blog/outbox-pattern-turbocharged.md)
-- [blog/inbox-pattern-kafka.md](blog/inbox-pattern-kafka.md)
-- [blog/relay-deep-dive.md](blog/relay-deep-dive.md)
+The published pages that describe removed outbox, inbox, and relay APIs stay at
+their current URLs as migration notices. The notices point to the current
+`pg_trickle` guides or the `pg_tide` repository.
 
 Other blog posts mention outbox/inbox tangentially
 ([blog/self-monitoring.md](blog/self-monitoring.md),

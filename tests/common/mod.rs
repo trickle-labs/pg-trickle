@@ -7,7 +7,7 @@ use testcontainers_modules::postgres::Postgres;
 
 /// SQL to create the pgtrickle catalog schema and tables.
 /// Generated from `sql/archive/pg_trickle--<version>.sql` by `scripts/gen_test_schema.py`.
-/// Regenerate: `python3 scripts/gen_test_schema.py > tests/generated/schema.rs`
+/// Regenerate: `mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs`
 #[allow(dead_code)]
 pub const CATALOG_DDL: &str = include!(concat!(
     env!("CARGO_MANIFEST_DIR"),

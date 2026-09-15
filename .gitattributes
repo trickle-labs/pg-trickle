@@ -31,7 +31,6 @@ Cargo.lock          export-ignore
 codecov.yml         export-ignore
 CONTRIBUTING.md     export-ignore
 deny.toml           export-ignore
-Dockerfile.hub      export-ignore
 ESSENCE.md          export-ignore
 justfile            export-ignore
 ROADMAP.md          export-ignore

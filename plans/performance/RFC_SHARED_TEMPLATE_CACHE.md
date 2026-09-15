@@ -4,7 +4,7 @@
 **Author:** pg_trickle team  
 **Date:** 2025-07-15  
 **Target:** v0.16.0  
-**Ref:** REPORT_OVERALL_STATUS.md §14
+**Historical source:** [Performance assessment at the v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/performance/REPORT_OVERALL_STATUS.md)
 
 ---
 

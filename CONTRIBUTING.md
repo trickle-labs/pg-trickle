@@ -46,6 +46,11 @@ just test-e2e           # full E2E (builds Docker image)
 just test-pgbouncer     # PgBouncer transaction-pool compatibility tests
 ```
 
+For differential correctness, prefer multi-cycle mutation tests that compare
+the stream table with a fresh query result. Concurrency tests need a barrier or
+an observed database state to prove operations overlapped. Poll for completion
+instead of relying on fixed sleeps.
+
 Full setup instructions are in [INSTALL.md](INSTALL.md).
 
 ### Devcontainer / Containerized Development

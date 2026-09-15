@@ -2,8 +2,8 @@
 # Docker Hub Image Workflow — Build and smoke-test the official pg_trickle
 # Docker image.
 #
-# Builds pgtrickle/pg_trickle:<version>-pg18 from Dockerfile.hub but does NOT
-# push to Docker Hub.  Publishing is gated until v1.0.0 — at that point,
+# Builds pgtrickle/pg_trickle:<version>-pg18 from Dockerfile.ghcr but does NOT
+# push to Docker Hub. Publishing is gated until v1.0.0. At that point,
 # adding `push: true` and Docker Hub credentials is all that's needed.
 #
 # Smoke test: starts the container, creates a stream table, verifies a
@@ -54,7 +54,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.hub
+          file: Dockerfile.ghcr
           push: false
           load: true
           tags: ${{ steps.tag.outputs.tag }}

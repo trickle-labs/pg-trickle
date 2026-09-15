@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_stale_versions.sh — scan Dockerfile examples for stale pg_trickle image tags.
+# check_stale_versions.sh — scan the production Dockerfile for stale image tags.
 #
 # Reads the current Cargo.toml version and reports any occurrence of a
 # pg_trickle Docker image tag that hardcodes an old version number in
@@ -39,7 +39,7 @@ PG_TRICKLE_TAG_RE='(pgtrickle/pg_trickle|ghcr\.io/trickle-labs/pg_trickle):[0-9]
 
 PASS=true
 
-for FILE in Dockerfile.hub Dockerfile.ghcr; do
+for FILE in Dockerfile.ghcr; do
     [[ -f "$FILE" ]] || continue
 
     while IFS= read -r MATCH; do

@@ -10,7 +10,7 @@ PL/pgSQL stub for parse_duration_seconds (the extension uses MODULE_PATHNAME
 which cannot be loaded in a stock test container).
 
 Usage:
-    python3 scripts/gen_test_schema.py > tests/generated/schema.rs
+    mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs
     python3 scripts/gen_test_schema.py --check   # exits 1 if drift detected
 """
 
@@ -289,7 +289,7 @@ def main() -> None:
         if not generated_path.exists():
             print(
                 f"ERROR: {generated_path} does not exist.\n"
-                "Run: python3 scripts/gen_test_schema.py > tests/generated/schema.rs",
+                "Run: mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -297,7 +297,7 @@ def main() -> None:
         if existing != output:
             print(
                 "ERROR: tests/generated/schema.rs is out of date with the archive SQL.\n"
-                "Run: python3 scripts/gen_test_schema.py > tests/generated/schema.rs",
+                "Run: mkdir -p tests/generated && python3 scripts/gen_test_schema.py > tests/generated/schema.rs",
                 file=sys.stderr,
             )
             sys.exit(1)

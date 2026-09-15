@@ -51,8 +51,6 @@ independently of code changes (see §5).
 |---|---|---|
 | `Dockerfile.ghcr` | 5, 17, 22, 26 | Comments referencing `ghcr.io/grove/pg_trickle` |
 | `Dockerfile.ghcr` | 111 | `ARG REPO_URL=https://github.com/grove/pg-trickle` |
-| `Dockerfile.hub` | 15, 18, 22 | Comments referencing `pgtrickle/pg_trickle` (Docker Hub org — separate, see §3.3) |
-| `Dockerfile.hub` | 107 | `ARG REPO_URL=https://github.com/grove/pg-trickle` |
 | `cnpg/Dockerfile.ext` | 19 | `ARG REPO_URL=https://github.com/grove/pg-trickle` |
 
 ---
@@ -88,7 +86,7 @@ independently of code changes (see §5).
 | `book.toml` (lines 9–10) | `git-repository-url` and `edit-url-template` |
 | `META.json` (lines 23, 25, 26, 30) | `homepage`, source `url`, source `web`, bug-tracker `web` |
 | `ESSENCE.md` (line 196) | Source URL |
-| `doc/pg_trickle.md` (lines 206–212) | All six reference links in the psql `\h` man-page stub |
+| `README.md` | PGXN overview document; replaces the retired `doc/pg_trickle.md` stub |
 
 ---
 
@@ -178,7 +176,7 @@ user-facing files but should be updated for consistency:
 | File | Notes |
 |---|---|
 | `plans/PLAN_RELAY_STANDALONE.md` (lines 164, 182, 244) | References `grove/pg-trickle-relay` (see §3.4) |
-| `plans/REPORT_SUPERFLOUS_FEATURES.md` (lines 264, 286, 320) | References `grove/pg-trickle-dbt`, `grove/pg-trickle-relay`, `grove/pg-trickle-observability` |
+| [Historical pruning report at the v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md) | References `grove/pg-trickle-dbt`, `grove/pg-trickle-relay`, `grove/pg-trickle-observability` |
 | `plans/ecosystem/PLAN_CLOUDNATIVEPG.md` (lines 6, 210, 514, 546) | PR link, ARG REPO_URL example, image refs |
 | `plans/ecosystem/GAP_PG_IVM_COMPARISON.md` (lines 58, 919) | Comparison table repository column |
 | `plans/ecosystem/REPORT_READYSET.md` (line 37) | Comparison table |
@@ -288,10 +286,9 @@ is needed in `book.toml` or `docs.yml` as long as the repo name is unchanged.
 
 ### 3.3 Docker Hub organisation (`pgtrickle`)
 
-`Dockerfile.hub` and `.github/workflows/docker-hub.yml` target the Docker Hub
-organisation `pgtrickle` (not `grove`).  This is a **separate** Docker Hub
-account that is independent of the GitHub organisation name.  No Docker Hub
-change is required as part of this migration.
+`.github/workflows/docker-hub.yml` targets the Docker Hub organisation
+`pgtrickle` (not `grove`). It builds and smoke-tests the shared pinned
+`Dockerfile.ghcr`. Docker Hub remains independent of the GitHub organisation.
 
 If Docker Hub push is enabled in the future (currently gated until v1.0.0),
 ensure `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets are present in the
@@ -301,7 +298,8 @@ new `trickle-labs` organisation.
 
 ### 3.4 Related planned repositories
 
-`plans/PLAN_RELAY_STANDALONE.md` and `plans/REPORT_SUPERFLOUS_FEATURES.md`
+`plans/PLAN_RELAY_STANDALONE.md` and the [historical pruning report at the
+v0.106.0 review](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/REPORT_SUPERFLOUS_FEATURES.md)
 reference future spin-off repositories:
 
 - `grove/pg-trickle-relay`

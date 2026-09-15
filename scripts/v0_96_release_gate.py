@@ -2,7 +2,6 @@
 """Validate the v0.96 release surfaces and checked-in artifacts."""
 
 from pathlib import Path
-import re
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,9 +38,9 @@ missing_contracts = [needle for needle in needles if needle not in sources]
 if not any(marker in sources for marker in ("FORECAST_AND_REACT", "ACCOUNTED_FOOTPRINT")):
     missing_contracts.append("forecast disk contract")
 
-roadmap = (ROOT / "ROADMAP.md").read_text(encoding="utf-8")
-if not re.search(r"\[v0\.96\.0\].*?✅ Released", roadmap):
-    missing_contracts.append("ROADMAP.md v0.96.0 released status")
+roadmap = (ROOT / "roadmap/v0.96.0.md").read_text(encoding="utf-8")
+if "> **Status:** Released" not in roadmap:
+    missing_contracts.append("roadmap/v0.96.0.md released status")
 
 if missing or missing_contracts:
     for path in missing:

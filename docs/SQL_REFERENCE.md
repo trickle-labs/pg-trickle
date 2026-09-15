@@ -5118,9 +5118,12 @@ SELECT * FROM pgtrickle.dedup_stats();
 --                  1234 |           87 |            7.05
 ```
 
-A `dedup_ratio_pct` ≥ 10 is the threshold recommended for investigating a
-two-pass MERGE strategy. See `plans/performance/REPORT_OVERALL_STATUS.md §14`
-for background.
+A `dedup_ratio_pct` ≥ 10 is a screening threshold for profiling the refresh
+path, not a measured crossover point. PostgreSQL rejects a `MERGE` when more
+than one source row affects the same target row, so pg_trickle materializes and
+deduplicates the delta first. That work can dominate refresh time for workloads
+with rapid updates to the same rows. Benchmark a compaction or two-pass strategy
+before changing the path.
 
 ### `pgtrickle.shared_buffer_stats()`
 

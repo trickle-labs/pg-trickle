@@ -23,7 +23,7 @@ services:
     # image: ghcr.io/pgstream/pg-trickle:latest
     build:
       context: ..
-      dockerfile: Dockerfile.hub
+      dockerfile: Dockerfile.ghcr
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       # A45-4: Use ${POSTGRES_PASSWORD} from .env (see .env.example).

@@ -168,7 +168,7 @@ This workstream covers cases that do not need new engine behavior.
 - `CHANGELOG.md`
 - `docs/FAQ.md`
 - `docs/SQL_REFERENCE.md`
-- `plans/testing/STATUS_TESTING.md` if it enumerates ignored inventory
+- `plans/testing/PLAN_TESTING_GAPS.md` if remaining failures need tracking
 
 **Acceptance criteria:**
 
@@ -418,7 +418,7 @@ Once the re-enable work starts, the testing status documents should reflect it.
 
 **Files likely affected:**
 
-- `plans/testing/STATUS_TESTING.md`
+- `plans/testing/PLAN_TESTING_GAPS.md`
 - `plans/testing/PLAN_TESTING_GAPS.md` if the remaining failures become tracked implementation gaps
 
 ---

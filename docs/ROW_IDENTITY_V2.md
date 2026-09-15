@@ -77,6 +77,11 @@ workflow requires it. Report identity length and a short diagnostic fingerprint
 instead of complete bytes or reversible prefixes. External consumers must use
 `BYTEA`; an old numeric identity cannot be cast into a V2 identity.
 
+Publications, outbox, DuckLake, and other sinks include the row ID only when
+their update/delete contract requires it, or after an owner opts in following
+a data-classification review. Dump and support guidance warns that pass-through
+and keyless identities can retain values hidden by a later projection.
+
 The v0.87.17 recreation preflight is read-only and does not return identity
 bytes. Record external consumers and acknowledge their schema-change and
 resnapshot plan before dropping V1 state. Writes during the recreation window
@@ -259,6 +264,22 @@ matches PostgreSQL equality. Non-deterministic collations are rejected.
 
 The implementation must report the expression, resolved type, collation,
 operator class, and rejected property. Uncertainty is rejection.
+
+## Identity index and benchmark constraints
+
+The full canonical bytes establish identity. A digest alone can collide and
+destroys useful key ordering. Direct B-tree indexes work only for identities
+whose encoded size is bounded. For unbounded identities, the non-unique
+expression index uses an ordered 128-byte prefix and a 16-byte XXH3-128 digest;
+the refresh path always rechecks the full identity. This avoids a generated
+probe column, which would add heap and WAL cost and complicate PostgreSQL 18
+logical replication.
+
+The 128-byte prefix was selected from measurements across 32-, 64-, 128-, and
+256-byte candidates. The comparison covered short keys, ordered and random wide
+keys, common prefixes, overflow lookups, index size, WAL volume, and refresh
+latency. See the [v0.87.17 release gate](../roadmap/v0.87.17.md) for the
+benchmark contract.
 
 ## Independent check vectors
 

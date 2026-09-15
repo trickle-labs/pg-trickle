@@ -365,7 +365,7 @@ End-to-end release preparation checklist:
 6. **Documentation:** Update `docs/UPGRADING.md` with migration notes, update
    `ROADMAP.md` to mark items as shipped.
 7. **Pre-deployment:** Walk through `docs/PRE_DEPLOYMENT.md` checklist.
-8. **Docker images:** Verify `Dockerfile.hub` and `Dockerfile.ghcr` build.
+8. **Docker image:** Verify `Dockerfile.ghcr` builds for both registry workflows.
 9. **Tag:** Suggest `git tag -a v<version> -m "..."`.
 
 **Guard rails:**

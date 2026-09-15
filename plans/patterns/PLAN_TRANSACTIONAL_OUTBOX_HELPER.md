@@ -4,8 +4,8 @@
 > **Created:** 2026-04-18
 > **Category:** Integration Pattern — Implementation
 > **Related:** [PLAN_TRANSACTIONAL_OUTBOX.md](PLAN_TRANSACTIONAL_OUTBOX.md) ·
-> [PLAN_OVERALL_ASSESSMENT.md §9.12](../PLAN_OVERALL_ASSESSMENT.md#912-transactional-outbox-helper-s-effort--1-week) ·
-> [ROADMAP v0.24.0 OUTBOX](../../ROADMAP.md#v0240--transactional-inbox--outbox-patterns)
+> [PLAN_OVERALL_ASSESSMENT.md §9.12](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT.md#912-transactional-outbox-helper-s-effort--1-week) ·
+> [ROADMAP v0.28.0 OUTBOX](../../roadmap/v0.28.0.md-full.md)
 
 ---
 
@@ -1410,9 +1410,9 @@ SELECT * FROM pgtrickle.outbox_status('pending_order_events');
   background and pattern overview.
 - [PLAN_TRANSACTIONAL_INBOX.md](PLAN_TRANSACTIONAL_INBOX.md) — companion
   pattern for inbound events.
-- [PLAN_OVERALL_ASSESSMENT.md §9.12](../PLAN_OVERALL_ASSESSMENT.md#912-transactional-outbox-helper-s-effort--1-week) —
+- [PLAN_OVERALL_ASSESSMENT.md §9.12](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT.md#912-transactional-outbox-helper-s-effort--1-week) —
   original proposal.
-- [ROADMAP.md v0.24.0 §Transactional Inbox & Outbox](../../ROADMAP.md#v0240--transactional-inbox--outbox-patterns) —
+- [ROADMAP.md v0.28.0 §Transactional Inbox & Outbox](../../roadmap/v0.28.0.md-full.md) —
   scheduled OUTBOX-1 through OUTBOX-8 and OUTBOX-B1 through OUTBOX-B9 items.
 
 ---
