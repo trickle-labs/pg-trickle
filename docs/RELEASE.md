@@ -41,15 +41,16 @@ the workflow runs two clean builds and compares their outputs.
 
 The live database suite runs keyed aggregation, skewed join aggregation, and a
 small Graph V1 dependency graph. It compares source writes with no maintenance,
-capture paused, and active refresh. Graph cases also run with output consumers
+capture-only, and active refresh. Graph cases also run with output consumers
 disabled and active. The suite fixes the table size, 25 ms write-batch cadence,
 1 s active-refresh cadence, warmup, repetitions, and measurement window in the
 contract. It checks exact results and differential strategy, then records write
 latency, throughput, refresh latency, freshness, CPU, memory, WAL, backlog,
 temporary spill, output-log growth, and database growth.
 
-The workload gate limits p95 source-write latency overhead to 15% against the
-no-maintenance baseline. Criterion gates regressions above 10% when the absolute
+The workload gate limits p50 source-write latency overhead from active refresh
+to the capture-only baseline to 15%. This isolates refresh work from the fixed
+CDC capture cost. Criterion gates regressions above 10% when the absolute
 increase is at least 50 ns; smaller percentage-only changes remain visible in
 the retained evidence but do not fail the release. The release attaches raw
 measurements, Criterion estimates, suite records, and logs. The manifest

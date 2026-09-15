@@ -41,6 +41,26 @@ def main() -> int:
     try:
         shutil.rmtree(target_criterion, ignore_errors=True)
         shutil.rmtree(raw_dir, ignore_errors=True)
+
+        # Run the candidate before the baseline so both measurements see the
+        # same fresh runner conditions.  Measuring the baseline first biases
+        # tiny benchmarks toward a slower candidate after the runner warms up.
+        run(
+            [
+                "bash",
+                "scripts/run_benchmarks.sh",
+                "--",
+            ],
+            cwd=ROOT,
+            env=env,
+        )
+        if not target_criterion.is_dir():
+            raise RuntimeError("candidate Criterion run produced no raw estimates")
+        candidate_snapshots = []
+        candidate_snapshot = raw_dir / "candidate"
+        shutil.copytree(target_criterion, candidate_snapshot, dirs_exist_ok=True)
+        candidate_snapshots.append(candidate_snapshot)
+
         with tempfile.TemporaryDirectory(prefix="pgtrickle-v01053-baseline-") as temp_name:
             worktree = Path(temp_name) / "baseline"
             run(["git", "worktree", "add", "--detach", str(worktree), BASELINE_TAG], cwd=ROOT)
@@ -59,39 +79,37 @@ def main() -> int:
                 source = worktree / "target/criterion"
                 if not source.is_dir():
                     raise RuntimeError("baseline Criterion run produced no raw estimates")
-                shutil.copytree(source, target_criterion, dirs_exist_ok=True)
                 shutil.copytree(source, baseline_snapshot, dirs_exist_ok=True)
+                for baseline in source.rglob(BASELINE_VERSION):
+                    if baseline.is_dir():
+                        destination = target_criterion / baseline.relative_to(source)
+                        shutil.copytree(baseline, destination, dirs_exist_ok=True)
             finally:
                 subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=ROOT, check=False)
 
-        if target_criterion.is_dir():
-            for result in target_criterion.rglob("new"):
-                if result.is_dir():
-                    shutil.rmtree(result)
         comparison_failed = True
-        candidate_snapshots = []
         for attempt in range(MAX_COMPARISON_ATTEMPTS):
             if attempt:
                 # ponytail: one retry absorbs transient hosted-run noise; a repeatable regression still fails.
                 for result in target_criterion.rglob("new"):
                     if result.is_dir():
                         shutil.rmtree(result)
-            run(
-                [
-                    "bash",
-                    "scripts/run_benchmarks.sh",
-                    "--",
-                    "--baseline",
-                    BASELINE_VERSION,
-                ],
-                cwd=ROOT,
-                env=env,
-            )
-            if not target_criterion.is_dir():
-                raise RuntimeError("candidate Criterion run produced no raw estimates")
-            snapshot = raw_dir / ("candidate" if attempt == 0 else f"candidate-retry-{attempt}")
-            shutil.copytree(target_criterion, snapshot, dirs_exist_ok=True)
-            candidate_snapshots.append(snapshot)
+                run(
+                    [
+                        "bash",
+                        "scripts/run_benchmarks.sh",
+                        "--",
+                        "--baseline",
+                        BASELINE_VERSION,
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                )
+                if not target_criterion.is_dir():
+                    raise RuntimeError("candidate Criterion run produced no raw estimates")
+                snapshot = raw_dir / f"candidate-retry-{attempt}"
+                shutil.copytree(target_criterion, snapshot, dirs_exist_ok=True)
+                candidate_snapshots.append(snapshot)
             try:
                 run(
                     [
