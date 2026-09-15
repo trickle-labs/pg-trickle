@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.106.1 — Same-pass graph maintenance](#01061--same-pass-graph-maintenance)
 - [0.106.0 — Executed package qualification and database cost](#01060--executed-package-qualification-and-database-cost)
 - [0.105.3 — Differential correctness and release qualification](#01053--differential-correctness-and-release-qualification)
 - [0.105.2 — Package, upgrade, performance, and field validation](#01052--package-upgrade-performance-and-field-validation)
@@ -219,6 +220,22 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.106.1] — Same-pass graph maintenance
+
+v0.106.1 fixes differential maintenance when one graph refresh propagates new
+rows through projections, grouped statistics, and downstream self-joins.
+
+- Maps row identities through reordered projections and uses ordinal grouping
+  when injecting the DISTINCT baseline count.
+- Raises `external_graph_refresh` to Graph V1 minor 1 and adds a regression for
+  the candidate blocks, statistics, and pairs topology used by pg-mdm.
+- Caches statement-trigger metadata to reduce update-capture overhead.
+- Makes release measurements less sensitive to runner warmup and retries one
+  transient Criterion comparison without hiding a repeatable regression.
+
+The release adds no SQL objects or catalog changes. The upgrade records the
+new release version.
 
 ## [0.106.0] — Executed package qualification and database cost
 

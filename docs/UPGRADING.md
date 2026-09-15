@@ -2,6 +2,19 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.106.0 to 0.106.1
+
+Install the v0.106.1 library and extension files, then apply the metadata-only
+upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.106.1';
+```
+
+This patch fixes same-pass differential graph maintenance and raises
+`external_graph_refresh` to Graph V1 minor 1. It adds no SQL objects or catalog
+changes.
+
 ## 0.105.3 to 0.106.0
 
 Install the v0.106.0 library and extension files, then apply the metadata-only
