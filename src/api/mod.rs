@@ -31,6 +31,7 @@ pub(crate) mod spec;
 pub(crate) mod validation;
 
 pub(crate) const GRAPH_V1_CAPABILITY: &str = "external_graph_refresh";
+pub(crate) const GRAPH_V1_MINOR: i16 = 1;
 pub(crate) const DELTA_V1_CAPABILITY: &str = "output_delta_consumer";
 
 /// Admit the stable V1 integration contracts.
@@ -3478,7 +3479,7 @@ mod tests {
         let result = inject_pgt_count(query);
         assert_eq!(
             result,
-            "SELECT color, size, COUNT(*) AS __pgt_count FROM prop_dist GROUP BY color, size"
+            "SELECT color, size, COUNT(*) AS __pgt_count FROM prop_dist GROUP BY 1, 2"
         );
     }
 
@@ -3490,7 +3491,7 @@ mod tests {
         // reconstructs the prefix with literal "SELECT".
         assert_eq!(
             result,
-            "SELECT color, size, COUNT(*) AS __pgt_count from prop_dist GROUP BY color, size"
+            "SELECT color, size, COUNT(*) AS __pgt_count from prop_dist GROUP BY 1, 2"
         );
     }
 
@@ -3500,7 +3501,7 @@ mod tests {
         let result = inject_pgt_count(query);
         assert_eq!(
             result,
-            "SELECT color, COUNT(*) AS __pgt_count FROM items WHERE active = true GROUP BY color"
+            "SELECT color, COUNT(*) AS __pgt_count FROM items WHERE active = true GROUP BY 1"
         );
     }
 
@@ -3521,7 +3522,18 @@ mod tests {
         let result = inject_pgt_count(query);
         assert_eq!(
             result,
-            "SELECT a, b, c, COUNT(*) AS __pgt_count FROM t1 GROUP BY a, b, c"
+            "SELECT a, b, c, COUNT(*) AS __pgt_count FROM t1 GROUP BY 1, 2, 3"
+        );
+    }
+
+    #[test]
+    fn test_inject_pgt_count_distinct_with_aliases() {
+        let query =
+            "SELECT DISTINCT l.id AS left_id, r.id AS right_id FROM t l JOIN t r ON l.id < r.id";
+        let result = inject_pgt_count(query);
+        assert_eq!(
+            result,
+            "SELECT l.id AS left_id, r.id AS right_id, COUNT(*) AS __pgt_count FROM t l JOIN t r ON l.id < r.id GROUP BY 1, 2"
         );
     }
 

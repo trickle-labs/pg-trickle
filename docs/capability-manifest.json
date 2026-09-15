@@ -17,7 +17,7 @@
       "id": "graph-v1",
       "capability": "external_graph_refresh",
       "major_version": 1,
-      "minor_version": 0,
+      "minor_version": 1,
       "status": "stable",
       "enabled": true,
       "strategy": "public_sql",
@@ -96,5 +96,5 @@
       "docs/integrations/extension-contracts.md"
     ]
   },
-  "manifest_digest": "sha256:95a47c0e8be7e55f8f2dd617ecc0301e54fc4a5be046282ff671dac69ff0fa09"
+  "manifest_digest": "sha256:3dc73c49c7f71e7658866c57bf21b3bce7d4e8b074f5db341f7add16281a1500"
 }

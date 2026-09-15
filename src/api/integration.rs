@@ -139,7 +139,7 @@ pub fn integration_capabilities() -> TableIterator<
         (
             super::GRAPH_V1_CAPABILITY.to_string(),
             1,
-            0,
+            super::GRAPH_V1_MINOR,
             true,
             JsonB(serde_json::json!({
                 "status": "stable",
@@ -1086,6 +1086,7 @@ mod tests {
     fn test_integration_capabilities_reports_independent_capabilities() {
         assert_ne!("external_graph_refresh", "output_delta_consumer");
         assert_eq!(CONTRACT_VERSION, 1);
+        assert_eq!(super::GRAPH_V1_MINOR, 1);
     }
 
     #[test]

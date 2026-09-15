@@ -319,3 +319,79 @@ async fn test_v106_graph_refresh_propagates_same_pass_with_active_consumer() {
     db.assert_st_matches_query(root, "SELECT grp, total, n FROM public.v106_graph_middle")
         .await;
 }
+
+#[tokio::test]
+async fn test_graph_refresh_propagates_same_pass_through_distinct_self_join() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE graph_pair_source (\
+             source_record_id INT NOT NULL, field_name TEXT NOT NULL, state TEXT NOT NULL, \
+             canonical_value TEXT NOT NULL, source_sort_key INT NOT NULL, \
+             PRIMARY KEY (source_record_id, field_name))",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'graph_pair_blocks',\
+             query => 'SELECT ''email''::text AS channel_id, canonical_value AS block_key, \
+                              source_record_id, source_sort_key, field_name \
+                       FROM graph_pair_source \
+                       WHERE field_name = ''email'' AND state = ''value''',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'graph_pair_stats',\
+             query => 'SELECT channel_id, block_key, COUNT(*)::bigint AS block_records \
+                       FROM graph_pair_blocks GROUP BY channel_id, block_key',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'graph_pairs',\
+             query => 'SELECT DISTINCT \
+                           l.source_record_id AS left_source_record_id, \
+                           r.source_record_id AS right_source_record_id \
+                       FROM graph_pair_blocks l \
+                       JOIN graph_pair_stats s \
+                         ON s.channel_id = l.channel_id AND s.block_key = l.block_key \
+                       JOIN graph_pair_blocks r \
+                         ON r.channel_id = l.channel_id AND r.block_key = l.block_key \
+                        AND l.source_sort_key < r.source_sort_key \
+                       WHERE s.block_records <= 100',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+
+    let root = "public.graph_pairs";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+
+    db.execute(
+        "INSERT INTO graph_pair_source VALUES \
+             (1, 'email', 'value', 'same@example.test', 1), \
+             (2, 'email', 'value', 'same@example.test', 2)",
+    )
+    .await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+
+    db.assert_st_matches_query(
+        root,
+        "SELECT 1 AS left_source_record_id, 2 AS right_source_record_id",
+    )
+    .await;
+    for name in ["graph_pair_blocks", "graph_pair_stats", "graph_pairs"] {
+        let mode: String = db
+            .query_scalar(&format!(
+                "SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables \
+                 WHERE pgt_name = '{name}'"
+            ))
+            .await;
+        assert_eq!(mode, "DIFFERENTIAL", "{name} silently fell back to {mode}");
+    }
+}
