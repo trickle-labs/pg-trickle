@@ -750,20 +750,23 @@ pub fn execute_differential_refresh_with_tuning(
     crate::cdc::validate_stream_table_row_identity(st)?;
     let _validated_buffers = crate::cdc::validate_required_change_buffers(st, &dependencies)?;
 
-    // ── RLS-3: source row-level security may have been enabled after this ──
-    // stream table was created (admission only checks at CREATE/ALTER time).
-    // The differential CDC window cannot tell a delete/update image for a
-    // row whose owner-visibility changed apart from one that never did, so
-    // fall back to FULL for as long as RLS remains enabled on any source.
+    // ── RLS-3: source row-level security or owner privileges may have changed ──
+    // since this stream table was created (admission only checks at CREATE/
+    // ALTER time). Recheck the current stream owner before applying a delta;
+    // a role that is subject to RLS cannot safely reconstruct owner-visible old
+    // row images, while superusers and BYPASSRLS roles can.
     let dependency_oids: Vec<u32> = dependencies
         .iter()
         .map(|d| d.source_relid.to_u32())
         .collect();
-    if let Some(rls_source) = crate::cdc::first_rls_enabled_source(&dependency_oids)? {
+    let stream_owner_oid = crate::api::security_context::stream_execution_context(st)?.owner_oid;
+    if let Some(rls_source) =
+        crate::cdc::first_rls_source_for_role(&dependency_oids, stream_owner_oid)?
+    {
         pgrx::warning!(
-            "[pg_trickle] Falling back to FULL refresh: source \"{}\" now has row-level \
-             security enabled. Differential maintenance cannot safely reconstruct \
-             owner-visible old row images under RLS.",
+            "[pg_trickle] Falling back to FULL refresh: source \"{}\" has row-level security \
+             enabled for the current stream-table owner. Differential maintenance cannot \
+             safely reconstruct owner-visible old row images under RLS.",
             rls_source,
         );
         set_effective_mode("FULL");

@@ -56,10 +56,8 @@ async fn test_rls_on_source_does_not_filter_stream_table() {
     );
 }
 
-/// RLS-3: DIFFERENTIAL/IMMEDIATE cannot correctly represent OLD-row
-/// visibility for an RLS-protected source (the CDC window can only check
-/// *current* visibility), so explicit DIFFERENTIAL is rejected at creation
-/// and AUTO falls back to FULL instead.
+/// RLS-3: An owner subject to RLS keeps the conservative behavior. Explicit
+/// DIFFERENTIAL is rejected and AUTO falls back to FULL.
 #[tokio::test]
 async fn test_rls_on_source_rejects_explicit_differential() {
     let db = E2eDb::new().await.with_extension().await;
@@ -77,12 +75,31 @@ async fn test_rls_on_source_rejects_explicit_differential() {
     db.execute("CREATE POLICY tenant_only ON rls_diff_src USING (tenant_id = 10)")
         .await;
 
-    // Explicit DIFFERENTIAL over an RLS-protected source must be rejected —
-    // the engine cannot prove OLD-row visibility was ever checked correctly.
+    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
+    let subject_owner = format!("rls_subject_owner_{}", db_suffix.replace('-', "_"));
+    db.execute(&format!("CREATE ROLE {subject_owner} LOGIN"))
+        .await;
+    db.execute(&format!(
+        "GRANT USAGE, CREATE ON SCHEMA public TO {subject_owner}"
+    ))
+    .await;
+    db.execute(&format!(
+        "GRANT USAGE ON SCHEMA pgtrickle TO {subject_owner}"
+    ))
+    .await;
+    db.execute(&format!(
+        "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO {subject_owner}"
+    ))
+    .await;
+    db.execute(&format!("GRANT SELECT ON rls_diff_src TO {subject_owner}"))
+        .await;
+
     let result = db
-        .try_execute(
+        .try_execute_with_role(
+            &format!("SET ROLE {subject_owner}"),
             "SELECT pgtrickle.create_stream_table('rls_diff_st', \
-             $$SELECT id, tenant_id, val FROM rls_diff_src$$, '1m', 'DIFFERENTIAL')",
+             $$SELECT id, tenant_id FROM rls_diff_src$$, '1m', 'DIFFERENTIAL')",
+            "RESET ROLE",
         )
         .await;
     assert!(
@@ -91,42 +108,150 @@ async fn test_rls_on_source_rejects_explicit_differential() {
     );
 
     // AUTO mode falls back to FULL automatically instead of erroring.
-    db.create_st(
-        "rls_diff_st",
-        "SELECT id, tenant_id, val FROM rls_diff_src",
-        "1m",
-        "AUTO",
+    db.try_execute_with_role(
+        &format!("SET ROLE {subject_owner}"),
+        "SELECT pgtrickle.create_stream_table('rls_diff_st', \
+         $$SELECT id, tenant_id FROM rls_diff_src$$, '1m', 'AUTO')",
+        "RESET ROLE",
     )
-    .await;
+    .await
+    .expect("AUTO should fall back to FULL for an RLS-subject owner");
 
     db.refresh_st("rls_diff_st").await;
 
+    let (_, mode, _, _) = db.pgt_status("rls_diff_st").await;
+    assert_eq!(mode, "FULL", "RLS-subject owner should force FULL mode");
+
     let count: i64 = db.count("public.rls_diff_st").await;
-    assert_eq!(
-        count, 2,
-        "superuser-owned FULL-fallback stream should contain all rows"
-    );
+    assert_eq!(count, 1, "the policy should expose only tenant 10");
 
     // Insert another row; FULL re-executes the defining query from scratch
     // each cycle, so this is always correct under RLS.
-    db.execute("INSERT INTO rls_diff_src VALUES (3, 20, 'c')")
+    db.execute("INSERT INTO rls_diff_src VALUES (3, 10, 'c')")
         .await;
     db.refresh_st("rls_diff_st").await;
 
     let count: i64 = db.count("public.rls_diff_st").await;
     assert_eq!(
-        count, 3,
-        "stable superuser owner should continue to see all rows"
+        count, 2,
+        "the FULL fallback should continue to evaluate the owner-visible rows"
     );
 }
 
-/// RLS-3: the exact scenario the DIFFERENTIAL delete-compaction bug could
-/// not represent — a row transitioning hidden→visible via UPDATE, and a
-/// DELETE of a row already hidden from the owner. AUTO's FULL fallback
-/// (unlike a differential delta) always re-evaluates from scratch, so both
-/// must be reflected correctly on the very next refresh.
+/// RLS-3: Superuser owners may use DIFFERENTIAL even when the source forces
+/// row security. The source owner sees every row because PostgreSQL grants
+/// superusers an unconditional RLS bypass.
 #[tokio::test]
-async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
+async fn test_rls_differential_allowed_for_superuser_owner() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE rls_diff_super_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO rls_diff_super_src VALUES (1, 10, 'a'), (2, 20, 'b')")
+        .await;
+    db.execute("ALTER TABLE rls_diff_super_src ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute("ALTER TABLE rls_diff_super_src FORCE ROW LEVEL SECURITY")
+        .await;
+    db.execute("CREATE POLICY tenant_only ON rls_diff_super_src USING (tenant_id = 10)")
+        .await;
+
+    let query = "SELECT id, tenant_id, val FROM rls_diff_super_src";
+    db.create_st("rls_diff_super_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("rls_diff_super_st", query).await;
+
+    db.execute("INSERT INTO rls_diff_super_src VALUES (3, 30, 'c')")
+        .await;
+    db.execute("UPDATE rls_diff_super_src SET val = 'b2' WHERE id = 2")
+        .await;
+    db.execute("DELETE FROM rls_diff_super_src WHERE id = 1")
+        .await;
+    db.refresh_st("rls_diff_super_st").await;
+
+    db.assert_st_matches_query("rls_diff_super_st", query).await;
+    let effective_mode: String = db
+        .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_diff_super_st'")
+        .await;
+    assert_eq!(effective_mode, "DIFFERENTIAL");
+}
+
+/// RLS-3: A non-superuser with BYPASSRLS gets the same differential behavior,
+/// including for FORCE ROW LEVEL SECURITY. Revoking BYPASSRLS makes the next
+/// refresh fail before it can apply the pending delta.
+#[tokio::test]
+async fn test_rls_differential_allowed_for_bypassrls_owner_until_revoked() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE rls_diff_bypass_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO rls_diff_bypass_src VALUES (1, 10, 'a'), (2, 20, 'b')")
+        .await;
+    db.execute("ALTER TABLE rls_diff_bypass_src ENABLE ROW LEVEL SECURITY")
+        .await;
+    db.execute("ALTER TABLE rls_diff_bypass_src FORCE ROW LEVEL SECURITY")
+        .await;
+    db.execute("CREATE POLICY tenant_only ON rls_diff_bypass_src USING (tenant_id = 10)")
+        .await;
+    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
+    let bypass_owner = format!("rls_bypass_owner_{}", db_suffix.replace('-', "_"));
+    db.execute(&format!("CREATE ROLE {bypass_owner} LOGIN BYPASSRLS"))
+        .await;
+    db.execute(&format!(
+        "GRANT USAGE, CREATE ON SCHEMA public TO {bypass_owner}"
+    ))
+    .await;
+    db.execute(&format!(
+        "GRANT USAGE ON SCHEMA pgtrickle TO {bypass_owner}"
+    ))
+    .await;
+    db.execute(&format!(
+        "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO {bypass_owner}"
+    ))
+    .await;
+    db.execute(&format!(
+        "GRANT SELECT ON rls_diff_bypass_src TO {bypass_owner}"
+    ))
+    .await;
+
+    let query = "SELECT id, tenant_id, val FROM rls_diff_bypass_src";
+    db.try_execute_with_role(
+        &format!("SET ROLE {bypass_owner}"),
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'rls_diff_bypass_st',\
+            query => $$SELECT id, tenant_id, val FROM rls_diff_bypass_src$$,\
+            schedule => '1m',\
+            refresh_mode => 'DIFFERENTIAL',\
+            cdc_mode => 'trigger'\
+        )",
+        "RESET ROLE",
+    )
+    .await
+    .expect("BYPASSRLS owner should be allowed to create DIFFERENTIAL stream");
+    db.assert_st_matches_query("rls_diff_bypass_st", query)
+        .await;
+
+    db.execute("INSERT INTO rls_diff_bypass_src VALUES (3, 30, 'c')")
+        .await;
+    db.refresh_st("rls_diff_bypass_st").await;
+    db.assert_st_matches_query("rls_diff_bypass_st", query)
+        .await;
+
+    db.execute(&format!("ALTER ROLE {bypass_owner} NOBYPASSRLS"))
+        .await;
+    db.execute("INSERT INTO rls_diff_bypass_src VALUES (4, 40, 'd')")
+        .await;
+    let result = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('rls_diff_bypass_st')")
+        .await;
+    assert!(result.is_err(), "revoking BYPASSRLS must fail closed");
+    assert_eq!(db.count("public.rls_diff_bypass_st").await, 3);
+}
+
+/// RLS-3: a superuser stream owner can use DIFFERENTIAL even when source
+/// visibility changes, because the owner bypasses the source policy.
+#[tokio::test]
+async fn test_rls_bypass_owner_differential_tracks_source_mutations() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute(
@@ -145,9 +270,9 @@ async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
     )
     .await;
 
-    // AUTO downgrades to FULL because the source has RLS enabled. The
-    // stream owner (postgres, superuser) bypasses RLS entirely — see R5 —
-    // so all rows are materialized regardless of the policy.
+    // AUTO keeps DIFFERENTIAL because the stream owner (postgres, superuser)
+    // bypasses RLS entirely — see R5 — so all rows are materialized regardless
+    // of the policy.
     db.create_st(
         "rls_transition_st",
         "SELECT id, tenant, val FROM rls_transition_src",
@@ -158,7 +283,7 @@ async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
     assert_eq!(
         db.count("public.rls_transition_st").await,
         3,
-        "superuser-owned FULL-fallback stream should contain all rows initially"
+        "superuser-owned stream should contain all rows initially"
     );
 
     // Update row 2's tenant (no visibility effect for the superuser owner)
@@ -172,7 +297,7 @@ async fn test_rls_hidden_visible_transitions_correct_under_full_fallback() {
     let count: i64 = db.count("public.rls_transition_st").await;
     assert_eq!(
         count, 2,
-        "FULL fallback must reflect the DELETE on the very next refresh"
+        "differential refresh must reflect the DELETE on the very next refresh"
     );
     let bad: i64 = db
         .query_scalar("SELECT count(*) FROM public.rls_transition_st WHERE id = 3")

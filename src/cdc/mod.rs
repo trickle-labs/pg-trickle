@@ -2142,6 +2142,29 @@ pub(crate) fn first_rls_enabled_source(oids: &[u32]) -> Result<Option<String>, P
     Ok(None)
 }
 
+/// Return the first RLS-enabled source that the given role cannot bypass.
+/// PostgreSQL roles with `rolsuper` or `rolbypassrls` bypass RLS even when a
+/// table has `FORCE ROW LEVEL SECURITY` set.
+pub(crate) fn first_rls_source_for_role(
+    oids: &[u32],
+    role_oid: pg_sys::Oid,
+) -> Result<Option<String>, PgTrickleError> {
+    let bypasses_rls = Spi::get_one_with_args::<bool>(
+        "SELECT rolsuper OR rolbypassrls \
+           FROM pg_catalog.pg_roles \
+          WHERE oid = $1",
+        &[role_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+
+    if bypasses_rls {
+        Ok(None)
+    } else {
+        first_rls_enabled_source(oids)
+    }
+}
+
 /// Build PL/pgSQL expressions for computing `__pgt_row_id` in a CDC trigger.
 ///
 /// Returns `(new_expr, old_expr)` — the expression using NEW record keys

@@ -360,6 +360,7 @@ fn explain_alter_impl(name: &str, new_query: &str) -> Result<pgrx::JsonB, PgTric
             &mut refresh_mode,
             false,
             rw.had_nested_window_rewrite,
+            relation_owner(st.pgt_relid)?,
         )?;
         Ok((rw, vq))
     })?;
@@ -727,6 +728,7 @@ fn alter_stream_table_query(
             &mut refresh_mode,
             false,
             rw.had_nested_window_rewrite,
+            relation_owner(st.pgt_relid)?,
         )?;
         Ok((rw, vq))
     })?;
@@ -1550,6 +1552,7 @@ pub(crate) fn create_stream_table_impl(
             &mut refresh_mode,
             is_auto,
             rw.had_nested_window_rewrite,
+            outer_user_id(),
         )?;
         Ok((rw, vq))
     })?;
@@ -2220,7 +2223,11 @@ pub(crate) fn alter_stream_table_impl(
         // Validate the complete incremental admission before changing CDC mode,
         // schedule, catalog state, or trigger infrastructure.
         if target_refresh_mode != RefreshMode::Full {
-            super::validate_incremental_mode_for_query(&st.defining_query, target_refresh_mode)?;
+            super::validate_incremental_mode_for_query(
+                &st.defining_query,
+                target_refresh_mode,
+                relation_owner(st.pgt_relid)?,
+            )?;
         }
 
         if requested_cdc_mode_override != st.requested_cdc_mode {

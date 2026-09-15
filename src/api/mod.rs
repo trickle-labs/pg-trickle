@@ -1013,6 +1013,7 @@ fn validate_and_parse_query(
     refresh_mode: &mut RefreshMode,
     is_auto: bool,
     had_nested_window_rewrite: bool,
+    stream_owner_oid: pg_sys::Oid,
 ) -> Result<ValidatedQuery, PgTrickleError> {
     // Validate the defining query and extract output columns
     let (columns, query_volatility) = validate_defining_query(query)?;
@@ -1258,7 +1259,9 @@ fn validate_and_parse_query(
         None
     };
 
-    // RLS-3: A source with row-level security cannot be safely diffed.
+    // RLS-3: A source with row-level security cannot be safely diffed by an
+    // owner that is subject to RLS. Superusers and BYPASSRLS owners see the
+    // same source rows regardless of policy changes, including FORCE RLS.
     // The differential CDC staging window can only check whether a row is
     // visible in the *current* state of a source, so a delete/update image
     // for a row whose visibility changed (a hidden→visible UPDATE, a DELETE
@@ -1271,7 +1274,12 @@ fn validate_and_parse_query(
         source_oids.extend(pr.cte_registry.source_oids());
         source_oids.sort_unstable();
         source_oids.dedup();
-        if let Some(rls_source) = crate::cdc::first_rls_enabled_source(&source_oids)? {
+        let rls_source = if *refresh_mode == RefreshMode::Differential {
+            crate::cdc::first_rls_source_for_role(&source_oids, stream_owner_oid)?
+        } else {
+            crate::cdc::first_rls_enabled_source(&source_oids)?
+        };
+        if let Some(rls_source) = rls_source {
             if is_auto && *refresh_mode == RefreshMode::Differential {
                 pgrx::warning!(
                     "[pg_trickle] Falling back to FULL refresh: source \"{}\" has row-level \
@@ -1544,6 +1552,7 @@ fn validate_and_parse_query(
 pub(crate) fn validate_incremental_mode_for_query(
     defining_query: &str,
     mode: RefreshMode,
+    stream_owner_oid: pg_sys::Oid,
 ) -> Result<(), PgTrickleError> {
     if mode == RefreshMode::Full {
         return Ok(());
@@ -1551,6 +1560,24 @@ pub(crate) fn validate_incremental_mode_for_query(
     let (_, query_volatility) = validate_defining_query(defining_query)?;
     let result = crate::dvm::parse_defining_query_full(defining_query)?;
     crate::dvm::check_ivm_support_with_registry(&result)?;
+    let mut source_oids = result.tree.source_oids();
+    source_oids.extend(result.cte_registry.source_oids());
+    source_oids.sort_unstable();
+    source_oids.dedup();
+    let rls_source = if mode == RefreshMode::Differential {
+        crate::cdc::first_rls_source_for_role(&source_oids, stream_owner_oid)?
+    } else {
+        crate::cdc::first_rls_enabled_source(&source_oids)?
+    };
+    if let Some(rls_source) = rls_source {
+        return Err(PgTrickleError::UnsupportedOperator(format!(
+            "{} mode is not supported for source \"{}\" because it has row-level \
+             security enabled for the stream-table owner. Use 'FULL' or 'AUTO' mode \
+             for RLS-protected sources.",
+            mode.as_str(),
+            rls_source,
+        )));
+    }
     if mode.is_immediate() {
         crate::dvm::validate_immediate_mode_support(defining_query)?;
     }

@@ -163,13 +163,17 @@ are ordinary PostgreSQL tables — RLS can be applied to them with `ALTER TABLE
 
 **Important caveats:**
 
-- The background worker refreshes stream tables as the superuser. RLS policies
-  do **not** apply to the superuser by default.
-- To enforce RLS during refresh, use `FORCE ROW LEVEL SECURITY` on the stream
-  table and ensure the superuser is explicitly covered by a permissive policy.
-- The defining query for a stream table runs as the superuser regardless of who
-  created the stream table. This means RLS on **source tables** is bypassed
-  during refresh unless those tables also use `FORCE ROW LEVEL SECURITY`.
+- The scheduler switches to the current stream-table owner before it runs the
+  defining query. It sets `row_security = on` for that owner context.
+- Superusers and roles with `BYPASSRLS` bypass source-table RLS, including
+  `FORCE ROW LEVEL SECURITY`.
+- A source with RLS is admitted to `DIFFERENTIAL` only for a superuser or
+  `BYPASSRLS` stream owner. Other owners use `FULL` or receive a rejection.
+- The differential path rechecks the stream owner and source RLS state before
+  applying each delta. Revoking `BYPASSRLS` therefore fails closed instead of
+  applying a delta under a newly restricted owner.
+- To enforce RLS on the stream table itself, use `FORCE ROW LEVEL SECURITY`
+  on that stream table and define a policy for the roles that must read it.
 
 ---
 
