@@ -2332,10 +2332,8 @@ fn build_row_trigger_fn_sql(
 /// write-side overhead** for bulk DML versus per-row triggers.
 ///
 /// A44-10 (v0.43.0 — D+I schema):
-/// - *Keyed tables*: Use a single `INSERT … SELECT … UNION ALL SELECT …` to
-///   emit both the D-row (OLD values) and the I-row (NEW values) in one
-///   executor pass, opening the CB heap relation once per UPDATE statement.
-///   Both rows carry the `changed_cols` bitmask (WB-1 ADR).
+/// - *Keyed tables*: Pair old/new transition rows once and materialize their
+///   row identity and `changed_cols` mask before emitting D/I events together.
 /// - *Keyless tables*: no stable row identity for a JOIN.  UPDATE is split
 ///   into DELETE from `__pgt_old` + INSERT from `__pgt_new`, preserving the
 ///   DVM semantics the downstream engine expects.
@@ -2382,6 +2380,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2389,8 +2390,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -2411,6 +2411,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2419,14 +2422,12 @@ fn build_stmt_trigger_fn_sql(
              -- D-row (OLD values) — must be emitted before I-row.
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'D', {pko}{ocr}, trace_context
              FROM __pgt_old o;
              -- I-row (NEW values).
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'I', {pkn}{ncr}, trace_context
              FROM __pgt_new n;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -2443,53 +2444,60 @@ fn build_stmt_trigger_fn_sql(
         } else {
             ""
         };
-        let ucv = bitmask_opt
-            .as_deref()
-            .map(|e| format!(",\n\t\t        ({e})"))
-            .unwrap_or_default();
-        // PK-changing UPDATE: when a row's PK changes, the JOIN on PK
-        // produces zero rows for that update.  Emit separate D + I records
-        // for rows whose old PK has no match in __pgt_new (DELETE) and
-        // whose new PK has no match in __pgt_old (INSERT).
-        let not_exists_join = build_pk_join_condition(pk_columns);
-        // A44-10 (keyed table): use UNION ALL to emit D-row + I-row in one
-        // INSERT executor pass, opening the CB heap once per UPDATE statement.
-        // Both rows carry the same changed_cols bitmask (WB-1 ADR: symmetric).
+        let event_changed_cols = if bitmask_opt.is_some() {
+            ", p.changed_cols"
+        } else {
+            ""
+        };
+        let first_pk = pk_columns[0].replace('"', "\"\"");
+        let n_present = format!("n.\"{first_pk}\" IS NOT NULL");
+        let o_present = format!("o.\"{first_pk}\" IS NOT NULL");
+        let pair_row_id = format!("CASE WHEN {o_present} THEN {pko} ELSE {pkn} END");
+        let old_event_cols = columns
+            .iter()
+            .map(|(col, _)| format!(", (p.__pgt_old_row).\"{}\"", col.replace('"', "\"\"")))
+            .collect::<String>();
+        let new_event_cols = columns
+            .iter()
+            .map(|(col, _)| format!(", (p.__pgt_new_row).\"{}\"", col.replace('"', "\"\"")))
+            .collect::<String>();
+        let matched_changed_cols = bitmask_opt.as_deref().map_or_else(
+            || "NULL::varbit".to_string(),
+            |bitmask| format!("CASE WHEN {n_present} AND {o_present} THEN ({bitmask}) END"),
+        );
+        // A materialized pair CTE computes identity and the changed mask once
+        // per matched UPDATE; UNION ALL preserves the required D-before-I order.
         format!(
             "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
                  RETURN NULL;
              END IF;
-             -- D+I pair for keyed UPDATE (UNION ALL — one heap open, two rows).
-             -- D-row must be first row in the UNION ALL (change_id ordering invariant).
+             -- Pair stable keys and PK-changing UPDATEs once, then emit D before I.
+             WITH pair_rows AS MATERIALIZED (
+                 SELECT n AS __pgt_new_row, o AS __pgt_old_row,
+                        ({n_present}) AS __pgt_new_present,
+                        ({o_present}) AS __pgt_old_present,
+                        ({pair_row_id}) AS __pgt_row_id,
+                        ({matched_changed_cols}) AS changed_cols
+                 FROM __pgt_new n FULL JOIN __pgt_old o ON {join}
+             )
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{uccd}{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ucv}{ocr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
-             FROM __pgt_new n JOIN __pgt_old o ON {join}
+             SELECT statement_lsn, 'D', p.__pgt_row_id{event_changed_cols}{old_event_cols}, trace_context
+             FROM pair_rows p
+             WHERE p.__pgt_old_present
              UNION ALL
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ucv}{ncr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
-             FROM __pgt_new n JOIN __pgt_old o ON {join};
-             -- PK-changing UPDATE: old PK not in new set → genuine DELETE.
-             INSERT INTO {cs}.changes_{name}
-                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
-             FROM __pgt_old o
-             WHERE NOT EXISTS (SELECT 1 FROM __pgt_new n WHERE {not_exists_join});
-             -- PK-changing UPDATE: new PK not in old set → genuine INSERT.
-             INSERT INTO {cs}.changes_{name}
-                 (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
-             FROM __pgt_new n
-             WHERE NOT EXISTS (SELECT 1 FROM __pgt_old o WHERE {not_exists_join});
+             SELECT statement_lsn, 'I', p.__pgt_row_id{event_changed_cols}{new_event_cols}, trace_context
+             FROM pair_rows p
+             WHERE p.__pgt_new_present;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
@@ -2507,6 +2515,9 @@ fn build_stmt_trigger_fn_sql(
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
+         DECLARE
+             statement_lsn PG_LSN := pg_current_wal_insert_lsn();
+             trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -2514,8 +2525,7 @@ fn build_stmt_trigger_fn_sql(
              END IF;
              INSERT INTO {cs}.changes_{name}
                  (lsn, action, __pgt_row_id{cn}, __pgt_trace_context)
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
-                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
+             SELECT statement_lsn, 'D', {pko}{ocr}, trace_context
              FROM __pgt_old o;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -2672,7 +2682,7 @@ fn build_changed_cols_bitmask_stmt_expr(
 
 /// Build the JOIN condition for the UPDATE path in statement-level triggers.
 ///
-/// Returns `n."pk1" = o."pk1" AND n."pk2" = o."pk2"` (etc.).
+/// Returns hash/merge-joinable equality for non-null primary-key columns.
 /// Returns `"TRUE"` when called with an empty PK — should not normally happen
 /// because keyless tables take the DELETE+INSERT path instead.
 fn build_pk_join_condition(pk_columns: &[String]) -> String {
@@ -2683,7 +2693,7 @@ fn build_pk_join_condition(pk_columns: &[String]) -> String {
         .iter()
         .map(|col| {
             let qcol = col.replace('"', "\"\"");
-            format!("n.\"{qcol}\" IS NOT DISTINCT FROM o.\"{qcol}\"")
+            format!("n.\"{qcol}\" = o.\"{qcol}\"")
         })
         .collect::<Vec<_>>()
         .join(" AND ")
@@ -3497,6 +3507,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_statement_update_capture_uses_one_full_join() {
+        let pk = vec!["id".to_string()];
+        let columns = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("value".to_string(), "text".to_string()),
+        ];
+        let (_, update, _) =
+            build_stmt_trigger_fn_sql("pgtrickle_changes", "test_source", &pk, &columns);
+
+        assert!(update.contains("FULL JOIN __pgt_old"), "{update}");
+        assert!(
+            update.contains("WITH pair_rows AS MATERIALIZED"),
+            "{update}"
+        );
+        let d_row = update
+            .find("SELECT statement_lsn, 'D'")
+            .expect("D event query");
+        let union = update[d_row..].find("UNION ALL").expect("D/I union") + d_row;
+        let i_row = update[union..]
+            .find("SELECT statement_lsn, 'I'")
+            .expect("I event query")
+            + union;
+        assert!(
+            d_row < union && union < i_row,
+            "D must precede I in {update}"
+        );
+        assert!(!update.contains("NOT EXISTS"), "{update}");
+    }
+
     // ── build_pk_hash_trigger_exprs tests ────────────────────────────
 
     #[test]
@@ -3922,15 +3962,14 @@ mod tests {
     // ── build_pk_join_condition tests (SF-9) ────────────────────────
 
     #[test]
-    fn test_pk_join_single_column_uses_is_not_distinct_from() {
+    fn test_pk_join_single_column_uses_equality() {
         let pk = vec!["id".to_string()];
         let result = build_pk_join_condition(&pk);
         assert!(
-            result.contains("IS NOT DISTINCT FROM"),
-            "should use IS NOT DISTINCT FROM, got: {result}"
+            result.contains(r#"n."id" = o."id""#),
+            "should use equality for non-null PK columns, got: {result}"
         );
-        assert!(result.contains(r#"n."id""#), "got: {result}");
-        assert!(result.contains(r#"o."id""#), "got: {result}");
+        assert!(!result.contains("IS NOT DISTINCT FROM"), "got: {result}");
     }
 
     #[test]
@@ -3938,14 +3977,8 @@ mod tests {
         let pk = vec!["a".to_string(), "b".to_string()];
         let result = build_pk_join_condition(&pk);
         assert!(result.contains(" AND "), "got: {result}");
-        assert!(
-            result.contains(r#"n."a" IS NOT DISTINCT FROM o."a""#),
-            "got: {result}"
-        );
-        assert!(
-            result.contains(r#"n."b" IS NOT DISTINCT FROM o."b""#),
-            "got: {result}"
-        );
+        assert!(result.contains(r#"n."a" = o."a""#), "got: {result}");
+        assert!(result.contains(r#"n."b" = o."b""#), "got: {result}");
     }
 
     #[test]

@@ -280,6 +280,56 @@ async fn test_stmt_cdc_bulk_update_keyed_table() {
         .await;
 }
 
+#[tokio::test]
+async fn test_stmt_cdc_primary_key_change_captured_as_delete_insert() {
+    let db = E2eDb::new().await.with_extension().await;
+    disable_scheduler(&db).await;
+
+    db.execute("CREATE TABLE stmt_pk_change (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO stmt_pk_change VALUES (1, 'before'), (2, 'stable')")
+        .await;
+    db.create_st(
+        "stmt_pk_change_st",
+        "SELECT id, val FROM stmt_pk_change",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st("stmt_pk_change_st").await;
+
+    let source_oid = db.table_oid("stmt_pk_change").await;
+    let buf = db.change_buffer_table(source_oid as i64).await;
+    db.execute(&format!("DELETE FROM {buf} WHERE action <> 'S'"))
+        .await;
+
+    db.execute("UPDATE stmt_pk_change SET id = 3 WHERE id = 1")
+        .await;
+
+    let captured: Vec<(String, i32, Option<String>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT action::text, id, changed_cols::text FROM {buf} \
+             WHERE action IN ('D', 'I') ORDER BY action, id"
+        )))
+        .fetch_all(&db.pool)
+        .await
+        .expect("read captured PK-changing UPDATE rows");
+    assert_eq!(captured.len(), 2, "a PK change should emit D and I rows");
+    assert_eq!(captured[0].0, "D");
+    assert_eq!(captured[0].1, 1);
+    assert_eq!(captured[0].2, None, "PK changes are genuine delete/insert");
+    assert_eq!(captured[1].0, "I");
+    assert_eq!(captured[1].1, 3);
+    assert_eq!(captured[1].2, None, "PK changes are genuine delete/insert");
+
+    db.refresh_st("stmt_pk_change_st").await;
+    db.assert_st_matches_query(
+        "public.stmt_pk_change_st",
+        "SELECT id, val FROM stmt_pk_change",
+    )
+    .await;
+}
+
 /// A bulk `DELETE` produces `'D'` rows with `old_*` columns populated.
 #[tokio::test]
 async fn test_stmt_cdc_bulk_delete_keyed_table() {
