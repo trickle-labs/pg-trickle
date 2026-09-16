@@ -385,7 +385,7 @@ async fn test_agg_distinct_bound_exceeded_falls_back_to_full() {
     .fetch_one(&db.pool)
     .await
     .expect("refresh history");
-    assert_eq!(action, "DIFFERENTIAL");
+    assert_eq!(action, "FULL");
     assert!(full_fallback);
 }
 

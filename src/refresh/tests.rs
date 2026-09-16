@@ -137,6 +137,38 @@ fn test_refresh_action_variants_exist() {
 }
 
 #[test]
+fn test_history_action_records_differential_full_fallback() {
+    assert_eq!(
+        history_action_for_completion(
+            RefreshAction::Differential,
+            RefreshAction::Differential,
+            "FULL",
+        ),
+        RefreshAction::Full,
+    );
+}
+
+#[test]
+fn test_history_action_preserves_reinitialize() {
+    assert_eq!(
+        history_action_for_completion(RefreshAction::Reinitialize, RefreshAction::Full, "FULL",),
+        RefreshAction::Reinitialize,
+    );
+}
+
+#[test]
+fn test_history_action_records_no_data() {
+    assert_eq!(
+        history_action_for_completion(
+            RefreshAction::Differential,
+            RefreshAction::Differential,
+            "NO_DATA",
+        ),
+        RefreshAction::NoData,
+    );
+}
+
+#[test]
 fn test_merge_strategy_is_consumed_once() {
     set_merge_strategy("vector_agg");
     assert_eq!(take_merge_strategy(), "vector_agg");

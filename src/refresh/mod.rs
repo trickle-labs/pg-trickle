@@ -731,6 +731,22 @@ pub(crate) fn build_differential_cost_evidence(
     })
 }
 
+fn history_action_for_completion(
+    requested_action: RefreshAction,
+    effective_action: RefreshAction,
+    effective_mode: &str,
+) -> RefreshAction {
+    if requested_action == RefreshAction::Reinitialize {
+        return RefreshAction::Reinitialize;
+    }
+
+    match effective_mode {
+        "FULL" => RefreshAction::Full,
+        "NO_DATA" => RefreshAction::NoData,
+        _ => effective_action,
+    }
+}
+
 /// Finalize a successful refresh in the caller's existing transaction.
 ///
 /// Required durable operations deliberately propagate errors.  A failed
@@ -766,11 +782,11 @@ pub fn finalize_success(
 
     let effective_mode = take_effective_mode();
     let merge_strategy = take_merge_strategy();
-    let history_action = match effective_mode {
-        "FULL" => RefreshAction::Full,
-        "NO_DATA" => RefreshAction::NoData,
-        _ => execution.effective_action,
-    };
+    let history_action = history_action_for_completion(
+        execution.requested_action,
+        execution.effective_action,
+        effective_mode,
+    );
     let window_reason =
         if execution.full_reason.is_none() && history_action == RefreshAction::Differential {
             crate::window_state::ensure_plan(st)?
@@ -840,6 +856,7 @@ pub fn finalize_success(
             merge_strategy
         }),
         execution.was_full_fallback,
+        Some(history_action.as_str()),
         full_reason,
     )?;
 

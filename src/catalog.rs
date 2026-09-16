@@ -3024,6 +3024,7 @@ impl RefreshRecord {
             merge_strategy_used,
             was_full_fallback,
             None,
+            None,
         )
     }
 
@@ -3039,6 +3040,7 @@ impl RefreshRecord {
         delta_row_count: i64,
         merge_strategy_used: Option<&str>,
         was_full_fallback: bool,
+        final_action: Option<&str>,
         full_reason: Option<&crate::refresh::FullRefreshReason>,
     ) -> Result<(), PgTrickleError> {
         Spi::run_with_args(
@@ -3048,8 +3050,8 @@ impl RefreshRecord {
              rows_updated = $3, rows_deleted = $4, error_message = $5, \
              delta_row_count = $6, merge_strategy_used = $7, \
              was_full_fallback = $8, refresh_reason = $9, \
-             refresh_reason_detail = $10 \
-             WHERE refresh_id = $11",
+             refresh_reason_detail = $10, action = COALESCE($11, action) \
+             WHERE refresh_id = $12",
             &[
                 status.into(),
                 rows_inserted.into(),
@@ -3061,6 +3063,7 @@ impl RefreshRecord {
                 was_full_fallback.into(),
                 full_reason.map(|reason| reason.code.as_str()).into(),
                 full_reason.map(|reason| reason.detail.as_str()).into(),
+                final_action.into(),
                 refresh_id.into(),
             ],
         )

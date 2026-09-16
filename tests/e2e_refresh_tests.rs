@@ -130,6 +130,66 @@ async fn test_refresh_mixed_dml() {
         .await;
 }
 
+#[tokio::test]
+async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE rf_cost_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO rf_cost_src VALUES (1, 'a'), (2, 'b')")
+        .await;
+    db.create_st(
+        "rf_cost_st",
+        "SELECT id, val FROM rf_cost_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_cost_model_summary
+            (pgt_id, avg_full_ms, avg_diff_ms, sample_count)
+         SELECT pgt_id, 0.1, 100.0, 3
+           FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rf_cost_st'
+         ON CONFLICT (pgt_id) DO UPDATE
+             SET avg_full_ms = EXCLUDED.avg_full_ms,
+                 avg_diff_ms = EXCLUDED.avg_diff_ms,
+                 sample_count = EXCLUDED.sample_count",
+    )
+    .await;
+    db.execute("INSERT INTO rf_cost_src VALUES (3, 'c')").await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy = 'auto'",
+            "SET pg_trickle.differential_max_change_ratio = 0.8",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('rf_cost_st')",
+    )
+    .await
+    .expect("cost model fallback should succeed");
+
+    let (action, strategy, full_fallback, reason, detail): (String, String, bool, String, String) =
+        sqlx::query_as(
+            "SELECT h.action, h.merge_strategy_used, h.was_full_fallback,
+                h.refresh_reason, h.refresh_reason_detail
+           FROM pgtrickle.pgt_refresh_history h
+           JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+          WHERE st.pgt_name = 'rf_cost_st'
+          ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("read refresh history");
+
+    assert_eq!(action, "FULL");
+    assert_eq!(strategy, "FULL");
+    assert!(full_fallback);
+    assert_eq!(reason, "COST_MODEL_PREFERRED_FULL");
+    assert!(detail.contains("Predicted differential cost"));
+    db.assert_st_matches_query("rf_cost_st", "SELECT id, val FROM rf_cost_src")
+        .await;
+}
+
 // ── Aggregation & Join Refresh ─────────────────────────────────────────
 
 #[tokio::test]

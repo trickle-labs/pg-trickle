@@ -200,19 +200,26 @@ pub(crate) fn query_refresh_history_stats(pgt_id: i64) -> Option<RefreshHistoryS
                  FROM pgtrickle.pgt_refresh_history \
                  WHERE pgt_id = {pgt_id} \
                    AND action = 'DIFFERENTIAL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND NOT was_full_fallback \
                    AND status = 'COMPLETED' \
                    AND delta_row_count > 0 \
                    AND end_time IS NOT NULL \
                  ORDER BY refresh_id DESC LIMIT 10 \
                ) __pgt_incr \
              ) incr, ( \
-               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0) AS avg_full_ms \
+               SELECT COALESCE( \
+                        AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0), \
+                        (SELECT last_full_ms FROM pgtrickle.pgt_stream_tables \
+                          WHERE pgt_id = {pgt_id}) \
+                      ) AS avg_full_ms \
                FROM ( \
                  SELECT end_time, start_time \
                  FROM pgtrickle.pgt_refresh_history \
                  WHERE pgt_id = {pgt_id} \
-                   AND action = 'FULL' \
+                   AND (action = 'FULL' OR merge_strategy_used = 'FULL') \
                    AND status = 'COMPLETED' \
+                   AND rows_inserted > 0 \
                    AND end_time IS NOT NULL \
                  ORDER BY refresh_id DESC LIMIT 5 \
                ) __pgt_full \
@@ -281,19 +288,26 @@ pub(crate) fn estimate_cost_based_threshold(
                  FROM pgtrickle.pgt_refresh_history \
                  WHERE pgt_id = {pgt_id} \
                    AND action = 'DIFFERENTIAL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND NOT was_full_fallback \
                    AND status = 'COMPLETED' \
                    AND delta_row_count > 0 \
                    AND end_time IS NOT NULL \
                  ORDER BY refresh_id DESC LIMIT 10 \
                ) __pgt_incr \
              ) incr, ( \
-               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0) AS avg_full_ms \
+               SELECT COALESCE( \
+                        AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0), \
+                        (SELECT last_full_ms FROM pgtrickle.pgt_stream_tables \
+                          WHERE pgt_id = {pgt_id}) \
+                      ) AS avg_full_ms \
                FROM ( \
                  SELECT end_time, start_time \
                  FROM pgtrickle.pgt_refresh_history \
                  WHERE pgt_id = {pgt_id} \
-                   AND action = 'FULL' \
+                   AND (action = 'FULL' OR merge_strategy_used = 'FULL') \
                    AND status = 'COMPLETED' \
+                   AND rows_inserted > 0 \
                    AND end_time IS NOT NULL \
                  ORDER BY refresh_id DESC LIMIT 5 \
                ) __pgt_full \
@@ -406,31 +420,47 @@ pub(crate) fn batch_update_cost_model_summary() {
         INSERT INTO pgtrickle.pgt_cost_model_summary
             (pgt_id, avg_full_ms, avg_diff_ms, sample_count, updated_at)
         SELECT
-            pgt_id,
-            AVG(full_ms)                         AS avg_full_ms,
-            AVG(diff_ms)                         AS avg_diff_ms,
-            COUNT(*)::int                        AS sample_count,
-            now()                                AS updated_at
-        FROM (
-            SELECT
-                h.pgt_id,
-                CASE WHEN h.action = 'FULL' THEN
-                    EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0
-                END AS full_ms,
-                CASE WHEN h.action = 'DIFFERENTIAL' AND h.delta_row_count > 0 THEN
-                    EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0
-                    / GREATEST(h.delta_row_count, 1)
-                END AS diff_ms
-            FROM pgtrickle.pgt_refresh_history h
-            JOIN pgtrickle.pgt_refresh_summary s ON s.pgt_id = h.pgt_id
-            WHERE h.status = 'COMPLETED'
-              AND h.end_time IS NOT NULL
-              AND h.start_time >= s.stats_reset_at
-              AND h.action IN ('FULL', 'DIFFERENTIAL')
-        ) sub
-        WHERE full_ms IS NOT NULL OR diff_ms IS NOT NULL
-        GROUP BY pgt_id
-        HAVING COUNT(*) >= 3
+            s.pgt_id,
+            COALESCE(full_samples.avg_full_ms, st.last_full_ms),
+            diff_samples.avg_diff_ms,
+            diff_samples.sample_count,
+            now()
+        FROM pgtrickle.pgt_refresh_summary s
+        JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+        LEFT JOIN LATERAL (
+            SELECT AVG(full_ms) AS avg_full_ms
+            FROM (
+                SELECT EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0 AS full_ms
+                FROM pgtrickle.pgt_refresh_history h
+                WHERE h.pgt_id = s.pgt_id
+                  AND h.status = 'COMPLETED'
+                  AND h.end_time IS NOT NULL
+                  AND h.start_time >= s.stats_reset_at
+                  AND (h.action = 'FULL' OR h.merge_strategy_used = 'FULL')
+                  AND h.rows_inserted > 0
+                ORDER BY h.refresh_id DESC
+                LIMIT 5
+            ) recent_full
+        ) full_samples ON true
+        LEFT JOIN LATERAL (
+            SELECT AVG(diff_ms) AS avg_diff_ms,
+                   COUNT(*)::int AS sample_count
+            FROM (
+                SELECT EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000.0
+                       / GREATEST(h.delta_row_count, 1) AS diff_ms
+                FROM pgtrickle.pgt_refresh_history h
+                WHERE h.pgt_id = s.pgt_id
+                  AND h.status = 'COMPLETED'
+                  AND h.end_time IS NOT NULL
+                  AND h.start_time >= s.stats_reset_at
+                  AND h.action = 'DIFFERENTIAL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                  AND NOT h.was_full_fallback
+                  AND h.delta_row_count > 0
+                ORDER BY h.refresh_id DESC
+                LIMIT 10
+            ) recent_diff
+        ) diff_samples ON true
         ON CONFLICT (pgt_id) DO UPDATE
             SET avg_full_ms   = EXCLUDED.avg_full_ms,
                 avg_diff_ms   = EXCLUDED.avg_diff_ms,
@@ -502,8 +532,145 @@ pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), 
     Ok(result)
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
 mod tests {
+    use super::*;
+
+    #[pg_test]
+    fn test_cost_model_summary_uses_recent_effective_samples() {
+        Spi::run("CREATE TABLE public.cost_history_src (id INT PRIMARY KEY)")
+            .expect("create source");
+        Spi::run("INSERT INTO public.cost_history_src VALUES (1)").expect("seed source");
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                'public.cost_history_st',
+                'SELECT id FROM public.cost_history_src',
+                schedule => '1h',
+                refresh_mode => 'DIFFERENTIAL'
+            )",
+        )
+        .expect("create stream table");
+
+        let pgt_id = Spi::get_one::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+              WHERE pgt_schema = 'public' AND pgt_name = 'cost_history_st'",
+        )
+        .expect("read pgt_id")
+        .expect("stream table exists");
+
+        for sql in [
+            "DELETE FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1",
+            "DELETE FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1",
+            "UPDATE pgtrickle.pgt_refresh_summary
+                SET stats_reset_at = clock_timestamp() - interval '1 day'
+              WHERE pgt_id = $1",
+            "UPDATE pgtrickle.pgt_stream_tables SET last_full_ms = 321 WHERE pgt_id = $1",
+        ] {
+            Spi::run_with_args(sql, &[pgt_id.into()]).expect("reset cost history");
+        }
+
+        for sql in [
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             VALUES
+                ($1, now(), now() - interval '30 minutes',
+                 now() - interval '30 minutes' + interval '10 seconds',
+                 'FULL', 'COMPLETED', 1, 1, 'FULL', false),
+                ($1, now(), now() - interval '30 minutes',
+                 now() - interval '30 minutes' + interval '10 seconds',
+                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'delete_insert', false)",
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             SELECT $1, now(), now() - interval '1 minute',
+                    now() - interval '1 minute' + interval '100 milliseconds',
+                    'FULL', 'COMPLETED', 1, 1, 'FULL', false
+               FROM generate_series(1, 5)",
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             SELECT $1, now(), now() - interval '1 minute',
+                    now() - interval '1 minute' + interval '20 milliseconds',
+                    'DIFFERENTIAL', 'COMPLETED', 1, 10, 'delete_insert', false
+               FROM generate_series(1, 10)",
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             VALUES
+               ($1, now(), now() - interval '20 minutes',
+                 now() - interval '20 minutes' + interval '500 milliseconds',
+                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'FULL', true),
+                ($1, now(), now() - interval '1 minute', now(),
+                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'TOP_K', true),
+                ($1, now(), now() - interval '1 minute', now(),
+                 'FULL', 'COMPLETED', 0, 1, 'FULL', false)",
+        ] {
+            Spi::run_with_args(sql, &[pgt_id.into()]).expect("seed cost history");
+        }
+
+        batch_update_cost_model_summary();
+        let (avg_full_ms, avg_diff_ms, sample_count) = read_cost_summary(pgt_id);
+        assert!(
+            (avg_full_ms - 180.0).abs() < 0.01,
+            "expected recent effective FULL average, got {avg_full_ms}"
+        );
+        assert!((avg_diff_ms - 2.0).abs() < 0.01, "{avg_diff_ms}");
+        assert_eq!(sample_count, 10);
+
+        Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_refresh_history WHERE pgt_id = $1",
+            &[pgt_id.into()],
+        )
+        .expect("clear cost history");
+        Spi::run_with_args(
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                (pgt_id, data_timestamp, start_time, end_time, action, status,
+                 rows_inserted, delta_row_count, merge_strategy_used, was_full_fallback)
+             SELECT $1, now(), now() - interval '1 minute',
+                    now() - interval '1 minute' + interval '20 milliseconds',
+                    'DIFFERENTIAL', 'COMPLETED', 1, 10, 'delete_insert', false
+               FROM generate_series(1, 3)",
+            &[pgt_id.into()],
+        )
+        .expect("seed differential-only history");
+
+        batch_update_cost_model_summary();
+        let (avg_full_ms, avg_diff_ms, sample_count) = read_cost_summary(pgt_id);
+        assert!((avg_full_ms - 321.0).abs() < 0.01, "{avg_full_ms}");
+        assert!((avg_diff_ms - 2.0).abs() < 0.01, "{avg_diff_ms}");
+        assert_eq!(sample_count, 3);
+    }
+
+    fn read_cost_summary(pgt_id: i64) -> (f64, f64, i32) {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT avg_full_ms, avg_diff_ms, sample_count
+                       FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1",
+                    None,
+                    &[pgt_id.into()],
+                )
+                .expect("read cost summary")
+                .first();
+            (
+                row.get::<f64>(1)
+                    .expect("avg_full_ms")
+                    .expect("full sample"),
+                row.get::<f64>(2)
+                    .expect("avg_diff_ms")
+                    .expect("diff sample"),
+                row.get::<i32>(3)
+                    .expect("sample_count")
+                    .expect("sample count"),
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
     use super::*;
 
     // ── compute_adaptive_threshold tests (TEST-1) ────────────────────────────
