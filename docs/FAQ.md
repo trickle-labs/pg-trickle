@@ -2166,21 +2166,17 @@ source a stream table reads from.
 
 ### Can a stream table use DIFFERENTIAL or IMMEDIATE mode over an RLS-protected source?
 
-**No — those sources are FULL-only.** DIFFERENTIAL and IMMEDIATE maintenance
-work from a bounded window of change events and can only check whether a
-row is visible in the *current* state of a source table. They cannot
-reconstruct whether an old row image was ever visible to the stream owner
-before a policy-relevant change (e.g. a row that transitions from
-hidden to visible, or a DELETE of a row already hidden from the owner),
-so a delta computed that way can silently diverge from what a FULL
-recompute would produce.
+**DIFFERENTIAL is allowed when the stream-table owner is a superuser or has
+`BYPASSRLS`.** Those roles always bypass source RLS, even with `FORCE ROW LEVEL
+SECURITY`, so the owner-visible row set cannot change because of an RLS policy.
+pg_trickle checks the stream-table owner rather than the scheduler role.
 
-`AUTO` mode falls back to FULL automatically for a source with row-level
-security enabled — including if RLS is enabled on the source *after* the
-stream table was created. Explicit `DIFFERENTIAL` or `IMMEDIATE` mode is
-rejected (at creation/`ALTER`, and IMMEDIATE additionally fails closed at
-trigger time) for any source that has RLS enabled. Use `FULL` or `AUTO`
-mode for stream tables reading from RLS-protected sources.
+For an owner subject to RLS, the existing conservative behavior remains. An
+explicit `DIFFERENTIAL` request is rejected, and `AUTO` falls back to `FULL`.
+The refresh path checks the current owner and source RLS state before applying
+each differential delta. Revoking `BYPASSRLS` therefore causes the next
+refresh to fall back or fail before it applies a delta. `IMMEDIATE` remains
+unsupported for RLS-enabled sources.
 
 ### Can I use RLS on a stream table to filter reads per role?
 

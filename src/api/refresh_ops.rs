@@ -241,7 +241,11 @@ pub(crate) fn execute_manual_refresh(
         // stored user query under the same owner identity and search_path as
         // the refresh executor.
         refresh::with_stream_owner(st, || {
-            crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)
+            crate::api::validate_incremental_mode_for_query(
+                &st.defining_query,
+                st.refresh_mode,
+                crate::api::security_context::stream_execution_context(st)?.owner_oid,
+            )
         })?;
     }
 

@@ -3772,11 +3772,25 @@ Every refresh evaluates defining SQL as the stream-table owner with
 are materialized, while policies on the stream table determine who may read
 that materialized result.
 
+Differential maintenance has one exception to the conservative RLS rule. An
+RLS-enabled source may use `DIFFERENTIAL` when the stream-table owner is a
+superuser or has `BYPASSRLS`. PostgreSQL gives those roles an unconditional RLS
+bypass, including when the source uses `FORCE ROW LEVEL SECURITY`, so policy
+changes cannot change the owner-visible source rows without a source-row
+change. pg_trickle checks the current stream-table owner, not the scheduler
+role, at creation, alteration, and before each differential refresh.
+
+An owner subject to RLS keeps the safe behavior. Explicit `DIFFERENTIAL` is
+rejected, and `AUTO` uses `FULL`. If the owner loses `BYPASSRLS` or the source
+RLS state changes after creation, the next differential refresh falls back to
+`FULL` or fails before it applies a delta. `IMMEDIATE` remains unsupported for
+RLS-enabled sources.
+
 #### How It Works
 
 | Area | Behavior |
 |------|----------|
-| **RLS on source tables** | Applied as the stream-table owner during initial, manual, scheduled, full, differential, and IMMEDIATE maintenance. |
+| **RLS on source tables** | Applied as the stream-table owner during initial, manual, scheduled, full, differential, and IMMEDIATE maintenance. Differential mode is admitted only when that owner is a superuser or has `BYPASSRLS`. |
 | **RLS on the stream table** | Works naturally. Enable RLS and create policies on the stream table to filter reads per role — exactly as you would on any regular table. |
 | **RLS policy changes on source tables** | `CREATE POLICY`, `ALTER POLICY`, and `DROP POLICY` on a source table are detected by pg_trickle's DDL event trigger and mark the stream table for reinitialisation. |
 | **ENABLE/DISABLE RLS on source tables** | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `DISABLE ROW LEVEL SECURITY` on a source table mark the stream table for reinitialisation. |

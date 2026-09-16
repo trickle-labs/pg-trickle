@@ -3194,7 +3194,11 @@ fn refresh_single_st(
     if !st.needs_reinit
         && st.refresh_mode != RefreshMode::Full
         && let Err(e) = crate::refresh::with_stream_owner(&st, || {
-            crate::api::validate_incremental_mode_for_query(&st.defining_query, st.refresh_mode)
+            crate::api::validate_incremental_mode_for_query(
+                &st.defining_query,
+                st.refresh_mode,
+                crate::api::security_context::stream_execution_context(&st)?.owner_oid,
+            )
         })
     {
         let message = format!("incremental refresh suspended after semantic revalidation: {e}");
