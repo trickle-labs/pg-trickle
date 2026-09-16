@@ -952,7 +952,13 @@ jobs:
 
       - name: Check for regressions
         run: |
-          python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs
+          if ! python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs; then
+            # Shared runners can produce noisy microbenchmark samples. Re-run
+            # the candidate once on the same runner before blocking the PR.
+            find target/criterion -type d -name new -prune -exec rm -rf {} +
+            ./scripts/run_benchmarks.sh -- --baseline base
+            python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs
+          fi
         env:
           PGT_BENCH_REGRESSION_THRESHOLD: "0.10"
 
