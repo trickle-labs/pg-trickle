@@ -1102,12 +1102,15 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
     ))
     .await;
 
-    // Count functions after upgrade
+    // Count functions after upgrade. v0.93 retains three renamed v0.92
+    // signatures so existing OID-bound dependents keep working; fresh
+    // installs do not contain those compatibility shims.
     let upgraded_count: i64 = db
         .query_scalar(
             "SELECT count(*) FROM pg_proc p \
              JOIN pg_namespace n ON p.pronamespace = n.oid \
-             WHERE n.nspname = 'pgtrickle'",
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname NOT LIKE '%__v092'",
         )
         .await;
 
@@ -1123,7 +1126,8 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
         .query_scalar(
             "SELECT count(*) FROM pg_proc p \
              JOIN pg_namespace n ON p.pronamespace = n.oid \
-             WHERE n.nspname = 'pgtrickle'",
+             WHERE n.nspname = 'pgtrickle' \
+               AND p.proname NOT LIKE '%__v092'",
         )
         .await;
 
