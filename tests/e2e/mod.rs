@@ -872,15 +872,10 @@ impl E2eDb {
             .await
             .expect("Failed to CREATE EXTENSION pg_trickle");
 
-        // Signal the pg_trickle launcher to immediately discover this new database.
-        // Without this, the launcher can sleep up to 10 s before its next poll cycle,
-        // causing WAL-transition tests to time out waiting for the scheduler.
-        // The SIGHUP wakes the launcher, which then sees the DAG-version bump from
-        // CREATE EXTENSION, clears its skip-cache, and spawns the per-DB scheduler.
-        sqlx::query("SELECT pg_reload_conf()")
-            .execute(&self.pool)
-            .await
-            .expect("Failed to pg_reload_conf()");
+        // The cloned template already has the extension, so CREATE EXTENSION above
+        // may be a no-op and emit no launcher signal. Nudge explicitly so a database
+        // seen before its per-database setting is reset is not cached for 5 minutes.
+        self.nudge_launcher_rescan().await;
 
         if let Ok(mode) = std::env::var("PGT_PARALLEL_MODE") {
             let mode = mode.to_ascii_lowercase();
