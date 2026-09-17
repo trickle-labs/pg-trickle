@@ -137,43 +137,24 @@ fn test_refresh_action_variants_exist() {
 }
 
 #[test]
-fn test_effective_action_records_differential_full_fallback() {
-    assert_eq!(
-        effective_action_for_mode(RefreshAction::Differential, "FULL"),
-        RefreshAction::Full,
-    );
-    assert!(is_full_fallback(
-        RefreshAction::Differential,
-        RefreshAction::Full,
-    ));
-}
+fn test_effective_action_for_mode() {
+    use RefreshAction::*;
 
-#[test]
-fn test_effective_action_preserves_reinitialize() {
-    assert_eq!(
-        effective_action_for_mode(RefreshAction::Reinitialize, "FULL"),
-        RefreshAction::Reinitialize,
-    );
-    assert!(!is_full_fallback(
-        RefreshAction::Reinitialize,
-        RefreshAction::Reinitialize,
-    ));
-}
-
-#[test]
-fn test_effective_action_records_no_data() {
-    assert_eq!(
-        effective_action_for_mode(RefreshAction::Differential, "NO_DATA"),
-        RefreshAction::NoData,
-    );
-}
-
-#[test]
-fn test_effective_action_keeps_special_differential_modes() {
-    for mode in ["DIFFERENTIAL", "APPEND_ONLY", "TOP_K", ""] {
-        let effective = effective_action_for_mode(RefreshAction::Differential, mode);
-        assert_eq!(effective, RefreshAction::Differential);
-        assert!(!is_full_fallback(RefreshAction::Differential, effective));
+    for (requested, mode, expected) in [
+        (Differential, "FULL", Full),
+        (Reinitialize, "FULL", Reinitialize),
+        (Differential, "NO_DATA", NoData),
+        (Differential, "DIFFERENTIAL", Differential),
+        (Differential, "APPEND_ONLY", Differential),
+        (Differential, "TOP_K", Differential),
+        (Differential, "", Differential),
+    ] {
+        let effective = effective_action_for_mode(requested, mode);
+        assert_eq!(effective, expected);
+        assert_eq!(
+            is_full_fallback(requested, effective),
+            requested == Differential && expected == Full,
+        );
     }
 }
 

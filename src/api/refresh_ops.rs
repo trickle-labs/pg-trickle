@@ -377,7 +377,6 @@ pub(crate) fn execute_manual_refresh(
             };
             let execution = refresh::RefreshExecution {
                 requested_action,
-                effective_action,
                 effective_mode,
                 merge_strategy,
                 cost_evidence,

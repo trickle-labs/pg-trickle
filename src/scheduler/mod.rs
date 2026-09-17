@@ -1114,7 +1114,6 @@ fn try_fused_chain_refresh(
         )?;
         let execution = refresh::RefreshExecution {
             requested_action: RefreshAction::Differential,
-            effective_action: RefreshAction::Differential,
             effective_mode: "DIFFERENTIAL",
             merge_strategy: "DIFFERENTIAL",
             cost_evidence: None,
@@ -4205,7 +4204,6 @@ fn execute_scheduled_refresh(
             let effective_action = refresh::effective_action_for_mode(action, effective_mode);
             let execution = refresh::RefreshExecution {
                 requested_action: action,
-                effective_action,
                 effective_mode,
                 merge_strategy: refresh::take_merge_strategy(),
                 cost_evidence: refresh::take_last_cost_evidence(),

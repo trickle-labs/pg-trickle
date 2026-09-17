@@ -704,7 +704,6 @@ pub type FullRefreshReason = RefreshReason;
 #[derive(Debug, Clone)]
 pub struct RefreshExecution {
     pub requested_action: RefreshAction,
-    pub effective_action: RefreshAction,
     pub effective_mode: &'static str,
     pub merge_strategy: &'static str,
     pub cost_evidence: Option<String>,
@@ -788,7 +787,8 @@ pub fn finalize_success(
         StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
     }
 
-    let history_action = execution.effective_action;
+    let history_action =
+        effective_action_for_mode(execution.requested_action, execution.effective_mode);
     let window_reason =
         if execution.full_reason.is_none() && history_action == RefreshAction::Differential {
             crate::window_state::ensure_plan(st)?
