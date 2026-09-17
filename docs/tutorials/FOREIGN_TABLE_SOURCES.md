@@ -125,8 +125,9 @@ SELECT pgtrickle.create_stream_table(
    mirrors the remote table's data.
 2. On subsequent refreshes, it fetches the current remote data and computes
    an `EXCEPT ALL` difference against the snapshot.
-3. Only the changed rows are written to the change buffer and processed through
-   the incremental delta pipeline.
+3. Only changed rows are written to the change buffer. They seed the
+   incremental delta pipeline, which may also read affected join, group, or
+   partition state.
 4. The snapshot table is updated to reflect the new remote state.
 5. When the stream table is dropped, the snapshot table is cleaned up.
 

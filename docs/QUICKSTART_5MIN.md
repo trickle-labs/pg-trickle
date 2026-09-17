@@ -164,6 +164,35 @@ SELECT * FROM pgtrickle.health_check() WHERE severity != 'OK';
 SELECT pgtrickle.explain_st('revenue_by_region');
 ```
 
+The generated [runtime support summary](SUPPORT_SUMMARY.md) shows the tested
+declared mode, effective strategy, affected-state recomputation scope, and any
+whole-query FULL fallback for representative query families.
+
+### Pause and recover without losing captured changes
+
+Suspending a stream table stops its refreshes, not CDC capture. Source changes
+accumulate until you resume and refresh it:
+
+```sql
+SELECT pgtrickle.alter_stream_table('revenue_by_region', status => 'SUSPENDED');
+INSERT INTO orders (region, amount) VALUES ('EU', 25);
+SELECT pgtrickle.resume_stream_table('revenue_by_region');
+SELECT pgtrickle.refresh_stream_table('revenue_by_region');
+```
+
+If diagnostics say the frontier or capture objects need rebuilding, repair the
+table. The next refresh is a full resnapshot:
+
+```sql
+SELECT pgtrickle.repair_stream_table('revenue_by_region');
+SELECT pgtrickle.refresh_stream_table('revenue_by_region');
+```
+
+The packaged v0.107 operator-route test executes admission, creation, mutation,
+parity checks, suspension with concurrent source writes, resume, alteration,
+and repair. Release qualification runs upgrade and logical-restore suites on
+the same immutable package.
+
 ---
 
 ## Step 7 — Clean up

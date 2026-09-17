@@ -430,10 +430,10 @@ pub fn register_cdc_gucs() {
 
     GucRegistry::define_string_guc(
         c"pg_trickle.cdc_mode",
-        c"CDC mechanism: auto (default), trigger, or wal.",
-        c"'auto' (default) uses triggers initially and transitions to WAL-based CDC \
+        c"CDC mechanism: trigger (default), auto, or wal.",
+        c"'auto' uses triggers initially and transitions to WAL-based CDC \
            if wal_level=logical, falling back to triggers on error. \
-           'trigger' always uses row-level triggers for change capture. \
+           'trigger' uses statement-level triggers by default; cdc_trigger_mode can select row-level triggers. \
            'wal' requires wal_level=logical (fails otherwise).",
         &PGS_CDC_MODE,
         GucContext::Suset,

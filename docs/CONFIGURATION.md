@@ -276,9 +276,9 @@ CDC (Change Data Capture) mechanism selection.
 
 | Value | Description |
 |-------|-------------|
-| `'auto'` | **(default)** Compatibility alias for trigger-based CDC. No WAL transition is attempted. |
-| `'trigger'` | Always use trigger-based CDC for change capture (`cdc_trigger_mode` controls statement vs row triggers) |
-| `'wal'` | Rejected with `PGT_EXT_CDC_UNAVAILABLE` until v0.103.0 |
+| `'trigger'` | **(default)** Always use trigger-based CDC (`cdc_trigger_mode` controls statement vs row triggers) |
+| `'auto'` | Start with triggers and transition eligible sources to receipt-backed WAL capture |
+| `'wal'` | Request receipt-backed WAL capture; fall back to triggers when admission prerequisites are absent |
 
 **Default:** `'trigger'`
 
@@ -297,7 +297,7 @@ mechanism conservatively: any dependent stream table that requests `'trigger'`
 keeps the source on trigger CDC; otherwise `'wal'` wins over `'auto'`.
 
 ```sql
--- Compatibility alias for trigger-only CDC
+-- Start with triggers and transition eligible sources to WAL
 SET pg_trickle.cdc_mode = 'auto';
 
 -- Force trigger-only CDC (disable WAL transitions)

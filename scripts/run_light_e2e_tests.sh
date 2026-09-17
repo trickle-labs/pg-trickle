@@ -142,6 +142,10 @@ LIGHT_E2E_TESTS=(
     e2e_failure_recovery_tests
     e2e_publication_crash_recovery_tests
     e2e_pg_dump_tests
+    e2e_v107_operator_route_tests
+    e2e_buffer_growth_tests
+    e2e_dvm_negative_control_tests
+    e2e_v078_tests
 )
 
 usage() {
@@ -426,9 +430,10 @@ start_shared_light_e2e_container() {
         postgres:18.3 \
         -c track_commit_timestamp=on)
 
-    # Wait up to 120 s for PostgreSQL to accept connections
+    # pg_isready can report ready before PostgreSQL initialization completes.
+    # Wait until a real SQL query succeeds instead.
     local i=0
-    until docker exec "$cid" pg_isready -U postgres >/dev/null 2>&1; do
+    until docker exec "$cid" psql -U postgres -d postgres -Atqc 'SELECT 1' >/dev/null 2>&1; do
         i=$((i + 1))
         if [[ $i -gt 120 ]]; then
             echo "ERROR: shared light-E2E container failed to become ready" >&2

@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.107.0 — Verified support and operator procedures](#01070--verified-support-and-operator-procedures)
 - [0.106.1 — Same-pass graph maintenance](#01061--same-pass-graph-maintenance)
 - [0.106.0 — Executed package qualification and database cost](#01060--executed-package-qualification-and-database-cost)
 - [0.105.3 — Differential correctness and release qualification](#01053--differential-correctness-and-release-qualification)
@@ -220,6 +221,26 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.107.0] — Verified support and operator procedures
+
+v0.107.0 binds the support summary and operator recovery route to runtime
+tests executed against the immutable release candidate.
+
+- Generates capability and query-family records with declared mode, effective
+  strategy, affected-state recomputation scope, whole-query fallback, and
+  stable diagnostic identifiers.
+- Reconciles recursive CTE, statement-trigger, `cdc_mode`, and WAL admission
+  documentation with current behavior.
+- Qualifies composition, semantic negative controls, publication recovery,
+  resource boundaries, and two isolated executions of the operator route.
+- Documents that suspension and drain retain capture while `cdc_paused` in
+  discard mode loses changes and requires repair or resnapshot.
+- Preserves spaces, quotes, Unicode, and NULL values when receipt-backed WAL
+  capture parses logical-decoding rows.
+
+The release adds no SQL objects or catalog changes. The upgrade records the
+new release version.
 
 ## [0.106.1] — Same-pass graph maintenance
 

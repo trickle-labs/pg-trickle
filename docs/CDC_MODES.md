@@ -11,7 +11,7 @@ row-level triggers when explicitly configured.
 
 | Situation | Recommended mode |
 |-----------|-----------------|
-| Just getting started / unsure | `auto` (default) — triggers now, upgrades to WAL automatically |
+| Just getting started / unsure | `trigger` (default) |
 | High-write tables where trigger overhead matters | `auto` or `wal` |
 | `wal_level = logical` not available (managed PG, read replica) | `trigger` |
 | You want strict control — no automatic transitions | `trigger` or `wal` |
@@ -98,7 +98,7 @@ stream table slightly later than with triggers.
 
 ## The `auto` mode: transparent transition
 
-The default `cdc_mode = 'auto'` starts with triggers and automatically upgrades
+The opt-in `cdc_mode = 'auto'` starts with triggers and automatically upgrades
 to WAL-based CDC when the prerequisites are met.
 
 ```
@@ -132,8 +132,8 @@ required before capture mode changes are committed.
 In `postgresql.conf`:
 
 ```
-pg_trickle.cdc_mode = 'auto'     # default: start with triggers, upgrade to WAL
-pg_trickle.cdc_mode = 'trigger'  # always use triggers; never create replication slots
+pg_trickle.cdc_mode = 'trigger'  # default: always use triggers
+pg_trickle.cdc_mode = 'auto'     # start with triggers, upgrade eligible sources to WAL
 pg_trickle.cdc_mode = 'wal'      # receipt-backed WAL; fall back to triggers if unavailable
 ```
 
