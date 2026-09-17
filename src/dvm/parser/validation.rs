@@ -225,25 +225,7 @@ fn collect_admission_issues(tree: &OpTree, immediate: bool, issues: &mut Vec<Val
             }
             collect_admission_issues(child, immediate, issues);
         }
-        OpTree::LateralFunction {
-            func_sql: _func_sql,
-            child,
-            ..
-        } => {
-            #[cfg(not(test))]
-            if let Err(error) = parse_defining_query_full(&format!("SELECT {_func_sql}"))
-                .and_then(|inner| check_ivm_support_with_registry(&inner))
-            {
-                issues.push(ValidationIssue {
-                    code: "DVM-81-5-LATERAL-BODY",
-                    operator: "LATERAL",
-                    reason: format!(
-                        "the LATERAL function body is not incrementally supported: {error}"
-                    ),
-                    hint: "Use FULL or AUTO, or rewrite the LATERAL function body without unsupported constructs."
-                        .to_string(),
-                });
-            }
+        OpTree::LateralFunction { child, .. } => {
             collect_admission_issues(child, immediate, issues);
         }
         OpTree::Project { child, .. }
@@ -979,40 +961,10 @@ pub(crate) fn tree_collect_volatility(
         OpTree::Distinct { child } | OpTree::Subquery { child, .. } => {
             tree_collect_volatility(child, worst)?;
         }
-        OpTree::LateralFunction {
-            func_sql: _func_sql,
-            child,
-            ..
-        } => {
-            // COR-002 (v0.70.0): Scan the LATERAL function body for volatile
-            // calls. Previously only `child` (the left-hand scan) was checked;
-            // volatile expressions inside `func_sql` (e.g. `random()`) would
-            // bypass the volatile_function_policy check silently.
-            //
-            // Two-phase scan:
-            // 1. Try full semantic parse — uses resolved OpTree for accuracy.
-            // 2. On failure (e.g. outer-scope refs, no FROM clause), fall back
-            //    to raw AST walk via `scan_sql_for_volatility` which detects
-            //    volatile FuncCall nodes without needing catalog resolution.
-            //
-            // Special case: JSON_TABLE and similar SQL/JSON table-valued
-            // functions contain the COLUMNS keyword in their deparsed form.
-            // The wrapped SQL `SELECT JSON_TABLE(... COLUMNS (...))` is not a
-            // valid standalone statement — raw_parser ereports on COLUMNS in
-            // expression context. These constructs are stable (non-volatile),
-            // so skip scanning entirely when the COLUMNS keyword is present.
-            #[cfg(not(test))]
-            {
-                if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
-                    let wrapped = format!("SELECT {_func_sql}");
-                    match parse_defining_query_full(&wrapped) {
-                        Ok(inner) => tree_collect_volatility(&inner.tree, worst)?,
-                        Err(_) => scan_sql_for_volatility(&wrapped, worst)?,
-                    }
-                }
-            }
-            tree_collect_volatility(child, worst)?;
-        }
+        // The API validates the complete analyzed query before building this
+        // raw operator tree. That is the only context where correlated
+        // arguments can be resolved to exact function OIDs.
+        OpTree::LateralFunction { child, .. } => tree_collect_volatility(child, worst)?,
         OpTree::LateralSubquery {
             subquery_sql: _subquery_sql,
             child,
@@ -1342,35 +1294,10 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
         OpTree::RecursiveSelfRef { .. } => Ok(()),
         // Window functions use partition-based recomputation.
         OpTree::Window { child, .. } => check_ivm_support(child),
-        // Lateral SRFs use row-scoped recomputation.
-        // COR-002 (v0.70.0): Also check the function body for unsupported constructs.
-        OpTree::LateralFunction {
-            func_sql: _func_sql,
-            child,
-            ..
-        } => {
-            #[cfg(not(test))]
-            {
-                // COR-002: JSON_TABLE and similar SQL/JSON table-valued functions
-                // contain the COLUMNS keyword in their deparsed form.
-                // "SELECT JSON_TABLE(... COLUMNS (...))" is not valid standalone SQL —
-                // raw_parser ereports on COLUMNS in expression context, causing a
-                // PostgreSQL panic that propagates past `if let Ok`.
-                // JSON_TABLE has no unsupported IVM constructs, so skip safely.
-                if !_func_sql.to_ascii_uppercase().contains(" COLUMNS (") {
-                    let wrapped = format!("SELECT {_func_sql}");
-                    match parse_defining_query_full(&wrapped) {
-                        Ok(inner) => check_ivm_support_inner(&inner.tree)?,
-                        Err(e) => {
-                            return Err(PgTrickleError::UnsupportedOperator(format!(
-                                "cannot inspect LATERAL function body: {e}"
-                            )));
-                        }
-                    }
-                }
-            }
-            check_ivm_support(child)
-        }
+        // Lateral function expressions were resolved by PostgreSQL while the
+        // complete defining query was analyzed. The row-scoped operator only
+        // needs to validate its input tree here.
+        OpTree::LateralFunction { child, .. } => check_ivm_support(child),
         // Lateral subqueries use row-scoped recomputation.
         // COR-002 (v0.70.0): Also check the subquery body for unsupported constructs.
         OpTree::LateralSubquery {
@@ -2127,6 +2054,7 @@ mod monotonicity_tests {
             func_sql: "unnest(t.tags)".into(),
             alias: "x".into(),
             column_aliases: vec![],
+            declared_columns: vec![],
             with_ordinality: false,
             child: Box::new(scan()),
         };

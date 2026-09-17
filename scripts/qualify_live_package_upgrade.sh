@@ -72,10 +72,12 @@ psql "CREATE TABLE public.v106_upgrade_source (id integer PRIMARY KEY, value tex
           schedule => '1h', refresh_mode => 'DIFFERENTIAL', \
           initialize => false, orchestration_mode => 'EXTERNAL');" >/dev/null
 
-CONSUMER_ID="$(psql "SELECT consumer_id FROM pgtrickle.register_output_delta_consumer( \
+CONSUMER_REGISTRATION="$(psql "SELECT consumer_id::text || '|' || delta_relation FROM \
+    pgtrickle.register_output_delta_consumer( \
     'public.v106_upgrade_st'::regclass, 'v106-upgrade-cursor', \
     (SELECT contract_digest FROM pgtrickle.stream_table_contract('public.v106_upgrade_st')), \
     'RESNAPSHOT_REQUIRED')")"
+IFS='|' read -r CONSUMER_ID DELTA_RELATION <<< "$CONSUMER_REGISTRATION"
 
 refresh_graph() {
     psql "SELECT * FROM pgtrickle.refresh_graph_strict( \
@@ -98,7 +100,20 @@ refresh_graph
 BATCH_TOKEN="$(psql "SELECT batch_token FROM pgtrickle.output_delta_batches( \
     '${CONSUMER_ID}'::uuid, NULL::bigint) ORDER BY batch_token DESC LIMIT 1")"
 [[ -n "$BATCH_TOKEN" ]] || { echo "output consumer did not receive a batch" >&2; exit 1; }
-psql "SELECT pgtrickle.ack_output_delta('${CONSUMER_ID}'::uuid, ${BATCH_TOKEN}, 'APPLIED');" >/dev/null
+
+# Leave the batch and typed payload pending so the migration proves that both
+# survive alongside the consumer cursor. Also leave a second consumer's
+# resnapshot token outstanding to exercise the new fence-column backfill.
+[[ "$DELTA_RELATION" =~ ^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$ ]] || {
+    echo "invalid typed delta relation: $DELTA_RELATION" >&2
+    exit 1
+}
+FENCED_CONSUMER_ID="$(psql "SELECT consumer_id FROM pgtrickle.register_output_delta_consumer( \
+    'public.v106_upgrade_st'::regclass, 'v106-upgrade-fenced', \
+    (SELECT contract_digest FROM pgtrickle.stream_table_contract('public.v106_upgrade_st')), \
+    'RESNAPSHOT_REQUIRED')")"
+FENCED_TOKEN="$(psql "SELECT resnapshot_token FROM \
+    pgtrickle.begin_output_delta_resnapshot('${FENCED_CONSUMER_ID}'::uuid)")"
 
 # Leave a committed CDC backlog across the binary replacement and restart.
 psql "INSERT INTO public.v106_upgrade_source VALUES (3, 'pending'); \
@@ -122,10 +137,21 @@ DEPENDENCIES_BEFORE="$(psql "SELECT count(*) FROM pgtrickle.pgt_dependencies \
                     WHERE pgt_name = 'v106_upgrade_st')")"
 CURSOR_BEFORE="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
     pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '${CONSUMER_ID}'::uuid")"
+BATCHES_BEFORE="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' \
+    ORDER BY batch_token), '')) FROM pgtrickle.pgt_output_delta_batches b \
+    WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_output_delta_consumers \
+                    WHERE consumer_id = '${CONSUMER_ID}'::uuid)")"
+PAYLOAD_BEFORE="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(p)::text, '|' \
+    ORDER BY batch_token, ordinal), '')) FROM ${DELTA_RELATION} p")"
 QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 [[ "$QUIESCED" == "t" ]] || { echo "upgrade quiesce failed" >&2; exit 1; }
 
-test -f "$CANDIDATE_DIR/usr/share/postgresql/18/extension/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql"
+UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
+if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
+    [[ "$FROM_VERSION" == "0.106.1" && "$TO_VERSION" == "0.108.0" ]]
+    test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
+    test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
+fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
 docker cp "$CANDIDATE_DIR/usr/share/postgresql/18/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"
 docker restart "$CONTAINER_ID" >/dev/null
@@ -166,11 +192,21 @@ DEPENDENCIES_AFTER="$(psql "SELECT count(*) FROM pgtrickle.pgt_dependencies \
                     WHERE pgt_name = 'v106_upgrade_st')")"
 CURSOR_AFTER="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
     pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '${CONSUMER_ID}'::uuid")"
+BATCHES_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' \
+    ORDER BY batch_token), '')) FROM pgtrickle.pgt_output_delta_batches b \
+    WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_output_delta_consumers \
+                    WHERE consumer_id = '${CONSUMER_ID}'::uuid)")"
+PAYLOAD_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(p)::text, '|' \
+    ORDER BY batch_token, ordinal), '')) FROM ${DELTA_RELATION} p")"
 [[ "$PENDING_AFTER" == "$PENDING_BEFORE" ]] || { echo "pending CDC rows changed across upgrade" >&2; exit 1; }
 [[ "$GRAPH_AFTER" == "$GRAPH_BEFORE" ]] || { echo "graph binding changed across upgrade" >&2; exit 1; }
 [[ "$STREAM_STATE_AFTER" == "$STREAM_STATE_BEFORE" ]] || { echo "stream publication state changed across upgrade" >&2; exit 1; }
 [[ "$DEPENDENCIES_AFTER" == "$DEPENDENCIES_BEFORE" ]] || { echo "graph dependencies changed across upgrade" >&2; exit 1; }
 [[ "$CURSOR_AFTER" == "$CURSOR_BEFORE" ]] || { echo "consumer cursor changed across upgrade" >&2; exit 1; }
+[[ "$BATCHES_AFTER" == "$BATCHES_BEFORE" ]] || { echo "output batches changed across upgrade" >&2; exit 1; }
+[[ "$PAYLOAD_AFTER" == "$PAYLOAD_BEFORE" ]] || { echo "typed output payload changed across upgrade" >&2; exit 1; }
+psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
+    '${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid);" | grep -qx ACTIVE
 
 refresh_graph
 psql "SELECT NOT EXISTS ( \

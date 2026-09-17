@@ -31,6 +31,7 @@ pub fn diff_lateral_function(
         func_sql,
         alias,
         column_aliases,
+        declared_columns,
         with_ordinality,
         child,
     } = op
@@ -43,6 +44,19 @@ pub fn diff_lateral_function(
     // ── Differentiate child to get the source delta ────────────────────
     let child_result = ctx.diff_node(child)?;
 
+    // Preserve the leaf delta registry for aggregate rescans.  A direct
+    // Scan→LATERAL child can be differentiated through a cached operator
+    // path, leaving the scan registry unavailable when the parent aggregate
+    // later reconstructs its current source snapshot.
+    if let OpTree::Scan {
+        table_oid, alias, ..
+    } = child.as_ref()
+    {
+        ctx.scan_delta_ctes_mut()
+            .insert(alias.clone(), child_result.cte_name.clone());
+        ctx.set_scan_delta_cte_for_source(*table_oid, child_result.cte_name.clone());
+    }
+
     // Column names from the child (source table columns)
     let child_cols = &child_result.columns;
 
@@ -52,7 +66,8 @@ pub fn diff_lateral_function(
     let outer_alias = child.alias().to_string();
 
     // SRF result column names
-    let srf_cols = lateral_function_output_columns(func_sql, alias, column_aliases);
+    let srf_cols =
+        lateral_function_output_columns(func_sql, alias, column_aliases, declared_columns);
 
     let mut srf_cols_with_ord = srf_cols.clone();
     if *with_ordinality {
@@ -197,6 +212,7 @@ mod tests {
             func_sql: func_sql.to_string(),
             alias: alias.to_string(),
             column_aliases: col_aliases.into_iter().map(|c| c.to_string()).collect(),
+            declared_columns: vec![],
             with_ordinality,
             child: Box::new(child),
         }
@@ -474,5 +490,45 @@ mod tests {
         let child = scan(1, "t", "public", "t", &["id"]);
         let tree = lateral_func("unnest(t.tags)", "tag", vec![], false, child);
         assert_eq!(tree.node_kind(), "lateral function");
+    }
+
+    #[test]
+    fn test_lateral_function_output_columns_use_declared_table_columns() {
+        let declared = vec![
+            crate::dvm::parser::Column {
+                name: "normalized_value".into(),
+                type_oid: 25,
+                is_nullable: true,
+            },
+            crate::dvm::parser::Column {
+                name: "normalized_state".into(),
+                type_oid: 25,
+                is_nullable: true,
+            },
+        ];
+        assert_eq!(
+            lateral_function_output_columns("normalize_text(t.raw)", "n", &[], &declared),
+            vec!["normalized_value", "normalized_state"]
+        );
+
+        let mut ctx = test_ctx_with_st("public", "st");
+        let tree = OpTree::LateralFunction {
+            func_sql: "normalize_text(t.raw)".into(),
+            alias: "n".into(),
+            column_aliases: vec![],
+            declared_columns: declared,
+            with_ordinality: false,
+            child: Box::new(scan_with_pk(1, "t", "public", "t", &["id", "raw"], &["id"])),
+        };
+        let result = diff_lateral_function(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_eq!(
+            result.columns,
+            vec!["id", "raw", "normalized_value", "normalized_state"]
+        );
+        assert_sql_contains(&sql, "WHERE \"t\".\"__pgt_action\" = 'D'");
+        assert_sql_contains(&sql, "WHERE \"t\".\"__pgt_action\" = 'I'");
+        assert_sql_contains(&sql, "\"n\" (\"normalized_value\", \"normalized_state\")");
     }
 }

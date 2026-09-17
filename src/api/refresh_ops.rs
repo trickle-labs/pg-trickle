@@ -1065,12 +1065,10 @@ fn upstream_immediate_source_requires_full(st: &StreamTableMeta) -> Result<bool,
 fn upstream_st_source_requires_full(
     st: &StreamTableMeta,
 ) -> Result<Option<&'static str>, PgTrickleError> {
-    let mut st_source_count = 0;
     for dependency in StDependency::get_for_st(st.pgt_id)? {
         if dependency.source_type != "STREAM_TABLE" {
             continue;
         }
-        st_source_count += 1;
         let upstream = StreamTableMeta::get_by_relid(dependency.source_relid)?;
         if upstream.topk_limit.is_some()
             || upstream
@@ -1081,9 +1079,9 @@ fn upstream_st_source_requires_full(
             return Ok(Some("windowed or scoped upstream requires FULL refresh"));
         }
     }
-    if st_source_count > 2 {
-        return Ok(Some("three-way stream-table join requires FULL refresh"));
-    }
+    // Dependency count is not a fallback criterion. DVM admission and its
+    // snapshot planner validate the actual query shape and support nested
+    // joins with three or more stream-table sources.
     Ok(None)
 }
 

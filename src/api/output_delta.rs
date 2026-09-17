@@ -44,11 +44,11 @@ fn payload_name(pgt_id: i64) -> String {
     format!("{DELTA_RELATION_PREFIX}{pgt_id}")
 }
 
-fn batch_mode(rows_changed: i64, captured_rows: i64) -> &'static str {
-    if rows_changed > 0 && captured_rows == 0 {
-        "FULL_INVALIDATION"
-    } else {
+fn batch_mode(capture_complete: bool) -> &'static str {
+    if capture_complete {
         "EXACT"
+    } else {
+        "FULL_INVALIDATION"
     }
 }
 
@@ -91,6 +91,38 @@ fn output_columns(meta: &StreamTableMeta) -> Result<Vec<(String, String)>, PgTri
         }
     }
     Ok(columns)
+}
+
+fn payload_columns_match(
+    delta_relid: pg_sys::Oid,
+    meta: &StreamTableMeta,
+) -> Result<bool, PgTrickleError> {
+    let mut expected = vec![
+        ("batch_token".to_string(), "bigint".to_string()),
+        ("ordinal".to_string(), "bigint".to_string()),
+        ("action".to_string(), "text".to_string()),
+        ("row_identity".to_string(), "bytea".to_string()),
+    ];
+    expected.extend(output_columns(meta)?);
+    let actual = Spi::connect(|client| {
+        let rows = spi(client.select(
+            "SELECT attname::text, pg_catalog.format_type(atttypid, atttypmod)
+               FROM pg_catalog.pg_attribute
+              WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped
+              ORDER BY attnum",
+            None,
+            &[delta_relid.into()],
+        ))?;
+        let mut columns = Vec::new();
+        for row in rows {
+            columns.push((
+                spi(row.get::<String>(1))?.unwrap_or_default(),
+                spi(row.get::<String>(2))?.unwrap_or_default(),
+            ));
+        }
+        Ok::<_, PgTrickleError>(columns)
+    })?;
+    Ok(actual == expected)
 }
 
 fn ensure_payload(
@@ -197,6 +229,264 @@ fn consumer_owner(
     Ok((owner, meta))
 }
 
+#[derive(Debug)]
+struct ConsumerValidation {
+    state: String,
+    state_reason: Option<String>,
+    acknowledged_batch_token: i64,
+    log_head: i64,
+    output_contract_digest: Vec<u8>,
+    row_identity_version: i16,
+    database_instance_id: String,
+}
+
+fn lock_stream(pgt_id: i64) -> Result<(), PgTrickleError> {
+    spi(Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
+        &[pgt_id.into()],
+    ))?
+    .ok_or_else(|| delta_error("PGT_EXT_TOKEN_INVALID", "stream table no longer exists"))?;
+    Ok(())
+}
+
+fn invalidate_consumer(
+    consumer_id: pgrx::Uuid,
+    reason: &'static str,
+) -> Result<(), PgTrickleError> {
+    spi(Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_output_delta_consumers
+            SET state = 'INVALIDATED', state_reason = $1, updated_at = now()
+          WHERE consumer_id = $2",
+        &[reason.into(), consumer_id.into()],
+    ))
+}
+
+/// Lock and validate every durable object needed to consume a pending range.
+/// Integrity failures are returned as durable INVALIDATED state, not errors,
+/// because a raised PostgreSQL error would roll the state change back.
+fn validate_consumer_locked(
+    consumer_id: pgrx::Uuid,
+    meta: &StreamTableMeta,
+) -> Result<ConsumerValidation, PgTrickleError> {
+    lock_stream(meta.pgt_id)?;
+    let status = Spi::connect(|client| {
+        let rows = spi(client.select(
+            "SELECT c.state, c.state_reason, c.acknowledged_batch_token,
+                    c.database_instance_id, c.output_contract_digest,
+                    c.expected_contract_digest, c.row_identity_version,
+                    l.log_head, l.database_instance_id,
+                    l.output_contract_digest, l.row_identity_version, l.delta_relid
+               FROM pgtrickle.pgt_output_delta_consumers c
+               JOIN pgtrickle.pgt_output_delta_logs l ON l.pgt_id = c.pgt_id
+              WHERE c.consumer_id = $1 AND c.pgt_id = $2
+              FOR UPDATE OF c, l",
+            None,
+            &[consumer_id.into(), meta.pgt_id.into()],
+        ))?;
+        if rows.is_empty() {
+            return Err(delta_error(
+                "PGT_EXT_TOKEN_INVALID",
+                "consumer or output-delta log no longer exists",
+            ));
+        }
+        let row = rows.first();
+        Ok::<_, PgTrickleError>((
+            spi(row.get::<String>(1))?.unwrap_or_default(),
+            spi(row.get::<String>(2))?,
+            spi(row.get::<i64>(3))?.unwrap_or(0),
+            spi(row.get::<String>(4))?.unwrap_or_default(),
+            spi(row.get::<Vec<u8>>(5))?.unwrap_or_default(),
+            spi(row.get::<Vec<u8>>(6))?.unwrap_or_default(),
+            spi(row.get::<i16>(7))?.unwrap_or(0),
+            spi(row.get::<i64>(8))?.unwrap_or(0),
+            spi(row.get::<String>(9))?.unwrap_or_default(),
+            spi(row.get::<Vec<u8>>(10))?.unwrap_or_default(),
+            spi(row.get::<i16>(11))?.unwrap_or(0),
+            spi(row.get::<pg_sys::Oid>(12))?.unwrap_or(pg_sys::InvalidOid),
+        ))
+    })?;
+    let (
+        state,
+        state_reason,
+        ack,
+        consumer_instance,
+        consumer_digest,
+        expected_digest,
+        consumer_version,
+        head,
+        log_instance,
+        log_digest,
+        log_version,
+        delta_relid,
+    ) = status;
+    let current_instance = database_instance_id()?;
+    let current_contract = contract(meta);
+    let contract_unavailable = current_contract.is_err();
+    let (current_digest, current_version) = current_contract.unwrap_or_default();
+
+    let reason = if current_instance != log_instance || consumer_instance != log_instance {
+        Some("DATABASE_INSTANCE_CHANGED")
+    } else if contract_unavailable
+        || current_digest != log_digest
+        || consumer_digest != log_digest
+        || expected_digest != log_digest
+    {
+        Some("CONTRACT_MISMATCH")
+    } else if current_version != log_version || consumer_version != log_version {
+        Some("ROW_IDENTITY_VERSION_MISMATCH")
+    } else if ack > head {
+        Some("DELTA_GAP")
+    } else {
+        let pending = head.saturating_sub(ack);
+        let gap = spi(Spi::get_one_with_args::<bool>(
+            "SELECT CASE WHEN $3 = 0 THEN count(*) <> 0
+                         ELSE count(*) <> $3 OR min(batch_token) <> $2 + 1
+                              OR max(batch_token) <> $4 END
+               FROM pgtrickle.pgt_output_delta_batches
+              WHERE pgt_id = $1 AND batch_token > $2 AND batch_token <= $4",
+            &[meta.pgt_id.into(), ack.into(), pending.into(), head.into()],
+        ))?
+        .unwrap_or(true);
+        let metadata_bad = spi(Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_output_delta_batches
+                 WHERE pgt_id = $1 AND batch_token > $2 AND batch_token <= $3
+                   AND (database_instance_id <> $4
+                     OR output_contract_digest <> $5
+                     OR row_identity_version <> $6
+                     OR mode NOT IN ('EXACT', 'FULL_INVALIDATION')
+                     OR row_count <> rows_inserted + rows_deleted
+                     OR (mode = 'FULL_INVALIDATION'
+                         AND (row_count <> 0 OR rows_inserted <> 0 OR rows_deleted <> 0))))",
+            &[
+                meta.pgt_id.into(),
+                ack.into(),
+                head.into(),
+                log_instance.clone().into(),
+                log_digest.clone().into(),
+                log_version.into(),
+            ],
+        ))?
+        .unwrap_or(true);
+        if gap {
+            Some("DELTA_GAP")
+        } else if metadata_bad {
+            Some("PAYLOAD_INCONSISTENT")
+        } else {
+            let expected_relid = spi(Spi::get_one_with_args::<pg_sys::Oid>(
+                "SELECT to_regclass($1)::oid",
+                &[format!("pgtrickle_changes.{}", payload_name(meta.pgt_id)).into()],
+            ))?;
+            if expected_relid != Some(delta_relid) || !payload_columns_match(delta_relid, meta)? {
+                Some("PAYLOAD_INCONSISTENT")
+            } else {
+                let payload = format!(
+                    "pgtrickle_changes.{}",
+                    quoted_ident(&payload_name(meta.pgt_id))
+                );
+                let payload_bad = spi(Spi::get_one::<bool>(&format!(
+                    "SELECT EXISTS (
+                        SELECT 1
+                          FROM pgtrickle.pgt_output_delta_batches b
+                          LEFT JOIN LATERAL (
+                            SELECT count(*)::bigint AS n,
+                                   count(*) FILTER (WHERE action = 'INSERT')::bigint AS ins,
+                                   count(*) FILTER (WHERE action = 'DELETE')::bigint AS del,
+                                   count(*) FILTER (WHERE action NOT IN ('DELETE', 'INSERT'))::bigint AS bad,
+                                   min(ordinal) AS first_ordinal,
+                                   max(ordinal) AS last_ordinal
+                              FROM {payload} p
+                             WHERE p.batch_token = b.batch_token
+                          ) p ON true
+                         WHERE b.pgt_id = {} AND b.batch_token > {} AND b.batch_token <= {}
+                           AND (p.bad <> 0 OR p.n <> b.row_count
+                             OR (b.mode = 'FULL_INVALIDATION' AND p.n <> 0)
+                             OR (b.mode = 'EXACT' AND
+                                (p.ins <> b.rows_inserted OR p.del <> b.rows_deleted
+                                 OR (p.n > 0 AND (p.first_ordinal <> 0
+                                      OR p.last_ordinal <> p.n - 1)))))
+                    )",
+                    meta.pgt_id, ack, head
+                )))?
+                .unwrap_or(true);
+                payload_bad.then_some("PAYLOAD_INCONSISTENT")
+            }
+        }
+    };
+
+    let (state, state_reason) = if let Some(reason) = reason {
+        invalidate_consumer(consumer_id, reason)?;
+        (INVALIDATED.to_string(), Some(reason.to_string()))
+    } else {
+        (state, state_reason)
+    };
+    Ok(ConsumerValidation {
+        state,
+        state_reason,
+        acknowledged_batch_token: ack,
+        log_head: head,
+        output_contract_digest: log_digest,
+        row_identity_version: log_version,
+        database_instance_id: log_instance,
+    })
+}
+
+/// Rotate every output log to an adopted database identity. Consumer cursors
+/// and old batches stay intact until each consumer completes a new baseline.
+pub(crate) fn adopt_database_instance(instance_id: &str) -> Result<(), PgTrickleError> {
+    let logs = Spi::connect(|client| {
+        let rows = spi(client.select(
+            "SELECT l.pgt_id, st.pgt_relid
+               FROM pgtrickle.pgt_output_delta_logs l
+               JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = l.pgt_id
+              ORDER BY l.pgt_id
+              FOR UPDATE OF l",
+            None,
+            &[],
+        ))?;
+        let mut logs = Vec::new();
+        for row in rows {
+            logs.push((
+                spi(row.get::<i64>(1))?.ok_or_else(|| {
+                    delta_error("PGT_EXT_CONSUMER_BLOCKED", "output log has no stream id")
+                })?,
+                spi(row.get::<pg_sys::Oid>(2))?.ok_or_else(|| {
+                    delta_error(
+                        "PGT_EXT_CONSUMER_BLOCKED",
+                        "output log stream relation is missing",
+                    )
+                })?,
+            ));
+        }
+        Ok::<_, PgTrickleError>(logs)
+    })?;
+    for (pgt_id, relid) in logs {
+        let meta = StreamTableMeta::get_by_relid(relid)?;
+        let (digest, version) = contract(&meta)?;
+        spi(Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_output_delta_logs
+                SET database_instance_id = $1, output_contract_digest = $2,
+                    row_identity_version = $3, updated_at = now()
+              WHERE pgt_id = $4",
+            &[
+                instance_id.into(),
+                digest.into(),
+                version.into(),
+                pgt_id.into(),
+            ],
+        ))?;
+    }
+    spi(Spi::run(
+        "UPDATE pgtrickle.pgt_output_delta_consumers
+            SET state = 'INVALIDATED', state_reason = 'DATABASE_INSTANCE_CHANGED',
+                updated_at = now()
+          WHERE state <> 'DROPPED'",
+    ))?;
+    spi(Spi::run(
+        "DELETE FROM pgtrickle.pgt_output_delta_resnapshots",
+    ))
+}
+
 /// Start the output capture window immediately before a refresh executor runs.
 pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
     if !has_consumer(pgt_id) {
@@ -228,23 +518,23 @@ pub(crate) fn finalize(
     meta: &StreamTableMeta,
     refresh_id: i64,
     rows_changed: i64,
+    capture_complete: bool,
 ) -> Result<(), PgTrickleError> {
     if !has_consumer(meta.pgt_id) {
         return Ok(());
     }
     super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
-    let start = CAPTURE_STARTS
-        .with(|starts| starts.borrow_mut().remove(&meta.pgt_id))
-        .unwrap_or_else(|| {
-            let schema = crate::config::pg_trickle_change_buffer_schema();
-            Spi::get_one::<i64>(&format!(
-                "SELECT COALESCE(max(change_id), 0) FROM {}.changes_pgt_{}",
-                quoted_ident(&schema),
-                meta.pgt_id
-            ))
-            .unwrap_or(Some(0))
-            .unwrap_or(0)
-        });
+    let captured_start = CAPTURE_STARTS.with(|starts| starts.borrow_mut().remove(&meta.pgt_id));
+    let start = captured_start.unwrap_or_else(|| {
+        let schema = crate::config::pg_trickle_change_buffer_schema();
+        Spi::get_one::<i64>(&format!(
+            "SELECT COALESCE(max(change_id), 0) FROM {}.changes_pgt_{}",
+            quoted_ident(&schema),
+            meta.pgt_id
+        ))
+        .unwrap_or(Some(0))
+        .unwrap_or(0)
+    });
     let digest = spi(Spi::get_one_with_args::<Vec<u8>>(
         "SELECT output_contract_digest FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1 FOR UPDATE",
         &[meta.pgt_id.into()],
@@ -288,11 +578,12 @@ pub(crate) fn finalize(
     } else {
         (0, 0)
     };
-    let mode = if unsupported_rows > 0 {
-        "FULL_INVALIDATION"
-    } else {
-        batch_mode(rows_changed, changed_rows)
-    };
+    let mode = batch_mode(
+        capture_complete
+            && captured_start.is_some()
+            && unsupported_rows == 0
+            && (rows_changed == 0 || changed_rows > 0),
+    );
     let (payload_rows, inserted, deleted) = if mode == "EXACT" && changed_rows > 0 {
         let target_cols = if col_names.is_empty() {
             "batch_token, ordinal, action, row_identity".to_string()
@@ -572,23 +863,18 @@ pub fn output_delta_batches(
     let result = (|| -> Result<_, PgTrickleError> {
         super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
         let (_, meta) = consumer_owner(consumer_id)?;
-        let state = spi(Spi::get_one_with_args::<String>(
-            "SELECT state FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1",
-            &[consumer_id.into()],
-        ))?
-        .unwrap_or_default();
-        if state != ACTIVE && state != PAUSED {
+        let status = validate_consumer_locked(consumer_id, &meta)?;
+        if status.state == INVALIDATED {
+            return Ok(TableIterator::new(Vec::new()));
+        }
+        if status.state != ACTIVE && status.state != PAUSED {
             return Err(delta_error(
                 "PGT_EXT_RESNAPSHOT_REQUIRED",
                 "consumer requires a resnapshot",
             ));
         }
-        let ack = spi(Spi::get_one_with_args::<i64>("SELECT acknowledged_batch_token FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1", &[consumer_id.into()]))?.unwrap_or(0);
-        let head = spi(Spi::get_one_with_args::<i64>(
-            "SELECT log_head FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
-            &[meta.pgt_id.into()],
-        ))?
-        .unwrap_or(0);
+        let ack = status.acknowledged_batch_token;
+        let head = status.log_head;
         let through = through_token.unwrap_or(head);
         if through < ack || through > head {
             return Err(delta_error(
@@ -652,23 +938,18 @@ pub fn ack_output_delta(consumer_id: pgrx::Uuid, through_token: i64, disposition
     let result = (|| -> Result<String, PgTrickleError> {
         super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
         let (_, meta) = consumer_owner(consumer_id)?;
-        let state = spi(Spi::get_one_with_args::<String>(
-            "SELECT state FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1",
-            &[consumer_id.into()],
-        ))?
-        .unwrap_or_default();
-        if state != ACTIVE {
+        let status = validate_consumer_locked(consumer_id, &meta)?;
+        if status.state == INVALIDATED {
+            return Ok(INVALIDATED.to_string());
+        }
+        if status.state != ACTIVE {
             return Err(delta_error(
                 "PGT_EXT_RESNAPSHOT_REQUIRED",
                 "consumer is not ACTIVE",
             ));
         }
-        let ack = spi(Spi::get_one_with_args::<i64>("SELECT acknowledged_batch_token FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1", &[consumer_id.into()]))?.unwrap_or(0);
-        let head = spi(Spi::get_one_with_args::<i64>(
-            "SELECT log_head FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
-            &[meta.pgt_id.into()],
-        ))?
-        .unwrap_or(0);
+        let ack = status.acknowledged_batch_token;
+        let head = status.log_head;
         if through_token < ack || through_token > head {
             return Err(delta_error(
                 "PGT_EXT_ACK_OUT_OF_ORDER",
@@ -702,6 +983,205 @@ pub fn ack_output_delta(consumer_id: pgrx::Uuid, through_token: i64, disposition
     }
 }
 
+/// Require a fresh baseline without deleting the durable log or cursor.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+#[allow(clippy::type_complexity)]
+pub fn request_output_delta_resnapshot(
+    consumer_id: pgrx::Uuid,
+) -> TableIterator<
+    'static,
+    (
+        name!(state, String),
+        name!(state_reason, Option<String>),
+        name!(acknowledged_batch_token, i64),
+        name!(log_head, i64),
+        name!(output_contract_digest, Vec<u8>),
+        name!(row_identity_version, i16),
+    ),
+> {
+    let result = (|| -> Result<_, PgTrickleError> {
+        super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
+        let (_, meta) = consumer_owner(consumer_id)?;
+        let status = validate_consumer_locked(consumer_id, &meta)?;
+        if status.state == ACTIVE || status.state == PAUSED {
+            spi(Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_output_delta_consumers
+                    SET state = 'RESNAPSHOT_REQUIRED', state_reason = 'ADMIN_REQUESTED',
+                        updated_at = now()
+                  WHERE consumer_id = $1",
+                &[consumer_id.into()],
+            ))?;
+        }
+        spi(Spi::run_with_args(
+            "DELETE FROM pgtrickle.pgt_output_delta_resnapshots WHERE consumer_id = $1",
+            &[consumer_id.into()],
+        ))?;
+        let state = if status.state == ACTIVE || status.state == PAUSED {
+            RESNAPSHOT_REQUIRED.to_string()
+        } else {
+            status.state
+        };
+        let reason = if state == RESNAPSHOT_REQUIRED
+            && matches!(
+                status.state_reason.as_deref(),
+                None | Some("ADMIN_REQUESTED")
+            ) {
+            Some("ADMIN_REQUESTED".to_string())
+        } else {
+            status.state_reason
+        };
+        Ok(TableIterator::once((
+            state,
+            reason,
+            status.acknowledged_batch_token,
+            status.log_head,
+            status.output_contract_digest,
+            status.row_identity_version,
+        )))
+    })();
+    match result {
+        Ok(rows) => rows,
+        Err(error) => raise(error),
+    }
+}
+
+/// Validate a consumer and persist any recoverable integrity failure.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+#[allow(clippy::type_complexity)]
+pub fn validate_output_delta_consumer(
+    consumer_id: pgrx::Uuid,
+) -> TableIterator<
+    'static,
+    (
+        name!(consumer_id, pgrx::Uuid),
+        name!(delta_relation, String),
+        name!(state, String),
+        name!(state_reason, Option<String>),
+        name!(acknowledged_batch_token, i64),
+        name!(log_head, i64),
+        name!(batch_lag, i64),
+        name!(output_contract_digest, Vec<u8>),
+        name!(row_identity_version, i16),
+        name!(database_instance_id, String),
+    ),
+> {
+    let result = (|| -> Result<_, PgTrickleError> {
+        super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
+        let (_, meta) = consumer_owner(consumer_id)?;
+        let status = validate_consumer_locked(consumer_id, &meta)?;
+        Ok(TableIterator::once((
+            consumer_id,
+            format!("pgtrickle_changes.{}", payload_name(meta.pgt_id)),
+            status.state,
+            status.state_reason,
+            status.acknowledged_batch_token,
+            status.log_head,
+            status
+                .log_head
+                .saturating_sub(status.acknowledged_batch_token),
+            status.output_contract_digest,
+            status.row_identity_version,
+            status.database_instance_id,
+        )))
+    })();
+    match result {
+        Ok(rows) => rows,
+        Err(error) => raise(error),
+    }
+}
+
+/// Exercise the fixed Delta V1 downstream recovery scenarios.
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+pub fn qualify_output_delta_recovery(consumer_id: pgrx::Uuid, scenario: &str) -> String {
+    let result = (|| -> Result<String, PgTrickleError> {
+        if !crate::config::pg_trickle_output_delta_qualification_enabled() {
+            return Err(delta_error(
+                "PGT_EXT_QUALIFICATION_DISABLED",
+                "output-delta recovery qualification is disabled",
+            ));
+        }
+        let superuser = spi(Spi::get_one_with_args::<bool>(
+            "SELECT rolsuper FROM pg_catalog.pg_roles WHERE oid = $1",
+            &[outer_user_id().into()],
+        ))?
+        .unwrap_or(false);
+        if !superuser {
+            return Err(delta_error(
+                "PGT_EXT_AUTHORIZATION",
+                "qualify_output_delta_recovery() requires a superuser",
+            ));
+        }
+        if !matches!(
+            scenario,
+            "FULL_INVALIDATION" | "DELTA_GAP" | "CONTRACT_MISMATCH" | "INVALIDATED"
+        ) {
+            return Err(delta_error(
+                "PGT_EXT_TOKEN_INVALID",
+                "unsupported output-delta recovery qualification scenario",
+            ));
+        }
+        let (_, meta) = consumer_owner(consumer_id)?;
+        let status = validate_consumer_locked(consumer_id, &meta)?;
+        match scenario {
+            "FULL_INVALIDATION" => {
+                if status.state != ACTIVE && status.state != PAUSED {
+                    return Err(delta_error(
+                        "PGT_EXT_RESNAPSHOT_REQUIRED",
+                        "consumer must be ACTIVE or PAUSED",
+                    ));
+                }
+                let token = status.log_head.saturating_add(1);
+                spi(Spi::run_with_args(
+                    "INSERT INTO pgtrickle.pgt_output_delta_batches
+                        (pgt_id, database_instance_id, batch_token, producing_refresh_id,
+                         mode, row_count, rows_inserted, rows_deleted,
+                         output_contract_digest, row_identity_version)
+                     VALUES ($1, $2, $3, 0, 'FULL_INVALIDATION', 0, 0, 0, $4, $5)",
+                    &[
+                        meta.pgt_id.into(),
+                        status.database_instance_id.into(),
+                        token.into(),
+                        status.output_contract_digest.into(),
+                        status.row_identity_version.into(),
+                    ],
+                ))?;
+                spi(Spi::run_with_args(
+                    "UPDATE pgtrickle.pgt_output_delta_logs
+                        SET log_head = $1, updated_at = now() WHERE pgt_id = $2",
+                    &[token.into(), meta.pgt_id.into()],
+                ))?;
+            }
+            "INVALIDATED" => {
+                invalidate_consumer(consumer_id, "INVALIDATED")?;
+                spi(Spi::run_with_args(
+                    "DELETE FROM pgtrickle.pgt_output_delta_resnapshots WHERE consumer_id = $1",
+                    &[consumer_id.into()],
+                ))?;
+            }
+            reason => {
+                spi(Spi::run_with_args(
+                    "UPDATE pgtrickle.pgt_output_delta_consumers
+                        SET state = 'RESNAPSHOT_REQUIRED', state_reason = $1, updated_at = now()
+                      WHERE consumer_id = $2",
+                    &[reason.into(), consumer_id.into()],
+                ))?;
+                spi(Spi::run_with_args(
+                    "DELETE FROM pgtrickle.pgt_output_delta_resnapshots WHERE consumer_id = $1",
+                    &[consumer_id.into()],
+                ))?;
+            }
+        }
+        Ok(scenario.to_string())
+    })();
+    match result {
+        Ok(value) => value,
+        Err(error) => raise(error),
+    }
+}
+
 /// Begin a transaction-scoped full baseline for a consumer.
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
@@ -720,42 +1200,30 @@ pub fn begin_output_delta_resnapshot(
     let result = (|| -> Result<_, PgTrickleError> {
         super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
         let (_, meta) = consumer_owner(consumer_id)?;
-        spi(Spi::get_one_with_args::<i64>(
-            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE",
-            &[meta.pgt_id.into()],
-        ))?
-        .ok_or_else(|| {
-            delta_error(
-                "PGT_EXT_REFRESH_BUSY",
-                "stream table disappeared during resnapshot",
-            )
-        })?;
-        let state = spi(Spi::get_one_with_args::<String>(
-            "SELECT state FROM pgtrickle.pgt_output_delta_consumers WHERE consumer_id = $1",
-            &[consumer_id.into()],
-        ))?
-        .unwrap_or_default();
-        if state != RESNAPSHOT_REQUIRED && state != INVALIDATED {
+        let mut status = validate_consumer_locked(consumer_id, &meta)?;
+        if status.state != RESNAPSHOT_REQUIRED && status.state != INVALIDATED {
             return Err(delta_error(
                 "PGT_EXT_TOKEN_INVALID",
                 "consumer does not require a resnapshot",
             ));
         }
-        let head = spi(Spi::get_one_with_args::<i64>(
-            "SELECT log_head FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
-            &[meta.pgt_id.into()],
-        ))?
-        .unwrap_or(0);
-        let digest = spi(Spi::get_one_with_args::<Vec<u8>>(
-            "SELECT output_contract_digest FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
-            &[meta.pgt_id.into()],
-        ))?
-        .unwrap_or_default();
-        let version = spi(Spi::get_one_with_args::<i16>(
-            "SELECT row_identity_version FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
-            &[meta.pgt_id.into()],
-        ))?
-        .unwrap_or(0);
+        let (digest, version) = contract(&meta)?;
+        let instance = database_instance_id()?;
+        spi(Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_output_delta_logs
+                SET database_instance_id = $1, output_contract_digest = $2,
+                    row_identity_version = $3, updated_at = now()
+              WHERE pgt_id = $4",
+            &[
+                instance.clone().into(),
+                digest.clone().into(),
+                version.into(),
+                meta.pgt_id.into(),
+            ],
+        ))?;
+        status.database_instance_id = instance;
+        status.output_contract_digest = digest;
+        status.row_identity_version = version;
         let token = spi(Spi::get_one::<pgrx::Uuid>(
             "SELECT md5(clock_timestamp()::text || random()::text || txid_current()::text)::uuid",
         ))?
@@ -766,19 +1234,29 @@ pub fn begin_output_delta_resnapshot(
             )
         })?;
         spi(Spi::run_with_args(
-            "INSERT INTO pgtrickle.pgt_output_delta_resnapshots (resnapshot_token, consumer_id, pgt_id, log_head) VALUES ($1, $2, $3, $4)",
+            "DELETE FROM pgtrickle.pgt_output_delta_resnapshots WHERE consumer_id = $1",
+            &[consumer_id.into()],
+        ))?;
+        spi(Spi::run_with_args(
+            "INSERT INTO pgtrickle.pgt_output_delta_resnapshots
+                (resnapshot_token, consumer_id, pgt_id, log_head,
+                 database_instance_id, output_contract_digest, row_identity_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             &[
                 token.into(),
                 consumer_id.into(),
                 meta.pgt_id.into(),
-                head.into(),
+                status.log_head.into(),
+                status.database_instance_id.clone().into(),
+                status.output_contract_digest.clone().into(),
+                status.row_identity_version.into(),
             ],
         ))?;
         Ok(TableIterator::once((
             format!("{}.{}", meta.pgt_schema, meta.pgt_name),
-            head,
-            digest,
-            version,
+            status.log_head,
+            status.output_contract_digest,
+            status.row_identity_version,
             token,
         )))
     })();
@@ -798,10 +1276,71 @@ pub fn ack_output_delta_resnapshot(
     let result = (|| -> Result<String, PgTrickleError> {
         super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
         let (_, meta) = consumer_owner(consumer_id)?;
-        let head = spi(Spi::get_one_with_args::<i64>("SELECT log_head FROM pgtrickle.pgt_output_delta_resnapshots WHERE resnapshot_token = $1 AND consumer_id = $2 AND pgt_id = $3", &[resnapshot_token.into(), consumer_id.into(), meta.pgt_id.into()]))?.ok_or_else(|| delta_error("PGT_EXT_TOKEN_INVALID", "unknown or replayed resnapshot token"))?;
+        lock_stream(meta.pgt_id)?;
+        let fenced = Spi::connect(|client| {
+            let rows = spi(client.select(
+                "SELECT r.log_head, r.database_instance_id, r.output_contract_digest,
+                        r.row_identity_version, l.log_head, l.database_instance_id,
+                        l.output_contract_digest, l.row_identity_version
+                   FROM pgtrickle.pgt_output_delta_resnapshots r
+                   JOIN pgtrickle.pgt_output_delta_logs l ON l.pgt_id = r.pgt_id
+                  WHERE r.resnapshot_token = $1 AND r.consumer_id = $2 AND r.pgt_id = $3
+                  FOR UPDATE OF r, l",
+                None,
+                &[
+                    resnapshot_token.into(),
+                    consumer_id.into(),
+                    meta.pgt_id.into(),
+                ],
+            ))?;
+            if rows.is_empty() {
+                return Err(delta_error(
+                    "PGT_EXT_TOKEN_INVALID",
+                    "unknown or replayed resnapshot token",
+                ));
+            }
+            let row = rows.first();
+            Ok::<_, PgTrickleError>((
+                spi(row.get::<i64>(1))?.unwrap_or(0),
+                spi(row.get::<String>(2))?.unwrap_or_default(),
+                spi(row.get::<Vec<u8>>(3))?.unwrap_or_default(),
+                spi(row.get::<i16>(4))?.unwrap_or(0),
+                spi(row.get::<i64>(5))?.unwrap_or(0),
+                spi(row.get::<String>(6))?.unwrap_or_default(),
+                spi(row.get::<Vec<u8>>(7))?.unwrap_or_default(),
+                spi(row.get::<i16>(8))?.unwrap_or(0),
+            ))
+        })?;
+        let (head, instance, digest, version, current_head, log_instance, log_digest, log_version) =
+            fenced;
+        let (current_digest, current_version) = contract(&meta)?;
+        if head != current_head
+            || instance != log_instance
+            || digest != log_digest
+            || version != log_version
+            || database_instance_id()? != log_instance
+            || current_digest != log_digest
+            || current_version != log_version
+        {
+            return Err(delta_error(
+                "PGT_EXT_TOKEN_INVALID",
+                "resnapshot token is stale",
+            ));
+        }
         spi(Spi::run_with_args(
-            "UPDATE pgtrickle.pgt_output_delta_consumers SET state = 'ACTIVE', state_reason = NULL, acknowledged_batch_token = $1, acknowledged_at = now(), updated_at = now() WHERE consumer_id = $2",
-            &[head.into(), consumer_id.into()],
+            "UPDATE pgtrickle.pgt_output_delta_consumers
+                SET state = 'ACTIVE', state_reason = NULL,
+                    acknowledged_batch_token = $1, database_instance_id = $2,
+                    expected_contract_digest = $3, output_contract_digest = $3,
+                    row_identity_version = $4, acknowledged_at = now(), updated_at = now()
+              WHERE consumer_id = $5",
+            &[
+                head.into(),
+                instance.into(),
+                digest.into(),
+                version.into(),
+                consumer_id.into(),
+            ],
         ))?;
         spi(Spi::run_with_args(
             "DELETE FROM pgtrickle.pgt_output_delta_resnapshots WHERE resnapshot_token = $1",
@@ -881,8 +1420,7 @@ mod tests {
 
     #[test]
     fn test_delta_batch_mode_fails_closed_when_capture_is_missing() {
-        assert_eq!(batch_mode(3, 0), "FULL_INVALIDATION");
-        assert_eq!(batch_mode(0, 0), "EXACT");
-        assert_eq!(batch_mode(3, 2), "EXACT");
+        assert_eq!(batch_mode(false), "FULL_INVALIDATION");
+        assert_eq!(batch_mode(true), "EXACT");
     }
 }

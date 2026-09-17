@@ -52,10 +52,13 @@ pub static PGS_EXPLAIN_ANNOTATIONS: GucSetting<bool> = GucSetting::<bool>::new(f
 /// Deprecated compatibility setting. Graph V1 is stable and no longer gated.
 pub static PGS_EXPERIMENTAL_GRAPH_V1: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Enable the constrained Delta V1 recovery qualification API.
+pub static PGS_ENABLE_OUTPUT_DELTA_QUALIFICATION: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // ── Registration ──────────────────────────────────────────────────────────
 
-/// Register all GUC variables for the pgtrickle extension.
-pub fn register_gucs() {
+/// Register GUC variables for the pgtrickle extension.
+pub fn register_gucs(in_shared_preload: bool) {
     GucRegistry::define_bool_guc(
         c"pg_trickle.enabled",
         c"Master enable/disable switch for pgtrickle.",
@@ -152,6 +155,17 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    if in_shared_preload {
+        GucRegistry::define_bool_guc(
+            c"pg_trickle.enable_output_delta_qualification",
+            c"Enable the output-delta recovery qualification API.",
+            c"This postmaster-start setting exposes constrained fault scenarios for conformance testing.",
+            &PGS_ENABLE_OUTPUT_DELTA_QUALIFICATION,
+            GucContext::Postmaster,
+            GucFlags::default(),
+        );
+    }
+
     scheduler::register_scheduler_gucs();
     cdc::register_cdc_gucs();
     dvm::register_dvm_gucs();
@@ -192,6 +206,11 @@ pub fn pg_trickle_explain_annotations() -> bool {
 /// Returns the deprecated Graph V1 compatibility setting.
 pub fn pg_trickle_experimental_graph_v1() -> bool {
     PGS_EXPERIMENTAL_GRAPH_V1.get()
+}
+
+/// Returns whether the constrained output-delta qualification API is enabled.
+pub fn pg_trickle_output_delta_qualification_enabled() -> bool {
+    PGS_ENABLE_OUTPUT_DELTA_QUALIFICATION.get()
 }
 
 /// Returns the maximum number of concurrent refresh workers.

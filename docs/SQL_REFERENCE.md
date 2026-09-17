@@ -31,7 +31,16 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.integration\_capabilities](#pgtrickleintegration_capabilities)
     - [pgtrickle.stream\_table\_contract](#pgtricklestream_table_contract)
     - [pgtrickle.graph\_contract](#pgtricklegraph_contract)
-- [pgtrickle.refresh\_graph\_strict](#pgtricklerefresh_graph_strict)
+    - [pgtrickle.refresh\_graph\_strict](#pgtricklerefresh_graph_strict)
+    - [pgtrickle.register\_output\_delta\_consumer](#pgtrickleregister_output_delta_consumer)
+    - [pgtrickle.output\_delta\_batches](#pgtrickleoutput_delta_batches)
+    - [pgtrickle.ack\_output\_delta](#pgtrickleack_output_delta)
+    - [pgtrickle.begin\_output\_delta\_resnapshot](#pgtricklebegin_output_delta_resnapshot)
+    - [pgtrickle.ack\_output\_delta\_resnapshot](#pgtrickleack_output_delta_resnapshot)
+    - [pgtrickle.request\_output\_delta\_resnapshot](#pgtricklerequest_output_delta_resnapshot)
+    - [pgtrickle.validate\_output\_delta\_consumer](#pgtricklevalidate_output_delta_consumer)
+    - [pgtrickle.output\_delta\_consumer\_status](#pgtrickleoutput_delta_consumer_status)
+    - [pgtrickle.qualify\_output\_delta\_recovery](#pgtricklequalify_output_delta_recovery)
   - [Status & Monitoring](#status--monitoring)
     - [pgtrickle.pgt\_status](#pgtricklepgt_status)
     - [pgtrickle.health\_check](#pgtricklehealth_check)
@@ -1655,6 +1664,23 @@ enabled on this installation.
 SELECT * FROM pgtrickle.integration_capabilities();
 ```
 
+Graph V1.2 reports the differential feature identifiers
+`stable_row_identity_encoder_v2`, `custom_table_srf_out_columns`, and
+`lateral_immutable_composite_function`. Delta V1.1 reports recovery contract
+version 1, public resnapshot requests, public validation, qualification API
+name `qualify_output_delta_recovery`, and typed delta encoding version 1.
+
+Graph V1.2 does not generally admit `STABLE` functions. In the checked-in
+pg-mdm compiler-v9 fixture, bootstrap is FULL-equivalent, but the exact
+evidence node remains rejected because it calls `pg_catalog.concat_ws`, which
+PostgreSQL declares `STABLE`. A fixture-only immutable equivalent admits the
+evidence and dependent golden nodes and proves the complete graph with FULL
+bootstrap followed by strict differential insert, update, NULL transition,
+delete, soft-delete, reactivation, rollback, retry, no-change, pair, and
+overflow cases. A downstream compiler must emit an immutable equivalent to
+`concat_ws` before its exact evidence and golden SQL can use
+`full_policy => 'ERROR'`.
+
 ### pgtrickle.set_orchestration_mode
 
 Assign durable refresh ownership to a stream table. The caller must own the
@@ -1706,6 +1732,29 @@ FROM pgtrickle.graph_contract(ARRAY['public.orders_total'::regclass]);
 
 ### pgtrickle.refresh_graph_strict
 
+Validates and refreshes the complete upstream closure of `EXTERNAL` roots in
+topological order inside the caller's transaction. Graph V1 does not require a
+feature GUC.
+
+```sql
+SELECT * FROM pgtrickle.refresh_graph_strict(
+    ARRAY['public.orders_total'::regclass],
+    (SELECT graph_digest FROM pgtrickle.graph_contract(
+        ARRAY['public.orders_total'::regclass]))
+);
+```
+
+The expected digest is mandatory. The function rejects stale contracts,
+unsupported members, authorization failures, and busy or changed catalog state
+before executing any member. It does not commit. Revoking a required source
+grant causes subsequent contract and refresh calls to fail closed.
+
+`full_policy => 'ERROR'` rejects any graph member that needs a whole-query FULL
+refresh, including runtime differential fallbacks. `ALLOW` permits the
+existing fallback behavior. Graph refresh holds its source and member locks
+until the caller commits or rolls back. Keep the transaction short, and treat
+the returned node results as transaction-local until commit.
+
 ### pgtrickle.register_output_delta_consumer
 
 Registers an owner-scoped cursor for an `EXTERNAL` stream table. Pass the
@@ -1731,38 +1780,70 @@ Captures a transaction-scoped output-log head and returns a resnapshot token.
 ### pgtrickle.ack_output_delta_resnapshot
 
 Commits the resnapshot token and activates the consumer at the captured log
-head.
+head. The token fences the log head, the database instance ID, the output
+contract digest, and the row identity version. A change to any fenced value
+invalidates the token.
+
+### pgtrickle.request_output_delta_resnapshot
+
+Moves an `ACTIVE` or `PAUSED` consumer to `RESNAPSHOT_REQUIRED` with reason
+`ADMIN_REQUESTED`. The function preserves the cursor, the log, all batches,
+and typed payload rows. Calls for consumers that already require a resnapshot
+are idempotent.
+
+```sql
+SELECT *
+FROM pgtrickle.request_output_delta_resnapshot(
+    '00000000-0000-0000-0000-000000000000'::uuid
+);
+```
+
+The caller must own the consumer or be a superuser.
+
+### pgtrickle.validate_output_delta_consumer
+
+Validates the consumer cursor, the output log, pending batches, typed payload,
+stream contract, row identity version, and database instance under a lock.
+The function returns the validated state and contract metadata.
+
+```sql
+SELECT *
+FROM pgtrickle.validate_output_delta_consumer(
+    '00000000-0000-0000-0000-000000000000'::uuid
+);
+```
+
+Recoverable validation failures persist `INVALIDATED` with one of these stable
+reasons: `DELTA_GAP`, `PAYLOAD_INCONSISTENT`, `CONTRACT_MISMATCH`,
+`ROW_IDENTITY_VERSION_MISMATCH`, or `DATABASE_INSTANCE_CHANGED`. An
+invalidated consumer must complete a new resnapshot before it reads or
+acknowledges more batches.
 
 ### pgtrickle.output_delta_consumer_status
 
 Lists the current owner-visible consumer state, cursor, lag, and contract
 metadata.
 
-Validate and refresh the complete upstream closure of `EXTERNAL` roots in
-topological order inside the caller's transaction. Graph V1 is stable in
-v0.104 and does not require a feature GUC.
+### pgtrickle.qualify_output_delta_recovery
+
+Runs one constrained recovery scenario for downstream conformance tests. The
+caller must be a superuser, and
+`pg_trickle.enable_output_delta_qualification` must be enabled at server
+startup. Accepted scenarios are `FULL_INVALIDATION`, `DELTA_GAP`,
+`CONTRACT_MISMATCH`, and `INVALIDATED`.
 
 ```sql
-SELECT * FROM pgtrickle.refresh_graph_strict(
-    ARRAY['public.orders_total'::regclass],
-    (SELECT graph_digest FROM pgtrickle.graph_contract(
-        ARRAY['public.orders_total'::regclass]))
+SELECT pgtrickle.qualify_output_delta_recovery(
+    '00000000-0000-0000-0000-000000000000'::uuid,
+    'FULL_INVALIDATION'
 );
 ```
 
-The expected digest is mandatory. The function rejects stale contracts,
-unsupported members, authorization failures, and busy or changed catalog state
-before executing any member. It does not commit. Revoking a required source
-grant causes subsequent contract and refresh calls to fail closed.
-
-`full_policy => 'ERROR'` rejects any graph member that needs a whole-query FULL
-refresh, including runtime differential fallbacks. `ALLOW` permits the
-existing fallback behavior. Graph refresh holds its source and member locks
-until the caller commits or rolls back, so callers should keep the transaction
-short and treat the returned node results as transaction-local until commit.
+Do not enable the qualification GUC on a production server.
 
 The `external_graph_refresh` and `output_delta_consumer` capabilities report
-`stable` and enabled in v0.104. The deprecated
+`stable` and enabled. Their current versions are Graph V1.2 and Delta V1.1.
+The deprecated
 `pg_trickle.experimental_graph_v1` setting remains only for upgrade
 compatibility and has no effect.
 
@@ -2965,7 +3046,7 @@ SELECT pgtrickle.pg_trickle_hash_multi(ARRAY['key1', 'key2']);
 
 Encode a PostgreSQL record using the exact, typed Version 2 row-identity
 contract. The `domain` must be one of `SCAN_KEY`, `KEYLESS_ROW`, `GROUP_KEY`,
-`JOIN_KEY`, `SET_KEY`, `WINDOW_KEY`, or `SYNTHETIC`.
+`JOIN_KEY`, `SET_KEY`, `WINDOW_KEY`, `SYNTHETIC`, or `MDM_SOURCE_KEY_V1`.
 
 ```sql
 pgtrickle.encode_row_id_v2(domain text, record anyelement) → bytea

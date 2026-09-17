@@ -335,6 +335,20 @@ pub fn replace_column_refs_in_raw(sql: &str, child_cols: &[String]) -> String {
 }
 
 fn replace_qualified_column_refs(sql: &str, child_cols: &[String]) -> String {
+    replace_qualified_column_refs_with(sql, |alias, column| {
+        resolve_qualified_column_ref(alias, column, child_cols)
+    })
+}
+
+/// Replace qualified SQL column references using a caller-provided resolver.
+///
+/// This keeps the quote- and string-aware scanner shared between filter and
+/// projection rewriting while allowing projections to resolve references
+/// against the operator tree, not only the flattened child column names.
+pub(crate) fn replace_qualified_column_refs_with(
+    sql: &str,
+    mut resolve: impl FnMut(&str, &str) -> Option<String>,
+) -> String {
     let chars: Vec<char> = sql.chars().collect();
     let mut result = String::with_capacity(sql.len());
     let mut i = 0;
@@ -364,7 +378,7 @@ fn replace_qualified_column_refs(sql: &str, child_cols: &[String]) -> String {
             && chars[alias_end] == '.'
             && let Some((column, column_end)) = parse_sql_identifier(&chars, alias_end + 1)
         {
-            if let Some(replacement) = resolve_qualified_column_ref(&alias, &column, child_cols) {
+            if let Some(replacement) = resolve(&alias, &column) {
                 result.push_str(&replacement);
                 i = column_end;
                 continue;

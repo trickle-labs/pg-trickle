@@ -357,9 +357,16 @@ pub fn lateral_function_output_columns(
     func_sql: &str,
     alias: &str,
     column_aliases: &[String],
+    declared_columns: &[Column],
 ) -> Vec<String> {
     if !column_aliases.is_empty() {
         return column_aliases.to_vec();
+    }
+    if !declared_columns.is_empty() {
+        return declared_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
     }
 
     infer_default_lateral_function_columns(func_sql).unwrap_or_else(|| vec![alias.to_string()])
@@ -1461,6 +1468,8 @@ pub enum OpTree {
         alias: String,
         /// Column aliases from `AS alias(c1, c2)`, if any.
         column_aliases: Vec<String>,
+        /// Declared OUT/TABLE columns resolved from pg_proc.
+        declared_columns: Vec<Column>,
         /// Whether `WITH ORDINALITY` was specified (adds a `bigint` ordinal column).
         with_ordinality: bool,
         /// The left-hand FROM item that this function may reference (LATERAL dependency).
@@ -2265,11 +2274,15 @@ impl OpTree {
                     let pk_aliases = join_pk_aliases(expressions, aliases, unwrapped);
                     return Some(pk_aliases.unwrap_or_else(|| aliases.clone()));
                 }
-                // Lateral subqueries have a complete content identity. SRF
-                // bodies are FULL-only when their result cannot be inspected;
-                // returning no key here makes FULL refresh use its generic
-                // row_to_json identity instead of trying to encode JSONB.
-                if matches!(unwrapped, OpTree::LateralSubquery { .. }) {
+                // LATERAL results have no natural key, so use the complete
+                // visible row as their identity. The differential Project
+                // path uses the same columns; keeping this metadata explicit
+                // prevents FULL refresh from falling back to a different
+                // row_to_json identity that DELETE deltas cannot match.
+                if matches!(
+                    unwrapped,
+                    OpTree::LateralFunction { .. } | OpTree::LateralSubquery { .. }
+                ) {
                     return Some(aliases.clone());
                 }
                 // For semi-join/anti-join children (EXISTS / NOT EXISTS / IN),
@@ -2284,6 +2297,13 @@ impl OpTree {
                 // rows in the stream table after a differential refresh.
                 if matches!(unwrapped, OpTree::SemiJoin { .. } | OpTree::AntiJoin { .. }) {
                     return Some(aliases.clone());
+                }
+                // The MDM source-key encoder deliberately turns source PK values
+                // into a visible, stable key even when the raw PK is not selected.
+                // Prefer that output over positional inference: equal input/output
+                // arity does not mean input column N produced output column N.
+                if let Some(position) = expressions.iter().position(is_mdm_source_key_expr) {
+                    return aliases.get(position).cloned().map(|alias| vec![alias]);
                 }
                 // Project may drop or rename columns — map child's key
                 // column names through the aliasing, then verify they're in
@@ -2372,23 +2392,25 @@ impl OpTree {
                 }
                 match child.row_id_key_columns() {
                     Some(keys) => {
+                        let mut used_positions = vec![false; expressions.len()];
                         let mapped: Vec<String> = keys
                             .iter()
                             .map(|k| {
-                                if let Some(pos) = expressions.iter().position(|expr| {
-                                    matches!(
-                                        expr,
-                                        Expr::ColumnRef { column_name, .. }
-                                            if column_name == k
-                                    )
-                                }) {
+                                if let Some(pos) =
+                                    expressions.iter().enumerate().find_map(|(pos, expr)| {
+                                        (!used_positions[pos]
+                                            && matches!(
+                                                expr,
+                                                Expr::ColumnRef { column_name, .. }
+                                                    if column_name == k
+                                            ))
+                                        .then_some(pos)
+                                    })
+                                {
+                                    used_positions[pos] = true;
                                     return aliases.get(pos).cloned().unwrap_or_else(|| k.clone());
                                 }
-                                if let Some(pos) = child_out.iter().position(|c| c == k) {
-                                    aliases.get(pos).cloned().unwrap_or_else(|| k.clone())
-                                } else {
-                                    k.clone()
-                                }
+                                k.clone()
                             })
                             .collect();
                         let out = self.output_columns();
@@ -2574,6 +2596,7 @@ impl OpTree {
                 func_sql,
                 alias,
                 column_aliases,
+                declared_columns,
                 with_ordinality,
                 child,
                 ..
@@ -2584,6 +2607,7 @@ impl OpTree {
                     func_sql,
                     alias,
                     column_aliases,
+                    declared_columns,
                 ));
                 if *with_ordinality {
                     columns.push("ordinality".to_string());
@@ -3479,6 +3503,20 @@ fn join_pk_expr_indices_for(expressions: &[Expr], join_child: &OpTree) -> Option
     }
 
     None
+}
+
+fn is_mdm_source_key_expr(expr: &Expr) -> bool {
+    let Expr::FuncCall { func_name, args } = expr else {
+        return false;
+    };
+    func_name.eq_ignore_ascii_case("pgtrickle.encode_row_id_v2")
+        && args.first().is_some_and(|domain| {
+            matches!(
+                domain,
+                Expr::Literal(value) | Expr::Raw(value)
+                    if value.trim().eq_ignore_ascii_case("'MDM_SOURCE_KEY_V1'")
+            )
+        })
 }
 
 /// Return stable `(source alias, key column)` pairs visible from a join side.

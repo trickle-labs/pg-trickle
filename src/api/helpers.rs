@@ -1090,6 +1090,32 @@ fn max_analyzed_volatility(a: char, b: char) -> char {
     }
 }
 
+#[cfg(not(test))]
+fn is_safe_row_identity_encoder(oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT p.oid = pg_catalog.to_regprocedure(\
+                    'pgtrickle.encode_row_id_v2(text,anyelement)') \
+                AND p.proargtypes = '25 2283'::pg_catalog.oidvector \
+                AND p.prorettype = 'bytea'::pg_catalog.regtype \
+                AND p.provolatile = 's' \
+                AND p.proparallel = 's' \
+                AND EXISTS (\
+                    SELECT 1 \
+                      FROM pg_catalog.pg_depend d \
+                      JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+                     WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass \
+                       AND d.objid = p.oid \
+                       AND d.deptype = 'e' \
+                       AND e.extname = 'pg_trickle'\
+                ) \
+           FROM pg_catalog.pg_proc p \
+          WHERE p.oid = $1",
+        &[oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("row identity function lookup failed: {e}")))
+    .map(|value| value.unwrap_or(false))
+}
+
 /// Resolve volatility from the analyzed expression nodes.
 ///
 /// Aggregate implementation functions are deliberately not included: their
@@ -1143,6 +1169,9 @@ fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgT
         .map_err(|e| PgTrickleError::SpiError(format!("volatility lookup failed: {e}")))?
         .and_then(|value| value.chars().next())
         .unwrap_or('v');
+        if volatility == 's' && is_safe_row_identity_encoder(oid)? {
+            continue;
+        }
         collector.worst = max_analyzed_volatility(collector.worst, volatility);
     }
 

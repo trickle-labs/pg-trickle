@@ -10,6 +10,7 @@
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
+use crate::dvm::operators::join_common::{build_snapshot_inline_from, build_snapshot_sql};
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree};
 use crate::error::PgTrickleError;
@@ -131,13 +132,7 @@ fn build_group_filter(delta_cte: &str, group_by: &[Expr], group_output: &[String
     let delta_cols = group_output
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            format!(
-                "{} AS {}",
-                quote_ident(column),
-                quote_ident(&format!("__pgt_group_{index}")),
-            )
-        })
+        .map(|(index, _)| quote_ident(&format!("__pgt_group_{index}")))
         .collect::<Vec<_>>()
         .join(", ");
     let conditions = group_by
@@ -153,16 +148,27 @@ fn build_group_filter(delta_cte: &str, group_by: &[Expr], group_output: &[String
         })
         .collect::<Vec<_>>()
         .join(" AND ");
-    format!(
-        "EXISTS (SELECT 1 FROM (SELECT {delta_cols} FROM {delta_cte}) __pgt_d2 WHERE {conditions})"
-    )
+    format!("EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_cols}) WHERE {conditions})")
+}
+
+fn internal_group_columns(group_output: &[String]) -> Vec<String> {
+    let has_duplicates = group_output
+        .iter()
+        .enumerate()
+        .any(|(index, column)| group_output[..index].contains(column));
+    if has_duplicates {
+        (0..group_output.len())
+            .map(|index| format!("__pgt_group_{index}"))
+            .collect()
+    } else {
+        group_output.to_vec()
+    }
 }
 
 /// Reconstruct the FROM clause SQL from a child OpTree.
 ///
 /// Returns the SQL fragment for `FROM ...` suitable for the rescan CTE.
-/// Returns `None` for complex children (CTEs, subqueries, unions) that
-/// cannot be reconstructed reliably.
+/// Returns `None` for child shapes that cannot be reconstructed reliably.
 ///
 /// The `registry` is used to resolve [`OpTree::CteScan`] nodes: instead of
 /// emitting the CTE alias as a bare table reference (which would fail at
@@ -235,6 +241,7 @@ fn child_to_from_sql(
             let r = child_to_from_sql(right, registry, project_scan_columns)?;
             Some(format!("{l} FULL JOIN {r} ON {}", condition.to_sql()))
         }
+        OpTree::LateralFunction { .. } => build_snapshot_inline_from(child),
         OpTree::Project {
             expressions,
             aliases,
@@ -246,6 +253,47 @@ fn child_to_from_sql(
             // from `EXTRACT(year FROM o_orderdate) AS o_year`) resolve
             // correctly in the rescan CTE.
             let inner = child_to_from_sql(child, registry, project_scan_columns)?;
+            let child_columns = child.output_columns();
+            let has_duplicate_child_columns = child_columns
+                .iter()
+                .enumerate()
+                .any(|(index, column)| child_columns[..index].contains(column));
+            let is_positional_passthrough = has_duplicate_child_columns
+                && child_columns.len() == expressions.len()
+                && expressions
+                    .iter()
+                    .zip(&child_columns)
+                    .all(|(expr, child_column)| {
+                        matches!(
+                            expr,
+                            Expr::ColumnRef {
+                                table_alias: None,
+                                column_name,
+                            } if column_name == child_column
+                        )
+                    });
+            if is_positional_passthrough {
+                let positional_columns = (0..child_columns.len())
+                    .map(|index| format!("__pgt_project_col_{index}"))
+                    .collect::<Vec<_>>();
+                let select_items = positional_columns
+                    .iter()
+                    .zip(aliases)
+                    .map(|(source, alias)| {
+                        format!("{} AS {}", quote_ident(source), quote_ident(alias))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let column_aliases = positional_columns
+                    .iter()
+                    .map(|column| quote_ident(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Some(format!(
+                    "(SELECT {select_items} FROM (SELECT * FROM {inner}) \
+                     AS __pgt_project_input({column_aliases})) __pgt_proj"
+                ));
+            }
             let select_items: Vec<String> = expressions
                 .iter()
                 .zip(aliases.iter())
@@ -367,8 +415,128 @@ fn child_to_from_sql(
                 gb,
             ))
         }
+        OpTree::UnionAll { children } if !children.is_empty() => {
+            let branches = children
+                .iter()
+                .map(|child| {
+                    child_to_from_sql(child, registry, project_scan_columns)
+                        .map(|from| format!("SELECT * FROM {from}"))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("({}) AS __pgt_union", branches.join(" UNION ALL ")))
+        }
         _ => None,
     }
+}
+
+fn child_to_from_sql_in_context(
+    child: &OpTree,
+    ctx: &DiffContext,
+    project_scan_columns: bool,
+) -> Option<String> {
+    match child {
+        OpTree::Filter { predicate, child } => {
+            let inner = child_to_from_sql_in_context(child, ctx, project_scan_columns)?;
+            Some(format!("{inner} WHERE {}", predicate.to_sql()))
+        }
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let left_from = child_to_from_sql_in_context(left, ctx, project_scan_columns)?;
+            let right_from = child_to_from_sql_in_context(right, ctx, project_scan_columns)?;
+            Some(format!(
+                "{left_from} INNER JOIN {right_from} ON {}",
+                condition.to_sql()
+            ))
+        }
+        OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let left_from = child_to_from_sql_in_context(left, ctx, project_scan_columns)?;
+            let right_from = child_to_from_sql_in_context(right, ctx, project_scan_columns)?;
+            Some(format!(
+                "{left_from} LEFT JOIN {right_from} ON {}",
+                condition.to_sql()
+            ))
+        }
+        OpTree::FullJoin {
+            condition,
+            left,
+            right,
+        } => {
+            let left_from = child_to_from_sql_in_context(left, ctx, project_scan_columns)?;
+            let right_from = child_to_from_sql_in_context(right, ctx, project_scan_columns)?;
+            Some(format!(
+                "{left_from} FULL JOIN {right_from} ON {}",
+                condition.to_sql()
+            ))
+        }
+        OpTree::LateralFunction {
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+            child: lateral_child,
+        } => {
+            // The LATERAL builder adds the source alias itself. Its fallback
+            // must therefore be an unaliased snapshot, not child_to_from_sql's
+            // already-aliased `(SELECT ...) AS alias` form.
+            let child_snapshot = current_bypass_scan_from_sql(lateral_child, ctx)
+                .unwrap_or_else(|| build_snapshot_sql(lateral_child));
+            Some(
+                crate::dvm::operators::join_common::build_lateral_function_from_clause(
+                    func_sql,
+                    alias,
+                    column_aliases,
+                    declared_columns,
+                    *with_ordinality,
+                    lateral_child,
+                    &child_snapshot,
+                ),
+            )
+        }
+        _ => child_to_from_sql(child, ctx.cte_registry(), project_scan_columns),
+    }
+}
+
+fn current_bypass_scan_from_sql(child: &OpTree, ctx: &DiffContext) -> Option<String> {
+    let OpTree::Scan {
+        schema,
+        table_name,
+        table_oid,
+        alias,
+        columns,
+        ..
+    } = child
+    else {
+        return None;
+    };
+    // Strict graph members run after their upstream storage merge, so their
+    // physical stream-table relation is already current.  Only fused-chain
+    // execution exposes a pre-merge bypass relation that needs the staged
+    // D/I reconstruction here.
+    let pgt_id = ctx.st_source_pgt_ids().get(table_oid)?;
+    if !ctx.st_bypass_tables().contains_key(pgt_id) {
+        return None;
+    }
+    let delta_cte = ctx.scan_delta_cte_for_source(*table_oid, alias)?;
+    let column_list = columns
+        .iter()
+        .map(|column| quote_ident(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "(SELECT {column_list} FROM {}.{} \
+         EXCEPT ALL SELECT {column_list} FROM {delta_cte} WHERE __pgt_action = 'D' \
+         UNION ALL SELECT {column_list} FROM {delta_cte} WHERE __pgt_action = 'I')",
+        quote_ident(schema),
+        quote_ident(table_name),
+    ))
 }
 
 fn child_from_has_outer_where(child: &OpTree) -> bool {
@@ -571,7 +739,7 @@ fn build_intermediate_agg_delta(
     aggregates: &[AggExpr],
     delta_cte: &str,
 ) -> Result<DiffResult, PgTrickleError> {
-    let source_from = child_to_from_sql(child, ctx.cte_registry(), true);
+    let source_from = child_to_from_sql_in_context(child, ctx, true);
 
     // We need the child's source SQL for rescanning. If we can't reconstruct
     // it, fall back to the defining query approach.
@@ -587,9 +755,19 @@ fn build_intermediate_agg_delta(
         }
     };
 
+    // Intermediate aggregate keys may intentionally have duplicate public
+    // names (for example, the left and right IDs in a candidate pair). Keep
+    // their CTE-local names unique and restore the public names only in the
+    // final positional output.
+    let group_columns: Vec<String> = group_output
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("__pgt_group_{index}"))
+        .collect();
+
     // Build the rescan SELECT list: group columns + all aggregates
     let mut rescan_selects = Vec::new();
-    for (expr, output) in group_by.iter().zip(group_output.iter()) {
+    for (expr, output) in group_by.iter().zip(group_columns.iter()) {
         let expr_sql = expr.to_sql();
         let qt_output = quote_ident(output);
         if expr_sql == *output && !expr_sql.contains('(') {
@@ -676,11 +854,11 @@ fn build_intermediate_agg_delta(
         // The GROUP BY key is the row identity. Aggregate values may change
         // while the logical group remains the same, so including them would
         // make the DELETE half of a D+I update miss the stored row.
-        let group_hash_d: Vec<String> = group_output
+        let group_hash_d: Vec<String> = group_columns
             .iter()
             .map(|c| format!("d.{}", quote_ident(c)))
             .collect();
-        let group_hash_n: Vec<String> = group_output
+        let group_hash_n: Vec<String> = group_columns
             .iter()
             .map(|c| format!("n.{}", quote_ident(c)))
             .collect();
@@ -696,13 +874,15 @@ fn build_intermediate_agg_delta(
         };
 
         // D event group columns from delta_cte
-        let d_group_refs: Vec<String> = group_output
+        let d_group_refs: Vec<String> = group_columns
             .iter()
-            .map(|c| format!("d.{}", quote_ident(c)))
+            .zip(group_output)
+            .map(|(column, output)| format!("d.{} AS {}", quote_ident(column), quote_ident(output)))
             .collect();
-        let n_group_refs: Vec<String> = group_output
+        let n_group_refs: Vec<String> = group_columns
             .iter()
-            .map(|c| format!("n.{}", quote_ident(c)))
+            .zip(group_output)
+            .map(|(column, output)| format!("n.{} AS {}", quote_ident(column), quote_ident(output)))
             .collect();
 
         // Algebraic old expressions: old_X = COALESCE(new_X, 0) - ins_X + del_X
@@ -733,7 +913,7 @@ fn build_intermediate_agg_delta(
         let join_cond = if group_output.is_empty() {
             "TRUE".to_string()
         } else {
-            group_output
+            group_columns
                 .iter()
                 .map(|c| format!("d.{q} IS NOT DISTINCT FROM n.{q}", q = quote_ident(c),))
                 .collect::<Vec<_>>()
@@ -762,14 +942,26 @@ fn build_intermediate_agg_delta(
             format!(",\n       {}", new_agg_refs.join(",\n       "))
         };
 
+        let delta_group_aliases = group_columns
+            .iter()
+            .map(|column| quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let delta_from = if delta_group_aliases.is_empty() {
+            format!("{delta_cte} d")
+        } else {
+            format!("{delta_cte} AS d({delta_group_aliases})")
+        };
+
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
 SELECT {row_id_d} AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {extra_d_groups}{old_pgt_count} AS __pgt_count{extra_old_aggs}
-FROM {delta_cte} d
+FROM {delta_from}
 LEFT JOIN {new_rescan_cte} n ON {join_cond}
+WHERE ({old_pgt_count}) > 0
 
 UNION ALL
 
@@ -777,7 +969,8 @@ UNION ALL
 SELECT {row_id_n} AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {extra_n_groups}n.__pgt_count{extra_new_aggs}
-FROM {new_rescan_cte} n",
+FROM {new_rescan_cte} n
+WHERE n.__pgt_count > 0",
         );
 
         ctx.add_cte(final_cte.clone(), final_sql);
@@ -840,11 +1033,11 @@ FROM {new_rescan_cte} n",
         // ── Final CTE: emit D/I pairs ───────────────────────────────
         let final_cte = ctx.next_cte_name("agg_final");
 
-        let group_hash_n: Vec<String> = group_output
+        let group_hash_n: Vec<String> = group_columns
             .iter()
             .map(|c| format!("n.{}", quote_ident(c)))
             .collect();
-        let group_hash_o: Vec<String> = group_output
+        let group_hash_o: Vec<String> = group_columns
             .iter()
             .map(|c| format!("o.{}", quote_ident(c)))
             .collect();
@@ -859,14 +1052,16 @@ FROM {new_rescan_cte} n",
             build_hash_expr_for_domain("GROUP_KEY", &group_hash_o)
         };
 
-        let new_group_refs = group_output
+        let new_group_refs = group_columns
             .iter()
-            .map(|c| format!("n.{}", quote_ident(c)))
+            .zip(group_output)
+            .map(|(column, output)| format!("n.{} AS {}", quote_ident(column), quote_ident(output)))
             .collect::<Vec<_>>()
             .join(", ");
-        let old_group_refs = group_output
+        let old_group_refs = group_columns
             .iter()
-            .map(|c| format!("o.{}", quote_ident(c)))
+            .zip(group_output)
+            .map(|(column, output)| format!("o.{} AS {}", quote_ident(column), quote_ident(output)))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -973,7 +1168,7 @@ fn build_rescan_cte(
     }
 
     let rescan_cte = ctx.next_cte_name("agg_rescan");
-    let source_from = child_to_from_sql(child, ctx.cte_registry(), false);
+    let source_from = child_to_from_sql_in_context(child, ctx, false);
     let can_rescan_sum_nonnull = source_from.is_some();
 
     // Build SELECT list: group columns + rescan aggregate calls
@@ -1086,7 +1281,12 @@ fn build_rescan_cte(
             let delta_col = &group_output[0];
             let dq_col = dq_col_name(delta_col);
             format!(
-                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE __pgt_dq.{dqc} IS NOT DISTINCT FROM __pgt_d2.{d2c})",
+                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE __pgt_dq.{dqc} IS NOT DISTINCT FROM __pgt_d2.{d2c})",
+                delta_aliases = group_output
+                    .iter()
+                    .map(|column| quote_ident(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 dqc = quote_ident(&dq_col),
                 d2c = quote_ident(delta_col),
             )
@@ -1102,8 +1302,13 @@ fn build_rescan_cte(
                     )
                 })
                 .collect();
+            let delta_aliases = group_output
+                .iter()
+                .map(|column| quote_ident(column))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
-                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} __pgt_d2 WHERE {})",
+                "\nWHERE EXISTS (SELECT 1 FROM {delta_cte} AS __pgt_d2({delta_aliases}) WHERE {})",
                 corr.join(" AND "),
             )
         };
@@ -1769,6 +1974,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
         (delta_cte, group_output)
     };
+    let group_columns = internal_group_columns(&group_output);
 
     // ── Detect intermediate aggregate ───────────────────────────────
     //
@@ -1824,7 +2030,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         ctx,
         child,
         group_by,
-        &group_output,
+        &group_columns,
         aggregates,
         &delta_cte,
         use_having_rescan,
@@ -1849,7 +2055,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     };
 
     // Row ID from group-by columns (using output names)
-    let group_hash_exprs: Vec<String> = group_output
+    let group_hash_exprs: Vec<String> = group_columns
         .iter()
         .map(|c| format!("d.{}", quote_ident(c)))
         .collect();
@@ -1871,7 +2077,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     ));
 
     // Group columns
-    for col in &group_output {
+    for col in &group_columns {
         merge_selects.push(format!("d.{}", quote_ident(col)));
     }
 
@@ -2035,13 +2241,20 @@ END AS __pgt_meta_action"
     merge_selects.push(action_case);
 
     // Join condition on group-by columns
-    let join_cond = if group_output.is_empty() {
+    let join_cond = if group_columns.is_empty() {
         "TRUE".to_string()
     } else {
-        group_output
+        group_columns
             .iter()
-            .map(|c| {
-                let st_c = st_col_name(c);
+            .enumerate()
+            .map(|(index, c)| {
+                let internal = format!("__pgt_group_{index}");
+                let st_c = ctx
+                    .st_column_alias_map
+                    .as_ref()
+                    .and_then(|map| map.get(&internal))
+                    .cloned()
+                    .unwrap_or_else(|| st_col_name(c));
                 format!(
                     "st.{st_qc} IS NOT DISTINCT FROM d.{d_qc}",
                     st_qc = quote_ident(&st_c),
@@ -2054,10 +2267,10 @@ END AS __pgt_meta_action"
 
     // Optional LEFT JOIN to the rescan CTE for group-rescan aggregates
     let rescan_join = if let Some(ref rc) = rescan_cte {
-        let rescan_join_cond = if group_output.is_empty() {
+        let rescan_join_cond = if group_columns.is_empty() {
             "TRUE".to_string()
         } else {
-            group_output
+            group_columns
                 .iter()
                 .map(|c| format!("r.{qc} IS NOT DISTINCT FROM d.{qc}", qc = quote_ident(c)))
                 .collect::<Vec<_>>()
@@ -2068,8 +2281,18 @@ END AS __pgt_meta_action"
         String::new()
     };
 
+    let delta_group_aliases = group_columns
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let delta_from = if delta_group_aliases.is_empty() {
+        format!("{delta_cte} d")
+    } else {
+        format!("{delta_cte} AS d({delta_group_aliases})")
+    };
     let merge_sql = format!(
-        "SELECT {selects}\nFROM {delta_cte} d\nLEFT JOIN {st_table} st ON {join_cond}{rescan_join}",
+        "SELECT {selects}\nFROM {delta_from}\nLEFT JOIN {st_table} st ON {join_cond}{rescan_join}",
         selects = merge_selects.join(",\n       "),
     );
     ctx.add_cte(merge_cte.clone(), merge_sql);
@@ -2115,9 +2338,10 @@ END AS __pgt_meta_action"
         }
     }
 
-    let group_col_refs = group_output
+    let group_col_refs = group_columns
         .iter()
-        .map(|c| format!("m.{}", quote_ident(c)))
+        .zip(&group_output)
+        .map(|(column, output)| format!("m.{} AS {}", quote_ident(column), quote_ident(output)))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -5589,6 +5813,169 @@ mod tests {
     }
 
     #[test]
+    fn test_child_to_from_sql_filter_over_lateral_function() {
+        let child = filter(
+            Expr::Raw("field_name = 'name' AND pg_catalog.char_length(token) >= 3".into()),
+            OpTree::LateralFunction {
+                func_sql: "pg_catalog.regexp_split_to_table(normalized, '[[:space:]]+')".into(),
+                alias: "token".into(),
+                column_aliases: vec!["token".into()],
+                declared_columns: vec![],
+                with_ordinality: false,
+                child: Box::new(scan_with_pk(
+                    1,
+                    "normalized_name",
+                    "public",
+                    "normalized_name",
+                    &[
+                        "source_record_id",
+                        "field_name",
+                        "normalized",
+                        "source_sort_key",
+                    ],
+                    &["source_record_id", "field_name"],
+                )),
+            },
+        );
+
+        let sql = child_to_from_sql(&child, &CteRegistry::default(), true)
+            .expect("LATERAL aggregate child should be reconstructible");
+
+        assert!(sql.contains("CROSS JOIN LATERAL"), "{sql}");
+        assert!(sql.contains("AS \"token\" (\"token\")"), "{sql}");
+        assert!(sql.contains("WHERE field_name = 'name'"), "{sql}");
+    }
+
+    #[test]
+    fn test_lateral_aggregate_current_snapshot_applies_same_pass_stage_delta() {
+        let scan = scan_with_pk(
+            10,
+            "normalized_name",
+            "public",
+            "normalized_name",
+            &[
+                "source_record_id",
+                "field_name",
+                "normalized",
+                "source_sort_key",
+            ],
+            &["source_record_id", "field_name"],
+        );
+        let child = filter(
+            Expr::Raw("field_name = 'name' AND char_length(token) >= 3".into()),
+            OpTree::LateralFunction {
+                func_sql: "regexp_split_to_table(normalized, '[[:space:]]+')".into(),
+                alias: "token".into(),
+                column_aliases: vec!["token".into()],
+                declared_columns: vec![],
+                with_ordinality: false,
+                child: Box::new(scan),
+            },
+        );
+        let mut ctx = test_ctx();
+        ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(10, 42)]));
+        ctx.set_source_stage_tables(std::collections::HashMap::from([(
+            10,
+            "pg_temp.__pgt_cdc_99_10".into(),
+        )]));
+        ctx.set_st_bypass_tables(std::collections::HashMap::from([(
+            42,
+            "pg_temp.__pgt_cdc_99_10".into(),
+        )]));
+        ctx.scan_delta_ctes_mut()
+            .insert("normalized_name".into(), "__pgt_cte_scan_normalized".into());
+
+        let sql = crate::refresh::with_refresh_context(
+            crate::refresh::RefreshContext::graph_result(
+                "0/10",
+                crate::refresh::FullPolicy::Error,
+                1,
+                vec![],
+            ),
+            || Ok(child_to_from_sql_in_context(&child, &ctx, true)),
+        )
+        .expect("same-pass LATERAL aggregate snapshot should be reconstructible")
+        .expect("same-pass LATERAL aggregate snapshot should be present");
+
+        assert!(sql.contains("EXCEPT ALL"), "{sql}");
+        assert!(sql.contains("WHERE __pgt_action = 'D'"), "{sql}");
+        assert!(sql.contains("UNION ALL"), "{sql}");
+        assert!(sql.contains("WHERE __pgt_action = 'I'"), "{sql}");
+        assert!(sql.contains("CROSS JOIN LATERAL"), "{sql}");
+    }
+
+    #[test]
+    fn test_lateral_aggregate_current_snapshot_does_not_reapply_base_table_stage_delta() {
+        let child = OpTree::LateralFunction {
+            func_sql: "regexp_split_to_table(normalized, ' ')".into(),
+            alias: "token".into(),
+            column_aliases: vec!["token".into()],
+            declared_columns: vec![],
+            with_ordinality: false,
+            child: Box::new(scan(
+                10,
+                "normalized_name",
+                "public",
+                "normalized_name",
+                &["source_record_id", "normalized"],
+            )),
+        };
+        let mut ctx = test_ctx();
+        ctx.set_source_stage_tables(std::collections::HashMap::from([(
+            10,
+            "pg_temp.__pgt_cdc_99_10".into(),
+        )]));
+        ctx.scan_delta_ctes_mut()
+            .insert("normalized_name".into(), "__pgt_cte_scan_normalized".into());
+
+        let sql = child_to_from_sql_in_context(&child, &ctx, true)
+            .expect("base-table LATERAL snapshot should be reconstructible");
+
+        assert!(!sql.contains("EXCEPT ALL"), "{sql}");
+        assert!(!sql.contains("__pgt_cte_scan_normalized"), "{sql}");
+        assert!(
+            sql.starts_with(
+                "\"public\".\"normalized_name\" AS \"normalized_name\" CROSS JOIN LATERAL"
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_lateral_aggregate_current_snapshot_adds_source_alias_once() {
+        let child = OpTree::LateralFunction {
+            func_sql: "regexp_split_to_table(normalized, ' ')".into(),
+            alias: "token".into(),
+            column_aliases: vec!["token".into()],
+            declared_columns: vec![],
+            with_ordinality: false,
+            child: Box::new(scan(
+                10,
+                "mdm_v9_st_normalized_name",
+                "public",
+                "mdm_v9_st_normalized_name",
+                &["source_record_id", "normalized"],
+            )),
+        };
+        let ctx = test_ctx();
+
+        let sql = child_to_from_sql_in_context(&child, &ctx, true)
+            .expect("LATERAL snapshot should be reconstructible");
+
+        assert!(
+            sql.starts_with(
+                "\"public\".\"mdm_v9_st_normalized_name\" AS \
+                 \"mdm_v9_st_normalized_name\" CROSS JOIN LATERAL"
+            ),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("AS \"mdm_v9_st_normalized_name\" \"mdm_v9_st_normalized_name\""),
+            "{sql}"
+        );
+    }
+
+    #[test]
     fn test_child_to_from_sql_project_over_subquery() {
         // A Project over a simple Subquery should preserve both the
         // projected columns and the subquery's visible alias.
@@ -5606,6 +5993,234 @@ mod tests {
         let sql = result.expect("Project over Subquery should be reconstructible");
         assert!(sql.contains("SELECT * FROM"), "{sql}");
         assert!(sql.contains("AS \"sub\""), "{sql}");
+    }
+
+    #[test]
+    fn test_intermediate_count_reconstructs_deduped_union_subquery() {
+        let branch = |oid, table: &str| {
+            let left = scan(
+                oid,
+                &format!("{table}_left"),
+                "public",
+                "l",
+                &["source_record_id", "source_sort_key", "channel_id"],
+            );
+            let stats = scan(
+                oid + 10,
+                &format!("{table}_stats"),
+                "public",
+                "s",
+                &["channel_id"],
+            );
+            let right = scan(
+                oid + 20,
+                &format!("{table}_right"),
+                "public",
+                "r",
+                &["source_record_id", "source_sort_key", "channel_id"],
+            );
+            let joined = inner_join(
+                eq_cond("l", "channel_id", "r", "channel_id"),
+                inner_join(eq_cond("l", "channel_id", "s", "channel_id"), left, stats),
+                right,
+            );
+            let duplicate_names = project(
+                vec![
+                    qcolref("l", "source_record_id"),
+                    qcolref("r", "source_record_id"),
+                    qcolref("l", "source_sort_key"),
+                    qcolref("r", "source_sort_key"),
+                ],
+                vec![
+                    "source_record_id",
+                    "source_record_id",
+                    "source_sort_key",
+                    "source_sort_key",
+                ],
+                joined,
+            );
+            project(
+                vec![
+                    colref("source_record_id"),
+                    colref("source_record_id"),
+                    colref("source_sort_key"),
+                    colref("source_sort_key"),
+                ],
+                vec![
+                    "left_source_record_id",
+                    "right_source_record_id",
+                    "left_sort_key",
+                    "right_sort_key",
+                ],
+                duplicate_names,
+            )
+        };
+        let candidates = union_all(vec![
+            branch(1, "composite_pairs"),
+            branch(2, "email_pairs"),
+            branch(3, "prefix_pairs"),
+            branch(4, "token_pairs"),
+        ]);
+        let deduped = aggregate(
+            vec![
+                colref("left_source_record_id"),
+                colref("right_source_record_id"),
+                colref("left_sort_key"),
+                colref("right_sort_key"),
+            ],
+            vec![],
+            subquery("candidate_pairs", vec![], candidates),
+        );
+        let pairs = subquery("pairs", vec![], deduped);
+        let aggregates = vec![count_star("candidate_pairs")];
+        let mut ctx = test_ctx();
+
+        let result = build_intermediate_agg_delta(
+            &mut ctx,
+            &pairs,
+            &[],
+            &[],
+            &aggregates,
+            "candidate_delta",
+        )
+        .expect("COUNT over a deduped UNION subquery should be reconstructible");
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_eq!(sql.matches(" UNION ALL ").count(), 3, "{sql}");
+        assert!(sql.contains("GROUP BY"), "{sql}");
+        assert!(sql.contains("COUNT(*) AS \"candidate_pairs\""), "{sql}");
+        assert!(sql.contains("\"__pgt_project_col_0\""), "{sql}");
+        assert!(
+            !sql.contains("SELECT \"source_record_id\" AS \"left_source_record_id\""),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_intermediate_aggregate_uses_unique_internal_group_columns() {
+        let pairs = scan(
+            1,
+            "candidate_pairs",
+            "public",
+            "pairs",
+            &[
+                "left_source_record_id",
+                "right_source_record_id",
+                "left_sort_key",
+                "right_sort_key",
+            ],
+        );
+        let group_by = vec![
+            qcolref("pairs", "left_source_record_id"),
+            qcolref("pairs", "right_source_record_id"),
+            qcolref("pairs", "left_sort_key"),
+            qcolref("pairs", "right_sort_key"),
+        ];
+        let group_output = vec![
+            "source_record_id".to_string(),
+            "source_record_id".to_string(),
+            "source_sort_key".to_string(),
+            "source_sort_key".to_string(),
+        ];
+        let mut ctx = test_ctx();
+
+        let result = build_intermediate_agg_delta(
+            &mut ctx,
+            &pairs,
+            &group_by,
+            &group_output,
+            &[],
+            "candidate_delta",
+        )
+        .expect("duplicate public group names should remain positionally addressable");
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert!(
+            sql.contains(
+                "candidate_delta AS d(\"__pgt_group_0\", \"__pgt_group_1\", \"__pgt_group_2\", \"__pgt_group_3\")"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("d.\"__pgt_group_0\" IS NOT DISTINCT FROM n.\"__pgt_group_0\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("d.\"__pgt_group_0\" AS \"source_record_id\"")
+                && sql.contains("d.\"__pgt_group_1\" AS \"source_record_id\""),
+            "{sql}"
+        );
+        assert!(!sql.contains("d.\"source_record_id\""), "{sql}");
+    }
+
+    #[test]
+    fn test_tracked_aggregate_uses_unique_internal_group_columns() {
+        let left = scan(
+            1,
+            "blocks_left",
+            "public",
+            "l",
+            &["source_record_id", "source_sort_key", "channel_id"],
+        );
+        let right = scan(
+            2,
+            "blocks_right",
+            "public",
+            "r",
+            &["source_record_id", "source_sort_key", "channel_id"],
+        );
+        let grouped = aggregate(
+            vec![
+                qcolref("l", "source_record_id"),
+                qcolref("r", "source_record_id"),
+                qcolref("l", "source_sort_key"),
+                qcolref("r", "source_sort_key"),
+            ],
+            vec![],
+            inner_join(eq_cond("l", "channel_id", "r", "channel_id"), left, right),
+        );
+        let tree = project(
+            vec![
+                colref("source_record_id"),
+                colref("source_record_id"),
+                colref("source_sort_key"),
+                colref("source_sort_key"),
+            ],
+            vec![
+                "left_source_record_id",
+                "right_source_record_id",
+                "left_sort_key",
+                "right_sort_key",
+            ],
+            grouped,
+        );
+        let mut ctx = test_ctx_with_st("public", "pairs");
+        ctx.st_user_columns = Some(vec![
+            "left_source_record_id".to_string(),
+            "right_source_record_id".to_string(),
+            "left_sort_key".to_string(),
+            "right_sort_key".to_string(),
+        ]);
+        ctx.st_has_pgt_count = true;
+
+        let result = ctx
+            .diff_node(&tree)
+            .expect("tracked aggregate keys should remain positionally addressable");
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert!(
+            sql.contains("m.\"__pgt_group_0\" AS \"source_record_id\"")
+                && sql.contains("m.\"__pgt_group_1\" AS \"source_record_id\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("st.\"left_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_0\"")
+                && sql.contains(
+                    "st.\"right_source_record_id\" IS NOT DISTINCT FROM d.\"__pgt_group_1\""
+                ),
+            "{sql}"
+        );
+        assert!(!sql.contains("m.\"source_record_id\""), "{sql}");
     }
 
     #[test]

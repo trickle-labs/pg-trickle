@@ -5,6 +5,130 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identity() {
+    let db = E2eDb::new().await.with_extension().await;
+    let encoder_is_owned_and_parallel_safe: bool = db
+        .query_scalar(
+            "SELECT p.proparallel = 's' AND p.provolatile = 's' AND EXISTS (\
+                 SELECT 1 FROM pg_catalog.pg_depend d \
+                 JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+                 WHERE d.classid = 'pg_catalog.pg_proc'::regclass \
+                   AND d.objid = p.oid AND d.deptype = 'e' \
+                   AND e.extname = 'pg_trickle'\
+             ) FROM pg_catalog.pg_proc p \
+             WHERE p.oid = 'pgtrickle.encode_row_id_v2(text,anyelement)'::regprocedure",
+        )
+        .await;
+    assert!(encoder_is_owned_and_parallel_safe);
+
+    db.execute("CREATE TABLE row_id_admission_source (id int PRIMARY KEY, value text)")
+        .await;
+    db.execute("INSERT INTO row_id_admission_source VALUES (1, 'a')")
+        .await;
+    db.create_st(
+        "row_id_admission",
+        "SELECT id, value, pgtrickle.encode_row_id_v2(\
+             'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
+         FROM row_id_admission_source",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    assert_eq!(db.pgt_status("row_id_admission").await.1, "DIFFERENTIAL");
+
+    for mutation in [
+        "INSERT INTO row_id_admission_source VALUES (2, 'b')",
+        "UPDATE row_id_admission_source SET value = 'updated' WHERE id = 1",
+        "DELETE FROM row_id_admission_source WHERE id = 2",
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("row_id_admission").await;
+        db.assert_st_matches_query(
+            "public.row_id_admission",
+            "SELECT id, value, pgtrickle.encode_row_id_v2(\
+                 'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
+             FROM row_id_admission_source",
+        )
+        .await;
+    }
+    let mut transaction = db.pool.begin().await.expect("begin rollback probe");
+    sqlx::query("INSERT INTO row_id_admission_source VALUES (3, 'rolled back')")
+        .execute(&mut *transaction)
+        .await
+        .expect("insert rollback probe");
+    transaction.rollback().await.expect("rollback probe");
+    db.refresh_st_with_retry("row_id_admission").await;
+    db.assert_st_matches_query(
+        "public.row_id_admission",
+        "SELECT id, value, pgtrickle.encode_row_id_v2(\
+             'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
+         FROM row_id_admission_source",
+    )
+    .await;
+
+    db.execute("CREATE SCHEMA impostor").await;
+    db.execute(
+        "CREATE FUNCTION impostor.encode_row_id_v2(text, anyelement) RETURNS bytea \
+         LANGUAGE sql STABLE PARALLEL SAFE AS 'SELECT decode(md5($1), ''hex'')'",
+    )
+    .await;
+    let impostor = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+                 'row_id_impostor', \
+                 $$SELECT id, impostor.encode_row_id_v2('x', ROW(id)) \
+                   FROM row_id_admission_source$$, \
+                 '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        impostor.is_err(),
+        "same-named stable function must be rejected"
+    );
+
+    db.execute("CREATE TABLE unsupported_identity_source (id int PRIMARY KEY, tags int[])")
+        .await;
+    db.execute("INSERT INTO unsupported_identity_source VALUES (1, ARRAY[1, 2])")
+        .await;
+    let unsupported_type = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+                 'unsupported_identity', \
+                 $$SELECT pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW(tags)) \
+                   FROM unsupported_identity_source$$, \
+                 '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        unsupported_type.is_err(),
+        "unsupported identity type must fail during registration"
+    );
+
+    db.execute(
+        "CREATE COLLATION row_id_nondeterministic (\
+             provider = icu, locale = 'und', deterministic = false); \
+         CREATE TABLE nondeterministic_identity_source (\
+             id int PRIMARY KEY, value text COLLATE row_id_nondeterministic)",
+    )
+    .await;
+    db.execute("INSERT INTO nondeterministic_identity_source VALUES (1, 'a')")
+        .await;
+    let nondeterministic_collation = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+                 'nondeterministic_identity', \
+                 $$SELECT pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW(value)) \
+                   FROM nondeterministic_identity_source$$, \
+                 '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        nondeterministic_collation.is_err(),
+        "non-deterministic identity collation must fail during registration"
+    );
+}
+
+#[tokio::test]
 async fn test_row_id_v2_sql_entry_points_are_exact_and_bounded() {
     let db = E2eDb::new().await.with_extension().await;
 
@@ -18,6 +142,19 @@ async fn test_row_id_v2_sql_entry_points_are_exact_and_bounded() {
         identity,
         vec![
             0x02, 0x01, 0, 0, 0, 2, 0x03, 0x01, 0x80, 0, 0, 1, 0x09, 0x01, b'a', 0, 0, 0xff,
+        ]
+    );
+
+    let mdm_identity: Vec<u8> = db
+        .query_scalar(
+            "SELECT pgtrickle.encode_row_id_v2(\
+             'MDM_SOURCE_KEY_V1', ROW(1::int4))",
+        )
+        .await;
+    assert_eq!(
+        mdm_identity,
+        vec![
+            0x02, 0x08, 0x00, 0x00, 0x00, 0x01, 0x03, 0x01, 0x80, 0x00, 0x00, 0x01, 0xff,
         ]
     );
 
@@ -61,6 +198,40 @@ async fn test_row_id_v2_sql_entry_points_are_exact_and_bounded() {
         rejected.is_err(),
         "unsupported array identity must be rejected"
     );
+}
+
+#[tokio::test]
+async fn test_computed_mdm_source_key_keeps_project_rows_distinct() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE computed_key_identity (entity_id uuid PRIMARY KEY); \
+         INSERT INTO computed_key_identity VALUES \
+             ('10000000-0000-0000-0000-000000000001'); \
+         CREATE TABLE computed_key_source ( \
+             id integer PRIMARY KEY, name text NOT NULL, deleted boolean NOT NULL); \
+         INSERT INTO computed_key_source VALUES \
+             (1, 'Alice', false), (2, 'Bob', false)",
+    )
+    .await;
+    let defining_query = "SELECT 'crm'::text AS source_name, \
+                pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW( \
+                    (SELECT entity_id FROM computed_key_identity), id)) AS source_record_key, \
+                name \
+           FROM computed_key_source \
+          WHERE deleted IS NOT TRUE";
+    db.create_st("computed_key_stream", defining_query, "1m", "DIFFERENTIAL")
+        .await;
+
+    for mutation in [
+        "INSERT INTO computed_key_source VALUES (3, 'Carol', false)",
+        "UPDATE computed_key_source SET name = 'Alice Updated' WHERE id = 1",
+        "DELETE FROM computed_key_source WHERE id = 2",
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("computed_key_stream").await;
+        db.assert_st_matches_query("public.computed_key_stream", defining_query)
+            .await;
+    }
 }
 
 #[tokio::test]

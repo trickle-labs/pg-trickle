@@ -102,6 +102,13 @@ upgrade does not reject an existing configuration entry. Use
 `full_policy => 'ERROR'` when a coordinator must fail instead of allowing a
 whole-query FULL fallback.
 
+`pg_trickle.enable_output_delta_qualification` enables the constrained Delta
+V1.1 recovery qualification API. The default is `off`. This `postmaster`
+setting requires a restart and exists only for downstream conformance tests.
+Keep it disabled in production. When enabled, only a superuser can call
+`pgtrickle.qualify_output_delta_recovery()`, and the function accepts four
+fixed scenarios. It does not accept SQL, relation names, or catalog values.
+
 ---
 
 ## Table of Contents

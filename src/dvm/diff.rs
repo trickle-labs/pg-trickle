@@ -93,6 +93,7 @@ pub struct CacheContext {
     scan_pushed_predicate: Option<Expr>,
     st_bypass_tables: HashMap<i64, String>,
     scan_delta_ctes: HashMap<String, String>,
+    scan_delta_ctes_by_oid: HashMap<u32, String>,
     snapshot_cte_cache: HashMap<String, (String, String)>,
     snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
     fallback_leaf_oids: HashSet<u32>,
@@ -623,6 +624,7 @@ impl DiffContext {
                 scan_pushed_predicate: None,
                 st_bypass_tables: HashMap::new(),
                 scan_delta_ctes: HashMap::new(),
+                scan_delta_ctes_by_oid: HashMap::new(),
                 snapshot_cte_cache: HashMap::new(),
                 snapshot_fingerprint_cache: HashMap::new(),
                 fallback_leaf_oids: HashSet::new(),
@@ -749,6 +751,10 @@ impl DiffContext {
         self.cache.st_bypass_tables = tables;
     }
 
+    pub(crate) fn st_bypass_tables(&self) -> &HashMap<i64, String> {
+        &self.cache.st_bypass_tables
+    }
+
     pub(crate) fn scan_delta_ctes(&self) -> &HashMap<String, String> {
         &self.cache.scan_delta_ctes
     }
@@ -757,8 +763,27 @@ impl DiffContext {
         &mut self.cache.scan_delta_ctes
     }
 
+    pub(crate) fn set_scan_delta_cte_for_source(&mut self, source_oid: u32, cte: String) {
+        self.cache.scan_delta_ctes_by_oid.insert(source_oid, cte);
+    }
+
+    pub(crate) fn scan_delta_cte_for_source(
+        &self,
+        source_oid: u32,
+        alias: &str,
+    ) -> Option<&String> {
+        self.cache
+            .scan_delta_ctes
+            .get(alias)
+            .or_else(|| self.cache.scan_delta_ctes_by_oid.get(&source_oid))
+    }
+
     pub(crate) fn fallback_leaf_oids(&self) -> &HashSet<u32> {
         &self.cache.fallback_leaf_oids
+    }
+
+    pub(crate) fn is_top_level_diff_node(&self) -> bool {
+        self.optimization.diff_depth <= 1
     }
 
     pub(crate) fn set_fallback_leaf_oids(&mut self, oids: HashSet<u32>) {

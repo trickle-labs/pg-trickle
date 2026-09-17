@@ -148,19 +148,28 @@ pub fn integration_capabilities() -> TableIterator<
                 "unavailable_reason": null,
                 "refresh_api": "refresh_graph_strict",
                 "max_graph_members": 1024,
-                "source_boundary": "local_trigger_or_wal"
+                "source_boundary": "local_trigger_or_wal",
+                "differential_features": [
+                    "stable_row_identity_encoder_v2",
+                    "custom_table_srf_out_columns",
+                    "lateral_immutable_composite_function"
+                ]
             })),
         ),
         (
             super::DELTA_V1_CAPABILITY.to_string(),
             1,
-            0,
+            super::DELTA_V1_MINOR,
             true,
             JsonB(serde_json::json!({
                 "status": "stable",
                 "enabled": true,
                 "phase": "v0.104_conformance",
                 "graph_dependency": "external_graph_refresh",
+                "consumer_recovery_version": 1,
+                "public_resnapshot_request": true,
+                "public_consumer_validation": true,
+                "qualification_api": "qualify_output_delta_recovery",
                 "typed_delta_encoding_version": 1
             })),
         ),
@@ -441,6 +450,22 @@ fn build_stream_contract(meta: &StreamTableMeta) -> Result<BuiltContract, PgTric
         .into_iter()
         .map(CanonicalValue::Text)
         .collect();
+    let row_identity_source_types = sources
+        .iter()
+        .map(|source| {
+            serde_json::json!({
+                "source_relid": source["source_relid"],
+                "columns": source["column_snapshot"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let row_identity = serde_json::json!({
+        "version": meta.row_identity_version,
+        "input_type_metadata": {
+            "output": output,
+            "sources": row_identity_source_types
+        }
+    });
     let fields = vec![
         CanonicalField::new(1, CanonicalValue::Text(relation_label(&info))),
         CanonicalField::new(2, CanonicalValue::U64(info.oid.to_u32() as u64)),
@@ -514,6 +539,7 @@ fn build_stream_contract(meta: &StreamTableMeta) -> Result<BuiltContract, PgTric
         "refresh_mode": meta.refresh_mode.as_str(),
         "orchestration_mode": meta.orchestration_mode,
         "row_identity_version": meta.row_identity_version,
+        "row_identity": row_identity,
         "row_probe_version": meta.row_probe_version,
         "planner_format_version": crate::dvm::planner::FORMAT_VERSION,
         "rewrite_contract_version": REWRITE_CONTRACT_VERSION,
@@ -1049,6 +1075,16 @@ pub fn refresh_graph_strict(
                 }),
             );
         }
+        let change_schema = crate::config::pg_trickle_change_buffer_schema();
+        let upstream_ids = members
+            .iter()
+            .flat_map(|meta| StDependency::get_for_st(meta.pgt_id).unwrap_or_default())
+            .filter(|dependency| dependency.source_type == "STREAM_TABLE")
+            .filter_map(|dependency| StreamTableMeta::pgt_id_for_relid(dependency.source_relid))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        crate::refresh::cleanup_st_change_buffers_by_frontier(&change_schema, &upstream_ids);
         Ok(TableIterator::once((
             CONTRACT_VERSION,
             graph_refresh_id,
@@ -1086,7 +1122,7 @@ mod tests {
     fn test_integration_capabilities_reports_independent_capabilities() {
         assert_ne!("external_graph_refresh", "output_delta_consumer");
         assert_eq!(CONTRACT_VERSION, 1);
-        assert_eq!(super::GRAPH_V1_MINOR, 1);
+        assert_eq!(super::GRAPH_V1_MINOR, 2);
     }
 
     #[test]

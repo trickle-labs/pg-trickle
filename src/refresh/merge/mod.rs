@@ -1053,7 +1053,14 @@ pub fn execute_differential_refresh_with_tuning(
         .filter(|dep| dep.source_type == "STREAM_TABLE")
         .filter_map(|dep| crate::catalog::StreamTableMeta::pgt_id_for_relid(dep.source_relid))
         .collect();
-    cleanup_st_change_buffers_by_frontier(&change_schema, &st_source_pgt_ids);
+    // Graph V1 members publish at one shared bound.  A downstream member may
+    // still carry a frontier from the previous pass while an upstream member
+    // has just published this pass's delta; cleaning here can therefore erase
+    // that delta before the downstream scan consumes it.  Graph orchestration
+    // performs one cleanup after every member has run.
+    if crate::refresh::current_graph_refresh_id().is_none() {
+        cleanup_st_change_buffers_by_frontier(&change_schema, &st_source_pgt_ids);
+    }
 
     // C-4: Compact change buffers that exceed the configured threshold.
     // This reduces delta scan overhead by eliminating net-zero changes
@@ -1222,6 +1229,35 @@ pub fn execute_differential_refresh_with_tuning(
     };
 
     if !any_changes && !any_st_changes {
+        if crate::refresh::current_graph_refresh_id().is_some()
+            && st.st_partition_key.is_none()
+            && !dvm::query_has_recursive_cte(&effective_defining_query).unwrap_or(false)
+        {
+            let quoted_table = format!(
+                "\"{}\".\"{}\"",
+                schema.replace('"', "\"\""),
+                name.replace('"', "\"\""),
+            );
+            super::phd1::prepare_cross_cycle_phantom_table(st, &effective_defining_query)?;
+            let reconciled = with_stream_owner(st, || {
+                super::phd1::cleanup_cross_cycle_phantoms(
+                    st.pgt_id,
+                    &quoted_table,
+                    &effective_defining_query,
+                    10_000,
+                )
+            })?;
+            crate::refresh::drop_owner_temp_table(st, &format!("__pgt_recon_{}", st.pgt_id));
+            if reconciled > 0 {
+                pgrx::debug1!(
+                    "[pg_trickle] graph no-data reconciliation for {}.{}: {} rows",
+                    schema,
+                    name,
+                    reconciled,
+                );
+                return Ok((0, reconciled));
+            }
+        }
         return Ok((0, 0));
     }
 
@@ -1866,6 +1902,11 @@ pub fn execute_differential_refresh_with_tuning(
     let has_recursive_cte = with_stream_owner(st, || {
         dvm::query_has_recursive_cte(&effective_defining_query)
     })?;
+    // Graph members execute sequentially in one transaction.  A downstream
+    // member's LATERAL aggregate rescan must be compiled against the
+    // upstream staged D/I rows, so graph-specific SQL must not come from or
+    // enter the ordinary cross-refresh template cache.
+    let graph_same_pass = crate::refresh::current_safe_bound().is_some();
     // Non-recursive CTEs (WITH … AS (…)) are fully supported by the DVM
     // engine: parse_defining_query_full() builds CteScan nodes and the
     // diff engine processes them via diff_cte_scan().  There is no need for
@@ -1874,7 +1915,7 @@ pub fn execute_differential_refresh_with_tuning(
     // generate their delta SQL on every refresh instead of caching a
     // template with LSN placeholders).
 
-    let cached = if has_recursive_cte || incremental_window_state.is_some() {
+    let cached = if has_recursive_cte || incremental_window_state.is_some() || graph_same_pass {
         None
     } else {
         MERGE_TEMPLATE_CACHE
@@ -1976,7 +2017,7 @@ pub fn execute_differential_refresh_with_tuning(
                     name,
                 )
             })?
-        } else if has_recursive_cte {
+        } else if has_recursive_cte || graph_same_pass {
             with_stream_owner(st, || {
                 dvm::generate_delta_query_staged(
                     st.pgt_id,
@@ -2036,11 +2077,12 @@ pub fn execute_differential_refresh_with_tuning(
 
         // Build the MERGE template using the raw delta SQL template
         // (with __PGS_PREV_LSN_* / __PGS_NEW_LSN_* placeholder tokens).
-        let delta_sql_template = if has_recursive_cte || incremental_window_state.is_some() {
-            delta_sql.clone()
-        } else {
-            dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_sql.clone())
-        };
+        let delta_sql_template =
+            if has_recursive_cte || incremental_window_state.is_some() || graph_same_pass {
+                delta_sql.clone()
+            } else {
+                dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_sql.clone())
+            };
 
         // Build template USING clause — skip deduplication when deduplicated (G-M1)
         // EC-06a: For keyless sources, weight-aggregate to cancel within-delta
@@ -2098,7 +2140,7 @@ pub fn execute_differential_refresh_with_tuning(
             };
 
         // Store templates in the cache for subsequent refreshes.
-        if !has_recursive_cte && incremental_window_state.is_none() {
+        if !has_recursive_cte && incremental_window_state.is_none() && !graph_same_pass {
             // P-8: Resize LRU cache if needed, then put() (automatically evicts LRU at capacity).
             maybe_evict_lru_cache_entry();
             MERGE_TEMPLATE_CACHE.with(|cache| {
@@ -3289,14 +3331,14 @@ pub fn execute_differential_refresh_with_tuning(
                 if cols.is_empty() {
                     Vec::new()
                 } else if let Err(e) = Spi::run(&snapshot_sql) {
-                    pgrx::warning!(
-                        "[pg_trickle] ST-ST-10: pre-snapshot failed for {}.{}: {} — \
-                     falling back to delta-based capture",
-                        schema,
-                        name,
-                        e,
-                    );
-                    Vec::new()
+                    return Err(PgTrickleError::RefreshFinalizationFailed {
+                        pgt_id: st.pgt_id,
+                        stage: "downstream pre-snapshot".to_string(),
+                        reason: format!(
+                            "cannot capture an exact downstream delta for {}.{}: {e}",
+                            schema, name
+                        ),
+                    });
                 } else {
                     cols
                 }
@@ -3388,53 +3430,18 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     // Private CDC finalization resumes only after owner SQL has completed.
-    if let Some(diff_capture_cols) = downstream_capture {
-        let capture_result = if diff_capture_cols.is_empty() {
-            capture_delta_to_st_buffer(st, &get_st_user_columns(st))
-        } else {
-            capture_incremental_diff_to_st_buffer(st, &diff_capture_cols)
-        };
-        if let Err(e) = capture_result {
-            pgrx::warning!(
-                "[pg_trickle] ST-ST: downstream delta capture failed for {}.{}: {} — \
-                 marking downstream stream tables for reinitialization",
-                schema,
-                name,
-                e,
-            );
-            if let Ok(downstream_ids) =
-                crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-            {
-                for downstream_id in downstream_ids {
-                    StreamTableMeta::mark_for_reinitialize(downstream_id)?;
-                }
-            }
-        }
-    }
-
-    // EC-01 / v0.38.0: non-deduplicated join deltas can leave stale row_ids
-    // from earlier refresh cycles that are not present in the current delta.
-    // After every such differential apply, reconcile the stream table against
-    // the full-query row_id set. Only for join-bearing queries where cross-cycle
-    // phantom rows can materialize from partial delta application.
+    // EC-01: differential deltas can leave stale or missing rows when a
+    // predicate or join partner changes outside the emitted row set. Reconcile
+    // every non-recursive, non-partitioned stream against its full result so
+    // downstream capture publishes only the committed post-refresh state.
     //
-    // EC-01b: use the parsed OpTree for join detection instead of keyword
-    // matching so comma-joins (`FROM a, b`) and joins inside subqueries are
-    // also covered. Falls back to `true` (run cleanup, fail-safe) if the
-    // query cannot be parsed.
-    let query_has_join =
-        with_stream_owner(st, || dvm::query_has_join(&effective_defining_query)).unwrap_or(true);
     // Skip full-query reconciliation for recursive CTEs — it bypasses the
     // ivm_recursive_max_depth guard and would insert suppressed rows.
     let query_has_recursive_cte = with_stream_owner(st, || {
         dvm::query_has_recursive_cte(&effective_defining_query)
     })
     .unwrap_or(false);
-    let phantom_cleanup_count = if query_has_join
-        && !query_has_recursive_cte
-        && !resolved.is_deduplicated
-        && st.st_partition_key.is_none()
-    {
+    let phantom_cleanup_count = if !query_has_recursive_cte && st.st_partition_key.is_none() {
         let quoted_table = format!(
             "\"{}\".\"{}\"",
             schema.replace('"', "\"\""),
@@ -3455,18 +3462,31 @@ pub fn execute_differential_refresh_with_tuning(
         0
     };
 
-    if phantom_cleanup_count > 0
-        && has_downstream_st_consumers(st.pgt_id)
-        && let Ok(downstream_ids) =
-            crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
-    {
-        for ds_id in &downstream_ids {
-            if let Err(e) = StreamTableMeta::mark_for_reinitialize(*ds_id) {
-                pgrx::warning!(
-                    "[pg_trickle] EC01-2: failed to mark downstream ST {} for reinit after phantom cleanup: {}",
-                    ds_id,
-                    e,
-                );
+    // Capture only after cross-cycle phantom reconciliation.  Join deltas may
+    // transiently materialize duplicate rows during explicit DML; recording
+    // that transient state would publish rows that are immediately removed by
+    // the reconciliation pass.  The post-cleanup snapshot is the committed
+    // stream-table state downstream consumers must observe.
+    if let Some(diff_capture_cols) = downstream_capture {
+        let capture_result = if diff_capture_cols.is_empty() {
+            capture_delta_to_st_buffer(st, &get_st_user_columns(st))
+        } else {
+            capture_incremental_diff_to_st_buffer(st, &diff_capture_cols)
+        };
+        if let Err(e) = capture_result {
+            pgrx::warning!(
+                "[pg_trickle] ST-ST: downstream delta capture failed for {}.{}: {} — \
+                 marking downstream stream tables for reinitialization",
+                schema,
+                name,
+                e,
+            );
+            if let Ok(downstream_ids) =
+                crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+            {
+                for downstream_id in downstream_ids {
+                    StreamTableMeta::mark_for_reinitialize(downstream_id)?;
+                }
             }
         }
     }

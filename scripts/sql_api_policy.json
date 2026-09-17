@@ -1262,6 +1262,27 @@
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
     },
+    "pgtrickle.request_output_delta_resnapshot(uuid)": {
+      "schema": "pgtrickle",
+      "name": "request_output_delta_resnapshot",
+      "identity_arguments": "uuid",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.validate_output_delta_consumer(uuid)": {
+      "schema": "pgtrickle",
+      "name": "validate_output_delta_consumer",
+      "identity_arguments": "uuid",
+      "class": "owner_lifecycle",
+      "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.qualify_output_delta_recovery(uuid, text)": {
+      "schema": "pgtrickle",
+      "name": "qualify_output_delta_recovery",
+      "identity_arguments": "uuid, text",
+      "class": "admin_global",
+      "execution_policy": "capability_specific"
+    },
     "pgtrickle.output_delta_consumer_status()": {
       "schema": "pgtrickle",
       "name": "output_delta_consumer_status",
