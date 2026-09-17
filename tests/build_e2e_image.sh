@@ -67,13 +67,26 @@ echo "  Dockerfile:   ${SCRIPT_DIR}/Dockerfile.e2e"
 echo "  Builder image: ${BUILDER_IMAGE}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-docker build \
-    --platform "${DOCKER_PLATFORM}" \
-    -t "${IMAGE_NAME}:${IMAGE_TAG}" \
-    -f "${SCRIPT_DIR}/Dockerfile.e2e" \
-    --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
-    ${EXTRA_ARGS} \
-    "${PROJECT_ROOT}"
+if [[ -n "${BUILDX_CACHE_SCOPE:-}" ]]; then
+    docker buildx build \
+        --platform "${DOCKER_PLATFORM}" \
+        --load \
+        --cache-from "type=gha,scope=${BUILDX_CACHE_SCOPE}" \
+        --cache-to "type=gha,scope=${BUILDX_CACHE_SCOPE},mode=max,ignore-error=true" \
+        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+        -f "${SCRIPT_DIR}/Dockerfile.e2e" \
+        --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
+        ${EXTRA_ARGS} \
+        "${PROJECT_ROOT}"
+else
+    docker build \
+        --platform "${DOCKER_PLATFORM}" \
+        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+        -f "${SCRIPT_DIR}/Dockerfile.e2e" \
+        --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
+        ${EXTRA_ARGS} \
+        "${PROJECT_ROOT}"
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
