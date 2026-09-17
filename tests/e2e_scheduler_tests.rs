@@ -144,6 +144,89 @@ async fn test_scheduler_fanout_deduplicates_buffer_scan() {
     );
 }
 
+#[tokio::test]
+async fn test_scheduler_records_and_cleans_up_effective_full_fallback() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.refresh_strategy", "full", "full")
+        .await;
+
+    db.execute("CREATE TABLE effective_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO effective_src VALUES (1, 'initial')")
+        .await;
+    db.create_st(
+        "effective_st",
+        "SELECT id, val FROM effective_src",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let source_oid = i64::from(db.table_oid("effective_src").await);
+    let buffer = db.change_buffer_table(source_oid).await;
+    db.execute("INSERT INTO effective_src VALUES (2, 'fallback')")
+        .await;
+    let pending_changes = format!("SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D')");
+    assert!(
+        db.query_scalar::<i64>(&pending_changes).await > 0,
+        "CDC buffer should contain the insert"
+    );
+
+    let completed = db
+        .wait_for_condition(
+            "scheduler effective FULL fallback",
+            "SELECT EXISTS(SELECT 1
+               FROM pgtrickle.pgt_refresh_history h
+               JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+              WHERE st.pgt_name = 'effective_st'
+                AND h.status = 'COMPLETED'
+                AND h.refresh_reason = 'CONFIGURED_FULL')",
+            Duration::from_secs(60),
+            Duration::from_millis(300),
+        )
+        .await;
+    assert!(
+        completed,
+        "scheduler should complete the configured FULL fallback"
+    );
+
+    let (action, strategy, was_fallback): (String, String, bool) = sqlx::query_as(
+        "SELECT h.action, h.merge_strategy_used, h.was_full_fallback
+           FROM pgtrickle.pgt_refresh_history h
+           JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+          WHERE st.pgt_name = 'effective_st'
+            AND h.refresh_reason = 'CONFIGURED_FULL'
+          ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read scheduler fallback history");
+    assert_eq!(action, "FULL");
+    assert_eq!(strategy, "FULL");
+    assert!(was_fallback);
+
+    assert_eq!(
+        db.query_scalar::<i64>(&pending_changes).await,
+        0,
+        "effective FULL finalization should remove consumed CDC rows"
+    );
+    let (full_count, diff_count): (i64, i64) = sqlx::query_as(
+        "SELECT total_full_refreshes, total_diff_refreshes
+           FROM pgtrickle.pgt_refresh_summary
+          WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                           WHERE pgt_name = 'effective_st')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read refresh summary");
+    assert!(full_count >= 1);
+    assert_eq!(diff_count, 0);
+
+    db.alter_system_reset_and_wait("pg_trickle.refresh_strategy", "auto")
+        .await;
+}
+
 /// API-1/2: `pause_scheduler` stops the scheduler from dispatching a node;
 /// `resume_scheduler` re-enables it.
 #[tokio::test]

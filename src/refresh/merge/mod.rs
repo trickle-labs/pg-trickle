@@ -303,9 +303,8 @@ pub(crate) fn execute_full_refresh_target(
 
 /// Post-full-refresh cleanup helper (G3 + G4).
 ///
-/// Intended to be called immediately after any FULL or REINITIALIZE refresh
-/// completes successfully, from both the scheduled refresh path and from the
-/// adaptive fallback path inside `execute_differential_refresh`.
+/// Called by the common refresh finalizer after any effective FULL or
+/// REINITIALIZE refresh completes successfully.
 ///
 /// 1. **G4 — Change buffer flush**: Deletes stale change buffer rows up to the
 ///    minimum stored frontier across all stream tables sharing each source.
@@ -721,6 +720,7 @@ pub fn execute_differential_refresh_with_tuning(
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
     crate::refresh::clear_last_cost_evidence();
+    set_effective_mode("DIFFERENTIAL");
     validate_differential_refresh_inputs(st, prev_frontier)?;
 
     // Persist upgraded strategy metadata. Production v0.89 plans retain
@@ -1492,11 +1492,7 @@ pub fn execute_differential_refresh_with_tuning(
                 "A source TRUNCATE cannot be represented as a differential delta.",
             ),
         )?;
-        let truncate_full_result = execute_full_refresh(st);
-        if truncate_full_result.is_ok() {
-            post_full_refresh_cleanup(st);
-        }
-        return truncate_full_result;
+        return execute_full_refresh(st);
     }
 
     // ── P2: Capped-count threshold check (only when changes exist) ───────
@@ -1711,11 +1707,6 @@ pub fn execute_differential_refresh_with_tuning(
         ) {
             pgrx::debug1!("[pg_trickle] Failed to update last_full_ms: {}", e);
         }
-        // G4: Flush stale change buffer rows to prevent the next differential
-        // tick from re-examining rows already materialized by this FULL refresh.
-        if result.is_ok() {
-            post_full_refresh_cleanup(st);
-        }
         return result;
     }
 
@@ -1785,9 +1776,6 @@ pub fn execute_differential_refresh_with_tuning(
                 Some(full_ms),
             ) {
                 pgrx::debug1!("[pg_trickle] Failed to update last_full_ms: {}", e);
-            }
-            if result.is_ok() {
-                post_full_refresh_cleanup(st);
             }
             return result;
         }

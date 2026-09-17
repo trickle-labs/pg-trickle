@@ -137,35 +137,44 @@ fn test_refresh_action_variants_exist() {
 }
 
 #[test]
-fn test_history_action_records_differential_full_fallback() {
+fn test_effective_action_records_differential_full_fallback() {
     assert_eq!(
-        history_action_for_completion(
-            RefreshAction::Differential,
-            RefreshAction::Differential,
-            "FULL",
-        ),
+        effective_action_for_mode(RefreshAction::Differential, "FULL"),
         RefreshAction::Full,
     );
+    assert!(is_full_fallback(
+        RefreshAction::Differential,
+        RefreshAction::Full,
+    ));
 }
 
 #[test]
-fn test_history_action_preserves_reinitialize() {
+fn test_effective_action_preserves_reinitialize() {
     assert_eq!(
-        history_action_for_completion(RefreshAction::Reinitialize, RefreshAction::Full, "FULL",),
+        effective_action_for_mode(RefreshAction::Reinitialize, "FULL"),
         RefreshAction::Reinitialize,
     );
+    assert!(!is_full_fallback(
+        RefreshAction::Reinitialize,
+        RefreshAction::Reinitialize,
+    ));
 }
 
 #[test]
-fn test_history_action_records_no_data() {
+fn test_effective_action_records_no_data() {
     assert_eq!(
-        history_action_for_completion(
-            RefreshAction::Differential,
-            RefreshAction::Differential,
-            "NO_DATA",
-        ),
+        effective_action_for_mode(RefreshAction::Differential, "NO_DATA"),
         RefreshAction::NoData,
     );
+}
+
+#[test]
+fn test_effective_action_keeps_special_differential_modes() {
+    for mode in ["DIFFERENTIAL", "APPEND_ONLY", "TOP_K", ""] {
+        let effective = effective_action_for_mode(RefreshAction::Differential, mode);
+        assert_eq!(effective, RefreshAction::Differential);
+        assert!(!is_full_fallback(RefreshAction::Differential, effective));
+    }
 }
 
 #[test]
@@ -180,6 +189,23 @@ fn test_effective_mode_is_consumed_once() {
     set_effective_mode("FULL");
     assert_eq!(take_effective_mode(), "FULL");
     assert_eq!(take_effective_mode(), "");
+}
+
+#[test]
+fn test_reset_execution_state_discards_failed_refresh_output() {
+    set_effective_mode("FULL");
+    set_merge_strategy("merge");
+    set_last_cost_evidence("stale".to_string());
+    set_last_rows_updated(7);
+    set_last_temp_blks_written(11);
+
+    reset_execution_state();
+
+    assert_eq!(take_effective_mode(), "");
+    assert_eq!(take_merge_strategy(), "");
+    assert_eq!(take_last_cost_evidence(), None);
+    assert_eq!(take_last_rows_updated(), 0);
+    assert_eq!(take_last_temp_blks_written(), -1);
 }
 
 #[test]

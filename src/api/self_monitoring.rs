@@ -27,12 +27,20 @@ SELECT
     st.pgt_schema,
     st.pgt_name,
     count(*)                                                     AS total_refreshes,
-    count(*) FILTER (WHERE h.action = 'DIFFERENTIAL')            AS diff_count,
-    count(*) FILTER (WHERE h.action = 'FULL')                    AS full_count,
+    count(*) FILTER (WHERE h.action = 'DIFFERENTIAL'
+                       AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                       AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                       AND NOT h.was_full_fallback)               AS diff_count,
+    count(*) FILTER (WHERE h.action IN ('FULL', 'REINITIALIZE')
+                       OR h.merge_strategy_used = 'FULL')         AS full_count,
     avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)
-        FILTER (WHERE h.action = 'DIFFERENTIAL')                 AS avg_diff_ms,
+        FILTER (WHERE h.action = 'DIFFERENTIAL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                  AND NOT h.was_full_fallback)                   AS avg_diff_ms,
     avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)
-        FILTER (WHERE h.action = 'FULL')                         AS avg_full_ms,
+        FILTER (WHERE h.action IN ('FULL', 'REINITIALIZE')
+                  OR h.merge_strategy_used = 'FULL')             AS avg_full_ms,
     avg(h.delta_row_count::float
         / NULLIF(h.rows_inserted + h.rows_deleted, 0))          AS avg_change_ratio,
     max(h.start_time)                                            AS last_refresh_at
@@ -53,7 +61,10 @@ SELECT
                   SELECT max(h2.start_time) FROM pgtrickle.pgt_refresh_history h2
                   WHERE h2.pgt_id = h.pgt_id AND h2.status = 'COMPLETED'))
               > 3.0 * NULLIF(avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)
-              FILTER (WHERE h.action = 'DIFFERENTIAL'), 0)
+              FILTER (WHERE h.action = 'DIFFERENTIAL'
+                        AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                        AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                        AND NOT h.was_full_fallback), 0)
          THEN 'DURATION_SPIKE'
     END AS duration_anomaly,
     max(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)
@@ -62,11 +73,19 @@ SELECT
             WHERE h2.pgt_id = h.pgt_id AND h2.status = 'COMPLETED'))
         AS last_duration_ms,
     avg(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)
-        FILTER (WHERE h.action = 'DIFFERENTIAL')                 AS baseline_diff_ms,
+        FILTER (WHERE h.action = 'DIFFERENTIAL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                  AND NOT h.was_full_fallback)                   AS baseline_diff_ms,
     count(*) FILTER (WHERE h.status = 'FAILED')                  AS recent_failures,
-    count(DISTINCT h.action) FILTER (
-        WHERE h.action IN ('FULL', 'DIFFERENTIAL')
-    ) AS distinct_modes_recent,
+    count(DISTINCT CASE
+        WHEN h.action IN ('FULL', 'REINITIALIZE') OR h.merge_strategy_used = 'FULL'
+            THEN 'FULL'
+        WHEN h.action = 'DIFFERENTIAL'
+         AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+         AND NOT h.was_full_fallback
+            THEN 'DIFFERENTIAL'
+    END) AS distinct_modes_recent,
     st.auto_threshold,
     st.effective_refresh_mode
 FROM pgtrickle.pgt_refresh_history h

@@ -201,6 +201,7 @@ pub(crate) fn query_refresh_history_stats(pgt_id: i64) -> Option<RefreshHistoryS
                  WHERE pgt_id = {pgt_id} \
                    AND action = 'DIFFERENTIAL' \
                    AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
                    AND NOT was_full_fallback \
                    AND status = 'COMPLETED' \
                    AND delta_row_count > 0 \
@@ -289,6 +290,7 @@ pub(crate) fn estimate_cost_based_threshold(
                  WHERE pgt_id = {pgt_id} \
                    AND action = 'DIFFERENTIAL' \
                    AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
                    AND NOT was_full_fallback \
                    AND status = 'COMPLETED' \
                    AND delta_row_count > 0 \
@@ -455,6 +457,7 @@ pub(crate) fn batch_update_cost_model_summary() {
                   AND h.start_time >= s.stats_reset_at
                   AND h.action = 'DIFFERENTIAL'
                   AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
                   AND NOT h.was_full_fallback
                   AND h.delta_row_count > 0
                 ORDER BY h.refresh_id DESC
@@ -601,9 +604,9 @@ mod tests {
              VALUES
                ($1, now(), now() - interval '20 minutes',
                  now() - interval '20 minutes' + interval '500 milliseconds',
-                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'FULL', true),
+                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'FULL', false),
                 ($1, now(), now() - interval '1 minute', now(),
-                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'TOP_K', true),
+                 'DIFFERENTIAL', 'COMPLETED', 1, 1, 'TOP_K', false),
                 ($1, now(), now() - interval '1 minute', now(),
                  'FULL', 'COMPLETED', 0, 1, 'FULL', false)",
         ] {

@@ -2506,17 +2506,31 @@ impl RefreshRecord {
         let mode_costs = Spi::connect(|client| {
             let rows = client
                 .select(
-                    "SELECT h.action::text, count(*)::bigint,
+                    "SELECT h.effective_action, count(*)::bigint,
                             min(h.duration_ms),
                             percentile_cont(0.50) WITHIN GROUP (ORDER BY h.duration_ms),
                             percentile_cont(0.95) WITHIN GROUP (ORDER BY h.duration_ms)
-                       FROM pgtrickle.pgt_refresh_history h
-                      WHERE h.pgt_id = $1
-                        AND h.status = 'COMPLETED'
-                        AND h.action IN ('FULL', 'DIFFERENTIAL')
-                        AND h.plan_identity = $2
-                        AND h.duration_ms IS NOT NULL
-                      GROUP BY h.action",
+                       FROM (
+                         SELECT CASE
+                                  WHEN action IN ('FULL', 'REINITIALIZE')
+                                    OR merge_strategy_used = 'FULL' THEN 'FULL'
+                                  ELSE 'DIFFERENTIAL'
+                                END AS effective_action,
+                                duration_ms
+                           FROM pgtrickle.pgt_refresh_history
+                          WHERE pgt_id = $1
+                            AND status = 'COMPLETED'
+                            AND plan_identity = $2
+                            AND duration_ms IS NOT NULL
+                            AND (
+                              action IN ('FULL', 'REINITIALIZE')
+                              OR merge_strategy_used = 'FULL'
+                              OR (action = 'DIFFERENTIAL'
+                                  AND merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                                  AND NOT was_full_fallback)
+                            )
+                       ) h
+                      GROUP BY h.effective_action",
                     None,
                     &[pgt_id.into(), plan_identity.into()],
                 )
@@ -2872,12 +2886,26 @@ impl RefreshRecord {
                          (EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
                      ELSE 0
                  END,
-                 CASE WHEN h.status = 'COMPLETED' AND h.action IN ('FULL', 'REINITIALIZE') THEN 1 ELSE 0 END,
-                 CASE WHEN h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' THEN 1 ELSE 0 END,
+                 CASE WHEN h.status = 'COMPLETED'
+                            AND (h.action IN ('FULL', 'REINITIALIZE')
+                                 OR h.merge_strategy_used = 'FULL')
+                      THEN 1 ELSE 0 END,
+                 CASE WHEN h.status = 'COMPLETED'
+                            AND h.action = 'DIFFERENTIAL'
+                            AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                            AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+                            AND NOT h.was_full_fallback
+                      THEN 1 ELSE 0 END,
                  CASE WHEN h.status = 'COMPLETED' THEN COALESCE(h.delta_row_count, 0) ELSE 0 END,
-                 CASE WHEN h.action IN ('FULL', 'REINITIALIZE') THEN h.refresh_reason END,
-                 CASE WHEN h.action IN ('FULL', 'REINITIALIZE') THEN h.refresh_reason_detail END,
-                 h.action,
+                 CASE WHEN h.action IN ('FULL', 'REINITIALIZE') OR h.merge_strategy_used = 'FULL'
+                      THEN h.refresh_reason END,
+                 CASE WHEN h.action IN ('FULL', 'REINITIALIZE') OR h.merge_strategy_used = 'FULL'
+                      THEN h.refresh_reason_detail END,
+                 CASE
+                     WHEN h.action = 'REINITIALIZE' THEN 'REINITIALIZE'
+                     WHEN h.action = 'FULL' OR h.merge_strategy_used = 'FULL' THEN 'FULL'
+                     ELSE h.action
+                 END,
                  h.status,
                  COALESCE(h.end_time, h.start_time)
              FROM pgtrickle.pgt_refresh_history h

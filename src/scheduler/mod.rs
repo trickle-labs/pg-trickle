@@ -1115,16 +1115,17 @@ fn try_fused_chain_refresh(
         let execution = refresh::RefreshExecution {
             requested_action: RefreshAction::Differential,
             effective_action: RefreshAction::Differential,
+            effective_mode: "DIFFERENTIAL",
+            merge_strategy: "DIFFERENTIAL",
+            cost_evidence: None,
             frontier: nd.new_frontier.clone(),
             rows_inserted,
             rows_updated,
             rows_deleted,
             data_changed: rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0,
-            was_full_fallback: false,
             full_reason: None,
             downstream_capture_complete: true,
         };
-        refresh::set_effective_mode("DIFFERENTIAL");
         refresh::finalize_success(
             &nd.st,
             &execution,
@@ -3615,6 +3616,14 @@ fn apply_scheduled_deadlines(st: &StreamTableMeta) -> Result<(), crate::error::P
     .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))
 }
 
+fn cost_model_observation(action: RefreshAction, elapsed_ms: f64) -> (Option<f64>, Option<f64>) {
+    match action {
+        RefreshAction::Full | RefreshAction::Reinitialize => (Some(elapsed_ms), None),
+        RefreshAction::Differential => (None, Some(elapsed_ms)),
+        RefreshAction::NoData => (None, None),
+    }
+}
+
 /// Execute a scheduled refresh for a stream table.
 ///
 /// Returns a [`RefreshOutcome`] indicating whether the refresh succeeded,
@@ -3635,6 +3644,8 @@ fn execute_scheduled_refresh(
     tick_watermark: Option<&str>,
     drift_counter: Option<&mut i32>,
 ) -> RefreshOutcome {
+    refresh::reset_execution_state();
+
     if let Err(e) = apply_scheduled_deadlines(st) {
         pgrx::warning!(
             "pg_trickle: failed to apply scheduled refresh deadlines for {}.{}: {}",
@@ -3970,8 +3981,6 @@ fn execute_scheduled_refresh(
         )),
         _ => None,
     };
-    let mut was_full_fallback = action == RefreshAction::Reinitialize;
-
     let result = if st.topk_limit.is_some() {
         // TopK tables bypass the normal Full/Differential refresh paths and use
         // scoped-recomputation MERGE (ORDER BY … LIMIT N) instead.
@@ -3979,7 +3988,6 @@ fn execute_scheduled_refresh(
             refresh::FullRefreshReasonCode::TopKRecompute,
             "TopK maintenance recomputes the bounded ordered result set.",
         ));
-        was_full_fallback = action != RefreshAction::Full;
         refresh::execute_topk_refresh(st)
     } else {
         match action {
@@ -3997,9 +4005,6 @@ fn execute_scheduled_refresh(
                         match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
                             Err(e) => Err(e),
                             Ok(()) => {
-                                // G3+G4: advance WAL slots and flush change buffers
-                                // now that the new frontier is stored.
-                                refresh::post_full_refresh_cleanup(st);
                                 if let Some(counter) = drift_counter {
                                     *counter = 0;
                                 }
@@ -4020,9 +4025,6 @@ fn execute_scheduled_refresh(
                         match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
                             Err(e) => Err(e),
                             Ok(()) => {
-                                // G3+G4: advance WAL slots and flush change buffers
-                                // now that the new frontier is stored.
-                                refresh::post_full_refresh_cleanup(st);
                                 // Drift reset mechanism: reset counter on full reinit
                                 if let Some(counter) = drift_counter {
                                     *counter = 0;
@@ -4055,7 +4057,6 @@ fn execute_scheduled_refresh(
                             "The stream table has not been populated yet."
                         },
                     ));
-                    was_full_fallback = true;
                     let mut new_frontier =
                         version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
                     augment_frontier(&mut new_frontier);
@@ -4065,9 +4066,6 @@ fn execute_scheduled_refresh(
                             match StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
                                 Err(e) => Err(e),
                                 Ok(()) => {
-                                    // G3+G4: advance WAL slots and flush change buffers
-                                    // now that the new frontier is stored.
-                                    refresh::post_full_refresh_cleanup(st);
                                     if let Some(counter) = drift_counter {
                                         *counter = 0;
                                     }
@@ -4130,7 +4128,6 @@ fn execute_scheduled_refresh(
                                     "Differential maintenance exceeded a configured complexity limit: {msg}"
                                 ),
                             ));
-                            was_full_fallback = true;
                             match refresh::execute_full_refresh(st) {
                                 Ok((ins, del)) => {
                                     // COR-001 (v0.72.0): Propagate frontier-store failure.
@@ -4138,7 +4135,6 @@ fn execute_scheduled_refresh(
                                     {
                                         Err(e) => Err(e),
                                         Ok(()) => {
-                                            refresh::post_full_refresh_cleanup(st);
                                             if let Some(counter) = drift_counter {
                                                 *counter = 0;
                                             }
@@ -4205,16 +4201,20 @@ fn execute_scheduled_refresh(
                     return RefreshOutcome::RetryableFailure;
                 }
             };
+            let effective_mode = refresh::take_effective_mode();
+            let effective_action = refresh::effective_action_for_mode(action, effective_mode);
             let execution = refresh::RefreshExecution {
                 requested_action: action,
-                effective_action: action,
+                effective_action,
+                effective_mode,
+                merge_strategy: refresh::take_merge_strategy(),
+                cost_evidence: refresh::take_last_cost_evidence(),
                 frontier,
                 rows_inserted,
                 rows_updated,
                 rows_deleted,
-                data_changed: action != RefreshAction::NoData
+                data_changed: effective_action != RefreshAction::NoData
                     && (rows_inserted > 0 || rows_updated > 0 || rows_deleted > 0),
-                was_full_fallback,
                 full_reason,
                 downstream_capture_complete: true,
             };
@@ -4241,7 +4241,7 @@ fn execute_scheduled_refresh(
             monitor::alert_refresh_completed(
                 &st.pgt_schema,
                 &st.pgt_name,
-                action.as_str(),
+                effective_action.as_str(),
                 rows_inserted,
                 rows_deleted,
                 elapsed_ms,
@@ -4252,7 +4252,7 @@ fn execute_scheduled_refresh(
                 "pg_trickle: refreshed {}.{} ({}, +{} -{} rows, {}ms)",
                 st.pgt_schema,
                 st.pgt_name,
-                action.as_str(),
+                effective_action.as_str(),
                 rows_inserted,
                 rows_deleted,
                 elapsed_ms,
@@ -4263,11 +4263,7 @@ fn execute_scheduled_refresh(
             // SELECT to pgt_stream_tables on every dispatch tick.
             {
                 let elapsed_f64 = elapsed_ms as f64;
-                let (new_full, new_diff) = match action {
-                    RefreshAction::Full | RefreshAction::Reinitialize => (Some(elapsed_f64), None),
-                    RefreshAction::Differential => (None, Some(elapsed_f64)),
-                    _ => (None, None),
-                };
+                let (new_full, new_diff) = cost_model_observation(effective_action, elapsed_f64);
                 crate::shmem::update_cost_model(st.pgt_id, new_full, new_diff);
             }
 
@@ -4756,6 +4752,20 @@ mod tests {
         let outcome = RefreshOutcome::RetryableFailure;
         let cloned = outcome;
         assert_eq!(outcome, cloned);
+    }
+
+    #[test]
+    fn test_effective_full_fallback_updates_full_cost_slot() {
+        let effective = refresh::effective_action_for_mode(RefreshAction::Differential, "FULL");
+        assert_eq!(cost_model_observation(effective, 42.0), (Some(42.0), None));
+        assert_eq!(
+            cost_model_observation(RefreshAction::Differential, 42.0),
+            (None, Some(42.0)),
+        );
+        assert_eq!(
+            cost_model_observation(RefreshAction::NoData, 42.0),
+            (None, None),
+        );
     }
 
     // ── is_group_due_pure tests ─────────────────────────────────────

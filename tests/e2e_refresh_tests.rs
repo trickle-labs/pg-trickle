@@ -145,6 +145,8 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
         "DIFFERENTIAL",
     )
     .await;
+    let source_oid = i64::from(db.table_oid("rf_cost_src").await);
+    let buffer = db.change_buffer_table(source_oid).await;
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_cost_model_summary
@@ -158,6 +160,8 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
     )
     .await;
     db.execute("INSERT INTO rf_cost_src VALUES (3, 'c')").await;
+    let pending_changes = format!("SELECT count(*) FROM {buffer} WHERE action IN ('I', 'D')");
+    assert!(db.query_scalar::<i64>(&pending_changes).await > 0);
     db.try_execute_with_config(
         &[
             "SET pg_trickle.refresh_strategy = 'auto'",
@@ -186,6 +190,11 @@ async fn test_cost_model_full_fallback_records_effective_action_and_reason() {
     assert!(full_fallback);
     assert_eq!(reason, "COST_MODEL_PREFERRED_FULL");
     assert!(detail.contains("Predicted differential cost"));
+    assert_eq!(
+        db.query_scalar::<i64>(&pending_changes).await,
+        0,
+        "effective FULL finalization should remove consumed CDC rows"
+    );
     db.assert_st_matches_query("rf_cost_st", "SELECT id, val FROM rf_cost_src")
         .await;
 }
