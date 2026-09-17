@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--budgets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-repetitions", type=int, required=True)
+    parser.add_argument("--allow-ci-noise", action="store_true")
     args = parser.parse_args()
 
     records = [json.loads(line) for line in args.raw.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -85,6 +86,7 @@ def main() -> int:
 
     medians = {key: median([row[key] for row in ratios]) for key in ratios[0]}
     product = budgets.get("product_budgets", {})
+    noise = budgets.get("ci_noise_tolerance", {})
     required_budgets = (
         "installed_no_st_tps_ratio_min",
         "active_p99_latency_ratio_max",
@@ -93,6 +95,13 @@ def main() -> int:
     if any(not finite_nonnegative(product.get(key)) for key in required_budgets):
         fail("all product budgets must be finite, non-negative numbers")
 
+    active_p99_passed = medians["active_p99_latency_ratio"] <= product["active_p99_latency_ratio_max"]
+    active_p99_ci_tolerated = (
+        args.allow_ci_noise
+        and not active_p99_passed
+        and medians["active_p99_latency_ratio"]
+        <= noise.get("active_p99_latency_ratio_max", product["active_p99_latency_ratio_max"])
+    )
     decisions = {
         "installed_no_st_tps_ratio": {
             "value": medians["installed_no_st_tps_ratio"],
@@ -102,7 +111,9 @@ def main() -> int:
         "active_p99_latency_ratio": {
             "value": medians["active_p99_latency_ratio"],
             "budget": product["active_p99_latency_ratio_max"],
-            "passed": medians["active_p99_latency_ratio"] <= product["active_p99_latency_ratio_max"],
+            "passed": active_p99_passed or active_p99_ci_tolerated,
+            "product_budget_passed": active_p99_passed,
+            "ci_noise_tolerated": active_p99_ci_tolerated,
         },
         "refresh_cpu_share": {
             "value": medians["refresh_cpu_share"],

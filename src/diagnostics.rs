@@ -217,7 +217,11 @@ fn gather_window_diagnostics(
     let (latest_action, latest_reason, latest_detail, last_fallback_reason, last_fallback_detail) =
         Spi::connect(|client| {
             let latest = client.select(
-                "SELECT action, refresh_reason, refresh_reason_detail \
+                "SELECT CASE \
+                          WHEN action = 'REINITIALIZE' THEN 'REINITIALIZE' \
+                          WHEN action = 'FULL' OR merge_strategy_used = 'FULL' THEN 'FULL' \
+                          ELSE action \
+                        END, refresh_reason, refresh_reason_detail \
                    FROM pgtrickle.pgt_refresh_history \
                   WHERE pgt_id = $1 AND status = 'COMPLETED' \
                   ORDER BY refresh_id DESC LIMIT 1",
@@ -2143,7 +2147,9 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
     // DIFFERENTIAL timing stats
     stats.diff_count = Spi::get_one_with_args::<i64>(
         "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
-         WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED'",
+         WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+           AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+           AND merge_strategy_used IS DISTINCT FROM 'TOP_K' AND NOT was_full_fallback",
         &[pgt_id.into()],
     )
     .unwrap_or(Some(0))
@@ -2154,6 +2160,8 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
             "SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
              FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
                    WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                     AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                     AND merge_strategy_used IS DISTINCT FROM 'TOP_K' AND NOT was_full_fallback \
                      AND end_time IS NOT NULL \
                    ORDER BY start_time DESC LIMIT 100) sub",
             &[pgt_id.into()],
@@ -2164,7 +2172,8 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
     // FULL timing stats
     stats.full_count = Spi::get_one_with_args::<i64>(
         "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
-         WHERE pgt_id = $1 AND action = 'FULL' AND status = 'COMPLETED'",
+         WHERE pgt_id = $1 AND status = 'COMPLETED' \
+           AND (action IN ('FULL', 'REINITIALIZE') OR merge_strategy_used = 'FULL')",
         &[pgt_id.into()],
     )
     .unwrap_or(Some(0))
@@ -2174,7 +2183,8 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
         stats.full_avg_ms = Spi::get_one_with_args::<f64>(
             "SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
              FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
-                   WHERE pgt_id = $1 AND action = 'FULL' AND status = 'COMPLETED' \
+                   WHERE pgt_id = $1 AND status = 'COMPLETED' \
+                     AND (action IN ('FULL', 'REINITIALIZE') OR merge_strategy_used = 'FULL') \
                      AND end_time IS NOT NULL \
                    ORDER BY start_time DESC LIMIT 100) sub",
             &[pgt_id.into()],
@@ -2190,6 +2200,8 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
                  (ORDER BY EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
              FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
                    WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                     AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                     AND merge_strategy_used IS DISTINCT FROM 'TOP_K' AND NOT was_full_fallback \
                      AND end_time IS NOT NULL \
                    ORDER BY start_time DESC LIMIT 100) sub",
             &[pgt_id.into()],
@@ -2201,6 +2213,8 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
                  (ORDER BY EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
              FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
                    WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                     AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                     AND merge_strategy_used IS DISTINCT FROM 'TOP_K' AND NOT was_full_fallback \
                      AND end_time IS NOT NULL \
                    ORDER BY start_time DESC LIMIT 100) sub",
             &[pgt_id.into()],

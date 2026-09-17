@@ -3497,7 +3497,12 @@ pub(super) fn recommend_refresh_mode(
 
         // Effective mode: what actually ran last time
         let effective = Spi::get_one_with_args::<String>(
-            "SELECT action FROM pgtrickle.pgt_refresh_history \
+            "SELECT CASE \
+                      WHEN action = 'REINITIALIZE' THEN 'REINITIALIZE' \
+                      WHEN action = 'FULL' OR merge_strategy_used = 'FULL' THEN 'FULL' \
+                      ELSE action \
+                    END \
+               FROM pgtrickle.pgt_refresh_history \
              WHERE pgt_id = $1 AND status = 'COMPLETED' \
              ORDER BY start_time DESC LIMIT 1",
             &[st.pgt_id.into()],

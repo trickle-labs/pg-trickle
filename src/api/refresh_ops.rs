@@ -221,9 +221,7 @@ pub(crate) fn execute_manual_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<ManualRefreshResult, PgTrickleError> {
-    // Discard a stale mode left by a prior failed Rust-level execution before
-    // the common finalizer observes the next result.
-    let _ = refresh::take_effective_mode();
+    refresh::reset_execution_state();
 
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the refresh executor to modify the storage table.
@@ -254,22 +252,23 @@ pub(crate) fn execute_manual_refresh(
     }
 
     // ERG-D: Determine the action label for history recording.
-    let action = if st.topk_limit.is_some() {
-        "FULL"
+    let requested_action = if st.topk_limit.is_some() {
+        RefreshAction::Full
     } else if st.needs_reinit {
-        "REINITIALIZE"
+        RefreshAction::Reinitialize
     } else {
         match st.refresh_mode {
-            RefreshMode::Full | RefreshMode::Immediate => "FULL",
+            RefreshMode::Full | RefreshMode::Immediate => RefreshAction::Full,
             RefreshMode::Differential => {
                 if st.frontier.is_none() {
-                    "FULL"
+                    RefreshAction::Full
                 } else {
-                    "DIFFERENTIAL"
+                    RefreshAction::Differential
                 }
             }
         }
     };
+    let action = requested_action.as_str();
 
     // ERG-D: Record refresh start in pgt_refresh_history.
     let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
@@ -360,16 +359,10 @@ pub(crate) fn execute_manual_refresh(
 
     // ERG-D: Complete the refresh history record.
     let mut rows_updated_for_result = 0;
-    let effective_mode = refresh::peek_effective_mode();
-    let effective_action = match effective_mode {
-        "FULL" => RefreshAction::Full,
-        "NO_DATA" => RefreshAction::NoData,
-        _ => match action {
-            "FULL" => RefreshAction::Full,
-            "DIFFERENTIAL" => RefreshAction::Differential,
-            _ => RefreshAction::Reinitialize,
-        },
-    };
+    let effective_mode = refresh::take_effective_mode();
+    let effective_action = refresh::effective_action_for_mode(requested_action, effective_mode);
+    let merge_strategy = refresh::take_merge_strategy();
+    let cost_evidence = refresh::take_last_cost_evidence();
     match &result {
         Ok((rows_inserted, rows_deleted)) => {
             let rows_updated = refresh::take_last_rows_updated();
@@ -383,21 +376,17 @@ pub(crate) fn execute_manual_refresh(
                 }
             };
             let execution = refresh::RefreshExecution {
-                requested_action: match action {
-                    "FULL" => RefreshAction::Full,
-                    "DIFFERENTIAL" => RefreshAction::Differential,
-                    _ => RefreshAction::Reinitialize,
-                },
-                effective_action,
+                requested_action,
+                effective_mode,
+                merge_strategy,
+                cost_evidence,
                 frontier,
                 rows_inserted: *rows_inserted,
                 rows_updated,
                 rows_deleted: *rows_deleted,
-                data_changed: !refresh::effective_mode_is_no_data()
+                data_changed: effective_action != RefreshAction::NoData
                     && (*rows_inserted > 0 || rows_updated > 0 || *rows_deleted > 0),
-                was_full_fallback: effective_action == RefreshAction::Full && action != "FULL",
-                full_reason: if effective_action == RefreshAction::Full && action == "DIFFERENTIAL"
-                {
+                full_reason: if refresh::is_full_fallback(requested_action, effective_action) {
                     // Differential fallback paths persist their typed reason
                     // before entering the shared FULL executor.
                     None
@@ -972,7 +961,6 @@ fn execute_manual_differential_refresh(
                 );
                 let (ins, del) = refresh::execute_full_refresh(st)?;
                 StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)?;
-                refresh::post_full_refresh_cleanup(st);
                 pgrx::info!(
                     "Stream table {}.{} refreshed (FULL fallback: +{} -{})",
                     schema,

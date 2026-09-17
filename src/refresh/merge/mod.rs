@@ -303,9 +303,8 @@ pub(crate) fn execute_full_refresh_target(
 
 /// Post-full-refresh cleanup helper (G3 + G4).
 ///
-/// Intended to be called immediately after any FULL or REINITIALIZE refresh
-/// completes successfully, from both the scheduled refresh path and from the
-/// adaptive fallback path inside `execute_differential_refresh`.
+/// Called by the common refresh finalizer after any effective FULL or
+/// REINITIALIZE refresh completes successfully.
 ///
 /// 1. **G4 — Change buffer flush**: Deletes stale change buffer rows up to the
 ///    minimum stored frontier across all stream tables sharing each source.
@@ -721,6 +720,7 @@ pub fn execute_differential_refresh_with_tuning(
     tuning: &crate::catalog::RefreshRuntimeTuning,
 ) -> Result<(i64, i64), PgTrickleError> {
     crate::refresh::clear_last_cost_evidence();
+    set_effective_mode("DIFFERENTIAL");
     validate_differential_refresh_inputs(st, prev_frontier)?;
 
     // Persist upgraded strategy metadata. Production v0.89 plans retain
@@ -1492,11 +1492,7 @@ pub fn execute_differential_refresh_with_tuning(
                 "A source TRUNCATE cannot be represented as a differential delta.",
             ),
         )?;
-        let truncate_full_result = execute_full_refresh(st);
-        if truncate_full_result.is_ok() {
-            post_full_refresh_cleanup(st);
-        }
-        return truncate_full_result;
+        return execute_full_refresh(st);
     }
 
     // ── P2: Capped-count threshold check (only when changes exist) ───────
@@ -1511,7 +1507,19 @@ pub fn execute_differential_refresh_with_tuning(
     let strategy = crate::config::pg_trickle_refresh_strategy();
     let global_ratio = crate::config::pg_trickle_differential_max_change_ratio();
     let max_ratio = st.auto_threshold.unwrap_or(global_ratio);
-    let mut should_fallback = strategy == crate::config::RefreshStrategy::Full;
+    let mut fallback_reason = if crate::config::pg_trickle_force_full_refresh() {
+        Some(crate::refresh::FullRefreshReason::new(
+            crate::refresh::FullRefreshReasonCode::ForceFullRefresh,
+            "pg_trickle.force_full_refresh is enabled.",
+        ))
+    } else if strategy == crate::config::RefreshStrategy::Full {
+        Some(crate::refresh::FullRefreshReason::new(
+            crate::refresh::FullRefreshReasonCode::ConfiguredFull,
+            "pg_trickle.refresh_strategy is set to full.",
+        ))
+    } else {
+        None
+    };
     let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
     let mut total_change_count: i64 = 0;
     let mut _total_table_size: i64 = 0;
@@ -1587,12 +1595,17 @@ pub fn execute_differential_refresh_with_tuning(
             zero_change_oids.insert(*oid);
         }
 
-        if change_count > threshold_rows {
+        if fallback_reason.is_none() && change_count > threshold_rows {
             // B-4: When refresh_strategy = 'differential', skip the ratio
             // check — the user explicitly wants DIFFERENTIAL regardless of
             // change volume. The BUF-LIMIT safety check still applies below.
             if !skip_ratio_check {
-                should_fallback = true;
+                fallback_reason = Some(crate::refresh::FullRefreshReason::new(
+                    crate::refresh::FullRefreshReasonCode::DeltaRatioExceeded,
+                    format!(
+                        "{change_count} changes exceed the {threshold_rows}-row threshold for source OID {oid}."
+                    ),
+                ));
                 break; // No need to check remaining sources
             }
         }
@@ -1602,7 +1615,7 @@ pub fn execute_differential_refresh_with_tuning(
     // If any source's change buffer exceeds max_buffer_rows, force FULL
     // refresh to prevent unbounded disk growth from repeated failures.
     let max_buffer_rows = crate::config::pg_trickle_max_buffer_rows();
-    if !should_fallback && max_buffer_rows > 0 {
+    if fallback_reason.is_none() && max_buffer_rows > 0 {
         for &(oid, change_count, _table_size) in &per_source_stats {
             if change_count > max_buffer_rows {
                 pgrx::warning!(
@@ -1615,7 +1628,12 @@ pub fn execute_differential_refresh_with_tuning(
                     change_count,
                     max_buffer_rows,
                 );
-                should_fallback = true;
+                fallback_reason = Some(crate::refresh::FullRefreshReason::new(
+                    crate::refresh::FullRefreshReasonCode::BufferRowLimitExceeded,
+                    format!(
+                        "Change buffer for source OID {oid} contains {change_count} rows, exceeding the {max_buffer_rows}-row limit."
+                    ),
+                ));
                 break;
             }
         }
@@ -1625,7 +1643,7 @@ pub fn execute_differential_refresh_with_tuning(
     // When strategy = 'auto' and the ratio check didn't trigger, query
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
-    if !should_fallback && !skip_ratio_check && total_change_count > 0 {
+    if fallback_reason.is_none() && !skip_ratio_check && total_change_count > 0 {
         let complexity = with_stream_owner(st, || {
             Ok(classify_query_complexity(&effective_defining_query))
         })?;
@@ -1638,60 +1656,46 @@ pub fn execute_differential_refresh_with_tuning(
                 crate::config::pg_trickle_cost_model_safety_margin(),
             )
         {
+            let estimated_diff =
+                hist.avg_ms_per_delta * complexity.diff_cost_factor() * total_change_count as f64;
+            let estimated_full =
+                hist.avg_full_ms * crate::config::pg_trickle_cost_model_safety_margin();
             pgrx::debug1!(
                 "[pg_trickle] B-4 cost model: FULL preferred for {}.{} \
                  (est_diff={:.1}ms > est_full×margin={:.1}ms, class={:?}, Δ={})",
                 st.pgt_schema,
                 st.pgt_name,
-                hist.avg_ms_per_delta * complexity.diff_cost_factor() * total_change_count as f64,
-                hist.avg_full_ms * crate::config::pg_trickle_cost_model_safety_margin(),
+                estimated_diff,
+                estimated_full,
                 complexity,
                 total_change_count,
             );
-            should_fallback = true;
+            fallback_reason = Some(crate::refresh::FullRefreshReason::new(
+                crate::refresh::FullRefreshReasonCode::CostModelPreferredFull,
+                format!(
+                    "Predicted differential cost {estimated_diff:.1} ms exceeds the {estimated_full:.1} ms full-refresh threshold for {total_change_count} changes."
+                ),
+            ));
         }
     }
 
-    if should_fallback {
+    if let Some(fallback_reason) = fallback_reason {
         // A22 (v0.35.0): Emit NOTICE on every FULL fallback so operators
         // see the reason in client log output.
-        let reason = if crate::config::pg_trickle_force_full_refresh() {
-            "force_full_refresh GUC override".to_string()
-        } else if strategy == crate::config::RefreshStrategy::Full {
-            "refresh_strategy=full GUC".to_string()
-        } else {
-            format!("change ratio exceeds threshold ({:.1}%)", max_ratio * 100.0,)
-        };
         pgrx::notice!(
             "stream table \"{}\".\"{}\" using FULL refresh: {}",
             st.pgt_schema,
             st.pgt_name,
-            reason,
+            fallback_reason.detail,
         );
         pgrx::warning!(
-            "[pg_trickle] Falling back to FULL refresh for {}.{}: change ratio exceeds \
-             adaptive threshold ({:.0}% of source table size).\n\
-             This means too many rows changed since the last refresh for differential \
-             mode to be efficient. \n\
-             Suggestion: increase pg_trickle.differential_max_change_ratio (currently {:.2}), \
-             adjust the per-table auto_threshold via ALTER STREAM TABLE ... SET (auto_threshold = ...), \
-             or refresh more frequently to reduce the change volume per cycle.",
+            "[pg_trickle] Falling back to FULL refresh for {}.{}: {} ({})",
             st.pgt_schema,
             st.pgt_name,
-            max_ratio * 100.0,
-            max_ratio,
+            fallback_reason.code.as_str(),
+            fallback_reason.detail,
         );
-        let fallback_reason = if crate::config::pg_trickle_force_full_refresh() {
-            crate::refresh::FullRefreshReasonCode::ForceFullRefresh
-        } else if strategy == crate::config::RefreshStrategy::Full {
-            crate::refresh::FullRefreshReasonCode::ConfiguredFull
-        } else {
-            crate::refresh::FullRefreshReasonCode::DeltaRatioExceeded
-        };
-        StreamTableMeta::set_refresh_reason(
-            st.pgt_id,
-            &crate::refresh::FullRefreshReason::new(fallback_reason, reason.clone()),
-        )?;
+        StreamTableMeta::set_refresh_reason(st.pgt_id, &fallback_reason)?;
         let t_full_start = Instant::now();
         let result = execute_full_refresh(st);
         let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
@@ -1702,11 +1706,6 @@ pub fn execute_differential_refresh_with_tuning(
             Some(full_ms),
         ) {
             pgrx::debug1!("[pg_trickle] Failed to update last_full_ms: {}", e);
-        }
-        // G4: Flush stale change buffer rows to prevent the next differential
-        // tick from re-examining rows already materialized by this FULL refresh.
-        if result.is_ok() {
-            post_full_refresh_cleanup(st);
         }
         return result;
     }
@@ -1725,8 +1724,7 @@ pub fn execute_differential_refresh_with_tuning(
     // - group count is very small (< 10): the comparison is unreliable
     //   because a handful of INSERTs for new groups easily triggers the
     //   threshold without actually saturating existing groups
-    if !should_fallback
-        && !skip_ratio_check
+    if !skip_ratio_check
         && total_change_count > 0
         && effective_defining_query
             .to_ascii_uppercase()
@@ -1778,9 +1776,6 @@ pub fn execute_differential_refresh_with_tuning(
                 Some(full_ms),
             ) {
                 pgrx::debug1!("[pg_trickle] Failed to update last_full_ms: {}", e);
-            }
-            if result.is_ok() {
-                post_full_refresh_cleanup(st);
             }
             return result;
         }
@@ -2426,6 +2421,8 @@ pub fn execute_differential_refresh_with_tuning(
     // data_timestamp would never advance — breaking ST-on-ST cascades.
     if is_append_only && !has_downstream_st_consumers(st.pgt_id) {
         let non_monotonic = has_non_monotonic_cte(&resolved.merge_sql);
+        let keep_append_only_hint =
+            crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query);
         // Non-deduplicated deltas (joins, aggregates) must NOT use the
         // append-only fast path: even with ON CONFLICT DO NOTHING, the
         // delta can produce rows that collide with existing ST rows from
@@ -2438,7 +2435,13 @@ pub fn execute_differential_refresh_with_tuning(
                 schema,
                 name,
             );
-            let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            // DVM-1: CASE/IN-list aggregates are safely maintained by the
+            // GROUP_RESCAN path for append-only sources. Keep the hint so a
+            // later refresh does not misclassify the source as mutable and
+            // re-enter the defensive FULL fallback.
+            if !keep_append_only_hint {
+                let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            }
         } else if non_monotonic {
             pgrx::debug1!(
                 "[pg_trickle] A-3a: skipping append-only for {}.{} — \
@@ -2446,7 +2449,9 @@ pub fn execute_differential_refresh_with_tuning(
                 schema,
                 name,
             );
-            let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            if !keep_append_only_hint {
+                let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            }
         } else {
             let t_insert_start = Instant::now();
 

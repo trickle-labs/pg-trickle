@@ -913,8 +913,11 @@ fn acknowledge_receipt_batch(
         let expected = receipts
             .iter()
             .filter(|receipt| {
+                // PostgreSQL reports the slot's starting boundary at the
+                // first change LSN, so the acknowledgement read must include
+                // that boundary record as well.
                 lsn_position(&receipt.lsn)
-                    .map(|position| position > confirmed_position)
+                    .map(|position| position >= confirmed_position)
                     .unwrap_or(false)
             })
             .collect::<Vec<_>>();

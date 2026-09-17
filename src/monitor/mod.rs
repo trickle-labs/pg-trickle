@@ -1465,6 +1465,9 @@ fn amplification_stats(pgt_id: i64) -> Result<String, PgTrickleError> {
          FROM pgtrickle.pgt_refresh_history \
          WHERE pgt_id = {pgt_id} \
            AND action = 'DIFFERENTIAL' \
+           AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+           AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
+           AND NOT was_full_fallback \
            AND status = 'COMPLETED' \
            AND delta_row_count > 0 \
          ORDER BY refresh_id DESC \
@@ -1518,7 +1521,11 @@ fn amplification_stats(pgt_id: i64) -> Result<String, PgTrickleError> {
 /// `{"samples":10,"min_ms":12.3,"max_ms":450.0,"avg_ms":85.7,"latest_ms":42.1,"latest_action":"DIFFERENTIAL"}`
 fn refresh_timing_stats(pgt_id: i64) -> Result<String, PgTrickleError> {
     let sql = format!(
-        "SELECT action::text, \
+        "SELECT CASE \
+                  WHEN action = 'REINITIALIZE' THEN 'REINITIALIZE' \
+                  WHEN action = 'FULL' OR merge_strategy_used = 'FULL' THEN 'FULL' \
+                  ELSE action \
+                END, \
                 EXTRACT(EPOCH FROM (end_time - start_time)) * 1000 AS duration_ms \
          FROM pgtrickle.pgt_refresh_history \
          WHERE pgt_id = {pgt_id} \

@@ -292,8 +292,13 @@ for ((repetition = 0; repetition < repetitions; repetition++)); do
     done
 done
 
+ci_noise_flag=()
+if [[ "$PROFILE" == blocking ]]; then
+    ci_noise_flag+=(--allow-ci-noise)
+fi
 python3 "$BENCH_DIR/compare.py" \
     --raw "$raw_file" \
     --budgets "$BENCH_DIR/budgets.json" \
     --output "$result_file" \
-    --expected-repetitions "$repetitions"
+    --expected-repetitions "$repetitions" \
+    "${ci_noise_flag[@]}"

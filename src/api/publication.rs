@@ -1025,7 +1025,10 @@ pub fn fit_linear_regression(pgt_id: i64) -> Option<(f64, f64, i64)> {
             .select(
                 "SELECT EXTRACT(EPOCH FROM (now() - MIN(start_time))) \
                  FROM pgtrickle.pgt_refresh_history \
-                 WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED'",
+                 WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
+                   AND NOT was_full_fallback",
                 None,
                 &[pgt_id.into()],
             )
@@ -1056,6 +1059,9 @@ pub fn fit_linear_regression(pgt_id: i64) -> Option<(f64, f64, i64)> {
                  WHERE pgt_id = $1 \
                    AND status = 'COMPLETED' \
                    AND action = 'DIFFERENTIAL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
+                   AND NOT was_full_fallback \
                    AND end_time IS NOT NULL \
                    AND start_time > now() - ($2 || ' minutes')::interval",
                 None,
@@ -1092,6 +1098,9 @@ pub fn fit_linear_regression(pgt_id: i64) -> Option<(f64, f64, i64)> {
                  WHERE pgt_id = $1 \
                    AND status = 'COMPLETED' \
                    AND action = 'DIFFERENTIAL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                   AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
+                   AND NOT was_full_fallback \
                    AND end_time IS NOT NULL \
                    AND start_time > now() - ($2 || ' minutes')::interval \
                    AND EXTRACT(EPOCH FROM (end_time - start_time)) * 1000 \

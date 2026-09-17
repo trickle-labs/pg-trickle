@@ -704,13 +704,14 @@ pub type FullRefreshReason = RefreshReason;
 #[derive(Debug, Clone)]
 pub struct RefreshExecution {
     pub requested_action: RefreshAction,
-    pub effective_action: RefreshAction,
+    pub effective_mode: &'static str,
+    pub merge_strategy: &'static str,
+    pub cost_evidence: Option<String>,
     pub frontier: crate::version::Frontier,
     pub rows_inserted: i64,
     pub rows_updated: i64,
     pub rows_deleted: i64,
     pub data_changed: bool,
-    pub was_full_fallback: bool,
     pub full_reason: Option<FullRefreshReason>,
     pub downstream_capture_complete: bool,
 }
@@ -729,6 +730,28 @@ pub(crate) fn build_differential_cost_evidence(
             output_rows_changed,
         ),
     })
+}
+
+pub(crate) fn effective_action_for_mode(
+    requested_action: RefreshAction,
+    effective_mode: &str,
+) -> RefreshAction {
+    if requested_action == RefreshAction::Reinitialize {
+        return RefreshAction::Reinitialize;
+    }
+
+    match effective_mode {
+        "FULL" => RefreshAction::Full,
+        "NO_DATA" => RefreshAction::NoData,
+        _ => requested_action,
+    }
+}
+
+pub(crate) fn is_full_fallback(
+    requested_action: RefreshAction,
+    effective_action: RefreshAction,
+) -> bool {
+    requested_action == RefreshAction::Differential && effective_action == RefreshAction::Full
 }
 
 /// Finalize a successful refresh in the caller's existing transaction.
@@ -764,13 +787,8 @@ pub fn finalize_success(
         StreamTableMeta::update_after_no_data_refresh(st.pgt_id)?;
     }
 
-    let effective_mode = take_effective_mode();
-    let merge_strategy = take_merge_strategy();
-    let history_action = match effective_mode {
-        "FULL" => RefreshAction::Full,
-        "NO_DATA" => RefreshAction::NoData,
-        _ => execution.effective_action,
-    };
+    let history_action =
+        effective_action_for_mode(execution.requested_action, execution.effective_mode);
     let window_reason =
         if execution.full_reason.is_none() && history_action == RefreshAction::Differential {
             crate::window_state::ensure_plan(st)?
@@ -810,9 +828,8 @@ pub fn finalize_success(
         .or_else(|| FullRefreshReason::for_action(history_action, !st.is_populated));
     let full_reason = derived_reason.as_ref();
     let cost_evidence = if history_action == RefreshAction::Differential {
-        take_last_cost_evidence()
+        execution.cost_evidence.as_deref()
     } else {
-        clear_last_cost_evidence();
         None
     };
     if matches!(
@@ -834,12 +851,15 @@ pub fn finalize_success(
         execution.rows_deleted,
         None,
         execution.rows_inserted + execution.rows_updated + execution.rows_deleted,
-        Some(if merge_strategy.is_empty() {
-            history_action.as_str()
+        Some(if !execution.merge_strategy.is_empty() {
+            execution.merge_strategy
+        } else if !execution.effective_mode.is_empty() {
+            execution.effective_mode
         } else {
-            merge_strategy
+            history_action.as_str()
         }),
-        execution.was_full_fallback,
+        is_full_fallback(execution.requested_action, history_action),
+        Some(history_action.as_str()),
         full_reason,
     )?;
 
@@ -860,11 +880,11 @@ pub fn finalize_success(
     if full_reason.is_none()
         && let Some(evidence) = cost_evidence
     {
-        RefreshRecord::set_cost_evidence(refresh_id, &evidence)?;
+        RefreshRecord::set_cost_evidence(refresh_id, evidence)?;
     }
 
-    if !effective_mode.is_empty() {
-        StreamTableMeta::update_effective_refresh_mode(st.pgt_id, effective_mode)?;
+    if !execution.effective_mode.is_empty() {
+        StreamTableMeta::update_effective_refresh_mode(st.pgt_id, execution.effective_mode)?;
     }
 
     let rows_changed = execution.rows_inserted + execution.rows_updated + execution.rows_deleted;
@@ -921,7 +941,7 @@ pub fn finalize_success(
         }
     }
 
-    if rows_changed > 0 && execution.effective_action != RefreshAction::NoData {
+    if rows_changed > 0 && history_action != RefreshAction::NoData {
         crate::api::fire_distance_subscriptions(
             schema,
             table_name,
@@ -932,7 +952,7 @@ pub fn finalize_success(
     }
 
     if matches!(
-        execution.effective_action,
+        history_action,
         RefreshAction::Full | RefreshAction::Reinitialize
     ) {
         post_full_refresh_cleanup(st);
@@ -1152,7 +1172,7 @@ pub(crate) fn set_last_cost_evidence(evidence: String) {
     LAST_COST_EVIDENCE.with(|value| value.replace(Some(evidence)));
 }
 
-fn take_last_cost_evidence() -> Option<String> {
+pub(crate) fn take_last_cost_evidence() -> Option<String> {
     LAST_COST_EVIDENCE.with(|value| value.borrow_mut().take())
 }
 
@@ -1168,7 +1188,7 @@ pub(crate) fn set_merge_strategy(strategy: &'static str) {
     LAST_MERGE_STRATEGY.with(|value| value.set(strategy));
 }
 
-fn take_merge_strategy() -> &'static str {
+pub(crate) fn take_merge_strategy() -> &'static str {
     LAST_MERGE_STRATEGY.with(|value| value.replace(""))
 }
 
@@ -1179,14 +1199,16 @@ pub fn take_effective_mode() -> &'static str {
     LAST_EFFECTIVE_MODE.with(|m| m.replace(""))
 }
 
-/// Read the effective mode without clearing it so a caller can build the
-/// durable execution record before the common finalizer consumes it.
-pub(crate) fn peek_effective_mode() -> &'static str {
-    LAST_EFFECTIVE_MODE.with(|m| m.get())
-}
-
-pub(crate) fn effective_mode_is_no_data() -> bool {
-    LAST_EFFECTIVE_MODE.with(|m| m.get() == "NO_DATA")
+/// Clear per-thread execution output before starting a top-level refresh.
+///
+/// Failed refreshes do not reach the common finalizer, so their output must
+/// not be observed by the next refresh handled by the same backend.
+pub(crate) fn reset_execution_state() {
+    let _ = take_effective_mode();
+    let _ = take_merge_strategy();
+    clear_last_cost_evidence();
+    let _ = take_last_rows_updated();
+    let _ = take_last_temp_blks_written();
 }
 
 thread_local! {

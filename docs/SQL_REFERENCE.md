@@ -4138,7 +4138,7 @@ Audit log of all refresh operations.
 | `data_timestamp` | `timestamptz` | Data timestamp of the refresh |
 | `start_time` | `timestamptz` | When the refresh started |
 | `end_time` | `timestamptz` | When it completed |
-| `action` | `text` | NO_DATA, FULL, DIFFERENTIAL, REINITIALIZE, SKIP |
+| `action` | `text` | Effective completed action: NO_DATA, FULL, DIFFERENTIAL, REINITIALIZE, or SKIP. Failed rows retain the requested action. |
 | `rows_inserted` | `bigint` | Rows inserted |
 | `rows_updated` | `bigint` | Rows updated; TopK and fused MERGE paths use `merge_action()` accounting |
 | `rows_deleted` | `bigint` | Rows deleted |

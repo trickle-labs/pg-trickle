@@ -488,9 +488,12 @@ pub fn collect_evidence(
             .select(
                 "SELECT delta_row_count, \
                         (EXTRACT(epoch FROM (end_time - start_time)) * 1000000)::bigint \
-                   FROM pgtrickle.pgt_refresh_history \
+                  FROM pgtrickle.pgt_refresh_history \
                   WHERE pgt_id = $1 AND status = 'COMPLETED' \
-                    AND action = 'DIFFERENTIAL' AND end_time IS NOT NULL \
+                    AND action = 'DIFFERENTIAL' \
+                    AND merge_strategy_used IS DISTINCT FROM 'FULL' \
+                    AND merge_strategy_used IS DISTINCT FROM 'TOP_K' \
+                    AND NOT was_full_fallback AND end_time IS NOT NULL \
                   ORDER BY refresh_id DESC LIMIT 1",
                 None,
                 &[pgt_id.into()],

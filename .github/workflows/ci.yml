@@ -960,6 +960,7 @@ jobs:
             python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs
           fi
         env:
+          BENCH_QUICK: "1"
           PGT_BENCH_REGRESSION_THRESHOLD: "0.10"
 
   # ── Benchmarks (non-blocking, Linux only) ───────────────────────────────

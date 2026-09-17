@@ -137,6 +137,28 @@ fn test_refresh_action_variants_exist() {
 }
 
 #[test]
+fn test_effective_action_for_mode() {
+    use RefreshAction::*;
+
+    for (requested, mode, expected) in [
+        (Differential, "FULL", Full),
+        (Reinitialize, "FULL", Reinitialize),
+        (Differential, "NO_DATA", NoData),
+        (Differential, "DIFFERENTIAL", Differential),
+        (Differential, "APPEND_ONLY", Differential),
+        (Differential, "TOP_K", Differential),
+        (Differential, "", Differential),
+    ] {
+        let effective = effective_action_for_mode(requested, mode);
+        assert_eq!(effective, expected);
+        assert_eq!(
+            is_full_fallback(requested, effective),
+            requested == Differential && expected == Full,
+        );
+    }
+}
+
+#[test]
 fn test_merge_strategy_is_consumed_once() {
     set_merge_strategy("vector_agg");
     assert_eq!(take_merge_strategy(), "vector_agg");
@@ -148,6 +170,23 @@ fn test_effective_mode_is_consumed_once() {
     set_effective_mode("FULL");
     assert_eq!(take_effective_mode(), "FULL");
     assert_eq!(take_effective_mode(), "");
+}
+
+#[test]
+fn test_reset_execution_state_discards_failed_refresh_output() {
+    set_effective_mode("FULL");
+    set_merge_strategy("merge");
+    set_last_cost_evidence("stale".to_string());
+    set_last_rows_updated(7);
+    set_last_temp_blks_written(11);
+
+    reset_execution_state();
+
+    assert_eq!(take_effective_mode(), "");
+    assert_eq!(take_merge_strategy(), "");
+    assert_eq!(take_last_cost_evidence(), None);
+    assert_eq!(take_last_rows_updated(), 0);
+    assert_eq!(take_last_temp_blks_written(), -1);
 }
 
 #[test]
