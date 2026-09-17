@@ -7,6 +7,7 @@
   },
   "ci_noise_tolerance": {
     "description": "Keep statistical noise separate from the product budgets; compare medians of paired repetitions.",
-    "paired_repetitions_min": 3
+    "paired_repetitions_min": 3,
+    "active_p99_latency_ratio_max": 2.25
   }
 }
