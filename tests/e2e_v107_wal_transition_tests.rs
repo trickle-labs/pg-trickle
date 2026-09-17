@@ -17,6 +17,10 @@ async fn cdc_mode(db: &E2eDb, source: &str) -> String {
 #[tokio::test]
 async fn test_v107_auto_wal_transition_captures_changes() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    eprintln!(
+        "PGT_ACTUAL_POSTGRESQL_VERSION={}",
+        db.query_scalar::<String>("SHOW server_version").await
+    );
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
         .await;
 
