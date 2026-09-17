@@ -384,7 +384,7 @@ fn validate_consumer_locked(
                     "pgtrickle_changes.{}",
                     quoted_ident(&payload_name(meta.pgt_id))
                 );
-                let payload_bad = spi(Spi::get_one::<bool>(&format!(
+                let payload_bad_sql = format!(
                     "SELECT EXISTS (
                         SELECT 1
                           FROM pgtrickle.pgt_output_delta_batches b
@@ -398,16 +398,19 @@ fn validate_consumer_locked(
                               FROM {payload} p
                              WHERE p.batch_token = b.batch_token
                           ) p ON true
-                         WHERE b.pgt_id = {} AND b.batch_token > {} AND b.batch_token <= {}
+                         WHERE b.pgt_id = $1 AND b.batch_token > $2 AND b.batch_token <= $3
                            AND (p.bad <> 0 OR p.n <> b.row_count
                              OR (b.mode = 'FULL_INVALIDATION' AND p.n <> 0)
                              OR (b.mode = 'EXACT' AND
                                 (p.ins <> b.rows_inserted OR p.del <> b.rows_deleted
                                  OR (p.n > 0 AND (p.first_ordinal <> 0
                                       OR p.last_ordinal <> p.n - 1)))))
-                    )",
-                    meta.pgt_id, ack, head
-                )))?
+                    )"
+                );
+                let payload_bad = spi(Spi::get_one_with_args::<bool>(
+                    &payload_bad_sql,
+                    &[meta.pgt_id.into(), ack.into(), head.into()],
+                ))?
                 .unwrap_or(true);
                 payload_bad.then_some("PAYLOAD_INCONSISTENT")
             }
