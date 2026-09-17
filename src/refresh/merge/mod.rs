@@ -2433,6 +2433,8 @@ pub fn execute_differential_refresh_with_tuning(
     // data_timestamp would never advance — breaking ST-on-ST cascades.
     if is_append_only && !has_downstream_st_consumers(st.pgt_id) {
         let non_monotonic = has_non_monotonic_cte(&resolved.merge_sql);
+        let keep_append_only_hint =
+            crate::refresh::classify_case_in_list_aggregate_drift(&st.defining_query);
         // Non-deduplicated deltas (joins, aggregates) must NOT use the
         // append-only fast path: even with ON CONFLICT DO NOTHING, the
         // delta can produce rows that collide with existing ST rows from
@@ -2445,7 +2447,13 @@ pub fn execute_differential_refresh_with_tuning(
                 schema,
                 name,
             );
-            let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            // DVM-1: CASE/IN-list aggregates are safely maintained by the
+            // GROUP_RESCAN path for append-only sources. Keep the hint so a
+            // later refresh does not misclassify the source as mutable and
+            // re-enter the defensive FULL fallback.
+            if !keep_append_only_hint {
+                let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            }
         } else if non_monotonic {
             pgrx::debug1!(
                 "[pg_trickle] A-3a: skipping append-only for {}.{} — \
@@ -2453,7 +2461,9 @@ pub fn execute_differential_refresh_with_tuning(
                 schema,
                 name,
             );
-            let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            if !keep_append_only_hint {
+                let _ = StreamTableMeta::update_append_only(st.pgt_id, false);
+            }
         } else {
             let t_insert_start = Instant::now();
 
