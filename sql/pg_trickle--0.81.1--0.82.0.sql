@@ -3,8 +3,28 @@
 SELECT set_config('pg_trickle.enabled', 'off', true);
 
 -- The composite return type of this SQL-facing function gains rows_updated.
--- Drop the old signature before the v0.82.0 install SQL recreates it.
+-- Drop the old signature before recreating it with the v0.82.0 return shape.
 DROP FUNCTION IF EXISTS pgtrickle.get_refresh_history(text, integer);
+
+CREATE FUNCTION pgtrickle.get_refresh_history(
+    name TEXT,
+    max_rows INT DEFAULT 20
+) RETURNS TABLE (
+    refresh_id BIGINT,
+    data_timestamp TIMESTAMPTZ,
+    start_time TIMESTAMPTZ,
+    end_time TIMESTAMPTZ,
+    action TEXT,
+    status TEXT,
+    rows_inserted BIGINT,
+    rows_updated BIGINT,
+    rows_deleted BIGINT,
+    duration_ms DOUBLE PRECISION,
+    error_message TEXT
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'get_refresh_history_wrapper';
 
 ALTER TABLE pgtrickle.pgt_scheduler_jobs
     ADD COLUMN IF NOT EXISTS dispatch_tick_id BIGINT,

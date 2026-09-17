@@ -10,11 +10,11 @@ The ordering of items is not stable, it is driven by a dependency graph.
 -- src/lib.rs:253
 -- bootstrap
 
-CREATE SEQUENCE IF NOT EXISTS pgtrickle.pgt_graph_refresh_id_seq;
-
 -- Extension schemas
 CREATE SCHEMA IF NOT EXISTS pgtrickle;
 CREATE SCHEMA IF NOT EXISTS pgtrickle_changes;
+
+CREATE SEQUENCE IF NOT EXISTS pgtrickle.pgt_graph_refresh_id_seq;
 
 -- F51: Restrict change buffer schema access to prevent unauthorized
 -- injection of bogus changes that would be applied on next refresh.

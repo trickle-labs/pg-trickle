@@ -90,9 +90,22 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
         .await;
     db.execute("DELETE FROM rls_wal_src WHERE id = 1").await;
 
+    let converged = db
+        .wait_for_condition(
+            "rls WAL stream table",
+            "SELECT NOT EXISTS (\
+                (SELECT id, tenant_id, val FROM rls_wal_st EXCEPT ALL \
+                 SELECT id, tenant_id, val FROM rls_wal_src) \
+                UNION ALL \
+                (SELECT id, tenant_id, val FROM rls_wal_src EXCEPT ALL \
+                 SELECT id, tenant_id, val FROM rls_wal_st)\
+            )",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
+        .await;
     assert!(
-        db.wait_for_auto_refresh("rls_wal_st", Duration::from_secs(60))
-            .await,
+        converged,
         "scheduler should apply the WAL INSERT, UPDATE, and DELETE"
     );
     db.assert_st_matches_query("rls_wal_st", query).await;
