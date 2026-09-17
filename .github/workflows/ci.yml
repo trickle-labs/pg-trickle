@@ -446,6 +446,7 @@ jobs:
           # Falls back to building locally if the GHCR image is unavailable.
           if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
             docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+            echo "BUILDER_IMAGE=ghcr.io/trickle-labs/pg-trickle/builder:pg18" >> "$GITHUB_ENV"
             echo "Builder image pulled from GHCR — skipping local build"
           else
             echo "::warning::Builder image not in GHCR (first run?). Will build locally."
@@ -518,6 +519,7 @@ jobs:
           # Falls back to building locally if the GHCR image is unavailable.
           if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
             docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+            echo "BUILDER_IMAGE=ghcr.io/trickle-labs/pg-trickle/builder:pg18" >> "$GITHUB_ENV"
             echo "Builder image pulled from GHCR — skipping local build"
           else
             echo "::warning::Builder image not in GHCR (first run?). Will build locally."
@@ -1511,6 +1513,7 @@ jobs:
         run: |
           if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
             docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+            echo "BUILDER_IMAGE=ghcr.io/trickle-labs/pg-trickle/builder:pg18" >> "$GITHUB_ENV"
             echo "Builder image pulled from GHCR — skipping local build"
           else
             echo "::warning::Builder image not in GHCR (first run?). Will build locally."

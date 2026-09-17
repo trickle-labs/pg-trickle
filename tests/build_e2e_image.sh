@@ -67,7 +67,10 @@ echo "  Dockerfile:   ${SCRIPT_DIR}/Dockerfile.e2e"
 echo "  Builder image: ${BUILDER_IMAGE}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-if [[ -n "${BUILDX_CACHE_SCOPE:-}" ]]; then
+# The docker-container driver cannot see host-only image tags. Use the GHA
+# cache path only when the builder image is registry-addressable; local-image
+# fallbacks keep using the Docker daemon's native builder.
+if [[ -n "${BUILDX_CACHE_SCOPE:-}" && "${BUILDER_IMAGE}" == */* ]]; then
     docker buildx build \
         --platform "${DOCKER_PLATFORM}" \
         --load \
