@@ -81,7 +81,7 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 
 ### Core IVM engine
 
-- **Incremental by default** — delta queries are derived automatically from the defining query's operator tree; only changed rows are processed.
+- **Incremental by default** — delta queries are derived from the defining query's operator tree and recompute affected groups, partitions, or join neighborhoods. Join amplification can produce more work than the source-row count.
 - **Four refresh modes** — `AUTO` (smart default: DIFFERENTIAL when possible, FULL fallback), `DIFFERENTIAL` (incremental), `FULL` (complete recomputation), and `IMMEDIATE` (synchronous, in-transaction IVM).
 - **Transactional IVM** — `IMMEDIATE` mode maintains stream tables within the same transaction as the base-table DML, giving read-your-writes consistency with no background worker required.
 - **Change buffer compaction** — cancelling INSERT/DELETE pairs and sequential changes to the same row are collapsed automatically, reducing delta scan overhead 50–90% on high-churn tables.
@@ -104,8 +104,8 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 
 ### Change data capture
 
-- **Trigger-based CDC** — lightweight `AFTER` row-level triggers; no `wal_level = logical`, no replication slots required.
-- **Safe default** — `pg_trickle.cdc_mode = auto` aliases trigger capture in v0.100; WAL capture is unavailable until durable receipt is proven.
+- **Trigger-based CDC** — lightweight statement-level `AFTER` triggers by default; no `wal_level = logical` or replication slots required.
+- **Safe default** — `pg_trickle.cdc_mode = trigger` keeps capture transactional. Opt-in `auto` starts with triggers and moves eligible sources to receipt-backed WAL capture.
 - **Watermark gating** — external loaders publish per-source watermarks; downstream refreshes wait until all sources are aligned before proceeding.
 
 ### Scheduling & dependency management
@@ -219,11 +219,11 @@ See [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) for the full differentiation 
 
 ## Performance
 
-pg_trickle is designed for low-latency, high-throughput incremental view maintenance. Differential refresh processes only changed rows — not the entire base table — yielding significant speedups over full recomputation.
+pg_trickle is designed for low-latency, high-throughput incremental view maintenance. Differential refresh starts from captured changes and updates only affected state instead of recomputing the entire result.
 
 ### When Differential Wins
 
-DIFFERENTIAL processes only changed rows; FULL re-executes the entire query. The gap between them grows with table size and shrinks with change rate — at 50% churn the two modes converge.
+DIFFERENTIAL processes captured changes plus the state they affect; FULL re-executes the entire query. Joins can amplify one changed row into many matches, while aggregates and windows may rescan affected groups or partitions. The gap generally grows with table size and shrinks as affected state grows.
 
 DIFFERENTIAL is the right default for **scans, joins, filtered projections, and high-cardinality aggregates** (`GROUP BY customer_id` with thousands of distinct groups): FULL must TRUNCATE and re-insert or re-aggregate the entire result set, while DIFFERENTIAL touches only the 1–2% of rows that changed. The TPC-H validation section below shows 15.9x measured speedup for joins at 1% change rate.
 
@@ -290,17 +290,23 @@ Incremental view maintenance is not free on the write side. CDC triggers add ove
 
 Several layers reduce this cost automatically:
 
-- **Trigger CDC** — the v0.100 safe default uses trigger capture; `auto` is an alias for `trigger`, and WAL capture is rejected with `PGT_EXT_CDC_UNAVAILABLE`.
+- **Trigger CDC** — the default `trigger` mode uses one trigger invocation per statement and writes one buffer row per affected source row.
 - **Columnar change tracking** — CDC records only the columns referenced by the defining query, using a VARBIT bitmask. UPDATEs that touch only unreferenced columns are skipped entirely, reducing delta volume by **50–90%** for wide tables.
 - **Delta predicate pushdown** — WHERE predicates from the defining query are injected into change buffer scans, filtering irrelevant changes at read time (**5–10x** delta volume reduction for selective queries).
 - **Event-driven scheduler wake** — CDC triggers emit `pg_notify()` to wake the scheduler immediately instead of polling, reducing propagation latency from ~515 ms to ~15 ms median.
 - **Adaptive FULL fallback** — when the change ratio exceeds a threshold (default: 50%), the engine automatically switches to FULL refresh for that cycle, avoiding the case where differential is slower than recomputation.
 
-For write-heavy workloads where trigger overhead is a concern, FULL refresh mode bypasses CDC entirely — no triggers are installed, and each refresh re-executes the full query.
+For write-heavy workloads where trigger overhead is a concern, FULL refresh mode bypasses CDC entirely. No triggers are installed, and each refresh re-executes the full query.
+
+A source row is not a unit-of-work guarantee. A key change can invalidate two
+groups, a join can amplify one source row into many result rows, and a window
+change can recompute an affected partition. The generated
+[support summary](docs/SUPPORT_SUMMARY.md) records whether each tested path
+uses local affected-state work or a whole-query FULL fallback.
 
 **If overhead is still a concern:**
 
-- **Avoid unsupported WAL capture** — `cdc_mode = 'wal'` is intentionally rejected in v0.100 until durable receipt is implemented.
+- **Use WAL capture when qualified** — `cdc_mode = 'auto'` transitions eligible sources from triggers to receipt-backed WAL; explicit `wal` falls back to triggers if admission fails.
 - **Batch writes** — prefer multi-row `INSERT` or `COPY` over single-row statements. Per-row trigger cost is constant, so batching amortizes it across fewer transactions and reduces change buffer pressure.
 - **Narrow the defining query** — referencing fewer source columns lets columnar filtering discard more UPDATE events at capture time. UPDATEs that touch only unreferenced columns are skipped entirely, with no entry written to the change buffer.
 - **Increase `refresh_interval`** — less frequent refreshes allow the compactor to collapse more cancelling changes per cycle, reducing the total delta volume the engine must process.
@@ -357,7 +363,7 @@ shared_preload_libraries = 'pg_trickle'
 max_worker_processes = 8
 ```
 
-> **Note:** `wal_level = logical` and `max_replication_slots` are **not** required by default. CDC uses lightweight row-level triggers unless you opt in to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` (see [CONFIGURATION.md](docs/CONFIGURATION.md)).
+> **Note:** `wal_level = logical` and `max_replication_slots` are **not** required by default. CDC uses statement-level triggers unless you opt in to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` (see [CONFIGURATION.md](docs/CONFIGURATION.md)).
 
 Restart PostgreSQL, then:
 
@@ -638,7 +644,7 @@ See [SQL Reference — Restrictions & Interoperability](docs/SQL_REFERENCE.md#re
 
 1. **Create** — `pgtrickle.create_stream_table()` parses the defining query into an operator tree, creates a storage table, installs lightweight CDC triggers on source tables, and registers the ST in the catalog.
 
-2. **Capture** — Changes to base tables are captured via the hybrid CDC layer. By default, `AFTER INSERT/UPDATE/DELETE` row-level triggers write to per-source change buffer tables in the `pgtrickle_changes` schema. With `pg_trickle.cdc_mode = 'auto'`, the system transitions to WAL-based capture (logical replication) after the first successful refresh for lower write-side overhead.
+2. **Capture** — Changes to base tables are captured via the hybrid CDC layer. By default, statement-level `AFTER INSERT/UPDATE/DELETE` triggers write one record per affected source row to per-source change buffers in `pgtrickle_changes`. With opt-in `pg_trickle.cdc_mode = 'auto'`, eligible sources transition to receipt-backed WAL capture after starting on triggers.
 
 3. **Schedule** — A background worker wakes periodically (default: 1s) and checks which STs have exceeded their schedule (or whose cron schedule has fired). STs are scheduled for refresh in topological order.
 

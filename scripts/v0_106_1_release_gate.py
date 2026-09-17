@@ -15,7 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.106.1"
+PREVIOUS_VERSION = "0.106.0"
 QUALIFICATION = ROOT / "tests/release/v0.106.1-qualification.json"
+GATE_SCRIPT = "v0_106_1_release_gate.py"
 EXPECTED_SUITES = {
     "release-gate", "graph-v1", "delta-v1", "dvm-oracle", "recovery",
     "wal-admission", "pending-data-upgrade", "recreation", "logical-restore",
@@ -34,7 +36,7 @@ CANDIDATE = "a" * 40
 
 def require(condition: bool, message: str) -> None:
     if not condition:
-        raise SystemExit(f"v0.106.1 release gate failed: {message}")
+        raise SystemExit(f"v{VERSION} release gate failed: {message}")
 
 
 def job_block(workflow: str, name: str) -> str:
@@ -53,7 +55,7 @@ def synthetic_contract() -> dict[str, object]:
     return {
         "release_version": VERSION,
         "postgresql_major": 18,
-        "source_versions": ["0.106.0"],
+        "source_versions": [PREVIOUS_VERSION],
         "database_settings": {
             "fsync": "on", "synchronous_commit": "on", "full_page_writes": "on",
         },
@@ -126,7 +128,7 @@ def invoke_writer(case: str) -> tuple[int, str]:
         contract_path = temp / "qualification.json"
         contract = synthetic_contract()
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
-        artifact_path = temp / "pg_trickle-0.106.1-pg18-linux-amd64.tar.gz"
+        artifact_path = temp / f"pg_trickle-{VERSION}-pg18-linux-amd64.tar.gz"
         artifact_path.write_bytes(b"test-package")
         artifact_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
         log_path = temp / "suite.log"
@@ -255,7 +257,7 @@ def invoke_writer(case: str) -> tuple[int, str]:
             "kind": "criterion",
             "candidate_commit": CANDIDATE,
             "artifact_digest": artifact_digest,
-            "baseline_version": "v0.106.0" if case == "criterion-baseline-mismatch" else "0.106.0",
+            "baseline_version": f"v{PREVIOUS_VERSION}" if case == "criterion-baseline-mismatch" else PREVIOUS_VERSION,
             "compared_benchmarks": 113,
             "minimum_absolute_delta_ns": 249.0 if case == "criterion-floor-mismatch" else 250.0,
             "maximum_mean_regression_pct": 0.0,
@@ -319,8 +321,8 @@ def check_suite_runner() -> None:
         (package / "lib").mkdir(parents=True)
         (package / "extension").mkdir()
         (package / "lib/pg_trickle.so").write_bytes(b"test-library")
-        (package / "extension/pg_trickle.control").write_text("default_version = '0.106.1'\n", encoding="utf-8")
-        artifact = temp / "pg_trickle-0.106.1-pg18-linux-amd64.tar.gz"
+        (package / "extension/pg_trickle.control").write_text(f"default_version = '{VERSION}'\n", encoding="utf-8")
+        artifact = temp / f"pg_trickle-{VERSION}-pg18-linux-amd64.tar.gz"
         with tarfile.open(artifact, "w:gz") as archive:
             archive.add(package, arcname="pg_trickle-package")
 
@@ -373,7 +375,7 @@ def main() -> None:
     require(cargo.get("version") == VERSION, "META.json version drift")
     contract = json.loads(QUALIFICATION.read_text(encoding="utf-8"))
     require(contract.get("release_version") == VERSION, "qualification version drift")
-    require(contract.get("source_versions") == ["0.106.0"], "previous package boundary drift")
+    require(contract.get("source_versions") == [PREVIOUS_VERSION], "previous package boundary drift")
     require(contract.get("evidence", {}).get("schema_version") == 3, "structured evidence schema is not enabled")
     suites = contract.get("required_suites", [])
     ids = {suite.get("id") for suite in suites if isinstance(suite, dict)}
@@ -397,7 +399,7 @@ def main() -> None:
 
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     preflight = job_block(workflow, "preflight")
-    require("v0_106_1_release_gate.py" in preflight, "v0.106.1 release gate is not wired into preflight")
+    require(GATE_SCRIPT in preflight, f"v{VERSION} release gate is not wired into preflight")
     qualification = job_block(workflow, "qualification")
     require("scripts/run_release_suite.py" in qualification, "qualification jobs do not emit structured suite results")
     require(
@@ -418,7 +420,7 @@ def main() -> None:
     check_negative_controls()
     subprocess.run([sys.executable, str(ROOT / "scripts/generate_capability_manifest.py"), "--check"], cwd=ROOT, check=True)
     subprocess.run([str(ROOT / "scripts/check_version_sync.sh")], cwd=ROOT, check=True)
-    print("v0.106.1 qualification, evidence, publication, and negative-control gates passed")
+    print(f"v{VERSION} qualification, evidence, publication, and negative-control gates passed")
 
 
 if __name__ == "__main__":

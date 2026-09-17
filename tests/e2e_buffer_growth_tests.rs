@@ -85,12 +85,12 @@ async fn test_buffer_growth_triggers_full_fallback() {
     )
     .await;
 
-    // Create stream table with manual refresh (no auto-schedule)
+    // Use a long schedule so the test controls refresh timing.
     db.execute(
         "SELECT pgtrickle.create_stream_table(
             'buf_st',
             'SELECT val, COUNT(*) AS cnt FROM buf_source GROUP BY val',
-            schedule => 'manual'
+            schedule => '1h'
         )",
     )
     .await;
@@ -188,7 +188,7 @@ async fn test_buffer_growth_recovery_after_burst() {
         "SELECT pgtrickle.create_stream_table(
             'recovery_st',
             'SELECT val, COUNT(*) AS cnt FROM recovery_source GROUP BY val',
-            schedule => 'manual'
+            schedule => '1h'
         )",
     )
     .await;
@@ -280,7 +280,7 @@ async fn test_buffer_growth_no_data_loss() {
             'nodloss_st',
             'SELECT category, SUM(amount) AS total, COUNT(*) AS cnt
              FROM nodloss_source GROUP BY category',
-            schedule => 'manual'
+            schedule => '1h'
         )",
     )
     .await;

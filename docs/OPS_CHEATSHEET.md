@@ -37,7 +37,7 @@ ORDER BY buffer_rows DESC;
 |---|---|---|
 | `pg_trickle.max_concurrent_refreshes` | `4`–`8` | Prevent refresh storms from saturating I/O; tune up for large worker pools |
 | `pg_trickle.differential_max_change_ratio` | `0.05`–`0.20` | Fraction of the table that must change before switching from DIFF to FULL refresh; lower = more aggressive DIFF |
-| `pg_trickle.delta_work_mem_cap_mb` | `256` (default) | Cap per-refresh memory; raise to `512`–`1024` on large joins |
+| `pg_trickle.delta_work_mem_cap_mb` | `256` (default) | Hard cap for the delta-path `work_mem` setting; it does not cap total executor memory or temporary files |
 | `pg_trickle.scheduler_interval_ms` | `500`–`2000` | Refresh loop cadence; lower = fresher data, higher CPU; match to your latency SLA |
 | `max_worker_processes` | `≥ 32` | PostgreSQL default of 8 is exhausted quickly; silent scheduler stalls result |
 
@@ -61,7 +61,8 @@ SELECT pgtrickle.refresh_stream_table('schema.my_summary');
 -- Inspect the refresh plan without running it
 SELECT * FROM pgtrickle.explain_refresh_mode('schema.my_summary');
 
--- Suspend and resume (keeps CDC triggers alive)
+-- Suspend and resume refresh for one stream table. Capture stays active,
+-- so the source backlog grows until resume.
 SELECT pgtrickle.alter_stream_table('schema.my_summary', status => 'SUSPENDED');
 SELECT pgtrickle.resume_stream_table('schema.my_summary');
 
@@ -101,12 +102,16 @@ Full reference: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) ·
 ## Maintenance Operations
 
 ```sql
--- Graceful quiesce before pg_upgrade or a rolling restart
+-- Graceful refresh drain before pg_upgrade or a rolling restart.
+-- Capture continues and backlog can grow until resume_after_drain().
 SELECT pgtrickle.drain();
 SELECT pgtrickle.is_drained();   -- wait until true
+SELECT pgtrickle.resume_after_drain();
 
--- Pause CDC without dropping triggers (maintenance window)
+-- Stop trigger capture. The default discard mode drops source changes while
+-- paused, so affected stream tables require repair/resnapshot after resume.
 SET pg_trickle.cdc_paused = on;
+SELECT * FROM pgtrickle.cdc_pause_status();
 -- ... perform maintenance ...
 SET pg_trickle.cdc_paused = off;
 
@@ -114,6 +119,12 @@ SET pg_trickle.cdc_paused = off;
 -- (data in buffers is reconstructable via FULL refresh after crash)
 SELECT pgtrickle.convert_buffers_to_unlogged();
 ```
+
+Resource controls have different semantics: `max_buffer_rows` is a hard row
+limit that triggers FULL fallback, spill settings are observed thresholds that
+can trigger reinitialization, and scheduled lock/statement timeouts cancel a
+refresh. A batch limit does not bound total executor memory, temporary files,
+lock retention, or transaction duration.
 
 Full reference: [RUNBOOK_DRAIN.md](RUNBOOK_DRAIN.md) ·
 [UPGRADING.md](UPGRADING.md) · [PRE_DEPLOYMENT.md](PRE_DEPLOYMENT.md)

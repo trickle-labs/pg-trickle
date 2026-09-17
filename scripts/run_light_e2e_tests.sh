@@ -142,6 +142,10 @@ LIGHT_E2E_TESTS=(
     e2e_failure_recovery_tests
     e2e_publication_crash_recovery_tests
     e2e_pg_dump_tests
+    e2e_v107_operator_route_tests
+    e2e_buffer_growth_tests
+    e2e_dvm_negative_control_tests
+    e2e_v078_tests
 )
 
 usage() {

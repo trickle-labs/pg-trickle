@@ -47,7 +47,7 @@ incremental change (DIFFERENTIAL).
 Tells pg_trickle *how* to refresh. The four modes:
 
 - **AUTO** — pick the cheapest mode each cycle (the default).
-- **DIFFERENTIAL** — incremental: only changed rows are processed.
+- **DIFFERENTIAL** — incremental: captured changes drive updates to affected rows, groups, partitions, or join matches.
 - **FULL** — re-run the entire defining query.
 - **IMMEDIATE** — refresh inside the same transaction as the source DML
   (no scheduler involved).

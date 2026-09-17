@@ -1084,12 +1084,7 @@ fn resolve_wal_filter_names(
 /// false matches when a schema/table name or column value happens to contain
 /// an action keyword (G2.3).
 fn parse_pgoutput_action(data: &str) -> Option<char> {
-    // Strip the fixed "table " prefix that prefixes all DML lines.
-    let rest = data.strip_prefix("table ")?;
-    // Skip over "schema.tablename" to the first ": " separator.
-    let after_table_colon = rest.split_once(": ")?.1;
-    // The action keyword is the next token up to the next ':'.
-    let action = after_table_colon.split_once(':')?.0.trim();
+    let (action, _) = pgoutput_action_payload(data)?;
     match action {
         "INSERT" => Some('I'),
         "UPDATE" => Some('U'),
@@ -1097,6 +1092,13 @@ fn parse_pgoutput_action(data: &str) -> Option<char> {
         "TRUNCATE" => Some('T'),
         _ => None,
     }
+}
+
+fn pgoutput_action_payload(data: &str) -> Option<(&str, &str)> {
+    let rest = data.strip_prefix("table ")?;
+    let after_table_colon = rest.split_once(": ")?.1;
+    let (action, payload) = after_table_colon.split_once(':')?;
+    Some((action.trim(), payload))
 }
 
 #[doc(hidden)]
@@ -1109,25 +1111,118 @@ pub fn parse_test_decoding_action_for_fuzz(data: &str) -> Option<char> {
 /// Extracts `column_name[type]:value` pairs from the pgoutput text format.
 /// Returns a map from column name to string value.
 fn parse_pgoutput_columns(data: &str) -> std::collections::HashMap<String, String> {
-    let mut cols = std::collections::HashMap::new();
-    let payload = if let Some(pos) = data.find("INSERT:") {
-        data.get(pos + "INSERT:".len()..).unwrap_or("")
-    } else if let Some(pos) = data.find("UPDATE:") {
-        data.get(pos + "UPDATE:".len()..).unwrap_or("")
-    } else if let Some(pos) = data.find("DELETE:") {
-        data.get(pos + "DELETE:".len()..).unwrap_or("")
-    } else {
-        return cols;
+    let Some((action, payload)) = pgoutput_action_payload(data) else {
+        return std::collections::HashMap::new();
     };
-    for segment in payload.split_whitespace() {
-        if let Some(bracket_pos) = segment.find('[') {
-            let col_name = &segment[..bracket_pos];
-            if let Some(colon_pos) = segment.find("]:") {
-                let value = segment[colon_pos + 2..].trim_matches('\'');
-                cols.insert(col_name.to_string(), value.to_string());
+    if !matches!(action, "INSERT" | "UPDATE" | "DELETE") {
+        return std::collections::HashMap::new();
+    }
+    parse_pgoutput_column_payload(payload)
+}
+
+/// Parse `name[type]:value` fields without splitting quoted values on spaces.
+/// Later occurrences replace earlier ones, so UPDATE's `new-tuple` wins over
+/// matching `old-key` columns.
+fn parse_pgoutput_column_payload(payload: &str) -> std::collections::HashMap<String, String> {
+    let mut cols = std::collections::HashMap::new();
+    let bytes = payload.as_bytes();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if payload[pos..].starts_with("old-key:") {
+            pos += "old-key:".len();
+            continue;
+        }
+        if payload[pos..].starts_with("new-tuple:") {
+            pos += "new-tuple:".len();
+            continue;
+        }
+
+        let (column, after_name) = if bytes.get(pos) == Some(&b'"') {
+            let mut name = String::new();
+            let mut cursor = pos + 1;
+            let mut closed = false;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'"' {
+                    if bytes.get(cursor + 1) == Some(&b'"') {
+                        name.push('"');
+                        cursor += 2;
+                    } else {
+                        cursor += 1;
+                        closed = true;
+                        break;
+                    }
+                } else if let Some(ch) = payload[cursor..].chars().next() {
+                    name.push(ch);
+                    cursor += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if !closed {
+                break;
+            }
+            (name, cursor)
+        } else {
+            let start = pos;
+            while pos < bytes.len() && bytes[pos] != b'[' && !bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            (payload[start..pos].to_string(), pos)
+        };
+
+        pos = after_name;
+        if bytes.get(pos) != Some(&b'[') {
+            while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            continue;
+        }
+        let Some(type_end) = payload[pos..].find("]:") else {
+            break;
+        };
+        pos += type_end + 2;
+
+        if bytes.get(pos) == Some(&b'\'') {
+            pos += 1;
+            let mut value = String::new();
+            let mut closed = false;
+            while pos < bytes.len() {
+                if bytes[pos] == b'\'' {
+                    if bytes.get(pos + 1) == Some(&b'\'') {
+                        value.push('\'');
+                        pos += 2;
+                    } else {
+                        pos += 1;
+                        closed = true;
+                        break;
+                    }
+                } else if let Some(ch) = payload[pos..].chars().next() {
+                    value.push(ch);
+                    pos += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if !closed {
+                break;
+            }
+            cols.insert(column, value);
+        } else {
+            let start = pos;
+            while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            let value = &payload[start..pos];
+            if value != "null" {
+                cols.insert(column, value.to_string());
             }
         }
     }
+
     cols
 }
 
@@ -1151,25 +1246,17 @@ pub fn parse_test_decoding_columns_for_fuzz(
 /// "old-key:" section (i.e., REPLICA IDENTITY DEFAULT where only PK
 /// columns appear in old-key).
 fn parse_pgoutput_old_columns(data: &str) -> std::collections::HashMap<String, String> {
-    let mut cols = std::collections::HashMap::new();
-    let old_key_start = match data.find("old-key:") {
-        Some(pos) => pos + "old-key:".len(),
-        None => return cols,
+    let Some(("UPDATE", payload)) = pgoutput_action_payload(data) else {
+        return std::collections::HashMap::new();
     };
-    let old_key_end = data[old_key_start..]
-        .find("new-tuple:")
-        .map(|pos| old_key_start + pos)
-        .unwrap_or(data.len());
-    for segment in data[old_key_start..old_key_end].split_whitespace() {
-        if let Some(bracket_pos) = segment.find('[') {
-            let col_name = &segment[..bracket_pos];
-            if let Some(colon_pos) = segment.find("]:") {
-                let value = segment[colon_pos + 2..].trim_matches('\'');
-                cols.insert(col_name.to_string(), value.to_string());
-            }
-        }
-    }
-    cols
+    let Some(old_key_start) = payload.find("old-key:") else {
+        return std::collections::HashMap::new();
+    };
+    let old_payload = &payload[old_key_start + "old-key:".len()..];
+    let old_payload = old_payload
+        .split_once("new-tuple:")
+        .map_or(old_payload, |(old, _)| old);
+    parse_pgoutput_column_payload(old_payload)
 }
 
 #[doc(hidden)]
@@ -3116,6 +3203,27 @@ mod tests {
         let cols = parse_pgoutput_columns(data);
         assert_eq!(cols.get("id").map(|s| s.as_str()), Some("1"));
         assert_eq!(cols.get("name").map(|s| s.as_str()), Some("Alice"));
+    }
+
+    #[test]
+    fn test_parse_pgoutput_columns_preserves_quoted_values_and_nulls() {
+        let data = "table public.users: INSERT: id[integer]:1 name[text]:'Alice O''Brien' note[text]:null \"display name\"[text]:'東京 user'";
+        let cols = parse_pgoutput_columns(data);
+        assert_eq!(cols.get("name").map(String::as_str), Some("Alice O'Brien"));
+        assert_eq!(
+            cols.get("display name").map(String::as_str),
+            Some("東京 user")
+        );
+        assert!(!cols.contains_key("note"));
+    }
+
+    #[test]
+    fn test_parse_pgoutput_columns_update_prefers_new_tuple() {
+        let data = "table public.users: UPDATE: old-key: id[integer]:1 name[text]:'Before value' new-tuple: id[integer]:1 name[text]:'After value'";
+        let cols = parse_pgoutput_columns(data);
+        let old = parse_pgoutput_old_columns(data);
+        assert_eq!(cols.get("name").map(String::as_str), Some("After value"));
+        assert_eq!(old.get("name").map(String::as_str), Some("Before value"));
     }
 
     #[test]

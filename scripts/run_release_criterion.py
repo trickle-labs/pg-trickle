@@ -14,9 +14,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_TAG = "v0.106.0"
+BASELINE_TAG = "v0.106.1"
 BASELINE_VERSION = BASELINE_TAG.removeprefix("v")
-QUALIFICATION = ROOT / "tests/release/v0.106.1-qualification.json"
+QUALIFICATION = ROOT / "tests/release/v0.107.0-qualification.json"
 MAX_COMPARISON_ATTEMPTS = 2
 
 

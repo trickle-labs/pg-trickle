@@ -289,12 +289,12 @@ The trigger writes `action = 'D'` with the `OLD` values. The aggregate different
 | Typed columns | No JSONB serialization in the trigger, no `jsonb_populate_record` in the delta query |
 | Pre-computed pk_hash | No per-row hash computation during the delta query |
 | LSN-bounded reads | Index scan on the change buffer, not a full table scan |
-| Algebraic differentiation | Processes only changed rows — O(changes) not O(table size) |
+| Algebraic differentiation | Starts from captured changes and limits work to affected state |
 | MERGE statement | Single SQL round-trip for all inserts, updates, and deletes |
 | Cached templates | After the first refresh, delta SQL generation is skipped entirely |
 | Adaptive fallback | Automatically switches to FULL refresh when changes exceed a threshold |
 
-For a table with 10 million rows and 100 changed rows, a DIFFERENTIAL refresh processes only those 100 rows. A FULL refresh would need to scan all 10 million.
+For a table with 10 million rows and 100 changed rows, a DIFFERENTIAL refresh starts from those 100 rows. It may also read matching join rows or affected aggregate/window state; a FULL refresh must re-run the whole query.
 
 ---
 

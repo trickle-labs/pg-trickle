@@ -1155,7 +1155,7 @@ SUSPENDED, CDC buffer > 1 GB, scheduler down, high refresh duration.
 | **Stream tables** | Tables defined by a SQL query that stay automatically up to date |
 | **CDC triggers** | Lightweight change capture in the same transaction — no logical replication or polling required |
 | **DAG scheduling** | Stream tables can depend on other stream tables; refreshes run in topological order, schedules propagate upstream via `CALCULATED` mode |
-| **Algebraic IVM** | Delta queries that process only changed rows — O(changes) regardless of table size |
+| **Algebraic IVM** | Delta queries start from captured changes and update affected state instead of the full result |
 | **Semi-naive / DRed** | Incremental strategies for `WITH RECURSIVE` — INSERT uses semi-naive, DELETE/UPDATE uses Delete-and-Rederive |
 | **IMMEDIATE mode** | Synchronous in-transaction IVM — stream tables updated within the same transaction as your DML, always consistent |
 | **TopK** | `ORDER BY … LIMIT N` queries store exactly N rows, refreshed via scoped recomputation |

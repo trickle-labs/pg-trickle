@@ -2,6 +2,19 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.106.1 to 0.107.0
+
+Install the v0.107.0 library and extension files, then apply the metadata-only
+migration:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.107.0';
+```
+
+This release changes qualification tests and documentation, not SQL objects or
+catalog layouts. Trigger capture remains the default. Existing `cdc_mode =
+'auto'` overrides remain opt-in and may transition eligible sources to WAL.
+
 ## 0.106.0 to 0.106.1
 
 Install the v0.106.1 library and extension files, then apply the metadata-only

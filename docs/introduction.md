@@ -30,9 +30,9 @@ pg_trickle keeps stream tables current by tracking every change to the source
 tables — inserts, updates, and deletes — and recomputing only the parts of the
 view that are affected by those changes. This is called **differential** (or
 incremental) view maintenance. Instead of re-running the full query on every
-refresh cycle, pg_trickle applies a *delta* computation proportional to the
-number of changed rows, not the total table size. A stream table over a
-billion-row orders table refreshes in milliseconds when only a few rows changed.
+refresh cycle, pg_trickle starts from a *delta* and updates affected state.
+Joins can amplify a source change, and aggregates or windows may rescan an
+affected group or partition, so work is not necessarily one row per change.
 
 Change capture works through **trigger-based CDC** (statement-level triggers by
 default, row-level triggers available for compatibility) or **WAL-based logical

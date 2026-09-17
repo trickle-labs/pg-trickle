@@ -139,7 +139,10 @@ SELECT id, rnk FROM ranked WHERE rnk <= 10
 ```
 
 - Non-recursive CTEs: supported as inlined (NOT MATERIALIZED) sub-queries.
-- Recursive CTEs: fallback to FULL refresh with reason `recursive_cte_fallback`.
+- Recursive CTEs: DIFFERENTIAL and IMMEDIATE use semi-naive evaluation or
+  delete-and-rederive when possible. Shapes that cannot use those algorithms
+  recompute the recursive result and diff it against storage without changing
+  the whole stream table to FULL.
 
 ### Recursive CTEs
 
@@ -152,9 +155,14 @@ WITH RECURSIVE tree AS (
 SELECT * FROM tree
 ```
 
-- **Not differentially maintainable**.
-- Always falls back to FULL refresh.
-- `refresh_reason`: `recursive_cte_fallback`
+- INSERT-only changes use semi-naive evaluation.
+- DELETE and UPDATE changes use delete-and-rederive when the stored columns
+  contain the recursive state required by the algorithm.
+- Column projection mismatches and non-monotone recursive terms recompute the
+  recursive result locally. `refresh_reason` is `recursive_cte_fallback`; this
+  is not a whole-query FULL fallback.
+- A recursive term containing an unsupported set operation makes AUTO choose
+  FULL and makes explicit DIFFERENTIAL reject the query.
 
 ### UNION ALL
 
@@ -271,7 +279,7 @@ restrictions on what the defining query can do:
 | Non-correlated scalar subquery | ✅ Yes | |
 | Lateral join | ⚠️ Limited | Only if lateral body is a simple scan |
 | Window functions | ⚠️ Limited | Partition recomputation; large partitions may exceed lock timeout |
-| Recursive CTE | ❌ Blocked | Causes lock acquisition cycle risk |
+| Recursive CTE | ✅ Yes | Semi-naive/DRed when eligible; otherwise recursive-result recomputation |
 | Cross-database references | ❌ Blocked | SPI cannot span databases in one transaction |
 | Long-running aggregate (cost > threshold) | ❌ Blocked | May exceed `lock_timeout` |
 
@@ -351,7 +359,7 @@ O(delta × lineitem) work.
 | COUNT/SUM/AVG(DISTINCT simple scalar) | GROUP_RESCAN | Affected group exceeds `distinct_agg_max_values_per_group` | `DISTINCT_AGG_BOUNDED_STATE_FULL_FALLBACK` |
 | Other DISTINCT aggregates | FULL | Always | `AGG-101-1-DISTINCT` |
 | Non-recursive CTE | DIFF (inlined) | — | — |
-| Recursive CTE | FULL | Always | `recursive_cte_fallback` |
+| Recursive CTE | DIFF semi-naive / DRed | Recursive-result recomputation for ineligible shapes | `recursive_cte_fallback` |
 | UNION ALL | DIFF | — | — |
 | Lateral join | DIFF (snapshot) | — | — |
 | Window functions | DIFF partition recompute | Always in v0.89 | `WINDOW_*` in strategy and diagnostics |

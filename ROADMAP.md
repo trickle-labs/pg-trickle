@@ -12,8 +12,8 @@ release requirement.
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| [v0.106.0](roadmap/v0.106.0.md) | Verify package support, pending-data upgrades, platform tiers, and database resource budgets with executed evidence. | In progress |
-| [v0.107.0](roadmap/v0.107.0.md) | Back support claims and operator procedures with runtime tests. | Planned |
+| [v0.106.0](roadmap/v0.106.0.md) | Verify package support, pending-data upgrades, platform tiers, and database resource budgets with executed evidence. | Released |
+| [v0.107.0](roadmap/v0.107.0.md) | Back support claims and operator procedures with runtime tests. | In progress |
 | [v0.108.0](roadmap/v0.108.0.md) | Make at most two internal changes for reproduced defects or measured performance costs. Skip this release if the evidence does not justify a change. | Conditional |
 
 ## Release constraints

@@ -189,9 +189,10 @@ orders → orders_by_customer → customer_top10
 ```
 
 When `orders` changes, pg_trickle refreshes `orders_by_customer` first, then
-uses its delta to refresh `customer_top10`. Each step is O(Δ), so the full
-chain completes in time proportional to the number of changed rows — not the
-total data size.
+uses its delta to refresh `customer_top10`. Each step starts from Δ, but joins
+can amplify changes and aggregates or windows can rescan affected groups or
+partitions. The work is bounded by affected state rather than always being one
+unit of work per changed row.
 
 pg_trickle detects cycles and rejects stream table definitions that would
 create them (unless `pg_trickle.allow_circular = true`, which enables fixpoint
