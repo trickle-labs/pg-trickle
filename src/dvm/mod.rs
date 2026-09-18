@@ -1579,39 +1579,84 @@ pub(crate) fn window_row_identity_expr(row_alias: &str, key_columns: &[String]) 
     crate::hash::build_row_identity_expr("WINDOW_KEY", &expressions)
 }
 
-fn contains_unsupported_lateral(tree: &parser::OpTree) -> bool {
-    match tree {
-        parser::OpTree::LateralFunction {
-            declared_columns,
-            child,
-            ..
-        } => {
-            let registry = crate::dvm::row_id_v2::TypeRegistry::new();
-            let all_scalar = !declared_columns.is_empty()
-                && declared_columns.iter().all(|col| {
-                    registry
-                        .validate_type(
-                            &col.name,
-                            col.type_oid,
-                            crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
-                        )
-                        .is_ok()
-                });
-            !all_scalar || contains_unsupported_lateral(child)
-        }
-        parser::OpTree::Filter { child, .. }
-        | parser::OpTree::Project { child, .. }
-        | parser::OpTree::Subquery { child, .. }
-        | parser::OpTree::Window { child, .. } => contains_unsupported_lateral(child),
-        parser::OpTree::InnerJoin { left, right, .. }
-        | parser::OpTree::LeftJoin { left, right, .. }
-        | parser::OpTree::FullJoin { left, right, .. }
-        | parser::OpTree::SemiJoin { left, right, .. }
-        | parser::OpTree::AntiJoin { left, right, .. } => {
-            contains_unsupported_lateral(left) || contains_unsupported_lateral(right)
-        }
-        _ => false,
+#[cfg(any(not(test), feature = "pg_test"))]
+fn query_target_column_types(query: &str) -> Option<std::collections::HashMap<String, u32>> {
+    use pgrx::PgList;
+    use pgrx::pg_sys;
+    use std::collections::HashMap;
+    use std::ffi::CStr;
+    use std::panic::AssertUnwindSafe;
+
+    let c_sql = std::ffi::CString::new(query).ok()?;
+    // SAFETY: parser and analyzer run inside a PostgreSQL backend memory context.
+    unsafe {
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(|| {
+            let raw_list =
+                pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+            let stmts = PgList::<pg_sys::RawStmt>::from_pg(raw_list);
+            let raw_stmt = stmts.get_ptr(0)?;
+            let query_node = pg_sys::parse_analyze_fixedparams(
+                raw_stmt,
+                c_sql.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            );
+            if query_node.is_null() {
+                return None;
+            }
+            let target_list = PgList::<pg_sys::TargetEntry>::from_pg((*query_node).targetList);
+            let mut map = HashMap::new();
+            for (index, tle_ptr) in target_list.iter_ptr().enumerate() {
+                if tle_ptr.is_null() {
+                    continue;
+                }
+                let tle = &*tle_ptr;
+                if tle.resjunk {
+                    continue;
+                }
+                let name = if !tle.resname.is_null() {
+                    CStr::from_ptr(tle.resname).to_string_lossy().into_owned()
+                } else {
+                    format!("column_{}", index + 1)
+                };
+                let type_oid = if tle.expr.is_null() {
+                    0
+                } else {
+                    pg_sys::exprType(tle.expr as *const pg_sys::Node).to_u32()
+                };
+                map.insert(name, type_oid);
+            }
+            Some(map)
+        }))
+        .execute()
     }
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn query_target_column_types(_query: &str) -> Option<std::collections::HashMap<String, u32>> {
+    None
+}
+
+fn key_cols_have_unsupported_types(defining_query: &str, key_cols: &[String]) -> bool {
+    if let Some(col_types) = query_target_column_types(defining_query) {
+        let registry = crate::dvm::row_id_v2::TypeRegistry::new();
+        for col in key_cols {
+            if let Some((_, &type_oid)) =
+                col_types.iter().find(|(k, _)| k.eq_ignore_ascii_case(col))
+                && registry
+                    .validate_type(
+                        col,
+                        type_oid,
+                        crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
+                    )
+                    .is_err()
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Generate a SQL expression for computing `__pgt_row_id` from a subquery
@@ -1624,25 +1669,23 @@ fn contains_unsupported_lateral(tree: &parser::OpTree) -> bool {
 /// row-id computation is too complex (joins, union all).
 pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let tree = parse_defining_query(defining_query).ok();
-    if tree.as_ref().is_some_and(contains_unsupported_lateral) {
-        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(row_to_json(sub)::text))".to_string();
-    }
     let key_cols = tree.as_ref().and_then(|t| t.row_id_key_columns());
     let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
     match key_cols {
         Some(cols) if domain == "WINDOW_KEY" => window_row_identity_expr("sub", &cols),
-        Some(cols) if cols.len() == 1 => {
-            format!(
-                "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
-                diff::quote_ident(&cols[0]),
-            )
-        }
-        Some(cols) if cols.len() > 1 => {
-            let array_items: Vec<String> = cols
-                .iter()
-                .map(|c| format!("sub.{}", diff::quote_ident(c)))
-                .collect();
-            crate::hash::build_row_identity_expr(domain, &array_items)
+        Some(cols) if !key_cols_have_unsupported_types(defining_query, &cols) => {
+            if cols.len() == 1 {
+                format!(
+                    "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
+                    diff::quote_ident(&cols[0]),
+                )
+            } else {
+                let array_items: Vec<String> = cols
+                    .iter()
+                    .map(|c| format!("sub.{}", diff::quote_ident(c)))
+                    .collect();
+                crate::hash::build_row_identity_expr(domain, &array_items)
+            }
         }
         _ => {
             // Scalar aggregate (no GROUP BY): use singleton sentinel hash

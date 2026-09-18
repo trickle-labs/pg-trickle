@@ -2300,33 +2300,15 @@ impl OpTree {
                     let pk_aliases = join_pk_aliases(expressions, aliases, unwrapped);
                     return Some(pk_aliases.unwrap_or_else(|| aliases.clone()));
                 }
-                // Lateral subqueries have a complete content identity. Lateral
-                // table functions with declared scalar OUT columns also expose
-                // a stable visible row identity that differential refresh can match.
-                // General SRFs (like jsonb_array_elements) have no declared scalar
-                // columns; returning None allows FULL refresh to use its generic
-                // row_to_json identity instead of trying to encode JSONB via encode_row_id_v2.
-                if let OpTree::LateralFunction {
-                    declared_columns, ..
-                } = unwrapped
-                {
-                    let registry = crate::dvm::row_id_v2::TypeRegistry::new();
-                    let all_scalar = !declared_columns.is_empty()
-                        && declared_columns.iter().all(|col| {
-                            registry
-                                .validate_type(
-                                    &col.name,
-                                    col.type_oid,
-                                    crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
-                                )
-                                .is_ok()
-                        });
-                    if all_scalar {
-                        return Some(aliases.clone());
-                    }
-                    return None;
-                }
-                if matches!(unwrapped, OpTree::LateralSubquery { .. }) {
+                // LATERAL results have no natural key, so use the complete
+                // visible row as their identity. The differential Project
+                // path uses the same columns; keeping this metadata explicit
+                // prevents FULL refresh from falling back to a different
+                // row_to_json identity that DELETE deltas cannot match.
+                if matches!(
+                    unwrapped,
+                    OpTree::LateralFunction { .. } | OpTree::LateralSubquery { .. }
+                ) {
                     return Some(aliases.clone());
                 }
                 // For semi-join/anti-join children (EXISTS / NOT EXISTS / IN),
