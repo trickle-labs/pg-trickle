@@ -494,7 +494,7 @@ FROM orders o,
 
 The subquery is wrapped in `OpTree::Subquery` and its internal column references to the outer table (`o.id`) will fail to resolve during delta computation.
 
-**Status:** A comprehensive implementation plan exists in [PLAN_LATERAL_JOINS.md](PLAN_LATERAL_JOINS.md).
+**Status:** A comprehensive implementation plan exists in the historical LATERAL-join design.
 
 ---
 
@@ -894,7 +894,7 @@ Phase B (Subqueries & Aggs) ──┘
 
 ### Recommended Next Step
 
-**All planned phases are complete.** Remaining work is limited to Tier 3 structural enhancements and additional aggregate functions — see GAP_SQL_PHASE_4.md for prioritized recommendations.
+**All planned phases are complete.** Remaining work is limited to Tier 3 structural enhancements and additional aggregate functions; see the completed SQL-gap work for the historical recommendations.
 
 ---
 

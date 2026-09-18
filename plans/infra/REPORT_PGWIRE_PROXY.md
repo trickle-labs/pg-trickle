@@ -242,7 +242,7 @@ sidecar installs as PL/pgSQL stubs that write to command/response tables
 
 **Value:** High for developer experience. The custom DDL syntax feels
 native and matches the extension's `ProcessUtility_hook`-based syntax
-plan (see [PLAN_NATIVE_SYNTAX.md](../sql/PLAN_NATIVE_SYNTAX.md)).
+plan (see the rejected native-syntax proposal).
 
 **Complexity:** Medium-high. Must parse the custom syntax, distinguish it
 from regular PG DDL, and synthesize appropriate pgwire response messages
@@ -723,5 +723,5 @@ direct sidecar is proven and there is clear demand.
   PostgreSQL connection pooler (Apache-2.0)
 - [REPORT_EXTERNAL_PROCESS.md](REPORT_EXTERNAL_PROCESS.md) — External sidecar
   process feasibility study
-- [PLAN_NATIVE_SYNTAX.md](../sql/PLAN_NATIVE_SYNTAX.md) — Native DDL
+- Rejected native-syntax proposal — Native DDL
   syntax plan for the extension

@@ -106,7 +106,7 @@ anomalous data volumes. The gate pattern (check → pass/block) is universal.
 
 ### 1.2 Watermark Gating — Cross-Source Temporal Alignment
 
-**Source:** [PLAN_WATERMARK_GATING.md](../sql/PLAN_WATERMARK_GATING.md)
+**Source:** the implemented watermark-gating behavior
 
 #### What It Does
 
@@ -227,7 +227,7 @@ internal decomposition.
    (`create_green → catching_up → converged → promote | rollback →
    cleanup`) is a generic state machine. This pattern appears in:
    - Blue-green deployment (this feature)
-   - CDC mode transitions (trigger → WAL, per PLAN_HYBRID_CDC.md)
+   - CDC mode transitions (trigger → WAL, per the implemented hybrid CDC behavior)
    - Stream table status transitions (ACTIVE → SUSPENDED → ERROR)
 
    A generic `LifecycleStateMachine<State, Event>` could unify these.
@@ -941,7 +941,7 @@ and IMMEDIATE mode (compiled triggers) to prove both abstractions end-to-end.
 | [REPORT_EXTERNAL_PROCESS.md](REPORT_EXTERNAL_PROCESS.md) | Sidecar feasibility — primary consumer of extracted components |
 | [REPORT_BLUE_GREEN_DEPLOYMENT.md](REPORT_BLUE_GREEN_DEPLOYMENT.md) | Full blue-green design |
 | [PLAN_FUSE.md](../sql/PLAN_FUSE.md) | Full fuse design |
-| [PLAN_WATERMARK_GATING.md](../sql/PLAN_WATERMARK_GATING.md) | Full watermark gating design |
+| Historical watermark-gating implementation | Full watermark gating design |
 | [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](../sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md) | Diamond consistency — atomic refresh groups |
 | [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](../sql/PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md) | Cross-source snapshot consistency — REPEATABLE READ groups |
 | [PLAN_TRANSACTIONAL_IVM.md](../sql/PLAN_TRANSACTIONAL_IVM.md) | Transactional IVM — IMMEDIATE mode with transition tables |

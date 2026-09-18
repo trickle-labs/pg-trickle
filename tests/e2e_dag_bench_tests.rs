@@ -1,4 +1,4 @@
-//! DAG Topology Benchmarks — PLAN_DAG_BENCHMARK.md §1–§14.
+//! DAG topology benchmarks and propagation measurements.
 //!
 //! Measures end-to-end propagation latency and throughput through multi-level
 //! DAG topologies (linear chains, wide DAGs, fan-out trees, diamonds, mixed).

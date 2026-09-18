@@ -2,7 +2,7 @@
 
 **Status:** Evaluation Report (updated with implementation status)  
 **Date:** 2026-02-24  
-**Context:** ADR-001/ADR-002 in [PLAN_ADRS.md](../adrs/PLAN_ADRS.md) · [PLAN_USER_TRIGGERS_EXPLICIT_DML.md](PLAN_USER_TRIGGERS_EXPLICIT_DML.md)
+**Context:** ADR-001/ADR-002 in [PLAN_ADRS.md](../adrs/PLAN_ADRS.md) · the implemented user-trigger support
 
 ---
 
@@ -159,7 +159,7 @@ the `session_replication_role` conflict with logical replication publishing).
 In DIFFERENTIAL mode, explicit per-row DML (INSERT/UPDATE/DELETE) is used
 instead of MERGE so that user-defined AFTER triggers fire correctly. The
 implementation is controlled by the `pg_trickle.user_triggers` GUC (`auto`/
-`on`/`off`). See [PLAN_USER_TRIGGERS_EXPLICIT_DML.md](PLAN_USER_TRIGGERS_EXPLICIT_DML.md)
+`on`/`off`). See the implemented user-trigger support
 for the full design.
 
 > **Note:** Sections 2.1–2.5 compare creation-time and operational aspects.

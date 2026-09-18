@@ -409,12 +409,12 @@ the physical `pgt_id`.** When green is promoted and takes over the name
 
 - [REPORT_BLUE_GREEN_DEPLOYMENT.md](REPORT_BLUE_GREEN_DEPLOYMENT.md) — pipeline
   hot-swapping (parallel concern).
-- [PLAN_USER_TRIGGERS_EXPLICIT_DML.md](../sql/PLAN_USER_TRIGGERS_EXPLICIT_DML.md) — existing user trigger support (foundation for Layer 2).
+- Implemented user-trigger support — existing user trigger support (foundation for Layer 2).
 - [PLAN_TRANSACTIONAL_IVM.md](../sql/PLAN_TRANSACTIONAL_IVM.md) — immediate-mode
   IVM changes the latency profile for consumers.
 - [PLAN_ECO_SYSTEM.md](../ecosystem/PLAN_ECO_SYSTEM.md) — planned integrations
   (Airflow, Prometheus, CLI).
 - [REPORT_EXTERNAL_PROCESS.md](REPORT_EXTERNAL_PROCESS.md) — sidecar HTTP API
   could host webhook/SSE endpoints (post-1.0).
-- [PLAN_HYBRID_CDC.md](../sql/PLAN_HYBRID_CDC.md) — CDC mode transitions
+- Implemented CDC mode transitions
   (input-side analogue of output CDC lifecycle).

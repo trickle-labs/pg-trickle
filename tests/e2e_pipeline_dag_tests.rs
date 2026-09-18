@@ -1,6 +1,6 @@
 //! E2E tests for full multi-level DAG pipelines.
 //!
-//! Inspired by the test suites described in `plans/testing/PLAN_TEST_SUITES.md`.
+//! Inspired by the project's external test-suite planning work.
 //! Each scenario builds a realistic stream table DAG across 3-4 levels,
 //! verifies initial population, then exercises INSERT / UPDATE / DELETE at
 //! different points in the graph and confirms that changes cascade correctly

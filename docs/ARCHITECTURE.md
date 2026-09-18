@@ -189,7 +189,7 @@ When `pg_trickle.cdc_mode` is set to `'auto'` or `'wal'` and `wal_level = logica
 3. **Transition Orchestration** — The transition is a three-step process: (a) create a replication slot, (b) wait for the decoder to catch up to the trigger's last confirmed LSN, (c) drop the trigger and switch the dependency to WAL mode. If the decoder doesn't catch up within `pg_trickle.wal_transition_timeout` (default 300s), the system falls back to triggers.
 4. **CDC Mode Tracking** — Each source dependency in `pgt_dependencies` carries a `cdc_mode` column (TRIGGER / TRANSITIONING / WAL) and WAL-specific metadata (`slot_name`, `decoder_confirmed_lsn`, `transition_started_at`).
 
-See ADR-001 and ADR-002 in [plans/adrs/PLAN_ADRS.md](https://github.com/trickle-labs/pg-trickle/blob/main/plans/adrs/PLAN_ADRS.md) for the original design rationale and [plans/sql/PLAN_HYBRID_CDC.md](https://github.com/trickle-labs/pg-trickle/blob/main/plans/sql/PLAN_HYBRID_CDC.md) for the full implementation plan.
+See ADR-001 and ADR-002 in [plans/adrs/PLAN_ADRS.md](https://github.com/trickle-labs/pg-trickle/blob/main/plans/adrs/PLAN_ADRS.md) for the original design rationale. This document describes the current CDC implementation.
 
 #### Immediate Mode / Transactional IVM (`src/ivm.rs`)
 
