@@ -1,7 +1,7 @@
 # pg_trickle — Architecture & Roadmap Index
 
-> The implementation plan that used to live here has been archived.  
-> See [archive/PLAN_HISTORICAL.md](archive/PLAN_HISTORICAL.md) for the v0.9.0 era content.
+> The implementation plan that used to live here is no longer retained. This
+> file points to current planning and architecture documents.
 
 ## Active Planning Documents
 
@@ -28,7 +28,3 @@
 | [docs/LIMITATIONS.md](../docs/LIMITATIONS.md) | Known limitations and unsupported SQL patterns |
 | [docs/COMPARISONS.md](../docs/COMPARISONS.md) | pg_trickle vs pg_ivm, Materialize, Feldera, DuckDB/DuckLake |
 | [plans/PLAN_OVERALL_ASSESSMENT_14.md](https://github.com/trickle-labs/pg-trickle/blob/5ed05167/plans/PLAN_OVERALL_ASSESSMENT_14.md) | v0.74.0 deep-assessment findings (drives v0.72–v0.75 arc) |
-
-## Historical Archive
-
-Archived plans from past implementation cycles live in [archive/](archive/).

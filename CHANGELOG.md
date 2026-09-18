@@ -2039,9 +2039,9 @@ and `unit_kind` CHECK constraints to lag behind the extension catalog (missing
 
 **ARCH-003 / DOC-002: PLAN.md Archival**
 
-The 2,233-line v0.9.0 implementation plan in `plans/PLAN.md` has been moved to
-`plans/archive/PLAN_HISTORICAL.md`. `plans/PLAN.md` is now a short Architecture
-& Roadmap Index linking to active planning documents.
+The 2,233-line v0.9.0 implementation plan was removed from the active plan
+index. `plans/PLAN.md` is now a short Architecture & Roadmap Index linking to
+active planning documents.
 
 **DOC-003: plans/INDEX.md Generation**
 
