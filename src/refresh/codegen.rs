@@ -2637,6 +2637,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
         &dummy,
         schema,
         name,
+        None,
     ) {
         Ok(r) => r,
         Err(e) => {

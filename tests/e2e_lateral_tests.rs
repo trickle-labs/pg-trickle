@@ -287,7 +287,7 @@ async fn test_lateral_jsonb_array_elements_differential() {
     db.create_st(
         "lat_diff_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_diff d, \
+         FROM public.lat_diff d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",

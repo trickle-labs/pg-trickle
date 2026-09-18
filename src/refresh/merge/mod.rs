@@ -2031,18 +2031,15 @@ pub fn execute_differential_refresh_with_tuning(
                 )
             })?
         } else {
-            // The cache owns private L2 catalog access, but a cache miss also
-            // parses the defining query and must use its stored search_path.
-            with_stream_owner(st, || {
-                dvm::generate_delta_query_cached(
-                    st.pgt_id,
-                    &effective_defining_query,
-                    prev_frontier,
-                    new_frontier,
-                    schema,
-                    name,
-                )
-            })?
+            dvm::generate_delta_query_cached(
+                st.pgt_id,
+                &effective_defining_query,
+                prev_frontier,
+                new_frontier,
+                schema,
+                name,
+                Some(st),
+            )?
         };
 
         // DI-2: Clear per-leaf fallback OIDs after delta SQL generation.

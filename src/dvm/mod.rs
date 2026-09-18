@@ -780,6 +780,7 @@ pub fn generate_delta_query_cached(
     new_frontier: &Frontier,
     pgt_schema: &str,
     pgt_name: &str,
+    stream_owner: Option<&crate::catalog::StreamTableMeta>,
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     // Decision traces describe a concrete differentiation, so bypass both
     // template caches while tracing is enabled.
@@ -944,91 +945,98 @@ pub fn generate_delta_query_cached(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    // M-6 (v0.55.0): Time the DVM parse pass.
-    let parse_start = std::time::Instant::now();
-    let mut result = parse_defining_query_full(defining_query)?;
-    let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
-    crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
+    let build_entry = || -> Result<CachedDeltaTemplate, PgTrickleError> {
+        // M-6 (v0.55.0): Time the DVM parse pass.
+        let parse_start = std::time::Instant::now();
+        let mut result = parse_defining_query_full(defining_query)?;
+        let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
+        crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
 
-    let mut source_oids: Vec<u32> = result.tree.source_oids();
-    source_oids.extend(result.cte_registry.source_oids());
-    source_oids.sort_unstable();
-    source_oids.dedup();
+        let mut source_oids: Vec<u32> = result.tree.source_oids();
+        source_oids.extend(result.cte_registry.source_oids());
+        source_oids.sort_unstable();
+        source_oids.dedup();
 
-    // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns.
-    if crate::config::pg_trickle_enable_vector_agg() {
-        let vector_cols = resolve_vector_columns_for_sources(&source_oids);
-        if !vector_cols.is_empty() {
-            reclassify_vector_aggregates(&mut result.tree, &vector_cols);
+        // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns.
+        if crate::config::pg_trickle_enable_vector_agg() {
+            let vector_cols = resolve_vector_columns_for_sources(&source_oids);
+            if !vector_cols.is_empty() {
+                reclassify_vector_aggregates(&mut result.tree, &vector_cols);
+            }
         }
-    }
 
-    check_ivm_support_with_registry(&result)?;
-    row_id::verify_plan_row_id_schema(&result.tree).map_err(|e| {
-        PgTrickleError::InvalidArgument(format!("RowIdSchema verification failed: {e}"))
-    })?;
+        check_ivm_support_with_registry(&result)?;
+        row_id::verify_plan_row_id_schema(&result.tree).map_err(|e| {
+            PgTrickleError::InvalidArgument(format!("RowIdSchema verification failed: {e}"))
+        })?;
 
-    // Generate template with placeholder tokens instead of literal LSNs.
-    // Use dummy frontiers — the actual LSN values come from placeholders.
-    let is_scan_chain = is_scan_chain_tree(&result.tree);
-    let st_user_cols = result.tree.output_columns();
-    let has_pgt_count = result.tree.needs_pgt_count();
-    let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
-        .with_placeholders()
-        .with_pgt_name(pgt_schema, pgt_name)
-        .with_cte_registry(result.cte_registry)
-        .with_defining_query(defining_query);
-    ctx.st_user_columns = Some(st_user_cols);
-    ctx.merge_safe_dedup = is_scan_chain;
-    ctx.st_has_pgt_count = has_pgt_count;
+        // Generate template with placeholder tokens instead of literal LSNs.
+        // Use dummy frontiers — the actual LSN values come from placeholders.
+        let is_scan_chain = is_scan_chain_tree(&result.tree);
+        let st_user_cols = result.tree.output_columns();
+        let has_pgt_count = result.tree.needs_pgt_count();
+        let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
+            .with_placeholders()
+            .with_pgt_name(pgt_schema, pgt_name)
+            .with_cte_registry(result.cte_registry)
+            .with_defining_query(defining_query);
+        ctx.st_user_columns = Some(st_user_cols);
+        ctx.merge_safe_dedup = is_scan_chain;
+        ctx.st_has_pgt_count = has_pgt_count;
 
-    // P2-5: Resolve CDC column ordinals for bitmask filter.
-    ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
+        // P2-5: Resolve CDC column ordinals for bitmask filter.
+        ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
 
-    // A-2: Resolve key columns for value-only UPDATE detection.
-    ctx.set_source_key_columns(result.tree.source_key_columns_used());
+        // A-2: Resolve key columns for value-only UPDATE detection.
+        ctx.set_source_key_columns(result.tree.source_key_columns_used());
 
-    // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
-    ctx.set_st_source_pgt_ids(resolve_st_source_pgt_ids(&source_oids));
+        // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
+        ctx.set_st_source_pgt_ids(resolve_st_source_pgt_ids(&source_oids));
 
-    // CITUS-4: Pre-resolve stable buffer names so the scan generator
-    // does not need to call SPI during SQL generation.
-    ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
-    ctx.set_source_stage_tables(
-        source_oids
-            .iter()
-            .map(|oid| {
-                (
-                    *oid,
-                    format!(
-                        "pg_temp.\"{}\"",
-                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
-                    ),
-                )
-            })
-            .collect(),
-    );
+        // CITUS-4: Pre-resolve stable buffer names so the scan generator
+        // does not need to call SPI during SQL generation.
+        ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
+        ctx.set_source_stage_tables(
+            source_oids
+                .iter()
+                .map(|oid| {
+                    (
+                        *oid,
+                        format!(
+                            "pg_temp.\"{}\"",
+                            crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                        ),
+                    )
+                })
+                .collect(),
+        );
 
-    let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
-        ctx.differentiate_with_columns(&result.tree)?;
+        let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
+            ctx.differentiate_with_columns(&result.tree)?;
 
-    let is_all_algebraic = result.tree.is_all_algebraic_agg();
-    let statistics_epoch = planner::statistics_epoch_for_sources(&source_oids);
+        Ok(CachedDeltaTemplate {
+            defining_query_hash: query_hash,
+            statistics_epoch: planner::statistics_epoch_for_sources(&source_oids),
+            planning_version: planner::FORMAT_VERSION,
+            delta_sql_template: template_sql,
+            output_columns,
+            source_oids,
+            is_deduplicated: diff_dedup,
+            has_key_changed: diff_has_key_changed,
+            is_all_algebraic: result.tree.is_all_algebraic_agg(),
+            last_used: 0,
+        })
+    };
+    let entry = match stream_owner {
+        Some(st) => crate::refresh::with_stream_owner(st, build_entry)?,
+        None => build_entry()?,
+    };
+    let template_sql = entry.delta_sql_template.clone();
+    let output_columns = entry.output_columns.clone();
+    let source_oids = entry.source_oids.clone();
 
     // Store in cache (QW-5: with LRU eviction).
-    let entry = CachedDeltaTemplate {
-        defining_query_hash: query_hash,
-        statistics_epoch: statistics_epoch.clone(),
-        planning_version: planner::FORMAT_VERSION,
-        delta_sql_template: template_sql.clone(),
-        output_columns: output_columns.clone(),
-        source_oids: source_oids.clone(),
-        is_deduplicated: diff_dedup,
-        has_key_changed: diff_has_key_changed,
-        is_all_algebraic,
-        last_used: 0, // set by l1_insert_delta_template
-    };
-    l1_insert_delta_template(pgt_id, entry);
+    l1_insert_delta_template(pgt_id, entry.clone());
 
     // G14-SHC: Persist to L2 (catalog table) for cross-backend sharing.
     let _ = crate::template_cache::store(
@@ -1038,11 +1046,11 @@ pub fn generate_delta_query_cached(
             delta_sql_template: template_sql.clone(),
             output_columns: output_columns.clone(),
             source_oids: source_oids.clone(),
-            is_deduplicated: diff_dedup,
-            has_key_changed: diff_has_key_changed,
-            is_all_algebraic,
-            statistics_epoch,
-            planning_version: planner::FORMAT_VERSION,
+            is_deduplicated: entry.is_deduplicated,
+            has_key_changed: entry.has_key_changed,
+            is_all_algebraic: entry.is_all_algebraic,
+            statistics_epoch: entry.statistics_epoch,
+            planning_version: entry.planning_version,
         },
     );
 
@@ -1059,9 +1067,9 @@ pub fn generate_delta_query_cached(
         delta_sql,
         output_columns,
         source_oids,
-        is_deduplicated: diff_dedup,
-        has_key_changed: diff_has_key_changed,
-        is_all_algebraic,
+        is_deduplicated: entry.is_deduplicated,
+        has_key_changed: entry.has_key_changed,
+        is_all_algebraic: entry.is_all_algebraic,
     })
 }
 

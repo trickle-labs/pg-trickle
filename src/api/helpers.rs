@@ -2943,7 +2943,7 @@ pub(super) fn initialize_st(
 
     // Initial population bypasses the normal FULL-refresh orchestrator, so
     // build the durable private branch-multiplicity state explicitly here.
-    if needs_dual_count {
+    if crate::dvm::query_needs_dual_count(query) {
         crate::setop_state::rebuild_for_full_refresh(&st)?;
     }
 
