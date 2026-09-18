@@ -2347,12 +2347,12 @@ mod tests {
         );
         assert!(
             snap.contains(
-                "left_join.\"left_join__left_join__l0__value\" = left_join.\"left_join__r0__value\""
+                "\"left_join\".\"left_join__left_join__l0__value\" = \"left_join\".\"left_join__r0__value\""
             ),
             "{snap}"
         );
         assert!(
-            snap.contains("left_join.\"l1__state\" = \"r1\".\"state\""),
+            snap.contains("\"left_join\".\"l1__state\" = \"r1\".\"state\""),
             "{snap}"
         );
 

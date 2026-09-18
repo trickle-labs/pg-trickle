@@ -517,6 +517,13 @@ pub fn query_has_join(query: &str) -> Result<bool, PgTrickleError> {
 /// If a filter sits above the scan, an UPDATE that moves a row from
 /// *passing* the predicate to *failing* it would only produce an INSERT
 /// with new values, which the filter discards — leaving the stale old
+fn unwrap_subqueries(op: &parser::OpTree) -> &parser::OpTree {
+    match op {
+        parser::OpTree::Subquery { child, .. } => unwrap_subqueries(child),
+        other => other,
+    }
+}
+
 /// row in the ST.  Standard D+I mode (merge_safe_dedup=false) emits
 /// both DELETE(old) and INSERT(new), so the filter correctly passes the
 /// DELETE for old values that matched and discards the INSERT with new
@@ -527,12 +534,41 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
         parser::OpTree::Project {
             expressions, child, ..
         } => {
-            // Any computed projection can change identity while the source
-            // key stays unchanged. Keep DELETE records for those rows.
-            expressions
+            // A computed MDM source key can change on a value-only source
+            // update. Keep the source DELETE so the old derived row identity
+            // is removed before the new one is inserted.
+            if expressions.iter().any(parser::is_mdm_source_key_expr) {
+                return false;
+            }
+            let is_pure_projection = expressions
                 .iter()
-                .all(|expr| matches!(expr, parser::Expr::ColumnRef { .. }))
-                && is_scan_chain_tree(child)
+                .all(|expr| matches!(expr, parser::Expr::ColumnRef { .. }));
+            let preserves_scan_pk = match unwrap_subqueries(child) {
+                parser::OpTree::Scan {
+                    pk_columns,
+                    alias,
+                    table_name,
+                    ..
+                } => {
+                    !pk_columns.is_empty()
+                        && pk_columns.iter().all(|pk| {
+                            expressions.iter().any(|expr| {
+                                matches!(
+                                    expr,
+                                    parser::Expr::ColumnRef {
+                                        column_name,
+                                        table_alias,
+                                    } if column_name == pk
+                                        && table_alias
+                                            .as_deref()
+                                            .is_none_or(|a| a == alias || a == table_name)
+                                )
+                            })
+                        })
+                }
+                _ => false,
+            };
+            (is_pure_projection || preserves_scan_pk) && is_scan_chain_tree(child)
         }
         parser::OpTree::Subquery { child, .. } => is_scan_chain_tree(child),
         _ => false,
@@ -1543,6 +1579,41 @@ pub(crate) fn window_row_identity_expr(row_alias: &str, key_columns: &[String]) 
     crate::hash::build_row_identity_expr("WINDOW_KEY", &expressions)
 }
 
+fn contains_unsupported_lateral(tree: &parser::OpTree) -> bool {
+    match tree {
+        parser::OpTree::LateralFunction {
+            declared_columns,
+            child,
+            ..
+        } => {
+            let registry = crate::dvm::row_id_v2::TypeRegistry::new();
+            let all_scalar = !declared_columns.is_empty()
+                && declared_columns.iter().all(|col| {
+                    registry
+                        .validate_type(
+                            &col.name,
+                            col.type_oid,
+                            crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
+                        )
+                        .is_ok()
+                });
+            !all_scalar || contains_unsupported_lateral(child)
+        }
+        parser::OpTree::Filter { child, .. }
+        | parser::OpTree::Project { child, .. }
+        | parser::OpTree::Subquery { child, .. }
+        | parser::OpTree::Window { child, .. } => contains_unsupported_lateral(child),
+        parser::OpTree::InnerJoin { left, right, .. }
+        | parser::OpTree::LeftJoin { left, right, .. }
+        | parser::OpTree::FullJoin { left, right, .. }
+        | parser::OpTree::SemiJoin { left, right, .. }
+        | parser::OpTree::AntiJoin { left, right, .. } => {
+            contains_unsupported_lateral(left) || contains_unsupported_lateral(right)
+        }
+        _ => false,
+    }
+}
+
 /// Generate a SQL expression for computing `__pgt_row_id` from a subquery
 /// aliased as `sub`, matching the hash formula used by the delta query.
 ///
@@ -1553,6 +1624,9 @@ pub(crate) fn window_row_identity_expr(row_alias: &str, key_columns: &[String]) 
 /// row-id computation is too complex (joins, union all).
 pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let tree = parse_defining_query(defining_query).ok();
+    if tree.as_ref().is_some_and(contains_unsupported_lateral) {
+        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(row_to_json(sub)::text))".to_string();
+    }
     let key_cols = tree.as_ref().and_then(|t| t.row_id_key_columns());
     let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
     match key_cols {
@@ -2460,6 +2534,47 @@ mod tests {
                 ],
             }],
             vec!["encoded_id"],
+            s,
+        );
+        assert!(!is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_project_with_computed_expr_preserving_pk() {
+        let s = crate::dvm::operators::test_helpers::scan_with_pk(
+            1,
+            "products",
+            "public",
+            "p",
+            &["id", "name", "price"],
+            &["id"],
+        );
+        let p = project(
+            vec![
+                colref("id"),
+                crate::dvm::parser::Expr::Raw("JSON_OBJECT('name': name)".to_string()),
+            ],
+            vec!["id", "data"],
+            s,
+        );
+        assert!(is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_project_with_computed_expr_without_pk_is_false() {
+        let s = crate::dvm::operators::test_helpers::scan_with_pk(
+            1,
+            "products",
+            "public",
+            "p",
+            &["id", "name", "price"],
+            &["id"],
+        );
+        let p = project(
+            vec![crate::dvm::parser::Expr::Raw(
+                "JSON_OBJECT('name': name)".to_string(),
+            )],
+            vec!["data"],
             s,
         );
         assert!(!is_scan_chain_tree(&p));
