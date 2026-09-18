@@ -241,9 +241,6 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             }
             Some(_) => "__pgt_row_id".to_string(),
             None => {
-                // FULL refresh falls back to a complete visible-row identity
-                // when a Project hides its child's key. Recompute that same
-                // identity here instead of forwarding an incompatible child ID.
                 let hash_cols: Vec<String> = expressions
                     .iter()
                     .enumerate()

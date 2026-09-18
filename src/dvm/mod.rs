@@ -527,10 +527,12 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
         parser::OpTree::Project {
             expressions, child, ..
         } => {
-            // A computed MDM source key can change on a value-only source
-            // update. Keep the source DELETE so the old derived row identity
-            // is removed before the new one is inserted.
-            !expressions.iter().any(parser::is_mdm_source_key_expr) && is_scan_chain_tree(child)
+            // Any computed projection can change identity while the source
+            // key stays unchanged. Keep DELETE records for those rows.
+            expressions
+                .iter()
+                .all(|expr| matches!(expr, parser::Expr::ColumnRef { .. }))
+                && is_scan_chain_tree(child)
         }
         parser::OpTree::Subquery { child, .. } => is_scan_chain_tree(child),
         _ => false,

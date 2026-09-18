@@ -1475,23 +1475,32 @@ fn rewrite_expr_for_join(
                     // Match both alias."col" and alias.col patterns.
                     // Also handle quoted form: "alias"."col" → "new_alias"."col"
                     // (Expr::ColumnRef::to_sql() emits double-quoted identifiers)
-                    let quoted_pattern = format!("\"{}\".", alias.replace('"', "\"\""));
-                    let quoted_replacement = format!("\"{}\".", new_alias.replace('"', "\"\""));
-                    result = result.replace(&quoted_pattern, &quoted_replacement);
-                    let pattern = format!("{}.", alias);
-                    let replacement = format!("{}.", new_alias);
-                    result = result.replace(&pattern, &replacement);
+                    result = crate::dvm::operators::filter::replace_qualified_column_refs_with(
+                        &result,
+                        |raw_alias, column| {
+                            (raw_alias == alias).then(|| {
+                                format!("{}.{}", quote_ident(new_alias), quote_ident(column))
+                            })
+                        },
+                    );
                 } else {
                     // Resolve every raw qualified reference through the same
                     // recursive naming used to build nested join snapshots.
-                    let quoted_prefix = format!("\"{}\".", alias.replace('"', "\"\""));
-                    if result.contains(&quoted_prefix) {
-                        result = rewrite_raw_quoted_alias_refs(&result, source, &alias, new_alias);
-                    }
-                    let dot_prefix = format!("{}.", alias);
-                    if result.contains(&dot_prefix) {
-                        result = rewrite_raw_alias_refs(&result, source, &alias, new_alias);
-                    }
+                    result = crate::dvm::operators::filter::replace_qualified_column_refs_with(
+                        &result,
+                        |raw_alias, column| {
+                            if raw_alias != alias {
+                                return None;
+                            }
+                            let resolved = resolve_disambiguated_column(source, &alias, column)
+                                .unwrap_or_else(|| snapshot_join_column_name(&alias, column));
+                            Some(format!(
+                                "{}.{}",
+                                quote_ident(new_alias),
+                                quote_ident(&resolved)
+                            ))
+                        },
+                    );
                 }
             }
             Expr::Raw(result)

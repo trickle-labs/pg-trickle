@@ -1234,9 +1234,13 @@ pub fn execute_differential_refresh_with_tuning(
         false
     };
 
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let has_user_triggers = crate::cdc::has_user_triggers(st.pgt_relid)?;
+
     if !any_changes && !any_st_changes {
         if crate::refresh::current_graph_refresh_id().is_some()
             && st.st_partition_key.is_none()
+            && dvm::query_has_join(&effective_defining_query).unwrap_or(true)
             && !dvm::query_has_recursive_cte(&effective_defining_query).unwrap_or(false)
             && !has_user_triggers
         {

@@ -360,7 +360,19 @@ pub fn lateral_function_output_columns(
     declared_columns: &[Column],
 ) -> Vec<String> {
     if !column_aliases.is_empty() {
-        return column_aliases.to_vec();
+        if declared_columns.is_empty() {
+            return column_aliases.to_vec();
+        }
+        let mut columns = declared_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        for (index, alias) in column_aliases.iter().enumerate() {
+            if let Some(column) = columns.get_mut(index) {
+                *column = alias.clone();
+            }
+        }
+        return columns;
     }
     if !declared_columns.is_empty() {
         return declared_columns
@@ -2430,6 +2442,11 @@ impl OpTree {
                         let out = self.output_columns();
                         if mapped.iter().all(|k| out.contains(k)) {
                             Some(mapped)
+                        } else if matches!(
+                            unwrapped,
+                            OpTree::Scan { pk_columns, .. } if !pk_columns.is_empty()
+                        ) {
+                            Some(aliases.clone())
                         } else {
                             None
                         }
