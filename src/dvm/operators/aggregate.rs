@@ -953,6 +953,16 @@ fn build_intermediate_agg_delta(
             format!("{delta_cte} AS d({delta_group_aliases})")
         };
 
+        let old_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            format!("\nWHERE ({old_pgt_count}) > 0")
+        };
+        let new_presence = if group_columns.is_empty() {
+            String::new()
+        } else {
+            "\nWHERE n.__pgt_count > 0".to_string()
+        };
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
@@ -960,8 +970,7 @@ SELECT {row_id_d} AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {extra_d_groups}{old_pgt_count} AS __pgt_count{extra_old_aggs}
 FROM {delta_from}
-LEFT JOIN {new_rescan_cte} n ON {join_cond}
-WHERE ({old_pgt_count}) > 0
+LEFT JOIN {new_rescan_cte} n ON {join_cond}{old_presence}
 
 UNION ALL
 
@@ -969,8 +978,7 @@ UNION ALL
 SELECT {row_id_n} AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {extra_n_groups}n.__pgt_count{extra_new_aggs}
-FROM {new_rescan_cte} n
-WHERE n.__pgt_count > 0",
+FROM {new_rescan_cte} n{new_presence}",
         );
 
         ctx.add_cte(final_cte.clone(), final_sql);
@@ -6151,6 +6159,26 @@ mod tests {
             "{sql}"
         );
         assert!(!sql.contains("d.\"source_record_id\""), "{sql}");
+    }
+
+    #[test]
+    fn test_intermediate_scalar_count_preserves_zero_singleton() {
+        let source = scan(1, "items", "public", "items", &["id"]);
+        let mut ctx = test_ctx();
+        let result = build_intermediate_agg_delta(
+            &mut ctx,
+            &source,
+            &[],
+            &[],
+            &[count_star("item_count")],
+            "items_delta",
+        )
+        .expect("scalar COUNT delta should be generated");
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // A global aggregate always has one result row, including COUNT(*)=0.
+        assert!(!sql.contains("WHERE n.__pgt_count > 0"), "{sql}");
+        assert!(!sql.contains("WHERE (COALESCE(n."), "{sql}");
     }
 
     #[test]

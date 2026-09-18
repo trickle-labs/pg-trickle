@@ -2579,9 +2579,10 @@ pub fn execute_differential_refresh_with_tuning(
     // Determine whether to use the explicit DML path based on the GUC
     // and the presence of user-defined row-level triggers on the ST.
     let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let has_user_triggers = crate::cdc::has_user_triggers(st.pgt_relid)?;
     let use_explicit_dml = match user_triggers_mode {
         crate::config::UserTriggersMode::Off => false,
-        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
+        crate::config::UserTriggersMode::Auto => has_user_triggers,
     };
 
     // EC-06: Keyless sources must use explicit DML because MERGE fails
@@ -2608,8 +2609,8 @@ pub fn execute_differential_refresh_with_tuning(
 
     // When user_triggers = 'off' but there ARE user triggers on the ST,
     // suppress them during the MERGE to prevent spurious firing.
-    let suppress_triggers = user_triggers_mode == crate::config::UserTriggersMode::Off
-        && crate::cdc::has_user_triggers(st.pgt_relid)?;
+    let suppress_triggers =
+        user_triggers_mode == crate::config::UserTriggersMode::Off && has_user_triggers;
     if suppress_triggers {
         let quoted_table = format!(
             "\"{}\".\"{}\"",
@@ -3430,18 +3431,31 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     // Private CDC finalization resumes only after owner SQL has completed.
-    // EC-01: differential deltas can leave stale or missing rows when a
-    // predicate or join partner changes outside the emitted row set. Reconcile
-    // every non-recursive, non-partitioned stream against its full result so
-    // downstream capture publishes only the committed post-refresh state.
+    // EC-01 / v0.38.0: non-deduplicated join deltas can leave stale row_ids
+    // from earlier refresh cycles that are not present in the current delta.
+    // Reconcile only those proven affected shapes; ordinary projections and
+    // keyed scans keep their differential cost.
     //
-    // Skip full-query reconciliation for recursive CTEs — it bypasses the
-    // ivm_recursive_max_depth guard and would insert suppressed rows.
+    // EC-01b: use the parsed OpTree for join detection. If parsing fails,
+    // fail safe and run the repair path.
+    let query_has_join =
+        with_stream_owner(st, || dvm::query_has_join(&effective_defining_query)).unwrap_or(true);
+    // A BEFORE trigger may deliberately change the materialized row after
+    // the defining query has produced it. Reconciliation against that query
+    // would erase the trigger's result, so only reconcile when triggers are
+    // disabled or absent.
+    let user_triggers_active =
+        user_triggers_mode != crate::config::UserTriggersMode::Off && has_user_triggers;
     let query_has_recursive_cte = with_stream_owner(st, || {
         dvm::query_has_recursive_cte(&effective_defining_query)
     })
     .unwrap_or(false);
-    let phantom_cleanup_count = if !query_has_recursive_cte && st.st_partition_key.is_none() {
+    let phantom_cleanup_count = if query_has_join
+        && !query_has_recursive_cte
+        && !resolved.is_deduplicated
+        && st.st_partition_key.is_none()
+        && !user_triggers_active
+    {
         let quoted_table = format!(
             "\"{}\".\"{}\"",
             schema.replace('"', "\"\""),
@@ -3461,6 +3475,26 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         0
     };
+
+    if phantom_cleanup_count > 0
+        && has_downstream_st_consumers(st.pgt_id)
+        && let Ok(downstream_ids) =
+            crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+    {
+        // The repair can touch identities outside the original delta. The
+        // bounded ST buffer cannot describe those rows, so downstream STs
+        // must rebuild from a consistent snapshot instead of consuming a
+        // falsely exact partial delta.
+        for downstream_id in &downstream_ids {
+            if let Err(e) = StreamTableMeta::mark_for_reinitialize(*downstream_id) {
+                pgrx::warning!(
+                    "[pg_trickle] EC01-2: failed to mark downstream ST {} for reinitialization after phantom cleanup: {}",
+                    downstream_id,
+                    e,
+                );
+            }
+        }
+    }
 
     // Capture only after cross-cycle phantom reconciliation.  Join deltas may
     // transiently materialize duplicate rows during explicit DML; recording

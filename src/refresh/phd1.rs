@@ -30,6 +30,22 @@ pub fn prepare_cross_cycle_phantom_table(
     Ok(())
 }
 
+fn content_signature_expr(alias: &str, quoted_user_cols: &[String]) -> String {
+    if quoted_user_cols.is_empty() {
+        // Degenerate case (no user columns); use a constant fingerprint so
+        // reconciliation collapses to a row-count diff.
+        return "''::text".to_string();
+    }
+    let values = quoted_user_cols
+        .iter()
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // A row constructor avoids jsonb_build_object's 100-argument limit while
+    // retaining PostgreSQL's native JSON encoding for each value.
+    format!("md5(to_jsonb(ROW({values}))::text)")
+}
+
 /// EC01-2: Reconcile the stream table against the full-query result set.
 ///
 /// After a refresh (DIFFERENTIAL or IMMEDIATE) applies a delta, residue from
@@ -95,24 +111,8 @@ pub fn cleanup_cross_cycle_phantoms(
     // makes the reconciliation correct for those query shapes too — two
     // rows with identical user content are considered equivalent regardless
     // of any internal hash drift.
-    let json_fields_for = |alias: &str| -> String {
-        if quoted_user_cols.is_empty() {
-            // Degenerate case (no user columns); use a constant fingerprint
-            // so reconciliation collapses to a row-count diff.
-            return "''::text".to_string();
-        }
-        let pairs: Vec<String> = quoted_user_cols
-            .iter()
-            .map(|c| {
-                let key = c.trim_matches('"').replace("\"\"", "\"");
-                let key_lit = key.replace('\'', "''");
-                format!("'{key_lit}', {alias}.{c}")
-            })
-            .collect();
-        format!("md5(jsonb_build_object({})::text)", pairs.join(", "))
-    };
-    let st_sig = json_fields_for("st");
-    let r_sig = json_fields_for("r");
+    let st_sig = content_signature_expr("st", &quoted_user_cols);
+    let r_sig = content_signature_expr("r", &quoted_user_cols);
     let recon_row_number_alias = {
         let mut suffix = 0_u32;
         loop {
@@ -255,6 +255,18 @@ pub fn cleanup_cross_cycle_phantoms(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_content_signature_supports_wide_rows() {
+        let columns = (0..51)
+            .map(|index| format!("\"column_{index}\""))
+            .collect::<Vec<_>>();
+        let expression = super::content_signature_expr("st", &columns);
+
+        assert!(expression.contains("to_jsonb(ROW("));
+        assert!(!expression.contains("jsonb_build_object"));
+        assert_eq!(expression.matches("st.\"column_").count(), 51);
+    }
+
     #[test]
     fn test_cleanup_returns_zero_for_empty_case() {
         // Verify batch_size defaults are positive integers
