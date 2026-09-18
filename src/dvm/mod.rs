@@ -524,7 +524,14 @@ pub fn query_has_join(query: &str) -> Result<bool, PgTrickleError> {
 fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
     match tree {
         parser::OpTree::Scan { .. } => true,
-        parser::OpTree::Project { child, .. } => is_scan_chain_tree(child),
+        parser::OpTree::Project {
+            expressions, child, ..
+        } => {
+            // A computed MDM source key can change on a value-only source
+            // update. Keep the source DELETE so the old derived row identity
+            // is removed before the new one is inserted.
+            !expressions.iter().any(parser::is_mdm_source_key_expr) && is_scan_chain_tree(child)
+        }
         parser::OpTree::Subquery { child, .. } => is_scan_chain_tree(child),
         _ => false,
     }
@@ -2456,6 +2463,23 @@ mod tests {
         let s = scan(1, "t", "public", "t", &["id", "name"]);
         let p = project(vec![colref("id")], vec!["id"], s);
         assert!(is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_computed_mdm_key_keeps_delete() {
+        let s = scan(1, "t", "public", "t", &["id", "value"]);
+        let p = project(
+            vec![crate::dvm::parser::Expr::FuncCall {
+                func_name: "pgtrickle.encode_row_id_v2".to_string(),
+                args: vec![
+                    crate::dvm::parser::Expr::Raw("'MDM_SOURCE_KEY_V1'".to_string()),
+                    crate::dvm::parser::Expr::Raw("ROW(id, value)".to_string()),
+                ],
+            }],
+            vec!["encoded_id"],
+            s,
+        );
+        assert!(!is_scan_chain_tree(&p));
     }
 
     #[test]

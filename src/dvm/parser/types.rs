@@ -3519,7 +3519,7 @@ fn join_pk_expr_indices_for(expressions: &[Expr], join_child: &OpTree) -> Option
     None
 }
 
-fn is_mdm_source_key_expr(expr: &Expr) -> bool {
+pub(crate) fn is_mdm_source_key_expr(expr: &Expr) -> bool {
     let Expr::FuncCall { func_name, args } = expr else {
         return false;
     };
