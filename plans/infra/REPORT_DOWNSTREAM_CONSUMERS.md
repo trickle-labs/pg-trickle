@@ -412,7 +412,7 @@ the physical `pgt_id`.** When green is promoted and takes over the name
 - Implemented user-trigger support — existing user trigger support (foundation for Layer 2).
 - [PLAN_TRANSACTIONAL_IVM.md](../sql/PLAN_TRANSACTIONAL_IVM.md) — immediate-mode
   IVM changes the latency profile for consumers.
-- [PLAN_ECO_SYSTEM.md](../ecosystem/PLAN_ECO_SYSTEM.md) — planned integrations
+- `ROADMAP.md` — planned integrations and post-1.0 directions
   (Airflow, Prometheus, CLI).
 - [REPORT_EXTERNAL_PROCESS.md](REPORT_EXTERNAL_PROCESS.md) — sidecar HTTP API
   could host webhook/SSE endpoints (post-1.0).

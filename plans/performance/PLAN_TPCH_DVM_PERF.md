@@ -3,7 +3,6 @@
 **Date:** 2026-04-19
 **Status:** Planning
 **Predecessor:** [PLAN_DVM_IMPROVEMENTS.md](PLAN_DVM_IMPROVEMENTS.md) (DI-1 – DI-10, DI-2 partial ✅),
-[PLAN_TPC_H_BENCHMARKING.md](PLAN_TPC_H_BENCHMARKING.md)
 **Related:** PR #574 (SF-10 nightly timeout root cause)
 **Scope:** Diagnose and fix the three DVM scaling failure modes identified by
 running `test_tpch_performance_comparison` at SF=0.01 / SF=0.1 / SF=1.0

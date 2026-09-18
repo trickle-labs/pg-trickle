@@ -2,7 +2,7 @@
 
 Date: 2026-02-26
 Status: IMPLEMENTED
-Supersedes: Project 5 in [PLAN_ECO_SYSTEM.md](PLAN_ECO_SYSTEM.md)
+Standalone implementation plan for the CloudNativePG image-volume extension.
 PR: [#15](https://github.com/trickle-labs/pg-trickle/pull/15)
 Branch: `cloudnative-pg-image-volume`
 

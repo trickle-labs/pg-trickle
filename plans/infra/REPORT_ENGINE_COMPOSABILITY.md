@@ -12,9 +12,9 @@ pg_trickle is a ~48K-line Rust codebase compiled as a single PostgreSQL extensio
 (`cdylib`). Analysis of the architecture, source coupling, and planned features
 reveals **five components that could be extracted as standalone projects** and
 **three internal decomposition opportunities** that would make the extension itself
-more composable. The existing [PLAN_ECO_SYSTEM.md](ecosystem/PLAN_ECO_SYSTEM.md)
-already covers *integrations* (dbt, Airflow, Grafana, CLI); this analysis focuses
-on **core engine decomposition** — breaking the monolith into reusable building blocks.
+more composable. Existing integration and deployment work treats pg_trickle as a
+black box; this analysis focuses on **core engine decomposition** — breaking the
+monolith into reusable building blocks.
 
 ### Why This Matters
 
@@ -183,9 +183,9 @@ achievable incrementally rather than as a big-bang rewrite.
 
 ### 1.5. `pg-trickle-cli` — Command-Line Management Tool
 
-Already planned in [PLAN_ECO_SYSTEM.md](ecosystem/PLAN_ECO_SYSTEM.md) Project 7.
-Including here for completeness — it benefits from `pg-dag` (1.2) for local
-DAG visualization and from the config crate for shared configuration schemas.
+The CLI remains a possible post-1.0 companion. It would benefit from `pg-dag`
+(1.2) for local DAG visualization and from the config crate for shared
+configuration schemas.
 
 **Effort:** ~20 hours (already estimated)
 
@@ -374,18 +374,18 @@ extracting them would be counterproductive:
 
 ---
 
-## Part 6: Comparison With Existing Ecosystem Plan
+## Part 6: Comparison With Integration Work
 
-[PLAN_ECO_SYSTEM.md](ecosystem/PLAN_ECO_SYSTEM.md) defines 11 ecosystem projects focused on
-**integrations** (dbt, Airflow, Prometheus, CLI, Docker, ORM). This analysis
-focuses on **engine decomposition** — they are complementary:
+Existing integration and deployment work focuses on **integrations** (dbt,
+CloudNativePG, monitoring, CLI, Docker, and ORM tooling). This analysis focuses
+on **engine decomposition** — the concerns are complementary:
 
-| Ecosystem Plan | This Analysis |
+| Integration work | This Analysis |
 |----------------|---------------|
 | Integration wrappers around SQL API | Core engine as composable crates |
 | All projects consume pg_trickle as a black box | Projects *are* pg_trickle's internals |
 | Separate repos, same SQL interface | Workspace crates, trait-based interfaces |
-| Useful today (0.x) | Phase A today, Phases B–D post-1.0 |
+| Useful at the SQL/API boundary | Phase A today, Phases B–D post-1.0 |
 
 The sidecar (1.4) is the bridge: it is both an ecosystem project (separate
 binary) and a consumer of the extracted core crates.
@@ -410,7 +410,6 @@ binary) and a consumer of the extracted core crates.
 |----------|-----------|
 | [REPORT_EXTERNAL_PROCESS.md](infra/REPORT_EXTERNAL_PROCESS.md) | Full sidecar feasibility study; coupling inventory |
 | [REPORT_PGWIRE_PROXY.md](infra/REPORT_PGWIRE_PROXY.md) | Proxy architecture (alternative to sidecar) |
-| [PLAN_ECO_SYSTEM.md](ecosystem/PLAN_ECO_SYSTEM.md) | Integration ecosystem plan (complementary) |
 | [PLAN_ADRS.md](adrs/PLAN_ADRS.md) | Architecture decisions (constraints) |
 | [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) | Current architecture |
 | [ROADMAP.md](../ROADMAP.md) | Release timeline for sequencing |

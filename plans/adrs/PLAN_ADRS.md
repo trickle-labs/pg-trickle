@@ -561,7 +561,7 @@ Defer the full custom Python adapter as an upgrade path.
 |-------|-------|
 | **Status** | Accepted |
 | **Category** | Ecosystem / Tooling |
-| **Sources** | `plans/dbt/PLAN_DBT_MACRO.md`, `plans/ecosystem/PLAN_ECO_SYSTEM.md` |
+| **Sources** | `plans/dbt/PLAN_DBT_MACRO.md` |
 
 **Decision:** Ship the dbt macro package as `dbt-pgtrickle/` inside the main
 pg_trickle repository, not in a separate repo.
