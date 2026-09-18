@@ -75,7 +75,7 @@ ratio. Items higher on the list provide the most value for the least work.
 | **Severity** | **Correctness gap** — not P0 (no wrong SQL generated) but produces wrong *data* |
 | **Effort** | 1–2 hours |
 | **Impact** | High — prevents silent data corruption for any user using volatile functions |
-| **Plan** | `plans/sql/PLAN_NON_DETERMINISM.md` (415 lines, fully designed) |
+| **Plan** | Completed non-determinism implementation |
 
 **Implementation:**
 - Add `lookup_function_volatility()` — SPI query to `pg_proc.provolatile`

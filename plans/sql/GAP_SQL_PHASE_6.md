@@ -225,7 +225,7 @@ the regular aggregate recognition path entirely.
 
 ### G2.1 — Views as Sources in DIFFERENTIAL Mode ✅ RESOLVED
 
-> **Resolved by:** View inlining auto-rewrite (PLAN_VIEW_INLINING.md). Views are
+> **Resolved by:** View inlining auto-rewrite. Views are
 > transparently replaced with inline subqueries so CDC triggers land on base
 > tables. Nested views fully expanded. Original query preserved for reinit.
 
@@ -262,7 +262,7 @@ SELECT pgtrickle.create('order_summary', 'DIFFERENTIAL',
 
 ### G2.2 — Materialized Views as Sources ✅ RESOLVED
 
-> **Resolved by:** View inlining auto-rewrite (PLAN_VIEW_INLINING.md).
+> **Resolved by:** View inlining auto-rewrite.
 > Materialized views are rejected in DIFFERENTIAL mode with a clear error.
 > Allowed in FULL mode.
 

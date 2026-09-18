@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-03-17
 **Driver:** Open
-**Relates to:** Priority 1-1 of `PLAN_TEST_EVALS_FINAL_REPORT.md`
+**Relates to:** the completed test-suite evaluation work
 
 ---
 

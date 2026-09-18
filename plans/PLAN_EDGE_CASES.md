@@ -130,7 +130,7 @@ Documented in CONFIGURATION.md.
 | **Documented in** | FAQ § "Window Functions" |
 | **Status** | ✅ **IMPLEMENTED** — `rewrite_nested_window_exprs()` subquery-lift in `src/dvm/parser.rs`; helper `collect_all_window_func_nodes()` for recursive window func harvesting; `deparse_select_window_clause()` for WINDOW clause passthrough; exported from `src/dvm/mod.rs`; wired in `src/api.rs` before DISTINCT ON rewrite |
 
-**Implementation: nested-subquery lift (see PLAN_TRANSACTIONAL_IVM_PART_2.md Task 1.3):**
+**Implementation: nested-subquery lift from the completed transactional IVM work:**
 
 Window functions nested inside expressions are lifted into a synthetic column
 in an inner subquery, then the outer SELECT applies the original expression
@@ -321,7 +321,7 @@ affected rows.
 | **Documented in** | FAQ § "What SQL features are NOT supported in IMMEDIATE mode?" |
 | **Status** | ✅ **Done** — recursive CTEs + TopK now supported in IMMEDIATE mode |
 
-**Proposed fix (recursive CTEs + TopK): ~~deferred to~~ implemented from PLAN_TRANSACTIONAL_IVM_PART_2.md Phase 5.**
+**Proposed fix (recursive CTEs + TopK): ~~deferred to~~ implemented in the completed transactional IVM work.**
 
 Both constructs are now implemented:
 
@@ -856,7 +856,7 @@ whenever any subquery row is NULL or fails the comparison.
 | **Current mitigation** | Use FULL mode; or pre-aggregate in DIFFERENTIAL and compute in a view |
 | **Documented in** | FAQ § "Unsupported Aggregates" |
 
-**Chosen fix: group-rescan (see PLAN_TRANSACTIONAL_IVM_PART_2.md Task 4.1):**
+**Chosen fix: group-rescan from the completed transactional IVM work:**
 
 Implement `CORR`/`COVAR_POP`/`COVAR_SAMP`/`REGR_*` using the proven
 group-rescan strategy already used for `BOOL_AND`, `STRING_AGG`, etc.:

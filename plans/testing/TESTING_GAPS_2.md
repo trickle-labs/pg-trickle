@@ -5,7 +5,7 @@
 **Scope:** Deep audit of all six test tiers to identify structural weaknesses
 where regressions are most likely to escape detection.
 
-This plan complements `PLAN_TESTING_GAPS.md` (feature-level coverage) with a
+This plan complements the earlier feature-level coverage work with a
 focus on **regression risk reduction**: scenarios where correct-today code can
 break tomorrow without any test catching it.
 

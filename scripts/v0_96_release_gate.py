@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parent.parent
 required_files = (
     "roadmap/v0.96.0.md",
     "roadmap/v0.96.0.md-full.md",
-    "plans/PLAN_0_96_0.md",
     "sql/pg_trickle--0.95.0--0.96.0.sql",
     "sql/archive/pg_trickle--0.96.0.sql",
     "docs/ERRORS.md",

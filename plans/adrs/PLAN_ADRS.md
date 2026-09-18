@@ -655,7 +655,7 @@ rejected, partially supported, or not yet considered.
 |-------|-------|
 | **Status** | Not Started |
 | **Category** | SQL Feature / Correctness |
-| **Sources** | `plans/sql/PLAN_NON_DETERMINISM.md` |
+| **Sources** | Completed non-determinism implementation |
 | **Effort** | Medium (3-5 sessions) |
 
 **Context:** Volatile functions (`random()`, `gen_random_uuid()`,

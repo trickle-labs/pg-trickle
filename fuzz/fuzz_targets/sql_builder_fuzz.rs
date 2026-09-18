@@ -19,7 +19,7 @@
 // Run locally:
 //   cargo +nightly fuzz run sql_builder_fuzz -- -max_total_time=60
 //
-// See plans/safety/PLAN_REDUCED_UNSAFE.md §SAF-2 and §A45-9 for context.
+// See the completed unsafe-reduction work and §A45-9 for context.
 
 #![no_main]
 
@@ -82,4 +82,3 @@ fuzz_target!(|data: &[u8]| {
         let _ = pg_trickle::dvm::parser::max_volatility(a, b);
     }
 });
-
