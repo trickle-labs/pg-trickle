@@ -2164,8 +2164,7 @@ max_worker_processes = 8     # Must include scheduler + refresh workers
 
 All phases (0–12) of the core plan are **IMPLEMENTED**. Current work
 focuses on edge-case hardening and SQL coverage expansion, tracked in
-[PLAN_EDGE_CASES.md](PLAN_EDGE_CASES.md) and
-[PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md).
+[PLAN_EDGE_CASES.md](PLAN_EDGE_CASES.md).
 
 **Completed sprints:**
 

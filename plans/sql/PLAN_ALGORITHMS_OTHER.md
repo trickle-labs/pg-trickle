@@ -647,7 +647,7 @@ $+1$ exists; weight $0$ means deleted; negative weights represent
 pending deletions. This is the Z-set model from DBSP.
 
 **Relevance to pg_trickle:** **Already partially implemented** in the
-multi-table delta batching plan (PLAN_MULTI_TABLE_DELTA_BATCHING.md).
+previously proposed multi-table delta batching work.
 The extension opportunities are:
 
 1. **Net-effect computation in change buffers:** Currently, if a row is
@@ -661,7 +661,7 @@ The extension opportunities are:
 **Implementation note:** The change buffer already has an `op` column
 ('+' / '-'). Converting to numeric weights and using `SUM(weight)
 GROUP BY key HAVING SUM(weight) <> 0` for net-effect computation is
-the natural extension. The `PLAN_MULTI_TABLE_DELTA_BATCHING.md` plan
+the natural extension. The earlier multi-table delta batching work
 covers the intra-query case; the opportunity here is to extend this to
 the **change buffer consolidation** phase before delta SQL generation.
 
