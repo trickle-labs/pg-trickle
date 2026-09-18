@@ -29,7 +29,7 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
         "row_id_admission",
         "SELECT id, value, pgtrickle.encode_row_id_v2(\
              'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
-         FROM row_id_admission_source",
+         FROM public.row_id_admission_source",
         "1m",
         "DIFFERENTIAL",
     )
@@ -47,7 +47,7 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
             "public.row_id_admission",
             "SELECT id, value, pgtrickle.encode_row_id_v2(\
                  'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
-             FROM row_id_admission_source",
+             FROM public.row_id_admission_source",
         )
         .await;
     }
@@ -62,7 +62,7 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
         "public.row_id_admission",
         "SELECT id, value, pgtrickle.encode_row_id_v2(\
              'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
-         FROM row_id_admission_source",
+             FROM public.row_id_admission_source",
     )
     .await;
 
@@ -77,7 +77,7 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
             "SELECT pgtrickle.create_stream_table(\
                  'row_id_impostor', \
                  $$SELECT id, impostor.encode_row_id_v2('x', ROW(id)) \
-                   FROM row_id_admission_source$$, \
+                   FROM public.row_id_admission_source$$, \
                  '1m', 'DIFFERENTIAL')",
         )
         .await;
@@ -95,7 +95,7 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
             "SELECT pgtrickle.create_stream_table(\
                  'unsupported_identity', \
                  $$SELECT pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW(tags)) \
-                   FROM unsupported_identity_source$$, \
+                   FROM public.unsupported_identity_source$$, \
                  '1m', 'DIFFERENTIAL')",
         )
         .await;
@@ -104,12 +104,12 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
         "unsupported identity type must fail during registration"
     );
 
-    db.execute(
+    db.execute_seq(&[
         "CREATE COLLATION row_id_nondeterministic (\
-             provider = icu, locale = 'und', deterministic = false); \
-         CREATE TABLE nondeterministic_identity_source (\
+             provider = icu, locale = 'und', deterministic = false)",
+        "CREATE TABLE nondeterministic_identity_source (\
              id int PRIMARY KEY, value text COLLATE row_id_nondeterministic)",
-    )
+    ])
     .await;
     db.execute("INSERT INTO nondeterministic_identity_source VALUES (1, 'a')")
         .await;
@@ -118,7 +118,7 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
             "SELECT pgtrickle.create_stream_table(\
                  'nondeterministic_identity', \
                  $$SELECT pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW(value)) \
-                   FROM nondeterministic_identity_source$$, \
+                   FROM public.nondeterministic_identity_source$$, \
                  '1m', 'DIFFERENTIAL')",
         )
         .await;
@@ -203,21 +203,21 @@ async fn test_row_id_v2_sql_entry_points_are_exact_and_bounded() {
 #[tokio::test]
 async fn test_computed_mdm_source_key_keeps_project_rows_distinct() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute(
-        "CREATE TABLE computed_key_identity (entity_id uuid PRIMARY KEY); \
-         INSERT INTO computed_key_identity VALUES \
-             ('10000000-0000-0000-0000-000000000001'); \
-         CREATE TABLE computed_key_source ( \
-             id integer PRIMARY KEY, name text NOT NULL, deleted boolean NOT NULL); \
-         INSERT INTO computed_key_source VALUES \
+    db.execute_seq(&[
+        "CREATE TABLE computed_key_identity (entity_id uuid PRIMARY KEY)",
+        "INSERT INTO computed_key_identity VALUES \
+             ('10000000-0000-0000-0000-000000000001')",
+        "CREATE TABLE computed_key_source ( \
+             id integer PRIMARY KEY, name text NOT NULL, deleted boolean NOT NULL)",
+        "INSERT INTO computed_key_source VALUES \
              (1, 'Alice', false), (2, 'Bob', false)",
-    )
+    ])
     .await;
     let defining_query = "SELECT 'crm'::text AS source_name, \
                 pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW( \
-                    (SELECT entity_id FROM computed_key_identity), id)) AS source_record_key, \
+                    (SELECT entity_id FROM public.computed_key_identity), id)) AS source_record_key, \
                 name \
-           FROM computed_key_source \
+           FROM public.computed_key_source \
           WHERE deleted IS NOT TRUE";
     db.create_st("computed_key_stream", defining_query, "1m", "DIFFERENTIAL")
         .await;
@@ -274,7 +274,7 @@ async fn test_row_id_v2_recreation_preflight_is_read_only_and_requires_ack() {
         .await;
     db.create_st(
         "preflight_stream",
-        "SELECT id, val FROM preflight_source",
+        "SELECT id, val FROM public.preflight_source",
         "1m",
         "DIFFERENTIAL",
     )

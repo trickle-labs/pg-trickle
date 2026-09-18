@@ -79,7 +79,7 @@ async fn test_lateral_immutable_table_function_uses_declared_out_columns_differe
         .try_execute(
             "SELECT pgtrickle.create_stream_table(\
                  'unsafe_normalized', \
-                 $$SELECT r.id, n.value FROM normalization_records r \
+                 $$SELECT r.id, n.value FROM public.normalization_records r \
                    CROSS JOIN LATERAL mdm_graph.unsafe_normalize(r.raw_value) n$$, \
                  '1m', 'DIFFERENTIAL')",
         )
@@ -103,7 +103,7 @@ async fn test_lateral_group_projection_preserves_constant_on_insert() {
     .await;
     let defining_query = "SELECT source_record_id, field_name, 'token_name'::text AS channel_id, \
                 token AS block_key, source_sort_key \
-           FROM token_records \
+           FROM public.token_records \
            CROSS JOIN LATERAL pg_catalog.regexp_split_to_table( \
                normalized, '[[:space:]]+') AS token(token) \
           WHERE field_name = 'name' AND pg_catalog.char_length(token) >= 3 \
@@ -145,7 +145,7 @@ async fn test_lateral_jsonb_array_elements_full_mode() {
     db.create_st(
         "lat_flat_full",
         "SELECT p.id, child.value AS val \
-         FROM lat_parent p, \
+         FROM public.lat_parent p, \
          jsonb_array_elements(p.data->'children') AS child",
         "1m",
         "FULL",
@@ -178,7 +178,7 @@ async fn test_lateral_jsonb_each_full_mode() {
     db.create_st(
         "lat_kv_full",
         "SELECT d.id, kv.key, kv.value \
-         FROM lat_kv d, \
+         FROM public.lat_kv d, \
          jsonb_each(d.props) AS kv",
         "1m",
         "FULL",
@@ -205,7 +205,7 @@ async fn test_lateral_unnest_full_mode() {
     db.create_st(
         "lat_tags_full",
         "SELECT t.id, tag.tag \
-         FROM lat_tags t, \
+         FROM public.lat_tags t, \
          unnest(t.tags) AS tag(tag)",
         "1m",
         "FULL",
@@ -228,7 +228,7 @@ async fn test_lateral_with_where_clause_full() {
     db.create_st(
         "lat_filtered_full",
         "SELECT a.id, (e.value)::int AS val \
-         FROM lat_arr a, \
+         FROM public.lat_arr a, \
          jsonb_array_elements(a.data) AS e \
          WHERE (e.value)::int > 15",
         "1m",
@@ -251,7 +251,7 @@ async fn test_lateral_full_refresh_picks_up_changes() {
     db.create_st(
         "lat_fr_st",
         "SELECT f.id, e.value AS val \
-         FROM lat_fr f, \
+         FROM public.lat_fr f, \
          jsonb_array_elements(f.data) AS e",
         "1m",
         "FULL",
@@ -316,7 +316,7 @@ async fn test_lateral_differential_insert() {
     db.create_st(
         "lat_dins_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_dins d, \
+         FROM public.lat_dins d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",
@@ -335,7 +335,7 @@ async fn test_lateral_differential_insert() {
     // Verify data matches the defining query
     db.assert_st_matches_query(
         "public.lat_dins_st",
-        "SELECT d.id, e.value AS val FROM lat_dins d, jsonb_array_elements(d.data) AS e",
+        "SELECT d.id, e.value AS val FROM public.lat_dins d, jsonb_array_elements(d.data) AS e",
     )
     .await;
 }
@@ -356,7 +356,7 @@ async fn test_lateral_differential_delete() {
     db.create_st(
         "lat_ddel_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_ddel d, \
+         FROM public.lat_ddel d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",
@@ -372,7 +372,7 @@ async fn test_lateral_differential_delete() {
 
     db.assert_st_matches_query(
         "public.lat_ddel_st",
-        "SELECT d.id, e.value AS val FROM lat_ddel d, jsonb_array_elements(d.data) AS e",
+        "SELECT d.id, e.value AS val FROM public.lat_ddel d, jsonb_array_elements(d.data) AS e",
     )
     .await;
 }
@@ -389,7 +389,7 @@ async fn test_lateral_differential_update_array() {
     db.create_st(
         "lat_dupd_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_dupd d, \
+         FROM public.lat_dupd d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",
@@ -407,7 +407,7 @@ async fn test_lateral_differential_update_array() {
 
     db.assert_st_matches_query(
         "public.lat_dupd_st",
-        "SELECT d.id, e.value AS val FROM lat_dupd d, jsonb_array_elements(d.data) AS e",
+        "SELECT d.id, e.value AS val FROM public.lat_dupd d, jsonb_array_elements(d.data) AS e",
     )
     .await;
 }
@@ -429,7 +429,7 @@ async fn test_lateral_differential_mixed_dml() {
     db.create_st(
         "lat_dmix_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_dmix d, \
+         FROM public.lat_dmix d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",
@@ -455,7 +455,7 @@ async fn test_lateral_differential_mixed_dml() {
 
     db.assert_st_matches_query(
         "public.lat_dmix_st",
-        "SELECT d.id, e.value AS val FROM lat_dmix d, jsonb_array_elements(d.data) AS e",
+        "SELECT d.id, e.value AS val FROM public.lat_dmix d, jsonb_array_elements(d.data) AS e",
     )
     .await;
 }
@@ -476,7 +476,7 @@ async fn test_lateral_differential_empty_array() {
     db.create_st(
         "lat_empty_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_empty d, \
+         FROM public.lat_empty d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",
@@ -495,7 +495,7 @@ async fn test_lateral_differential_empty_array() {
 
     db.assert_st_matches_query(
         "public.lat_empty_st",
-        "SELECT d.id, e.value AS val FROM lat_empty d, jsonb_array_elements(d.data) AS e",
+        "SELECT d.id, e.value AS val FROM public.lat_empty d, jsonb_array_elements(d.data) AS e",
     )
     .await;
 }
@@ -516,7 +516,7 @@ async fn test_lateral_unnest_differential() {
     db.create_st(
         "lat_utags_st",
         "SELECT t.id, tag.tag \
-         FROM lat_utags t, \
+         FROM public.lat_utags t, \
          unnest(t.tags) AS tag(tag)",
         "1m",
         "AUTO",
@@ -533,7 +533,7 @@ async fn test_lateral_unnest_differential() {
 
     db.assert_st_matches_query(
         "public.lat_utags_st",
-        "SELECT t.id, tag.tag FROM lat_utags t, unnest(t.tags) AS tag(tag)",
+        "SELECT t.id, tag.tag FROM public.lat_utags t, unnest(t.tags) AS tag(tag)",
     )
     .await;
 }
@@ -554,7 +554,7 @@ async fn test_lateral_jsonb_each_differential() {
     db.create_st(
         "lat_dkv_st",
         "SELECT d.id, kv.key, kv.value \
-         FROM lat_dkv d, \
+         FROM public.lat_dkv d, \
          jsonb_each(d.props) AS kv",
         "1m",
         "AUTO",
@@ -573,7 +573,7 @@ async fn test_lateral_jsonb_each_differential() {
 
     db.assert_st_matches_query(
         "public.lat_dkv_st",
-        "SELECT d.id, kv.key, kv.value FROM lat_dkv d, jsonb_each(d.props) AS kv",
+        "SELECT d.id, kv.key, kv.value FROM public.lat_dkv d, jsonb_each(d.props) AS kv",
     )
     .await;
 }
@@ -590,7 +590,7 @@ async fn test_lateral_with_where_clause_differential() {
     db.create_st(
         "lat_filt_st",
         "SELECT f.id, (e.value)::int AS val \
-         FROM lat_filt f, \
+         FROM public.lat_filt f, \
          jsonb_array_elements(f.data) AS e \
          WHERE (e.value)::int > 12",
         "1m",
@@ -611,7 +611,7 @@ async fn test_lateral_with_where_clause_differential() {
 
     db.assert_st_matches_query(
         "public.lat_filt_st",
-        "SELECT f.id, (e.value)::int AS val FROM lat_filt f, jsonb_array_elements(f.data) AS e WHERE (e.value)::int > 12",
+        "SELECT f.id, (e.value)::int AS val FROM public.lat_filt f, jsonb_array_elements(f.data) AS e WHERE (e.value)::int > 12",
     )
     .await;
 }
@@ -633,7 +633,7 @@ async fn test_lateral_with_aggregation_full() {
     db.create_st(
         "lat_agg_st",
         "SELECT a.id, count(*) AS elem_count \
-         FROM lat_agg a, \
+         FROM public.lat_agg a, \
          jsonb_array_elements(a.data) AS e \
          GROUP BY a.id",
         "1m",
@@ -665,7 +665,7 @@ async fn test_lateral_multiple_refreshes_converge() {
     db.create_st(
         "lat_conv_st",
         "SELECT d.id, e.value AS val \
-         FROM lat_conv d, \
+         FROM public.lat_conv d, \
          jsonb_array_elements(d.data) AS e",
         "1m",
         "AUTO",
@@ -690,7 +690,7 @@ async fn test_lateral_multiple_refreshes_converge() {
 
     db.assert_st_matches_query(
         "public.lat_conv_st",
-        "SELECT d.id, e.value AS val FROM lat_conv d, jsonb_array_elements(d.data) AS e",
+        "SELECT d.id, e.value AS val FROM public.lat_conv d, jsonb_array_elements(d.data) AS e",
     )
     .await;
 }
