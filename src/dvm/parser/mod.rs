@@ -44,7 +44,7 @@ fn push_parse_warning(msg: String) {
 // PostgreSQL parse-tree nodes, concentrating the `// SAFETY:` reasoning
 // into a handful of well-documented functions and macros.
 //
-// These wrappers document the unsafe-reduction rationale.
+// See plans/safety/PLAN_REDUCED_UNSAFE.md for the full rationale.
 
 /// Convert a PostgreSQL C string pointer to a Rust `&str`.
 ///
@@ -202,7 +202,7 @@ pub use window_plan::*;
 // These thin wrappers encapsulate the single `// SAFETY:` reasoning block
 // in one place, so call sites in `sublinks.rs` and `rewrites.rs` can call
 // them without an explicit `unsafe {}` block, reducing the per-module unsafe
-// block count by ≥40%.
+// block count by ≥40%.  See plans/safety/PLAN_REDUCED_UNSAFE.md §SAF-2.
 
 /// Safe wrapper for `node_to_expr`.
 ///
