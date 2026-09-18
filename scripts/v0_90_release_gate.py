@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parent.parent
 
 REQUIRED_ARTIFACTS = (
     "roadmap/v0.90.0.md",
-    "plans/PLAN_0_90_0.md",
     "sql/pg_trickle--0.89.0--0.90.0.sql",
     "sql/archive/pg_trickle--0.90.0.sql",
     "src/scheduler/controller.rs",

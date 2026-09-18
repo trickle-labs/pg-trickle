@@ -15,7 +15,6 @@ VERSION = "0.92.0"
 REQUIRED_FILES = (
     "roadmap/v0.92.0.md",
     "roadmap/v0.92.0.md-full.md",
-    "plans/PLAN_0_92_0.md",
     "sql/pg_trickle--0.91.0--0.92.0.sql",
     "sql/archive/pg_trickle--0.92.0.sql",
     "docs/upgrade-support-manifest.json",

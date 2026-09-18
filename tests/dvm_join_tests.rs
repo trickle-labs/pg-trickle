@@ -2,7 +2,7 @@
 //!
 //! These tests run the generated delta SQL against a standalone PostgreSQL
 //! container so we can validate result rows for the join operator family
-//! called out in PLAN_TEST_EVALS_UNIT.md.
+//! called out in the completed test-suite evaluation.
 //!
 //! Schema: orders (id, prod_id, amount) LEFT-JOIN products (id, name)
 //! on orders.prod_id = products.id.

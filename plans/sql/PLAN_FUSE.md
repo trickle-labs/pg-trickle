@@ -53,7 +53,7 @@ happen to apply anomalous deltas.
 
 ### Relationship to Watermark Gating
 
-[PLAN_WATERMARK_GATING.md](PLAN_WATERMARK_GATING.md) addresses the case
+The implemented watermark-gating behavior addresses the case
 where external data is *incomplete* — the fuse addresses the case where
 external data is *wrong*. The two features are complementary:
 
@@ -654,12 +654,12 @@ SELECT pgtrickle.alter_stream_table('line_summary',
 
 | Plan | Relationship |
 |------|--------------|
-| [PLAN_WATERMARK_GATING.md](PLAN_WATERMARK_GATING.md) | Complementary. Watermark gating prevents refresh when external data is *incomplete*. The fuse prevents refresh when data changes are *anomalous*. Both gate refresh but for different reasons. A ST can have both: watermark alignment must pass **and** fuse must be intact. |
+| Historical watermark-gating implementation | Complementary. Watermark gating prevents refresh when external data is *incomplete*. The fuse prevents refresh when data changes are *anomalous*. Both gate refresh but for different reasons. A ST can have both: watermark alignment must pass **and** fuse must be intact. |
 | [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md) | A blown fuse on any member of a diamond atomic group blocks the entire group (consistent with all-or-nothing semantics). |
 | [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md) | Orthogonal. Snapshot consistency concerns *which* data is visible; the fuse concerns *whether* to apply changes at all. |
 | Adaptive DIFF→FULL fallback ([refresh.rs](../../src/refresh.rs)) | The fuse is a stricter safety layer above the adaptive fallback. Both examine change volume but at different thresholds with different effects (block vs. switch strategy). Can share the change buffer count query. |
 | Auto-suspension ([scheduler.rs](../../src/scheduler.rs)) | Auto-suspension handles repeated *failures* (errors). The fuse handles anomalous *successes* (unexpected volumes). Complementary — different triggers, same protective intent. |
-| [PLAN_HYBRID_CDC.md](PLAN_HYBRID_CDC.md) | The fuse works regardless of CDC mode (trigger or WAL). In WAL mode, the "change buffer count" may be derived from decoded WAL records rather than trigger-written rows, but the blow logic is identical. |
+| Historical hybrid CDC implementation | The fuse works regardless of CDC mode (trigger or WAL). In WAL mode, the "change buffer count" may be derived from decoded WAL records rather than trigger-written rows, but the blow logic is identical. |
 
 ---
 

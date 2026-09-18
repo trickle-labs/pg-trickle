@@ -109,7 +109,7 @@ const LARGE_SCALE_DIFFERENTIAL_SKIP: &[&str] = &[];
 /// restrictions (subqueries in the target list, EXCEPT ALL, NOT IN correlated
 /// subqueries, etc.) are expected to be skipped.
 ///
-/// Populated from empirical test runs — see plans/testing/TEST_SUITE_TPC_H-GAPS.md §T2.
+/// Populated from empirical test runs; keep this list synchronized with the test suite.
 /// The regression guard at the end of the test will fail if any query not in
 /// this list is skipped, catching silent regressions as the DVM evolves.
 #[rustfmt::skip]

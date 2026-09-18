@@ -372,8 +372,7 @@ v0.104.0 makes Graph V1 and Delta V1 stable public SQL contracts.
 - Retains `pg_trickle.experimental_graph_v1` as a deprecated no-op for
   configuration compatibility.
 
-See the [v0.104.0 roadmap](roadmap/v0.104.0.md), the
-[v0.104.0 implementation plan](plans/PLAN_0_104_0.md), and the
+See the [v0.104.0 roadmap](roadmap/v0.104.0.md) and the
 [capability manifest](docs/capability-manifest.json).
 
 ## [0.103.0] — Durable WAL receipts and workload budgets
@@ -390,8 +389,7 @@ encounter repeated decoder failures fall back to trigger CDC.
 - Freezes the v0.103 workload-budget contract and release gate while reusing the
   existing scheduler quotas, deadlines, backpressure, and freshness controls.
 
-See the [v0.103.0 roadmap](roadmap/v0.103.0.md), the
-[v0.103.0 implementation plan](plans/PLAN_0_103_0.md), and the
+See the [v0.103.0 roadmap](roadmap/v0.103.0.md) and the
 [capability manifest](docs/capability-manifest.json).
 
 ## [0.102.0] — Output-sensitive delta performance
@@ -405,8 +403,7 @@ v0.102.0 records bounded cost evidence for completed differential refreshes.
   retained benchmark evidence supports a new rule.
 - Adds the v0.101.0 to v0.102.0 upgrade path and release gate.
 
-See the [v0.102.0 roadmap](roadmap/v0.102.0.md), the
-[v0.102.0 implementation plan](plans/PLAN_0_102_0.md), and the
+See the [v0.102.0 roadmap](roadmap/v0.102.0.md) and the
 [capability manifest](docs/capability-manifest.json).
 
 ## [0.101.0] — Exact relational state and semantic depth
@@ -616,8 +613,7 @@ source-commit and committed-visibility evidence.
 - Adds the v0.89 → v0.90 migration, fresh-install catalog parity, version
   checks, release gate, and upgrade documentation.
 
-See the [v0.90 roadmap](roadmap/v0.90.0.md), [implementation plan](plans/PLAN_0_90_0.md),
-and [upgrade guide](docs/UPGRADING.md).
+See the [v0.90 roadmap](roadmap/v0.90.0.md) and [upgrade guide](docs/UPGRADING.md).
 
 ## Upgrade
 
@@ -2043,9 +2039,9 @@ and `unit_kind` CHECK constraints to lag behind the extension catalog (missing
 
 **ARCH-003 / DOC-002: PLAN.md Archival**
 
-The 2,233-line v0.9.0 implementation plan in `plans/PLAN.md` has been moved to
-`plans/archive/PLAN_HISTORICAL.md`. `plans/PLAN.md` is now a short Architecture
-& Roadmap Index linking to active planning documents.
+The 2,233-line v0.9.0 implementation plan was removed from the active plan
+index. `plans/PLAN.md` is now a short Architecture & Roadmap Index linking to
+active planning documents.
 
 **DOC-003: plans/INDEX.md Generation**
 
@@ -8036,7 +8032,7 @@ large-scale behavior is easier to study.
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.
@@ -8345,7 +8341,7 @@ released when the transaction ends — whether it succeeds or fails.
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.
@@ -8474,7 +8470,7 @@ Added static security analysis to the CI pipeline:
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.
@@ -8539,7 +8535,7 @@ Completed a full hardening pass of the integration test suite, bringing all item
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.
@@ -8597,7 +8593,7 @@ Completed a full hardening pass of the integration test suite, bringing all item
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.
@@ -8751,7 +8747,7 @@ produced wrong results.
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.
@@ -8810,7 +8806,7 @@ checks at this point (improved to 22/22 in v0.1.3).
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
 
-Completed a full hardening pass of the integration test suite, bringing all items in `PLAN_TEST_EVALS_INTEGRATION.md` to done:
+Completed a full hardening pass of the integration test suite, bringing all items in the integration test evaluation to done:
 - **Multiset validation** — Extracted `assert_sets_equal()` helper relying on EXCEPT/UNION ALL SQL logic and applied it to workflow tests to ensure storage table state correctly matches the defining query post-refresh.
 - **Round-trip notifications** — `pg_trickle_alert` notifications now verify receipt end-to-end via `sqlx::PgListener`.
 - **DVM operators** — Added unit coverage for complex semi/anti-join behaviors (multi-column, filtered, complementary), multi-table join chains for inner and full joins, and `proptest!` fuzz tests enforcing generated SQL invariants across INNER, SEMI, and ANTI joins.

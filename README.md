@@ -124,17 +124,6 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Shard rebalance auto-recovery** — topology changes are detected by comparing `pg_dist_node` against `pgt_worker_slots`; stale slots are pruned and new ones inserted without operator intervention.
 - **Worker failure isolation** — per-worker poll failures are logged and skipped; after `pg_trickle.citus_worker_retry_ticks` (default 5) consecutive failures a WARNING is raised while healthy workers continue uninterrupted.
 
-### DuckLake lakehouse integration
-
-pg_trickle is positioning itself as the incremental view maintenance engine for [DuckLake](https://ducklake.select) — the PostgreSQL-catalog-backed lakehouse format from the DuckDB team.
-
-- **Phase 1** — tutorials, blog posts, and containerised demos for running pg_trickle as the IVM layer for DuckLake-backed data lakes using the existing foreign-table path; zero new extension code required.
-- **Phase 2** — native `CdcMode::DuckLakeChangeFeed` adapter calling DuckLake's `table_changes()` API for O(Δ) change consumption; snapshot-based frontier model; inlined-data trigger adapter; row-ID plumbing for O(1) delta application; compaction-window safety policy.
-- **Phase 3a** — DuckLake sink output mode (`sink => 'ducklake'`): stream table results serialised as Parquet (Snappy/ZSTD) via `arrow-rs`/`parquet` crates, uploaded to `file://` or `s3://`, and registered in the DuckLake catalog (data files, stats, snapshot) — queryable by DuckDB, Spark, and Trino with no custom export code.
-- **Phase 3b** — automatic DuckLake view registration on `create_stream_table` / `drop_stream_table`; snapshot provenance table (`pgtrickle.pgt_ducklake_provenance`) recording every sink run with `created_by` identity, snapshot ID, and delta row count for full end-to-end lineage.
-
-See [DuckLake Integration Plan](plans/ecosystem/PLAN_DUCKLAKE.md) and [ROADMAP.md](ROADMAP.md) for the full roadmap.
-
 ### Production & operations
 
 - **PgBouncer / connection-pool compatible** — works behind PgBouncer in transaction-pool mode (Supabase, Railway, Neon, etc.); row-level locking replaces session locks; per-table `pooler_compatibility_mode` available.

@@ -2,7 +2,7 @@
 //!
 //! These tests exercise the generated delta SQL directly against a live
 //! PostgreSQL container. They target the highest-risk transition cases from
-//! PLAN_TEST_EVALS_UNIT.md without requiring the full extension runtime.
+//! the completed test-suite evaluation without requiring the full extension runtime.
 
 mod common;
 

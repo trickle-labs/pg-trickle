@@ -2,7 +2,7 @@
 //!
 //! These tests execute generated delta SQL against a standalone PostgreSQL
 //! container so we can validate result rows for the remaining thin operators
-//! called out in PLAN_TEST_EVALS_UNIT.md.
+//! called out in the completed test-suite evaluation.
 
 mod common;
 

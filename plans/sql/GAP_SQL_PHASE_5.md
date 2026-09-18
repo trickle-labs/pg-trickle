@@ -75,7 +75,7 @@ ratio. Items higher on the list provide the most value for the least work.
 | **Severity** | **Correctness gap** — not P0 (no wrong SQL generated) but produces wrong *data* |
 | **Effort** | 1–2 hours |
 | **Impact** | High — prevents silent data corruption for any user using volatile functions |
-| **Plan** | `plans/sql/PLAN_NON_DETERMINISM.md` (415 lines, fully designed) |
+| **Plan** | Completed non-determinism implementation |
 
 **Implementation:**
 - Add `lookup_function_volatility()` — SPI query to `pg_proc.provolatile`
@@ -103,7 +103,7 @@ query that will produce wrong results.
 | **Severity** | P2 — rejected with clear error |
 | **Effort** | 6–8 hours |
 | **Impact** | Medium — common PostgreSQL idiom for "first row per group" |
-| **Source** | GAP_SQL_PHASE_4.md item S2 |
+| **Source** | Completed earlier SQL-gap work, item S2 |
 
 **Implementation:**
 - At parse time, detect `DISTINCT ON` with non-empty `distinctClause`
@@ -138,7 +138,7 @@ infrastructure.
 | **Severity** | P2 — rejected with clear error |
 | **Effort** | 4–6 hours |
 | **Impact** | Low-Medium — used in analytical queries |
-| **Source** | GAP_SQL_PHASE_4.md item E3 |
+| **Source** | Completed earlier SQL-gap work, item E3 |
 
 **Implementation:**
 - `ALL (subquery)` is the dual of `ANY (subquery)`:
@@ -161,7 +161,7 @@ Covers the last missing subquery expression type.
 | **Severity** | P2 — rejected with clear error |
 | **Effort** | 4–6 hours |
 | **Impact** | Low — niche statistical use, but covers 11 gap items at once |
-| **Source** | GAP_SQL_PHASE_4.md item A3 |
+| **Source** | Completed earlier SQL-gap work, item A3 |
 
 **Implementation:**
 - All 11 use the proven group-rescan pattern (copy-paste of existing aggregates)
@@ -184,7 +184,7 @@ minimal new code. All follow the exact same pattern as STDDEV/VARIANCE.
 | **Severity** | P2 — rejected with clear error |
 | **Effort** | 4–6 hours |
 | **Impact** | Low — uncommon pattern, but a completeness gap |
-| **Source** | GAP_SQL_PHASE_4.md item S3 |
+| **Source** | Completed earlier SQL-gap work, item S3 |
 
 **Implementation:**
 - PostgreSQL's parser already produces a nested tree for mixed set ops:
@@ -232,7 +232,7 @@ Simple to implement with `AFTER TRUNCATE` triggers.
 | **Severity** | P2 — rejected with clear error |
 | **Effort** | 10–15 hours |
 | **Impact** | Medium — used in reporting and OLAP queries |
-| **Source** | GAP_SQL_PHASE_4.md item S1 |
+| **Source** | Completed earlier SQL-gap work, item S1 |
 
 **Implementation (preferred: parse-time rewrite):**
 - Decompose into multiple GROUP BY queries combined with UNION ALL
@@ -264,7 +264,7 @@ rewrite avoids needing a new OpTree variant.
 | **Severity** | P2 — rejected with clear error |
 | **Effort** | 8–10 hours |
 | **Impact** | Low — edge case, but blocks legitimate analytics queries |
-| **Source** | GAP_SQL_PHASE_4.md item S4 |
+| **Source** | Completed earlier SQL-gap work, item S4 |
 
 **Implementation (multi-pass recomputation):**
 - Group window functions by their PARTITION BY clause
@@ -316,7 +316,7 @@ would significantly expand the extension's coverage.
 | **Severity** | P2 |
 | **Effort** | 6–8 hours |
 | **Impact** | Low — JOIN/CTE rewrite is straightforward |
-| **Source** | GAP_SQL_PHASE_4.md item E1 |
+| **Source** | Completed earlier SQL-gap work, item E1 |
 
 **Implementation:**
 - Auto-rewrite to a CROSS JOIN with the scalar subquery:

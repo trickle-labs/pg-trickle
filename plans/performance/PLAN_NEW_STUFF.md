@@ -760,8 +760,8 @@ lower replication lag and checkpoint pressure.
 
 **Effort.** 1–2 weeks (DDL changes, crash recovery handling, GUC).
 
-**Prior Art.** Mentioned in PLAN_TPC_H_BENCHMARKING.md as O-3. PostgreSQL's
-UNLOGGED tables; Oracle's NOLOGGING mode for materialized view logs.
+**Prior Art.** PostgreSQL's UNLOGGED tables; Oracle's NOLOGGING mode for
+materialized view logs.
 
 **Risk.** After crash, one FULL refresh per ST is required. For large or expensive
 stream tables this can be a significant availability event. The GUC defaults to

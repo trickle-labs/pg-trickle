@@ -689,8 +689,7 @@ automatically selected by the all-distributed rule in P4.1.
   publication API for ST storage; reused as-is.
 - [pgtrickle-relay/](pgtrickle-relay/) — outbox/inbox bridge
   available for cross-cluster fan-out.
-- [plans/infra/PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md)
-  — adjacent partitioning work; some primitives overlap.
+- The completed partitioning compatibility work; some primitives overlap.
 - [plans/infra/PLAN_MULTI_DATABASE.md](plans/infra/PLAN_MULTI_DATABASE.md)
   — multi-database scheduler.
 - [discussion #619](https://github.com/trickle-labs/pg-trickle/discussions/619)

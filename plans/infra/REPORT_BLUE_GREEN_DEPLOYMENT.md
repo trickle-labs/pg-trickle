@@ -492,7 +492,7 @@ enabling rollback.
 
 - [PLAN_UPGRADE_MIGRATIONS.md](../sql/PLAN_UPGRADE_MIGRATIONS.md) — extension
   upgrade migrations (overlapping concern for version-to-version transitions).
-- [PLAN_HYBRID_CDC.md](../sql/PLAN_HYBRID_CDC.md) — CDC mode transitions
+- Implemented CDC mode transitions
   already implement a form of "hot swap" from trigger to WAL.
 - [PLAN_FUSE.md](../sql/PLAN_FUSE.md) — anomalous change volume detection
   could trigger auto-rollback of a green pipeline.
