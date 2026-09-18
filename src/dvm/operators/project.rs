@@ -52,10 +52,22 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
                 .iter()
                 .map(|st_col| {
                     if let Some(pos) = aliases.iter().position(|a| a == st_col) {
-                        let child_name = child_out
-                            .get(pos)
-                            .cloned()
-                            .unwrap_or_else(|| st_col.clone());
+                        let child_name = match expressions.get(pos) {
+                            Some(Expr::ColumnRef {
+                                table_alias,
+                                column_name,
+                            }) => resolve_column_name_to_child(
+                                table_alias.as_deref(),
+                                column_name,
+                                &child_out,
+                                Some(differential_child),
+                            )
+                            .unwrap_or_else(|| st_col.clone()),
+                            _ => child_out
+                                .get(pos)
+                                .cloned()
+                                .unwrap_or_else(|| st_col.clone()),
+                        };
                         if child_name != *st_col {
                             alias_map.insert(child_name.clone(), st_col.clone());
                             alias_map.insert(format!("__pgt_group_{pos}"), st_col.clone());
@@ -269,7 +281,7 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     // this, the MERGE step inserts new aggregate rows with __pgt_count = 0
     // (the column default), corrupting the group count used for subsequent
     // differential refreshes.
-    let projects_target_row = ctx.is_top_level_diff_node()
+    let projects_target_row = (ctx.is_top_level_diff_node() || ctx.having_filter)
         && ctx.st_has_pgt_count
         && ctx
             .st_user_columns
@@ -1406,6 +1418,42 @@ mod tests {
 
         // The SQL CTE should SELECT __pgt_count
         assert_sql_contains(&sql, "__pgt_count");
+    }
+
+    #[test]
+    fn test_diff_project_forwards_aggregate_state_through_filter() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        ctx.st_user_columns = Some(vec!["region".to_string(), "cnt".to_string()]);
+        ctx.st_has_pgt_count = true;
+
+        let child = scan(1, "orders", "public", "o", &["id", "region"]);
+        let agg = aggregate(vec![colref("region")], vec![count_star("cnt")], child);
+        let tree = project(
+            vec![colref("region"), colref("cnt")],
+            vec!["region", "cnt"],
+            filter(Expr::Raw("cnt > 0".to_string()), agg),
+        );
+
+        let result = diff_project(&mut ctx, &tree).unwrap();
+        assert!(result.columns.contains(&"__pgt_count".to_string()));
+    }
+
+    #[test]
+    fn test_diff_project_maps_reordered_aggregate_targets_to_child_columns() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        ctx.st_user_columns = Some(vec!["c".to_string(), "g".to_string()]);
+        ctx.st_has_pgt_count = true;
+
+        let child = scan(1, "source", "public", "s", &["id", "g"]);
+        let agg = aggregate(vec![colref("g")], vec![count_star("c")], child);
+        let tree = project(vec![colref("c"), colref("g")], vec!["c", "g"], agg);
+
+        let result = diff_project(&mut ctx, &tree).unwrap();
+        let sql = ctx.cte_sql(&result.cte_name).unwrap();
+        assert!(
+            !sql.contains("st.\"c\" IS NOT DISTINCT FROM d.\"g\""),
+            "{sql}"
+        );
     }
 
     #[test]

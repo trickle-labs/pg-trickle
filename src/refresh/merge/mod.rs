@@ -1266,6 +1266,20 @@ pub fn execute_differential_refresh_with_tuning(
                     name,
                     reconciled,
                 );
+                if has_downstream_st_consumers(st.pgt_id)
+                    && let Ok(downstream_ids) =
+                        crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+                {
+                    for downstream_id in downstream_ids {
+                        if let Err(e) = StreamTableMeta::mark_for_reinitialize(downstream_id) {
+                            pgrx::warning!(
+                                "[pg_trickle] EC01-2: failed to mark downstream ST {} for reinitialization after no-data phantom cleanup: {}",
+                                downstream_id,
+                                e,
+                            );
+                        }
+                    }
+                }
                 return Ok((0, reconciled));
             }
         }
