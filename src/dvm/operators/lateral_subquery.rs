@@ -224,7 +224,8 @@ pub fn diff_lateral_subquery(
                 .map(|c| format!("{}.{}", quote_ident(alias), quote_ident(c))),
         )
         .collect();
-    let row_id_expr = crate::hash::build_text_row_identity_expr("SCAN_KEY", &hash_exprs);
+    let row_id_expr =
+        crate::dvm::operators::scan::build_hash_expr_for_domain("SCAN_KEY", &hash_exprs);
 
     // Build the subquery alias clause
     let sub_alias_clause = if column_aliases.is_empty() {
@@ -337,8 +338,10 @@ pub fn diff_lateral_subquery(
                     .map(|c| format!("{pc_alias}.{}", quote_ident(c))),
             )
             .collect();
-        let row_id_expr_precomp =
-            crate::hash::build_text_row_identity_expr("SCAN_KEY", &hash_exprs_precomp);
+        let row_id_expr_precomp = crate::dvm::operators::scan::build_hash_expr_for_domain(
+            "SCAN_KEY",
+            &hash_exprs_precomp,
+        );
 
         let expand_sql = format!(
             "SELECT DISTINCT ON ({outer_identity_refs}) {row_id_expr_precomp} AS \"__pgt_row_id\",\n\
@@ -947,12 +950,12 @@ mod tests {
         let result = diff_lateral_subquery(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // LEFT JOIN uses raw col::TEXT in hash (pg_trickle_hash_multi
-        // handles NULLs via \x00NULL\x00 sentinel). No COALESCE needed.
+        // LEFT JOIN preserves NULLs through the typed row identity encoder.
         assert_sql_contains(&sql, "LEFT JOIN LATERAL");
-        // Hash expression uses sub.val::TEXT without COALESCE
         assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
         assert_sql_contains(&sql, "\"sub\".\"val\"");
+        assert!(!sql.contains("\"t\".\"id\"::text"));
+        assert!(!sql.contains("\"sub\".\"val\"::text"));
     }
 
     #[test]

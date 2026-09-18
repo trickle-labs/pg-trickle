@@ -11,6 +11,7 @@
 //! kept — net result: INSERT into the ST. The converse is also correct.
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
+use crate::dvm::operators::join_common::snapshot_join_column_name;
 use crate::dvm::parser::{Expr, OpTree, unwrap_transparent};
 use crate::error::PgTrickleError;
 
@@ -225,7 +226,7 @@ fn resolve_predicate_for_child(predicate: &Expr, child_cols: &[String]) -> Strin
             column_name,
         } => {
             // Try direct disambiguated: tbl__col
-            let disambiguated = format!("{tbl}__{column_name}");
+            let disambiguated = snapshot_join_column_name(tbl, column_name);
             if child_cols.contains(&disambiguated) {
                 return quote_ident(&disambiguated);
             }
@@ -437,7 +438,7 @@ fn resolve_qualified_column_ref(
     column: &str,
     child_cols: &[String],
 ) -> Option<String> {
-    let disambiguated = format!("{alias}__{column}");
+    let disambiguated = snapshot_join_column_name(alias, column);
     if child_cols.contains(&disambiguated) {
         return Some(quote_ident(&disambiguated));
     }
@@ -614,6 +615,18 @@ mod tests {
         assert_sql_contains(&sql, "\"id\"");
         assert_sql_contains(&sql, "\"name\"");
         assert_eq!(result.columns, vec!["id", "name", "status"]);
+    }
+
+    #[test]
+    fn test_filter_resolves_hashed_join_column_name() {
+        let alias = "very_long_source_alias_abcdefghijklmnopqrstuv";
+        let column = "long_column_name_abcdefgh";
+        let hashed = snapshot_join_column_name(alias, column);
+
+        assert_eq!(
+            resolve_predicate_for_child(&qcolref(alias, column), std::slice::from_ref(&hashed)),
+            quote_ident(&hashed)
+        );
     }
 
     #[test]

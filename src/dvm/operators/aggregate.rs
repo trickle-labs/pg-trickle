@@ -10,7 +10,9 @@
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::join_common::{build_snapshot_inline_from, build_snapshot_sql};
+use crate::dvm::operators::join_common::{
+    build_snapshot_inline_from, build_snapshot_sql, snapshot_join_column_name,
+};
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree};
 use crate::error::PgTrickleError;
@@ -29,7 +31,7 @@ fn resolve_col_for_child(expr: &Expr, child_cols: &[String]) -> String {
             column_name,
         } => {
             // Direct disambiguated: tbl__col
-            let disambiguated = format!("{tbl}__{column_name}");
+            let disambiguated = snapshot_join_column_name(tbl, column_name);
             if child_cols.contains(&disambiguated) {
                 return disambiguated;
             }
@@ -6675,6 +6677,21 @@ mod tests {
         assert!(
             sql.contains("c.action = 'D'"),
             "SQL should filter on c.action = 'D': {sql}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_resolves_hashed_join_column_name() {
+        let alias = "very_long_source_alias_abcdefghijklmnopqrstuv";
+        let column = "long_column_name_abcdefgh";
+        let hashed = snapshot_join_column_name(alias, column);
+
+        assert_eq!(
+            resolve_col_for_child(
+                &crate::dvm::operators::test_helpers::qcolref(alias, column),
+                std::slice::from_ref(&hashed)
+            ),
+            hashed
         );
     }
 }

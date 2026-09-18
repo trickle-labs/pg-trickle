@@ -745,6 +745,10 @@ pub fn execute_differential_refresh_with_tuning(
 
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let has_user_triggers = crate::cdc::has_user_triggers(st.pgt_relid)?;
+    let user_triggers_active =
+        user_triggers_mode != crate::config::UserTriggersMode::Off && has_user_triggers;
     // F10: record start time for OTLP span (nanoseconds since Unix epoch).
     let start_ns = crate::otel::now_ns();
 
@@ -1234,6 +1238,7 @@ pub fn execute_differential_refresh_with_tuning(
         if crate::refresh::current_graph_refresh_id().is_some()
             && st.st_partition_key.is_none()
             && !dvm::query_has_recursive_cte(&effective_defining_query).unwrap_or(false)
+            && !has_user_triggers
         {
             let quoted_table = format!(
                 "\"{}\".\"{}\"",
@@ -2578,8 +2583,6 @@ pub fn execute_differential_refresh_with_tuning(
     // ── User-trigger detection ───────────────────────────────────────
     // Determine whether to use the explicit DML path based on the GUC
     // and the presence of user-defined row-level triggers on the ST.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
-    let has_user_triggers = crate::cdc::has_user_triggers(st.pgt_relid)?;
     let use_explicit_dml = match user_triggers_mode {
         crate::config::UserTriggersMode::Off => false,
         crate::config::UserTriggersMode::Auto => has_user_triggers,
@@ -3444,8 +3447,6 @@ pub fn execute_differential_refresh_with_tuning(
     // the defining query has produced it. Reconciliation against that query
     // would erase the trigger's result, so only reconcile when triggers are
     // disabled or absent.
-    let user_triggers_active =
-        user_triggers_mode != crate::config::UserTriggersMode::Off && has_user_triggers;
     let query_has_recursive_cte = with_stream_owner(st, || {
         dvm::query_has_recursive_cte(&effective_defining_query)
     })

@@ -205,17 +205,10 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             .enumerate()
             .map(|(index, expr)| resolve_project_expr(index, expr))
             .collect();
-        let row_id_expr = if is_lateral_child {
-            crate::hash::build_text_row_identity_expr(
-                crate::dvm::row_identity_domain(unwrapped),
-                &hash_cols,
-            )
-        } else {
-            crate::dvm::operators::scan::build_hash_expr_for_domain(
-                row_identity_domain(unwrapped),
-                &hash_cols,
-            )
-        };
+        let row_id_expr = crate::dvm::operators::scan::build_hash_expr_for_domain(
+            row_identity_domain(unwrapped),
+            &hash_cols,
+        );
         format!("{row_id_expr} AS __pgt_row_id")
     } else {
         // Recompute __pgt_row_id from the projected key columns to ensure

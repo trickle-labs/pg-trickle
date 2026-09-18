@@ -115,7 +115,8 @@ pub fn diff_lateral_function(
                 .collect::<Vec<_>>(),
         )
         .collect();
-    let row_id_expr = crate::hash::build_text_row_identity_expr("SCAN_KEY", &hash_exprs);
+    let row_id_expr =
+        crate::dvm::operators::scan::build_hash_expr_for_domain("SCAN_KEY", &hash_exprs);
 
     // Build the LATERAL SRF clause with optional WITH ORDINALITY
     let ordinality_clause = if *with_ordinality {
