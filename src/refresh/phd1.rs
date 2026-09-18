@@ -18,13 +18,13 @@ pub fn prepare_cross_cycle_phantom_table(
     st: &crate::catalog::StreamTableMeta,
     defining_query: &str,
 ) -> Result<(), PgTrickleError> {
-    let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
     let recon_table = format!("__pgt_recon_{}", st.pgt_id);
-    let recon_select =
-        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
     // defining_query is definition-derived: parse/analyze it under the
     // owner's identity and stored search_path, not this privileged caller's.
     crate::refresh::with_stream_owner(st, || {
+        let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
+        let recon_select =
+            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
         crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
     })?;
     Ok(())
@@ -113,6 +113,20 @@ pub fn cleanup_cross_cycle_phantoms(
     };
     let st_sig = json_fields_for("st");
     let r_sig = json_fields_for("r");
+    let recon_row_number_alias = {
+        let mut suffix = 0_u32;
+        loop {
+            let candidate = if suffix == 0 {
+                "__pgt_recon_rn".to_string()
+            } else {
+                format!("__pgt_recon_rn_{suffix}")
+            };
+            if !user_cols.iter().any(|column| column == &candidate) {
+                break candidate;
+            }
+            suffix += 1;
+        }
+    };
 
     // Step 1: materialise the live full-query result into the prepared temp table.
     let recon_table = format!("__pgt_recon_{pgt_id}");
@@ -199,14 +213,14 @@ pub fn cleanup_cross_cycle_phantoms(
             recon_numbered AS ( \
                 SELECT r.*, \
                        {r_sig_r} AS __pgt_sig_x, \
-                       ROW_NUMBER() OVER (PARTITION BY {r_sig_r}) AS rn \
+                       ROW_NUMBER() OVER (PARTITION BY {r_sig_r}) AS {recon_row_number_alias} \
                 FROM {recon_table} r \
             ), \
             to_insert AS ( \
                 SELECT n.* \
                 FROM recon_numbered n \
                 JOIN shortfall sh ON sh.__pgt_sig = n.__pgt_sig_x \
-                WHERE n.rn <= sh.missing_n \
+                WHERE n.{recon_row_number_alias} <= sh.missing_n \
                 LIMIT $1 \
             ), \
             inserted AS ( \

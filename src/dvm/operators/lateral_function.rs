@@ -14,7 +14,6 @@
 //! This is stable as long as the same source row produces the same expanded values.
 
 use crate::dvm::diff::{DiffContext, DiffResult, col_list, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
 use crate::dvm::parser::{OpTree, lateral_function_output_columns};
 use crate::error::PgTrickleError;
 
@@ -116,7 +115,7 @@ pub fn diff_lateral_function(
                 .collect::<Vec<_>>(),
         )
         .collect();
-    let row_id_expr = build_hash_expr(&hash_exprs);
+    let row_id_expr = crate::hash::build_text_row_identity_expr("SCAN_KEY", &hash_exprs);
 
     // Build the LATERAL SRF clause with optional WITH ORDINALITY
     let ordinality_clause = if *with_ordinality {

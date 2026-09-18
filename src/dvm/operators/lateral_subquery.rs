@@ -16,7 +16,6 @@
 //! CTE so that outer rows without matching inner rows produce NULL-padded rows.
 
 use crate::dvm::diff::{DiffContext, DiffResult, col_list, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
 
@@ -225,7 +224,7 @@ pub fn diff_lateral_subquery(
                 .map(|c| format!("{}.{}", quote_ident(alias), quote_ident(c))),
         )
         .collect();
-    let row_id_expr = build_hash_expr(&hash_exprs);
+    let row_id_expr = crate::hash::build_text_row_identity_expr("SCAN_KEY", &hash_exprs);
 
     // Build the subquery alias clause
     let sub_alias_clause = if column_aliases.is_empty() {
@@ -338,7 +337,8 @@ pub fn diff_lateral_subquery(
                     .map(|c| format!("{pc_alias}.{}", quote_ident(c))),
             )
             .collect();
-        let row_id_expr_precomp = build_hash_expr(&hash_exprs_precomp);
+        let row_id_expr_precomp =
+            crate::hash::build_text_row_identity_expr("SCAN_KEY", &hash_exprs_precomp);
 
         let expand_sql = format!(
             "SELECT DISTINCT ON ({outer_identity_refs}) {row_id_expr_precomp} AS \"__pgt_row_id\",\n\

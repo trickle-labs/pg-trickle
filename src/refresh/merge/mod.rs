@@ -294,7 +294,9 @@ pub(crate) fn execute_full_refresh_target(
     // Initial CREATE and reinitialization call the target-level FULL refresh
     // directly, so rebuild private set-operation state here as well as in the
     // public FULL-refresh wrapper.
-    if crate::dvm::query_needs_dual_count(&st.defining_query) {
+    if crate::refresh::with_stream_owner(st, || {
+        Ok(crate::dvm::query_needs_dual_count(&st.defining_query))
+    })? {
         crate::setop_state::rebuild_for_full_refresh(st)?;
     }
 
@@ -2029,17 +2031,18 @@ pub fn execute_differential_refresh_with_tuning(
                 )
             })?
         } else {
-            // The cached path owns private L2 catalog access and therefore
-            // runs as the extension, as it did before v0.89. Generated SQL is
-            // still executed separately through the stream-owner boundary.
-            dvm::generate_delta_query_cached(
-                st.pgt_id,
-                &effective_defining_query,
-                prev_frontier,
-                new_frontier,
-                schema,
-                name,
-            )?
+            // The cache owns private L2 catalog access, but a cache miss also
+            // parses the defining query and must use its stored search_path.
+            with_stream_owner(st, || {
+                dvm::generate_delta_query_cached(
+                    st.pgt_id,
+                    &effective_defining_query,
+                    prev_frontier,
+                    new_frontier,
+                    schema,
+                    name,
+                )
+            })?
         };
 
         // DI-2: Clear per-leaf fallback OIDs after delta SQL generation.

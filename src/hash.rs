@@ -36,6 +36,15 @@ pub(crate) fn build_row_identity_expr(domain: &str, expressions: &[String]) -> S
     )
 }
 
+/// Build an identity from expressions whose SQL types may be structural.
+pub(crate) fn build_text_row_identity_expr(domain: &str, expressions: &[String]) -> String {
+    let text_expressions = expressions
+        .iter()
+        .map(|expression| format!("({expression})::text"))
+        .collect::<Vec<_>>();
+    build_row_identity_expr(domain, &text_expressions)
+}
+
 /// Compute a 64-bit xxHash row ID from a text representation.
 ///
 /// This function is exposed as a SQL function for use in INSERT statements

@@ -2269,6 +2269,20 @@ impl OpTree {
                 let unwrapped = unwrap_transparent(child);
                 if matches!(
                     unwrapped,
+                    OpTree::Scan {
+                        pk_columns,
+                        ..
+                    } if pk_columns.is_empty()
+                ) {
+                    // A keyless source has no stable identity outside the
+                    // visible projected row. Hash those output columns in
+                    // both FULL and DIFFERENTIAL refreshes, including when
+                    // the projection keeps the same number of columns but
+                    // replaces one with a computed expression.
+                    return Some(aliases.clone());
+                }
+                if matches!(
+                    unwrapped,
                     OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. }
                 ) {
                     let pk_aliases = join_pk_aliases(expressions, aliases, unwrapped);

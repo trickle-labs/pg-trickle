@@ -495,7 +495,9 @@ pub(crate) fn execute_manual_full_refresh(
     let _window_plan = crate::window_state::prepare_for_protected_refresh(st)?;
     // REL-101-1: (re)build durable, private INTERSECT/EXCEPT branch-multiplicity
     // state on the manual/create FULL refresh path, matching the scheduler path.
-    if crate::dvm::query_needs_dual_count(&st.defining_query) {
+    if refresh::with_stream_owner(st, || {
+        Ok(crate::dvm::query_needs_dual_count(&st.defining_query))
+    })? {
         crate::setop_state::rebuild_for_full_refresh(st)?;
     }
     Ok(result)

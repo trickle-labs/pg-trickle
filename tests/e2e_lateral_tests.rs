@@ -93,13 +93,13 @@ async fn test_lateral_immutable_table_function_uses_declared_out_columns_differe
 #[tokio::test]
 async fn test_lateral_group_projection_preserves_constant_on_insert() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute(
+    db.execute_seq(&[
         "CREATE TABLE token_records ( \
              source_record_id integer PRIMARY KEY, field_name text NOT NULL, \
-             normalized text NOT NULL, source_sort_key bytea NOT NULL); \
-         INSERT INTO token_records VALUES \
+             normalized text NOT NULL, source_sort_key bytea NOT NULL)",
+        "INSERT INTO token_records VALUES \
              (1, 'name', 'alice example', decode('01', 'hex'))",
-    )
+    ])
     .await;
     let defining_query = "SELECT source_record_id, field_name, 'token_name'::text AS channel_id, \
                 token AS block_key, source_sort_key \

@@ -1538,9 +1538,17 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let tree = parse_defining_query(defining_query).ok();
     let key_cols = tree.as_ref().and_then(|t| t.row_id_key_columns());
     let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
+    let has_lateral = tree.as_ref().is_some_and(contains_lateral);
 
     match key_cols {
         Some(cols) if domain == "WINDOW_KEY" => window_row_identity_expr("sub", &cols),
+        Some(cols) if has_lateral => {
+            let expressions = cols
+                .iter()
+                .map(|column| format!("sub.{}", diff::quote_ident(column)))
+                .collect::<Vec<_>>();
+            crate::hash::build_text_row_identity_expr(domain, &expressions)
+        }
         Some(cols) if cols.len() == 1 => {
             format!(
                 "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
@@ -1570,6 +1578,16 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
                 "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(row_to_json(sub)::text))".to_string()
             }
         }
+    }
+}
+
+fn contains_lateral(tree: &parser::OpTree) -> bool {
+    match tree {
+        parser::OpTree::LateralFunction { .. } | parser::OpTree::LateralSubquery { .. } => true,
+        parser::OpTree::Filter { child, .. }
+        | parser::OpTree::Project { child, .. }
+        | parser::OpTree::Subquery { child, .. } => contains_lateral(child),
+        _ => false,
     }
 }
 
