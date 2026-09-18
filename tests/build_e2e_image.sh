@@ -67,13 +67,29 @@ echo "  Dockerfile:   ${SCRIPT_DIR}/Dockerfile.e2e"
 echo "  Builder image: ${BUILDER_IMAGE}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-docker build \
-    --platform "${DOCKER_PLATFORM}" \
-    -t "${IMAGE_NAME}:${IMAGE_TAG}" \
-    -f "${SCRIPT_DIR}/Dockerfile.e2e" \
-    --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
-    ${EXTRA_ARGS} \
-    "${PROJECT_ROOT}"
+# The docker-container driver cannot see host-only image tags. Use the GHA
+# cache path only when the builder image is registry-addressable; local-image
+# fallbacks keep using the Docker daemon's native builder.
+if [[ -n "${BUILDX_CACHE_SCOPE:-}" && "${BUILDER_IMAGE}" == */* ]]; then
+    docker buildx build \
+        --platform "${DOCKER_PLATFORM}" \
+        --load \
+        --cache-from "type=gha,scope=${BUILDX_CACHE_SCOPE}" \
+        --cache-to "type=gha,scope=${BUILDX_CACHE_SCOPE},mode=max,ignore-error=true" \
+        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+        -f "${SCRIPT_DIR}/Dockerfile.e2e" \
+        --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
+        ${EXTRA_ARGS} \
+        "${PROJECT_ROOT}"
+else
+    docker build \
+        --platform "${DOCKER_PLATFORM}" \
+        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+        -f "${SCRIPT_DIR}/Dockerfile.e2e" \
+        --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
+        ${EXTRA_ARGS} \
+        "${PROJECT_ROOT}"
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
