@@ -106,7 +106,9 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     };
 
     // Compute row_id using the same hash formula as normal refresh.
-    let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
+    let row_id_expr = crate::refresh::with_stream_owner(st, || {
+        Ok(crate::dvm::row_id_expr_for_query(&st.defining_query))
+    })?;
 
     // Build the source subquery with row IDs.
     // Use alias `sub` to match what row_id_expr_for_query() generates.

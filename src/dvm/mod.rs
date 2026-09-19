@@ -1629,6 +1629,7 @@ fn query_target_column_types(query: &str) -> Option<std::collections::HashMap<St
             }
             Some(map)
         }))
+        .catch_others(|_| None)
         .execute()
     }
 }

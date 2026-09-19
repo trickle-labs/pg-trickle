@@ -1066,7 +1066,9 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
         )
     };
 
-    let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
+    let row_id_expr = crate::refresh::with_stream_owner(st, || {
+        Ok(crate::dvm::row_id_expr_for_query(&st.defining_query))
+    })?;
     let columns = crate::refresh::with_stream_owner(st, || {
         crate::dvm::get_defining_query_columns(&st.defining_query)
     })?;
