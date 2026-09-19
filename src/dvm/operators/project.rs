@@ -17,6 +17,49 @@ use crate::dvm::row_identity_domain;
 use crate::dvm::schema::{ColumnProvenance, RelationColumn, RelationSchema};
 use crate::error::PgTrickleError;
 
+fn aggregate_group_position(
+    expressions: &[Expr],
+    group_by: &[Expr],
+    position: usize,
+) -> Option<usize> {
+    let is_same_column = |left: &Expr, right: &Expr| match (left, right) {
+        (
+            Expr::ColumnRef {
+                column_name: left_name,
+                table_alias: left_table,
+            },
+            Expr::ColumnRef {
+                column_name: right_name,
+                table_alias: right_table,
+            },
+        ) => {
+            left_name == right_name
+                && (left_table == right_table || left_table.is_none() || right_table.is_none())
+        }
+        _ => false,
+    };
+    let occurrence = expressions[..position]
+        .iter()
+        .filter(|previous| is_same_column(previous, &expressions[position]))
+        .count();
+    let positional_group = group_by.iter().enumerate().find_map(|(index, group)| {
+        matches!(
+            group,
+            Expr::Literal(value)
+                if value.trim().parse::<usize>().ok() == Some(position + 1)
+        )
+        .then_some(index)
+    });
+    positional_group.or_else(|| {
+        group_by
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| is_same_column(&expressions[position], group))
+            .nth(occurrence)
+            .map(|(index, _)| index)
+    })
+}
+
 /// Differentiate a Project node.
 pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
     let OpTree::Project {
@@ -73,34 +116,8 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
                         }
                         let unwrapped_child = unwrap_transparent(differential_child);
                         if let OpTree::Aggregate { group_by, .. } = unwrapped_child {
-                            let is_same_column = |left: &Expr, right: &Expr| match (left, right) {
-                                (
-                                    Expr::ColumnRef {
-                                        column_name: left_name,
-                                        table_alias: left_table,
-                                    },
-                                    Expr::ColumnRef {
-                                        column_name: right_name,
-                                        table_alias: right_table,
-                                    },
-                                ) => {
-                                    left_name == right_name
-                                        && (left_table == right_table
-                                            || left_table.is_none()
-                                            || right_table.is_none())
-                                }
-                                _ => false,
-                            };
-                            let occurrence = expressions[..pos]
-                                .iter()
-                                .filter(|previous| is_same_column(previous, &expressions[pos]))
-                                .count();
-                            if let Some(pos_in_agg) = group_by
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, group)| is_same_column(&expressions[pos], group))
-                                .nth(occurrence)
-                                .map(|(index, _)| index)
+                            if let Some(pos_in_agg) =
+                                aggregate_group_position(expressions, group_by, pos)
                             {
                                 alias_map
                                     .insert(format!("__pgt_group_{pos_in_agg}"), st_col.clone());
@@ -845,6 +862,36 @@ fn resolve_source_column(op: &OpTree, table_alias: &str, column_name: &str) -> O
 mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
+
+    #[test]
+    fn test_aggregate_group_position_resolves_group_by_ordinals() {
+        let expressions = vec![colref("left_id"), colref("right_id")];
+        let group_by = vec![Expr::Literal("1".into()), Expr::Literal("2".into())];
+
+        assert_eq!(
+            aggregate_group_position(&expressions, &group_by, 0),
+            Some(0)
+        );
+        assert_eq!(
+            aggregate_group_position(&expressions, &group_by, 1),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_aggregate_group_position_preserves_duplicate_columns() {
+        let expressions = vec![colref("id"), colref("id")];
+        let group_by = vec![colref("id"), colref("id")];
+
+        assert_eq!(
+            aggregate_group_position(&expressions, &group_by, 0),
+            Some(0)
+        );
+        assert_eq!(
+            aggregate_group_position(&expressions, &group_by, 1),
+            Some(1)
+        );
+    }
 
     #[test]
     fn test_diff_project_basic_columns() {
