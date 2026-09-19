@@ -63,6 +63,7 @@ different domains do not produce the same identity.
 | `SET_KEY` | `0x05` | Set-operation identity fields |
 | `WINDOW_KEY` | `0x06` | Partition and order identity fields |
 | `SYNTHETIC` | `0x07` | Registered internal discriminator and fields |
+| `MDM_SOURCE_KEY_V1` | `0x08` | pg-mdm source identity-key fields |
 
 No other domain tag is assigned. Pass-through operators retain the child
 identity. Derived operators place child identities in explicitly framed fields.

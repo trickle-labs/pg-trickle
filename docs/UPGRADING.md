@@ -2,6 +2,35 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.107.0 to 0.108.0
+
+Install the v0.108.0 library and extension files, then apply the upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.108.0';
+```
+
+The migration preserves output-delta consumers, cursors, batches, and typed
+payload. It extends outstanding resnapshot records with fences for the
+database instance ID, the output contract digest, and the row identity
+version. Graph V1 advances to 1.2, and Delta V1 advances to 1.1.
+
+Installations pinned to 0.106.1 can update directly to 0.108.0. PostgreSQL
+applies the packaged 0.106.1-to-0.107.0 and 0.107.0-to-0.108.0 scripts in
+sequence; the release qualification runs that exact package path with pending
+consumer batches and typed payload.
+
+After the upgrade, validate each consumer before resuming delivery:
+
+```sql
+SELECT * FROM pgtrickle.output_delta_consumer_status();
+SELECT * FROM pgtrickle.validate_output_delta_consumer('<consumer-id>'::uuid);
+```
+
+If validation reports `INVALIDATED` or `RESNAPSHOT_REQUIRED`, build and
+acknowledge a new baseline with the public resnapshot APIs. Existing log and
+payload data remain available until the baseline succeeds.
+
 ## 0.106.1 to 0.107.0
 
 Install the v0.107.0 library and extension files, then apply the metadata-only

@@ -58,7 +58,7 @@ use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
     build_leaf_snapshot_sql, build_snapshot_sql, extract_equijoin_keys_aliased,
-    rewrite_join_condition,
+    rewrite_join_condition, snapshot_join_column_name,
 };
 use crate::dvm::parser::OpTree;
 use crate::dvm::snapshot::SnapshotPlan;
@@ -96,10 +96,10 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     let mut output_cols = Vec::new();
     for c in left_cols {
-        output_cols.push(format!("{left_prefix}__{c}"));
+        output_cols.push(snapshot_join_column_name(left_prefix, c));
     }
     for c in right_cols {
-        output_cols.push(format!("{right_prefix}__{c}"));
+        output_cols.push(snapshot_join_column_name(right_prefix, c));
     }
 
     let right_table = build_snapshot_sql(right);
@@ -112,7 +112,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "dl.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{left_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
             )
         })
         .collect();
@@ -122,7 +122,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "r.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{right_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
             )
         })
         .collect();
@@ -132,7 +132,7 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "l.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{left_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
             )
         })
         .collect();
@@ -142,17 +142,27 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "dr.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{right_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
             )
         })
         .collect();
     let null_right_cols: Vec<String> = right_cols
         .iter()
-        .map(|c| format!("NULL AS {}", quote_ident(&format!("{right_prefix}__{c}"))))
+        .map(|c| {
+            format!(
+                "NULL AS {}",
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
+            )
+        })
         .collect();
     let null_left_cols: Vec<String> = left_cols
         .iter()
-        .map(|c| format!("NULL AS {}", quote_ident(&format!("{left_prefix}__{c}"))))
+        .map(|c| {
+            format!(
+                "NULL AS {}",
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
+            )
+        })
         .collect();
 
     let part1_cols = [dl_cols.as_slice(), r_cols.as_slice()].concat().join(", ");
@@ -889,11 +899,11 @@ WHERE (SELECT has_del FROM {left_flags_cte})
 
     let left_output_cols: Vec<String> = left_cols
         .iter()
-        .map(|column| format!("{left_prefix}__{column}"))
+        .map(|column| snapshot_join_column_name(left_prefix, column))
         .collect();
     let right_output_cols: Vec<String> = right_cols
         .iter()
-        .map(|column| format!("{right_prefix}__{column}"))
+        .map(|column| snapshot_join_column_name(right_prefix, column))
         .collect();
     let schema = left_result
         .schema

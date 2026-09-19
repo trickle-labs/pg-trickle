@@ -517,6 +517,13 @@ pub fn query_has_join(query: &str) -> Result<bool, PgTrickleError> {
 /// If a filter sits above the scan, an UPDATE that moves a row from
 /// *passing* the predicate to *failing* it would only produce an INSERT
 /// with new values, which the filter discards — leaving the stale old
+fn unwrap_subqueries(op: &parser::OpTree) -> &parser::OpTree {
+    match op {
+        parser::OpTree::Subquery { child, .. } => unwrap_subqueries(child),
+        other => other,
+    }
+}
+
 /// row in the ST.  Standard D+I mode (merge_safe_dedup=false) emits
 /// both DELETE(old) and INSERT(new), so the filter correctly passes the
 /// DELETE for old values that matched and discards the INSERT with new
@@ -524,7 +531,45 @@ pub fn query_has_join(query: &str) -> Result<bool, PgTrickleError> {
 fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
     match tree {
         parser::OpTree::Scan { .. } => true,
-        parser::OpTree::Project { child, .. } => is_scan_chain_tree(child),
+        parser::OpTree::Project {
+            expressions, child, ..
+        } => {
+            // A computed MDM source key can change on a value-only source
+            // update. Keep the source DELETE so the old derived row identity
+            // is removed before the new one is inserted.
+            if expressions.iter().any(parser::is_mdm_source_key_expr) {
+                return false;
+            }
+            let is_pure_projection = expressions
+                .iter()
+                .all(|expr| matches!(expr, parser::Expr::ColumnRef { .. }));
+            let preserves_scan_pk = match unwrap_subqueries(child) {
+                parser::OpTree::Scan {
+                    pk_columns,
+                    alias,
+                    table_name,
+                    ..
+                } => {
+                    !pk_columns.is_empty()
+                        && pk_columns.iter().all(|pk| {
+                            expressions.iter().any(|expr| {
+                                matches!(
+                                    expr,
+                                    parser::Expr::ColumnRef {
+                                        column_name,
+                                        table_alias,
+                                    } if column_name == pk
+                                        && table_alias
+                                            .as_deref()
+                                            .is_none_or(|a| a == alias || a == table_name)
+                                )
+                            })
+                        })
+                }
+                _ => false,
+            };
+            (is_pure_projection || preserves_scan_pk) && is_scan_chain_tree(child)
+        }
         parser::OpTree::Subquery { child, .. } => is_scan_chain_tree(child),
         _ => false,
     }
@@ -780,6 +825,7 @@ pub fn generate_delta_query_cached(
     new_frontier: &Frontier,
     pgt_schema: &str,
     pgt_name: &str,
+    stream_owner: Option<&crate::catalog::StreamTableMeta>,
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     // Decision traces describe a concrete differentiation, so bypass both
     // template caches while tracing is enabled.
@@ -944,91 +990,98 @@ pub fn generate_delta_query_cached(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    // M-6 (v0.55.0): Time the DVM parse pass.
-    let parse_start = std::time::Instant::now();
-    let mut result = parse_defining_query_full(defining_query)?;
-    let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
-    crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
+    let build_entry = || -> Result<CachedDeltaTemplate, PgTrickleError> {
+        // M-6 (v0.55.0): Time the DVM parse pass.
+        let parse_start = std::time::Instant::now();
+        let mut result = parse_defining_query_full(defining_query)?;
+        let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
+        crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
 
-    let mut source_oids: Vec<u32> = result.tree.source_oids();
-    source_oids.extend(result.cte_registry.source_oids());
-    source_oids.sort_unstable();
-    source_oids.dedup();
+        let mut source_oids: Vec<u32> = result.tree.source_oids();
+        source_oids.extend(result.cte_registry.source_oids());
+        source_oids.sort_unstable();
+        source_oids.dedup();
 
-    // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns.
-    if crate::config::pg_trickle_enable_vector_agg() {
-        let vector_cols = resolve_vector_columns_for_sources(&source_oids);
-        if !vector_cols.is_empty() {
-            reclassify_vector_aggregates(&mut result.tree, &vector_cols);
+        // F4 (v0.37.0): Reclassify avg/sum on vector-typed columns.
+        if crate::config::pg_trickle_enable_vector_agg() {
+            let vector_cols = resolve_vector_columns_for_sources(&source_oids);
+            if !vector_cols.is_empty() {
+                reclassify_vector_aggregates(&mut result.tree, &vector_cols);
+            }
         }
-    }
 
-    check_ivm_support_with_registry(&result)?;
-    row_id::verify_plan_row_id_schema(&result.tree).map_err(|e| {
-        PgTrickleError::InvalidArgument(format!("RowIdSchema verification failed: {e}"))
-    })?;
+        check_ivm_support_with_registry(&result)?;
+        row_id::verify_plan_row_id_schema(&result.tree).map_err(|e| {
+            PgTrickleError::InvalidArgument(format!("RowIdSchema verification failed: {e}"))
+        })?;
 
-    // Generate template with placeholder tokens instead of literal LSNs.
-    // Use dummy frontiers — the actual LSN values come from placeholders.
-    let is_scan_chain = is_scan_chain_tree(&result.tree);
-    let st_user_cols = result.tree.output_columns();
-    let has_pgt_count = result.tree.needs_pgt_count();
-    let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
-        .with_placeholders()
-        .with_pgt_name(pgt_schema, pgt_name)
-        .with_cte_registry(result.cte_registry)
-        .with_defining_query(defining_query);
-    ctx.st_user_columns = Some(st_user_cols);
-    ctx.merge_safe_dedup = is_scan_chain;
-    ctx.st_has_pgt_count = has_pgt_count;
+        // Generate template with placeholder tokens instead of literal LSNs.
+        // Use dummy frontiers — the actual LSN values come from placeholders.
+        let is_scan_chain = is_scan_chain_tree(&result.tree);
+        let st_user_cols = result.tree.output_columns();
+        let has_pgt_count = result.tree.needs_pgt_count();
+        let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
+            .with_placeholders()
+            .with_pgt_name(pgt_schema, pgt_name)
+            .with_cte_registry(result.cte_registry)
+            .with_defining_query(defining_query);
+        ctx.st_user_columns = Some(st_user_cols);
+        ctx.merge_safe_dedup = is_scan_chain;
+        ctx.st_has_pgt_count = has_pgt_count;
 
-    // P2-5: Resolve CDC column ordinals for bitmask filter.
-    ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
+        // P2-5: Resolve CDC column ordinals for bitmask filter.
+        ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
 
-    // A-2: Resolve key columns for value-only UPDATE detection.
-    ctx.set_source_key_columns(result.tree.source_key_columns_used());
+        // A-2: Resolve key columns for value-only UPDATE detection.
+        ctx.set_source_key_columns(result.tree.source_key_columns_used());
 
-    // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
-    ctx.set_st_source_pgt_ids(resolve_st_source_pgt_ids(&source_oids));
+        // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
+        ctx.set_st_source_pgt_ids(resolve_st_source_pgt_ids(&source_oids));
 
-    // CITUS-4: Pre-resolve stable buffer names so the scan generator
-    // does not need to call SPI during SQL generation.
-    ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
-    ctx.set_source_stage_tables(
-        source_oids
-            .iter()
-            .map(|oid| {
-                (
-                    *oid,
-                    format!(
-                        "pg_temp.\"{}\"",
-                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
-                    ),
-                )
-            })
-            .collect(),
-    );
+        // CITUS-4: Pre-resolve stable buffer names so the scan generator
+        // does not need to call SPI during SQL generation.
+        ctx.set_source_buffer_names(resolve_buffer_names_for_sources(&source_oids));
+        ctx.set_source_stage_tables(
+            source_oids
+                .iter()
+                .map(|oid| {
+                    (
+                        *oid,
+                        format!(
+                            "pg_temp.\"{}\"",
+                            crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                        ),
+                    )
+                })
+                .collect(),
+        );
 
-    let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
-        ctx.differentiate_with_columns(&result.tree)?;
+        let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
+            ctx.differentiate_with_columns(&result.tree)?;
 
-    let is_all_algebraic = result.tree.is_all_algebraic_agg();
-    let statistics_epoch = planner::statistics_epoch_for_sources(&source_oids);
+        Ok(CachedDeltaTemplate {
+            defining_query_hash: query_hash,
+            statistics_epoch: planner::statistics_epoch_for_sources(&source_oids),
+            planning_version: planner::FORMAT_VERSION,
+            delta_sql_template: template_sql,
+            output_columns,
+            source_oids,
+            is_deduplicated: diff_dedup,
+            has_key_changed: diff_has_key_changed,
+            is_all_algebraic: result.tree.is_all_algebraic_agg(),
+            last_used: 0,
+        })
+    };
+    let entry = match stream_owner {
+        Some(st) => crate::refresh::with_stream_owner(st, build_entry)?,
+        None => build_entry()?,
+    };
+    let template_sql = entry.delta_sql_template.clone();
+    let output_columns = entry.output_columns.clone();
+    let source_oids = entry.source_oids.clone();
 
     // Store in cache (QW-5: with LRU eviction).
-    let entry = CachedDeltaTemplate {
-        defining_query_hash: query_hash,
-        statistics_epoch: statistics_epoch.clone(),
-        planning_version: planner::FORMAT_VERSION,
-        delta_sql_template: template_sql.clone(),
-        output_columns: output_columns.clone(),
-        source_oids: source_oids.clone(),
-        is_deduplicated: diff_dedup,
-        has_key_changed: diff_has_key_changed,
-        is_all_algebraic,
-        last_used: 0, // set by l1_insert_delta_template
-    };
-    l1_insert_delta_template(pgt_id, entry);
+    l1_insert_delta_template(pgt_id, entry.clone());
 
     // G14-SHC: Persist to L2 (catalog table) for cross-backend sharing.
     let _ = crate::template_cache::store(
@@ -1038,11 +1091,11 @@ pub fn generate_delta_query_cached(
             delta_sql_template: template_sql.clone(),
             output_columns: output_columns.clone(),
             source_oids: source_oids.clone(),
-            is_deduplicated: diff_dedup,
-            has_key_changed: diff_has_key_changed,
-            is_all_algebraic,
-            statistics_epoch,
-            planning_version: planner::FORMAT_VERSION,
+            is_deduplicated: entry.is_deduplicated,
+            has_key_changed: entry.has_key_changed,
+            is_all_algebraic: entry.is_all_algebraic,
+            statistics_epoch: entry.statistics_epoch,
+            planning_version: entry.planning_version,
         },
     );
 
@@ -1059,9 +1112,9 @@ pub fn generate_delta_query_cached(
         delta_sql,
         output_columns,
         source_oids,
-        is_deduplicated: diff_dedup,
-        has_key_changed: diff_has_key_changed,
-        is_all_algebraic,
+        is_deduplicated: entry.is_deduplicated,
+        has_key_changed: entry.has_key_changed,
+        is_all_algebraic: entry.is_all_algebraic,
     })
 }
 
@@ -1526,6 +1579,87 @@ pub(crate) fn window_row_identity_expr(row_alias: &str, key_columns: &[String]) 
     crate::hash::build_row_identity_expr("WINDOW_KEY", &expressions)
 }
 
+#[cfg(any(not(test), feature = "pg_test"))]
+fn query_target_column_types(query: &str) -> Option<std::collections::HashMap<String, u32>> {
+    use pgrx::PgList;
+    use pgrx::pg_sys;
+    use std::collections::HashMap;
+    use std::ffi::CStr;
+    use std::panic::AssertUnwindSafe;
+
+    let c_sql = std::ffi::CString::new(query).ok()?;
+    // SAFETY: parser and analyzer run inside a PostgreSQL backend memory context.
+    unsafe {
+        pgrx::PgTryBuilder::new(AssertUnwindSafe(|| {
+            let raw_list =
+                pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+            let stmts = PgList::<pg_sys::RawStmt>::from_pg(raw_list);
+            let raw_stmt = stmts.get_ptr(0)?;
+            let query_node = pg_sys::parse_analyze_fixedparams(
+                raw_stmt,
+                c_sql.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            );
+            if query_node.is_null() {
+                return None;
+            }
+            let target_list = PgList::<pg_sys::TargetEntry>::from_pg((*query_node).targetList);
+            let mut map = HashMap::new();
+            for (index, tle_ptr) in target_list.iter_ptr().enumerate() {
+                if tle_ptr.is_null() {
+                    continue;
+                }
+                let tle = &*tle_ptr;
+                if tle.resjunk {
+                    continue;
+                }
+                let name = if !tle.resname.is_null() {
+                    CStr::from_ptr(tle.resname).to_string_lossy().into_owned()
+                } else {
+                    format!("column_{}", index + 1)
+                };
+                let type_oid = if tle.expr.is_null() {
+                    0
+                } else {
+                    pg_sys::exprType(tle.expr as *const pg_sys::Node).to_u32()
+                };
+                map.insert(name, type_oid);
+            }
+            Some(map)
+        }))
+        .catch_others(|_| None)
+        .execute()
+    }
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn query_target_column_types(_query: &str) -> Option<std::collections::HashMap<String, u32>> {
+    None
+}
+
+fn key_cols_have_unsupported_types(defining_query: &str, key_cols: &[String]) -> bool {
+    if let Some(col_types) = query_target_column_types(defining_query) {
+        let registry = crate::dvm::row_id_v2::TypeRegistry::new();
+        for col in key_cols {
+            if let Some((_, &type_oid)) =
+                col_types.iter().find(|(k, _)| k.eq_ignore_ascii_case(col))
+                && registry
+                    .validate_type(
+                        col,
+                        type_oid,
+                        crate::dvm::row_id_v2::SUPPORTED_POSTGRES_MAJORS[0],
+                    )
+                    .is_err()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Generate a SQL expression for computing `__pgt_row_id` from a subquery
 /// aliased as `sub`, matching the hash formula used by the delta query.
 ///
@@ -1538,21 +1672,21 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let tree = parse_defining_query(defining_query).ok();
     let key_cols = tree.as_ref().and_then(|t| t.row_id_key_columns());
     let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
-
     match key_cols {
         Some(cols) if domain == "WINDOW_KEY" => window_row_identity_expr("sub", &cols),
-        Some(cols) if cols.len() == 1 => {
-            format!(
-                "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
-                diff::quote_ident(&cols[0]),
-            )
-        }
-        Some(cols) if cols.len() > 1 => {
-            let array_items: Vec<String> = cols
-                .iter()
-                .map(|c| format!("sub.{}", diff::quote_ident(c)))
-                .collect();
-            crate::hash::build_row_identity_expr(domain, &array_items)
+        Some(cols) if !key_cols_have_unsupported_types(defining_query, &cols) => {
+            if cols.len() == 1 {
+                format!(
+                    "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
+                    diff::quote_ident(&cols[0]),
+                )
+            } else {
+                let array_items: Vec<String> = cols
+                    .iter()
+                    .map(|c| format!("sub.{}", diff::quote_ident(c)))
+                    .collect();
+                crate::hash::build_row_identity_expr(domain, &array_items)
+            }
         }
         _ => {
             // Scalar aggregate (no GROUP BY): use singleton sentinel hash
@@ -2430,6 +2564,64 @@ mod tests {
         let s = scan(1, "t", "public", "t", &["id", "name"]);
         let p = project(vec![colref("id")], vec!["id"], s);
         assert!(is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_computed_mdm_key_keeps_delete() {
+        let s = scan(1, "t", "public", "t", &["id", "value"]);
+        let p = project(
+            vec![crate::dvm::parser::Expr::FuncCall {
+                func_name: "pgtrickle.encode_row_id_v2".to_string(),
+                args: vec![
+                    crate::dvm::parser::Expr::Raw("'MDM_SOURCE_KEY_V1'".to_string()),
+                    crate::dvm::parser::Expr::Raw("ROW(id, value)".to_string()),
+                ],
+            }],
+            vec!["encoded_id"],
+            s,
+        );
+        assert!(!is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_project_with_computed_expr_preserving_pk() {
+        let s = crate::dvm::operators::test_helpers::scan_with_pk(
+            1,
+            "products",
+            "public",
+            "p",
+            &["id", "name", "price"],
+            &["id"],
+        );
+        let p = project(
+            vec![
+                colref("id"),
+                crate::dvm::parser::Expr::Raw("JSON_OBJECT('name': name)".to_string()),
+            ],
+            vec!["id", "data"],
+            s,
+        );
+        assert!(is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_project_with_computed_expr_without_pk_is_false() {
+        let s = crate::dvm::operators::test_helpers::scan_with_pk(
+            1,
+            "products",
+            "public",
+            "p",
+            &["id", "name", "price"],
+            &["id"],
+        );
+        let p = project(
+            vec![crate::dvm::parser::Expr::Raw(
+                "JSON_OBJECT('name': name)".to_string(),
+            )],
+            vec!["data"],
+            s,
+        );
+        assert!(!is_scan_chain_tree(&p));
     }
 
     #[test]

@@ -1530,10 +1530,10 @@ async fn test_lateral_volatile_srf_argument_rejected_in_differential() {
     );
 }
 
-/// COR-002: An immutable but uninspectable LATERAL SRF must use the safe
-/// AUTO-to-FULL path rather than entering incremental maintenance.
+/// COR-002: An immutable LATERAL SRF resolved by PostgreSQL analysis is safe
+/// for AUTO-to-DIFFERENTIAL admission.
 #[tokio::test]
-async fn test_lateral_immutable_srf_falls_back_to_full() {
+async fn test_lateral_immutable_srf_uses_differential() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE lat_immut_src (id INT PRIMARY KEY, tags JSONB)")
@@ -1545,12 +1545,12 @@ async fn test_lateral_immutable_srf_falls_back_to_full() {
     )
     .await;
 
-    // jsonb_array_elements_text is immutable, but its correlated body cannot
-    // be independently parsed for incremental admission.
+    // The correlated argument is validated from PostgreSQL's analyzed query,
+    // so it does not need to be parsed as a standalone expression.
     db.create_st(
         "lat_immut_st",
         "SELECT s.id, e.tag \
-         FROM lat_immut_src s, \
+         FROM public.lat_immut_src s, \
          jsonb_array_elements_text(s.tags) AS e(tag)",
         "1m",
         "AUTO",
@@ -1559,7 +1559,7 @@ async fn test_lateral_immutable_srf_falls_back_to_full() {
 
     let (status, mode, populated, errors) = db.pgt_status("lat_immut_st").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(mode, "FULL");
+    assert_eq!(mode, "DIFFERENTIAL");
     assert!(populated, "Stream table should be populated after creation");
     assert_eq!(errors, 0);
 

@@ -1,6 +1,7 @@
 //! v0.104 Graph V1 and Delta V1 public-contract conformance.
 
 mod e2e;
+#[allow(dead_code)]
 #[path = "conformance/reference_clients.rs"]
 mod reference_clients;
 

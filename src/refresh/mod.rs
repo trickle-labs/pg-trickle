@@ -888,7 +888,12 @@ pub fn finalize_success(
     }
 
     let rows_changed = execution.rows_inserted + execution.rows_updated + execution.rows_deleted;
-    crate::api::output_delta::finalize(st, refresh_id, rows_changed)?;
+    crate::api::output_delta::finalize(
+        st,
+        refresh_id,
+        rows_changed,
+        execution.downstream_capture_complete && history_action == RefreshAction::Differential,
+    )?;
     if rows_changed > 0 {
         let outbox_attached =
             crate::api::outbox::get_outbox_table_name(st.pgt_id).map_err(|e| {

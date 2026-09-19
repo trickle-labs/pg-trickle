@@ -45,6 +45,7 @@ pub const DOMAIN_JOIN_KEY: u8 = 0x04;
 pub const DOMAIN_SET_KEY: u8 = 0x05;
 pub const DOMAIN_WINDOW_KEY: u8 = 0x06;
 pub const DOMAIN_SYNTHETIC: u8 = 0x07;
+pub const DOMAIN_MDM_SOURCE_KEY_V1: u8 = 0x08;
 
 /// Stable scalar and structural type tags.
 pub const TYPE_BOOL: u8 = 0x01;
@@ -85,6 +86,7 @@ pub enum IdentityDomain {
     SetKey,
     WindowKey,
     Synthetic,
+    MdmSourceKeyV1,
 }
 
 impl IdentityDomain {
@@ -97,6 +99,7 @@ impl IdentityDomain {
             Self::SetKey => DOMAIN_SET_KEY,
             Self::WindowKey => DOMAIN_WINDOW_KEY,
             Self::Synthetic => DOMAIN_SYNTHETIC,
+            Self::MdmSourceKeyV1 => DOMAIN_MDM_SOURCE_KEY_V1,
         }
     }
 
@@ -109,6 +112,7 @@ impl IdentityDomain {
             Self::SetKey => "SET_KEY",
             Self::WindowKey => "WINDOW_KEY",
             Self::Synthetic => "SYNTHETIC",
+            Self::MdmSourceKeyV1 => "MDM_SOURCE_KEY_V1",
         }
     }
 }
@@ -131,6 +135,7 @@ impl FromStr for IdentityDomain {
             "SET_KEY" => Ok(Self::SetKey),
             "WINDOW_KEY" => Ok(Self::WindowKey),
             "SYNTHETIC" => Ok(Self::Synthetic),
+            "MDM_SOURCE_KEY_V1" => Ok(Self::MdmSourceKeyV1),
             _ => Err(RowIdV2Error::InvalidDomain(value.to_owned())),
         }
     }
@@ -841,6 +846,7 @@ pub fn validate_identity_v2(input: &[u8]) -> Result<(), RowIdV2Error> {
         DOMAIN_SET_KEY => "SET_KEY",
         DOMAIN_WINDOW_KEY => "WINDOW_KEY",
         DOMAIN_SYNTHETIC => "SYNTHETIC",
+        DOMAIN_MDM_SOURCE_KEY_V1 => "MDM_SOURCE_KEY_V1",
         _ => {
             return Err(wire_error(format!(
                 "unknown identity domain tag {}",
@@ -1825,8 +1831,30 @@ mod tests {
             IdentityDomain::from_str("SYNTHETIC").unwrap().tag(),
             DOMAIN_SYNTHETIC
         );
+        assert_eq!(
+            IdentityDomain::from_str("MDM_SOURCE_KEY_V1").unwrap(),
+            IdentityDomain::MdmSourceKeyV1
+        );
+        assert_eq!(IdentityDomain::MdmSourceKeyV1.tag(), 0x08);
+        assert_eq!(IdentityDomain::MdmSourceKeyV1.name(), "MDM_SOURCE_KEY_V1");
         assert_eq!(TYPE_BOOL, 1);
         assert_eq!(TYPE_COMPOSITE, 0x40);
+    }
+
+    #[test]
+    fn mdm_source_key_v1_has_stable_exact_bytes_and_validates() {
+        let encoded = encode_tuple(
+            IdentityDomain::MdmSourceKeyV1,
+            &[EncodedField::value(TYPE_INT4, &[0x80, 0x00, 0x00, 0x01])],
+        )
+        .unwrap();
+        assert_eq!(
+            encoded,
+            vec![
+                0x02, 0x08, 0x00, 0x00, 0x00, 0x01, 0x03, 0x01, 0x80, 0x00, 0x00, 0x01, 0xff,
+            ]
+        );
+        assert!(validate_identity_v2(&encoded).is_ok());
     }
 
     #[test]

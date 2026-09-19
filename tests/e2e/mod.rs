@@ -432,6 +432,14 @@ async fn shared_container() -> &'static SharedContainer {
                 image = image.with_mount(mount);
             }
 
+            if std::env::var("PGT_OUTPUT_DELTA_QUALIFICATION").as_deref() == Ok("on") {
+                image = image.with_cmd([
+                    "postgres",
+                    "-c",
+                    "pg_trickle.enable_output_delta_qualification=on",
+                ]);
+            }
+
             let container = start_e2e_image(image).await.expect(
                 "Failed to start shared pg_trickle E2E container. \
                  Did you run ./tests/build_e2e_image.sh first?",

@@ -144,4 +144,59 @@ mod tests {
         let error = diff_union_all(&mut ctx, &tree).unwrap_err();
         assert!(error.to_string().contains("alias mismatch"));
     }
+
+    #[test]
+    fn test_nested_aggregate_project_does_not_leak_count_into_union_schema() {
+        let names = [
+            "left_source_record_id",
+            "right_source_record_id",
+            "left_sort_key",
+            "right_sort_key",
+        ];
+        let expressions = || names.iter().map(|name| colref(name)).collect::<Vec<_>>();
+        let aliases = || names.to_vec();
+        let branch = |oid, table: &str| {
+            project(
+                expressions(),
+                aliases(),
+                scan(oid, table, "public", table, &names),
+            )
+        };
+        let token_scan = scan(4, "token_pairs", "public", "token", &names);
+        let token_branch = project(
+            expressions(),
+            aliases(),
+            aggregate(expressions(), vec![], token_scan),
+        );
+        let candidates = union_all(vec![
+            branch(1, "composite_pairs"),
+            branch(2, "email_pairs"),
+            branch(3, "prefix_pairs"),
+            token_branch,
+        ]);
+        let deduped = aggregate(
+            expressions(),
+            vec![],
+            subquery("candidate_pairs", vec![], candidates),
+        );
+        let tree = project(expressions(), aliases(), deduped);
+        let mut ctx = test_ctx_with_st("public", "pairs");
+        ctx.st_user_columns = Some(names.iter().map(|name| (*name).to_string()).collect());
+        ctx.st_has_pgt_count = true;
+
+        let result = ctx
+            .diff_node(&tree)
+            .expect("the nested token aggregate must match the other UNION branches");
+
+        assert_eq!(
+            result.columns,
+            vec![
+                "left_source_record_id",
+                "right_source_record_id",
+                "left_sort_key",
+                "right_sort_key",
+                "__pgt_count",
+            ]
+        );
+    }
 }

@@ -1930,7 +1930,7 @@ fn test_build_bypass_capture_sql_no_lsn_override() {
         None,
     );
     // Should use pg_current_wal_lsn() by default
-    assert!(sql.contains("pg_current_wal_lsn()"));
+    assert!(sql.contains("pg_current_wal_insert_lsn()"));
 }
 
 #[test]

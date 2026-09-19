@@ -156,7 +156,12 @@ impl Facts {
                     self.unsupported = Some(SnapshotUnsupportedReason::MissingCteBody);
                 }
             }
-            OpTree::UnionAll { .. } | OpTree::Intersect { .. } | OpTree::Except { .. } => {
+            OpTree::UnionAll { children } => {
+                for child in children {
+                    self.visit(child);
+                }
+            }
+            OpTree::Intersect { .. } | OpTree::Except { .. } => {
                 self.pure_leaf_tree = false;
                 self.unsupported = Some(SnapshotUnsupportedReason::SetOperation);
             }
@@ -164,7 +169,8 @@ impl Facts {
                 self.pure_leaf_tree = false;
                 self.unsupported = Some(SnapshotUnsupportedReason::WindowEvaluation);
             }
-            OpTree::LateralFunction { .. } | OpTree::LateralSubquery { .. } => {
+            OpTree::LateralFunction { child, .. } => self.visit(child),
+            OpTree::LateralSubquery { .. } => {
                 self.pure_leaf_tree = false;
                 self.unsupported = Some(SnapshotUnsupportedReason::LateralExpansion);
             }
@@ -240,15 +246,44 @@ mod tests {
     }
 
     #[test]
-    fn reports_unsupported_set_operation() {
+    fn plans_union_all_as_exact_per_leaf() {
         let tree = union_all(vec![
             scan(1, "left", "public", "left", &["id"]),
             scan(2, "right", "public", "right", &["id"]),
         ]);
+        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactPerLeaf);
+    }
+
+    #[test]
+    fn plans_lateral_function_from_leaf_as_exact_snapshot() {
+        let tree = OpTree::LateralFunction {
+            func_sql: "unnest(t.tags)".into(),
+            alias: "tag".into(),
+            column_aliases: vec!["value".into()],
+            declared_columns: vec![],
+            with_ordinality: false,
+            child: Box::new(scan(1, "items", "public", "t", &["id", "tags"])),
+        };
+
+        assert_eq!(SnapshotPlan::for_tree(&tree), SnapshotPlan::ExactCombined);
+    }
+
+    #[test]
+    fn keeps_lateral_subquery_snapshot_unsupported() {
+        let tree = lateral_subquery(
+            "SELECT 1",
+            "x",
+            vec![],
+            vec![],
+            false,
+            vec![],
+            scan(1, "items", "public", "t", &["id"]),
+        );
+
         assert_eq!(
             SnapshotPlan::for_tree(&tree),
             SnapshotPlan::Unsupported {
-                reason: SnapshotUnsupportedReason::SetOperation
+                reason: SnapshotUnsupportedReason::LateralExpansion
             }
         );
     }

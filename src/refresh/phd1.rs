@@ -18,16 +18,32 @@ pub fn prepare_cross_cycle_phantom_table(
     st: &crate::catalog::StreamTableMeta,
     defining_query: &str,
 ) -> Result<(), PgTrickleError> {
-    let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
     let recon_table = format!("__pgt_recon_{}", st.pgt_id);
-    let recon_select =
-        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
     // defining_query is definition-derived: parse/analyze it under the
     // owner's identity and stored search_path, not this privileged caller's.
     crate::refresh::with_stream_owner(st, || {
+        let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
+        let recon_select =
+            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
         crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
     })?;
     Ok(())
+}
+
+fn content_signature_expr(alias: &str, quoted_user_cols: &[String]) -> String {
+    if quoted_user_cols.is_empty() {
+        // Degenerate case (no user columns); use a constant fingerprint so
+        // reconciliation collapses to a row-count diff.
+        return "''::text".to_string();
+    }
+    let values = quoted_user_cols
+        .iter()
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // A row constructor avoids jsonb_build_object's 100-argument limit while
+    // retaining PostgreSQL's native JSON encoding for each value.
+    format!("md5(to_jsonb(ROW({values}))::text)")
 }
 
 /// EC01-2: Reconcile the stream table against the full-query result set.
@@ -95,24 +111,22 @@ pub fn cleanup_cross_cycle_phantoms(
     // makes the reconciliation correct for those query shapes too — two
     // rows with identical user content are considered equivalent regardless
     // of any internal hash drift.
-    let json_fields_for = |alias: &str| -> String {
-        if quoted_user_cols.is_empty() {
-            // Degenerate case (no user columns); use a constant fingerprint
-            // so reconciliation collapses to a row-count diff.
-            return "''::text".to_string();
+    let st_sig = content_signature_expr("st", &quoted_user_cols);
+    let r_sig = content_signature_expr("r", &quoted_user_cols);
+    let recon_row_number_alias = {
+        let mut suffix = 0_u32;
+        loop {
+            let candidate = if suffix == 0 {
+                "__pgt_recon_rn".to_string()
+            } else {
+                format!("__pgt_recon_rn_{suffix}")
+            };
+            if !user_cols.iter().any(|column| column == &candidate) {
+                break candidate;
+            }
+            suffix += 1;
         }
-        let pairs: Vec<String> = quoted_user_cols
-            .iter()
-            .map(|c| {
-                let key = c.trim_matches('"').replace("\"\"", "\"");
-                let key_lit = key.replace('\'', "''");
-                format!("'{key_lit}', {alias}.{c}")
-            })
-            .collect();
-        format!("md5(jsonb_build_object({})::text)", pairs.join(", "))
     };
-    let st_sig = json_fields_for("st");
-    let r_sig = json_fields_for("r");
 
     // Step 1: materialise the live full-query result into the prepared temp table.
     let recon_table = format!("__pgt_recon_{pgt_id}");
@@ -199,14 +213,14 @@ pub fn cleanup_cross_cycle_phantoms(
             recon_numbered AS ( \
                 SELECT r.*, \
                        {r_sig_r} AS __pgt_sig_x, \
-                       ROW_NUMBER() OVER (PARTITION BY {r_sig_r}) AS rn \
+                       ROW_NUMBER() OVER (PARTITION BY {r_sig_r}) AS {recon_row_number_alias} \
                 FROM {recon_table} r \
             ), \
             to_insert AS ( \
                 SELECT n.* \
                 FROM recon_numbered n \
                 JOIN shortfall sh ON sh.__pgt_sig = n.__pgt_sig_x \
-                WHERE n.rn <= sh.missing_n \
+                WHERE n.{recon_row_number_alias} <= sh.missing_n \
                 LIMIT $1 \
             ), \
             inserted AS ( \
@@ -241,6 +255,18 @@ pub fn cleanup_cross_cycle_phantoms(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_content_signature_supports_wide_rows() {
+        let columns = (0..51)
+            .map(|index| format!("\"column_{index}\""))
+            .collect::<Vec<_>>();
+        let expression = super::content_signature_expr("st", &columns);
+
+        assert!(expression.contains("to_jsonb(ROW("));
+        assert!(!expression.contains("jsonb_build_object"));
+        assert_eq!(expression.matches("st.\"column_").count(), 51);
+    }
+
     #[test]
     fn test_cleanup_returns_zero_for_empty_case() {
         // Verify batch_size defaults are positive integers

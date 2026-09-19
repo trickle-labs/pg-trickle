@@ -8,7 +8,7 @@ FULL_E2E_LABEL_SUITE="com.pgtrickle.suite=full-e2e"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_e2e_tests.sh <cargo nextest args...>
+Usage: scripts/run_e2e_tests.sh <cargo test-selection args...>
 
 Examples:
   scripts/run_e2e_tests.sh --test 'e2e_*'
@@ -55,5 +55,8 @@ trap cleanup_full_e2e_containers EXIT INT TERM
 echo "Full E2E run id: ${PGT_E2E_RUN_ID}"
 
 
-cargo nextest run "$@"
-
+if [[ "${PGT_DISABLE_NEXTEST:-0}" == "1" ]]; then
+    cargo test --features pg18 "$@" -- --nocapture
+else
+    cargo nextest run "$@"
+fi

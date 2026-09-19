@@ -25,6 +25,7 @@ EXPECTED_SUITES = {
     "package-smoke", "upgrade-chain", "version-sync", "monitoring-contract",
     "criterion-regression", "database-workloads",
 }
+EXPECTED_SOURCE_VERSIONS: list[str] | None = None
 EXPECTED_ARTIFACTS = {
     "linux-amd64": "runtime-qualified",
     "linux-arm64": "build-only",
@@ -375,7 +376,10 @@ def main() -> None:
     require(cargo.get("version") == VERSION, "META.json version drift")
     contract = json.loads(QUALIFICATION.read_text(encoding="utf-8"))
     require(contract.get("release_version") == VERSION, "qualification version drift")
-    require(contract.get("source_versions") == [PREVIOUS_VERSION], "previous package boundary drift")
+    require(
+        contract.get("source_versions") == (EXPECTED_SOURCE_VERSIONS or [PREVIOUS_VERSION]),
+        "previous package boundary drift",
+    )
     require(contract.get("evidence", {}).get("schema_version") == 3, "structured evidence schema is not enabled")
     suites = contract.get("required_suites", [])
     ids = {suite.get("id") for suite in suites if isinstance(suite, dict)}
