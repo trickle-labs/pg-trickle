@@ -139,6 +139,10 @@ pub struct DiffContext {
     /// Q21-type numwait regression where EXCEPT ALL at sub-join levels
     /// interacts with the SemiJoin's R_old snapshot computation.
     pub inside_semijoin: bool,
+    /// When true, the current diff node is inside an intermediate subtree
+    /// (e.g. child of aggregate, join, union, set operation, CTE body, window)
+    /// and cannot merge directly into the target stream table.
+    pub inside_intermediate: bool,
     /// Whether the stream table has a `__pgt_count` auxiliary column.
     /// True when the top-level OpTree contains Aggregate or Distinct.
     /// Used by the aggregate operator to detect intermediate aggregates
@@ -643,6 +647,7 @@ impl DiffContext {
             st_user_columns: None,
             merge_safe_dedup: false,
             inside_semijoin: false,
+            inside_intermediate: false,
             st_has_pgt_count: false,
             st_column_alias_map: None,
             having_filter: false,
@@ -956,6 +961,27 @@ impl DiffContext {
             );
         }
         Ok(result)
+    }
+
+    /// Recursively differentiate an intermediate subtree.
+    ///
+    /// Sets `inside_intermediate = true` and clears `st_user_columns` and
+    /// `st_column_alias_map` so that intermediate operators (such as aggregates
+    /// in CTEs, subqueries, UNION branches, or JOIN operands) do not mistakenly
+    /// attempt to merge directly into the stream table.
+    pub fn diff_node_in_intermediate(&mut self, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
+        let saved_intermediate = self.inside_intermediate;
+        let saved_st_cols = self.st_user_columns.take();
+        let saved_alias_map = self.st_column_alias_map.take();
+        self.inside_intermediate = true;
+
+        let result = self.diff_node(op);
+
+        self.inside_intermediate = saved_intermediate;
+        self.st_user_columns = saved_st_cols;
+        self.st_column_alias_map = saved_alias_map;
+
+        result
     }
 
     /// Inner dispatch for `diff_node()` — called after depth and CTE checks.

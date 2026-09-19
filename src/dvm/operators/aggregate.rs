@@ -1865,7 +1865,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         generate_direct_agg_delta(ctx, child, group_by, aggregates)?
     } else {
         // ── Standard path: differentiate child first ───────────────────
-        let child_result = ctx.diff_node(child)?;
+        let child_result = ctx.diff_node_in_intermediate(child)?;
 
         // Resolve group-by expressions against child CTE's column names.
         let child_cols = &child_result.columns;
@@ -2001,24 +2001,25 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Filter(CteScan{...}).  The aggregate's group/value columns match
     // the ST's user columns, but `__pgt_count` was never added because
     // `needs_pgt_count()` returns false for the top-level CteScan.
-    let is_intermediate = if let Some(ref st_cols) = ctx.st_user_columns {
-        if !ctx.st_has_pgt_count {
-            // ST has no __pgt_count → aggregate merge cannot read st.__pgt_count
-            true
-        } else if !group_output.is_empty() {
-            // Grouped aggregate: check if any group column is missing from ST
-            group_output.iter().any(|g| !st_cols.contains(g))
-        } else if !aggregates.is_empty() {
-            // Global aggregate (no GROUP BY): check if aggregate output
-            // columns exist in the stream table. If not, this is an
-            // intermediate aggregate (e.g., MAX inside a scalar subquery).
-            aggregates.iter().any(|a| !st_cols.contains(&a.alias))
+    let is_intermediate = ctx.inside_intermediate
+        || if let Some(ref st_cols) = ctx.st_user_columns {
+            if !ctx.st_has_pgt_count {
+                // ST has no __pgt_count → aggregate merge cannot read st.__pgt_count
+                true
+            } else if !group_output.is_empty() {
+                // Grouped aggregate: check if any group column is missing from ST
+                group_output.iter().any(|g| !st_cols.contains(g))
+            } else if !aggregates.is_empty() {
+                // Global aggregate (no GROUP BY): check if aggregate output
+                // columns exist in the stream table. If not, this is an
+                // intermediate aggregate (e.g., MAX inside a scalar subquery).
+                aggregates.iter().any(|a| !st_cols.contains(&a.alias))
+            } else {
+                false
+            }
         } else {
             false
-        }
-    } else {
-        false
-    };
+        };
 
     if is_intermediate {
         return build_intermediate_agg_delta(
@@ -2259,12 +2260,15 @@ END AS __pgt_meta_action"
             .enumerate()
             .map(|(index, c)| {
                 let internal = format!("__pgt_group_{index}");
-                let st_c = ctx
-                    .st_column_alias_map
-                    .as_ref()
-                    .and_then(|map| map.get(&internal))
-                    .cloned()
-                    .unwrap_or_else(|| st_col_name(c));
+                let st_c = if c.starts_with("__pgt_group_") {
+                    ctx.st_column_alias_map
+                        .as_ref()
+                        .and_then(|map| map.get(&internal))
+                        .cloned()
+                        .unwrap_or_else(|| st_col_name(c))
+                } else {
+                    st_col_name(c)
+                };
                 format!(
                     "st.{st_qc} IS NOT DISTINCT FROM d.{d_qc}",
                     st_qc = quote_ident(&st_c),

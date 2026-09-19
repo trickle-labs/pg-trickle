@@ -45,8 +45,7 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     let saved_alias_map = ctx.st_column_alias_map.clone();
     if let Some(ref st_cols) = saved_st_cols {
         let child_out = differential_child.output_columns();
-        // Map positionally: aliases[i] in st_cols → child_out[i]
-        if child_out.len() == aliases.len() {
+        if !child_out.is_empty() {
             let mut alias_map = std::collections::HashMap::new();
             let mapped: Vec<String> = st_cols
                 .iter()
@@ -63,13 +62,38 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
                                 Some(differential_child),
                             )
                             .unwrap_or_else(|| st_col.clone()),
-                            _ => child_out
+                            _ if child_out.len() == aliases.len() => child_out
                                 .get(pos)
                                 .cloned()
                                 .unwrap_or_else(|| st_col.clone()),
+                            _ => st_col.clone(),
                         };
                         if child_name != *st_col {
                             alias_map.insert(child_name.clone(), st_col.clone());
+                        }
+                        let unwrapped_child = unwrap_transparent(differential_child);
+                        if let OpTree::Aggregate { group_by, .. } = unwrapped_child {
+                            if let Some(pos_in_agg) = group_by.iter().position(|g| {
+                                match (&expressions[pos], g) {
+                                    (
+                                        Expr::ColumnRef {
+                                            column_name: c1,
+                                            table_alias: t1,
+                                        },
+                                        Expr::ColumnRef {
+                                            column_name: c2,
+                                            table_alias: t2,
+                                        },
+                                    ) => c1 == c2 && (t1 == t2 || t1.is_none() || t2.is_none()),
+                                    _ => false,
+                                }
+                            }) {
+                                alias_map.insert(
+                                    format!("__pgt_group_{pos_in_agg}"),
+                                    st_col.clone(),
+                                );
+                            }
+                        } else if child_out.len() == aliases.len() {
                             alias_map.insert(format!("__pgt_group_{pos}"), st_col.clone());
                         }
                         child_name
@@ -1475,5 +1499,78 @@ mod tests {
             vec!["left_source_record_id", "right_source_record_id"]
         );
         assert!(!sql.contains("__pgt_count"), "{sql}");
+    }
+
+    #[test]
+    fn test_diff_project_forwards_aggregate_count_for_blocks_token_name() {
+        let mut ctx = test_ctx_with_st("public", "mdm_v9_st_blocks_token_name");
+        let aliases = vec![
+            "source_record_id".to_string(),
+            "field_name".to_string(),
+            "channel_id".to_string(),
+            "block_key".to_string(),
+            "source_sort_key".to_string(),
+        ];
+        ctx.st_user_columns = Some(aliases.clone());
+        ctx.st_has_pgt_count = true;
+
+        let scan_node = scan(
+            1,
+            "normalized_name",
+            "public",
+            "n",
+            &["source_record_id", "field_name", "normalized", "state", "source_sort_key"],
+        );
+        let lateral = OpTree::LateralFunction {
+            func_sql: "regexp_split_to_table(n.normalized, '[[:space:]]+')".into(),
+            alias: "token".into(),
+            column_aliases: vec!["token".into()],
+            declared_columns: vec![crate::dvm::parser::Column {
+                name: "token".into(),
+                type_oid: 25,
+                is_nullable: true,
+            }],
+            with_ordinality: false,
+            child: Box::new(scan_node),
+        };
+        let filt = filter(
+            Expr::Raw("field_name = 'name' AND state = 'value'".into()),
+            lateral,
+        );
+        let agg = aggregate(
+            vec![
+                colref("source_record_id"),
+                colref("field_name"),
+                colref("token"),
+                colref("source_sort_key"),
+            ],
+            vec![],
+            filt,
+        );
+        let tree = project(
+            vec![
+                colref("source_record_id"),
+                colref("field_name"),
+                Expr::Raw("'token_name'::text".into()),
+                colref("token"),
+                colref("source_sort_key"),
+            ],
+            vec![
+                "source_record_id",
+                "field_name",
+                "channel_id",
+                "block_key",
+                "source_sort_key",
+            ],
+            agg,
+        );
+
+        assert!(tree.needs_pgt_count(), "tree should need pgt_count");
+        let result = diff_project(&mut ctx, &tree).unwrap();
+        assert!(
+            result.columns.contains(&"__pgt_count".to_string()),
+            "result columns should contain __pgt_count: {:?}",
+            result.columns
+        );
     }
 }
