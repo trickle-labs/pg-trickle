@@ -73,25 +73,37 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
                         }
                         let unwrapped_child = unwrap_transparent(differential_child);
                         if let OpTree::Aggregate { group_by, .. } = unwrapped_child {
-                            if let Some(pos_in_agg) = group_by.iter().position(|g| {
-                                match (&expressions[pos], g) {
-                                    (
-                                        Expr::ColumnRef {
-                                            column_name: c1,
-                                            table_alias: t1,
-                                        },
-                                        Expr::ColumnRef {
-                                            column_name: c2,
-                                            table_alias: t2,
-                                        },
-                                    ) => c1 == c2 && (t1 == t2 || t1.is_none() || t2.is_none()),
-                                    _ => false,
+                            let is_same_column = |left: &Expr, right: &Expr| match (left, right) {
+                                (
+                                    Expr::ColumnRef {
+                                        column_name: left_name,
+                                        table_alias: left_table,
+                                    },
+                                    Expr::ColumnRef {
+                                        column_name: right_name,
+                                        table_alias: right_table,
+                                    },
+                                ) => {
+                                    left_name == right_name
+                                        && (left_table == right_table
+                                            || left_table.is_none()
+                                            || right_table.is_none())
                                 }
-                            }) {
-                                alias_map.insert(
-                                    format!("__pgt_group_{pos_in_agg}"),
-                                    st_col.clone(),
-                                );
+                                _ => false,
+                            };
+                            let occurrence = expressions[..pos]
+                                .iter()
+                                .filter(|previous| is_same_column(previous, &expressions[pos]))
+                                .count();
+                            if let Some(pos_in_agg) = group_by
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, group)| is_same_column(&expressions[pos], group))
+                                .nth(occurrence)
+                                .map(|(index, _)| index)
+                            {
+                                alias_map
+                                    .insert(format!("__pgt_group_{pos_in_agg}"), st_col.clone());
                             }
                         } else if child_out.len() == aliases.len() {
                             alias_map.insert(format!("__pgt_group_{pos}"), st_col.clone());
@@ -1519,7 +1531,13 @@ mod tests {
             "normalized_name",
             "public",
             "n",
-            &["source_record_id", "field_name", "normalized", "state", "source_sort_key"],
+            &[
+                "source_record_id",
+                "field_name",
+                "normalized",
+                "state",
+                "source_sort_key",
+            ],
         );
         let lateral = OpTree::LateralFunction {
             func_sql: "regexp_split_to_table(n.normalized, '[[:space:]]+')".into(),
