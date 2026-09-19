@@ -2002,6 +2002,9 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // the ST's user columns, but `__pgt_count` was never added because
     // `needs_pgt_count()` returns false for the top-level CteScan.
     let is_intermediate = ctx.inside_intermediate
+        || (!ctx.st_source_pgt_ids().is_empty()
+            && !group_output.is_empty()
+            && aggregates.is_empty())
         || if let Some(ref st_cols) = ctx.st_user_columns {
             if !ctx.st_has_pgt_count {
                 // ST has no __pgt_count → aggregate merge cannot read st.__pgt_count

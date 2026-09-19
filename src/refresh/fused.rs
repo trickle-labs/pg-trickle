@@ -80,6 +80,10 @@ pub struct NodeSpec {
     /// predicate on the partition key; for the fused path this placeholder
     /// is stripped (no partition routing needed in the single-statement path).
     pub has_partition_key: bool,
+    /// Whether the delta has at most one row per row identity.
+    pub is_deduplicated: bool,
+    /// Whether the stream table permits duplicate row identities.
+    pub has_keyless_source: bool,
 }
 
 /// Output of [`fuse_diff_batch`].
@@ -322,18 +326,25 @@ pub(crate) fn rename_ctes(sql: &str, remap: &HashMap<String, String>) -> String 
 /// the delta CTE that should be used as the MERGE source.
 fn build_fused_merge(node: &NodeSpec, using_cte: &str) -> String {
     use super::codegen::{
-        build_is_distinct_clause, build_row_id_match, format_col_list, format_prefixed_col_list,
-        format_update_set,
+        build_is_distinct_clause, build_keyless_weight_agg, build_row_id_match,
+        build_weight_agg_using, format_col_list, format_prefixed_col_list, format_update_set,
     };
     let user_col_list = format_col_list(&node.user_cols);
     let d_user_col_list = format_prefixed_col_list("d", &node.user_cols);
     let update_set = format_update_set(&node.user_cols);
     let is_distinct = build_is_distinct_clause(&node.user_cols);
+    let using_clause = if node.is_deduplicated {
+        using_cte.to_string()
+    } else if node.has_keyless_source {
+        build_keyless_weight_agg(&format!("SELECT * FROM {using_cte}"), &user_col_list)
+    } else {
+        build_weight_agg_using(&format!("SELECT * FROM {using_cte}"), &user_col_list)
+    };
     // Partition-key predicate: strip in fused path (no partition routing).
     let _ = node.has_partition_key;
     format!(
         "MERGE INTO {qt} AS st \
-         USING {using_cte} AS d \
+         USING {using_clause} AS d \
          ON {row_id_match} \
          WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
          WHEN MATCHED AND d.__pgt_action = 'I' AND ({is_distinct}) THEN \
@@ -587,6 +598,8 @@ SELECT * FROM __pgt_cte_scan_{c2}",
             delta_sql,
             user_cols: vec!["id".to_string(), "val".to_string()],
             has_partition_key: false,
+            is_deduplicated: true,
+            has_keyless_source: false,
         }
     }
 
@@ -767,6 +780,8 @@ SELECT * FROM __pgt_cte_scan_{c2}",
             delta_sql: make_delta_sql(oid, lsn_prev, lsn_new, counter_start),
             user_cols: vec!["val".into()],
             has_partition_key: false,
+            is_deduplicated: true,
+            has_keyless_source: false,
         }
     }
 

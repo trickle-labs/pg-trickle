@@ -912,7 +912,7 @@ fn try_fused_chain_refresh(
         st.defining_query.hash(&mut hasher);
         let query_hash = hasher.finish();
 
-        let (delta_tmpl, src_oids, _is_dedup) =
+        let (delta_tmpl, src_oids, is_deduplicated) =
             match refresh::get_fused_refresh_template(pgt_id, query_hash) {
                 Some(t) => t,
                 None => {
@@ -957,6 +957,8 @@ fn try_fused_chain_refresh(
             delta_sql,
             user_cols,
             has_partition_key: st.st_partition_key.is_some(),
+            is_deduplicated,
+            has_keyless_source: st.has_keyless_source,
         };
 
         eligible.push(NodeData {

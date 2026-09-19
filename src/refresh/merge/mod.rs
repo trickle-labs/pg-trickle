@@ -3343,13 +3343,20 @@ pub fn execute_differential_refresh_with_tuning(
                     name.replace('"', "\"\""),
                 );
                 let pre_table = format!("__pgt_pre_{}", st.pgt_id);
-                let snapshot_sql = format!(
-                    "INSERT INTO {pre_table} \
-                     SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
-                     WHERE EXISTS (SELECT 1 FROM {delta_table} d \
-                       WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
-                         AND st.__pgt_row_id = d.__pgt_row_id)"
-                );
+                let snapshot_sql = if st.has_keyless_source {
+                    format!(
+                        "INSERT INTO {pre_table} \
+                         SELECT st.__pgt_row_id, {col_list} FROM {qt} st"
+                    )
+                } else {
+                    format!(
+                        "INSERT INTO {pre_table} \
+                         SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
+                         WHERE EXISTS (SELECT 1 FROM {delta_table} d \
+                           WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+                             AND st.__pgt_row_id = d.__pgt_row_id)"
+                    )
+                };
                 if cols.is_empty() {
                     Vec::new()
                 } else if let Err(e) = Spi::run(&snapshot_sql) {
