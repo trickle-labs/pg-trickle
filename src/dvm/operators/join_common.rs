@@ -21,7 +21,26 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dvm::diff::quote_ident;
 use crate::dvm::operators::aggregate::agg_to_rescan_sql;
-use crate::dvm::parser::{Expr, OpTree};
+use crate::dvm::parser::{Column, Expr, OpTree, lateral_function_output_columns};
+
+const MAX_POSTGRES_IDENTIFIER_BYTES: usize = 63;
+const SNAPSHOT_COLUMN_HASH_SEED: u64 = 0x7067_745f_736e_6170;
+
+pub(crate) fn snapshot_join_column_name(source_alias: &str, column_name: &str) -> String {
+    let name = format!("{source_alias}__{column_name}");
+    if name.len() <= MAX_POSTGRES_IDENTIFIER_BYTES {
+        return name;
+    }
+
+    let hash = xxhash_rust::xxh64::xxh64(name.as_bytes(), SNAPSHOT_COLUMN_HASH_SEED);
+    let suffix = format!("__{hash:016x}");
+    let prefix_bytes = MAX_POSTGRES_IDENTIFIER_BYTES - suffix.len();
+    let mut end = prefix_bytes.min(name.len());
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &name[..end])
+}
 
 // ── Snapshot SQL generation ─────────────────────────────────────────────
 
@@ -119,6 +138,25 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
             left,
             right,
         } => build_join_snapshot("FULL JOIN", condition, left, right),
+        OpTree::LateralFunction {
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+            child,
+        } => {
+            let child_snap = build_snapshot_sql(child);
+            build_lateral_function_snapshot(
+                func_sql,
+                alias,
+                column_aliases,
+                declared_columns,
+                *with_ordinality,
+                child,
+                &child_snap,
+            )
+        }
         OpTree::Filter { predicate, child } => {
             let child_snap = build_snapshot_sql(child);
             if matches!(child.as_ref(), OpTree::Scan { .. }) {
@@ -164,7 +202,7 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                 .iter()
                 .zip(aliases.iter())
                 .map(|(expr, alias)| {
-                    let expr_sql = expr.to_sql();
+                    let expr_sql = rewrite_project_expr_for_snapshot(expr, child).to_sql();
                     let alias_ident = quote_ident(alias);
                     if expr_sql == *alias {
                         alias_ident
@@ -173,7 +211,7 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                     }
                 })
                 .collect();
-            if let Some(from_clause) = build_snapshot_inline_from_for_join(child) {
+            if let Some(from_clause) = build_snapshot_inline_from(child) {
                 format!("(SELECT {} FROM {})", selects.join(", "), from_clause)
             } else {
                 let inner = build_snapshot_sql(child);
@@ -257,6 +295,20 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                 gb,
             )
         }
+        OpTree::UnionAll { children } => {
+            let branches = children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    format!(
+                        "SELECT * FROM {} {}",
+                        build_snapshot_sql(child),
+                        quote_ident(&format!("__pgt_union_{index}")),
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("({})", branches.join(" UNION ALL "))
+        }
         OpTree::SemiJoin {
             condition,
             left,
@@ -329,7 +381,108 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
     }
 }
 
-/// Build an inline FROM clause for a join node using `build_snapshot_sql` for each child.
+fn lateral_snapshot_columns(
+    func_sql: &str,
+    alias: &str,
+    column_aliases: &[String],
+    declared_columns: &[Column],
+    with_ordinality: bool,
+) -> Vec<String> {
+    let mut columns =
+        lateral_function_output_columns(func_sql, alias, column_aliases, declared_columns);
+    if with_ordinality {
+        columns.push("ordinality".to_string());
+    }
+    columns
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_lateral_function_from_clause(
+    func_sql: &str,
+    alias: &str,
+    column_aliases: &[String],
+    declared_columns: &[Column],
+    with_ordinality: bool,
+    child: &OpTree,
+    child_snapshot: &str,
+) -> String {
+    let columns = lateral_snapshot_columns(
+        func_sql,
+        alias,
+        column_aliases,
+        declared_columns,
+        with_ordinality,
+    );
+    let ordinality = if with_ordinality {
+        " WITH ORDINALITY"
+    } else {
+        ""
+    };
+    let column_list = columns
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{child_snapshot} AS {child_alias} CROSS JOIN LATERAL {func_sql}{ordinality} AS {alias_q} ({column_list})",
+        child_alias = quote_ident(child.alias()),
+        alias_q = quote_ident(alias),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_lateral_function_snapshot(
+    func_sql: &str,
+    alias: &str,
+    column_aliases: &[String],
+    declared_columns: &[Column],
+    with_ordinality: bool,
+    child: &OpTree,
+    child_snapshot: &str,
+) -> String {
+    let child_alias = child.alias();
+    let mut selects = snapshot_output_columns(child)
+        .iter()
+        .map(|column| {
+            format!(
+                "{}.{} AS {}",
+                quote_ident(child_alias),
+                quote_ident(column),
+                quote_ident(column),
+            )
+        })
+        .collect::<Vec<_>>();
+    selects.extend(
+        lateral_snapshot_columns(
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+        )
+        .iter()
+        .map(|column| {
+            format!(
+                "{}.{} AS {}",
+                quote_ident(alias),
+                quote_ident(column),
+                quote_ident(column),
+            )
+        }),
+    );
+    let from_clause = build_lateral_function_from_clause(
+        func_sql,
+        alias,
+        column_aliases,
+        declared_columns,
+        with_ordinality,
+        child,
+        child_snapshot,
+    );
+    format!("(SELECT {} FROM {from_clause})", selects.join(", "))
+}
+
+/// Build an inline FROM clause that keeps direct child aliases visible.
 ///
 /// Returns the raw FROM clause string (e.g., `<left_snap> "a" FULL JOIN <right_snap> "b" ON ...`)
 /// *without* a wrapping `(SELECT ... FROM ...)`. This preserves the original table aliases (`a`, `b`)
@@ -363,8 +516,8 @@ fn build_snapshot_inline_join_from(
 /// a Project wraps a join snapshot subquery (aliased as `"full_join"` etc.) — inside
 /// that subquery the original aliases `a`, `b` are no longer visible.
 ///
-/// Returns `Some(from_clause)` for direct join children; `None` otherwise.
-fn build_snapshot_inline_from_for_join(op: &OpTree) -> Option<String> {
+/// Returns `Some(from_clause)` for direct join or LATERAL-function children.
+pub(crate) fn build_snapshot_inline_from(op: &OpTree) -> Option<String> {
     match op {
         OpTree::InnerJoin {
             condition,
@@ -392,6 +545,22 @@ fn build_snapshot_inline_from_for_join(op: &OpTree) -> Option<String> {
             condition,
             left,
             right,
+        )),
+        OpTree::LateralFunction {
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+            child,
+        } => Some(build_lateral_function_from_clause(
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            *with_ordinality,
+            child,
+            &build_snapshot_sql(child),
         )),
         // No recursion through Filter (would lose the predicate) or other wrappers.
         _ => None,
@@ -425,7 +594,7 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
             "{}.{} AS {}",
             quote_ident(left_alias),
             quote_ident(c),
-            quote_ident(&format!("{left_alias}__{c}"))
+            quote_ident(&snapshot_join_column_name(left_alias, c))
         ));
     }
     for c in &right_cols {
@@ -433,7 +602,7 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
             "{}.{} AS {}",
             quote_ident(right_alias),
             quote_ident(c),
-            quote_ident(&format!("{right_alias}__{c}"))
+            quote_ident(&snapshot_join_column_name(right_alias, c))
         ));
     }
 
@@ -687,7 +856,7 @@ pub fn build_pre_change_snapshot_sql(
                 .iter()
                 .zip(aliases.iter())
                 .map(|(expr, alias)| {
-                    let expr_sql = expr.to_sql();
+                    let expr_sql = rewrite_project_expr_for_snapshot(expr, child).to_sql();
                     let alias_ident = quote_ident(alias);
                     if expr_sql == *alias {
                         alias_ident
@@ -696,7 +865,7 @@ pub fn build_pre_change_snapshot_sql(
                     }
                 })
                 .collect();
-            if let Some(from_clause) = build_pre_change_inline_from_for_join(
+            if let Some(from_clause) = build_pre_change_inline_from(
                 child,
                 scan_delta_ctes,
                 fallback_oids,
@@ -718,6 +887,30 @@ pub fn build_pre_change_snapshot_sql(
                     quote_ident(child_alias),
                 )
             }
+        }
+        OpTree::LateralFunction {
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+            child,
+        } => {
+            let child_snap = build_pre_change_snapshot_sql(
+                child,
+                scan_delta_ctes,
+                fallback_oids,
+                st_source_pgt_ids,
+            );
+            build_lateral_function_snapshot(
+                func_sql,
+                alias,
+                column_aliases,
+                declared_columns,
+                *with_ordinality,
+                child,
+                &child_snap,
+            )
         }
         OpTree::Subquery {
             column_aliases,
@@ -804,6 +997,25 @@ pub fn build_pre_change_snapshot_sql(
                 quote_ident(child_alias),
                 group_by_sql,
             )
+        }
+        OpTree::UnionAll { children } => {
+            let branches = children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    format!(
+                        "SELECT * FROM {} {}",
+                        build_pre_change_snapshot_sql(
+                            child,
+                            scan_delta_ctes,
+                            fallback_oids,
+                            st_source_pgt_ids,
+                        ),
+                        quote_ident(&format!("__pgt_union_{index}")),
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("({})", branches.join(" UNION ALL "))
         }
         OpTree::CteScan {
             alias,
@@ -902,8 +1114,8 @@ fn build_pre_change_inline_join_from(
     )
 }
 
-/// Pre-change variant of [`build_snapshot_inline_from_for_join`].
-fn build_pre_change_inline_from_for_join(
+/// Pre-change variant of [`build_snapshot_inline_from`].
+fn build_pre_change_inline_from(
     op: &OpTree,
     scan_delta_ctes: &HashMap<String, String>,
     fallback_oids: &HashSet<u32>,
@@ -949,6 +1161,30 @@ fn build_pre_change_inline_from_for_join(
             fallback_oids,
             st_source_pgt_ids,
         )),
+        OpTree::LateralFunction {
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+            child,
+        } => {
+            let child_snapshot = build_pre_change_snapshot_sql(
+                child,
+                scan_delta_ctes,
+                fallback_oids,
+                st_source_pgt_ids,
+            );
+            Some(build_lateral_function_from_clause(
+                func_sql,
+                alias,
+                column_aliases,
+                declared_columns,
+                *with_ordinality,
+                child,
+                &child_snapshot,
+            ))
+        }
         _ => None,
     }
 }
@@ -982,7 +1218,7 @@ fn build_pre_change_join_snapshot(
             "{}.{} AS {}",
             quote_ident(left_alias),
             quote_ident(c),
-            quote_ident(&format!("{left_alias}__{c}"))
+            quote_ident(&snapshot_join_column_name(left_alias, c))
         ));
     }
     for c in &right_cols {
@@ -990,7 +1226,7 @@ fn build_pre_change_join_snapshot(
             "{}.{} AS {}",
             quote_ident(right_alias),
             quote_ident(c),
-            quote_ident(&format!("{right_alias}__{c}"))
+            quote_ident(&snapshot_join_column_name(right_alias, c))
         ));
     }
 
@@ -1027,10 +1263,10 @@ fn snapshot_output_columns(op: &OpTree) -> Vec<String> {
             let right_prefix = right.alias();
             let mut cols = Vec::new();
             for c in snapshot_output_columns(left) {
-                cols.push(format!("{left_prefix}__{c}"));
+                cols.push(snapshot_join_column_name(left_prefix, &c));
             }
             for c in snapshot_output_columns(right) {
-                cols.push(format!("{right_prefix}__{c}"));
+                cols.push(snapshot_join_column_name(right_prefix, &c));
             }
             cols
         }
@@ -1112,7 +1348,7 @@ fn rewrite_expr_for_join(
                     // Fallback: single-level disambiguation
                     Expr::ColumnRef {
                         table_alias: Some(new_left.to_string()),
-                        column_name: format!("{alias}__{column_name}"),
+                        column_name: snapshot_join_column_name(alias, column_name),
                     }
                 }
             } else if has_source_alias(right, alias) {
@@ -1125,7 +1361,7 @@ fn rewrite_expr_for_join(
                 } else {
                     Expr::ColumnRef {
                         table_alias: Some(new_right.to_string()),
-                        column_name: format!("{alias}__{column_name}"),
+                        column_name: snapshot_join_column_name(alias, column_name),
                     }
                 }
             } else {
@@ -1221,42 +1457,65 @@ fn rewrite_expr_for_join(
                 .into_iter()
                 .chain(collect_source_aliases(right));
             for alias in all_aliases {
-                let (new_alias, is_simple) = if has_source_alias(left, &alias) {
-                    (new_left, is_simple_source(left, &alias))
-                } else {
-                    (new_right, is_simple_source(right, &alias))
-                };
+                let (source, new_alias, is_simple) =
+                    if has_source_alias(right, &alias) && is_simple_source(right, &alias) {
+                        (right, new_right, true)
+                    } else if has_source_alias(left, &alias) && is_simple_source(left, &alias) {
+                        (left, new_left, true)
+                    } else if has_source_alias(left, &alias) {
+                        (left, new_left, false)
+                    } else if has_source_alias(right, &alias) {
+                        (right, new_right, false)
+                    } else {
+                        continue;
+                    };
 
                 if is_simple {
                     // Simple: replace alias.col → new_alias.col
                     // Match both alias."col" and alias.col patterns.
                     // Also handle quoted form: "alias"."col" → "new_alias"."col"
                     // (Expr::ColumnRef::to_sql() emits double-quoted identifiers)
-                    let quoted_pattern = format!("\"{}\".", alias.replace('"', "\"\""));
-                    let quoted_replacement = format!("\"{}\".", new_alias.replace('"', "\"\""));
-                    result = result.replace(&quoted_pattern, &quoted_replacement);
-                    let pattern = format!("{}.", alias);
-                    let replacement = format!("{}.", new_alias);
-                    result = result.replace(&pattern, &replacement);
+                    result = crate::dvm::operators::filter::replace_qualified_column_refs_with(
+                        &result,
+                        |raw_alias, column| {
+                            (raw_alias == alias).then(|| {
+                                format!("{}.{}", quote_ident(new_alias), quote_ident(column))
+                            })
+                        },
+                    );
                 } else {
-                    // Nested: alias.col → new_alias."alias__col"
-                    // This is harder in raw SQL — we do a conservative
-                    // pattern replacement for alias."col" → new_alias."alias__col"
-                    // and alias.col → new_alias."alias__col"
-                    // Also handle quoted form "alias"."col"
-                    let quoted_prefix = format!("\"{}\".", alias.replace('"', "\"\""));
-                    if result.contains(&quoted_prefix) {
-                        result = rewrite_raw_quoted_alias_refs(&result, &alias, new_alias);
-                    }
-                    let dot_prefix = format!("{}.", alias);
-                    if result.contains(&dot_prefix) {
-                        // Replace qualified references carefully
-                        result = rewrite_raw_alias_refs(&result, &alias, new_alias);
-                    }
+                    // Resolve every raw qualified reference through the same
+                    // recursive naming used to build nested join snapshots.
+                    result = crate::dvm::operators::filter::replace_qualified_column_refs_with(
+                        &result,
+                        |raw_alias, column| {
+                            if raw_alias != alias {
+                                return None;
+                            }
+                            let resolved = resolve_disambiguated_column(source, &alias, column)
+                                .unwrap_or_else(|| snapshot_join_column_name(&alias, column));
+                            Some(format!(
+                                "{}.{}",
+                                quote_ident(new_alias),
+                                quote_ident(&resolved)
+                            ))
+                        },
+                    );
                 }
             }
             Expr::Raw(result)
         }
+    }
+}
+
+fn rewrite_project_expr_for_snapshot(expr: &Expr, child: &OpTree) -> Expr {
+    match child {
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            rewrite_expr_for_join(expr, left, left.alias(), right, right.alias())
+        }
+        _ => expr.clone(),
     }
 }
 
@@ -1284,17 +1543,21 @@ fn collect_source_aliases(op: &OpTree) -> Vec<String> {
         | OpTree::Project { child, .. }
         | OpTree::Aggregate { child, .. }
         | OpTree::Distinct { child, .. } => collect_source_aliases(child),
+        OpTree::LateralFunction { alias, child, .. } => {
+            let mut aliases = collect_source_aliases(child);
+            aliases.push(alias.clone());
+            aliases
+        }
         OpTree::UnionAll { children } => children.iter().flat_map(collect_source_aliases).collect(),
-        // Window, LateralFunction, LateralSubquery, RecursiveCte,
-        // RecursiveSelfRef, etc. — these rarely appear as direct join
-        // children, but return empty to be safe.
+        // Window, LateralSubquery, RecursiveCte, RecursiveSelfRef, etc. return
+        // no aliases because they are not accepted as direct join children.
         _ => vec![],
     }
 }
 
 /// Rewrite `alias.col` and `alias."col"` patterns in raw SQL text
 /// to `new_alias."alias__col"` for nested join disambiguation.
-fn rewrite_raw_alias_refs(sql: &str, old_alias: &str, new_alias: &str) -> String {
+fn rewrite_raw_alias_refs(sql: &str, source: &OpTree, old_alias: &str, new_alias: &str) -> String {
     let prefix = format!("{}.", old_alias);
     let mut result = String::with_capacity(sql.len());
     let mut remaining = sql;
@@ -1331,13 +1594,9 @@ fn rewrite_raw_alias_refs(sql: &str, old_alias: &str, new_alias: &str) -> String
             name.to_string()
         };
 
-        // Emit the disambiguated reference: new_alias."old_alias__col"
-        result.push_str(&format!(
-            "{}.\"{}__{}\"",
-            new_alias,
-            old_alias.replace('"', "\"\""),
-            col_name.replace('"', "\"\""),
-        ));
+        let resolved = resolve_disambiguated_column(source, old_alias, &col_name)
+            .unwrap_or_else(|| snapshot_join_column_name(old_alias, &col_name));
+        result.push_str(&format!("{}.{}", new_alias, quote_ident(&resolved),));
     }
 
     // Append the rest
@@ -1347,7 +1606,12 @@ fn rewrite_raw_alias_refs(sql: &str, old_alias: &str, new_alias: &str) -> String
 
 /// Rewrite `"alias"."col"` patterns (double-quoted form from `Expr::to_sql()`)
 /// to `new_alias."alias__col"` for nested join disambiguation.
-fn rewrite_raw_quoted_alias_refs(sql: &str, bare_alias: &str, new_alias: &str) -> String {
+fn rewrite_raw_quoted_alias_refs(
+    sql: &str,
+    source: &OpTree,
+    bare_alias: &str,
+    new_alias: &str,
+) -> String {
     let prefix = format!("\"{}\".", bare_alias.replace('"', "\"\""));
     let mut result = String::with_capacity(sql.len());
     let mut remaining = sql;
@@ -1380,13 +1644,9 @@ fn rewrite_raw_quoted_alias_refs(sql: &str, bare_alias: &str, new_alias: &str) -
             name.to_string()
         };
 
-        // Emit: new_alias."bare_alias__col"
-        result.push_str(&format!(
-            "{}.\"{}__{}\"",
-            new_alias,
-            bare_alias.replace('"', "\"\""),
-            col_name.replace('"', "\"\""),
-        ));
+        let resolved = resolve_disambiguated_column(source, bare_alias, &col_name)
+            .unwrap_or_else(|| snapshot_join_column_name(bare_alias, &col_name));
+        result.push_str(&format!("{}.{}", new_alias, quote_ident(&resolved),));
     }
 
     result.push_str(remaining);
@@ -1412,6 +1672,11 @@ pub fn has_source_alias(op: &OpTree, alias: &str) -> bool {
         | OpTree::Project { child, .. }
         | OpTree::Aggregate { child, .. }
         | OpTree::Distinct { child, .. } => has_source_alias(child, alias),
+        OpTree::LateralFunction {
+            alias: function_alias,
+            child,
+            ..
+        } => function_alias == alias || has_source_alias(child, alias),
         OpTree::Subquery {
             alias: sub_alias,
             child,
@@ -1471,6 +1736,29 @@ fn find_column_source(op: &OpTree, column_name: &str) -> Option<String> {
         | OpTree::Subquery { child, .. }
         | OpTree::Aggregate { child, .. }
         | OpTree::Distinct { child, .. } => find_column_source(child, column_name),
+        OpTree::LateralFunction {
+            func_sql,
+            alias,
+            column_aliases,
+            declared_columns,
+            with_ordinality,
+            child,
+        } => {
+            if lateral_snapshot_columns(
+                func_sql,
+                alias,
+                column_aliases,
+                declared_columns,
+                *with_ordinality,
+            )
+            .iter()
+            .any(|column| column == column_name)
+            {
+                Some(alias.clone())
+            } else {
+                find_column_source(child, column_name)
+            }
+        }
         _ => None,
     }
 }
@@ -1492,7 +1780,7 @@ fn resolve_disambiguated_column(
     match op {
         OpTree::Scan { alias, .. } if alias == table_alias => {
             // Found the target scan — return alias__column_name
-            Some(format!("{alias}__{column_name}"))
+            Some(snapshot_join_column_name(alias, column_name))
         }
         OpTree::CteScan { alias, .. } if alias == table_alias => Some(column_name.to_string()),
         OpTree::InnerJoin { left, right, .. }
@@ -1501,18 +1789,18 @@ fn resolve_disambiguated_column(
             if has_source_alias(left, table_alias) {
                 if is_simple_source(left, table_alias) {
                     // The table IS the left child scan — single level
-                    Some(format!("{table_alias}__{column_name}"))
+                    Some(snapshot_join_column_name(table_alias, column_name))
                 } else {
                     // Nested — recurse and add the left child's alias prefix
                     let inner = resolve_disambiguated_column(left, table_alias, column_name)?;
-                    Some(format!("{}__{inner}", left.alias()))
+                    Some(snapshot_join_column_name(left.alias(), &inner))
                 }
             } else if has_source_alias(right, table_alias) {
                 if is_simple_source(right, table_alias) {
-                    Some(format!("{table_alias}__{column_name}"))
+                    Some(snapshot_join_column_name(table_alias, column_name))
                 } else {
                     let inner = resolve_disambiguated_column(right, table_alias, column_name)?;
-                    Some(format!("{}__{inner}", right.alias()))
+                    Some(snapshot_join_column_name(right.alias(), &inner))
                 }
             } else {
                 None
@@ -1522,6 +1810,13 @@ fn resolve_disambiguated_column(
         | OpTree::Project { child, .. }
         | OpTree::Subquery { child, .. } => {
             resolve_disambiguated_column(child, table_alias, column_name)
+        }
+        OpTree::LateralFunction { alias, child, .. } => {
+            if alias == table_alias || has_source_alias(child, table_alias) {
+                Some(column_name.to_string())
+            } else {
+                None
+            }
         }
         // SemiJoin/AntiJoin output only left-side columns. The right
         // side is used for the EXISTS check and doesn't contribute to
@@ -1546,6 +1841,11 @@ pub fn is_simple_source(op: &OpTree, alias: &str) -> bool {
         OpTree::Filter { child, .. } | OpTree::Project { child, .. } => {
             is_simple_source(child, alias)
         }
+        OpTree::LateralFunction {
+            alias: function_alias,
+            child,
+            ..
+        } => function_alias == alias || is_simple_source(child, alias),
         OpTree::Subquery {
             alias: sub_alias,
             child,
@@ -1790,6 +2090,28 @@ mod tests {
         SnapshotPlan::for_tree_in_context(child, inside_semijoin).uses_pre_change()
     }
 
+    fn lateral_normalizer(child: OpTree) -> OpTree {
+        OpTree::LateralFunction {
+            func_sql: "mdm_graph.normalize_text(r.raw_value)".into(),
+            alias: "n".into(),
+            column_aliases: vec![],
+            declared_columns: vec![
+                Column {
+                    name: "state".into(),
+                    type_oid: 25,
+                    is_nullable: true,
+                },
+                Column {
+                    name: "normalized".into(),
+                    type_oid: 25,
+                    is_nullable: true,
+                },
+            ],
+            with_ordinality: false,
+            child: Box::new(child),
+        }
+    }
+
     // ── build_snapshot_sql tests ────────────────────────────────
 
     #[test]
@@ -1849,6 +2171,308 @@ mod tests {
         let snap = build_snapshot_sql(&node);
         assert!(snap.contains("SELECT *"));
         assert!(snap.contains("WHERE"));
+    }
+
+    #[test]
+    fn test_snapshot_lateral_function_as_direct_join_source() {
+        let lateral = lateral_normalizer(scan(
+            1,
+            "records",
+            "public",
+            "r",
+            &["source_record_key", "raw_value"],
+        ));
+        let source_records = scan(
+            2,
+            "source_records",
+            "mdm_graph",
+            "sr",
+            &["source_record_key", "source_record_id"],
+        );
+        let tree = inner_join(
+            eq_cond("r", "source_record_key", "sr", "source_record_key"),
+            lateral,
+            source_records,
+        );
+
+        let snap = build_snapshot_sql(&tree);
+        assert!(snap.contains("CROSS JOIN LATERAL mdm_graph.normalize_text(r.raw_value)"));
+        assert!(snap.contains("AS \"n\" (\"state\", \"normalized\")"));
+        assert!(snap.contains("\"n\".\"source_record_key\" = \"sr\".\"source_record_key\""));
+    }
+
+    #[test]
+    fn test_snapshot_project_over_lateral_function_preserves_source_aliases() {
+        let lateral = lateral_normalizer(scan(
+            1,
+            "records",
+            "public",
+            "r",
+            &["source_record_key", "raw_value"],
+        ));
+        let tree = project(
+            vec![
+                qcolref("r", "source_record_key"),
+                qcolref("n", "normalized"),
+            ],
+            vec!["source_record_key", "normalized"],
+            lateral,
+        );
+
+        let snap = build_snapshot_sql(&tree);
+        assert!(snap.contains("\"r\".\"source_record_key\" AS \"source_record_key\""));
+        assert!(snap.contains("\"n\".\"normalized\" AS \"normalized\""));
+        assert!(snap.contains("FROM \"public\".\"records\" AS \"r\" CROSS JOIN LATERAL"));
+    }
+
+    #[test]
+    fn test_snapshot_union_subquery_as_direct_join_source() {
+        let branch = |oid, table: &str| {
+            let pairs = scan(
+                oid,
+                table,
+                "public",
+                "p",
+                &[
+                    "left_source_record_id",
+                    "right_source_record_id",
+                    "left_sort_key",
+                    "right_sort_key",
+                ],
+            );
+            let left = scan(
+                oid + 100,
+                &format!("{table}_left"),
+                "public",
+                "l0",
+                &["source_record_id", "value"],
+            );
+            let pair_with_left = left_join(
+                eq_cond("p", "left_source_record_id", "l0", "source_record_id"),
+                pairs,
+                left,
+            );
+            let right = scan(
+                oid + 200,
+                &format!("{table}_right"),
+                "public",
+                "r0",
+                &["source_record_id", "value"],
+            );
+            let joined = left_join(
+                eq_cond("p", "right_source_record_id", "r0", "source_record_id"),
+                pair_with_left,
+                right,
+            );
+            let left_1 = scan(
+                oid + 300,
+                &format!("{table}_left_1"),
+                "public",
+                "l1",
+                &["source_record_id", "state", "value"],
+            );
+            let joined = left_join(
+                eq_cond("p", "left_source_record_id", "l1", "source_record_id"),
+                joined,
+                left_1,
+            );
+            let right_1 = scan(
+                oid + 400,
+                &format!("{table}_right_1"),
+                "public",
+                "r1",
+                &["source_record_id", "state", "value"],
+            );
+            let joined = left_join(
+                eq_cond("p", "right_source_record_id", "r1", "source_record_id"),
+                joined,
+                right_1,
+            );
+            project(
+                vec![
+                    qcolref("p", "left_source_record_id"),
+                    qcolref("p", "right_source_record_id"),
+                    qcolref("p", "left_sort_key"),
+                    qcolref("p", "right_sort_key"),
+                    qcolref("l0", "value"),
+                    qcolref("r0", "value"),
+                    Expr::Raw(
+                        "CASE WHEN \"l0\".\"value\" = \"r0\".\"value\" AND \"l1\".\"state\" = \"r1\".\"state\" THEN \"l1\".\"value\" ELSE \"r1\".\"value\" END"
+                            .into(),
+                    ),
+                ],
+                vec![
+                    "left_source_record_id",
+                    "right_source_record_id",
+                    "left_sort_key",
+                    "right_sort_key",
+                    "left_value",
+                    "right_value",
+                    "composite_value",
+                ],
+                joined,
+            )
+        };
+        let evidence = subquery(
+            "evidence",
+            vec![],
+            union_all(vec![
+                branch(1, "evidence_1"),
+                branch(2, "evidence_2"),
+                branch(3, "evidence_3"),
+                branch(4, "evidence_4"),
+            ]),
+        );
+        let tree = left_join(
+            lit("false"),
+            evidence,
+            scan(5, "dependency", "public", "dependency_0", &["id"]),
+        );
+
+        let snap = build_snapshot_sql(&tree);
+        assert_eq!(snap.matches(" UNION ALL ").count(), 3, "{snap}");
+        assert!(snap.contains("LEFT JOIN"), "{snap}");
+        assert!(snap.contains("\"evidence\""), "{snap}");
+        assert!(
+            snap.contains(
+                "SELECT * FROM (SELECT \"left_join\".\"left_join__left_join__p__left_source_record_id\" AS \"left_source_record_id\""
+            ),
+            "{snap}"
+        );
+        assert!(
+            !snap.contains(
+                "SELECT * FROM (SELECT \"p\".\"left_source_record_id\" AS \"left_source_record_id\""
+            ),
+            "{snap}"
+        );
+        assert!(
+            snap.contains(
+                "\"left_join\".\"left_join__left_join__l0__value\" = \"left_join\".\"left_join__r0__value\""
+            ),
+            "{snap}"
+        );
+        assert!(
+            snap.contains("\"left_join\".\"l1__state\" = \"r1\".\"state\""),
+            "{snap}"
+        );
+
+        let scan_deltas = HashMap::from([
+            ("p".to_string(), "delta_p".to_string()),
+            ("l0".to_string(), "delta_l0".to_string()),
+            ("r0".to_string(), "delta_r0".to_string()),
+            ("l1".to_string(), "delta_l1".to_string()),
+            ("r1".to_string(), "delta_r1".to_string()),
+        ]);
+        let pre_change =
+            build_pre_change_snapshot_sql(&tree, &scan_deltas, &HashSet::new(), &HashMap::new());
+        assert!(pre_change.contains("delta_p"), "{pre_change}");
+        assert!(pre_change.contains("delta_l0"), "{pre_change}");
+        assert!(pre_change.contains("delta_r0"), "{pre_change}");
+        assert!(pre_change.contains("delta_l1"), "{pre_change}");
+        assert!(pre_change.contains("delta_r1"), "{pre_change}");
+        assert!(
+            pre_change.contains(
+                "SELECT * FROM (SELECT \"left_join\".\"left_join__left_join__p__left_source_record_id\" AS \"left_source_record_id\""
+            ),
+            "{pre_change}"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_deep_join_column_names_are_bounded_and_collision_resistant() {
+        let mut comparator = snapshot_join_column_name("evidence", "comparator");
+        let mut comparator_version = snapshot_join_column_name("evidence", "comparator_version");
+        for _ in 0..18 {
+            comparator = snapshot_join_column_name("left_join", &comparator);
+            comparator_version = snapshot_join_column_name("left_join", &comparator_version);
+            assert!(comparator.len() <= MAX_POSTGRES_IDENTIFIER_BYTES);
+            assert!(comparator_version.len() <= MAX_POSTGRES_IDENTIFIER_BYTES);
+            assert_ne!(comparator, comparator_version);
+        }
+
+        let mut child = scan(
+            1,
+            "evidence",
+            "public",
+            "evidence",
+            &["comparator", "comparator_version"],
+        );
+        for index in 0..18 {
+            let alias = format!("dependency_{index}");
+            child = left_join(
+                lit("false"),
+                child,
+                scan(100 + index, &alias, "public", &alias, &["dependency_value"]),
+            );
+        }
+        let (project_comparator, project_comparator_version) = match &child {
+            OpTree::LeftJoin { left, .. } => (
+                resolve_disambiguated_column(left, "evidence", "comparator")
+                    .expect("evidence comparator must resolve"),
+                resolve_disambiguated_column(left, "evidence", "comparator_version")
+                    .expect("evidence comparator_version must resolve"),
+            ),
+            _ => unreachable!("fixture builds a left join chain"),
+        };
+        let tree = project(
+            vec![
+                qcolref("evidence", "comparator"),
+                qcolref("evidence", "comparator_version"),
+            ],
+            vec!["comparator", "comparator_version"],
+            child,
+        );
+
+        let snapshot = build_snapshot_sql(&tree);
+        assert!(
+            snapshot.contains(&format!(
+                "\"left_join\".{}",
+                quote_ident(&project_comparator)
+            )),
+            "{snapshot}"
+        );
+        assert!(
+            snapshot.contains(&format!(
+                "\"left_join\".{}",
+                quote_ident(&project_comparator_version)
+            )),
+            "{snapshot}"
+        );
+
+        let pre_change =
+            build_pre_change_snapshot_sql(&tree, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        assert!(
+            pre_change.contains(&format!(
+                "\"left_join\".{}",
+                quote_ident(&project_comparator)
+            )),
+            "{pre_change}"
+        );
+        assert!(
+            pre_change.contains(&format!(
+                "\"left_join\".{}",
+                quote_ident(&project_comparator_version)
+            )),
+            "{pre_change}"
+        );
+    }
+
+    #[test]
+    fn test_pre_change_snapshot_rebuilds_lateral_from_old_child_rows() {
+        let tree = lateral_normalizer(scan(
+            1,
+            "records",
+            "public",
+            "r",
+            &["source_record_key", "raw_value"],
+        ));
+        let scan_deltas = HashMap::from([("r".to_string(), "scan_r_delta".to_string())]);
+
+        let snap =
+            build_pre_change_snapshot_sql(&tree, &scan_deltas, &HashSet::new(), &HashMap::new());
+        assert!(snap.contains("scan_r_delta"));
+        assert!(snap.contains("__pgt_action = 'D'"));
+        assert!(snap.contains("CROSS JOIN LATERAL mdm_graph.normalize_text(r.raw_value)"));
     }
 
     // ── has_source_alias tests ──────────────────────────────────

@@ -919,6 +919,9 @@ pub fn recover_capture_instance() -> String {
     ) {
         super::raise_error_with_context(PgTrickleError::SpiError(error.to_string()));
     }
+    if let Err(error) = crate::api::output_delta::adopt_database_instance(&instance_id) {
+        super::raise_error_with_context(error);
+    }
     if let Err(error) = Spi::run(
         "UPDATE pgtrickle.pgt_stream_tables
             SET status = 'SUSPENDED',

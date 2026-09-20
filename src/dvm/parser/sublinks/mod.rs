@@ -1430,6 +1430,137 @@ pub fn parse_defining_query_full(query: &str) -> Result<ParseResult, PgTrickleEr
     unsafe { parse_defining_query_inner(query) }
 }
 
+#[derive(Clone, Debug)]
+struct AnalyzedLateralFunction {
+    columns: Vec<Column>,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+struct AnalyzedLateralContext {
+    functions: HashMap<i32, AnalyzedLateralFunction>,
+    error: Option<PgTrickleError>,
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+unsafe extern "C-unwind" fn analyzed_lateral_walker(
+    node: *mut pg_sys::Node,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    // SAFETY: PostgreSQL invokes this walker synchronously with the context
+    // and analyzed nodes supplied to query_tree_walker_impl below.
+    unsafe {
+        let context = &mut *(context as *mut AnalyzedLateralContext);
+        if pgrx::is_a(node, pg_sys::NodeTag::T_RangeTblEntry) {
+            let rte = &*(node as *const pg_sys::RangeTblEntry);
+            if rte.rtekind == pg_sys::RTEKind::RTE_FUNCTION {
+                for table_function in
+                    pgrx::PgList::<pg_sys::RangeTblFunction>::from_pg(rte.functions).iter_ptr()
+                {
+                    if table_function.is_null() || (*table_function).funcexpr.is_null() {
+                        continue;
+                    }
+                    let expression = (*table_function).funcexpr;
+                    if !pgrx::is_a(expression, pg_sys::NodeTag::T_FuncExpr) {
+                        context.error = Some(PgTrickleError::UnsupportedOperator(
+                            "LATERAL table expression is not a resolved function call".into(),
+                        ));
+                        return true;
+                    }
+                    let function = &*(expression as *const pg_sys::FuncExpr);
+                    if pg_sys::func_volatile(function.funcid) as u8 != b'i'
+                        || pg_sys::func_parallel(function.funcid) as u8 != b's'
+                    {
+                        context.error = Some(PgTrickleError::UnsupportedOperator(format!(
+                            "LATERAL function OID {} must be IMMUTABLE and PARALLEL SAFE",
+                            function.funcid.to_u32()
+                        )));
+                        return true;
+                    }
+
+                    let descriptor = pg_sys::get_expr_result_tupdesc(expression, true);
+                    let mut columns = Vec::new();
+                    if !descriptor.is_null() {
+                        for index in 0..(*descriptor).natts {
+                            let attribute = pg_sys::TupleDescAttr(descriptor, index);
+                            if attribute.is_null() || (*attribute).attisdropped {
+                                continue;
+                            }
+                            let name = std::ffi::CStr::from_ptr((*attribute).attname.data.as_ptr())
+                                .to_string_lossy()
+                                .into_owned();
+                            columns.push(Column {
+                                name,
+                                type_oid: (*attribute).atttypid.to_u32(),
+                                is_nullable: !(*attribute).attnotnull,
+                            });
+                        }
+                    }
+                    context
+                        .functions
+                        .insert(function.location, AnalyzedLateralFunction { columns });
+                }
+            }
+            return false;
+        }
+        if pgrx::is_a(node, pg_sys::NodeTag::T_Query) {
+            pg_sys::query_tree_walker_impl(
+                node as *mut pg_sys::Query,
+                Some(analyzed_lateral_walker),
+                context as *mut AnalyzedLateralContext as *mut std::ffi::c_void,
+                pg_sys::QTW_EXAMINE_RTES_BEFORE as i32,
+            )
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn collect_analyzed_lateral_functions(
+    query: &str,
+) -> Result<HashMap<i32, AnalyzedLateralFunction>, PgTrickleError> {
+    let sql = std::ffi::CString::new(query)
+        .map_err(|e| PgTrickleError::QueryParseError(format!("query contains null byte: {e}")))?;
+    // SAFETY: parser and analyzer run inside a PostgreSQL backend memory context.
+    unsafe {
+        let raw = pg_sys::raw_parser(sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT);
+        let statements = pgrx::PgList::<pg_sys::RawStmt>::from_pg(raw);
+        let statement = statements.get_ptr(0).ok_or_else(|| {
+            PgTrickleError::QueryParseError("query produced no parse tree nodes".into())
+        })?;
+        let analyzed = pg_sys::parse_analyze_fixedparams(
+            statement,
+            sql.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+        );
+        let mut context = AnalyzedLateralContext {
+            functions: HashMap::new(),
+            error: None,
+        };
+        analyzed_lateral_walker(
+            analyzed as *mut pg_sys::Node,
+            &mut context as *mut AnalyzedLateralContext as *mut std::ffi::c_void,
+        );
+        if let Some(error) = context.error {
+            Err(error)
+        } else {
+            Ok(context.functions)
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn collect_analyzed_lateral_functions(
+    _query: &str,
+) -> Result<HashMap<i32, AnalyzedLateralFunction>, PgTrickleError> {
+    Ok(HashMap::new())
+}
+
 /// Return whether PostgreSQL's analyzed query tree contains a window function.
 ///
 /// Unlike the DVM parser, this accepts every SELECT shape PostgreSQL accepts,
@@ -2459,6 +2590,8 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
     PARSE_ADVISORY_WARNINGS.with(|w| w.borrow_mut().clear());
     WINDOW_PLANNING_INPUTS.with(|inputs| inputs.borrow_mut().clear());
     ANALYZED_AGGREGATE_LOCATIONS.with(|cache| *cache.borrow_mut() = None);
+    CURRENT_DEFINING_QUERY.with(|current| *current.borrow_mut() = query.to_string());
+    ANALYZED_LATERAL_FUNCTIONS.with(|cache| *cache.borrow_mut() = None);
 
     // PERF-2 (v0.30.0): Reject queries whose approximate parse-node count
     // would exceed pg_trickle.max_parse_nodes.  We estimate node count
@@ -2857,6 +2990,7 @@ unsafe fn parse_select_stmt_inner(
                 func_sql,
                 alias,
                 column_aliases,
+                declared_columns,
                 with_ordinality,
                 ..
             } = right
@@ -2865,6 +2999,7 @@ unsafe fn parse_select_stmt_inner(
                     func_sql,
                     alias,
                     column_aliases,
+                    declared_columns,
                     with_ordinality,
                     child: Box::new(tree),
                 };
@@ -3076,17 +3211,13 @@ unsafe fn parse_select_stmt_inner(
             }
         }
 
-        let mut rename_map = std::collections::HashMap::<usize, String>::new();
-        for (i, gb_expr) in group_by.iter().enumerate() {
-            let gb_sql = gb_expr.to_sql();
-            let gb_output = gb_expr.output_name();
-            for (te, ta) in target_exprs.iter().zip(target_aliases.iter()) {
-                if te.to_sql() == gb_sql && ta != &gb_output {
-                    rename_map.insert(i, ta.clone());
-                    break;
-                }
-            }
-        }
+        let target_projection = aggregate_target_projection(
+            &target_exprs,
+            &target_aliases,
+            &group_by,
+            &aggregates,
+            &coalesced_sum_defaults,
+        );
 
         tree = OpTree::Aggregate {
             group_by,
@@ -3094,38 +3225,10 @@ unsafe fn parse_select_stmt_inner(
             child: Box::new(tree),
         };
 
-        // Add a Project wrapper for GROUP BY renames and for
-        // COALESCE(SUM(...), default), so the aggregate node restores NULL
-        // and the outer projection applies PostgreSQL's COALESCE semantics.
-        let needs_projection = !rename_map.is_empty() || !coalesced_sum_defaults.is_empty();
-        if needs_projection {
-            let agg_output = tree.output_columns();
-            let proj_exprs: Vec<Expr> = agg_output
-                .iter()
-                .map(|name| {
-                    coalesced_sum_defaults.get(name).map_or_else(
-                        || Expr::ColumnRef {
-                            table_alias: None,
-                            column_name: name.clone(),
-                        },
-                        |default| Expr::FuncCall {
-                            func_name: "COALESCE".to_string(),
-                            args: vec![
-                                Expr::ColumnRef {
-                                    table_alias: None,
-                                    column_name: name.clone(),
-                                },
-                                default.clone(),
-                            ],
-                        },
-                    )
-                })
-                .collect();
-            let proj_aliases: Vec<String> = agg_output
-                .iter()
-                .enumerate()
-                .map(|(i, name)| rename_map.get(&i).cloned().unwrap_or_else(|| name.clone()))
-                .collect();
+        // Aggregate emits only GROUP BY columns and aggregate results. Restore
+        // target-list constants and expressions, as well as aliases and
+        // COALESCE wrappers, in their original SELECT-list positions.
+        if let Some((proj_exprs, proj_aliases)) = target_projection {
             tree = OpTree::Project {
                 expressions: proj_exprs,
                 aliases: proj_aliases,
@@ -3222,6 +3325,69 @@ unsafe fn parse_select_stmt_inner(
     }
 
     Ok(tree)
+}
+
+fn aggregate_target_projection(
+    target_exprs: &[Expr],
+    target_aliases: &[String],
+    group_by: &[Expr],
+    aggregates: &[AggExpr],
+    coalesced_sum_defaults: &std::collections::HashMap<String, Expr>,
+) -> Option<(Vec<Expr>, Vec<String>)> {
+    let aggregate_output: Vec<String> = group_by
+        .iter()
+        .map(Expr::output_name)
+        .chain(aggregates.iter().map(|aggregate| aggregate.alias.clone()))
+        .collect();
+    let expressions: Vec<Expr> = target_exprs
+        .iter()
+        .zip(target_aliases)
+        .map(|(expr, alias)| {
+            if let Some(default) = coalesced_sum_defaults.get(alias) {
+                return Expr::FuncCall {
+                    func_name: "COALESCE".to_string(),
+                    args: vec![
+                        Expr::ColumnRef {
+                            table_alias: None,
+                            column_name: alias.clone(),
+                        },
+                        default.clone(),
+                    ],
+                };
+            }
+            if aggregates.iter().any(|aggregate| aggregate.alias == *alias) {
+                return Expr::ColumnRef {
+                    table_alias: None,
+                    column_name: alias.clone(),
+                };
+            }
+            if let Some(group_expr) = group_by
+                .iter()
+                .find(|group_expr| group_expr.to_sql() == expr.to_sql())
+            {
+                return Expr::ColumnRef {
+                    table_alias: None,
+                    column_name: group_expr.output_name(),
+                };
+            }
+            expr.clone()
+        })
+        .collect();
+
+    let is_identity = target_aliases == aggregate_output.as_slice()
+        && expressions
+            .iter()
+            .zip(&aggregate_output)
+            .all(|(expr, output)| {
+                matches!(
+                    expr,
+                    Expr::ColumnRef {
+                        table_alias: None,
+                        column_name,
+                    } if column_name == output
+                )
+            });
+    (!is_identity).then(|| (expressions, target_aliases.to_vec()))
 }
 
 /// Parse simple appended scalar subqueries in the SELECT list.
@@ -3632,6 +3798,7 @@ unsafe fn parse_from_item_inner(
             func_sql,
             alias,
             column_aliases,
+            declared_columns,
             with_ordinality,
             ..
         } = right
@@ -3642,6 +3809,7 @@ unsafe fn parse_from_item_inner(
                         func_sql,
                         alias,
                         column_aliases,
+                        declared_columns,
                         with_ordinality,
                         child: Box::new(left),
                     });
@@ -3953,6 +4121,9 @@ unsafe fn parse_from_item_inner(
             func_sql,
             alias,
             column_aliases,
+            declared_columns: resolve_lateral_function_columns(
+                func_node as *const pg_sys::FuncCall,
+            )?,
             with_ordinality,
             child: Box::new(OpTree::Scan {
                 table_oid: 0,
@@ -3992,6 +4163,7 @@ unsafe fn parse_from_item_inner(
             func_sql,
             alias,
             column_aliases,
+            declared_columns: vec![],
             with_ordinality: false,
             child: Box::new(OpTree::Scan {
                 table_oid: 0,
@@ -4180,6 +4352,34 @@ pub(crate) fn extract_alias_colnames(alias: &pg_sys::Alias) -> Result<Vec<String
         names.push(name);
     }
     Ok(names)
+}
+
+/// Resolve declared OUT/TABLE columns for a FROM-clause function.
+///
+/// PostgreSQL stores these alongside input arguments in `proallargtypes`;
+/// `pronargs` alone deliberately excludes them.
+fn resolve_lateral_function_columns(
+    function: *const pg_sys::FuncCall,
+) -> Result<Vec<Column>, PgTrickleError> {
+    // SAFETY: callers pass a FuncCall checked against T_FuncCall.
+    let location = unsafe { (*function).location };
+    if ANALYZED_LATERAL_FUNCTIONS.with(|functions| functions.borrow().is_none()) {
+        let query = CURRENT_DEFINING_QUERY.with(|current| current.borrow().clone());
+        let analyzed = collect_analyzed_lateral_functions(&query)?;
+        ANALYZED_LATERAL_FUNCTIONS.with(|functions| *functions.borrow_mut() = Some(analyzed));
+    }
+    ANALYZED_LATERAL_FUNCTIONS.with(|functions| {
+        functions
+            .borrow()
+            .as_ref()
+            .and_then(|functions| functions.get(&location))
+            .map(|function| function.columns.clone())
+            .ok_or_else(|| {
+                PgTrickleError::UnsupportedOperator(
+                    "LATERAL function could not be resolved by PostgreSQL analysis".into(),
+                )
+            })
+    })
 }
 
 /// Resolve a table name to its OID via SPI.
@@ -6819,6 +7019,8 @@ type WindowExtraction = (Vec<WindowExpr>, Vec<(Expr, String)>);
 thread_local! {
     static WINDOW_PLANNING_INPUTS: RefCell<Vec<WindowPlanningInput>> = const { RefCell::new(Vec::new()) };
     static ANALYZED_AGGREGATE_LOCATIONS: RefCell<Option<HashMap<i32, pg_sys::Oid>>> = const { RefCell::new(None) };
+    static CURRENT_DEFINING_QUERY: RefCell<String> = const { RefCell::new(String::new()) };
+    static ANALYZED_LATERAL_FUNCTIONS: RefCell<Option<HashMap<i32, AnalyzedLateralFunction>>> = const { RefCell::new(None) };
 }
 
 /// Extract window function expressions and pass-through columns from a target list.
@@ -7905,6 +8107,57 @@ unsafe fn target_alias_for_res_target(rt: &pg_sys::ResTarget, ordinal: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_aggregate_target_projection_restores_constant_position() {
+        let target_exprs = vec![
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "source_record_id".into(),
+            },
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "field_name".into(),
+            },
+            Expr::Raw("CAST('token_name' AS text)".into()),
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "token".into(),
+            },
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "source_sort_key".into(),
+            },
+        ];
+        let aliases = [
+            "source_record_id",
+            "field_name",
+            "channel_id",
+            "block_key",
+            "source_sort_key",
+        ]
+        .map(str::to_string);
+        let group_by =
+            ["source_record_id", "field_name", "token", "source_sort_key"].map(|column_name| {
+                Expr::ColumnRef {
+                    table_alias: None,
+                    column_name: column_name.to_string(),
+                }
+            });
+
+        let (expressions, projected_aliases) = aggregate_target_projection(
+            &target_exprs,
+            &aliases,
+            &group_by,
+            &[],
+            &std::collections::HashMap::new(),
+        )
+        .expect("constant target requires a Project");
+
+        assert_eq!(projected_aliases, aliases);
+        assert_eq!(expressions[2].to_sql(), "CAST('token_name' AS text)");
+        assert_eq!(expressions[3].to_sql(), "token");
+    }
     use crate::dvm::parser::types::{AggExpr, AggFunc};
 
     // Helper: build a minimal AggExpr for testing rewrite_having_expr.

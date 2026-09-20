@@ -93,6 +93,7 @@ pub struct CacheContext {
     scan_pushed_predicate: Option<Expr>,
     st_bypass_tables: HashMap<i64, String>,
     scan_delta_ctes: HashMap<String, String>,
+    scan_delta_ctes_by_oid: HashMap<u32, String>,
     snapshot_cte_cache: HashMap<String, (String, String)>,
     snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
     fallback_leaf_oids: HashSet<u32>,
@@ -138,6 +139,10 @@ pub struct DiffContext {
     /// Q21-type numwait regression where EXCEPT ALL at sub-join levels
     /// interacts with the SemiJoin's R_old snapshot computation.
     pub inside_semijoin: bool,
+    /// When true, the current diff node is inside an intermediate subtree
+    /// (e.g. child of aggregate, join, union, set operation, CTE body, window)
+    /// and cannot merge directly into the target stream table.
+    pub inside_intermediate: bool,
     /// Whether the stream table has a `__pgt_count` auxiliary column.
     /// True when the top-level OpTree contains Aggregate or Distinct.
     /// Used by the aggregate operator to detect intermediate aggregates
@@ -623,6 +628,7 @@ impl DiffContext {
                 scan_pushed_predicate: None,
                 st_bypass_tables: HashMap::new(),
                 scan_delta_ctes: HashMap::new(),
+                scan_delta_ctes_by_oid: HashMap::new(),
                 snapshot_cte_cache: HashMap::new(),
                 snapshot_fingerprint_cache: HashMap::new(),
                 fallback_leaf_oids: HashSet::new(),
@@ -641,6 +647,7 @@ impl DiffContext {
             st_user_columns: None,
             merge_safe_dedup: false,
             inside_semijoin: false,
+            inside_intermediate: false,
             st_has_pgt_count: false,
             st_column_alias_map: None,
             having_filter: false,
@@ -749,6 +756,10 @@ impl DiffContext {
         self.cache.st_bypass_tables = tables;
     }
 
+    pub(crate) fn st_bypass_tables(&self) -> &HashMap<i64, String> {
+        &self.cache.st_bypass_tables
+    }
+
     pub(crate) fn scan_delta_ctes(&self) -> &HashMap<String, String> {
         &self.cache.scan_delta_ctes
     }
@@ -757,8 +768,29 @@ impl DiffContext {
         &mut self.cache.scan_delta_ctes
     }
 
+    pub(crate) fn set_scan_delta_cte_for_source(&mut self, source_oid: u32, cte: String) {
+        if self.cdc.st_source_pgt_ids.contains_key(&source_oid) {
+            self.cache.scan_delta_ctes_by_oid.insert(source_oid, cte);
+        }
+    }
+
+    pub(crate) fn scan_delta_cte_for_source(
+        &self,
+        source_oid: u32,
+        alias: &str,
+    ) -> Option<&String> {
+        self.cache
+            .scan_delta_ctes
+            .get(alias)
+            .or_else(|| self.cache.scan_delta_ctes_by_oid.get(&source_oid))
+    }
+
     pub(crate) fn fallback_leaf_oids(&self) -> &HashSet<u32> {
         &self.cache.fallback_leaf_oids
+    }
+
+    pub(crate) fn is_top_level_diff_node(&self) -> bool {
+        self.optimization.diff_depth <= 1
     }
 
     pub(crate) fn set_fallback_leaf_oids(&mut self, oids: HashSet<u32>) {
@@ -931,6 +963,27 @@ impl DiffContext {
             );
         }
         Ok(result)
+    }
+
+    /// Recursively differentiate an intermediate subtree.
+    ///
+    /// Sets `inside_intermediate = true` and clears `st_user_columns` and
+    /// `st_column_alias_map` so that intermediate operators (such as aggregates
+    /// in CTEs, subqueries, UNION branches, or JOIN operands) do not mistakenly
+    /// attempt to merge directly into the stream table.
+    pub fn diff_node_in_intermediate(&mut self, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
+        let saved_intermediate = self.inside_intermediate;
+        let saved_st_cols = self.st_user_columns.take();
+        let saved_alias_map = self.st_column_alias_map.take();
+        self.inside_intermediate = true;
+
+        let result = self.diff_node(op);
+
+        self.inside_intermediate = saved_intermediate;
+        self.st_user_columns = saved_st_cols;
+        self.st_column_alias_map = saved_alias_map;
+
+        result
     }
 
     /// Inner dispatch for `diff_node()` — called after depth and CTE checks.

@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**167 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**170 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -111,6 +111,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.preflight()` | `pgtrickle` | `text` | Returns a JSON string with one entry per check: `pass` (bool), `check` (name), `detail` (human-readable message). |
 | `pgtrickle.preflight_upgrade()` | `pgtrickle` | `text` | Check whether an upgrade can proceed and return stable machine-readable statuses. |
 | `pgtrickle.preview_stream_table()` | `pgtrickle` | `` | # Example ```sql SELECT * FROM pgtrickle.preview_stream_table(     'SELECT o.id, SUM(i.amount) FROM orders o JOIN items i ON o.id = i.order_id GROUP BY o.id' ); ```. |
+| `pgtrickle.qualify_output_delta_recovery()` | `pgtrickle` | `text` | Exercise the fixed Delta V1 downstream recovery scenarios. |
 | `pgtrickle.quiesce()` | `pgtrickle` | `` | Quiesce capture and refresh dispatch before a PostgreSQL or extension upgrade. |
 | `pgtrickle.rebuild_cdc_triggers()` | `pgtrickle` | `text` | Returns `'done'` on success. |
 | `pgtrickle.recommend_refresh_mode()` | `pgtrickle` | `` | Read-only — no side effects. |
@@ -126,6 +127,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.reinitialize_stream_table()` | `pgtrickle` | `text` | Reinitialize a stream table after a source schema change. |
 | `pgtrickle.reliability_counters()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.reliability_counters()`. |
 | `pgtrickle.repair_stream_table()` | `pgtrickle` | `text` | Steps performed (actions taken are summarized in the return text): 1. |
+| `pgtrickle.request_output_delta_resnapshot()` | `pgtrickle` | `SetOf row` | Require a fresh baseline without deleting the durable log or cursor. |
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
 | `pgtrickle.restore_stream_tables()` | `pgtrickle` | `void` | During a `pg_restore`, `pg_dump` will restore the base storage tables and the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers, dependency wiring, frontiers, and ownership state cannot be safely reconstructed here without a protected reconciliation flow. |
@@ -165,6 +167,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.ungate_source()` | `pgtrickle` | `void` | `source` is the source table name, optionally schema-qualified. |
 | `pgtrickle.unsubscribe()` | `pgtrickle` | `void` | UX-SUB: Remove a NOTIFY subscription for a stream table / channel pair. |
 | `pgtrickle.unsubscribe_distance()` | `pgtrickle` | `void` | VH-2 (v0.48.0): Remove a distance-predicate subscription. |
+| `pgtrickle.validate_output_delta_consumer()` | `pgtrickle` | `SetOf row` | Validate a consumer and persist any recoverable integrity failure. |
 | `pgtrickle.validate_query()` | `pgtrickle` | `SetOf row` | # SQL usage ```sql SELECT * FROM pgtrickle.validate_query(   'SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id' ); ```. |
 | `pgtrickle.validate_recovery()` | `pgtrickle` | `text` | Validate capture ownership, source infrastructure, and persisted frontiers. |
 | `pgtrickle.vector_status()` | `pgtrickle` | `SetOf row` | Returns one row per stream table that has a `post_refresh_action` other than 'none', or that has any ANN-relevant index on its storage table. |

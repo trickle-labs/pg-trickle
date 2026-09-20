@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.107.0-pg18 -f Dockerfile.ghcr .
+    docker build -t pgtrickle/pg_trickle:0.108.0-pg18 -f Dockerfile.ghcr .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -273,6 +273,16 @@ test-light-e2e-fast:
 [group: "test"]
 test-v104-conformance:
     bash ./scripts/run_light_e2e_tests.sh --package --test e2e_v104_conformance_tests
+
+# Run the v0.108 Graph V1.2 and Delta V1.1 public conformance suite.
+[group: "test"]
+test-v108-conformance: build-e2e-image
+    bash ./scripts/run_v108_conformance.sh
+
+# Validate the v0.108 qualification contract and publication wiring.
+[group: "release"]
+v0-108-release-gate:
+    python3 scripts/v0_108_0_release_gate.py
 
 # Run the v0.105 qualification gate.
 [group: "release"]
@@ -691,12 +701,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.107.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.108.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.107.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.108.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

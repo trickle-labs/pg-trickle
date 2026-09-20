@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**149 configuration parameters** extracted from `src/config/`.
+**150 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -57,6 +57,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.dvm_decision_trace` | `bool` | `false` | When enabled, the DVM logs JSON events containing operator paths, output schemas, snapshot plans, and generated delta CTEs. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `false` | Disable if a specific DAG shape causes unexpected planner behaviour. |
+| `pg_trickle.enable_output_delta_qualification` | `bool` | `false` | Enable the constrained Delta V1 recovery qualification API. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | When `true`, trace context is propagated through refresh cycles for distributed tracing with OpenTelemetry. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |

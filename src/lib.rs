@@ -96,15 +96,15 @@ mod pgtrickle {}
 #[allow(non_snake_case)]
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    // Register GUC variables first (always available)
-    config::register_gucs();
-    #[cfg(feature = "pg18")]
-    explain_hook::register();
-
     // Check if loaded via shared_preload_libraries
     // SAFETY: Reading a global boolean set by PostgreSQL during startup.
     // This is safe because the value is set before any extension code runs.
     let in_shared_preload = unsafe { pg_sys::process_shared_preload_libraries_in_progress };
+    // PGC_POSTMASTER variables can only be created during shared preload.
+    config::register_gucs(in_shared_preload);
+    #[cfg(feature = "pg18")]
+    explain_hook::register();
+
     if in_shared_preload {
         // Register shared memory allocations
         shmem::init_shared_memory();
@@ -943,6 +943,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_output_delta_resnapshots (
     pgt_id           BIGINT NOT NULL
                      REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
     log_head         BIGINT NOT NULL,
+    database_instance_id  TEXT NOT NULL,
+    output_contract_digest BYTEA NOT NULL,
+    row_identity_version   SMALLINT NOT NULL CHECK (row_identity_version > 0),
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -2075,6 +2078,7 @@ REVOKE EXECUTE ON FUNCTION pgtrickle.pause_all() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.pause_scheduler(text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.quiesce(integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.recover_capture_instance() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgtrickle.qualify_output_delta_recovery(uuid, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.rebuild_cdc_triggers() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.restore_stream_tables() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.resume_all() FROM PUBLIC;
@@ -2147,6 +2151,8 @@ GRANT EXECUTE ON FUNCTION pgtrickle.cdc_pause_status() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.change_buffer_sizes() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.check_cdc_health() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.capture_instance_status() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.request_output_delta_resnapshot(uuid) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.validate_output_delta_consumer(uuid) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.cluster_worker_summary() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.commit_latency_stats() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.freshness() TO PUBLIC;

@@ -31,7 +31,7 @@ async fn test_rows_from_dual_unnest_full() {
     db.create_st(
         "rf_dual_unnest",
         "SELECT rf.id, u.name, u.score \
-         FROM rf_src rf, \
+         FROM public.rf_src rf, \
          ROWS FROM(unnest(rf.names), unnest(rf.scores)) AS u(name, score)",
         "1m",
         "FULL",
@@ -47,7 +47,7 @@ async fn test_rows_from_dual_unnest_full() {
     // id=1: 3 rows (alice/90, bob/85, carol/70)
     // id=2: 2 rows (dave/60, NULL/95)
     let query = "SELECT rf.id, u.name, u.score \
-         FROM rf_src rf, \
+         FROM public.rf_src rf, \
          ROWS FROM(unnest(rf.names), unnest(rf.scores)) AS u(name, score)";
     db.assert_st_matches_query("rf_dual_unnest", query).await;
 }
@@ -67,7 +67,7 @@ async fn test_rows_from_triple_unnest_full() {
     db.create_st(
         "rf_tri_unnest",
         "SELECT t.id, u.col_a, u.col_b, u.col_c \
-         FROM rf_tri t, \
+         FROM public.rf_tri t, \
          ROWS FROM(unnest(t.a), unnest(t.b), unnest(t.c)) AS u(col_a, col_b, col_c)",
         "1m",
         "FULL",
@@ -81,7 +81,7 @@ async fn test_rows_from_triple_unnest_full() {
 
     // Longest array has 3 elements, so 3 rows total (shorter arrays padded with NULL)
     let query = "SELECT t.id, u.col_a, u.col_b, u.col_c \
-         FROM rf_tri t, \
+         FROM public.rf_tri t, \
          ROWS FROM(unnest(t.a), unnest(t.b), unnest(t.c)) AS u(col_a, col_b, col_c)";
     db.assert_st_matches_query("rf_tri_unnest", query).await;
 }
@@ -107,7 +107,7 @@ async fn test_rows_from_mixed_srfs_full() {
     db.create_st(
         "rf_mixed_srfs",
         "SELECT m.id, u.val, u.n \
-         FROM rf_mixed m, \
+         FROM public.rf_mixed m, \
          ROWS FROM(unnest(m.arr), generate_series(1, 5)) AS u(val, n)",
         "1m",
         "FULL",
@@ -122,7 +122,7 @@ async fn test_rows_from_mixed_srfs_full() {
     // unnest produces 3 rows, generate_series produces 5 rows.
     // ROWS FROM zips them → 5 rows (the longer of the two).
     let query = "SELECT m.id, u.val, u.n \
-         FROM rf_mixed m, \
+         FROM public.rf_mixed m, \
          ROWS FROM(unnest(m.arr), generate_series(1, 5)) AS u(val, n)";
     db.assert_st_matches_query("rf_mixed_srfs", query).await;
 }
@@ -141,7 +141,7 @@ async fn test_rows_from_dual_unnest_differential_insert() {
         .await;
 
     let query = "SELECT d.id, u.x, u.y \
-         FROM rf_diff d, \
+         FROM public.rf_diff d, \
          ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
 
     db.create_st("rf_diff_view", query, "1m", "AUTO").await;
@@ -171,7 +171,7 @@ async fn test_rows_from_dual_unnest_differential_delete() {
     .await;
 
     let query = "SELECT d.id, u.x, u.y \
-         FROM rf_del d, \
+         FROM public.rf_del d, \
          ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
 
     db.create_st("rf_del_view", query, "1m", "AUTO").await;
@@ -200,7 +200,7 @@ async fn test_rows_from_dual_unnest_differential_update() {
     .await;
 
     let query = "SELECT d.id, u.x, u.y \
-         FROM rf_upd d, \
+         FROM public.rf_upd d, \
          ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
 
     db.create_st("rf_upd_view", query, "1m", "AUTO").await;
@@ -230,7 +230,7 @@ async fn test_rows_from_single_function_passthrough() {
         .await;
 
     let query = "SELECT s.id, u.val \
-         FROM rf_single s, \
+         FROM public.rf_single s, \
          ROWS FROM(unnest(s.arr)) AS u(val)";
 
     // Single-function ROWS FROM — should pass through without rewriting

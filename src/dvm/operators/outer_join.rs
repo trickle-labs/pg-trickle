@@ -39,7 +39,7 @@ use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
     build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, is_simple_child,
-    rewrite_join_condition,
+    rewrite_join_condition, snapshot_join_column_name,
 };
 use crate::dvm::parser::OpTree;
 use crate::dvm::snapshot::SnapshotPlan;
@@ -82,10 +82,10 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     let mut output_cols = Vec::new();
     for c in left_cols {
-        output_cols.push(format!("{left_prefix}__{c}"));
+        output_cols.push(snapshot_join_column_name(left_prefix, c));
     }
     for c in right_cols {
-        output_cols.push(format!("{right_prefix}__{c}"));
+        output_cols.push(snapshot_join_column_name(right_prefix, c));
     }
 
     let right_table = build_snapshot_sql(right);
@@ -98,7 +98,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "dl.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{left_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
             )
         })
         .collect();
@@ -108,7 +108,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "r.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{right_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
             )
         })
         .collect();
@@ -118,7 +118,7 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "l.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{left_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
             )
         })
         .collect();
@@ -128,13 +128,18 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             format!(
                 "dr.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{right_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
             )
         })
         .collect();
     let null_right_cols: Vec<String> = right_cols
         .iter()
-        .map(|c| format!("NULL AS {}", quote_ident(&format!("{right_prefix}__{c}"))))
+        .map(|c| {
+            format!(
+                "NULL AS {}",
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
+            )
+        })
         .collect();
 
     let part1_cols = [dl_cols.as_slice(), r_cols.as_slice()].concat().join(", ");
@@ -540,11 +545,11 @@ WHERE (SELECT has_del FROM {flags_cte})
 
     let left_output_cols: Vec<String> = left_cols
         .iter()
-        .map(|column| format!("{left_prefix}__{column}"))
+        .map(|column| snapshot_join_column_name(left_prefix, column))
         .collect();
     let right_output_cols: Vec<String> = right_cols
         .iter()
-        .map(|column| format!("{right_prefix}__{column}"))
+        .map(|column| snapshot_join_column_name(right_prefix, column))
         .collect();
     let schema = left_result
         .schema
@@ -726,6 +731,51 @@ mod tests {
         assert!(
             result.is_ok(),
             "left join with nested right child should diff: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_diff_left_join_deep_snapshot_consumer_uses_bounded_column_names() {
+        let mut tree = scan(
+            1,
+            "evidence",
+            "public",
+            "evidence",
+            &["left_source_record_id", "comparator", "comparator_version"],
+        );
+        let mut evidence_column = "left_source_record_id".to_string();
+        let mut final_left_column = String::new();
+        for index in 0..18 {
+            final_left_column = evidence_column.clone();
+            let left_prefix = tree.alias().to_string();
+            let alias = format!("dependency_{index}");
+            tree = left_join(
+                lit("false"),
+                tree,
+                scan(100 + index, &alias, "public", &alias, &["dependency_value"]),
+            );
+            evidence_column = snapshot_join_column_name(&left_prefix, &evidence_column);
+        }
+
+        let mut ctx = test_ctx();
+        let result = ctx.diff_node(&tree).expect("deep left join must diff");
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert!(result.columns.iter().all(|column| column.len() <= 63));
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            result.columns.len()
+        );
+        assert!(
+            sql.contains(&format!(
+                "l.{} AS {}",
+                quote_ident(&final_left_column),
+                quote_ident(&evidence_column)
+            )),
+            "{sql}"
         );
     }
 

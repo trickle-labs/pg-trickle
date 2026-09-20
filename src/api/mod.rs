@@ -31,8 +31,9 @@ pub(crate) mod spec;
 pub(crate) mod validation;
 
 pub(crate) const GRAPH_V1_CAPABILITY: &str = "external_graph_refresh";
-pub(crate) const GRAPH_V1_MINOR: i16 = 1;
+pub(crate) const GRAPH_V1_MINOR: i16 = 2;
 pub(crate) const DELTA_V1_CAPABILITY: &str = "output_delta_consumer";
+pub(crate) const DELTA_V1_MINOR: i16 = 1;
 
 /// Admit the stable V1 integration contracts.
 pub(crate) fn require_v098_capability(capability: &str) -> Result<(), PgTrickleError> {

@@ -374,6 +374,11 @@ impl E2eDb {
         }
     }
 
+    /// Start a fresh database with output-delta qualification disabled.
+    pub async fn new_with_output_delta_qualification_disabled() -> Self {
+        Self::new().await
+    }
+
     /// Start a fresh database WITHOUT the extension pre-installed.
     ///
     /// Unlike [`Self::new`] (which clones from the pre-seeded template), this

@@ -1,0 +1,464 @@
+{
+  "compiler_version": 9,
+  "executable": true,
+  "format_version": 1,
+  "nodes": [
+    {
+      "defining_sql": "SELECT 'crm'::text AS source_name, pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW((SELECT entity_id FROM mdm_graph.source_identity_map WHERE entity_name = 'person' AND source_name = 'crm'), (SELECT source_identity_id FROM mdm_graph.source_identity_map WHERE entity_name = 'person' AND source_name = 'crm'), \"id\")) AS source_record_key, \"birth_date\" AS \"birth_date\", \"birth_date_state\" AS \"birth_date_state\", \"email\" AS \"email\", \"email_state\" AS \"email_state\", \"display_name\" AS \"name\", \"name_state\" AS \"name_state\", \"changed_at\" AS row_changed_at\nFROM public.mdm_crm\nWHERE \"deleted\" IS NOT TRUE",
+      "dependencies": [],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "records/crm",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "birth_date": "text",
+        "birth_date_state": "text",
+        "email": "text",
+        "email_state": "text",
+        "name": "text",
+        "name_state": "text",
+        "row_changed_at": "timestamptz",
+        "source_name": "text",
+        "source_record_key": "bytea"
+      },
+      "refresh_mode": "AUTO"
+    },
+    {
+      "defining_sql": "SELECT 'erp'::text AS source_name, pgtrickle.encode_row_id_v2('MDM_SOURCE_KEY_V1', ROW((SELECT entity_id FROM mdm_graph.source_identity_map WHERE entity_name = 'person' AND source_name = 'erp'), (SELECT source_identity_id FROM mdm_graph.source_identity_map WHERE entity_name = 'person' AND source_name = 'erp'), \"tenant_id\", \"external_id\")) AS source_record_key, \"birth_date\" AS \"birth_date\", \"birth_date_state\" AS \"birth_date_state\", \"email\" AS \"email\", \"email_state\" AS \"email_state\", \"legal_name\" AS \"name\", \"name_state\" AS \"name_state\", \"changed_at\" AS row_changed_at\nFROM public.mdm_erp",
+      "dependencies": [],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "records/erp",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "birth_date": "text",
+        "birth_date_state": "text",
+        "email": "text",
+        "email_state": "text",
+        "name": "text",
+        "name_state": "text",
+        "row_changed_at": "timestamptz",
+        "source_name": "text",
+        "source_record_key": "bytea"
+      },
+      "refresh_mode": "AUTO"
+    },
+    {
+      "defining_sql": "SELECT 'crm'::text AS source_name, r.source_record_key AS source_record_key, sr.source_record_id AS source_record_id, sr.source_record_key AS source_sort_key, 'name'::text AS field_name, r.\"name\"::text AS raw_value, r.row_changed_at::timestamptz AS row_changed_at, n.state AS state, n.normalized AS normalized, n.canonical_bytes AS canonical_bytes\nFROM @{records/crm} AS r\nCROSS JOIN LATERAL mdm_graph.normalize_text((r.\"name\")::text, 'text', 1, r.\"name_state\", '{}'::jsonb) AS n\nJOIN mdm_graph.source_records sr ON sr.source_record_key = r.source_record_key AND sr.active\nJOIN mdm_graph.source_identity_map si ON si.source_identity_id = sr.source_identity_id AND si.source_name = 'crm'\nUNION ALL\nSELECT 'erp'::text AS source_name, r.source_record_key AS source_record_key, sr.source_record_id AS source_record_id, sr.source_record_key AS source_sort_key, 'name'::text AS field_name, r.\"name\"::text AS raw_value, r.row_changed_at::timestamptz AS row_changed_at, n.state AS state, n.normalized AS normalized, n.canonical_bytes AS canonical_bytes\nFROM @{records/erp} AS r\nCROSS JOIN LATERAL mdm_graph.normalize_text((r.\"name\")::text, 'text', 1, r.\"name_state\", '{}'::jsonb) AS n\nJOIN mdm_graph.source_records sr ON sr.source_record_key = r.source_record_key AND sr.active\nJOIN mdm_graph.source_identity_map si ON si.source_identity_id = sr.source_identity_id AND si.source_name = 'erp'",
+      "dependencies": [
+        "records/crm",
+        "records/erp"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "normalized/name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "canonical_bytes": "bytea",
+        "field_name": "text",
+        "normalized": "text",
+        "raw_value": "text",
+        "row_changed_at": "timestamptz",
+        "source_name": "text",
+        "source_record_id": "uuid",
+        "source_record_key": "bytea",
+        "source_sort_key": "bytea",
+        "state": "text"
+      },
+      "refresh_mode": "AUTO"
+    },
+    {
+      "defining_sql": "SELECT 'crm'::text AS source_name, r.source_record_key AS source_record_key, sr.source_record_id AS source_record_id, sr.source_record_key AS source_sort_key, 'email'::text AS field_name, r.\"email\"::text AS raw_value, r.row_changed_at::timestamptz AS row_changed_at, n.state AS state, n.normalized AS normalized, n.canonical_bytes AS canonical_bytes\nFROM @{records/crm} AS r\nCROSS JOIN LATERAL mdm_graph.normalize_text((r.\"email\")::text, 'email', 1, r.\"email_state\", '{}'::jsonb) AS n\nJOIN mdm_graph.source_records sr ON sr.source_record_key = r.source_record_key AND sr.active\nJOIN mdm_graph.source_identity_map si ON si.source_identity_id = sr.source_identity_id AND si.source_name = 'crm'\nUNION ALL\nSELECT 'erp'::text AS source_name, r.source_record_key AS source_record_key, sr.source_record_id AS source_record_id, sr.source_record_key AS source_sort_key, 'email'::text AS field_name, r.\"email\"::text AS raw_value, r.row_changed_at::timestamptz AS row_changed_at, n.state AS state, n.normalized AS normalized, n.canonical_bytes AS canonical_bytes\nFROM @{records/erp} AS r\nCROSS JOIN LATERAL mdm_graph.normalize_text((r.\"email\")::text, 'email', 1, r.\"email_state\", '{}'::jsonb) AS n\nJOIN mdm_graph.source_records sr ON sr.source_record_key = r.source_record_key AND sr.active\nJOIN mdm_graph.source_identity_map si ON si.source_identity_id = sr.source_identity_id AND si.source_name = 'erp'",
+      "dependencies": [
+        "records/crm",
+        "records/erp"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "normalized/email",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "canonical_bytes": "bytea",
+        "field_name": "text",
+        "normalized": "text",
+        "raw_value": "text",
+        "row_changed_at": "timestamptz",
+        "source_name": "text",
+        "source_record_id": "uuid",
+        "source_record_key": "bytea",
+        "source_sort_key": "bytea",
+        "state": "text"
+      },
+      "refresh_mode": "AUTO"
+    },
+    {
+      "defining_sql": "SELECT 'crm'::text AS source_name, r.source_record_key AS source_record_key, sr.source_record_id AS source_record_id, sr.source_record_key AS source_sort_key, 'birth_date'::text AS field_name, r.\"birth_date\"::text AS raw_value, r.row_changed_at::timestamptz AS row_changed_at, n.state AS state, n.normalized AS normalized, n.canonical_bytes AS canonical_bytes\nFROM @{records/crm} AS r\nCROSS JOIN LATERAL mdm_graph.normalize_date((r.\"birth_date\")::date, 'date', 1, r.\"birth_date_state\", '{}'::jsonb) AS n\nJOIN mdm_graph.source_records sr ON sr.source_record_key = r.source_record_key AND sr.active\nJOIN mdm_graph.source_identity_map si ON si.source_identity_id = sr.source_identity_id AND si.source_name = 'crm'\nUNION ALL\nSELECT 'erp'::text AS source_name, r.source_record_key AS source_record_key, sr.source_record_id AS source_record_id, sr.source_record_key AS source_sort_key, 'birth_date'::text AS field_name, r.\"birth_date\"::text AS raw_value, r.row_changed_at::timestamptz AS row_changed_at, n.state AS state, n.normalized AS normalized, n.canonical_bytes AS canonical_bytes\nFROM @{records/erp} AS r\nCROSS JOIN LATERAL mdm_graph.normalize_date((r.\"birth_date\")::date, 'date', 1, r.\"birth_date_state\", '{}'::jsonb) AS n\nJOIN mdm_graph.source_records sr ON sr.source_record_key = r.source_record_key AND sr.active\nJOIN mdm_graph.source_identity_map si ON si.source_identity_id = sr.source_identity_id AND si.source_name = 'erp'",
+      "dependencies": [
+        "records/crm",
+        "records/erp"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "normalized/birth_date",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "canonical_bytes": "bytea",
+        "field_name": "text",
+        "normalized": "text",
+        "raw_value": "text",
+        "row_changed_at": "timestamptz",
+        "source_name": "text",
+        "source_record_id": "uuid",
+        "source_record_key": "bytea",
+        "source_sort_key": "bytea",
+        "state": "text"
+      },
+      "refresh_mode": "AUTO"
+    },
+    {
+      "defining_sql": "SELECT n0.source_record_id, n0.field_name, 'composite_person'::text AS channel_id, pg_catalog.int4send(pg_catalog.octet_length(n0.canonical_bytes)) || n0.canonical_bytes || pg_catalog.int4send(pg_catalog.octet_length(n1.canonical_bytes)) || n1.canonical_bytes AS block_key, n0.source_sort_key\nFROM @{normalized/name} n0\nJOIN @{normalized/birth_date} n1 USING (source_record_id, source_sort_key)\nWHERE n0.field_name = 'name' AND n0.state = 'value' AND n1.field_name = 'birth_date' AND n1.state = 'value'",
+      "dependencies": [
+        "normalized/name",
+        "normalized/birth_date"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "blocks/composite_person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "bytea",
+        "channel_id": "text",
+        "field_name": "text",
+        "source_record_id": "uuid",
+        "source_sort_key": "bytea"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, pg_catalog.count(*)::bigint AS block_records\nFROM @{blocks/composite_person}\nGROUP BY channel_id, block_key",
+      "dependencies": [
+        "blocks/composite_person"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-stats/composite_person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "bytea",
+        "block_records": "bigint",
+        "channel_id": "text"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, block_records, 2::bigint AS max_block_records\nFROM @{block-stats/composite_person}\nWHERE block_records > 2",
+      "dependencies": [
+        "block-stats/composite_person"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-overflow/composite_person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "bytea",
+        "block_records": "bigint",
+        "channel_id": "text",
+        "max_block_records": "bigint"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT source_record_id, field_name, 'exact_email'::text AS channel_id, canonical_bytes AS block_key, source_sort_key\nFROM @{normalized/email}\nWHERE field_name = 'email' AND state = 'value' AND canonical_bytes IS NOT NULL",
+      "dependencies": [
+        "normalized/email"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "blocks/exact_email",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "bytea",
+        "channel_id": "text",
+        "field_name": "text",
+        "source_record_id": "uuid",
+        "source_sort_key": "bytea"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, pg_catalog.count(*)::bigint AS block_records\nFROM @{blocks/exact_email}\nGROUP BY channel_id, block_key",
+      "dependencies": [
+        "blocks/exact_email"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-stats/exact_email",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "bytea",
+        "block_records": "bigint",
+        "channel_id": "text"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, block_records, 2::bigint AS max_block_records\nFROM @{block-stats/exact_email}\nWHERE block_records > 2",
+      "dependencies": [
+        "block-stats/exact_email"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-overflow/exact_email",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "bytea",
+        "block_records": "bigint",
+        "channel_id": "text",
+        "max_block_records": "bigint"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT source_record_id, field_name, 'prefix_name'::text AS channel_id, pg_catalog.left(normalized, 3) AS block_key, source_sort_key\nFROM @{normalized/name}\nWHERE field_name = 'name' AND state = 'value' AND normalized IS NOT NULL",
+      "dependencies": [
+        "normalized/name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "blocks/prefix_name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "text",
+        "channel_id": "text",
+        "field_name": "text",
+        "source_record_id": "uuid",
+        "source_sort_key": "bytea"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, pg_catalog.count(*)::bigint AS block_records\nFROM @{blocks/prefix_name}\nGROUP BY channel_id, block_key",
+      "dependencies": [
+        "blocks/prefix_name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-stats/prefix_name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "text",
+        "block_records": "bigint",
+        "channel_id": "text"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, block_records, 2::bigint AS max_block_records\nFROM @{block-stats/prefix_name}\nWHERE block_records > 2",
+      "dependencies": [
+        "block-stats/prefix_name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-overflow/prefix_name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "text",
+        "block_records": "bigint",
+        "channel_id": "text",
+        "max_block_records": "bigint"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT source_record_id, field_name, 'token_name'::text AS channel_id, token AS block_key, source_sort_key\nFROM @{normalized/name}\nCROSS JOIN LATERAL pg_catalog.regexp_split_to_table(normalized, '[[:space:]]+') AS token(token)\nWHERE field_name = 'name' AND state = 'value' AND pg_catalog.char_length(token) >= 3\nGROUP BY source_record_id, field_name, token, source_sort_key",
+      "dependencies": [
+        "normalized/name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "blocks/token_name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "text",
+        "channel_id": "text",
+        "field_name": "text",
+        "source_record_id": "uuid",
+        "source_sort_key": "bytea"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, pg_catalog.count(*)::bigint AS block_records\nFROM @{blocks/token_name}\nGROUP BY channel_id, block_key",
+      "dependencies": [
+        "blocks/token_name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-stats/token_name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "text",
+        "block_records": "bigint",
+        "channel_id": "text"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT channel_id, block_key, block_records, 2::bigint AS max_block_records\nFROM @{block-stats/token_name}\nWHERE block_records > 2",
+      "dependencies": [
+        "block-stats/token_name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "block-overflow/token_name",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "block_key": "text",
+        "block_records": "bigint",
+        "channel_id": "text",
+        "max_block_records": "bigint"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT left_source_record_id, right_source_record_id, left_sort_key, right_sort_key\nFROM (\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/composite_person} l\nJOIN @{block-stats/composite_person} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/composite_person} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nUNION ALL\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/exact_email} l\nJOIN @{block-stats/exact_email} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/exact_email} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nUNION ALL\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/prefix_name} l\nJOIN @{block-stats/prefix_name} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/prefix_name} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nUNION ALL\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/token_name} l\nJOIN @{block-stats/token_name} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/token_name} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nGROUP BY l.source_record_id, r.source_record_id, l.source_sort_key, r.source_sort_key\n) AS candidate_pairs\nGROUP BY 1, 2, 3, 4",
+      "dependencies": [
+        "blocks/composite_person",
+        "blocks/exact_email",
+        "blocks/prefix_name",
+        "blocks/token_name",
+        "block-stats/composite_person",
+        "block-stats/exact_email",
+        "block-stats/prefix_name",
+        "block-stats/token_name",
+        "block-overflow/composite_person",
+        "block-overflow/exact_email",
+        "block-overflow/prefix_name",
+        "block-overflow/token_name",
+        "pair-stats/person",
+        "pair-overflow/person"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "pairs/person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "left_sort_key": "bytea",
+        "left_source_record_id": "uuid",
+        "right_sort_key": "bytea",
+        "right_source_record_id": "uuid"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT pg_catalog.count(*)::bigint AS candidate_pairs FROM (SELECT left_source_record_id, right_source_record_id, left_sort_key, right_sort_key\nFROM (\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/composite_person} l\nJOIN @{block-stats/composite_person} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/composite_person} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nUNION ALL\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/exact_email} l\nJOIN @{block-stats/exact_email} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/exact_email} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nUNION ALL\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/prefix_name} l\nJOIN @{block-stats/prefix_name} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/prefix_name} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nUNION ALL\nSELECT l.source_record_id AS left_source_record_id, r.source_record_id AS right_source_record_id, l.source_sort_key AS left_sort_key, r.source_sort_key AS right_sort_key\nFROM @{blocks/token_name} l\nJOIN @{block-stats/token_name} s ON s.channel_id = l.channel_id AND s.block_key = l.block_key\nJOIN @{blocks/token_name} r ON r.channel_id = l.channel_id AND r.block_key = l.block_key AND l.source_sort_key < r.source_sort_key\nWHERE s.block_records <= 2\nGROUP BY l.source_record_id, r.source_record_id, l.source_sort_key, r.source_sort_key\n) AS candidate_pairs\nGROUP BY 1, 2, 3, 4) AS pairs",
+      "dependencies": [
+        "blocks/composite_person",
+        "blocks/exact_email",
+        "blocks/prefix_name",
+        "blocks/token_name",
+        "block-stats/composite_person",
+        "block-stats/exact_email",
+        "block-stats/prefix_name",
+        "block-stats/token_name",
+        "block-overflow/composite_person",
+        "block-overflow/exact_email",
+        "block-overflow/prefix_name",
+        "block-overflow/token_name"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "pair-stats/person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "candidate_pairs": "bigint"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT candidate_pairs, 10::bigint AS max_candidate_pairs\nFROM @{pair-stats/person}\nWHERE candidate_pairs > 10",
+      "dependencies": [
+        "pair-stats/person"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "pair-overflow/person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "candidate_pairs": "bigint",
+        "max_candidate_pairs": "bigint"
+      },
+      "refresh_mode": "DIFFERENTIAL"
+    },
+    {
+      "defining_sql": "SELECT evidence.left_source_record_id, evidence.right_source_record_id, evidence.left_sort_key, evidence.right_sort_key, evidence.rule, evidence.evidence_group, evidence.class, evidence.score, evidence.comparator, evidence.comparator_version, evidence.left_value_digest, evidence.right_value_digest\nFROM (SELECT p.left_source_record_id, p.right_source_record_id, p.left_sort_key, p.right_sort_key, 'exact_email'::text AS rule, 'email'::text AS evidence_group, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN CASE WHEN l0.canonical_bytes = r0.canonical_bytes THEN 'agree'::text ELSE 'disagree'::text END ELSE 'no_evidence'::text END AS class, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN NULL::smallint ELSE NULL::smallint END AS score, 'exact_v1'::text AS comparator, 1::smallint AS comparator_version, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), l0.normalized)) ELSE NULL::bytea END AS left_value_digest, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), r0.normalized)) ELSE NULL::bytea END AS right_value_digest\nFROM @{pairs/person} p\nLEFT JOIN @{normalized/email} l0 ON l0.source_record_id = p.left_source_record_id AND l0.field_name = 'email'\nLEFT JOIN @{normalized/email} r0 ON r0.source_record_id = p.right_source_record_id AND r0.field_name = 'email'\nUNION ALL\nSELECT p.left_source_record_id, p.right_source_record_id, p.left_sort_key, p.right_sort_key, 'prefix_name'::text AS rule, 'name'::text AS evidence_group, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN CASE WHEN mdm_graph.normalized_levenshtein_score(pg_catalog.concat_ws(pg_catalog.chr(31), l0.normalized), pg_catalog.concat_ws(pg_catalog.chr(31), r0.normalized), (SELECT COALESCE((d.expanded_definition->'limits'->>'max_comparator_work')::bigint, 1000000::bigint) FROM mdm_graph.definition_limits d WHERE d.entity_name = 'person'::text))::smallint >= 8000 THEN 'agree'::text ELSE 'disagree'::text END ELSE 'no_evidence'::text END AS class, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.normalized_levenshtein_score(pg_catalog.concat_ws(pg_catalog.chr(31), l0.normalized), pg_catalog.concat_ws(pg_catalog.chr(31), r0.normalized), (SELECT COALESCE((d.expanded_definition->'limits'->>'max_comparator_work')::bigint, 1000000::bigint) FROM mdm_graph.definition_limits d WHERE d.entity_name = 'person'::text))::smallint ELSE NULL::smallint END AS score, 'normalized_levenshtein_v1'::text AS comparator, 1::smallint AS comparator_version, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), l0.normalized)) ELSE NULL::bytea END AS left_value_digest, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), r0.normalized)) ELSE NULL::bytea END AS right_value_digest\nFROM @{pairs/person} p\nLEFT JOIN @{normalized/name} l0 ON l0.source_record_id = p.left_source_record_id AND l0.field_name = 'name'\nLEFT JOIN @{normalized/name} r0 ON r0.source_record_id = p.right_source_record_id AND r0.field_name = 'name'\nUNION ALL\nSELECT p.left_source_record_id, p.right_source_record_id, p.left_sort_key, p.right_sort_key, 'token_name'::text AS rule, 'name_token'::text AS evidence_group, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN CASE WHEN l0.canonical_bytes = r0.canonical_bytes THEN 'agree'::text ELSE 'disagree'::text END ELSE 'no_evidence'::text END AS class, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN NULL::smallint ELSE NULL::smallint END AS score, 'exact_v1'::text AS comparator, 1::smallint AS comparator_version, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), l0.normalized)) ELSE NULL::bytea END AS left_value_digest, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), r0.normalized)) ELSE NULL::bytea END AS right_value_digest\nFROM @{pairs/person} p\nLEFT JOIN @{normalized/name} l0 ON l0.source_record_id = p.left_source_record_id AND l0.field_name = 'name'\nLEFT JOIN @{normalized/name} r0 ON r0.source_record_id = p.right_source_record_id AND r0.field_name = 'name'\nUNION ALL\nSELECT p.left_source_record_id, p.right_source_record_id, p.left_sort_key, p.right_sort_key, 'composite_person'::text AS rule, 'person'::text AS evidence_group, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL AND l1.state = 'value' AND r1.state = 'value' AND l1.canonical_bytes IS NOT NULL AND r1.canonical_bytes IS NOT NULL THEN CASE WHEN l0.canonical_bytes = r0.canonical_bytes AND l1.canonical_bytes = r1.canonical_bytes THEN 'agree'::text ELSE 'disagree'::text END ELSE 'no_evidence'::text END AS class, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL AND l1.state = 'value' AND r1.state = 'value' AND l1.canonical_bytes IS NOT NULL AND r1.canonical_bytes IS NOT NULL THEN NULL::smallint ELSE NULL::smallint END AS score, 'exact_v1'::text AS comparator, 1::smallint AS comparator_version, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL AND l1.state = 'value' AND r1.state = 'value' AND l1.canonical_bytes IS NOT NULL AND r1.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), l0.normalized, l1.normalized)) ELSE NULL::bytea END AS left_value_digest, CASE WHEN l0.state = 'value' AND r0.state = 'value' AND l0.canonical_bytes IS NOT NULL AND r0.canonical_bytes IS NOT NULL AND l1.state = 'value' AND r1.state = 'value' AND l1.canonical_bytes IS NOT NULL AND r1.canonical_bytes IS NOT NULL THEN mdm_graph.evidence_digest(pg_catalog.concat_ws(pg_catalog.chr(31), r0.normalized, r1.normalized)) ELSE NULL::bytea END AS right_value_digest\nFROM @{pairs/person} p\nLEFT JOIN @{normalized/name} l0 ON l0.source_record_id = p.left_source_record_id AND l0.field_name = 'name'\nLEFT JOIN @{normalized/name} r0 ON r0.source_record_id = p.right_source_record_id AND r0.field_name = 'name'\nLEFT JOIN @{normalized/birth_date} l1 ON l1.source_record_id = p.left_source_record_id AND l1.field_name = 'birth_date'\nLEFT JOIN @{normalized/birth_date} r1 ON r1.source_record_id = p.right_source_record_id AND r1.field_name = 'birth_date') AS evidence\nLEFT JOIN @{blocks/composite_person} AS dependency_0 ON false\nLEFT JOIN @{blocks/exact_email} AS dependency_1 ON false\nLEFT JOIN @{blocks/prefix_name} AS dependency_2 ON false\nLEFT JOIN @{blocks/token_name} AS dependency_3 ON false\nLEFT JOIN @{block-stats/composite_person} AS dependency_4 ON false\nLEFT JOIN @{block-stats/exact_email} AS dependency_5 ON false\nLEFT JOIN @{block-stats/prefix_name} AS dependency_6 ON false\nLEFT JOIN @{block-stats/token_name} AS dependency_7 ON false\nLEFT JOIN @{block-overflow/composite_person} AS dependency_8 ON false\nLEFT JOIN @{block-overflow/exact_email} AS dependency_9 ON false\nLEFT JOIN @{block-overflow/prefix_name} AS dependency_10 ON false\nLEFT JOIN @{block-overflow/token_name} AS dependency_11 ON false\nLEFT JOIN @{normalized/name} AS dependency_12 ON false\nLEFT JOIN @{normalized/email} AS dependency_13 ON false\nLEFT JOIN @{normalized/birth_date} AS dependency_14 ON false\nLEFT JOIN @{pairs/person} AS dependency_15 ON false\nLEFT JOIN @{pair-stats/person} AS dependency_16 ON false\nLEFT JOIN @{pair-overflow/person} AS dependency_17 ON false",
+      "dependencies": [
+        "blocks/composite_person",
+        "blocks/exact_email",
+        "blocks/prefix_name",
+        "blocks/token_name",
+        "block-stats/composite_person",
+        "block-stats/exact_email",
+        "block-stats/prefix_name",
+        "block-stats/token_name",
+        "block-overflow/composite_person",
+        "block-overflow/exact_email",
+        "block-overflow/prefix_name",
+        "block-overflow/token_name",
+        "normalized/name",
+        "normalized/email",
+        "normalized/birth_date",
+        "pairs/person",
+        "pair-stats/person",
+        "pair-overflow/person"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "evidence/person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "class": "text",
+        "comparator": "text",
+        "comparator_version": "smallint",
+        "evidence_group": "text",
+        "left_sort_key": "bytea",
+        "left_source_record_id": "uuid",
+        "left_value_digest": "bytea",
+        "right_sort_key": "bytea",
+        "right_source_record_id": "uuid",
+        "right_value_digest": "bytea",
+        "rule": "text",
+        "score": "smallint"
+      },
+      "refresh_mode": "AUTO"
+    },
+    {
+      "defining_sql": "SELECT n.source_record_id, n.source_name, n.field_name, CASE n.source_name WHEN 'crm' THEN 0 WHEN 'erp' THEN 1 ELSE 2147483647 END::integer AS source_priority, n.row_changed_at, false AS authoritative, n.source_sort_key, n.raw_value, n.state, n.normalized, n.canonical_bytes\nFROM @{normalized/name} n\nLEFT JOIN @{evidence/person} AS evidence_dependency ON false\nWHERE n.field_name = 'name'\n/* @{evidence/person} */",
+      "dependencies": [
+        "normalized/name",
+        "evidence/person"
+      ],
+      "executable": true,
+      "initialize": false,
+      "logical_id": "golden/person",
+      "orchestration_mode": "EXTERNAL",
+      "output_schema": {
+        "authoritative": "boolean",
+        "canonical_bytes": "bytea",
+        "field_name": "text",
+        "normalized": "text",
+        "raw_value": "text",
+        "row_changed_at": "timestamptz",
+        "source_name": "text",
+        "source_priority": "integer",
+        "source_record_id": "uuid",
+        "source_sort_key": "bytea",
+        "state": "text"
+      },
+      "refresh_mode": "AUTO"
+    }
+  ],
+  "roots": [
+    "golden/person"
+  ]
+}

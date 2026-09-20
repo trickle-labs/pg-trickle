@@ -3,7 +3,7 @@
 This file is generated from the release admission fixtures. Run
 `python3 scripts/generate_capability_manifest.py` to update it.
 
-Release: `0.107.0`
+Release: `0.108.0`
 
 ## Capability status
 
@@ -31,6 +31,22 @@ Release: `0.107.0`
 | `nullable-group-key-rescan` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | group | none | — | `test_v0873_mandatory_composition_matrix` |
 | `intersect-auto-full` | accepted | AUTO | FULL | — → — | whole-query | whole-query | UNSUPPORTED_OPERATOR | `test_diff_full_equivalence_intersect` |
 | `mutable-case-aggregate-full-fallback` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | whole-query | whole-query | CASE_IN_LIST_DVM_DRIFT_FULL_FALLBACK | `test_dvm1_case_in_list_mutable_full_fallback` |
+| `graph-v1-2-capability-details` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_capability_details_publish_graph_1_2_and_delta_1_1` |
+| `graph-v1-2-row-identity-table-srf` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | none | none | — | `test_v108_graph_row_identity_and_table_srf_stay_differential` |
+| `graph-v1-2-pg-mdm-compiler-v9-exact-evidence` | rejected | DIFFERENTIAL | UNAVAILABLE | — → — | none | none | UNSUPPORTED_OPERATOR | `test_pg_mdm_compiler_v9_bootstrap_and_mutations_match_full_without_fallback` |
+| `graph-v1-2-pg-mdm-compiler-v9-immutable-equivalent` | accepted | DIFFERENTIAL | DIFFERENTIAL | — → — | none | none | — | `test_pg_mdm_compiler_v9_bootstrap_and_mutations_match_full_without_fallback` |
+| `delta-v1-1-public-resnapshot` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_non_pristine_registration_and_public_resnapshot` |
+| `delta-v1-1-exact-rollback` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_exact_batch_acknowledgement_rolls_back` |
+| `delta-v1-1-full-invalidation` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_full_invalidation_requires_resynchronized_ack` |
+| `delta-v1-1-contract-mismatch` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_qualification_requires_resnapshot_for_contract_mismatch` |
+| `delta-v1-1-gap` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_qualification_requires_resnapshot_for_delta_gap` |
+| `delta-v1-1-invalidated-read` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | — | `test_v108_invalidated_consumer_returns_no_partial_batch_range` |
+| `delta-v1-1-detected-gap` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | DELTA_GAP | `test_v108_validation_persists_detected_delta_gap` |
+| `delta-v1-1-detected-payload-mismatch` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | PAYLOAD_INCONSISTENT | `test_v108_validation_persists_detected_payload_mismatch` |
+| `delta-v1-1-detected-contract-mismatch` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | CONTRACT_MISMATCH | `test_v108_validation_persists_detected_contract_mismatch` |
+| `delta-v1-1-detected-row-identity-version-mismatch` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | ROW_IDENTITY_VERSION_MISMATCH | `test_v108_validation_persists_detected_row_identity_version_mismatch` |
+| `delta-v1-1-clone-adoption` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | DATABASE_INSTANCE_CHANGED | `test_v108_clone_adoption_allows_new_consumer_baseline` |
+| `delta-v1-1-detected-database-instance-change` | accepted | PUBLIC_SQL | PUBLIC_SQL | — → — | none | none | DATABASE_INSTANCE_CHANGED | `test_v108_validation_persists_detected_database_instance_change` |
 
 A local group, partition, or recursive-result recomputation still runs inside
 a differential refresh. Only `whole-query` in the fallback column means the

@@ -832,6 +832,17 @@ pub(crate) const PLANNER_HINT_WORKMEM_THRESHOLD: i64 = 10_000;
 /// PostgreSQL's default planner choices (nested loops, low work_mem).
 const DEEP_JOIN_SCAN_THRESHOLD: usize = 5;
 
+fn planner_work_mem(
+    requested_mb: i32,
+    cap_mb: i32,
+    full_policy: crate::refresh::FullPolicy,
+) -> (i32, bool) {
+    let cap_exceeded = cap_mb > 0 && requested_mb > cap_mb;
+    let effective_mb = if cap_exceeded { cap_mb } else { requested_mb };
+    let fallback_to_full = cap_exceeded && full_policy == crate::refresh::FullPolicy::Allow;
+    (effective_mb, fallback_to_full)
+}
+
 /// Apply `SET LOCAL` planner hints based on the estimated delta size
 /// and the join depth (scan count) of the defining query.
 ///
@@ -847,8 +858,10 @@ const DEEP_JOIN_SCAN_THRESHOLD: usize = 5;
 /// `SET LOCAL` is automatically reset at the end of the current transaction,
 /// so these hints cannot leak to other queries.
 ///
-/// Returns `true` if the SCAL-3 work_mem cap would be exceeded, signalling
-/// that the caller should fall back to a FULL refresh instead.
+/// Returns `true` if the SCAL-3 work_mem cap requires an allowed FULL
+/// fallback. Under `FullPolicy::Error`, the capped setting is applied and the
+/// differential plan continues because the cap affects performance, not
+/// correctness.
 pub(crate) fn apply_planner_hints(
     estimated_delta: i64,
     st_relid: pg_sys::Oid,
@@ -874,17 +887,23 @@ pub(crate) fn apply_planner_hints(
     // so the planner considers all join orderings, and remove the
     // temp_file_limit cap so the query can run to completion.
     if scan_count >= DEEP_JOIN_SCAN_THRESHOLD {
-        let mb = tuning.merge_work_mem_mb.max(512);
+        let requested_mb = tuning.merge_work_mem_mb.max(512);
 
-        // SCAL-3: If a work_mem cap is set and the deep-join allocation
-        // would exceed it, signal fallback to FULL refresh.
         let cap = tuning.delta_work_mem_cap_mb;
-        if cap > 0 && mb > cap {
+        let (mb, fallback_to_full) =
+            planner_work_mem(requested_mb, cap, crate::refresh::current_full_policy());
+        if fallback_to_full {
             pgrx::notice!(
-                "[pg_trickle] SCAL-3: deep-join work_mem ({mb}MB) exceeds \
+                "[pg_trickle] SCAL-3: deep-join work_mem ({requested_mb}MB) exceeds \
                  delta_work_mem_cap_mb ({cap}MB). Falling back to FULL refresh.",
             );
             return true;
+        }
+        if mb != requested_mb {
+            pgrx::notice!(
+                "[pg_trickle] SCAL-3: deep-join work_mem ({requested_mb}MB) exceeds \
+                 delta_work_mem_cap_mb ({cap}MB). Continuing DIFFERENTIAL at the cap.",
+            );
         }
 
         if let Err(e) = Spi::run("SET LOCAL enable_nestloop = off") {
@@ -967,17 +986,23 @@ pub(crate) fn apply_planner_hints(
 
     if estimated_delta >= PLANNER_HINT_WORKMEM_THRESHOLD {
         // Large delta: disable nested loops AND raise work_mem for hash joins
-        let mb = tuning.merge_work_mem_mb;
+        let requested_mb = tuning.merge_work_mem_mb;
 
-        // SCAL-3: If a work_mem cap is set and the large-delta allocation
-        // would exceed it, signal fallback to FULL refresh.
         let cap = tuning.delta_work_mem_cap_mb;
-        if cap > 0 && mb > cap {
+        let (mb, fallback_to_full) =
+            planner_work_mem(requested_mb, cap, crate::refresh::current_full_policy());
+        if fallback_to_full {
             pgrx::notice!(
-                "[pg_trickle] SCAL-3: large-delta work_mem ({mb}MB) exceeds \
+                "[pg_trickle] SCAL-3: large-delta work_mem ({requested_mb}MB) exceeds \
                  delta_work_mem_cap_mb ({cap}MB). Falling back to FULL refresh.",
             );
             return true;
+        }
+        if mb != requested_mb {
+            pgrx::notice!(
+                "[pg_trickle] SCAL-3: large-delta work_mem ({requested_mb}MB) exceeds \
+                 delta_work_mem_cap_mb ({cap}MB). Continuing DIFFERENTIAL at the cap.",
+            );
         }
 
         if let Err(e) = Spi::run("SET LOCAL enable_nestloop = off") {
@@ -1082,13 +1107,14 @@ pub fn build_content_hash_expr_for_domain(
 /// Graph members publish their transactional deltas at the shared graph bound
 /// so later topological members can consume them in the same graph pass.
 fn graph_change_capture_lsn() -> Option<String> {
-    crate::refresh::current_graph_refresh_id().and_then(|_| crate::refresh::current_safe_bound())
+    crate::refresh::current_safe_bound()
 }
 
 fn change_capture_lsn_expr(lsn_override: Option<&str>) -> String {
     lsn_override
+        .filter(|lsn| *lsn != "0/0")
         .map(|lsn| format!("'{lsn}'::pg_lsn"))
-        .unwrap_or_else(|| "pg_current_wal_lsn()".to_string())
+        .unwrap_or_else(|| "pg_current_wal_insert_lsn()".to_string())
 }
 
 /// Capture delta rows from a materialized delta temp table into the ST's
@@ -1381,10 +1407,7 @@ pub(crate) fn capture_diff_to_table(
 
     // DAG-4: When an LSN override is provided (bypass tables), use the
     // literal value so the rows fall within the downstream frontier range.
-    let lsn_expr = match lsn_override {
-        Some(lsn) => format!("'{lsn}'::pg_lsn"),
-        None => "pg_current_wal_lsn()".to_string(),
-    };
+    let lsn_expr = change_capture_lsn_expr(lsn_override);
 
     let mut total: i64 = 0;
 
@@ -1495,10 +1518,7 @@ pub fn build_bypass_capture_sql(
 
     // DAG-4: Use the persistent buffer's LSN when available so the bypass
     // rows fall within the downstream scan's frontier range.
-    let lsn_expr = match lsn_override {
-        Some(lsn) => format!("'{lsn}'::pg_lsn"),
-        None => "pg_current_wal_lsn()".to_string(),
-    };
+    let lsn_expr = change_capture_lsn_expr(lsn_override);
 
     format!(
         "CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP;\n\
@@ -1528,7 +1548,6 @@ pub(crate) fn capture_incremental_diff_to_st_buffer(
 
     let target_table = format!("\"{change_schema}\".changes_pgt_{pgt_id}");
     let total = capture_diff_to_table(st, user_cols, &target_table, pgt_id, graph_lsn.as_deref())?;
-
     if total > 0 {
         pgrx::debug1!(
             "[pg_trickle] ST-ST INCR: captured {} diff rows to changes_pgt_{} for {}.{}",
@@ -2618,6 +2637,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
         &dummy,
         schema,
         name,
+        None,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -2791,6 +2811,22 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
 mod tests {
     use super::*;
     use crate::version::{Frontier, SourceVersion};
+
+    #[test]
+    fn test_planner_work_mem_cap_respects_full_policy() {
+        assert_eq!(
+            planner_work_mem(512, 256, crate::refresh::FullPolicy::Error),
+            (256, false)
+        );
+        assert_eq!(
+            planner_work_mem(512, 256, crate::refresh::FullPolicy::Allow),
+            (256, true)
+        );
+        assert_eq!(
+            planner_work_mem(512, 0, crate::refresh::FullPolicy::Error),
+            (512, false)
+        );
+    }
 
     // ── build_content_hash_expr ─────────────────────────────────────
 

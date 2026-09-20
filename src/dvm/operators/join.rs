@@ -85,7 +85,7 @@ use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
     build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
-    is_simple_child, join_scan_count, rewrite_join_condition,
+    is_simple_child, join_scan_count, rewrite_join_condition, snapshot_join_column_name,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::dvm::snapshot::SnapshotPlan;
@@ -148,10 +148,10 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 
     let mut output_cols = Vec::new();
     for c in left_cols {
-        output_cols.push(format!("{left_prefix}__{c}"));
+        output_cols.push(snapshot_join_column_name(left_prefix, c));
     }
     for c in right_cols {
-        output_cols.push(format!("{right_prefix}__{c}"));
+        output_cols.push(snapshot_join_column_name(right_prefix, c));
     }
 
     let left_col_refs: Vec<String> = left_cols
@@ -160,7 +160,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             format!(
                 "dl.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{left_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
             )
         })
         .collect();
@@ -170,7 +170,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             format!(
                 "r.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{right_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
             )
         })
         .collect();
@@ -180,7 +180,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             format!(
                 "l.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{left_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(left_prefix, c))
             )
         })
         .collect();
@@ -190,7 +190,7 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             format!(
                 "dr.{} AS {}",
                 quote_ident(c),
-                quote_ident(&format!("{right_prefix}__{c}"))
+                quote_ident(&snapshot_join_column_name(right_prefix, c))
             )
         })
         .collect();
@@ -656,11 +656,11 @@ JOIN {delta_right} dr ON {join_cond_part2}{correction_sql}",
 
     let left_output_cols: Vec<String> = left_cols
         .iter()
-        .map(|column| format!("{left_prefix}__{column}"))
+        .map(|column| snapshot_join_column_name(left_prefix, column))
         .collect();
     let right_output_cols: Vec<String> = right_cols
         .iter()
-        .map(|column| format!("{right_prefix}__{column}"))
+        .map(|column| snapshot_join_column_name(right_prefix, column))
         .collect();
     let schema = left_result
         .schema

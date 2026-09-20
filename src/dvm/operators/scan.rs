@@ -183,6 +183,7 @@ FROM {new_table}",
     // pre-change snapshots in deep join trees.
     ctx.scan_delta_ctes_mut()
         .insert(alias.to_string(), cte_name.clone());
+    ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
     Ok(DiffResult {
         cte_name,
@@ -719,6 +720,7 @@ FROM (
     // snapshots for deep join trees without full-snapshot EXCEPT ALL.
     ctx.scan_delta_ctes_mut()
         .insert(alias.to_string(), cte_name.clone());
+    ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
     Ok(DiffResult {
         cte_name,

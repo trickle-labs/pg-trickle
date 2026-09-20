@@ -2670,6 +2670,46 @@ mod tests {
     }
 
     #[test]
+    fn test_row_id_key_columns_project_uses_computed_mdm_source_key() {
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "mdm_crm".to_string(),
+            schema: "public".to_string(),
+            columns: vec![
+                make_column("id"),
+                make_column("name"),
+                make_column("deleted"),
+            ],
+            pk_columns: vec!["id".to_string()],
+            alias: "mdm_crm".to_string(),
+        };
+        let tree = OpTree::Project {
+            expressions: vec![
+                Expr::Raw("'crm'::text".to_string()),
+                Expr::FuncCall {
+                    func_name: "pgtrickle.encode_row_id_v2".to_string(),
+                    args: vec![
+                        Expr::Raw("'MDM_SOURCE_KEY_V1'".to_string()),
+                        Expr::Raw("ROW((SELECT entity_id FROM identity_map), id)".to_string()),
+                    ],
+                },
+                col("name"),
+            ],
+            aliases: vec![
+                "source_name".to_string(),
+                "source_record_key".to_string(),
+                "name".to_string(),
+            ],
+            child: Box::new(scan),
+        };
+
+        assert_eq!(
+            tree.row_id_key_columns(),
+            Some(vec!["source_record_key".to_string()])
+        );
+    }
+
+    #[test]
     fn test_row_id_key_columns_project_maps_reordered_composite_key() {
         let scan = OpTree::Scan {
             table_oid: 1,
