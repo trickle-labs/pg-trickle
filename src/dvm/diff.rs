@@ -769,7 +769,9 @@ impl DiffContext {
     }
 
     pub(crate) fn set_scan_delta_cte_for_source(&mut self, source_oid: u32, cte: String) {
-        self.cache.scan_delta_ctes_by_oid.insert(source_oid, cte);
+        if self.cdc.st_source_pgt_ids.contains_key(&source_oid) {
+            self.cache.scan_delta_ctes_by_oid.insert(source_oid, cte);
+        }
     }
 
     pub(crate) fn scan_delta_cte_for_source(
