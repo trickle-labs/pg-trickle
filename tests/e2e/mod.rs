@@ -848,7 +848,20 @@ impl E2eDb {
                 Ok(Ok(pool)) => {
                     // Verify the connection actually works
                     match sqlx::query("SELECT 1").execute(&pool).await {
-                        Ok(_) => return pool,
+                        Ok(_) => {
+                            match sqlx::query_scalar::<_, String>("SHOW server_version")
+                                .fetch_one(&pool)
+                                .await
+                            {
+                                Ok(version) => {
+                                    eprintln!("PGT_ACTUAL_POSTGRESQL_VERSION={version}");
+                                }
+                                Err(error) => {
+                                    eprintln!("E2E: failed to report PostgreSQL version: {error}");
+                                }
+                            }
+                            return pool;
+                        }
                         Err(e) if attempt < max_attempts => {
                             eprintln!(
                                 "E2E connect attempt {}/{}: ping failed: {}",
