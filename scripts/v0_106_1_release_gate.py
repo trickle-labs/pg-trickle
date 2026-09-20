@@ -56,7 +56,7 @@ def synthetic_contract() -> dict[str, object]:
     return {
         "release_version": VERSION,
         "postgresql_major": 18,
-        "source_versions": [PREVIOUS_VERSION],
+        "source_versions": EXPECTED_SOURCE_VERSIONS or [PREVIOUS_VERSION],
         "database_settings": {
             "fsync": "on", "synchronous_commit": "on", "full_page_writes": "on",
         },

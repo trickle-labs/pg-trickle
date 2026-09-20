@@ -290,7 +290,7 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
                 or not isinstance(subfloor_regressions, list)
             ):
                 raise ValueError("Criterion evidence must include compared benchmarks and maximum regression")
-            if measurement.get("baseline_version") != contract.get("source_versions", [None])[0]:
+            if measurement.get("baseline_version") != contract.get("source_versions", [None])[-1]:
                 raise ValueError("Criterion baseline does not match the previous published version")
             if minimum_delta_ns != spec.get("minimum_absolute_delta_ns"):
                 raise ValueError("Criterion materiality floor differs from the qualification contract")
