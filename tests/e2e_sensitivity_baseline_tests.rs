@@ -327,6 +327,41 @@ async fn test_oracle_null_multiplicity_compares_exactly() {
     );
 }
 
+#[tokio::test]
+async fn test_oracle_public_setop_rows_are_not_reconstructed() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE oracle_setop_a (value INT)",
+        "CREATE TABLE oracle_setop_b (value INT)",
+        "INSERT INTO oracle_setop_a VALUES (1), (2)",
+        "INSERT INTO oracle_setop_b VALUES (2), (3)",
+    ])
+    .await;
+
+    let query = "SELECT value FROM oracle_setop_a EXCEPT SELECT value FROM oracle_setop_b";
+    db.create_st("oracle_setop_st", query, "1m", "FULL").await;
+    assert!(
+        oracle::compare_st_to_query(&db, "oracle_setop_st", query)
+            .await
+            .is_ok()
+    );
+
+    db.execute_seq(&[
+        "ALTER TABLE oracle_setop_st DISABLE TRIGGER ALL",
+        "UPDATE oracle_setop_st SET value = 99 WHERE value = 1",
+        "ALTER TABLE oracle_setop_st ENABLE TRIGGER ALL",
+    ])
+    .await;
+
+    let diff = oracle::compare_st_to_query(&db, "oracle_setop_st", query)
+        .await
+        .expect_err("a corrupted public set-operation row must fail comparison");
+    assert_eq!((diff.extra_count, diff.missing_count), (1, 1));
+    assert!(diff.extra_rows[0].contains("99"));
+    assert!(diff.missing_rows[0].contains("1"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  2. Issue #938 / #939 Sensitivity Baseline Reproductions
 // ═══════════════════════════════════════════════════════════════════════════
