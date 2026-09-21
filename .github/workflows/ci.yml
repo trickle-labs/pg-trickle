@@ -23,12 +23,14 @@ on:
       - 'Cargo.lock'
       - 'tests/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
       - '.github/actions/**'
       - 'benchmarks/**'
       - 'Dockerfile.ghcr'
       - 'cnpg/**'
       - 'docker/**'
       - 'docs/**'
+      - 'tests/release/**'
   pull_request:
     branches: [main]
     paths:
@@ -39,6 +41,7 @@ on:
       - 'Cargo.lock'
       - 'tests/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
       - '.github/actions/**'
       - 'benchmarks/**'
       - 'Dockerfile.ghcr'

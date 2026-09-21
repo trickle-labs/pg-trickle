@@ -179,6 +179,10 @@ jobs:
           # Copy docs
           cp README.md LICENSE INSTALL.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
 
+          test -z "${RUSTFLAGS:-}"
+          printf '{"candidate_commit":"%s","build_kind":"exact-release","feature_scope":"default-release","build_provenance":{"workflow":"release.yml","cargo_profile":"release","instrumentation":"none"}}\n' \
+            "$GITHUB_SHA" > "dist/${ARCHIVE_NAME}/release-candidate.json"
+
           cd dist
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           echo "Archive: ${ARCHIVE_NAME}.tar.gz ($(du -h "${ARCHIVE_NAME}.tar.gz" | cut -f1))"
@@ -243,6 +247,10 @@ jobs:
 
           # Copy docs
           Copy-Item README.md, LICENSE, INSTALL.md "dist\${archiveName}\" -ErrorAction SilentlyContinue
+
+          if ($env:RUSTFLAGS) { throw "release builds must not set RUSTFLAGS" }
+          '{"candidate_commit":"${{ github.sha }}","build_kind":"exact-release","feature_scope":"default-release","build_provenance":{"workflow":"release.yml","cargo_profile":"release","instrumentation":"none"}}' |
+            Set-Content -Path "dist\${archiveName}\release-candidate.json" -NoNewline
 
           Compress-Archive -Path "dist\${archiveName}" -DestinationPath "dist\${archiveName}.zip"
           Write-Host "Archive: ${archiveName}.zip"
@@ -463,7 +471,7 @@ jobs:
           name: qualification-evidence
           path: qualification-logs/
           retention-days: 30
-          if-no-files-found: ignore
+          if-no-files-found: error
 
       - name: Require all qualification suites to pass
         if: always()
@@ -495,10 +503,15 @@ jobs:
 
       - name: Collect release files
         run: |
+          test -s qualification-logs/RELEASE-EVIDENCE.json
+          jq -e '.status == "passed"' qualification-logs/RELEASE-EVIDENCE.json
+          jq -r '.retained_logs[].path' qualification-logs/RELEASE-EVIDENCE.json | while read -r path; do
+            test -s "$path"
+          done
           mkdir -p release-files
           find artifacts/ -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
             -exec cp {} release-files/ \;
-          tar czf release-files/qualification-evidence.tar.gz -C qualification-logs .
+          tar czf release-files/qualification-evidence.tar.gz qualification-logs
           echo "Release files:"
           ls -lh release-files/
 

@@ -13,12 +13,105 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_SUMMARY = re.compile(r"test result: .*?(\d+) passed; (\d+) failed; (\d+) ignored;")
 POSTGRES_VERSION = re.compile(r"PGT_ACTUAL_POSTGRESQL_VERSION=([0-9]+\.[0-9]+(?:\.[0-9]+)?)")
+MACHINE_STATUS = {"ok": "passed", "failed": "failed", "leaked": "failed", "timeout": "failed", "ignored": "skipped"}
+
+
+def canonical_digest(value: object) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def payload_manifest(candidate: Path) -> dict[str, object]:
+    files: list[dict[str, object]] = []
+    for root_name in ("usr/lib/postgresql/18/lib", "usr/share/postgresql/18/extension"):
+        root = candidate / root_name
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            data = path.read_bytes()
+            files.append(
+                {
+                    "path": path.relative_to(candidate).as_posix(),
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+    if not files:
+        raise ValueError("candidate package contains no installed payload files")
+    return {"files": files, "sha256": canonical_digest(files)}
+
+
+def artifact_identity(artifact: Path) -> dict[str, object] | None:
+    try:
+        if artifact.suffix == ".zip":
+            with zipfile.ZipFile(artifact) as archive:
+                names = [name for name in archive.namelist() if name.endswith("/release-candidate.json")]
+                if len(names) != 1:
+                    return None
+                return json.loads(archive.read(names[0]))
+        with tarfile.open(artifact, "r:gz") as archive:
+            members = [member for member in archive.getmembers() if member.name.endswith("/release-candidate.json")]
+            if len(members) != 1:
+                return None
+            stream = archive.extractfile(members[0])
+            if stream is None:
+                return None
+            return json.loads(stream.read())
+    except (tarfile.TarError, zipfile.BadZipFile):
+        return None
+    except (OSError, KeyError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not read release candidate identity from {artifact}: {error}") from error
+
+
+def machine_case_attempts(output: str, required_cases: list[str]) -> list[list[dict[str, str]]]:
+    events: dict[str, list[str]] = {identity: [] for identity in required_cases}
+    for line in output.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("type") != "test" or message.get("event") not in MACHINE_STATUS:
+            continue
+        name = message.get("name")
+        if not isinstance(name, str):
+            continue
+        for identity in required_cases:
+            binary, test_name = identity.split("::", 1)
+            if name.endswith(f"::{binary}${test_name}"):
+                events[identity].append(MACHINE_STATUS[message["event"]])
+                break
+    attempt_count = max((len(statuses) for statuses in events.values()), default=0)
+    return [
+        [
+            {"id": identity, "status": statuses[index] if index < len(statuses) else "missing"}
+            for identity, statuses in events.items()
+        ]
+        for index in range(attempt_count)
+    ]
+
+
+def machine_summary(output: str) -> tuple[int, int, int] | None:
+    summary = [
+        json.loads(line)
+        for line in output.splitlines()
+        if line.startswith("{") and '"type":"suite"' in line
+    ]
+    completed = [item for item in summary if item.get("event") in {"ok", "failed"}]
+    if not completed:
+        return None
+    return (
+        sum(int(item.get("passed", 0)) for item in completed),
+        sum(int(item.get("failed", 0)) for item in completed),
+        sum(int(item.get("ignored", 0)) for item in completed),
+    )
 
 
 def package_directory(artifact: Path, destination: Path) -> Path:
@@ -73,6 +166,22 @@ def main() -> int:
         artifact = args.artifact.resolve()
         artifact_spec = next(item for item in contract["artifacts"] if item["id"] == suite["artifact_id"])
         artifact_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        declared_identity = artifact_identity(artifact)
+        identity_required = bool(contract.get("candidate_identity", {}).get("required"))
+        if declared_identity is not None and not isinstance(declared_identity, dict):
+            raise ValueError("release artifact candidate identity must be a JSON object")
+        if identity_required and declared_identity is None:
+            raise ValueError("release artifact has no candidate identity")
+        if declared_identity is not None:
+            for key, expected in (
+                ("candidate_commit", args.candidate_commit),
+                ("build_kind", contract.get("build_kind", "exact-release")),
+                ("feature_scope", contract.get("feature_scope", "default-release")),
+            ):
+                if declared_identity.get(key) != expected:
+                    raise ValueError(f"release artifact candidate identity has the wrong {key}")
+            if declared_identity.get("build_provenance") != contract.get("build_provenance"):
+                raise ValueError("release artifact candidate identity has untrusted build provenance")
         args.log.parent.mkdir(parents=True, exist_ok=True)
         args.result.parent.mkdir(parents=True, exist_ok=True)
 
@@ -85,17 +194,44 @@ def main() -> int:
         command = suite["command_argv"]
         if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
             raise ValueError(f"suite {args.suite!r} has no valid command_argv")
+        required_cases = suite.get("required_cases", [])
+        if not isinstance(required_cases, list) or not all(isinstance(case, str) for case in required_cases):
+            raise ValueError(f"suite {args.suite!r} has invalid required_cases")
+        if len(required_cases) != len(set(required_cases)):
+            raise ValueError(f"suite {args.suite!r} has duplicate required cases")
+        shard = suite.get("shard", {"id": suite["id"], "index": 1, "count": 1})
+        if not isinstance(shard, dict):
+            raise ValueError(f"suite {args.suite!r} has invalid shard metadata")
+        build_kind = (declared_identity or {}).get("build_kind", contract.get("build_kind", "unknown"))
+        feature_scope = (declared_identity or {}).get(
+            "feature_scope", contract.get("feature_scope", "default-release")
+        )
+        candidate_manifest: dict[str, object] = {}
+        installation_observations: list[dict[str, object]] = []
+        observed_case_results: list[dict[str, str]] = []
+        attempt_case_results: list[list[dict[str, str]]] = []
+        attempt_started_at = time.time()
 
         with tempfile.TemporaryDirectory(prefix="pgt-release-suite-") as temp_name:
             temp = Path(temp_name)
             extension_dir = package_directory(artifact, temp)
+            candidate_manifest = payload_manifest(extension_dir)
+            attestation_path = args.result.with_suffix(".installation.json")
+            attestation_path.write_text("[]\n", encoding="utf-8")
             environment = os.environ.copy()
             environment.update(
                 {
                     "PGT_EXTENSION_DIR": str(extension_dir),
                     "PGT_RELEASE_CANDIDATE_COMMIT": args.candidate_commit,
+                    "PGT_RELEASE_ARTIFACT_ID": artifact_spec["id"],
                     "PGT_RELEASE_ARTIFACT_SHA256": artifact_digest,
-                    "PGT_DISABLE_NEXTEST": "1",
+                    "PGT_RELEASE_PLATFORM": artifact_spec["platform"],
+                    "PGT_RELEASE_BUILD_KIND": str(build_kind),
+                    "PGT_RELEASE_FEATURE_SCOPE": str(feature_scope),
+                    "PGT_RELEASE_ATTESTATION_PATH": str(attestation_path),
+                    "PGT_RELEASE_MIN_POSTMASTER_START_EPOCH": str(attempt_started_at),
+                    "PGT_RELEASE_MACHINE_FORMAT": "1",
+                    "PGT_RELEASE_NEXTEST_RETRIES": "2",
                 }
             )
             if suite.get("e2e_image"):
@@ -107,11 +243,22 @@ def main() -> int:
                 measurement_path.unlink(missing_ok=True)
                 environment["PGS_RELEASE_MEASUREMENT_JSON"] = str(measurement_path)
 
-            completed = subprocess.run(command, cwd=ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            completed = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            output = completed.stdout.decode("utf-8", errors="replace")
             args.log.write_bytes(completed.stdout)
             sys.stdout.buffer.write(completed.stdout)
-            summaries = TEST_SUMMARY.findall(completed.stdout.decode("utf-8", errors="replace"))
-            if summaries:
+            machine_results = machine_summary(output)
+            summaries = TEST_SUMMARY.findall(output)
+            if machine_results is not None:
+                passed, failed, skipped = machine_results
+                executed = passed + failed
+            elif summaries:
                 passed, failed, ignored = (sum(int(row[index]) for row in summaries) for index in range(3))
                 executed = passed + failed
                 skipped = ignored
@@ -126,8 +273,24 @@ def main() -> int:
                     or measurement.get("compared_benchmarks", 0)
                 )
 
-            version_match = POSTGRES_VERSION.search(completed.stdout.decode("utf-8", errors="replace"))
+            version_match = POSTGRES_VERSION.search(output)
             postgres_version = version_match.group(1) if version_match else None
+            attempt_case_results = machine_case_attempts(output, required_cases)
+            observed_case_results = attempt_case_results[-1] if attempt_case_results else [
+                {"id": identity, "status": "missing"} for identity in required_cases
+            ]
+            if required_cases and (
+                not attempt_case_results
+                or any(case["status"] != "passed" for attempt in attempt_case_results for case in attempt)
+            ):
+                status = "failed"
+                print(
+                    "ERROR: required case identities were not all observed: "
+                    + ", ".join(
+                        f"{case['id']}={case['status']}" for case in observed_case_results if case["status"] != "passed"
+                    ),
+                    file=sys.stderr,
+                )
             if measurement is not None:
                 measurement.update(
                     {
@@ -155,6 +318,11 @@ def main() -> int:
                         "sha256": hashlib.sha256(attachment_bytes).hexdigest(),
                     })
             status = "passed" if completed.returncode == 0 else "failed"
+            if required_cases and (
+                not attempt_case_results
+                or any(case["status"] != "passed" for attempt in attempt_case_results for case in attempt)
+            ):
+                status = "failed"
             if completed.returncode == 0 and suite.get("requires_postgresql", False) and postgres_version is None:
                 status = "failed"
                 print("ERROR: suite did not report the actual PostgreSQL server version", file=sys.stderr)
@@ -165,25 +333,65 @@ def main() -> int:
                 status = "failed"
                 print("ERROR: measurement suite did not write its result file", file=sys.stderr)
 
+            if attestation_path.is_file():
+                raw_attestations = json.loads(attestation_path.read_text(encoding="utf-8"))
+                if not isinstance(raw_attestations, list):
+                    raise ValueError("release installation attestation must contain a list")
+                installation_observations = raw_attestations
+            if suite.get("runtime") and not installation_observations:
+                status = "failed"
+                print("ERROR: runtime suite did not attest an installed candidate payload", file=sys.stderr)
+
+        server_configuration = [
+            observation.get("server", {}).get("settings", {})
+            for observation in installation_observations
+            if isinstance(observation.get("server"), dict)
+        ]
         log_bytes = args.log.stat().st_size
+        log = {
+            "path": args.log.relative_to(ROOT).as_posix(),
+            "bytes": log_bytes,
+            "sha256": hashlib.sha256(args.log.read_bytes()).hexdigest(),
+        }
+        if not attempt_case_results:
+            attempt_case_results = [[]]
+        attempts = [
+            {
+                "attempt": index,
+                "status": "passed" if all(case["status"] == "passed" for case in cases) else "failed",
+                "exit_code": completed.returncode if index == len(attempt_case_results) else 1,
+                "log": log,
+                "cases": cases,
+            }
+            for index, cases in enumerate(attempt_case_results, start=1)
+        ]
+        retry_count = len(attempts) - 1
         record = {
             "suite_id": suite["id"],
             "candidate_commit": args.candidate_commit,
             "artifact_id": artifact_spec["id"],
             "artifact_digest": artifact_digest,
             "platform": artifact_spec["platform"],
+            "candidate_identity": declared_identity,
+            "build_kind": build_kind,
+            "feature_scope": feature_scope,
             "postgresql_version": postgres_version,
             "suite_version": suite["suite_version"],
             "command": suite["command"],
+            "command_argv": command,
             "effective_workload": suite["workload"],
             "executed_tests": executed,
             "skipped_tests": skipped,
+            "selected_cases": required_cases,
+            "observed_cases": observed_case_results,
+            "shard": shard,
+            "attempts": attempts,
+            "retry_count": retry_count,
+            "candidate_payload": candidate_manifest,
+            "installation_observations": installation_observations,
+            "server_configuration": server_configuration,
             "status": status,
-            "log": {
-                "path": args.log.relative_to(ROOT).as_posix(),
-                "bytes": log_bytes,
-                "sha256": hashlib.sha256(args.log.read_bytes()).hexdigest(),
-            },
+            "log": log,
         }
         if measurement is not None:
             record["measurement"] = measurement

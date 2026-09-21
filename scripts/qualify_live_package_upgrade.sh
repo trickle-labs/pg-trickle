@@ -172,6 +172,12 @@ LOADED_VERSION="$(psql 'SELECT pgtrickle.version()')"
     echo "candidate binary reports $LOADED_VERSION, expected $TO_VERSION" >&2
     exit 1
 }
+if [[ -n "${PGT_RELEASE_ATTESTATION_PATH:-}" ]]; then
+    python3 scripts/release_install_attestation.py \
+        --container "$CONTAINER_ID" \
+        --candidate-root "$CANDIDATE_DIR" \
+        --output "$PGT_RELEASE_ATTESTATION_PATH"
+fi
 psql "ALTER EXTENSION pg_trickle UPDATE TO '${TO_VERSION}'" >/dev/null
 UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")"
 [[ "$UPDATED_VERSION" == "$TO_VERSION" ]] || {

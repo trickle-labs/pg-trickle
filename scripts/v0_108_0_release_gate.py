@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import generate_capability_manifest as capabilities
@@ -13,6 +15,16 @@ import v0_106_1_release_gate as shared
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.108.0"
+REQUIRED_CASES = {
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_same_count_different_content",
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_duplicate_multiplicity_mismatch",
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_schema_mismatch",
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_missing_user_column",
+    "e2e_failure_recovery_tests::test_lock_timeout_during_refresh",
+    "e2e_failure_recovery_tests::test_statement_timeout_during_refresh_recovers",
+    "e2e_failure_recovery_tests::test_cancel_backend_during_refresh_recovers",
+    "e2e_dvm_failpoint_tests::test_dvm_failpoint_preserves_last_committed_result_and_recovers",
+}
 EXPECTED_SUITES = shared.EXPECTED_SUITES | {
     "support-contract",
     "query-family-fixtures",
@@ -24,6 +36,7 @@ EXPECTED_SUITES = shared.EXPECTED_SUITES | {
     "publication-recovery",
     "resource-boundaries",
     "delta-qualification-default-off",
+    "sensitivity-baseline",
 }
 
 
@@ -102,6 +115,10 @@ def check_support_contract() -> None:
     qualification = json.loads(
         (ROOT / "tests/release/v0.108.0-qualification.json").read_text(encoding="utf-8")
     )
+    shared.require(qualification.get("contract_version") == 3, "release qualification contract is not evidence-complete")
+    shared.require(qualification.get("build_kind") == "exact-release", "qualification does not require exact release builds")
+    shared.require(qualification.get("feature_scope") == "default-release", "qualification feature scope drifted")
+    shared.require(qualification.get("candidate_identity", {}).get("required") is True, "candidate identity is optional")
     suites = {suite["id"]: suite for suite in qualification["required_suites"]}
     for suite_id, test_binary in (
         ("delta-v1", "e2e_v108_conformance_tests"),
@@ -128,6 +145,33 @@ def check_support_contract() -> None:
         suites["upgrade-chain"]["command_argv"][-2:] == ["0.107.0", "0.108.0"],
         "archive and upgrade completeness do not cover the release boundary",
     )
+    shards = {shard["id"]: shard for shard in qualification.get("required_shards", [])}
+    shared.require(
+        set(qualification.get("required_cases", [])) == REQUIRED_CASES,
+        "required release case identities are incomplete or renamed",
+    )
+    shared.require(
+        set(shards) == {"sensitivity-baseline", "failure-recovery"}
+        and {case for shard in shards.values() for case in shard["required_cases"]} == REQUIRED_CASES
+        and all(len(shard["required_cases"]) == len(set(shard["required_cases"])) for shard in shards.values()),
+        "required release case shards are incomplete or ambiguous",
+    )
+    shared.require(
+        set(suites["sensitivity-baseline"].get("required_cases", []))
+        == set(shards["sensitivity-baseline"]["required_cases"])
+        and set(suites["recovery"].get("required_cases", []))
+        == set(shards["failure-recovery"]["required_cases"]),
+        "required case suites do not match their shards",
+    )
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    shared.require("release-candidate.json" in workflow, "release archives do not carry candidate identity")
+    shared.require("jq -e '.status == \"passed\"'" in workflow, "publication does not revalidate passed release evidence")
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    shared.require("release-qualification-contract" in ci, "PR CI does not run the release evidence contract gate")
+    shared.require(
+        ".github/workflows/release.yml" in ci and "tests/release/**" in ci,
+        "PR CI does not trigger for release contract changes",
+    )
 
 
 def main() -> None:
@@ -138,6 +182,11 @@ def main() -> None:
     shared.GATE_SCRIPT = "v0_108_0_release_gate.py"
     shared.EXPECTED_SUITES = EXPECTED_SUITES
     check_support_contract()
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "scripts.test_release_evidence"],
+        cwd=ROOT,
+        check=True,
+    )
     shared.main()
 
 
