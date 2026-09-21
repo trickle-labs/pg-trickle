@@ -187,8 +187,11 @@ async fn test_inner_join_simultaneous_both_sides_update_large() {
     let q = "SELECT l.id, l.category, l.value, r.label AS label_r
              FROM ij_big_left l
              JOIN ij_big_right r ON l.category = r.category";
+    let expected_q = "SELECT l.id, l.category, l.value::NUMERIC, r.label AS label_r
+                      FROM ij_big_left l
+                      JOIN ij_big_right r ON l.category = r.category";
     db.create_st("ij_big_st", q, "1m", "DIFFERENTIAL").await;
-    db.assert_st_matches_query("ij_big_st", q).await;
+    db.assert_st_matches_query("ij_big_st", expected_q).await;
 
     // Round 1: UPDATE 5 rows in left AND 5 rows in right simultaneously.
     // Both sources have changes in the same refresh cycle.
@@ -197,7 +200,7 @@ async fn test_inner_join_simultaneous_both_sides_update_large() {
     db.execute("UPDATE ij_big_right SET value = value + 100, label = label || '_u' WHERE id <= 5")
         .await;
     db.refresh_st("ij_big_st").await;
-    db.assert_st_matches_query("ij_big_st", q).await;
+    db.assert_st_matches_query("ij_big_st", expected_q).await;
 
     // Round 2: UPDATE different rows simultaneously.
     db.execute(
@@ -209,7 +212,7 @@ async fn test_inner_join_simultaneous_both_sides_update_large() {
     )
     .await;
     db.refresh_st("ij_big_st").await;
-    db.assert_st_matches_query("ij_big_st", q).await;
+    db.assert_st_matches_query("ij_big_st", expected_q).await;
 
     // Round 3: INSERT new rows into BOTH sources + UPDATE existing rows.
     db.execute(
@@ -229,7 +232,7 @@ async fn test_inner_join_simultaneous_both_sides_update_large() {
     db.execute("UPDATE ij_big_right SET value = value + 25 WHERE id BETWEEN 20 AND 25")
         .await;
     db.refresh_st("ij_big_st").await;
-    db.assert_st_matches_query("ij_big_st", q).await;
+    db.assert_st_matches_query("ij_big_st", expected_q).await;
 
     // Round 4: Multi-cycle stress — UPDATE same rows multiple times in sequence.
     for i in 1..=5_u32 {
@@ -244,7 +247,7 @@ async fn test_inner_join_simultaneous_both_sides_update_large() {
         ))
         .await;
         db.refresh_st("ij_big_st").await;
-        db.assert_st_matches_query("ij_big_st", q).await;
+        db.assert_st_matches_query("ij_big_st", expected_q).await;
     }
 }
 
