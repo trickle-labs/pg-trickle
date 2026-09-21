@@ -21,7 +21,7 @@
 mod e2e;
 
 use e2e::{E2eDb, oracle};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -31,6 +31,51 @@ struct FailureWitness {
     query: String,
     wait_event_type: String,
     wait_event: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SessionSnapshot {
+    statement_timeout: String,
+    lock_timeout: String,
+    temp_tables: i64,
+    temp_locks: i64,
+}
+
+#[derive(Debug)]
+struct RefreshCleanup {
+    session_pid: i32,
+    baseline: SessionSnapshot,
+    after: SessionSnapshot,
+}
+
+async fn session_snapshot(conn: &mut PgConnection) -> Result<SessionSnapshot, sqlx::Error> {
+    let (statement_timeout, lock_timeout): (String, String) = sqlx::query_as(
+        "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let temp_tables: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM pg_class
+         WHERE relpersistence = 't' AND relname LIKE '__pgt_delta_%'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let temp_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint
+         FROM pg_locks l
+         JOIN pg_class c ON c.oid = l.relation
+         WHERE l.pid = pg_backend_pid()
+           AND c.relpersistence = 't'
+           AND c.relname LIKE '__pgt_delta_%'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(SessionSnapshot {
+        statement_timeout,
+        lock_timeout,
+        temp_tables,
+        temp_locks,
+    })
 }
 
 async fn wait_for_blocked_refresh(
@@ -77,10 +122,7 @@ async fn start_blocked_refresh(
     st_name: &str,
     settings: &[&str],
 ) -> (
-    tokio::task::JoinHandle<(
-        Result<(), sqlx::Error>,
-        Result<(i32, String, String, i64, i64), sqlx::Error>,
-    )>,
+    tokio::task::JoinHandle<(Result<(), sqlx::Error>, Result<RefreshCleanup, sqlx::Error>)>,
     i32,
 ) {
     let mut conn = db
@@ -92,6 +134,9 @@ async fn start_blocked_refresh(
         .fetch_one(&mut *conn)
         .await
         .expect("failed to get refresh backend PID");
+    let baseline = session_snapshot(&mut conn)
+        .await
+        .expect("failed to capture refresh-session baseline");
     for setting in settings {
         sqlx::query(sqlx::AssertSqlSafe((*setting).to_owned()))
             .execute(&mut *conn)
@@ -118,28 +163,12 @@ async fn start_blocked_refresh(
             sqlx::query("SET lock_timeout = 0")
                 .execute(&mut *conn)
                 .await?;
-            let settings: (String, String) = sqlx::query_as(
-                "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
-            )
-            .fetch_one(&mut *conn)
-            .await?;
-            let temp_tables: i64 = sqlx::query_scalar(
-                "SELECT count(*)::bigint FROM pg_class
-                 WHERE relpersistence = 't' AND relname LIKE '__pgt_delta_%'",
-            )
-            .fetch_one(&mut *conn)
-            .await?;
-            let temp_locks: i64 = sqlx::query_scalar(
-                "SELECT count(*)::bigint
-                 FROM pg_locks l
-                 JOIN pg_class c ON c.oid = l.relation
-                 WHERE l.pid = pg_backend_pid()
-                   AND c.relpersistence = 't'
-                   AND c.relname LIKE '__pgt_delta_%'",
-            )
-            .fetch_one(&mut *conn)
-            .await?;
-            Ok((session_pid, settings.0, settings.1, temp_tables, temp_locks))
+            let after = session_snapshot(&mut conn).await?;
+            Ok(RefreshCleanup {
+                session_pid,
+                baseline,
+                after,
+            })
         }
         .await;
 
@@ -216,6 +245,240 @@ fn assert_refresh_failure(
     );
 }
 
+#[cfg(not(feature = "light-e2e"))]
+async fn check_disruption_instance_ownership() {
+    let disrupted = E2eDb::new_dedicated().await.with_extension().await;
+    let sentinel = E2eDb::new_dedicated().await.with_extension().await;
+    assert_ne!(
+        disrupted.container_id(),
+        sentinel.container_id(),
+        "disruption and sentinel tests must use separate PostgreSQL instances"
+    );
+
+    let sentinel_before = sentinel
+        .show_setting("pg_trickle.test_chaos_for_table")
+        .await;
+    disrupted
+        .alter_system_set_and_wait(
+            "pg_trickle.test_chaos_for_table",
+            "'ownership_probe'",
+            "ownership_probe",
+        )
+        .await;
+    assert_eq!(
+        sentinel
+            .show_setting("pg_trickle.test_chaos_for_table")
+            .await,
+        sentinel_before,
+        "the sentinel instance must not inherit the disruption setting"
+    );
+    assert_eq!(sentinel.query_scalar::<i32>("SELECT 1").await, 1);
+
+    disrupted
+        .alter_system_reset_and_wait("pg_trickle.test_chaos_for_table", "")
+        .await;
+}
+
+#[tokio::test]
+#[cfg(not(feature = "light-e2e"))]
+async fn test_disruption_instance_ownership_preserves_sentinel() {
+    check_disruption_instance_ownership().await;
+}
+
+#[tokio::test]
+#[cfg(not(feature = "light-e2e"))]
+async fn test_failure_witness_controls_reject_missing_fault() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE fr_control_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO fr_control_src VALUES (1, 'baseline')")
+        .await;
+    db.create_st(
+        "fr_control_st",
+        "SELECT id, val FROM fr_control_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("fr_control_st", "SELECT id, val FROM fr_control_src")
+        .await;
+    db.execute("INSERT INTO fr_control_src VALUES (2, 'pending')")
+        .await;
+
+    // Removing the blocker must remove the lock-wait witness, not merely make
+    // the refresh fail for an unrelated reason.
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_control_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
+    )
+    .await;
+    assert!(
+        wait_for_blocked_refresh(&db.pool, refresh_pid, 0, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "a missing blocker must not produce a lock-wait witness"
+    );
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert!(
+        result.is_ok(),
+        "control refresh without a blocker must succeed"
+    );
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
+
+    db.execute("INSERT INTO fr_control_src VALUES (3, 'cancel-control')")
+        .await;
+    let mut blocker = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire wrong-PID blocker");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("failed to get wrong-PID blocker backend PID");
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE fr_control_src IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to acquire wrong-PID blocker");
+
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_control_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '500ms'"],
+    )
+    .await;
+    assert!(
+        wait_for_blocked_refresh(&db.pool, refresh_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .is_some(),
+        "wrong-PID control did not reach the lock wait"
+    );
+
+    let mut wrong_target = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire wrong cancellation target");
+    let wrong_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *wrong_target)
+        .await
+        .expect("failed to get wrong cancellation target PID");
+    let wrong_target_handle = tokio::spawn(async move {
+        sqlx::query("SELECT pg_sleep(5)")
+            .execute(&mut *wrong_target)
+            .await
+    });
+    let mut cancel_conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire wrong-PID cancellation connection");
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(wrong_pid)
+        .fetch_one(&mut *cancel_conn)
+        .await
+        .expect("failed to cancel wrong backend");
+    assert!(cancelled, "wrong-PID cancellation request must be accepted");
+    assert!(
+        wait_for_blocked_refresh(
+            &db.pool,
+            refresh_pid,
+            blocker_pid,
+            Duration::from_millis(250)
+        )
+        .await
+        .is_some(),
+        "cancelling the wrong backend must not remove the target witness"
+    );
+    let _ = wrong_target_handle.await;
+
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert_refresh_failure(result, "57014", "statement timeout");
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to release wrong-PID blocker");
+
+    // Disabling scheduler injection must leave the normal scheduler path
+    // successful and must not fabricate a failure marker.
+    let scheduler_db = E2eDb::new_dedicated().await.with_extension().await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "100", "100")
+        .await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.min_schedule_seconds", "1", "1")
+        .await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.auto_backoff", "off", "off")
+        .await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "'off'", "off")
+        .await;
+    assert!(
+        scheduler_db
+            .wait_for_scheduler(Duration::from_secs(90))
+            .await,
+        "scheduler did not appear for the disabled-injection control"
+    );
+    scheduler_db
+        .execute("CREATE TABLE fr_control_sched_src (id INT PRIMARY KEY)")
+        .await;
+    scheduler_db
+        .execute("INSERT INTO fr_control_sched_src VALUES (1)")
+        .await;
+    scheduler_db
+        .create_st(
+            "fr_control_sched_st",
+            "SELECT id FROM fr_control_sched_src",
+            "1s",
+            "DIFFERENTIAL",
+        )
+        .await;
+    assert!(
+        scheduler_db
+            .wait_for_condition(
+                "disabled-injection initial refresh",
+                "SELECT is_populated FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_control_sched_st'",
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+            .await,
+        "scheduler did not perform the control stream table's initial refresh"
+    );
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
+        .await;
+    scheduler_db
+        .execute("INSERT INTO fr_control_sched_src VALUES (2)")
+        .await;
+    assert!(
+        scheduler_db
+            .wait_for_condition(
+                "disabled-injection recovery",
+                "SELECT count(*) = 2 FROM fr_control_sched_st",
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+            .await,
+        "scheduler did not refresh with injection disabled"
+    );
+    let injected_failures: i64 = scheduler_db
+        .query_scalar(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history
+             WHERE status = 'FAILED'
+               AND error_message LIKE '%PGT_TEST_FAILPOINT_REACHED%'",
+        )
+        .await;
+    assert_eq!(injected_failures, 0);
+}
+
 // ── FR-1: statement_timeout ─────────────────────────────────────────────────
 
 /// Hold a source lock, observe the refresh waiting on it, and require the
@@ -264,13 +527,9 @@ async fn test_statement_timeout_during_refresh_recovers() {
     check_failure_attempt_path(&db, "fr_timeout_st", &witness, "DIFFERENTIAL").await;
     let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
     assert_refresh_failure(result, "57014", "statement timeout");
-    let (session_pid, statement_timeout, lock_timeout, temp_tables, temp_locks) =
-        cleanup.expect("refresh-session cleanup failed");
-    assert_eq!(session_pid, refresh_pid);
-    assert_eq!(statement_timeout, "0");
-    assert_eq!(lock_timeout, "0");
-    assert_eq!(temp_tables, 0);
-    assert_eq!(temp_locks, 0);
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
     assert_matches_checkpoint(&db, "public.fr_timeout_st", "fr_timeout_checkpoint").await;
     sqlx::query("ROLLBACK")
@@ -330,13 +589,9 @@ async fn test_lock_timeout_during_refresh() {
     check_failure_attempt_path(&db, "fr_lock_st", &witness, "DIFFERENTIAL").await;
     let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
     assert_refresh_failure(result, "55P03", "lock timeout");
-    let (session_pid, statement_timeout, lock_timeout, temp_tables, temp_locks) =
-        cleanup.expect("refresh-session cleanup failed");
-    assert_eq!(session_pid, refresh_pid);
-    assert_eq!(statement_timeout, "0");
-    assert_eq!(lock_timeout, "0");
-    assert_eq!(temp_tables, 0);
-    assert_eq!(temp_locks, 0);
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
     assert_matches_checkpoint(&db, "public.fr_lock_st", "fr_lock_checkpoint").await;
     sqlx::query("ROLLBACK")
@@ -659,13 +914,9 @@ async fn test_cancel_backend_during_refresh_recovers() {
 
     let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
     assert_refresh_failure(result, "57014", "user request");
-    let (session_pid, statement_timeout, lock_timeout, temp_tables, temp_locks) =
-        cleanup.expect("refresh-session cleanup failed");
-    assert_eq!(session_pid, refresh_pid);
-    assert_eq!(statement_timeout, "0");
-    assert_eq!(lock_timeout, "0");
-    assert_eq!(temp_tables, 0);
-    assert_eq!(temp_locks, 0);
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
     assert_matches_checkpoint(&db, "public.fr_cancel_st", "fr_cancel_checkpoint").await;
     sqlx::query("ROLLBACK")
@@ -734,13 +985,9 @@ async fn test_no_resource_leak_after_timeout() {
     check_failure_attempt_path(&db, "fr_leak_st", &witness, "DIFFERENTIAL").await;
     let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
     assert_refresh_failure(result, "57014", "statement timeout");
-    let (session_pid, statement_timeout, lock_timeout, temp_tables, temp_locks) =
-        cleanup.expect("refresh-session cleanup failed");
-    assert_eq!(session_pid, refresh_pid);
-    assert_eq!(statement_timeout, "0");
-    assert_eq!(lock_timeout, "0");
-    assert_eq!(temp_tables, 0);
-    assert_eq!(temp_locks, 0);
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
     assert_matches_checkpoint(&db, "public.fr_leak_st", "fr_leak_checkpoint").await;
 
