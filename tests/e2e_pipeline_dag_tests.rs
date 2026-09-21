@@ -332,8 +332,9 @@ async fn test_nx_pipeline_insert_new_bid_cascades() {
     // DBSP invariant: L1 matches its defining query
     db.assert_st_matches_query(
         "nx_auction_bids",
-        "SELECT b.id AS bid_id, b.auction_id, b.bidder_id, b.price,
-                a.seller_id, a.category, a.item_name, a.reserve_price
+        "SELECT b.id AS bid_id, b.auction_id, b.bidder_id,
+                b.price::NUMERIC AS price, a.seller_id, a.category,
+                a.item_name, a.reserve_price::NUMERIC AS reserve_price
          FROM nx_bids b
          JOIN nx_auctions a ON a.id = b.auction_id",
     )
@@ -506,8 +507,9 @@ async fn test_nx_pipeline_update_auction_category_cascades() {
 
     db.assert_st_matches_query(
         "nx_auction_bids",
-        "SELECT b.id AS bid_id, b.auction_id, b.bidder_id, b.price,
-                a.seller_id, a.category, a.item_name, a.reserve_price
+        "SELECT b.id AS bid_id, b.auction_id, b.bidder_id,
+                b.price::NUMERIC AS price, a.seller_id, a.category,
+                a.item_name, a.reserve_price::NUMERIC AS reserve_price
          FROM nx_bids b
          JOIN nx_auctions a ON a.id = b.auction_id",
     )
@@ -853,7 +855,8 @@ async fn test_ec_pipeline_insert_order_cascades_all_layers() {
     // DBSP invariant on all layers
     db.assert_st_matches_query(
         "ec_line_details",
-        "SELECT oi.id AS line_id, oi.order_id, oi.quantity, oi.unit_price,
+        "SELECT oi.id AS line_id, oi.order_id, oi.quantity,
+                oi.unit_price::NUMERIC AS unit_price,
                 oi.quantity * oi.unit_price AS line_total,
                 ep.product_id, ep.product_name, ep.category_id, ep.category_name
          FROM ec_order_items oi
