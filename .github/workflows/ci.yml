@@ -278,9 +278,6 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
-      - name: Pull PostgreSQL benchmark image
-        run: docker pull postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
-
       - name: Pull builder image when available
         run: |
           if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
@@ -293,11 +290,14 @@ jobs:
       - name: Run v0.87 pgbench gate
         run: |
           # Shared runners can produce noisy p99/TPS samples. Require three
-          # independent failures before blocking the PR; the budgets remain
-          # unchanged in benchmarks/pgbench-v0.87/budgets.json.
-          benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87 \
-            || benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87 \
-            || benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87
+          # independent failures before blocking the PR. Retain every attempt.
+          for attempt in 1 2 3; do
+            if benchmarks/pgbench-v0.87/run.sh --profile blocking \
+              --output "target/pgbench-v0.87/attempt-$attempt"; then
+              exit 0
+            fi
+          done
+          exit 1
 
       - name: Upload v0.87 pgbench result
         if: always()

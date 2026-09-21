@@ -68,10 +68,11 @@ case "$PROFILE" in
         ;;
 esac
 
-absent_image="${PGT_PGBENCH_ABSENT_IMAGE:-postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf}"
+base_image="$(awk '$1 == "FROM" && $2 ~ /^postgres:/ { print $2; exit }' "$ROOT_DIR/tests/Dockerfile.e2e")"
+[[ -n "$base_image" ]] || { echo "PostgreSQL runtime base image is missing" >&2; exit 1; }
+absent_image="${PGT_PGBENCH_ABSENT_IMAGE:-$base_image}"
 installed_image="${PGT_PGBENCH_INSTALLED_IMAGE:-pg_trickle_e2e:latest}"
 seed="${PGT_PGBENCH_SEED:-8700}"
-postgres_version="${PGT_PGBENCH_POSTGRES_VERSION:-18.4}"
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 run_root="$OUTPUT_DIR/raw"
@@ -101,6 +102,7 @@ for image in "$absent_image" "$installed_image"; do
     fi
 done
 
+rm -rf "$run_root"
 mkdir -p "$run_root"
 rm -f "$raw_file" "$result_file"
 container_names=()
@@ -118,33 +120,8 @@ db_query() {
     docker exec "$container" psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d postgres -Atqc "$1"
 }
 
-cpu_sample() {
-    docker exec "$container" sh -ceu '
-        total=0
-        worker=0
-        found=0
-        for stat in /proc/[0-9]*/stat; do
-            [ -r "$stat" ] || continue
-            ticks=$(awk "{print \$14 + \$15}" "$stat")
-            case "$ticks" in
-                ""|*[!0-9]*) continue ;;
-            esac
-            total=$((total + ticks))
-            pid=${stat#/proc/}
-            pid=${pid%/stat}
-            comm=$(awk "{print \$2}" "$stat" 2>/dev/null || true)
-            cmdline=$(tr "\000" " " < "/proc/$pid/cmdline" 2>/dev/null || true)
-            if printf "%s %s" "$comm" "$cmdline" | grep -Eiq "pg_trickle|scheduler|refresh"; then
-                worker=$((worker + ticks))
-                found=1
-            fi
-        done
-        if [ "$found" -eq 0 ]; then
-            echo unsupported
-        else
-            echo "$worker,$total"
-        fi
-    '
+cpu_total_sample() {
+    docker exec "$container" awk '$1 == "usage_usec" { print $2 }' /sys/fs/cgroup/cpu.stat
 }
 
 wait_for_postgres() {
@@ -212,16 +189,21 @@ run_one() {
     local stdout_file="$run_dir/pgbench.stdout"
     local log_dir="$run_dir/logs"
     local warmup_file="$run_dir/warmup.stdout"
-    local history_before refresh_stats refresh_count refresh_duration correct workload_finished_at
-    local cpu_before cpu_after
+    local history_before refresh_count refresh_duration correct workload_finished_at postgres_version postgres_settings
+    local cpu_before cpu_after cpu_hz sampler_pid
+    local postgres_args=(-c wal_level=logical -c track_commit_timestamp=on \
+        -c max_replication_slots=10 -c max_worker_processes=128)
 
     mkdir -p "$log_dir"
     chmod 777 "$run_dir" "$log_dir"
     container="pgtrickle-pgbench-${repetition}-${config}-$$"
     container_names+=("$container")
     docker run --rm -d --name "$container" -v "$run_dir:/bench" \
-        -e POSTGRES_PASSWORD=postgres "$image" >/dev/null
+        -v "$BENCH_DIR:/bench-scripts:ro" \
+        -e POSTGRES_PASSWORD=postgres "$image" "${postgres_args[@]}" >/dev/null
     wait_for_postgres
+    postgres_version="$(db_query 'SHOW server_version_num')"
+    postgres_settings="$(db_query "SELECT current_setting('wal_level') || '|' || current_setting('track_commit_timestamp') || '|' || current_setting('max_replication_slots') || '|' || current_setting('max_worker_processes')")"
 
     if [[ "$config" != absent ]]; then
         db_query "CREATE EXTENSION IF NOT EXISTS pg_trickle;" >/dev/null
@@ -240,10 +222,22 @@ run_one() {
     else
         history_before=0
     fi
-    cpu_before="$(cpu_sample)"
+    rm -f "$run_dir/cpu.stop" "$run_dir/cpu.ready"
+    docker exec "$container" sh /bench-scripts/cpu_sampler.sh \
+        /bench/cpu.samples /bench/cpu.ready /bench/cpu.stop &
+    sampler_pid=$!
+    for _ in $(seq 1 50); do
+        [[ -e "$run_dir/cpu.ready" ]] && break
+        sleep 0.1
+    done
+    [[ -e "$run_dir/cpu.ready" ]] || { echo "CPU sampler did not start" >&2; exit 1; }
+    cpu_hz="$(docker exec "$container" getconf CLK_TCK)"
+    cpu_before="$(cpu_total_sample)"
     docker exec "$container" pgbench -h 127.0.0.1 -U postgres -c "$clients" -j "$jobs" -T "$duration" -n \
         -l --sampling-rate=0.1 --log-prefix=/bench/logs/pgbench postgres >"$stdout_file"
-    cpu_after="$(cpu_sample)"
+    cpu_after="$(cpu_total_sample)"
+    touch "$run_dir/cpu.stop"
+    wait "$sampler_pid"
     workload_finished_at="$(db_query "SELECT clock_timestamp()")"
 
     if [[ "$config" == active ]]; then
@@ -266,11 +260,14 @@ run_one() {
         --log-dir "$log_dir" \
         --cpu-before "$cpu_before" \
         --cpu-after "$cpu_after" \
+        --cpu-samples "$run_dir/cpu.samples" \
+        --cpu-hz "$cpu_hz" \
         --refresh-count "$refresh_count" \
         --refresh-duration-ms "$refresh_duration" \
         --correct "$correct" \
         --commit "$(git -C "$ROOT_DIR" rev-parse HEAD)" \
         --postgres-version "$postgres_version" \
+        --postgres-settings "$postgres_settings" \
         --image "$image" >>"$raw_file"
 
     docker rm -f "$container" >/dev/null
