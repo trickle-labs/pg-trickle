@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.108.0 — Incremental graph and consumer recovery qualification](#01080--incremental-graph-and-consumer-recovery-qualification)
 - [0.107.0 — Verified support and operator procedures](#01070--verified-support-and-operator-procedures)
 - [0.106.1 — Same-pass graph maintenance](#01061--same-pass-graph-maintenance)
 - [0.106.0 — Executed package qualification and database cost](#01060--executed-package-qualification-and-database-cost)
@@ -221,6 +222,25 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.108.0] — Incremental graph and consumer recovery qualification
+
+v0.108.0 qualifies a broader incremental-maintenance surface and ties it to
+packaged release evidence.
+
+- Adds Graph V1.2 support for stable row identity V2, custom table-function
+  output columns, and immutable composite lateral functions.
+- Adds Delta V1.1 consumer recovery with resnapshot fencing, clone adoption,
+  validation, and an explicit qualification API that is off by default.
+- Improves differential correctness for aggregates, joins, lateral queries,
+  projections, row identity, and mutable rows, with packaged conformance
+  coverage for the pg-mdm compiler-v9 workload.
+- Verifies the v0.106.1 and v0.107.0 upgrade paths, release-package behavior,
+  WAL admission, recovery, and exact differential results against PostgreSQL
+  18.
+
+The release adds the Delta V1.1 and Graph V1.2 SQL/API surface and records the
+new release version in the upgrade script.
 
 ## [0.107.0] — Verified support and operator procedures
 
