@@ -221,34 +221,6 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::Success;
     }
 
-    // D-3 TEST-MODE: same chaos check as refresh_single_st — ensures the GUC
-    // is honoured in parallel dispatch mode where execute_worker_singleton is
-    // the code path rather than refresh_single_st.
-    {
-        let chaos_target = config::pg_trickle_test_chaos_for_table();
-        if !chaos_target.is_empty() && chaos_target == st.pgt_name {
-            match StreamTableMeta::increment_errors(pgt_id) {
-                Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
-                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
-                    monitor::alert_auto_suspended(
-                        &st.pgt_schema,
-                        &st.pgt_name,
-                        count,
-                        st.pooler_compatibility_mode,
-                    );
-                    log!(
-                        "pg_trickle: TEST-MODE suspended {}.{} after {} chaos-injected errors",
-                        st.pgt_schema,
-                        st.pgt_name,
-                        count,
-                    );
-                }
-                _ => {}
-            }
-            return RefreshOutcome::RetryableFailure;
-        }
-    }
-
     // BOOT-4: Check bootstrap source gates — skip if any source is gated.
     let gated_oids = load_gated_source_oids();
     if is_any_source_gated(pgt_id, &gated_oids) {
@@ -3099,37 +3071,6 @@ fn refresh_single_st(
         return;
     }
 
-    // D-3 TEST-MODE: When pg_trickle.test_chaos_for_table names this ST,
-    // simulate a retryable refresh failure by directly incrementing
-    // consecutive_errors and returning early — no subtransaction, no SPI
-    // inside a subtransaction, no PG exception handling required.  This lets
-    // the D-3 E2E test reliably trigger auto-suspension without depending on
-    // catching PostgreSQL exceptions from user trigger RAISE EXCEPTION calls.
-    {
-        let chaos_target = config::pg_trickle_test_chaos_for_table();
-        if !chaos_target.is_empty() && chaos_target == st.pgt_name {
-            match StreamTableMeta::increment_errors(pgt_id) {
-                Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
-                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
-                    monitor::alert_auto_suspended(
-                        &st.pgt_schema,
-                        &st.pgt_name,
-                        count,
-                        st.pooler_compatibility_mode,
-                    );
-                    log!(
-                        "pg_trickle: TEST-MODE suspended {}.{} after {} chaos-injected errors",
-                        st.pgt_schema,
-                        st.pgt_name,
-                        count,
-                    );
-                }
-                _ => {}
-            }
-            return;
-        }
-    }
-
     // BOOT-4: Check bootstrap source gates — skip if any source is gated.
     let gated_oids = load_gated_source_oids();
     if is_any_source_gated(pgt_id, &gated_oids) {
@@ -3789,6 +3730,33 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::RetryableFailure;
         }
     };
+
+    // D-3 TEST-MODE: exercise the real scheduler failure path after the
+    // attempt is recorded but before refresh apply.  The normal refresh
+    // error branch persists the FAILED history row and retry state.
+    let test_failure = if config::pg_trickle_test_chaos_for_table() == st.pgt_name {
+        const SERIALIZATION_FAILURE_SQLSTATE: u32 = 527_283_932;
+        let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
+            .ok()
+            .flatten()
+            .unwrap_or(-1);
+        Some(crate::error::PgTrickleError::SpiErrorCode(
+            // Keep this synthetic error in the encoding consumed by the
+            // extension's SQLSTATE classifier (40001).
+            SERIALIZATION_FAILURE_SQLSTATE,
+            format!(
+                "PGT_TEST_FAILPOINT_REACHED table={}.{} phase=before_apply \
+                 backend_pid={} action={} actual_path=NOT_REACHED",
+                st.pgt_schema,
+                st.pgt_name,
+                backend_pid,
+                action.as_str(),
+            ),
+        ))
+    } else {
+        None
+    };
+
     if let Err(e) = crate::api::output_delta::begin_capture(st.pgt_id) {
         log!(
             "pg_trickle: failed to start output-delta capture for {}.{}: {}",
@@ -3982,7 +3950,9 @@ fn execute_scheduled_refresh(
         )),
         _ => None,
     };
-    let result = if st.topk_limit.is_some() {
+    let result = if let Some(error) = test_failure {
+        Err(error)
+    } else if st.topk_limit.is_some() {
         // TopK tables bypass the normal Full/Differential refresh paths and use
         // scoped-recomputation MERGE (ORDER BY … LIMIT N) instead.
         full_reason = Some(refresh::FullRefreshReason::new(

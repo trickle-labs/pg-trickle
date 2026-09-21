@@ -278,9 +278,6 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
-      - name: Pull PostgreSQL benchmark image
-        run: docker pull postgres:18.4-bookworm@sha256:efef99e1558f86089bc84bece29208c0777a185ff717ec7fa288a652ce2d0adf
-
       - name: Pull builder image when available
         run: |
           if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
@@ -293,11 +290,14 @@ jobs:
       - name: Run v0.87 pgbench gate
         run: |
           # Shared runners can produce noisy p99/TPS samples. Require three
-          # independent failures before blocking the PR; the budgets remain
-          # unchanged in benchmarks/pgbench-v0.87/budgets.json.
-          benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87 \
-            || benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87 \
-            || benchmarks/pgbench-v0.87/run.sh --profile blocking --output target/pgbench-v0.87
+          # independent failures before blocking the PR. Retain every attempt.
+          for attempt in 1 2 3; do
+            if benchmarks/pgbench-v0.87/run.sh --profile blocking \
+              --output "target/pgbench-v0.87/attempt-$attempt"; then
+              exit 0
+            fi
+          done
+          exit 1
 
       - name: Upload v0.87 pgbench result
         if: always()
@@ -1440,6 +1440,7 @@ jobs:
     outputs:
       dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
       security_changed: ${{ steps.filter.outputs.security_changed }}
+      failure_recovery_changed: ${{ steps.filter.outputs.failure_recovery_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1459,6 +1460,13 @@ jobs:
               - 'src/cdc/**'
               - 'src/refresh/**'
               - 'sql/*.sql'
+            failure_recovery_changed:
+              - 'src/scheduler/**'
+              - 'tests/e2e_failure_recovery_tests.rs'
+              - 'tests/e2e_dvm_failpoint_tests.rs'
+              - 'tests/e2e_cleanup_chaos_tests.rs'
+              - 'scripts/run_failure_recovery_repetition.sh'
+              - '.github/workflows/ci.yml'
 
   e2e-sensitive-gate:
     name: Sensitive E2E gate
@@ -1466,7 +1474,8 @@ jobs:
     if: >
       github.event_name == 'pull_request' &&
       (needs.detect-e2e-gates.outputs.dvm_changed == 'true' ||
-       needs.detect-e2e-gates.outputs.security_changed == 'true')
+       needs.detect-e2e-gates.outputs.security_changed == 'true' ||
+       needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1539,6 +1548,19 @@ jobs:
             --test e2e_failure_recovery_tests \
             --test e2e_wal_cdc_tests \
             --test e2e_rls_wal_tests
+
+      - name: Repeat failure-recovery schedules
+        if: needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
+        run: bash ./scripts/run_failure_recovery_repetition.sh
+
+      - name: Upload failure-recovery witnesses
+        if: always() && needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-recovery-repetition
+          path: ${{ runner.temp }}/failure-recovery-repetition
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v6

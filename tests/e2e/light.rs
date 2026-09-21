@@ -374,6 +374,12 @@ impl E2eDb {
         }
     }
 
+    /// Light E2E isolates tests with a fresh database rather than a fresh
+    /// PostgreSQL container. Full E2E uses a dedicated container here.
+    pub async fn new_dedicated() -> Self {
+        Self::new().await
+    }
+
     /// Start a fresh database with output-delta qualification disabled.
     pub async fn new_with_output_delta_qualification_disabled() -> Self {
         Self::new().await

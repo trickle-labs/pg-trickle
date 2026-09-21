@@ -24,11 +24,13 @@ paired repetition and rotates the configuration order deterministically:
 | `installed` | pg_trickle installed and preloaded, with no stream tables |
 | `active` | pg_trickle with projection, aggregate, and join stream tables |
 
-The blocking profile uses PostgreSQL 18.3, scale 10, 8 clients, 2 jobs, a
+The blocking profile uses the pinned PostgreSQL base image from
+`tests/Dockerfile.e2e`, scale 10, 8 clients, 2 jobs, a
 10-second warm-up, a 30-second measurement, and 3 paired repetitions. It
+matches PostgreSQL settings across the stock and extension images, then
 samples pgbench transaction logs at 10%, records p50/p95/p99, checks active
-stream-table correctness and refresh history, and samples Linux `/proc`
-jiffies for the scheduler/refresh workers. The publication profile is a
+stream-table correctness and refresh history, and samples worker `/proc`
+jiffies against container cgroup CPU time. The publication profile is a
 five-repetition, 60-second run.
 
 ```bash
@@ -36,7 +38,8 @@ five-repetition, 60-second run.
 benchmarks/pgbench-v0.87/run.sh --profile blocking
 ```
 
-The machine-readable result is `target/pgbench-v0.87/result.json`; the
+The machine-readable result is `target/pgbench-v0.87/result.json` for a direct
+run, or one `result.json` per retained CI attempt; the
 versioned product budgets are in
 [`benchmarks/pgbench-v0.87/budgets.json`](../benchmarks/pgbench-v0.87/budgets.json).
 The gate fails closed for missing repetitions, malformed/non-finite values,

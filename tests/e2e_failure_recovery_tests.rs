@@ -20,115 +20,586 @@
 
 mod e2e;
 
-use e2e::E2eDb;
+use e2e::{E2eDb, oracle};
+use sqlx::{PgConnection, PgPool};
+use std::time::Duration;
 
-// ── FR-1: statement_timeout ─────────────────────────────────────────────────
+#[derive(Debug)]
+struct FailureWitness {
+    refresh_pid: i32,
+    blocker_pid: i32,
+    query: String,
+    wait_event_type: String,
+    wait_event: String,
+}
 
-/// SET statement_timeout to 1 ms, trigger a manual refresh on a large ST,
-/// expect the refresh to fail, then reset timeout and verify recovery.
-#[tokio::test]
-async fn test_statement_timeout_during_refresh_recovers() {
-    let db = E2eDb::new().await.with_extension().await;
-    db.execute("CREATE TABLE fr_timeout_src (id SERIAL PRIMARY KEY, val TEXT)")
-        .await;
-    // Insert enough rows that a 1 ms timeout during MERGE will reliably fire.
-    // 500 rows is plenty — the timeout is set to 1 ms.
-    db.execute(
-        "INSERT INTO fr_timeout_src (val) \
-         SELECT 'row_' || generate_series FROM generate_series(1, 500)",
+#[derive(Debug, PartialEq, Eq)]
+struct SessionSnapshot {
+    statement_timeout: String,
+    lock_timeout: String,
+    temp_tables: i64,
+    temp_locks: i64,
+}
+
+#[derive(Debug)]
+struct RefreshCleanup {
+    session_pid: i32,
+    baseline: SessionSnapshot,
+    after: SessionSnapshot,
+}
+
+async fn session_snapshot(conn: &mut PgConnection) -> Result<SessionSnapshot, sqlx::Error> {
+    let (statement_timeout, lock_timeout): (String, String) = sqlx::query_as(
+        "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')",
     )
-    .await;
-
-    let q = "SELECT id, val FROM fr_timeout_src";
-    db.create_st("fr_timeout_st", q, "1m", "DIFFERENTIAL").await;
-    db.assert_st_matches_query("fr_timeout_st", q).await;
-
-    // Insert more rows to force a real MERGE pass
-    db.execute(
-        "INSERT INTO fr_timeout_src (val) \
-         SELECT 'extra_' || generate_series FROM generate_series(1, 100)",
+    .fetch_one(&mut *conn)
+    .await?;
+    let temp_tables: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM pg_class
+         WHERE relpersistence = 't' AND relname LIKE '__pgt_delta_%'",
     )
-    .await;
+    .fetch_one(&mut *conn)
+    .await?;
+    let temp_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint
+         FROM pg_locks l
+         JOIN pg_class c ON c.oid = l.relation
+         WHERE l.pid = pg_backend_pid()
+           AND c.relpersistence = 't'
+           AND c.relname LIKE '__pgt_delta_%'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(SessionSnapshot {
+        statement_timeout,
+        lock_timeout,
+        temp_tables,
+        temp_locks,
+    })
+}
 
-    // Attempt refresh with an absurdly tight timeout — it should FAIL.
-    let result = db
-        .try_execute(
-            "SET statement_timeout = '1ms'; SELECT pgtrickle.refresh_stream_table('fr_timeout_st')",
+async fn wait_for_blocked_refresh(
+    pool: &PgPool,
+    refresh_pid: i32,
+    blocker_pid: i32,
+    timeout: Duration,
+) -> Option<FailureWitness> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let witness: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT a.query, a.wait_event_type, a.wait_event
+             FROM pg_stat_activity a
+             WHERE a.pid = $1
+               AND a.state = 'active'
+               AND a.wait_event_type = 'Lock'
+               AND $2 = ANY(pg_blocking_pids(a.pid))",
         )
-        .await;
-    // Reset timeout so subsequent queries work
-    db.execute("SET statement_timeout = 0").await;
+        .bind(refresh_pid)
+        .bind(blocker_pid)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
 
-    // The refresh may or may not time out depending on machine speed;
-    // either way the ST must remain in a stable, non-ERROR state.
-    let status: String = db
-        .query_scalar(
-            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_timeout_st'",
-        )
+        if let Some((query, wait_event_type, wait_event)) = witness {
+            return Some(FailureWitness {
+                refresh_pid,
+                blocker_pid,
+                query,
+                wait_event_type: wait_event_type.unwrap_or_default(),
+                wait_event: wait_event.unwrap_or_default(),
+            });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn start_blocked_refresh(
+    db: &E2eDb,
+    st_name: &str,
+    settings: &[&str],
+) -> (
+    tokio::task::JoinHandle<(Result<(), sqlx::Error>, Result<RefreshCleanup, sqlx::Error>)>,
+    i32,
+) {
+    let mut conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire refresh connection");
+    let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("failed to get refresh backend PID");
+    let baseline = session_snapshot(&mut conn)
+        .await
+        .expect("failed to capture refresh-session baseline");
+    for setting in settings {
+        sqlx::query(sqlx::AssertSqlSafe((*setting).to_owned()))
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|e| panic!("failed to set refresh-session setting: {e}"));
+    }
+
+    let st_name = st_name.to_owned();
+    let handle = tokio::spawn(async move {
+        let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT pgtrickle.refresh_stream_table('{st_name}')"
+        )))
+        .execute(&mut *conn)
+        .await
+        .map(|_| ());
+
+        let cleanup = async {
+            let session_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *conn)
+                .await?;
+            sqlx::query("SET statement_timeout = 0")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query("SET lock_timeout = 0")
+                .execute(&mut *conn)
+                .await?;
+            let after = session_snapshot(&mut conn).await?;
+            Ok(RefreshCleanup {
+                session_pid,
+                baseline,
+                after,
+            })
+        }
         .await;
+
+        (result, cleanup)
+    });
+
+    (handle, refresh_pid)
+}
+
+async fn check_failure_attempt_path(
+    db: &E2eDb,
+    st_name: &str,
+    witness: &FailureWitness,
+    expected_action: &str,
+) {
+    let (requested_mode, refresh_mode, effective_mode, needs_reinit): (
+        String,
+        String,
+        Option<String>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT requested_refresh_mode, refresh_mode, effective_refresh_mode, needs_reinit
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
+    )
+    .bind(st_name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("failed to inspect failure attempt path");
+    assert_eq!(requested_mode, expected_action);
+    assert_eq!(refresh_mode, expected_action);
+    assert_eq!(effective_mode.as_deref(), Some(expected_action));
+    assert!(
+        !needs_reinit,
+        "failure attempt unexpectedly changed reinit state"
+    );
+    assert!(witness.query.contains("refresh_stream_table"));
+    assert_eq!(witness.wait_event_type, "Lock");
+    assert!(witness.blocker_pid > 0);
+    assert!(witness.refresh_pid > 0);
+    assert!(!witness.wait_event.is_empty());
+}
+
+async fn checkpoint_table(db: &E2eDb, st_name: &str, checkpoint: &str) {
+    db.execute(&format!("CREATE TABLE {checkpoint} AS TABLE {st_name}"))
+        .await;
+}
+
+async fn assert_matches_checkpoint(db: &E2eDb, st_name: &str, checkpoint: &str) {
+    if let Err(diff) = oracle::compare_sts(db, st_name, checkpoint).await {
+        panic!("failed refresh changed the committed public result:\n{diff}");
+    }
+}
+
+fn assert_refresh_failure(
+    result: Result<(), sqlx::Error>,
+    expected_sqlstate: &str,
+    expected_message: &str,
+) {
+    let error = result.expect_err("refresh completed instead of reaching the injected fault");
+    let sqlstate = error
+        .as_database_error()
+        .and_then(|database_error| database_error.code().map(|code| code.into_owned()));
+    assert_eq!(
+        sqlstate.as_deref(),
+        Some(expected_sqlstate),
+        "refresh error: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(expected_message),
+        "unexpected refresh error: {error}"
+    );
+}
+
+#[cfg(not(feature = "light-e2e"))]
+async fn check_disruption_instance_ownership() {
+    let disrupted = E2eDb::new_dedicated().await.with_extension().await;
+    let sentinel = E2eDb::new_dedicated().await.with_extension().await;
     assert_ne!(
-        status, "SUSPENDED",
-        "A single timeout should not permanently suspend the ST"
+        disrupted.container_id(),
+        sentinel.container_id(),
+        "disruption and sentinel tests must use separate PostgreSQL instances"
     );
 
-    // Regardless of the timed-out refresh, a normal refresh must succeed.
-    db.refresh_st("fr_timeout_st").await;
-    db.assert_st_matches_query("fr_timeout_st", q).await;
-
-    // The consecutive_errors counter should be 0 after a successful refresh.
-    let errs: i64 = db
-        .query_scalar(
-            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_name = 'fr_timeout_st'",
+    let sentinel_before = sentinel
+        .show_setting("pg_trickle.test_chaos_for_table")
+        .await;
+    disrupted
+        .alter_system_set_and_wait(
+            "pg_trickle.test_chaos_for_table",
+            "'ownership_probe'",
+            "ownership_probe",
         )
         .await;
     assert_eq!(
-        errs, 0,
-        "consecutive_errors should reset after successful refresh"
+        sentinel
+            .show_setting("pg_trickle.test_chaos_for_table")
+            .await,
+        sentinel_before,
+        "the sentinel instance must not inherit the disruption setting"
     );
-    let _ = result; // consumed: whether it errored or not, test asserts recovery
+    assert_eq!(sentinel.query_scalar::<i32>("SELECT 1").await, 1);
+
+    disrupted
+        .alter_system_reset_and_wait("pg_trickle.test_chaos_for_table", "")
+        .await;
+}
+
+#[tokio::test]
+#[cfg(not(feature = "light-e2e"))]
+async fn test_disruption_instance_ownership_preserves_sentinel() {
+    check_disruption_instance_ownership().await;
+}
+
+#[tokio::test]
+#[cfg(not(feature = "light-e2e"))]
+async fn test_failure_witness_controls_reject_missing_fault() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE fr_control_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO fr_control_src VALUES (1, 'baseline')")
+        .await;
+    db.create_st(
+        "fr_control_st",
+        "SELECT id, val FROM fr_control_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("fr_control_st", "SELECT id, val FROM fr_control_src")
+        .await;
+    db.execute("INSERT INTO fr_control_src VALUES (2, 'pending')")
+        .await;
+
+    // Removing the blocker must remove the lock-wait witness, not merely make
+    // the refresh fail for an unrelated reason.
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_control_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
+    )
+    .await;
+    assert!(
+        wait_for_blocked_refresh(&db.pool, refresh_pid, 0, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "a missing blocker must not produce a lock-wait witness"
+    );
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert!(
+        result.is_ok(),
+        "control refresh without a blocker must succeed"
+    );
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
+
+    db.execute("INSERT INTO fr_control_src VALUES (3, 'cancel-control')")
+        .await;
+    let mut blocker = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire wrong-PID blocker");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("failed to get wrong-PID blocker backend PID");
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE fr_control_src IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to acquire wrong-PID blocker");
+
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_control_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '500ms'"],
+    )
+    .await;
+    assert!(
+        wait_for_blocked_refresh(&db.pool, refresh_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .is_some(),
+        "wrong-PID control did not reach the lock wait"
+    );
+
+    let mut wrong_target = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire wrong cancellation target");
+    let wrong_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *wrong_target)
+        .await
+        .expect("failed to get wrong cancellation target PID");
+    let wrong_target_handle = tokio::spawn(async move {
+        sqlx::query("SELECT pg_sleep(5)")
+            .execute(&mut *wrong_target)
+            .await
+    });
+    let mut cancel_conn = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire wrong-PID cancellation connection");
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(wrong_pid)
+        .fetch_one(&mut *cancel_conn)
+        .await
+        .expect("failed to cancel wrong backend");
+    assert!(cancelled, "wrong-PID cancellation request must be accepted");
+    assert!(
+        wait_for_blocked_refresh(
+            &db.pool,
+            refresh_pid,
+            blocker_pid,
+            Duration::from_millis(250)
+        )
+        .await
+        .is_some(),
+        "cancelling the wrong backend must not remove the target witness"
+    );
+    let _ = wrong_target_handle.await;
+
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert_refresh_failure(result, "57014", "statement timeout");
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to release wrong-PID blocker");
+
+    // Disabling scheduler injection must leave the normal scheduler path
+    // successful and must not fabricate a failure marker.
+    let scheduler_db = E2eDb::new_dedicated().await.with_extension().await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "100", "100")
+        .await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.min_schedule_seconds", "1", "1")
+        .await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.auto_backoff", "off", "off")
+        .await;
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "'off'", "off")
+        .await;
+    assert!(
+        scheduler_db
+            .wait_for_scheduler(Duration::from_secs(90))
+            .await,
+        "scheduler did not appear for the disabled-injection control"
+    );
+    scheduler_db
+        .execute("CREATE TABLE fr_control_sched_src (id INT PRIMARY KEY)")
+        .await;
+    scheduler_db
+        .execute("INSERT INTO fr_control_sched_src VALUES (1)")
+        .await;
+    scheduler_db
+        .create_st(
+            "fr_control_sched_st",
+            "SELECT id FROM fr_control_sched_src",
+            "1s",
+            "DIFFERENTIAL",
+        )
+        .await;
+    assert!(
+        scheduler_db
+            .wait_for_condition(
+                "disabled-injection initial refresh",
+                "SELECT is_populated FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_control_sched_st'",
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+            .await,
+        "scheduler did not perform the control stream table's initial refresh"
+    );
+    scheduler_db
+        .alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "''", "")
+        .await;
+    scheduler_db
+        .execute("INSERT INTO fr_control_sched_src VALUES (2)")
+        .await;
+    assert!(
+        scheduler_db
+            .wait_for_condition(
+                "disabled-injection recovery",
+                "SELECT count(*) = 2 FROM fr_control_sched_st",
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+            .await,
+        "scheduler did not refresh with injection disabled"
+    );
+    let injected_failures: i64 = scheduler_db
+        .query_scalar(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history
+             WHERE status = 'FAILED'
+               AND error_message LIKE '%PGT_TEST_FAILPOINT_REACHED%'",
+        )
+        .await;
+    assert_eq!(injected_failures, 0);
+}
+
+// ── FR-1: statement_timeout ─────────────────────────────────────────────────
+
+/// Hold a source lock, observe the refresh waiting on it, and require the
+/// pinned target session's statement timeout to cancel the refresh.
+#[tokio::test]
+async fn test_statement_timeout_during_refresh_recovers() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE fr_timeout_src (id SERIAL PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO fr_timeout_src VALUES (1, 'row_1'), (2, 'row_2')")
+        .await;
+
+    let q = "SELECT id, val FROM fr_timeout_src";
+    db.create_st("fr_timeout_st", q, "1h", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("fr_timeout_st", q).await;
+    checkpoint_table(&db, "public.fr_timeout_st", "fr_timeout_checkpoint").await;
+
+    db.execute("INSERT INTO fr_timeout_src VALUES (3, 'extra')")
+        .await;
+
+    let mut blocker = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire lock blocker");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("failed to get blocker backend PID");
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE fr_timeout_src IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to acquire source blocker");
+
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_timeout_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '250ms'"],
+    )
+    .await;
+    let witness =
+        wait_for_blocked_refresh(&db.pool, refresh_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .expect("refresh never reached the controlled lock wait");
+    check_failure_attempt_path(&db, "fr_timeout_st", &witness, "DIFFERENTIAL").await;
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert_refresh_failure(result, "57014", "statement timeout");
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
+
+    assert_matches_checkpoint(&db, "public.fr_timeout_st", "fr_timeout_checkpoint").await;
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to release timeout blocker");
+
+    db.refresh_st("fr_timeout_st").await;
+    db.assert_st_matches_query("fr_timeout_st", q).await;
 }
 
 // ── FR-2: lock_timeout ──────────────────────────────────────────────────────
 
 /// Hold an ACCESS EXCLUSIVE lock on the source table from a separate
-/// transaction, then attempt a refresh with lock_timeout=100ms — it must
-/// either succeed (if the lock was released) or record an error without
-/// crashing.  After the blocker releases, a normal refresh must succeed.
+/// transaction, then observe a pinned refresh fail with SQLSTATE 55P03.
+/// After the blocker releases, a normal refresh must succeed.
 #[tokio::test]
 async fn test_lock_timeout_during_refresh() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("CREATE TABLE fr_lock_src (id INT PRIMARY KEY, v INT)")
         .await;
     db.execute("INSERT INTO fr_lock_src VALUES (1,10),(2,20)")
         .await;
 
     let q = "SELECT id, v FROM fr_lock_src";
-    db.create_st("fr_lock_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("fr_lock_st", q, "1h", "DIFFERENTIAL").await;
     db.assert_st_matches_query("fr_lock_st", q).await;
+    checkpoint_table(&db, "public.fr_lock_st", "fr_lock_checkpoint").await;
 
-    // Insert a row to make the next refresh have real work to do.
     db.execute("INSERT INTO fr_lock_src VALUES (3, 30)").await;
 
-    // Attempt a refresh with a short lock timeout.
-    // We don't actually hold a conflicting lock here (no easy cross-connection
-    // advisory lock from the same pool session), so this mostly verifies the
-    // SET + refresh + RESET sequence doesn't crash.
-    let result = db
-        .try_execute(
-            "SET lock_timeout = '100ms'; \
-             SELECT pgtrickle.refresh_stream_table('fr_lock_st'); \
-             SET lock_timeout = 0",
-        )
-        .await;
-    db.execute("SET lock_timeout = 0").await;
+    let mut blocker = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire lock blocker");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("failed to get blocker backend PID");
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE fr_lock_src IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to acquire source blocker");
 
-    // Whether it succeeded or failed with lock_timeout, a normal refresh
-    // must now bring the ST fully up to date.
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_lock_st",
+        &["SET lock_timeout = '250ms'", "SET statement_timeout = '0'"],
+    )
+    .await;
+    let witness =
+        wait_for_blocked_refresh(&db.pool, refresh_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .expect("refresh never reached the controlled lock wait");
+    check_failure_attempt_path(&db, "fr_lock_st", &witness, "DIFFERENTIAL").await;
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert_refresh_failure(result, "55P03", "lock timeout");
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
+
+    assert_matches_checkpoint(&db, "public.fr_lock_st", "fr_lock_checkpoint").await;
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to release lock blocker");
     db.refresh_st("fr_lock_st").await;
     db.assert_st_matches_query("fr_lock_st", q).await;
-
-    let _ = result;
 }
 
 // ── FR-3: TRUNCATE source between refreshes ─────────────────────────────────
@@ -385,100 +856,75 @@ async fn test_drop_source_and_reinit_recovery() {
 /// in a corrupt state and a subsequent refresh succeeds.
 #[tokio::test]
 async fn test_cancel_backend_during_refresh_recovers() {
-    use sqlx::Row;
-
-    let db = E2eDb::new().await.with_extension().await;
+    let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("CREATE TABLE fr_cancel_src (id SERIAL PRIMARY KEY, val TEXT)")
         .await;
-    // Insert enough rows that the refresh takes measurable time
-    db.execute(
-        "INSERT INTO fr_cancel_src (val) \
-         SELECT md5(generate_series::text) FROM generate_series(1, 2000)",
-    )
-    .await;
+    db.execute("INSERT INTO fr_cancel_src VALUES (1, 'row_1'), (2, 'row_2')")
+        .await;
 
     let q = "SELECT id, val FROM fr_cancel_src";
-    db.create_st("fr_cancel_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("fr_cancel_st", q, "1h", "DIFFERENTIAL").await;
     db.assert_st_matches_query("fr_cancel_st", q).await;
+    checkpoint_table(&db, "public.fr_cancel_st", "fr_cancel_checkpoint").await;
 
-    // Insert more rows so the next refresh has real MERGE work to do
-    db.execute(
-        "INSERT INTO fr_cancel_src (val) \
-         SELECT md5(generate_series::text) FROM generate_series(2001, 4000)",
-    )
-    .await;
+    db.execute("INSERT INTO fr_cancel_src VALUES (3, 'extra')")
+        .await;
 
-    // Acquire two separate connections from the pool
-    let mut conn_refresh = db
+    let mut blocker = db
         .pool
         .acquire()
         .await
-        .expect("failed to acquire refresh connection");
+        .expect("failed to acquire lock blocker");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("failed to get blocker backend PID");
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE fr_cancel_src IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to acquire source blocker");
+
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_cancel_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '0'"],
+    )
+    .await;
+    let witness =
+        wait_for_blocked_refresh(&db.pool, refresh_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .expect("refresh never reached the controlled lock wait");
+    check_failure_attempt_path(&db, "fr_cancel_st", &witness, "DIFFERENTIAL").await;
+
     let mut conn_cancel = db
         .pool
         .acquire()
         .await
         .expect("failed to acquire cancel connection");
-
-    // Get the PID of the refresh connection
-    let refresh_pid: i32 = sqlx::query("SELECT pg_backend_pid()")
-        .fetch_one(&mut *conn_refresh)
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(refresh_pid)
+        .fetch_one(&mut *conn_cancel)
         .await
-        .expect("failed to get PID")
-        .get(0);
-
-    // Start the refresh on one connection, cancel from the other.
-    // Use tokio::spawn to run the refresh concurrently.
-    let refresh_handle = tokio::spawn(async move {
-        sqlx::query("SELECT pgtrickle.refresh_stream_table('fr_cancel_st')")
-            .execute(&mut *conn_refresh)
-            .await
-    });
-
-    // Give the refresh a moment to start, then cancel it
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let cancel_result = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT pg_cancel_backend({})",
-        refresh_pid
-    )))
-    .execute(&mut *conn_cancel)
-    .await;
+        .expect("failed to issue cancellation");
     assert!(
-        cancel_result.is_ok(),
-        "pg_cancel_backend() call should succeed"
+        cancelled,
+        "pg_cancel_backend must cancel the witnessed target"
     );
 
-    // The refresh may succeed (if it finished before cancel) or fail
-    let refresh_result = refresh_handle.await.expect("refresh task panicked");
-    // Either outcome is acceptable — what matters is the ST is not corrupt
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert_refresh_failure(result, "57014", "user request");
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
-    // Verify the ST is in a recoverable state (ACTIVE or ERROR, not stuck)
-    let status: String = db
-        .query_scalar(
-            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_cancel_st'",
-        )
-        .await;
-    assert!(
-        status == "ACTIVE" || status == "ERROR",
-        "ST should be ACTIVE or ERROR after cancel, got: {status}"
-    );
-
-    // A subsequent refresh MUST succeed and bring data up to date
+    assert_matches_checkpoint(&db, "public.fr_cancel_st", "fr_cancel_checkpoint").await;
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to release cancel blocker");
     db.refresh_st("fr_cancel_st").await;
     db.assert_st_matches_query("fr_cancel_st", q).await;
-
-    // consecutive_errors should be 0 after a successful refresh
-    let errs: i64 = db
-        .query_scalar(
-            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_name = 'fr_cancel_st'",
-        )
-        .await;
-    assert_eq!(
-        errs, 0,
-        "consecutive_errors should reset after successful recovery"
-    );
-    let _ = refresh_result;
 }
 
 // ── FR-8: No orphaned temp tables after failure/cancel ──────────────────────
@@ -490,18 +936,16 @@ async fn test_cancel_backend_during_refresh_recovers() {
 /// - A subsequent refresh cleans up and succeeds
 #[tokio::test]
 async fn test_no_resource_leak_after_timeout() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = E2eDb::new_dedicated().await.with_extension().await;
     db.execute("CREATE TABLE fr_leak_src (id SERIAL PRIMARY KEY, val TEXT)")
         .await;
-    db.execute(
-        "INSERT INTO fr_leak_src (val) \
-         SELECT md5(generate_series::text) FROM generate_series(1, 500)",
-    )
-    .await;
+    db.execute("INSERT INTO fr_leak_src VALUES (1, 'row_1'), (2, 'row_2')")
+        .await;
 
     let q = "SELECT id, val FROM fr_leak_src";
-    db.create_st("fr_leak_st", q, "1m", "DIFFERENTIAL").await;
+    db.create_st("fr_leak_st", q, "1h", "DIFFERENTIAL").await;
     db.assert_st_matches_query("fr_leak_st", q).await;
+    checkpoint_table(&db, "public.fr_leak_st", "fr_leak_checkpoint").await;
 
     // Get the OID of the stream table source for change buffer lookup.
     // The change buffer is named changes_{src_oid} where src_oid is the
@@ -510,21 +954,42 @@ async fn test_no_resource_leak_after_timeout() {
         .query_scalar("SELECT oid::bigint FROM pg_class WHERE relname = 'fr_leak_src'")
         .await;
 
-    // Insert more rows to create pending changes
-    db.execute(
-        "INSERT INTO fr_leak_src (val) \
-         SELECT 'leak_test_' || generate_series FROM generate_series(1, 200)",
+    db.execute("INSERT INTO fr_leak_src VALUES (3, 'leak_test')")
+        .await;
+
+    let mut blocker = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire leak-test blocker");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("failed to get blocker backend PID");
+    sqlx::query("BEGIN").execute(&mut *blocker).await.unwrap();
+    sqlx::query("LOCK TABLE fr_leak_src IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to acquire leak-test blocker");
+
+    let (refresh_handle, refresh_pid) = start_blocked_refresh(
+        &db,
+        "fr_leak_st",
+        &["SET lock_timeout = '0'", "SET statement_timeout = '250ms'"],
     )
     .await;
+    let witness =
+        wait_for_blocked_refresh(&db.pool, refresh_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .expect("refresh never reached the controlled lock wait");
+    check_failure_attempt_path(&db, "fr_leak_st", &witness, "DIFFERENTIAL").await;
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert_refresh_failure(result, "57014", "statement timeout");
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
-    // Force a timeout — refresh may or may not fail
-    let _ = db
-        .try_execute(
-            "SET statement_timeout = '1ms'; \
-             SELECT pgtrickle.refresh_stream_table('fr_leak_st')",
-        )
-        .await;
-    db.execute("SET statement_timeout = 0").await;
+    assert_matches_checkpoint(&db, "public.fr_leak_st", "fr_leak_checkpoint").await;
 
     // Check for orphaned __pgt_delta_* temp tables in pg_class
     let orphaned_temps: i64 = db
@@ -560,7 +1025,10 @@ async fn test_no_resource_leak_after_timeout() {
         "Change buffer table should still exist after failed refresh"
     );
 
-    // A normal refresh must succeed and produce correct data
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .expect("failed to release leak-test blocker");
     db.refresh_st("fr_leak_st").await;
     db.assert_st_matches_query("fr_leak_st", q).await;
 

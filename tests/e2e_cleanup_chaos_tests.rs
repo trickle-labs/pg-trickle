@@ -7,10 +7,8 @@
 //!   1. Create source table + DIFFERENTIAL stream table.
 //!   2. Insert rows → changes land in the CDC buffer.
 //!   3. Enable the `pg_trickle.test_chaos_for_table` GUC (set to 'chaos_st').
-//!      The scheduler's `refresh_single_st` detects the GUC and directly
-//!      increments `consecutive_errors` on every tick instead of running the
-//!      actual refresh, simulating repeated failures without any trigger or
-//!      PG exception handling.
+//!      The scheduler reaches the real refresh error path and injects a
+//!      retryable failure before apply on every eligible tick.
 //!   4. Pre-seed `consecutive_errors` to `max_consecutive_errors − 1` so that
 //!      only a single increment is needed to reach the threshold.
 //!   5. After `max_consecutive_errors` failures the scheduler sets the stream
@@ -86,19 +84,13 @@ async fn wait_for_suspended(db: &E2eDb, pgt_name: &str, timeout: Duration) -> bo
 // D-3: Refresh chaos — consecutive refresh failures → SUSPENDED → recovery
 // ══════════════════════════════════════════════════════════════════════
 
-/// D-3 (v0.79.0): Activate the test-mode chaos GUC to simulate repeated
+/// D-3 (v0.79.0): Activate the test-mode chaos GUC to inject repeated
 /// differential refresh failures, assert the stream table auto-suspends, then
 /// disable the GUC, resume, and verify the stream table recovers and produces
-/// correct output.
-///
-/// The `pg_trickle.test_chaos_for_table` GUC causes `refresh_single_st` to
-/// directly increment `consecutive_errors` for the named stream table on each
-/// tick, bypassing the actual refresh.  This avoids depending on catching PG
-/// exceptions from user trigger RAISE EXCEPTION calls (which is fragile across
-/// PostgreSQL versions and executor call-stacks).
+/// correct output through the scheduler.
 #[tokio::test]
 async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
-    let db = E2eDb::new().await.with_extension().await;
+    let db = E2eDb::new_dedicated().await.with_extension().await;
     setup_chaos_scheduler(&db).await;
 
     // ── 1. Create source table and DIFFERENTIAL stream table ────────
@@ -141,11 +133,8 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
 
     // ── 2. Enable chaos via test-mode GUC ────────────────────────────
     //
-    // Setting `pg_trickle.test_chaos_for_table = 'chaos_st'` causes
-    // `refresh_single_st` to directly increment `consecutive_errors` on every
-    // tick for chaos_st, simulating repeated refresh failures without running
-    // the actual refresh.  This is more reliable than a trigger-based approach
-    // because it does not depend on catching PG exceptions from user triggers.
+    // Setting `pg_trickle.test_chaos_for_table = 'chaos_st'` injects a
+    // retryable error through the scheduler's normal refresh failure path.
     db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "'chaos_st'", "chaos_st")
         .await;
 
@@ -170,10 +159,8 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
 
     // ── 4. Wait for auto-suspension ──────────────────────────────────
     //
-    // The scheduler reads the test_chaos_for_table GUC and directly increments
-    // consecutive_errors for chaos_st on each tick.  With consecutive_errors
-    // pre-seeded to 2, a single tick increments it to 3 = max_consecutive_errors
-    // → status is set to SUSPENDED.
+    // With consecutive_errors pre-seeded to 2, one scheduler-owned injected
+    // failure increments it to 3 = max_consecutive_errors → SUSPENDED.
     let suspended = wait_for_suspended(&db, "chaos_st", Duration::from_secs(60)).await;
     // Capture diagnostic info before the assertion so the panic message is informative.
     let (status_at_timeout, _mode, _populated, consecutive_errors_at_timeout) =
@@ -190,6 +177,24 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
         consecutive_errors >= 3,
         "consecutive_errors should be >= 3 when auto-suspended, got {consecutive_errors}"
     );
+
+    let failure: (String, String, String, String, bool, String) = sqlx::query_as(
+        "SELECT h.action, h.initiated_by, h.error_code, h.error_sqlstate,
+                h.retryable, h.error_message
+         FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
+         WHERE st.pgt_name = 'chaos_st' AND h.status = 'FAILED'
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("scheduler failure should be recorded in refresh history");
+    assert_eq!(failure.0, "DIFFERENTIAL");
+    assert_eq!(failure.1, "SCHEDULER");
+    assert_eq!(failure.2, "SERIALIZATION");
+    assert_eq!(failure.3, "40001");
+    assert!(failure.4);
+    assert!(failure.5.contains("PGT_TEST_FAILPOINT_REACHED"));
 
     // Stream table data should still be at the last good count (3 rows)
     // because the scheduler never ran the actual refresh while chaos was active.

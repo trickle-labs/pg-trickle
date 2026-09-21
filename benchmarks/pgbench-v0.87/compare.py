@@ -63,6 +63,12 @@ def main() -> int:
 
     if set(by_repetition) != set(range(repetitions)):
         fail(f"repetitions must be exactly 0..{repetitions - 1}")
+    versions = {record.get("postgres_version") for record in records}
+    if len(versions) != 1 or not next(iter(versions)):
+        fail(f"PostgreSQL versions differ across configurations: {versions}")
+    settings = {record.get("postgres_settings") for record in records}
+    if len(settings) != 1 or not next(iter(settings)):
+        fail(f"PostgreSQL settings differ across configurations: {settings}")
 
     ratios: list[dict[str, float]] = []
     for repetition in range(repetitions):
@@ -122,11 +128,12 @@ def main() -> int:
         },
     }
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "version": budgets.get("version", "0.87.0"),
         "environment": {
             "commit": records[0].get("commit"),
             "postgres_version": records[0].get("postgres_version"),
+            "postgres_settings": records[0].get("postgres_settings"),
             "images": {record["config"]: record.get("image") for record in records[:3]},
         },
         "raw_repetitions": records,
