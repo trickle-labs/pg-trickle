@@ -547,11 +547,10 @@ pub static PGS_USE_SQLSTATE_CLASSIFICATION: GucSetting<bool> = GucSetting::<bool
 pub static PGS_VALIDATE_DELTA_INVARIANTS: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// D-3 (v0.79.0): TEST-MODE only. When set to a stream table name, the
-/// scheduler simulates a retryable refresh failure for that table on every
-/// tick (by directly calling `increment_errors`) instead of running the
-/// actual refresh. Used by the D-3 E2E test to reliably trigger auto-
-/// suspension without depending on PostgreSQL exception handling from user
-/// triggers. Default: `None` (disabled).
+/// scheduler injects a retryable failure immediately before refresh apply for
+/// that table on every eligible tick. The normal scheduler error path records
+/// the failed attempt and can trigger auto-suspension. Default: `None`
+/// (disabled).
 ///
 /// Activate with: `ALTER SYSTEM SET pg_trickle.test_chaos_for_table = 'name'`
 /// followed by `SELECT pg_reload_conf()`.
@@ -1247,13 +1246,12 @@ pub fn register_scheduler_gucs() {
     // D-3: Test-mode chaos injection GUC.
     GucRegistry::define_string_guc(
         c"pg_trickle.test_chaos_for_table",
-        c"TEST-MODE: simulate refresh failure for named stream table (v0.79.0).",
-        c"When set to a non-empty stream table name, the scheduler skips the actual \
-          refresh for that table and directly increments consecutive_errors on every \
-          tick, simulating repeated refresh failures. Used by the D-3 E2E test to \
-          trigger auto-suspension without relying on PG exception handling from user \
-          triggers. Requires SELECT pg_reload_conf() after ALTER SYSTEM SET. \
-          Default: empty string (disabled). Do not set in production.",
+        c"TEST-MODE: inject a refresh failure for a named stream table (v0.79.0).",
+        c"When set to a non-empty stream table name, the scheduler injects a retryable \
+          serialization failure immediately before refresh apply on every eligible tick. \
+          This exercises failure history, retry, and auto-suspension handling. Requires \
+          SELECT pg_reload_conf() after ALTER SYSTEM SET. Default: empty string \
+          (disabled). Do not set in production.",
         &PGS_TEST_CHAOS_FOR_TABLE,
         GucContext::Suset,
         GucFlags::default(),
