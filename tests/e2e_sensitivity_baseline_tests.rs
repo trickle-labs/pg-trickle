@@ -160,6 +160,208 @@ async fn test_oracle_detects_incompatible_type_mismatch() {
     );
 }
 
+#[tokio::test]
+async fn test_oracle_detects_missing_user_column() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE oracle_abpgt_st (id INT, abpgt_x TEXT)",
+        "CREATE TABLE oracle_abpgt_exp (id INT, abpgt_x TEXT)",
+        "INSERT INTO oracle_abpgt_st VALUES (1, 'apple'), (2, 'banana')",
+        "INSERT INTO oracle_abpgt_exp VALUES (1, 'apple'), (2, 'banana')",
+    ])
+    .await;
+
+    let query = "SELECT id, abpgt_x FROM oracle_abpgt_exp";
+    assert!(
+        oracle::compare_st_to_query(&db, "oracle_abpgt_st", query)
+            .await
+            .is_ok(),
+        "equal public results including abpgt_x must pass"
+    );
+
+    db.execute("UPDATE oracle_abpgt_exp SET abpgt_x = 'orange' WHERE id = 2")
+        .await;
+    let changed = oracle::compare_st_to_query(&db, "oracle_abpgt_st", query)
+        .await
+        .expect_err("a changed abpgt_x value must fail");
+    assert_eq!((changed.extra_count, changed.missing_count), (1, 1));
+    assert!(changed.extra_rows[0].contains("banana"));
+    assert!(changed.missing_rows[0].contains("orange"));
+
+    let missing =
+        oracle::compare_st_to_query(&db, "oracle_abpgt_st", "SELECT id FROM oracle_abpgt_exp")
+            .await
+            .expect_err("omitting a visible user column must fail schema comparison");
+    assert!(missing.schema_mismatch.is_some());
+}
+
+#[tokio::test]
+async fn test_oracle_quoted_identifiers_compare_exactly() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE SCHEMA \"Oracle Schema\"",
+        "CREATE TABLE \"Oracle Schema\".\"Actual \"\"Relation\"\"\" (\"Column \"\"Name\"\"\" INT, \"space col\" TEXT)",
+        "CREATE TABLE \"Oracle Schema\".\"Expected \"\"Relation\"\"\" (\"Column \"\"Name\"\"\" INT, \"space col\" TEXT)",
+        "INSERT INTO \"Oracle Schema\".\"Actual \"\"Relation\"\"\" VALUES (1, 'same')",
+        "INSERT INTO \"Oracle Schema\".\"Expected \"\"Relation\"\"\" VALUES (1, 'same')",
+    ])
+    .await;
+
+    let actual = "\"Oracle Schema\".\"Actual \"\"Relation\"\"\"";
+    let query = "SELECT \"Column \"\"Name\"\"\", \"space col\" FROM \"Oracle Schema\".\"Expected \"\"Relation\"\"\"";
+    assert!(
+        oracle::compare_st_to_query(&db, actual, query)
+            .await
+            .is_ok(),
+        "quoted relation and column identifiers must compare"
+    );
+
+    db.execute(
+        "UPDATE \"Oracle Schema\".\"Expected \"\"Relation\"\"\" SET \"space col\" = 'changed'",
+    )
+    .await;
+    let diff = oracle::compare_st_to_query(&db, actual, query)
+        .await
+        .expect_err("a changed quoted column must be detected");
+    assert_eq!((diff.extra_count, diff.missing_count), (1, 1));
+    assert!(diff.extra_rows[0].contains("same"));
+    assert!(diff.missing_rows[0].contains("changed"));
+}
+
+#[tokio::test]
+async fn test_oracle_missing_relation_fails_closed() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE oracle_missing_exp (id INT)").await;
+
+    let missing_actual = oracle::compare_st_to_query(
+        &db,
+        "oracle_missing_actual",
+        "SELECT id FROM oracle_missing_exp WHERE false",
+    )
+    .await
+    .expect_err("a missing actual relation must not compare as an empty relation");
+    assert!(
+        missing_actual
+            .comparison_error
+            .as_deref()
+            .is_some_and(|message| message.contains("oracle_missing_actual"))
+    );
+
+    db.execute("CREATE TABLE oracle_existing_actual (id INT)")
+        .await;
+    let missing_expected = oracle::compare_st_to_query(
+        &db,
+        "oracle_existing_actual",
+        "SELECT id FROM oracle_missing_expected",
+    )
+    .await
+    .expect_err("an invalid expected query must not compare as equal");
+    assert!(missing_expected.comparison_error.is_some());
+}
+
+#[test]
+fn test_oracle_schema_boundaries_reject_mismatch() {
+    let signature = |type_oid, typmod, collation_oid| oracle::RelationSignature {
+        columns: vec![oracle::ColumnSignature {
+            ordinal: 1,
+            name: "value".to_string(),
+            type_oid,
+            typmod,
+            collation_oid,
+        }],
+    };
+
+    assert!(
+        oracle::compare_signatures(&signature(23, -1, None), &signature(20, -1, None)).is_err()
+    );
+    assert!(
+        oracle::compare_signatures(&signature(25, -1, None), &signature(25, 12, None)).is_err()
+    );
+    assert!(
+        oracle::compare_signatures(&signature(25, -1, None), &signature(25, -1, Some(100)))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn test_oracle_query_error_fails_closed() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE oracle_query_error_actual (value INT)")
+        .await;
+    let diff =
+        oracle::compare_st_to_query(&db, "oracle_query_error_actual", "SELECT 1 / 0 AS value")
+            .await
+            .expect_err("a comparator query error must not compare as equal");
+    assert!(diff.comparison_error.is_some());
+}
+
+#[tokio::test]
+async fn test_oracle_null_multiplicity_compares_exactly() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE oracle_null_st (value TEXT)",
+        "CREATE TABLE oracle_null_exp (value TEXT)",
+        "INSERT INTO oracle_null_st VALUES (NULL), (NULL)",
+        "INSERT INTO oracle_null_exp VALUES (NULL)",
+    ])
+    .await;
+
+    let query = "SELECT value FROM oracle_null_exp";
+    let diff = oracle::compare_st_to_query(&db, "oracle_null_st", query)
+        .await
+        .expect_err("NULL multiplicity mismatch must fail");
+    assert_eq!((diff.extra_count, diff.missing_count), (1, 0));
+
+    db.execute("INSERT INTO oracle_null_exp VALUES (NULL)")
+        .await;
+    assert!(
+        oracle::compare_st_to_query(&db, "oracle_null_st", query)
+            .await
+            .is_ok(),
+        "equal NULL bags must pass"
+    );
+}
+
+#[tokio::test]
+async fn test_oracle_public_setop_rows_are_not_reconstructed() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute_seq(&[
+        "CREATE TABLE oracle_setop_a (value INT)",
+        "CREATE TABLE oracle_setop_b (value INT)",
+        "INSERT INTO oracle_setop_a VALUES (1), (2)",
+        "INSERT INTO oracle_setop_b VALUES (2), (3)",
+    ])
+    .await;
+
+    let query = "SELECT value FROM oracle_setop_a EXCEPT SELECT value FROM oracle_setop_b";
+    db.create_st("oracle_setop_st", query, "1m", "FULL").await;
+    assert!(
+        oracle::compare_st_to_query(&db, "oracle_setop_st", query)
+            .await
+            .is_ok()
+    );
+
+    db.execute_seq(&[
+        "ALTER TABLE oracle_setop_st DISABLE TRIGGER ALL",
+        "UPDATE oracle_setop_st SET value = 99 WHERE value = 1",
+        "ALTER TABLE oracle_setop_st ENABLE TRIGGER ALL",
+    ])
+    .await;
+
+    let diff = oracle::compare_st_to_query(&db, "oracle_setop_st", query)
+        .await
+        .expect_err("a corrupted public set-operation row must fail comparison");
+    assert_eq!((diff.extra_count, diff.missing_count), (1, 1));
+    assert!(diff.extra_rows[0].contains("99"));
+    assert!(diff.missing_rows[0].contains("1"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  2. Issue #938 / #939 Sensitivity Baseline Reproductions
 // ═══════════════════════════════════════════════════════════════════════════

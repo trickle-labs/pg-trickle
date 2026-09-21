@@ -224,6 +224,12 @@ async fn test_refresh_aggregate_correctness() {
 
     db.refresh_st("rf_agg_st").await;
 
+    db.assert_st_matches_query(
+        "public.rf_agg_st",
+        "SELECT grp, SUM(amount) AS total, COUNT(*) AS cnt FROM rf_agg GROUP BY grp",
+    )
+    .await;
+
     let total_1: i64 = db
         .query_scalar("SELECT total::bigint FROM public.rf_agg_st WHERE grp = 1")
         .await;

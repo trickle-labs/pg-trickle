@@ -7,6 +7,11 @@
 
 use super::E2eDb;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const JSON_OID: u32 = 114;
+static NEXT_TEMP_VIEW: AtomicU64 = AtomicU64::new(0);
+type RelationColumnRows = Vec<(i64, String, i64, i64, i64)>;
 
 /// Signature of an individual column in a relation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +39,7 @@ pub struct RelationDiff {
     pub extra_rows: Vec<String>,
     pub missing_rows: Vec<String>,
     pub schema_mismatch: Option<String>,
+    pub comparison_error: Option<String>,
     pub actual_signature: RelationSignature,
     pub expected_signature: RelationSignature,
 }
@@ -42,6 +48,9 @@ impl std::fmt::Display for RelationDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ref mismatch) = self.schema_mismatch {
             writeln!(f, "Schema mismatch:\n  {mismatch}")?;
+        }
+        if let Some(ref error) = self.comparison_error {
+            writeln!(f, "Comparator error:\n  {error}")?;
         }
         writeln!(
             f,
@@ -65,6 +74,27 @@ impl std::fmt::Display for RelationDiff {
 }
 
 impl std::error::Error for RelationDiff {}
+
+impl RelationDiff {
+    fn comparison_error(
+        error: impl Into<String>,
+        actual_signature: RelationSignature,
+        expected_signature: RelationSignature,
+    ) -> Self {
+        Self {
+            actual_count: -1,
+            expected_count: -1,
+            extra_count: -1,
+            missing_count: -1,
+            extra_rows: vec![],
+            missing_rows: vec![],
+            schema_mismatch: None,
+            comparison_error: Some(error.into()),
+            actual_signature,
+            expected_signature,
+        }
+    }
+}
 
 /// Fail-closed typed outcome classification for test cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,9 +246,14 @@ pub async fn fetch_relation_signature_from_table(
     db: &E2eDb,
     st_table: &str,
 ) -> Result<RelationSignature, sqlx::Error> {
-    let unquoted = st_table.trim_matches('"');
+    let relation_oid: Option<i64> = sqlx::query_scalar("SELECT to_regclass($1)::oid::int8")
+        .bind(st_table)
+        .fetch_one(&db.pool)
+        .await?;
+    let relation_oid = relation_oid
+        .ok_or_else(|| sqlx::Error::Protocol(format!("relation {st_table:?} does not exist")))?;
 
-    let sql = format!(
+    let rows: Vec<(i64, String, i64, i64, i64)> = sqlx::query_as(
         "SELECT \
             a.attnum::int8 AS ordinal, \
             a.attname::text AS name, \
@@ -226,29 +261,17 @@ pub async fn fetch_relation_signature_from_table(
             a.atttypmod::int8 AS typmod, \
             COALESCE(a.attcollation::int8, 0) AS collation_oid \
          FROM pg_attribute a \
-         WHERE a.attrelid = to_regclass('{unquoted}') \
+         WHERE a.attrelid = $1::oid \
            AND a.attnum > 0 \
            AND NOT a.attisdropped \
-           AND a.attname::text NOT LIKE '__pgt_%' \
-         ORDER BY a.attnum"
-    );
-    let rows: Vec<(i64, String, i64, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .fetch_all(&db.pool)
-        .await?;
+           AND left(a.attname::text, 6) <> '__pgt_' \
+         ORDER BY a.attnum",
+    )
+    .bind(relation_oid)
+    .fetch_all(&db.pool)
+    .await?;
 
-    let columns = rows
-        .into_iter()
-        .enumerate()
-        .map(|(index, (_ord, name, toid, tmod, coll))| ColumnSignature {
-            ordinal: index + 1,
-            name,
-            type_oid: toid as u32,
-            typmod: tmod as i32,
-            collation_oid: if coll > 0 { Some(coll as u32) } else { None },
-        })
-        .collect();
-
-    Ok(RelationSignature { columns })
+    Ok(relation_signature(rows))
 }
 
 /// Extract column metadata for an arbitrary SELECT query by creating a temporary view.
@@ -257,7 +280,11 @@ pub async fn fetch_relation_signature_from_query(
     defining_query: &str,
 ) -> Result<RelationSignature, sqlx::Error> {
     let mut conn = db.pool.acquire().await?;
-    let tmp_view = format!("_pgt_oracle_view_{}", std::process::id());
+    let tmp_view = format!(
+        "_pgt_oracle_view_{}_{}",
+        std::process::id(),
+        NEXT_TEMP_VIEW.fetch_add(1, Ordering::Relaxed)
+    );
     let create_view = format!("CREATE TEMPORARY VIEW {tmp_view} AS {defining_query}");
     sqlx::query(sqlx::AssertSqlSafe(create_view))
         .execute(&mut *conn)
@@ -274,32 +301,45 @@ pub async fn fetch_relation_signature_from_query(
          WHERE a.attrelid = '{tmp_view}'::regclass \
            AND a.attnum > 0 \
            AND NOT a.attisdropped \
-           AND a.attname::text NOT LIKE '__pgt_%' \
+           AND left(a.attname::text, 6) <> '__pgt_' \
          ORDER BY a.attnum"
     );
-    let rows: Vec<(i64, String, i64, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .fetch_all(&mut *conn)
-        .await?;
+    let rows_result: Result<RelationColumnRows, sqlx::Error> =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&mut *conn)
+            .await;
 
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+    let cleanup_result = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP VIEW IF EXISTS {tmp_view}"
     )))
     .execute(&mut *conn)
     .await;
+    let rows = rows_result?;
+    cleanup_result?;
 
-    let columns = rows
-        .into_iter()
-        .enumerate()
-        .map(|(index, (_ord, name, toid, tmod, coll))| ColumnSignature {
-            ordinal: index + 1,
-            name,
-            type_oid: toid as u32,
-            typmod: tmod as i32,
-            collation_oid: if coll > 0 { Some(coll as u32) } else { None },
-        })
-        .collect();
+    Ok(relation_signature(rows))
+}
 
-    Ok(RelationSignature { columns })
+fn relation_signature(rows: Vec<(i64, String, i64, i64, i64)>) -> RelationSignature {
+    RelationSignature {
+        columns: rows
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (_ord, name, type_oid, typmod, collation_oid))| ColumnSignature {
+                    ordinal: index + 1,
+                    name,
+                    type_oid: type_oid as u32,
+                    typmod: typmod as i32,
+                    collation_oid: if collation_oid > 0 {
+                        Some(collation_oid as u32)
+                    } else {
+                        None
+                    },
+                },
+            )
+            .collect(),
+    }
 }
 
 /// Compare two relation signatures for schema equivalence.
@@ -341,17 +381,14 @@ pub fn compare_signatures(
         }
         if !is_type_compatible(act.type_oid, exp.type_oid) {
             return Err(format!(
-                "Column {} ('{}' vs '{}') incompatible type OID: actual={}, expected={}",
+                "Column {} ('{}') incompatible type OID mismatch: actual={}, expected={}",
                 i + 1,
                 act.name,
-                exp.name,
                 act.type_oid,
                 exp.type_oid
             ));
         }
-        // PostgreSQL uses -1 for an unconstrained typmod; it is compatible
-        // with a query result that retains a source column's constraint.
-        if act.typmod >= 0 && exp.typmod >= 0 && act.typmod != exp.typmod {
+        if act.typmod != exp.typmod {
             return Err(format!(
                 "Column {} ('{}') typmod mismatch: actual={}, expected={}",
                 i + 1,
@@ -376,35 +413,44 @@ pub fn compare_signatures(
 
 /// Check if two PostgreSQL type OIDs are compatible for query comparison.
 pub fn is_type_compatible(act_oid: u32, exp_oid: u32) -> bool {
-    if act_oid == exp_oid || act_oid == 0 || exp_oid == 0 {
-        return true;
+    act_oid == exp_oid
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn public_projection(signature: &RelationSignature) -> String {
+    if signature.columns.is_empty() {
+        return "*".to_string();
     }
-    // Integer family (int2=21, int4=23, int8=20, oid=26)
-    let is_int = |oid| matches!(oid, 20 | 21 | 23 | 26);
-    if is_int(act_oid) && is_int(exp_oid) {
-        return true;
-    }
-    // String family (text=25, varchar=1043, bpchar=1042, name=19)
-    let is_str = |oid| matches!(oid, 19 | 25 | 1042 | 1043);
-    if is_str(act_oid) && is_str(exp_oid) {
-        return true;
-    }
-    // Floating-point / numeric family (float4=700, float8=701, numeric=1700)
-    let is_num = |oid| matches!(oid, 700 | 701 | 1700);
-    if (is_int(act_oid) || is_num(act_oid)) && (is_int(exp_oid) || is_num(exp_oid)) {
-        return true;
-    }
-    // Timestamp family (timestamp=1114, timestamptz=1184)
-    let is_ts = |oid| matches!(oid, 1114 | 1184);
-    if is_ts(act_oid) && is_ts(exp_oid) {
-        return true;
-    }
-    // JSON family (json=114, jsonb=3802)
-    let is_json = |oid| matches!(oid, 114 | 3802);
-    if is_json(act_oid) && is_json(exp_oid) {
-        return true;
-    }
-    false
+
+    signature
+        .columns
+        .iter()
+        .map(|column| {
+            let identifier = quote_identifier(&column.name);
+            if column.type_oid == JSON_OID {
+                format!("{identifier}::text AS {identifier}")
+            } else {
+                identifier
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn count_rows(db: &E2eDb, query: String) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+        .fetch_one(&db.pool)
+        .await
+}
+
+async fn sample_rows(db: &E2eDb, query: String) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .fetch_all(&db.pool)
+        .await?;
+    Ok(rows.into_iter().map(|(row,)| row).collect())
 }
 
 /// Compare a stream table's content and schema against a defining query.
@@ -413,26 +459,38 @@ pub async fn compare_st_to_query(
     st_table: &str,
     defining_query: &str,
 ) -> Result<(), RelationDiff> {
-    let actual_sig = fetch_relation_signature_from_table(db, st_table)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to fetch signature for table '{st_table}': {e}"));
+    let actual_sig = match fetch_relation_signature_from_table(db, st_table).await {
+        Ok(signature) => signature,
+        Err(error) => {
+            return Err(RelationDiff::comparison_error(
+                format!("Failed to inspect actual relation '{st_table}': {error}"),
+                RelationSignature { columns: vec![] },
+                RelationSignature { columns: vec![] },
+            ));
+        }
+    };
 
-    let expected_sig = fetch_relation_signature_from_query(db, defining_query)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to fetch signature for query '{defining_query}': {e}"));
+    let expected_sig = match fetch_relation_signature_from_query(db, defining_query).await {
+        Ok(signature) => signature,
+        Err(error) => {
+            return Err(RelationDiff::comparison_error(
+                format!("Failed to inspect expected query: {error}"),
+                actual_sig,
+                RelationSignature { columns: vec![] },
+            ));
+        }
+    };
 
     let schema_mismatch = compare_signatures(&actual_sig, &expected_sig).err();
 
-    // If there is any schema mismatch (arity or incompatible type), build early diff
+    // Schema mismatches are already a definitive failure; counts are diagnostic only.
     if let Some(ref mismatch) = schema_mismatch {
-        let actual_count: i64 = db
-            .query_scalar_opt(&format!("SELECT count(*) FROM {st_table}"))
+        let actual_count = count_rows(db, format!("SELECT count(*) FROM {st_table}"))
             .await
-            .unwrap_or(0);
-        let expected_count: i64 = db
-            .query_scalar_opt(&format!("SELECT count(*) FROM ({defining_query}) _q"))
+            .unwrap_or(-1);
+        let expected_count = count_rows(db, format!("SELECT count(*) FROM ({defining_query}) _q"))
             .await
-            .unwrap_or(0);
+            .unwrap_or(-1);
 
         return Err(RelationDiff {
             actual_count,
@@ -442,80 +500,17 @@ pub async fn compare_st_to_query(
             extra_rows: vec![],
             missing_rows: vec![],
             schema_mismatch: Some(mismatch.clone()),
+            comparison_error: None,
             actual_signature: actual_sig,
             expected_signature: expected_sig,
         });
     }
 
-    // Check whether the ST has dual-count columns (__pgt_count_l, __pgt_count_r)
-    let has_dual_counts: bool = db
-        .query_scalar(&format!(
-            "SELECT EXISTS( \
-                SELECT 1 FROM information_schema.columns \
-                WHERE (table_schema || '.' || table_name = '{st_table}' \
-                   OR table_name = '{st_table}') \
-                AND column_name = '__pgt_count_l')"
-        ))
-        .await;
-
-    let dq_upper = defining_query.to_uppercase();
-    let st_relation = if has_dual_counts {
-        if dq_upper.contains("INTERSECT ALL") {
-            format!(
-                "{st_table} CROSS JOIN generate_series(1, LEAST(__pgt_count_l, __pgt_count_r)::integer) WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
-            )
-        } else if dq_upper.contains("INTERSECT") {
-            format!("{st_table} WHERE __pgt_count_l > 0 AND __pgt_count_r > 0")
-        } else if dq_upper.contains("EXCEPT ALL") {
-            format!(
-                "{st_table} CROSS JOIN generate_series(1, GREATEST(0, __pgt_count_l - __pgt_count_r)::integer) WHERE GREATEST(0, __pgt_count_l - __pgt_count_r) > 0"
-            )
-        } else if dq_upper.contains("EXCEPT") {
-            format!("{st_table} WHERE __pgt_count_l > 0 AND __pgt_count_r = 0")
-        } else {
-            st_table.to_string()
-        }
-    } else {
-        st_table.to_string()
-    };
-
-    // Build casted projection columns for json compatibility with EXCEPT ALL
-    let st_select_cols = if actual_sig.columns.is_empty() {
-        "*".to_string()
-    } else {
-        actual_sig
-            .columns
-            .iter()
-            .map(|c| {
-                if c.type_oid == 114 {
-                    format!("{}::text AS {}", c.name, c.name)
-                } else {
-                    c.name.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let exp_select_cols = if expected_sig.columns.is_empty() {
-        "*".to_string()
-    } else {
-        expected_sig
-            .columns
-            .iter()
-            .map(|c| {
-                if c.type_oid == 114 {
-                    format!("{}::text AS {}", c.name, c.name)
-                } else {
-                    c.name.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let actual_subquery = format!("SELECT {st_select_cols} FROM {st_relation}");
-    let expected_subquery = format!("SELECT {exp_select_cols} FROM ({defining_query}) __pgt_dq");
+    let actual_subquery = format!("SELECT {} FROM {st_table}", public_projection(&actual_sig));
+    let expected_subquery = format!(
+        "SELECT {} FROM ({defining_query}) __pgt_dq",
+        public_projection(&expected_sig)
+    );
 
     let count_query = format!(
         "SELECT \
@@ -526,38 +521,57 @@ pub async fn compare_st_to_query(
     );
 
     let (actual_count, expected_count, extra_count, missing_count): (i64, i64, i64, i64) =
-        sqlx::query_as(sqlx::AssertSqlSafe(count_query))
+        match sqlx::query_as(sqlx::AssertSqlSafe(count_query))
             .fetch_one(&db.pool)
             .await
-            .unwrap_or_else(|e| panic!("Multiset diff query failed for '{st_table}': {e}"));
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                return Err(RelationDiff::comparison_error(
+                    format!("Multiset diff query failed for '{st_table}': {error}"),
+                    actual_sig,
+                    expected_sig,
+                ));
+            }
+        };
 
     if extra_count == 0 && missing_count == 0 && schema_mismatch.is_none() {
         return Ok(());
     }
 
     // Fetch up to 10 sample extra and missing rows for diagnostic reporting
-    let extra_rows: Vec<String> = if extra_count > 0 {
-        let sql = format!(
+    let extra_rows = if extra_count > 0 {
+        let query = format!(
             "SELECT row_to_json(t)::text FROM (({actual_subquery}) EXCEPT ALL ({expected_subquery})) t LIMIT 10"
         );
-        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&db.pool)
-            .await
-            .unwrap_or_default();
-        rows.into_iter().map(|(r,)| r).collect()
+        match sample_rows(db, query).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Err(RelationDiff::comparison_error(
+                    format!("Extra-row diagnostic query failed for '{st_table}': {error}"),
+                    actual_sig,
+                    expected_sig,
+                ));
+            }
+        }
     } else {
         vec![]
     };
 
-    let missing_rows: Vec<String> = if missing_count > 0 {
-        let sql = format!(
+    let missing_rows = if missing_count > 0 {
+        let query = format!(
             "SELECT row_to_json(t)::text FROM (({expected_subquery}) EXCEPT ALL ({actual_subquery})) t LIMIT 10"
         );
-        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&db.pool)
-            .await
-            .unwrap_or_default();
-        rows.into_iter().map(|(r,)| r).collect()
+        match sample_rows(db, query).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Err(RelationDiff::comparison_error(
+                    format!("Missing-row diagnostic query failed for '{st_table}': {error}"),
+                    actual_sig,
+                    expected_sig,
+                ));
+            }
+        }
     } else {
         vec![]
     };
@@ -570,6 +584,7 @@ pub async fn compare_st_to_query(
         extra_rows,
         missing_rows,
         schema_mismatch,
+        comparison_error: None,
         actual_signature: actual_sig,
         expected_signature: expected_sig,
     })
@@ -577,24 +592,36 @@ pub async fn compare_st_to_query(
 
 /// Compare two stream tables as multisets using symmetric EXCEPT ALL.
 pub async fn compare_sts(db: &E2eDb, left_st: &str, right_st: &str) -> Result<(), RelationDiff> {
-    let left_sig = fetch_relation_signature_from_table(db, left_st)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to fetch signature for left ST '{left_st}': {e}"));
+    let left_sig = match fetch_relation_signature_from_table(db, left_st).await {
+        Ok(signature) => signature,
+        Err(error) => {
+            return Err(RelationDiff::comparison_error(
+                format!("Failed to inspect left relation '{left_st}': {error}"),
+                RelationSignature { columns: vec![] },
+                RelationSignature { columns: vec![] },
+            ));
+        }
+    };
 
-    let right_sig = fetch_relation_signature_from_table(db, right_st)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to fetch signature for right ST '{right_st}': {e}"));
+    let right_sig = match fetch_relation_signature_from_table(db, right_st).await {
+        Ok(signature) => signature,
+        Err(error) => {
+            return Err(RelationDiff::comparison_error(
+                format!("Failed to inspect right relation '{right_st}': {error}"),
+                left_sig,
+                RelationSignature { columns: vec![] },
+            ));
+        }
+    };
 
     let schema_mismatch = compare_signatures(&left_sig, &right_sig).err();
     if let Some(ref mismatch) = schema_mismatch {
-        let left_count: i64 = db
-            .query_scalar_opt(&format!("SELECT count(*) FROM {left_st}"))
+        let left_count = count_rows(db, format!("SELECT count(*) FROM {left_st}"))
             .await
-            .unwrap_or(0);
-        let right_count: i64 = db
-            .query_scalar_opt(&format!("SELECT count(*) FROM {right_st}"))
+            .unwrap_or(-1);
+        let right_count = count_rows(db, format!("SELECT count(*) FROM {right_st}"))
             .await
-            .unwrap_or(0);
+            .unwrap_or(-1);
 
         return Err(RelationDiff {
             actual_count: left_count,
@@ -604,27 +631,13 @@ pub async fn compare_sts(db: &E2eDb, left_st: &str, right_st: &str) -> Result<()
             extra_rows: vec![],
             missing_rows: vec![],
             schema_mismatch: Some(mismatch.clone()),
+            comparison_error: None,
             actual_signature: left_sig,
             expected_signature: right_sig,
         });
     }
 
-    let select_cols = if left_sig.columns.is_empty() {
-        "*".to_string()
-    } else {
-        left_sig
-            .columns
-            .iter()
-            .map(|c| {
-                if c.type_oid == 114 {
-                    format!("{}::text AS {}", c.name, c.name)
-                } else {
-                    c.name.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let select_cols = public_projection(&left_sig);
 
     let left_subquery = format!("SELECT {select_cols} FROM {left_st}");
     let right_subquery = format!("SELECT {select_cols} FROM {right_st}");
@@ -638,39 +651,60 @@ pub async fn compare_sts(db: &E2eDb, left_st: &str, right_st: &str) -> Result<()
     );
 
     let (actual_count, expected_count, extra_count, missing_count): (i64, i64, i64, i64) =
-        sqlx::query_as(sqlx::AssertSqlSafe(count_query))
+        match sqlx::query_as(sqlx::AssertSqlSafe(count_query))
             .fetch_one(&db.pool)
             .await
-            .unwrap_or_else(|e| {
-                panic!("Multiset diff query failed for '{left_st}' vs '{right_st}': {e}")
-            });
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                return Err(RelationDiff::comparison_error(
+                    format!("Multiset diff query failed for '{left_st}' vs '{right_st}': {error}"),
+                    left_sig,
+                    right_sig,
+                ));
+            }
+        };
 
     if extra_count == 0 && missing_count == 0 && schema_mismatch.is_none() {
         return Ok(());
     }
 
-    let extra_rows: Vec<String> = if extra_count > 0 {
-        let sql = format!(
+    let extra_rows = if extra_count > 0 {
+        let query = format!(
             "SELECT row_to_json(t)::text FROM (({left_subquery}) EXCEPT ALL ({right_subquery})) t LIMIT 10"
         );
-        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&db.pool)
-            .await
-            .unwrap_or_default();
-        rows.into_iter().map(|(r,)| r).collect()
+        match sample_rows(db, query).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Err(RelationDiff::comparison_error(
+                    format!(
+                        "Extra-row diagnostic query failed for '{left_st}' vs '{right_st}': {error}"
+                    ),
+                    left_sig,
+                    right_sig,
+                ));
+            }
+        }
     } else {
         vec![]
     };
 
-    let missing_rows: Vec<String> = if missing_count > 0 {
-        let sql = format!(
+    let missing_rows = if missing_count > 0 {
+        let query = format!(
             "SELECT row_to_json(t)::text FROM (({right_subquery}) EXCEPT ALL ({left_subquery})) t LIMIT 10"
         );
-        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&db.pool)
-            .await
-            .unwrap_or_default();
-        rows.into_iter().map(|(r,)| r).collect()
+        match sample_rows(db, query).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Err(RelationDiff::comparison_error(
+                    format!(
+                        "Missing-row diagnostic query failed for '{left_st}' vs '{right_st}': {error}"
+                    ),
+                    left_sig,
+                    right_sig,
+                ));
+            }
+        }
     } else {
         vec![]
     };
@@ -683,6 +717,7 @@ pub async fn compare_sts(db: &E2eDb, left_st: &str, right_st: &str) -> Result<()
         extra_rows,
         missing_rows,
         schema_mismatch,
+        comparison_error: None,
         actual_signature: left_sig,
         expected_signature: right_sig,
     })
@@ -779,7 +814,7 @@ mod tests {
     #[test]
     fn schema_oracle_checks_names_typmods_and_collations() {
         let expected = signature("value", 12, Some(100));
-        assert!(compare_signatures(&signature("value", -1, Some(100)), &expected).is_ok());
+        assert!(compare_signatures(&signature("value", -1, Some(100)), &expected).is_err());
         for actual in [
             signature("other", 12, Some(100)),
             signature("value", 13, Some(100)),
@@ -790,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_oracle_keeps_postgres_type_family_compatibility() {
+    fn schema_oracle_rejects_type_differences_by_default() {
         let actual = RelationSignature {
             columns: vec![ColumnSignature {
                 ordinal: 1,
@@ -809,7 +844,7 @@ mod tests {
                 collation_oid: None,
             }],
         };
-        assert!(compare_signatures(&actual, &expected).is_ok());
+        assert!(compare_signatures(&actual, &expected).is_err());
     }
 
     #[test]
