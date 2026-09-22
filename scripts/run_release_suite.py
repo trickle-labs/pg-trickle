@@ -83,6 +83,7 @@ def machine_case_attempts(output: str, required_cases: list[str]) -> list[list[d
         name = message.get("name")
         if not isinstance(name, str):
             continue
+        name = re.sub(r"#\d+$", "", name)
         for identity in required_cases:
             binary, test_name = identity.split("::", 1)
             if name.endswith(f"::{binary}${test_name}"):
@@ -325,9 +326,6 @@ def main() -> int:
                 or any(case["status"] != "passed" for attempt in attempt_case_results for case in attempt)
             ):
                 status = "failed"
-            if completed.returncode == 0 and suite.get("requires_postgresql", False) and postgres_version is None:
-                status = "failed"
-                print("ERROR: suite did not report the actual PostgreSQL server version", file=sys.stderr)
             if completed.returncode == 0 and suite.get("kind") == "test" and executed == 0:
                 status = "failed"
                 print("ERROR: required test suite executed zero tests", file=sys.stderr)
@@ -340,9 +338,29 @@ def main() -> int:
                 if not isinstance(raw_attestations, list):
                     raise ValueError("release installation attestation must contain a list")
                 installation_observations = raw_attestations
+            if postgres_version is None and installation_observations:
+                versions = {
+                    observation.get("server", {}).get("server_version")
+                    for observation in installation_observations
+                    if isinstance(observation, dict) and isinstance(observation.get("server"), dict)
+                }
+                if len(versions) == 1:
+                    postgres_version = versions.pop()
+            if suite.get("requires_postgresql") and not postgres_version:
+                status = "failed"
+                print("ERROR: suite did not report the actual PostgreSQL server version", file=sys.stderr)
             if suite.get("runtime") and not installation_observations:
                 status = "failed"
                 print("ERROR: runtime suite did not attest an installed candidate payload", file=sys.stderr)
+            if suite.get("runtime") and any(
+                not isinstance(observation, dict)
+                or observation.get("installed_files") != candidate_manifest["files"]
+                or not isinstance(observation.get("server"), dict)
+                or observation["server"].get("fresh_postmaster") is not True
+                for observation in installation_observations
+            ):
+                status = "failed"
+                print("ERROR: runtime suite did not use a fresh installation of the candidate payload", file=sys.stderr)
 
         server_configuration = [
             observation.get("server", {}).get("settings", {})
@@ -357,6 +375,8 @@ def main() -> int:
         }
         if not attempt_case_results:
             attempt_case_results = [[]]
+        if required_cases:
+            skipped = sum(case["status"] in {"skipped", "missing"} for case in observed_case_results)
         attempts = [
             {
                 "attempt": index,

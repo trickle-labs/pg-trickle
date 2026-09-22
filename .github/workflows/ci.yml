@@ -342,6 +342,46 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  release-evidence-runtime:
+    name: Release evidence runtime controls
+    needs: light-e2e-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+               "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Download extension package
+        uses: actions/download-artifact@v8
+        with:
+          name: light-e2e-package
+          path: target/release
+
+      - name: Prove package identity and required case controls
+        run: |
+          python3 scripts/run_release_proof.py \
+            --package-dir target/release/pg_trickle-pg18 \
+            --candidate-commit "$GITHUB_SHA"
+
+      - name: Upload release proof records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-proof-controls
+          path: target/release-proof/
+          retention-days: 30
+          if-no-files-found: ignore
+
   # ── Light-E2E tests (stock postgres container, PR-friendly) ──────────────
   # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.3
   # container. No custom Docker image build needed. The curated allowlist

@@ -104,7 +104,12 @@ def validate_case_evidence(result: dict[str, object], spec: dict[str, object]) -
         return
     selected = result.get("selected_cases")
     if selected != required:
-        raise ValueError(f"suite {result.get('suite_id')!r} selected cases do not match the contract")
+        selected_ids = {case for case in selected if isinstance(case, str)} if isinstance(selected, list) else set()
+        raise ValueError(
+            f"suite {result.get('suite_id')!r} selected cases do not match the contract: "
+            f"missing={sorted(set(required) - selected_ids)}, "
+            f"unexpected={sorted(selected_ids - set(required))}"
+        )
     observed = result.get("observed_cases")
     if not isinstance(observed, list):
         raise ValueError(f"suite {result.get('suite_id')!r} has no observed case outcomes")
@@ -116,7 +121,11 @@ def validate_case_evidence(result: dict[str, object], spec: dict[str, object]) -
         if case.get("status") != "passed":
             raise ValueError(f"required case {case['id']!r} did not pass")
     if len(observed_ids) != len(set(observed_ids)) or set(observed_ids) != set(required):
-        raise ValueError(f"suite {result.get('suite_id')!r} has missing or unexpected observed cases")
+        raise ValueError(
+            f"suite {result.get('suite_id')!r} has missing or unexpected observed cases: "
+            f"missing={sorted(set(required) - set(observed_ids))}, "
+            f"unexpected={sorted(set(observed_ids) - set(required))}"
+        )
 
 
 def validate_case_log(result: dict[str, object], spec: dict[str, object], output: str) -> None:
@@ -237,6 +246,8 @@ def validate_installation(
             raise ValueError(f"runtime suite {result.get('suite_id')!r} did not use a fresh PostgreSQL process")
         if not str(server.get("server_version", "")).startswith("18."):
             raise ValueError(f"runtime suite {result.get('suite_id')!r} used an unsupported PostgreSQL server")
+        if str(server["server_version"]).split(" ", 1)[0] != str(result.get("postgresql_version", "")).split(" ", 1)[0]:
+            raise ValueError(f"runtime suite {result.get('suite_id')!r} PostgreSQL version differs from its server")
         settings = server.get("settings")
         if not isinstance(settings, dict) or any(
             settings.get(key) != expected for key, expected in database_settings.items()
@@ -431,10 +442,10 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
             if not isinstance(result.get("selected_cases"), list) or not result["selected_cases"] and spec.get("required_cases"):
                 raise ValueError(f"suite {suite_id!r} has an empty case selection")
             validate_case_evidence(result, spec)
-        if "attempts" in required_fields:
-            validate_attempts(result, spec)
         if "installation_observations" in required_fields:
             validate_installation(result, spec, artifact, contract.get("database_settings", {}))
+        if "attempts" in required_fields:
+            validate_attempts(result, spec)
 
         log = result.get("log")
         if not isinstance(log, dict) or not isinstance(log.get("path"), str):
@@ -725,26 +736,27 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
                     })
 
     failed_budgets = [item["id"] for item in budget_results if item["verdict"] != "passed"]
-    global_write_budget = next(item for item in contract["performance_budgets"] if item["id"] == "foreground-write-overhead")
-    write_overheads = [
-        item["value"] for item in budget_results
-        if item["id"].endswith("source-write-p50-overhead")
-    ]
-    if not write_overheads:
-        raise ValueError("database workload evidence did not evaluate source-write overhead")
-    maximum_write_overhead = max(write_overheads)
-    budget_results.append({
-        "id": global_write_budget["id"],
-        "metric": global_write_budget["metric"],
-        "baseline": "capture-only p50 per workload",
-        "measured": maximum_write_overhead,
-        "value": maximum_write_overhead,
-        "threshold": global_write_budget["threshold"],
-        "unit": global_write_budget["unit"],
-        "verdict": "passed" if maximum_write_overhead <= global_write_budget["threshold"] else "failed",
-    })
-    if maximum_write_overhead > global_write_budget["threshold"]:
-        failed_budgets.append(global_write_budget["id"])
+    if contract.get("performance_budgets"):
+        global_write_budget = next(item for item in contract["performance_budgets"] if item["id"] == "foreground-write-overhead")
+        write_overheads = [
+            item["value"] for item in budget_results
+            if item["id"].endswith("source-write-p50-overhead")
+        ]
+        if not write_overheads:
+            raise ValueError("database workload evidence did not evaluate source-write overhead")
+        maximum_write_overhead = max(write_overheads)
+        budget_results.append({
+            "id": global_write_budget["id"],
+            "metric": global_write_budget["metric"],
+            "baseline": "capture-only p50 per workload",
+            "measured": maximum_write_overhead,
+            "value": maximum_write_overhead,
+            "threshold": global_write_budget["threshold"],
+            "unit": global_write_budget["unit"],
+            "verdict": "passed" if maximum_write_overhead <= global_write_budget["threshold"] else "failed",
+        })
+        if maximum_write_overhead > global_write_budget["threshold"]:
+            failed_budgets.append(global_write_budget["id"])
     incomplete_artifacts = [
         artifact_id for artifact_id, artifact in artifacts.items()
         if artifact["support_tier"] == "runtime-qualified"

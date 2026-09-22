@@ -58,6 +58,7 @@ echo "Full E2E run id: ${PGT_E2E_RUN_ID}"
 if [[ "${PGT_RELEASE_MACHINE_FORMAT:-0}" == "1" ]]; then
     NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "$@" \
         --message-format libtest-json-plus \
+        --no-fail-fast \
         --retries "${PGT_RELEASE_NEXTEST_RETRIES:-2}"
 elif [[ "${PGT_DISABLE_NEXTEST:-0}" == "1" ]]; then
     cargo_test_args=(--nocapture)

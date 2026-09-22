@@ -488,6 +488,7 @@ if [[ "${PGT_RELEASE_MACHINE_FORMAT:-0}" == "1" ]]; then
     fi
     NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${cargo_args[@]}" \
         --message-format libtest-json-plus \
+        --no-fail-fast \
         --retries "${PGT_RELEASE_NEXTEST_RETRIES:-2}"
 elif command -v cargo-nextest >/dev/null 2>&1 && [[ "${PGT_DISABLE_NEXTEST:-0}" != "1" ]]; then
     if [[ "$ignored_only" == true ]]; then

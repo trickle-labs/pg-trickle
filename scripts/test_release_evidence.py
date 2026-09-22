@@ -33,6 +33,17 @@ class ReleaseEvidenceTests(unittest.TestCase):
             [[{"id": case, "status": "passed"}]],
         )
 
+    def test_machine_case_parser_keeps_retried_failures(self) -> None:
+        name = "pg_trickle::e2e_example_tests$test_required_case"
+        output = "\n".join(
+            f'{{"type":"test","event":"{event}","name":"{name}#{attempt}"}}'
+            for event, attempt in (("failed", 1), ("ok", 2))
+        )
+        self.assertEqual(
+            machine_case_attempts(output, [CASE]),
+            [[{"id": CASE, "status": "failed"}], [{"id": CASE, "status": "passed"}]],
+        )
+
     def test_required_case_omission_is_rejected(self) -> None:
         result = {
             "suite_id": "example",

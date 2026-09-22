@@ -133,7 +133,7 @@ def main() -> int:
     server = server_observation(args.container)
     observed = installed_files(args.container, files)
     if observed != files:
-        raise ValueError("installed PostgreSQL payload differs from the candidate payload")
+        print("ERROR: installed PostgreSQL payload differs from the candidate payload", flush=True)
     append_observation(
         args.output.resolve(),
         {
