@@ -2693,7 +2693,7 @@ true` only when disk exhaustion is an immediate risk.
 ALTER SYSTEM SET pg_trickle.enforce_backpressure = true;
 SELECT pg_reload_conf();
 -- After clearing: reinitialize affected stream tables
-SELECT pgtrickle.refresh_stream_table('my_stream', 'FULL');
+SELECT pgtrickle.reinitialize_stream_table('my_stream');
 ```
 
 ---
@@ -2815,8 +2815,9 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 - `"discard"` (default): CDC trigger bodies return `NULL`; changes arriving
   while paused are **dropped**. Stream tables must be reinitialized after
   un-pausing to recover from the data gap.
-- `"hold"`: Reserved for a future durable capture-and-hold mode. Currently
-  emits a `WARNING` and falls back to `"discard"`.
+- `"hold"`: CDC triggers keep writing to the logged change buffers while the
+  scheduler and manual refreshes are paused. Changes are consumed after
+  un-pausing.
 
 > **Operator checklist:** Before setting `cdc_paused = on`, check
 > `pgtrickle.cdc_pause_status()` to confirm the active mode. After
@@ -2827,7 +2828,7 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 |---|---|
 | Type | `string` |
 | Default | `discard` |
-| Valid values | `discard`, `hold` (reserved) |
+| Valid values | `discard`, `hold` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
 
@@ -2835,15 +2836,14 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 -- Check the current CDC pause status
 SELECT * FROM pgtrickle.cdc_pause_status();
 
--- Pause CDC (discard mode — changes arriving now are DROPPED)
+-- Pause CDC without losing committed changes
+ALTER SYSTEM SET pg_trickle.cdc_capture_mode = 'hold';
 ALTER SYSTEM SET pg_trickle.cdc_paused = on;
 SELECT pg_reload_conf();
 
--- After maintenance, un-pause and reinitialize affected tables
+-- After maintenance, un-pause and let differential refresh catch up
 ALTER SYSTEM SET pg_trickle.cdc_paused = off;
 SELECT pg_reload_conf();
--- Full refresh to recover from the gap:
-SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
 ```
 
 ---
@@ -3112,14 +3112,14 @@ SET pg_trickle.change_buffer_durability = 'unlogged'; -- faster, not crash-safe
 | **Default** | `false` |
 
 Global switch to temporarily stop capturing DML changes into change buffers.
-When `on`, the trigger returns without recording changes. Both `discard` and
-the reserved `hold` setting currently discard changes. This cannot provide a
-durable pause.
+When `on`, `discard` mode stops capture and loses the interval. `hold` mode
+keeps capture active and pauses refresh consumption, so committed changes stay
+in the logged buffer.
 
 Use `pgtrickle.cdc_pause_status()` to inspect the current state.
 
-For maintenance that must preserve committed changes, leave `cdc_paused = off`
-and pause scheduling instead. Monitor change-buffer growth while refresh is
+For maintenance that must preserve committed changes, set
+`cdc_capture_mode = 'hold'`. Monitor change-buffer growth while refresh is
 paused. After any use of discard mode, reinitialize all affected stream tables
 before relying on their contents.
 

@@ -341,6 +341,22 @@ fn register_change_buffer(
         reason: format!("registry insert failed: {e}"),
     })?;
 
+    // A logical dump can restore an old stable-name buffer with a sentinel
+    // for a different relation OID. Keep real CDC rows, but replace all
+    // synthetic markers so validation sees exactly the current sentinel.
+    let clear_sentinels = format!("DELETE FROM {change_schema}.{buffer_name} WHERE action = 'S'");
+    Spi::run(&clear_sentinels) // nosemgrep: rust.spi.run.dynamic-format — schema and buffer_name are extension-generated identifiers.
+        .map_err(|e| PgTrickleError::CdcStateInvalid {
+            pgt_id: if source_kind == "STREAM_TABLE" {
+                source_id
+            } else {
+                0
+            },
+            source_name: source_kind.to_string(),
+            buffer: buffer_name.to_string(),
+            reason: format!("sentinel cleanup failed: {e}"),
+        })?;
+
     let sql = format!(
         "INSERT INTO {change_schema}.{buffer_name} (lsn, action, __pgt_row_id) \
          SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)) \
@@ -910,8 +926,10 @@ pub fn create_change_trigger(
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              {sync_guard}
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              INSERT INTO {change_schema}.changes_{name}
@@ -2336,8 +2354,10 @@ fn build_row_trigger_fn_sql(
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              IF TG_OP = 'INSERT' THEN
@@ -2446,8 +2466,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
@@ -2477,8 +2499,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              -- D-row (OLD values) — must be emitted before I-row.
@@ -2538,8 +2562,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              -- Pair stable keys and PK-changing UPDATEs once, then emit D before I.
@@ -2581,8 +2607,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}

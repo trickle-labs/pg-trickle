@@ -107,11 +107,75 @@ SELECT pgtrickle.recover_capture_instance();
 ```
 
 Adoption does not remap source relation OIDs. If a logical restore changed those
-OIDs, recreate the affected stream tables from their saved definitions in
-dependency order. Neither `repair_stream_table()` nor
-`reinitialize_stream_table()` repairs that mapping. Reinitialization is suitable
-only when the registered relations still identify the intended source tables.
-Keep application writes and scheduling stopped until recovery validation passes.
+OIDs, recreate the stream-table DAG from saved definitions. Neither
+`repair_stream_table()` nor `reinitialize_stream_table()` repairs that mapping.
+Reinitialization is suitable only when the registered relations still identify
+the intended source tables.
+
+### Supported logical-restore recreation workflow
+
+Run this with application writes and scheduling stopped. Export each definition
+before the dump; `export_definition()` includes the configured create and alter
+options:
+
+```sql
+SELECT pgt_id,
+       pgt_schema || '.' || pgt_name AS stream_table,
+       pgtrickle.export_definition(pgt_schema || '.' || pgt_name) AS ddl
+FROM pgtrickle.pgt_stream_tables
+ORDER BY pgt_id;
+```
+
+Recreate a multi-level DAG in dependency order. The following query produces
+that order for an acyclic graph; it must return every stream table. A missing
+row means the graph contains a cycle and needs a manual, cycle-specific plan.
+
+```sql
+WITH RECURSIVE edges AS (
+    SELECT d.pgt_id AS downstream_id, upstream.pgt_id AS upstream_id
+    FROM pgtrickle.pgt_dependencies d
+    JOIN pgtrickle.pgt_stream_tables upstream
+      ON upstream.pgt_relid = d.source_relid
+    WHERE d.source_type = 'STREAM_TABLE'
+), walk(pgt_id, depth) AS (
+    SELECT st.pgt_id, 0
+    FROM pgtrickle.pgt_stream_tables st
+    WHERE NOT EXISTS (
+        SELECT 1 FROM edges e WHERE e.downstream_id = st.pgt_id
+    )
+  UNION ALL
+    SELECT e.downstream_id, w.depth + 1
+    FROM walk w
+    JOIN edges e ON e.upstream_id = w.pgt_id
+), order_by_dependency AS (
+    SELECT pgt_id, max(depth) AS depth
+    FROM walk
+    GROUP BY pgt_id
+)
+SELECT st.pgt_schema || '.' || st.pgt_name AS stream_table,
+       o.depth
+FROM order_by_dependency o
+JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+ORDER BY o.depth, st.pgt_id;
+```
+
+After `pg_restore` and explicit adoption, drop all restored stream tables in
+the reverse order returned above (use `bulk_drop_stream_tables()` or
+`exec_stream_ddl()`; `DROP STREAM TABLE` is pg_trickle syntax, not PostgreSQL
+syntax). Then remove the leading `DROP STREAM TABLE IF EXISTS` line from each
+saved export and run the remaining `create_stream_table()`/`ALTER` statements
+in the forward order. Finally rebuild capture and validate:
+
+```sql
+SELECT pgtrickle.rebuild_cdc_triggers();
+SELECT pgtrickle.validate_recovery();
+SELECT pgtrickle.pgt_status();
+```
+
+Only resume application writes and scheduling after recovery reports `SAFE` and
+each recreated stream table matches its defining query. This deliberately
+rebuilds frontiers and CDC state instead of guessing how old OIDs map to new
+relations.
 
 Do not guess from similarly named relations or reuse the source database's
 capture slots and frontiers.

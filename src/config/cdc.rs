@@ -287,10 +287,9 @@ pub static PGS_ENFORCE_BACKPRESSURE: GucSetting<bool> = GucSetting::<bool>::new(
 ///   reinitialized after un-pausing to recover from the data gap. This is the
 ///   legacy `cdc_paused` behaviour.
 ///
-/// - `"hold"`: Future mode — intended to keep CDC triggers active but pause
-///   the scheduler from consuming the change buffer. Changes accumulate in the
-///   buffer and are processed when the pause is lifted. **Not yet implemented;**
-///   setting this emits a WARNING and falls back to `"discard"`.
+/// - `"hold"`: Keep CDC capture active and pause the scheduler from consuming
+///   the change buffer. Changes accumulate in the buffer and are processed
+///   when the pause is lifted.
 ///
 /// Default: `"discard"`.
 ///
@@ -303,7 +302,7 @@ pub static PGS_CDC_CAPTURE_MODE: GucSetting<Option<std::ffi::CString>> =
 pub enum CdcCaptureMode {
     /// Changes are discarded while paused. Reinit required after un-pause.
     Discard,
-    /// (Future) Changes accumulate in the buffer while refreshes are paused.
+    /// Changes accumulate in the buffer while refreshes are paused.
     Hold,
 }
 
@@ -640,12 +639,12 @@ pub fn register_cdc_gucs() {
     // O39-8 (v0.39.0): CDC capture mode — explicit discard vs hold semantics.
     GucRegistry::define_string_guc(
         c"pg_trickle.cdc_capture_mode",
-        c"O39-8: CDC capture mode when cdc_paused=on: 'discard' (default) or 'hold' (reserved).",
+        c"O39-8: CDC capture mode when cdc_paused=on: 'discard' (default) or lossless 'hold'.",
         c"Controls what happens to CDC writes while pg_trickle.cdc_paused=on. \
           'discard' (default): trigger bodies return NULL; changes arriving while \
           paused are dropped — stream tables MUST be reinitialized after un-pausing. \
-          'hold': reserved for future use; setting this emits a WARNING and falls back \
-          to 'discard' until a durable hold path is implemented. \
+          'hold': keep capture active while refresh scheduling is paused; changes \
+          accumulate in the logged buffer until the pause is lifted. \
           Check pgtrickle.cdc_pause_status() to see the active mode.",
         &PGS_CDC_CAPTURE_MODE,
         GucContext::Suset,
@@ -854,23 +853,12 @@ pub fn pg_trickle_enforce_backpressure() -> bool {
 /// O39-8 (v0.39.0): Returns the active CDC capture mode.
 ///
 /// When `cdc_paused = on`, this determines whether changes are discarded (default)
-/// or held for later processing. `Hold` mode is reserved; if configured, a WARNING
-/// is emitted and the function returns `Discard`.
+/// or held for later processing.
 pub fn pg_trickle_cdc_capture_mode() -> CdcCaptureMode {
     let raw = PGS_CDC_CAPTURE_MODE
         .get()
         .and_then(|s| s.to_str().ok().map(|v| v.to_string()));
-    let mode = normalize_cdc_capture_mode(raw);
-    if mode == CdcCaptureMode::Hold {
-        pgrx::warning!(
-            "pg_trickle: cdc_capture_mode='hold' is not yet implemented. \
-             Falling back to 'discard'. Changes arriving while cdc_paused=on \
-             will be dropped — reinitialize stream tables after un-pausing."
-        );
-        CdcCaptureMode::Discard
-    } else {
-        mode
-    }
+    normalize_cdc_capture_mode(raw)
 }
 
 /// A44-3: Returns the maximum WAL changes per poll as i64.

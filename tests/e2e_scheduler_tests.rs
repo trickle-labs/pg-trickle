@@ -31,6 +31,68 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+/// A lossless CDC pause keeps trigger capture active while refresh consumption
+/// is stopped, then lets differential refresh catch up after resume.
+#[tokio::test]
+async fn test_cdc_hold_pause_preserves_dml_until_resume() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "trigger", "trigger")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_capture_mode", "hold", "hold")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_paused", "on", "on")
+        .await;
+
+    db.execute("CREATE TABLE cdc_hold_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO cdc_hold_src VALUES (1, 'one')")
+        .await;
+    db.create_st(
+        "cdc_hold_st",
+        "SELECT id, val FROM cdc_hold_src",
+        "1s",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let source_oid = db.table_oid("cdc_hold_src").await;
+    let buffer = db.change_buffer_table(source_oid as i64).await;
+    db.execute("INSERT INTO cdc_hold_src VALUES (2, 'two')")
+        .await;
+    db.execute("UPDATE cdc_hold_src SET val = 'updated' WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM cdc_hold_src WHERE id = 2").await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(db.count("public.cdc_hold_st").await, 1);
+    assert_eq!(
+        db.query_scalar::<String>("SELECT val FROM public.cdc_hold_st WHERE id = 1")
+            .await,
+        "one"
+    );
+    assert!(
+        db.count(&buffer).await >= 4,
+        "hold mode must retain INSERT/UPDATE/DELETE changes in the buffer"
+    );
+
+    db.alter_system_set_and_wait("pg_trickle.cdc_paused", "off", "off")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "CDC hold resume catch-up",
+            "SELECT count(*) = 1 AND bool_and(val = 'updated') FROM public.cdc_hold_st",
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+        )
+        .await,
+        "resuming CDC must let the scheduler apply the buffered changes"
+    );
+
+    db.alter_system_reset_and_wait("pg_trickle.cdc_capture_mode", "discard")
+        .await;
+}
+
 /// Wait until `pgt_name` has at least `min_count` COMPLETED refresh records.
 async fn wait_for_n_refreshes(
     db: &E2eDb,

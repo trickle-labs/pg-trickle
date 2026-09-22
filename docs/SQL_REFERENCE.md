@@ -1605,10 +1605,10 @@ SELECT pgtrickle.write_and_refresh(
 ```
 
 The refresh sees the caller's writes when it runs. If another refresh owns the
-lock, the function emits a NOTICE and skips the refresh. The write can still
-commit, so successful return does not guarantee that the stream table contains
-it yet. Other SQL or refresh errors abort the transaction. The caller must have
-the required source privileges and permission to refresh the stream table.
+lock, the function raises an error and the caller's write is rolled back; a
+successful return therefore means the refresh completed. Other SQL or refresh
+errors also abort the transaction. The caller must have the required source
+privileges and permission to refresh the stream table.
 
 ---
 
@@ -4973,7 +4973,7 @@ table management.
 | `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
 | `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
 | `pgtrickle.stream_table_lineage(st_name text)` | `SetOf row` | Returns the lineage graph for a single stream table — direct and transitive source tables with metadata. |
-| `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / `hold`), and a human-readable explanation. |
+| `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / lossless `hold`), and a human-readable explanation. |
 | `pgtrickle.cluster_worker_summary()` | `SetOf row` | Shows active background workers across all pg_trickle-enabled databases (requires `pg_monitor`). |
 | `pgtrickle.drain()` | — | Initiates a graceful drain: the scheduler finishes in-flight refreshes then stops. Useful before `pg_upgrade` or a rolling restart. |
 | `pgtrickle.resume_after_drain()` | `bool` | Explicitly re-enables scheduler dispatch after a persistent drain request. |

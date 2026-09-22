@@ -2992,8 +2992,8 @@ fn cdc_pause_status() -> TableIterator<
                     .to_string()
             }
             crate::config::CdcCaptureMode::Hold => {
-                "CDC is PAUSED in HOLD mode (reserved). Falling back to DISCARD semantics. \
-                 Changes arriving now are being DROPPED."
+                "CDC is PAUSED in HOLD mode. Changes remain in the logged change buffer \
+                 and refresh consumption resumes after un-pausing."
                     .to_string()
             }
         }

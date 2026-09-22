@@ -761,6 +761,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             return;
         }
 
+        // Lossless CDC pause: keep capture active, but do not consume buffers
+        // until the operator lifts the pause.
+        if config::pg_trickle_cdc_paused()
+            && config::pg_trickle_cdc_capture_mode() == config::CdcCaptureMode::Hold
+        {
+            continue;
+        }
+
         // v0.90.0: settle completed visibility XIDs before refreshing the
         // bounded SLA summaries. Missing commit timestamps remain NULL and
         // therefore cannot become fabricated freshness evidence.
@@ -1544,6 +1552,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let sts: Vec<_> = all_pgt_ids
                         .iter()
                         .filter_map(|&id| load_st_by_id(id))
+                        .filter(|st| check_schedule(st, dag_ref) || st.needs_reinit)
                         .collect();
 
                     match batched_has_source_changes(&sts) {
@@ -1598,9 +1607,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         .members
                         .iter()
                         .filter_map(|member| match member {
-                            NodeId::StreamTable(id) => {
-                                load_st_by_id(*id).map(|st| (*id, has_table_source_changes(&st)))
-                            }
+                            NodeId::StreamTable(id) => load_st_by_id(*id).map(|st| {
+                                let due = check_schedule(&st, dag_ref) || st.needs_reinit;
+                                (*id, due && has_table_source_changes(&st))
+                            }),
                             _ => None,
                         })
                         .collect(),

@@ -205,6 +205,46 @@ async fn test_pb1_concurrent_refresh_skip_locked_no_corruption() {
 }
 
 #[tokio::test]
+async fn test_write_and_refresh_rejects_lock_skip_and_rolls_back_write() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE wr_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO wr_src VALUES (1, 'one')").await;
+    db.create_st("wr_st", "SELECT id, val FROM wr_src", "1m", "DIFFERENTIAL")
+        .await;
+
+    let mut blocker = db.pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+            (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'wr_st')
+        )",
+    )
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.write_and_refresh(
+                'INSERT INTO wr_src VALUES (2, ''two'')', 'wr_st'
+            )",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "write_and_refresh must not report success after a skipped refresh"
+    );
+    assert!(
+        result.unwrap_err().to_string().contains("refresh skipped"),
+        "lock contention must be reported as refresh skipped"
+    );
+
+    blocker.commit().await.unwrap();
+    assert_eq!(db.count("public.wr_src").await, 1);
+    assert_eq!(db.count("public.wr_st").await, 1);
+}
+
+#[tokio::test]
 async fn test_concurrent_inserts_during_refresh() {
     let db = E2eDb::new().await.with_extension().await;
 

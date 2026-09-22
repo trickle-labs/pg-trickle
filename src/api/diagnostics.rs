@@ -335,7 +335,7 @@ pub(super) fn rebuild_cdc_triggers() -> &'static str {
             .select(
                 "SELECT DISTINCT source_relid \
                  FROM pgtrickle.pgt_dependencies \
-                 WHERE source_type IN ('TABLE', 'STREAM_TABLE')",
+                 WHERE source_type = 'TABLE'",
                 None,
                 &[],
             )

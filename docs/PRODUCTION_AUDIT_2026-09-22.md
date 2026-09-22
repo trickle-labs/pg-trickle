@@ -21,7 +21,7 @@ semantics or introduce a FULL fallback.
 | P2 | The serial scheduler parsed and semantically validated incremental queries before checking whether they were due or already refreshing. | Check schedule and refresh-lock availability first. Validation still precedes refresh execution. | `refresh_single_st` in [scheduler code](../src/scheduler/mod.rs). No measured throughput claim. |
 | P1 | Shipping source-built images omitted migration scripts, so an existing database could lack its ALTER EXTENSION UPDATE path after an image change. | Copy migration SQL into the production and CNPG runtime images. | [production Dockerfile](../Dockerfile.ghcr), [CNPG Dockerfile](../cnpg/Dockerfile.ext-build). |
 | P2 | The CNPG source build generated a new dependency lockfile instead of using the tested one. | Copy Cargo.lock and fetch with `--locked`. | [CNPG Dockerfile](../cnpg/Dockerfile.ext-build). |
-| P1 | Installation instructions claimed repair could reconcile changed source OIDs after logical restore. It reuses persisted OIDs. Documentation also advertised nonexistent hold behavior and an invalid two-argument refresh call. | Explain restore adoption separately from recreation, correct the reinitialization call, and document that CDC pause currently discards changes. Update cleanup guidance, typed-buffer inspection examples, and manual-refresh lock-contention semantics across the operator docs. | [installation](../INSTALL.md), [backup and restore](BACKUP_AND_RESTORE.md), [configuration](CONFIGURATION.md), [security model](SECURITY_MODEL.md). |
+| P1 | Installation instructions claimed repair could reconcile changed source OIDs after logical restore. It reuses persisted OIDs. Documentation also advertised nonexistent hold behavior and an invalid two-argument refresh call. | Separate restore adoption from recreation, resolve lifecycle ownership by current relation name after OID remapping, rebuild only base-table CDC triggers, normalize reused-buffer sentinels, correct the reinitialization call, document lossless CDC hold mode, and make `write_and_refresh` fail on a skipped refresh. | [backup and restore](BACKUP_AND_RESTORE.md), [configuration](CONFIGURATION.md), [SQL reference](SQL_REFERENCE.md), [upgrading](UPGRADING.md), [restore qualification](../tests/e2e_pg_dump_tests.rs). |
 
 PostgreSQL documents that TRUNCATE takes an ACCESS EXCLUSIVE lock and is not
 MVCC-safe. The race above follows from applying that operation after a separate
@@ -42,24 +42,19 @@ continues to read those histories. Single-consumer keyed buffers retain
 compaction. The eligibility checks run only when the compaction threshold is
 exceeded.
 
-Snapshot polling still scans source data. Deduplication avoids repeating the
-same poll for each consumer in the fanout pass. It does not make polling
-incremental or impose a remote-query timeout.
+Snapshot polling still scans source data. Each poll now materializes one source
+snapshot and serializes concurrent polls for that source; fanout and schedule
+gates avoid polling a source before a consumer is due. It does not make
+polling incremental or impose a remote-query timeout.
 
 ## Remaining work, in priority order
 
 | Priority | Action | Completion evidence |
 |---|---|---|
-| P1 | Replace destructive CDC pause semantics with durable buffering or reject source writes while capture is paused. Until then, leave `cdc_paused = off`; pause scheduling instead. The generated triggers in [cdc/mod.rs](../src/cdc/mod.rs) return without recording DML, and `hold` falls back to discard. | Commit insert, update, delete, and truncate operations across pause/resume and restart boundaries. Every accepted operation must be reflected after differential catch-up, or the source transaction must fail. Include upgrade-time trigger regeneration. |
-| P1 | Qualify snapshot polling under concurrent source updates and overlapping manual/scheduled polls. [polling.rs](../src/cdc/polling.rs) reads the source separately for deletes, inserts, and snapshot replacement. This audit has not proven that all supported FDWs supply a consistent view across those reads. | Deterministically change the source between reads. Compare a staged single-snapshot design with existing behavior; require exact multiset agreement and no skipped changes. Serialize overlapping polls per source if the test demonstrates a race. |
-| P1 | Add a supported logical-restore recreation command or an exact dependency-ordered runbook that exports definitions before backup and recreates catalog/CDC state against new OIDs. Current adoption and repair cannot remap dependencies. | Restore into a database with deliberately different OIDs, adopt it, recreate a multi-level DAG, perform new writes, and verify differential results and recovery status. Do not resume from old frontiers by guessing object identity. |
-| P1 | Run the CDC fixes through crash recovery, long open transactions, shared consumers, partitioned buffers, and WAL capture before release. Partition detach/drop and WAL receipt handling were not changed or fully qualified here. | Fresh-image E2E and manual CI results on the final revision; include rollback after delta application and before frontier commit. Source data and stream data must match after recovery. |
-| P2 | Measure write blocking from manual differential refresh. [refresh_ops.rs](../src/api/refresh_ops.rs) calls `lock_source_relations`, which takes SHARE locks on managed sources. A long writer can delay refresh, and refresh holds back new writers until its transaction ends. Keep this correctness barrier until there is a proven replacement. | Benchmark concurrent source writers and long transactions at the target refresh schedule. Replace the lock only with a commit-visible frontier/snapshot protocol that passes late-commit, rollback, join, and crash tests. |
-| P2 | Bound cleanup work per transaction if DELETE increases refresh tail latency. Measure first; use small batches below the persisted minimum consumer frontier, with continued cleanup on later ticks. | Record p50/p95/p99 refresh and source-write latency, dead tuples, WAL bytes, and buffer age at sustained load. Catch-up must remain exact with a lagging consumer. |
-| P2 | Avoid exact pending-row counts that cannot affect a disabled decision. [merge/mod.rs](../src/refresh/merge/mod.rs) counts pending rows before `maybe_auto_promote_buffer` even when automatic partition promotion is disabled. | Profile the default path, move the mode check ahead of the count, and show fewer buffer scans with unchanged promotion behavior for `auto`. |
-| P2 | Bound snapshot polling time and cadence. Fanout currently polls before per-stream schedule gates, and the legacy non-fanout path still needs equivalent failure isolation. | Test an unreachable and a slow remote source alongside a due local stream. Assert a bounded delay for the local stream in both fanout modes. Poll a shared source once per required interval. |
-| P2 | Decide whether `write_and_refresh` needs an optional strict completion contract. The SQL reference now documents its existing lock-contention behavior. [refresh_ops.rs](../src/api/refresh_ops.rs) can commit the user write after a skipped refresh with only a NOTICE. | Add a contention example and regression. If the API promises read-your-writes on the stream table, fail or wait rather than returning success after a skip. Preserve the existing manual refresh contract separately. |
-| P2 | Exercise the actual shipping image upgrade paths in CI, including CNPG. Include Dockerfiles and installation docs in relevant workflow path filters. [ci.yml](../.github/workflows/ci.yml) currently filters the main workflow to code/test/build-manifest paths. | Build both runtime images, enumerate installed update paths, restore a supported previous-version database, and execute ALTER EXTENSION UPDATE. Checking that migration files exist alone does not prove upgrade SQL works. |
+| P1 | Run the new CDC pause and polling paths through the final-image qualification matrix. | `test_cdc_hold_pause_preserves_dml_until_resume`, the existing shared-source/fanout tests, and the scheduled/manual `production-recovery-qualification` CI job. |
+| P2 | Measure write blocking from manual differential refresh. Keep `lock_source_relations` until a commit-visible frontier/snapshot replacement passes late-commit, rollback, join, and crash tests. | Benchmark concurrent source writers and long transactions at the target refresh schedule. |
+| P2 | Bound cleanup work per transaction if DELETE increases refresh tail latency. | Record p50/p95/p99 refresh and source-write latency, dead tuples, WAL bytes, and buffer age at sustained load before introducing batching. |
+| P2 | Bound remote snapshot polling time. Cadence and overlap are now bounded by due gates and per-source advisory serialization; no remote-query timeout was added. | Add an explicit timeout only after measuring the supported FDW timeout contract and verifying rollback of partial polling state. |
 
 Do not tune away correctness checks or select UNLOGGED buffers to claim a
 throughput improvement. Keep the logged default for deployments requiring
@@ -77,14 +72,18 @@ PostgreSQL server.
   metrics-server tests. The initial sandbox restriction was not a code failure.
 - `just test-integration`: 161 passed.
 - Fresh-image CDC, concurrent refresh, shared-buffer, and GUC E2E suites:
-  69 passed with retries disabled.
-- Final rebuilt-image scheduler E2E suite: 8 passed with retries disabled,
-  including failed remote polling, healthy-stream progress, and recovery.
-  Total focused E2E coverage: 77 passing tests.
+  70 passed with retries disabled.
+- Final rebuilt-image scheduler E2E suite: 9 passed with retries disabled,
+  including lossless hold pause, failed remote polling, healthy-stream progress,
+  and recovery.
+- Final rebuilt-image logical-restore qualification: 4 passed with retries
+  disabled, including the OID-shifted multi-level DAG recreation.
+  Total focused E2E coverage: 83 passing tests.
 - Shipping-image migration inclusion and locked CNPG dependency checks:
-  source-level checks passed. Runtime shipping-image upgrades remain untested.
+  source-level checks passed. Runtime upgrade execution is now in the scheduled
+  and manual CI jobs, but has not run locally.
 
-No release, deployment, commit, or remote CI run is part of this patch.
+No deployment or remote CI run is part of this audit update.
 
 Reproduce the focused E2E checks after building the image:
 
@@ -94,6 +93,5 @@ just build-e2e-image
 ./scripts/run_e2e_tests.sh --test e2e_scheduler_tests --test-threads 2 --retries 0 --no-fail-fast
 ```
 
-Before merging, push the reviewed revision and run the manual `ci.yml` workflow
-on that branch. The ignored TPC-H, stability, WAL recovery, and shipping-image
-upgrade qualifications remain separate release work.
+Before merging, run the manual `ci.yml` workflow on the pushed branch and
+complete the source-lock, cleanup, and remote-polling measurements above.

@@ -102,6 +102,10 @@ pub fn poll_foreign_table_changes(
         crate::citus::stable_name_for_oid(source_oid).unwrap_or_else(|_| oid_u32.to_string());
     let change_table = format!("\"{change_schema}\".changes_{stable_name}");
     let snapshot_table = format!("\"{change_schema}\".snapshot_{stable_name}");
+    let poll_table = format!(
+        "pg_temp.\"__pgt_poll_{stable_name}\"",
+        stable_name = stable_name.replace('"', "\"\"")
+    );
 
     let source_table =
         Spi::get_one_with_args::<String>("SELECT $1::oid::regclass::text", &[source_oid.into()])
@@ -143,6 +147,34 @@ pub fn poll_foreign_table_changes(
 
     super::set_sync_commit_for_buffer(&format!("changes_{stable_name}"))?;
 
+    // Serialize polls for one source and materialize the source exactly once.
+    // Later statements compare and replace from this local snapshot, so a
+    // source update between the delete/insert comparisons cannot be skipped.
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock( \
+             (SELECT oid::int4 FROM pg_catalog.pg_database \
+              WHERE datname = current_database()), $1::int4)",
+        &[i64::from(oid_u32).into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&format!("DROP TABLE IF EXISTS {poll_table}")) // nosemgrep: semgrep.rust.spi.run.dynamic-format — identifier is a local temp name derived from the source OID.
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to reset polling snapshot for {oid_u32}: {e}"
+            ))
+        })?; // nosemgrep: semgrep.rust.spi.run.dynamic-format — identifiers are local temp names derived from the source OID.
+    Spi::run(&format!(
+        "CREATE TEMP TABLE {poll_table} ON COMMIT DROP AS \
+         SELECT {src_col_list} FROM {source_table} WITH NO DATA"
+    )) // nosemgrep: semgrep.rust.spi.run.dynamic-format — relation and columns are catalog-derived and quoted.
+    .map_err(|e| PgTrickleError::SpiError(format!("Failed to create polling snapshot: {e}")))?;
+    Spi::run(&format!(
+        "INSERT INTO {poll_table} ({src_col_list}) SELECT {src_col_list} FROM {source_table}"
+    )) // nosemgrep: semgrep.rust.spi.run.dynamic-format — relation and columns are catalog-derived and quoted.
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!("Failed to materialize polling snapshot: {e}"))
+    })?;
+
     // ── Deleted rows: in snapshot but not in current foreign table ──
     // These appear as 'D' (delete) rows in the change buffer.
     // INSERT target uses cb_col_list (change-buffer names); SELECT uses src_col_list
@@ -153,10 +185,10 @@ pub fn poll_foreign_table_changes(
          FROM (\
            SELECT {src_col_list} FROM {snapshot_table} \
            EXCEPT ALL \
-           SELECT {src_col_list} FROM {source_table}\
+           SELECT {src_col_list} FROM {poll_table}\
          ) __pgt_del"
     );
-    Spi::run(&deleted_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&deleted_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: semgrep.rust.spi.run.dynamic-format — identifiers are catalog-derived and quoted.
 
     // ── Inserted rows: in current foreign table but not in snapshot ──
     // These appear as 'I' (insert) rows in the change buffer.
@@ -164,18 +196,18 @@ pub fn poll_foreign_table_changes(
         "INSERT INTO {change_table} (lsn, action, __pgt_row_id, source_xid, source_commit_at, {cb_col_list}) \
          SELECT pg_current_wal_insert_lsn(), 'I', {pk_hash_expr}, NULL::xid, NULL::timestamptz, {src_col_list} \
          FROM (\
-           SELECT {src_col_list} FROM {source_table} \
+           SELECT {src_col_list} FROM {poll_table} \
            EXCEPT ALL \
            SELECT {src_col_list} FROM {snapshot_table}\
          ) __pgt_ins"
     );
-    Spi::run(&inserted_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(&inserted_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: semgrep.rust.spi.run.dynamic-format — identifiers are catalog-derived and quoted.
 
     // ── Refresh snapshot — replace contents with current foreign table ──
     // snapshot_table: extension-controlled name; source_table: PostgreSQL regclass::text (safe).
     let truncate_sql = format!("TRUNCATE {snapshot_table}");
     Spi::run(&truncate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: semgrep.rust.spi.run.dynamic-format
-    let refresh_sql = format!("INSERT INTO {snapshot_table} SELECT * FROM {source_table}");
+    let refresh_sql = format!("INSERT INTO {snapshot_table} SELECT * FROM {poll_table}");
     Spi::run(&refresh_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?; // nosemgrep: semgrep.rust.spi.run.dynamic-format
 
     Ok(())

@@ -71,8 +71,10 @@ fn refresh_stream_table(name: &str) {
 /// SELECT pgtrickle.refresh_stream_table('order_totals');
 /// ```
 ///
-/// Calling `pgtrickle.write_and_refresh(sql, name)` guarantees the refresh
-/// sees the writes from `sql` because both run in the same transaction.
+/// Calling `pgtrickle.write_and_refresh(sql, name)` guarantees that the
+/// refresh completes after seeing the writes from `sql`. A concurrent refresh
+/// causes the call to fail, so the caller's write is not committed as a false
+/// success.
 #[pg_extern(schema = "pgtrickle")]
 fn write_and_refresh(sql: &str, stream_table_name: &str) {
     // Execute the user-supplied SQL.
@@ -85,11 +87,7 @@ fn write_and_refresh(sql: &str, stream_table_name: &str) {
         security_context::EntryContext::SecurityInvoker,
     );
     if let Err(e) = result {
-        if let PgTrickleError::RefreshSkipped(ref msg) = e {
-            pgrx::notice!("refresh skipped: {}", msg);
-        } else {
-            raise_error_with_context(e);
-        }
+        raise_error_with_context(e);
     }
 }
 
@@ -111,6 +109,14 @@ fn refresh_stream_table_impl(
     }
 
     crate::api::recovery::assert_capture_ready()?;
+
+    if crate::config::pg_trickle_cdc_paused()
+        && crate::config::pg_trickle_cdc_capture_mode() == crate::config::CdcCaptureMode::Hold
+    {
+        return Err(PgTrickleError::RefreshSkipped(
+            "CDC is paused in hold mode; refresh consumption is paused".to_string(),
+        ));
+    }
 
     let (schema, table_name, st) = resolve_owned_stream_table(name, entry_context)?;
 

@@ -1096,27 +1096,30 @@ pub fn execute_differential_refresh_with_tuning(
     // PERF-2: Auto-promote unpartitioned buffers to RANGE(lsn) partitioned
     // mode when `buffer_partitioning = 'auto'` and the buffer fill rate
     // exceeds `compact_threshold` within a single refresh cycle.
-    for &oid in &catalog_source_oids {
-        let prev_lsn = prev_frontier.get_lsn(oid);
-        let new_lsn = new_frontier.get_lsn(oid);
-        let pending = crate::cdc::count_pending_changes(&change_schema, oid, &prev_lsn, &new_lsn);
-        match crate::cdc::maybe_auto_promote_buffer(&change_schema, oid, pending) {
-            Ok(true) => {
-                pgrx::debug1!(
-                    "[pg_trickle] PERF-2: auto-promoted changes_{} to partitioned mode \
-                     (pending={} exceeded threshold)",
-                    oid,
-                    pending,
-                );
+    if crate::config::pg_trickle_buffer_partitioning().eq_ignore_ascii_case("auto") {
+        for &oid in &catalog_source_oids {
+            let prev_lsn = prev_frontier.get_lsn(oid);
+            let new_lsn = new_frontier.get_lsn(oid);
+            let pending =
+                crate::cdc::count_pending_changes(&change_schema, oid, &prev_lsn, &new_lsn);
+            match crate::cdc::maybe_auto_promote_buffer(&change_schema, oid, pending) {
+                Ok(true) => {
+                    pgrx::debug1!(
+                        "[pg_trickle] PERF-2: auto-promoted changes_{} to partitioned mode \
+                         (pending={} exceeded threshold)",
+                        oid,
+                        pending,
+                    );
+                }
+                Err(e) => {
+                    pgrx::warning!(
+                        "[pg_trickle] PERF-2: auto-promotion failed for changes_{}: {}",
+                        oid,
+                        e,
+                    );
+                }
+                _ => {}
             }
-            Err(e) => {
-                pgrx::warning!(
-                    "[pg_trickle] PERF-2: auto-promotion failed for changes_{}: {}",
-                    oid,
-                    e,
-                );
-            }
-            _ => {}
         }
     }
 
