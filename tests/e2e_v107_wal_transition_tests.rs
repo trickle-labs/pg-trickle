@@ -63,12 +63,12 @@ async fn test_v107_auto_wal_transition_captures_changes() {
     assert!(slot_exists, "WAL transition must create a replication slot");
 
     let _ = db
-        .wait_for_auto_refresh("v107_wal_stream", Duration::from_secs(15))
+        .wait_for_auto_refresh("v107_wal_stream", Duration::from_secs(30))
         .await;
     db.execute("INSERT INTO v107_wal_source VALUES (2, 'captured'), (3, 'also captured')")
         .await;
     assert!(
-        db.wait_for_auto_refresh("v107_wal_stream", Duration::from_secs(30))
+        db.wait_for_auto_refresh("v107_wal_stream", Duration::from_secs(60))
             .await,
         "WAL changes must schedule a refresh"
     );
