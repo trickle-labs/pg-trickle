@@ -182,23 +182,25 @@ async fn test_pgvector_sum_differential() {
     .await;
 
     let q = "SELECT grp, sum(embedding) AS total_vec FROM emb_sum_src GROUP BY grp";
+    let expected_q =
+        "SELECT grp, sum(embedding)::vector(3) AS total_vec FROM emb_sum_src GROUP BY grp";
     let create_sql = format!(
         "SELECT pgtrickle.create_stream_table('vec_sum_st', $${q}$$, '1m', 'DIFFERENTIAL')"
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create_sql])
         .await;
-    db.assert_st_matches_query("vec_sum_st", q).await;
+    db.assert_st_matches_query("vec_sum_st", expected_q).await;
 
     // INSERT
     db.execute("INSERT INTO emb_sum_src (grp, embedding) VALUES ('a', '[0,0,1]')")
         .await;
     db.refresh_st("vec_sum_st").await;
-    db.assert_st_matches_query("vec_sum_st", q).await;
+    db.assert_st_matches_query("vec_sum_st", expected_q).await;
 
     // DELETE
     db.execute("DELETE FROM emb_sum_src WHERE grp = 'b'").await;
     db.refresh_st("vec_sum_st").await;
-    db.assert_st_matches_query("vec_sum_st", q).await;
+    db.assert_st_matches_query("vec_sum_st", expected_q).await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -266,12 +268,15 @@ async fn test_pgvector_hnsw_index_on_stream_table() {
     .await;
 
     let q = "SELECT user_id, avg(embedding) AS centroid FROM emb_hnsw_src GROUP BY user_id";
+    let expected_q =
+        "SELECT user_id, avg(embedding)::vector(3) AS centroid FROM emb_hnsw_src GROUP BY user_id";
     let create_sql = format!(
         "SELECT pgtrickle.create_stream_table('centroid_hnsw_st', $${q}$$, '1m', 'DIFFERENTIAL')"
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create_sql])
         .await;
-    db.assert_st_matches_query("centroid_hnsw_st", q).await;
+    db.assert_st_matches_query("centroid_hnsw_st", expected_q)
+        .await;
 
     // Create HNSW index on the centroid stream table
     db.execute(
@@ -284,7 +289,8 @@ async fn test_pgvector_hnsw_index_on_stream_table() {
     db.execute("INSERT INTO emb_hnsw_src (user_id, embedding) VALUES (1, '[1,0,0]')")
         .await;
     db.refresh_st("centroid_hnsw_st").await;
-    db.assert_st_matches_query("centroid_hnsw_st", q).await;
+    db.assert_st_matches_query("centroid_hnsw_st", expected_q)
+        .await;
 
     // Verify the HNSW index can be used for ANN search
     let nn_result = db
@@ -601,6 +607,7 @@ async fn test_pgvector_halfvec_avg_values_correct() {
         .await;
 
     let q = "SELECT grp, avg(emb) AS centroid FROM hv_vals_src GROUP BY grp";
+    let expected_q = "SELECT grp, avg(emb)::halfvec(2) AS centroid FROM hv_vals_src GROUP BY grp";
     db.execute_seq(&[
         "SET pg_trickle.enable_vector_agg = on",
         &format!(
@@ -608,13 +615,13 @@ async fn test_pgvector_halfvec_avg_values_correct() {
         ),
     ])
     .await;
-    db.assert_st_matches_query("hv_vals_st", q).await;
+    db.assert_st_matches_query("hv_vals_st", expected_q).await;
 
     // INSERT — grp 1 centroid should become avg([2,4],[4,2],[6,0]) = [4,2]
     db.execute("INSERT INTO hv_vals_src (grp, emb) VALUES (1, '[6,0]')")
         .await;
     db.refresh_st("hv_vals_st").await;
-    db.assert_st_matches_query("hv_vals_st", q).await;
+    db.assert_st_matches_query("hv_vals_st", expected_q).await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
