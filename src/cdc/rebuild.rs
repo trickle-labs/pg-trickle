@@ -70,6 +70,95 @@ pub fn rebuild_cdc_trigger_function(
     Ok(())
 }
 
+fn function_oid(
+    change_schema: &str,
+    function_name: &str,
+) -> Result<Option<pg_sys::Oid>, PgTrickleError> {
+    Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT p.oid
+           FROM pg_catalog.pg_proc p
+           JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = $1 AND p.proname = $2 AND p.pronargs = 0",
+        &[change_schema.into(), function_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("CDC trigger function lookup failed: {e}")))
+}
+
+fn is_extension_member(oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM pg_catalog.pg_depend d
+               JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid
+              WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+                AND d.objid = $1
+                AND d.deptype = 'e'
+                AND e.extname = 'pg_trickle'
+         )",
+        &[oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("CDC trigger ownership lookup failed: {e}")))
+    .map(|member| member.unwrap_or(false))
+}
+
+/// Replace a dynamically-created trigger function during an extension update.
+///
+/// CDC trigger functions are user objects, so they are normally not extension
+/// members. PostgreSQL refuses `CREATE OR REPLACE FUNCTION` for such an object
+/// while an extension update is running. Temporarily attaching an existing
+/// function lets the update replace it without changing its identity or
+/// leaving it owned by the extension.
+fn replace_trigger_function(
+    change_schema: &str,
+    function_name: &str,
+    sql: &str,
+    kind: &str,
+) -> Result<(), PgTrickleError> {
+    let qualified = format!(
+        "{}.{}()",
+        crate::api::helpers::quote_identifier(change_schema),
+        crate::api::helpers::quote_identifier(function_name),
+    );
+    let existing_oid = function_oid(change_schema, function_name)?;
+    let was_extension_member = existing_oid
+        .map(is_extension_member)
+        .transpose()?
+        .unwrap_or(false);
+
+    if existing_oid.is_some() && !was_extension_member {
+        Spi::run(&format!(
+            "ALTER EXTENSION pg_trickle ADD FUNCTION {qualified}"
+        ))
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to attach CDC {kind} trigger function {qualified}: {e}"
+            ))
+        })?;
+    }
+
+    Spi::run(sql).map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "Failed to rebuild CDC {kind} trigger function {qualified}: {e}"
+        ))
+    })?;
+
+    if !was_extension_member
+        && let Some(new_oid) = function_oid(change_schema, function_name)?
+        && is_extension_member(new_oid)?
+    {
+        Spi::run(&format!(
+            "ALTER EXTENSION pg_trickle DROP FUNCTION {qualified}"
+        ))
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "Failed to detach CDC {kind} trigger function {qualified}: {e}"
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Rebuild the CDC trigger function body **and** replace the trigger DDL for a
 /// source table.
 ///
@@ -111,31 +200,34 @@ pub fn rebuild_cdc_trigger(
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) =
                 super::build_stmt_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
-            Spi::run(&ins_fn).map_err(|e| {
-                PgTrickleError::SpiError(format!(
-                    "Failed to rebuild CDC INSERT trigger function: {}",
-                    e
-                ))
-            })?;
-            Spi::run(&upd_fn).map_err(|e| {
-                PgTrickleError::SpiError(format!(
-                    "Failed to rebuild CDC UPDATE trigger function: {}",
-                    e
-                ))
-            })?;
-            Spi::run(&del_fn).map_err(|e| {
-                PgTrickleError::SpiError(format!(
-                    "Failed to rebuild CDC DELETE trigger function: {}",
-                    e
-                ))
-            })?;
+            replace_trigger_function(
+                change_schema,
+                &format!("pg_trickle_cdc_ins_fn_{cdc_name}"),
+                &ins_fn,
+                "INSERT",
+            )?;
+            replace_trigger_function(
+                change_schema,
+                &format!("pg_trickle_cdc_upd_fn_{cdc_name}"),
+                &upd_fn,
+                "UPDATE",
+            )?;
+            replace_trigger_function(
+                change_schema,
+                &format!("pg_trickle_cdc_del_fn_{cdc_name}"),
+                &del_fn,
+                "DELETE",
+            )?;
         }
         config::CdcTriggerMode::Row => {
             let fn_sql =
                 super::build_row_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
-            Spi::run(&fn_sql).map_err(|e| {
-                PgTrickleError::SpiError(format!("Failed to rebuild CDC trigger function: {}", e))
-            })?;
+            replace_trigger_function(
+                change_schema,
+                &format!("pg_trickle_cdc_fn_{cdc_name}"),
+                &fn_sql,
+                "row",
+            )?;
         }
     }
 
