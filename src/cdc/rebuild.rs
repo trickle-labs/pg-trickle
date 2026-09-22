@@ -74,14 +74,26 @@ fn function_oid(
     change_schema: &str,
     function_name: &str,
 ) -> Result<Option<pg_sys::Oid>, PgTrickleError> {
-    Spi::get_one_with_args::<pg_sys::Oid>(
-        "SELECT p.oid
-           FROM pg_catalog.pg_proc p
-           JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = $1 AND p.proname = $2 AND p.pronargs = 0",
-        &[change_schema.into(), function_name.into()],
-    )
-    .map_err(|e| PgTrickleError::SpiError(format!("CDC trigger function lookup failed: {e}")))
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT p.oid
+                   FROM pg_catalog.pg_proc p
+                   JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname = $1 AND p.proname = $2 AND p.pronargs = 0",
+                None,
+                &[change_schema.into(), function_name.into()],
+            )
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!("CDC trigger function lookup failed: {e}"))
+            })?;
+        if table.is_empty() {
+            return Ok(None);
+        }
+        table.first().get_one::<pg_sys::Oid>().map_err(|e| {
+            PgTrickleError::SpiError(format!("CDC trigger function lookup failed: {e}"))
+        })
+    })
 }
 
 fn is_extension_member(oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
@@ -126,6 +138,7 @@ fn replace_trigger_function(
         .unwrap_or(false);
 
     if existing_oid.is_some() && !was_extension_member {
+        // nosemgrep: rust.spi.run.dynamic-format — qualified contains only quote_identifier-escaped schema and function names.
         Spi::run(&format!(
             "ALTER EXTENSION pg_trickle ADD FUNCTION {qualified}"
         ))
@@ -146,6 +159,7 @@ fn replace_trigger_function(
         && let Some(new_oid) = function_oid(change_schema, function_name)?
         && is_extension_member(new_oid)?
     {
+        // nosemgrep: rust.spi.run.dynamic-format — qualified contains only quote_identifier-escaped schema and function names.
         Spi::run(&format!(
             "ALTER EXTENSION pg_trickle DROP FUNCTION {qualified}"
         ))

@@ -163,10 +163,11 @@ pub fn poll_foreign_table_changes(
                 "Failed to reset polling snapshot for {oid_u32}: {e}"
             ))
         })?; // nosemgrep: semgrep.rust.spi.run.dynamic-format — identifiers are local temp names derived from the source OID.
+    // nosemgrep: rust.spi.run.dynamic-format — relation and column names are catalog-derived and quoted.
     Spi::run(&format!(
         "CREATE TEMP TABLE {poll_table} ON COMMIT DROP AS \
          SELECT {src_col_list} FROM {source_table} WITH NO DATA"
-    )) // nosemgrep: semgrep.rust.spi.run.dynamic-format — relation and columns are catalog-derived and quoted.
+    ))
     .map_err(|e| PgTrickleError::SpiError(format!("Failed to create polling snapshot: {e}")))?;
     Spi::run(&format!(
         "INSERT INTO {poll_table} ({src_col_list}) SELECT {src_col_list} FROM {source_table}"

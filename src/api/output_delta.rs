@@ -136,6 +136,7 @@ fn ensure_payload(
         .collect::<String>();
     let name = payload_name(meta.pgt_id);
     let qualified = format!("pgtrickle_changes.{}", quoted_ident(&name));
+    // nosemgrep: rust.spi.run.dynamic-format — qualified is built only from quoted, OID-derived identifiers.
     Spi::run(&format!(
         "CREATE TABLE IF NOT EXISTS {qualified} (\
             batch_token BIGINT NOT NULL, ordinal BIGINT NOT NULL,\
@@ -144,7 +145,7 @@ fn ensure_payload(
             PRIMARY KEY (batch_token, ordinal))"
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-    // nosemgrep: qualified is built only from quoted, OID-derived identifiers.
+    // nosemgrep: rust.spi.run.dynamic-format — qualified is built only from quoted, OID-derived identifiers.
     Spi::run(&format!("REVOKE ALL ON TABLE {qualified} FROM PUBLIC"))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     let role = Spi::get_one_with_args::<String>(
@@ -567,11 +568,13 @@ pub(crate) fn finalize(
         quoted_ident(&payload_name(meta.pgt_id))
     );
     let (changed_rows, unsupported_rows) = if rows_changed > 0 {
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format — source is assembled from a quoted schema and OID-derived relation name.
         let changed_rows = spi(Spi::get_one_with_args::<i64>(
             &format!("SELECT count(*)::bigint FROM {source} b WHERE b.change_id > $1"),
             &[start.into()],
         ))?
         .unwrap_or(0);
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format — source is assembled from a quoted schema and OID-derived relation name.
         let unsupported_rows = spi(Spi::get_one_with_args::<i64>(
             &format!("SELECT count(*)::bigint FROM {source} b WHERE b.change_id > $1 AND b.action NOT IN ('D', 'I')"),
             &[start.into()],
@@ -607,6 +610,7 @@ pub(crate) fn finalize(
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
             Ok::<i64, PgTrickleError>(result.len() as i64)
         })?;
+        // nosemgrep: rust.spi.get_one_with_args.dynamic-format — payload is a quoted, OID-derived relation name.
         let inserted = spi(Spi::get_one_with_args::<i64>(
             &format!("SELECT count(*)::bigint FROM {payload} WHERE batch_token = $1 AND action = 'INSERT'"),
             &[token.into()],
@@ -653,6 +657,7 @@ fn prune(pgt_id: i64) -> Result<(), PgTrickleError> {
         return Ok(());
     };
     let payload = format!("pgtrickle_changes.{}", quoted_ident(&payload_name(pgt_id)));
+    // nosemgrep: rust.spi.run_with_args.dynamic-format — payload is a quoted, OID-derived relation name; values use $1.
     Spi::run_with_args(
         &format!("DELETE FROM {payload} WHERE batch_token <= $1"),
         &[min_ack.into()],
