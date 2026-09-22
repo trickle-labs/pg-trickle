@@ -270,6 +270,17 @@ fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> AlterClassifi
                 };
             }
         }
+        if let Some(old_col) = old_map.get(new_col.name.as_str())
+            && old_col.type_oid == new_col.type_oid
+            && old_col.typmod != new_col.typmod
+        {
+            return AlterClassification::Rebuildable {
+                reason: format!(
+                    "column '{}' typmod changed from {} to {}",
+                    new_col.name, old_col.typmod, new_col.typmod
+                ),
+            };
+        }
     }
 
     // Identify added and removed columns.
@@ -290,7 +301,7 @@ fn classify_schema_change(old: &[ColumnDef], new: &[ColumnDef]) -> AlterClassifi
             && old
                 .iter()
                 .zip(new.iter())
-                .all(|(o, n)| o.name == n.name && o.type_oid == n.type_oid);
+                .all(|(o, n)| o.name == n.name && o.type_oid == n.type_oid && o.typmod == n.typmod);
         if same_order {
             AlterClassification::Compatible {
                 oracle: AlterStateOracle::proven(),
@@ -357,6 +368,7 @@ fn explain_alter_impl(name: &str, new_query: &str) -> Result<pgrx::JsonB, PgTric
         let rw = run_query_rewrite_pipeline(new_query)?;
         let vq = validate_and_parse_query(
             &rw.query,
+            new_query,
             &mut refresh_mode,
             false,
             rw.had_nested_window_rewrite,
@@ -725,6 +737,7 @@ fn alter_stream_table_query(
         let rw = run_query_rewrite_pipeline(new_query)?;
         let vq = validate_and_parse_query(
             &rw.query,
+            new_query,
             &mut refresh_mode,
             false,
             rw.had_nested_window_rewrite,
@@ -1278,7 +1291,7 @@ fn get_storage_table_columns(
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT a.attname::text, a.atttypid \
+                "SELECT a.attname::text, a.atttypid, a.atttypmod \
                  FROM pg_attribute a \
                  JOIN pg_class c ON c.oid = a.attrelid \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -1299,9 +1312,11 @@ fn get_storage_table_columns(
                 .get::<pg_sys::Oid>(2)
                 .map_err(map_spi)?
                 .unwrap_or(pg_sys::InvalidOid);
+            let typmod = row.get::<i32>(3).map_err(map_spi)?.unwrap_or(-1);
             columns.push(ColumnDef {
                 name,
                 type_oid: PgOid::from(type_oid_raw),
+                typmod,
             });
         }
         Ok(columns)
@@ -1549,6 +1564,7 @@ pub(crate) fn create_stream_table_impl(
         let rw = run_query_rewrite_pipeline(query)?;
         let vq = validate_and_parse_query(
             &rw.query,
+            query,
             &mut refresh_mode,
             is_auto,
             rw.had_nested_window_rewrite,
@@ -3523,6 +3539,7 @@ mod tests {
         vec![ColumnDef {
             name: "id".to_string(),
             type_oid: PgOid::from(pg_sys::Oid::from(23_u32)),
+            typmod: -1,
         }]
     }
 
