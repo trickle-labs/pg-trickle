@@ -3369,7 +3369,30 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn reinitialize_stream_table(name: &str) -> String {
-    match repair_stream_table_impl(name) {
+    let result = (|| {
+        let summary = repair_stream_table_impl(name)?;
+        let caller = security_context::capture_caller_context(
+            security_context::EntryContext::SecurityDefiner,
+        )?;
+        let (_, _, st) = super::helpers::resolve_owned_stream_table_with_caller(name, &caller)?;
+        let defining_query = st
+            .original_query
+            .as_deref()
+            .unwrap_or(&st.defining_query)
+            .to_string();
+
+        // Reuse ALTER QUERY's protected rebuild when a source schema change
+        // also changed the stream table's output schema.
+        alter_stream_table_impl(AlterStreamTableOptions {
+            name,
+            query: Some(&defining_query),
+            entry_context: Some(security_context::EntryContext::SecurityDefiner),
+            ..Default::default()
+        })?;
+
+        Ok::<_, PgTrickleError>(summary)
+    })();
+    match result {
         Ok(summary) => summary,
         Err(error) => raise_error_with_context(error),
     }
