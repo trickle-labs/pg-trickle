@@ -25,6 +25,10 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/actions/**'
       - 'benchmarks/**'
+      - 'Dockerfile.ghcr'
+      - 'cnpg/**'
+      - 'docker/**'
+      - 'docs/**'
   pull_request:
     branches: [main]
     paths:
@@ -37,6 +41,10 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/actions/**'
       - 'benchmarks/**'
+      - 'Dockerfile.ghcr'
+      - 'cnpg/**'
+      - 'docker/**'
+      - 'docs/**'
   schedule:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
@@ -1238,7 +1246,7 @@ jobs:
         if: always()
         run: docker rm -f pgtrickle-getting-started 2>/dev/null || true
 
-  # ── CloudNativePG smoke test (non-blocking, Linux only) ─────────────────
+  # ── CloudNativePG smoke test (scheduled/manual gate, Linux only) ────────
   # Runs on weekly schedule and manual dispatch only (requires kind cluster).
   #
   # Uses a transitional approach: builds the scratch-based extension image
@@ -1254,7 +1262,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -1304,6 +1311,7 @@ jobs:
               chown -R 26:26 /var/lib/postgresql /var/run/postgresql
           COPY --from=ext /lib/ /usr/lib/postgresql/18/lib/
           COPY --from=ext /share/extension/ /usr/share/postgresql/18/extension/
+          COPY sql/archive/pg_trickle--0.107.0.sql /usr/share/postgresql/18/extension/
           DOCKERFILE
 
           docker build -t pg_trickle:18.3 -f /tmp/Dockerfile.cnpg-smoke .
@@ -1408,7 +1416,9 @@ jobs:
           # causing a syntax error. Use -c with a multi-line string instead.
           kubectl exec "${PRIMARY}" -- \
             psql -U postgres -d app -v ON_ERROR_STOP=1 -c "
-              CREATE EXTENSION pg_trickle;
+              CREATE EXTENSION pg_trickle VERSION '0.107.0';
+              SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_trickle';
+              ALTER EXTENSION pg_trickle UPDATE TO '0.108.0';
               SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_trickle';
               SHOW pg_trickle.enabled;
               CREATE TABLE cnpg_test_src (id INT PRIMARY KEY, val TEXT);
@@ -1420,11 +1430,93 @@ jobs:
                   'FULL'
               );
               SELECT * FROM cnpg_test_dt;
+              INSERT INTO cnpg_test_src VALUES (2, 'upgraded');
+              SELECT pgtrickle.refresh_stream_table('cnpg_test_dt');
+              SELECT count(*) FROM cnpg_test_dt;
               SELECT pgtrickle.drop_stream_table('cnpg_test_dt');
               DROP TABLE cnpg_test_src;
             "
 
           echo "CNPG smoke test passed!"
+
+  # ── Shipping image upgrade qualification ───────────────────────────────
+  # Exercises the image actually published to GHCR, including a supported
+  # previous-version database and the current ALTER EXTENSION path.
+  shipping-image-upgrade:
+    name: Shipping image upgrade
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build shipping image
+        run: docker build -t pg_trickle_shipping:ci -f Dockerfile.ghcr .
+
+      - name: Run shipping image upgrade smoke test
+        run: |
+          docker run -d --name pgtrickle-shipping-upgrade \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 15432:5432 \
+            pg_trickle_shipping:ci
+          for i in $(seq 1 90); do
+            if docker exec pgtrickle-shipping-upgrade \
+              psql -U postgres -qtAc "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          docker cp sql/archive/pg_trickle--0.107.0.sql \
+            pgtrickle-shipping-upgrade:/usr/share/postgresql/18/extension/
+          docker exec pgtrickle-shipping-upgrade psql -U postgres -v ON_ERROR_STOP=1 -c "
+            DROP EXTENSION pg_trickle CASCADE;
+            CREATE EXTENSION pg_trickle VERSION '0.107.0';
+            CREATE TABLE shipping_upgrade_src (id INT PRIMARY KEY, val TEXT);
+            INSERT INTO shipping_upgrade_src VALUES (1, 'before');
+            SELECT pgtrickle.create_stream_table(
+              'shipping_upgrade_st',
+              'SELECT id, val FROM shipping_upgrade_src',
+              '1m', 'DIFFERENTIAL');
+            ALTER EXTENSION pg_trickle UPDATE TO '0.108.0';
+            INSERT INTO shipping_upgrade_src VALUES (2, 'after');
+            SELECT pgtrickle.refresh_stream_table('shipping_upgrade_st');
+            SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+            SELECT count(*) FROM shipping_upgrade_st;
+          "
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs pgtrickle-shipping-upgrade
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f pgtrickle-shipping-upgrade 2>/dev/null || true
+
+  # ── CDC crash/WAL qualification ─────────────────────────────────────────
+  # Release qualification for the recovery paths touched by the production
+  # audit. Kept on scheduled/manual runs because these suites restart and
+  # deliberately disrupt PostgreSQL.
+  production-recovery-qualification:
+    name: CDC crash and WAL qualification
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run crash, WAL, and recovery qualification
+        run: |
+          cargo nextest run --profile ci --run-ignored all \
+            --test e2e_publication_crash_recovery_tests \
+            --test e2e_wal_cdc_tests \
+            --test e2e_failure_recovery_tests \
+            --test resilience_tests
 
   # TEST-10 (TPC-H nightly SF-1 + SF-10) has been moved to
   # .github/workflows/tpch-nightly.yml because it can exceed 120 min and

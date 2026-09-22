@@ -341,6 +341,22 @@ fn register_change_buffer(
         reason: format!("registry insert failed: {e}"),
     })?;
 
+    // A logical dump can restore an old stable-name buffer with a sentinel
+    // for a different relation OID. Keep real CDC rows, but replace all
+    // synthetic markers so validation sees exactly the current sentinel.
+    let clear_sentinels = format!("DELETE FROM {change_schema}.{buffer_name} WHERE action = 'S'");
+    Spi::run(&clear_sentinels) // nosemgrep: rust.spi.run.dynamic-format — schema and buffer_name are extension-generated identifiers.
+        .map_err(|e| PgTrickleError::CdcStateInvalid {
+            pgt_id: if source_kind == "STREAM_TABLE" {
+                source_id
+            } else {
+                0
+            },
+            source_name: source_kind.to_string(),
+            buffer: buffer_name.to_string(),
+            reason: format!("sentinel cleanup failed: {e}"),
+        })?;
+
     let sql = format!(
         "INSERT INTO {change_schema}.{buffer_name} (lsn, action, __pgt_row_id) \
          SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)) \
@@ -910,8 +926,10 @@ pub fn create_change_trigger(
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              {sync_guard}
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              INSERT INTO {change_schema}.changes_{name}
@@ -1413,6 +1431,21 @@ pub fn compact_change_buffer(
         return Ok(CompactionResult::BelowThreshold);
     }
 
+    // ponytail: keep shared/keyless histories intact; compact them only with
+    // a multiplicity-preserving algorithm that respects every consumer frontier.
+    let can_compact = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conrelid = $1 AND contype = 'p' AND NOT condeferrable)
+            AND (SELECT count(DISTINCT pgt_id) FROM pgtrickle.pgt_dependencies
+                 WHERE source_relid = $1) = 1",
+        &[pg_sys::Oid::from(source_oid).into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !can_compact {
+        return Ok(CompactionResult::BelowThreshold);
+    }
+
     // Advisory lock keyed on source OID to serialise with refresh.
     // Use a fixed namespace offset to avoid collisions with other locks.
     let lock_key = 0x5047_5400_i64 | (source_oid as i64);
@@ -1527,6 +1560,30 @@ pub fn compact_st_change_buffer(
     .unwrap_or(0);
 
     if pending_count <= threshold {
+        return Ok(0);
+    }
+
+    // A bag-valued ST may emit several rows with the same identity. Also keep
+    // shared histories intact when consumers have different frontier positions.
+    // ponytail: skip these cases until compaction preserves multiplicities and
+    // every consumer's frontier boundary.
+    let can_compact = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM pgtrickle.pgt_stream_tables st
+             JOIN pg_index i ON i.indrelid = st.pgt_relid
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+             WHERE st.pgt_id = $1 AND a.attname = '__pgt_row_id'
+               AND i.indisunique AND i.indisvalid AND i.indimmediate
+               AND i.indnkeyatts = 1 AND i.indpred IS NULL AND i.indexprs IS NULL
+         ) AND (SELECT count(DISTINCT dep.pgt_id)
+                FROM pgtrickle.pgt_dependencies dep
+                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_relid = dep.source_relid
+                WHERE st.pgt_id = $1) = 1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !can_compact {
         return Ok(0);
     }
 
@@ -2297,8 +2354,10 @@ fn build_row_trigger_fn_sql(
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              IF TG_OP = 'INSERT' THEN
@@ -2407,8 +2466,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
@@ -2438,8 +2499,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              -- D-row (OLD values) — must be emitted before I-row.
@@ -2499,8 +2562,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              -- Pair stable keys and PK-changing UPDATEs once, then emit D before I.
@@ -2542,8 +2607,10 @@ fn build_stmt_trigger_fn_sql(
              statement_lsn PG_LSN := pg_current_wal_insert_lsn();
              trace_context TEXT := NULLIF(current_setting('pg_trickle.trace_id', true), '');
          BEGIN
-             -- A07: CDC cdc_paused guard (A07).
-             IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
+             -- A07: discard mode is lossy; hold mode keeps capture active.
+             IF (current_setting('pg_trickle.cdc_paused', true) = 'on'
+                 AND current_setting('pg_trickle.cdc_capture_mode', true)
+                     IS DISTINCT FROM 'hold') THEN
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}

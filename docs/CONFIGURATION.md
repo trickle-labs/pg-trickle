@@ -41,7 +41,7 @@ catalog derived from `src/config.rs`, see [GUC_CATALOG.md](GUC_CATALOG.md).
 | Source | What it contains | When to use |
 |--------|-----------------|-------------|
 | **This file** | Curated narrative for the GUCs you are most likely to touch, with examples and cross-references | Day-to-day tuning and troubleshooting |
-| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated table of all 147 GUCs — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
+| **[GUC_CATALOG.md](GUC_CATALOG.md)** | Complete auto-generated GUC table — names, types, and defaults extracted from `src/config.rs` | Checking exact defaults, discovering lesser-known parameters |
 
 This file does **not** attempt to document every GUC — it focuses on the ones
 that have the most impact in production. If you do not see a GUC here, check
@@ -73,7 +73,7 @@ Not sure which GUC to change? Start here.
 | Goal | GUCs to adjust |
 |---|---|
 | **Lower refresh latency** | `scheduler_interval_ms`, `min_schedule_seconds` |
-| **Reduce write overhead on busy tables** | `compact_threshold`, `max_buffer_rows`, `cleanup_use_truncate`, `user_triggers` |
+| **Reduce write overhead on busy tables** | `compact_threshold`, `max_buffer_rows`, `user_triggers` |
 | **Handle larger DAGs without timeouts** | `parallel_refresh_mode`, `max_dynamic_refresh_workers`, `per_database_worker_quota`, `scheduler_interval_ms` |
 | **Connection-pooler compatibility (PgBouncer)** | `connection_pooler_mode`, `use_prepared_statements` |
 | **Lower memory usage during refresh** | `merge_work_mem_mb`, `max_delta_estimate_rows` |
@@ -666,7 +666,8 @@ SET pg_trickle.max_delta_estimate_rows = 0;
 
 ### pg_trickle.cleanup_use_truncate
 
-Use `TRUNCATE` instead of per-row `DELETE` for change buffer cleanup when the entire buffer is consumed by a refresh.
+Compatibility setting. Both values use bounded `DELETE` for ordinary change
+buffer cleanup. The setting remains accepted so existing configurations load.
 
 | Property | Value |
 |---|---|
@@ -675,19 +676,14 @@ Use `TRUNCATE` instead of per-row `DELETE` for change buffer cleanup when the en
 | Context | `SUSET` |
 | Restart Required | No |
 
-After a differential refresh consumes all rows from the change buffer, the engine must clean up the buffer table. `TRUNCATE` is O(1) regardless of row count, versus `DELETE` which must update indexes row-by-row. This saves 3–5 ms per refresh at 10%+ change rates.
+Cleanup removes consumed `I`, `D`, and `T` rows and preserves the buffer sentinel.
+A check followed by `TRUNCATE` could discard a concurrent writer's committed
+change because that writer was invisible to the check. Bounded `DELETE` avoids
+that race and the exclusive table lock. Partitioned buffers still use their
+partition cleanup path.
 
-**Trade-off:** `TRUNCATE` acquires an `AccessExclusiveLock` on the change buffer table. If concurrent DML on the source table is actively inserting into the same change buffer via triggers, this lock can cause brief contention.
-
-**Tuning Guidance:**
-- **Most workloads**: Leave at `true` — the performance benefit outweighs the brief lock.
-- **High-concurrency OLTP** with continuous writes during refresh: Set to `false` if you observe lock-wait timeouts on the change buffer.
-- **PgBouncer / connection poolers**: The `AccessExclusiveLock` acquired by `TRUNCATE` is held only on the change buffer table (not the source table), but in transaction-pooling mode with frequent refreshes, even brief exclusive locks can cause connection queuing. If you observe elevated `pg_stat_activity` wait events on change buffer tables, switch to `false`.
-
-```sql
--- Use per-row DELETE for change buffer cleanup
-SET pg_trickle.cleanup_use_truncate = false;
-```
+Monitor dead tuples and autovacuum on busy change buffers. This setting no longer
+changes cleanup cost or lock behavior.
 
 ---
 
@@ -2697,7 +2693,7 @@ true` only when disk exhaustion is an immediate risk.
 ALTER SYSTEM SET pg_trickle.enforce_backpressure = true;
 SELECT pg_reload_conf();
 -- After clearing: reinitialize affected stream tables
-SELECT pgtrickle.refresh_stream_table('my_stream', 'FULL');
+SELECT pgtrickle.reinitialize_stream_table('my_stream');
 ```
 
 ---
@@ -2819,8 +2815,9 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 - `"discard"` (default): CDC trigger bodies return `NULL`; changes arriving
   while paused are **dropped**. Stream tables must be reinitialized after
   un-pausing to recover from the data gap.
-- `"hold"`: Reserved for a future durable capture-and-hold mode. Currently
-  emits a `WARNING` and falls back to `"discard"`.
+- `"hold"`: CDC triggers keep writing to the logged change buffers while the
+  scheduler and manual refreshes are paused. Changes are consumed after
+  un-pausing.
 
 > **Operator checklist:** Before setting `cdc_paused = on`, check
 > `pgtrickle.cdc_pause_status()` to confirm the active mode. After
@@ -2831,7 +2828,7 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 |---|---|
 | Type | `string` |
 | Default | `discard` |
-| Valid values | `discard`, `hold` (reserved) |
+| Valid values | `discard`, `hold` |
 | Context | `SUSET` (superuser) |
 | Restart required | No |
 
@@ -2839,15 +2836,14 @@ Controls what happens to CDC writes when `pg_trickle.cdc_paused = on`.
 -- Check the current CDC pause status
 SELECT * FROM pgtrickle.cdc_pause_status();
 
--- Pause CDC (discard mode — changes arriving now are DROPPED)
+-- Pause CDC without losing committed changes
+ALTER SYSTEM SET pg_trickle.cdc_capture_mode = 'hold';
 ALTER SYSTEM SET pg_trickle.cdc_paused = on;
 SELECT pg_reload_conf();
 
--- After maintenance, un-pause and reinitialize affected tables
+-- After maintenance, un-pause and let differential refresh catch up
 ALTER SYSTEM SET pg_trickle.cdc_paused = off;
 SELECT pg_reload_conf();
--- Full refresh to recover from the gap:
-SELECT pgtrickle.refresh_stream_table('public.my_stream_table', 'FULL');
 ```
 
 ---
@@ -2868,7 +2864,7 @@ documents these cross-dependencies to help avoid misconfiguration.
 | `block_source_ddl` | DDL operations | When `true`, DDL on source tables (ALTER TABLE, DROP COLUMN) is blocked by an event trigger. Disable temporarily with `SET pg_trickle.block_source_ddl = false` before schema migrations, then re-enable. |
 | `cdc_mode` | `cdc_trigger_mode` | `cdc_trigger_mode` (`'statement'` / `'row'`) applies while a source uses trigger capture. |
 | `cdc_mode` | `wal_transition_timeout` | WAL transition timeouts return a source to trigger capture. |
-| `cleanup_use_truncate` | `compact_threshold` | `cleanup_use_truncate = true` uses TRUNCATE to clear consumed change buffers (fastest, acquires AccessExclusiveLock briefly). `compact_threshold` controls when fully-consumed buffers are compacted via DELETE — only relevant when TRUNCATE is disabled. |
+| `cleanup_use_truncate` | `compact_threshold` | `cleanup_use_truncate` is a compatibility setting with no effect. Bounded DELETE cleans consumed rows. `compact_threshold` controls compaction of pending changes when row identity and consumer count permit it. |
 | `buffer_partitioning` | `compact_threshold` | In `'auto'` mode, `compact_threshold` serves as the promotion trigger: if a buffer exceeds this many rows in a single refresh cycle, it is promoted to RANGE(lsn) partitioned mode. Lowering `compact_threshold` makes auto-promotion more sensitive. |
 | `allow_circular` | `max_fixpoint_iterations` | `max_fixpoint_iterations` is only evaluated when `allow_circular = true`. It caps the number of convergence iterations for circular dependency chains. |
 | `ivm_topk_max_limit` | TopK queries | Queries with `LIMIT > ivm_topk_max_limit` fall back to FULL refresh instead of the optimized TopK path. Raise this if you have legitimate large TopK queries. |
@@ -2899,7 +2895,6 @@ pg_trickle.max_concurrent_refreshes = 4
 # Lean merge
 pg_trickle.merge_planner_hints = true
 pg_trickle.merge_work_mem_mb = 128           # more memory = fewer disk sorts
-pg_trickle.cleanup_use_truncate = true
 pg_trickle.use_prepared_statements = true
 
 # Guardrails
@@ -2929,7 +2924,6 @@ pg_trickle.max_dynamic_refresh_workers = 8
 pg_trickle.merge_planner_hints = true
 pg_trickle.merge_work_mem_mb = 256           # large work_mem for big deltas
 pg_trickle.merge_seqscan_threshold = 0.01    # allow seq scans for >1% changes
-pg_trickle.cleanup_use_truncate = true
 pg_trickle.use_prepared_statements = true
 pg_trickle.auto_backoff = true
 pg_trickle.buffer_partitioning = 'auto'      # O(1) cleanup for hot buffers
@@ -2962,7 +2956,6 @@ pg_trickle.max_dynamic_refresh_workers = 1
 # Conservative memory
 pg_trickle.merge_work_mem_mb = 32
 pg_trickle.merge_planner_hints = true
-pg_trickle.cleanup_use_truncate = true
 
 # Tight guardrails
 pg_trickle.auto_backoff = true
@@ -2997,7 +2990,6 @@ pg_trickle.slot_lag_critical_threshold_mb = 1024
 pg_trickle.differential_max_change_ratio = 0.15
 pg_trickle.merge_planner_hints = true
 pg_trickle.merge_work_mem_mb = 64
-pg_trickle.cleanup_use_truncate = true
 pg_trickle.use_prepared_statements = true
 pg_trickle.user_triggers = 'auto'
 
@@ -3120,13 +3112,16 @@ SET pg_trickle.change_buffer_durability = 'unlogged'; -- faster, not crash-safe
 | **Default** | `false` |
 
 Global switch to temporarily stop capturing DML changes into change buffers.
-When `on`, the trigger still fires but captured rows are **discarded** (default)
-or **held** depending on `pg_trickle.cdc_capture_mode`.
+When `on`, `discard` mode stops capture and loses the interval. `hold` mode
+keeps capture active and pauses refresh consumption, so committed changes stay
+in the logged buffer.
 
 Use `pgtrickle.cdc_pause_status()` to inspect the current state.
 
-Typical use case: maintenance windows where you want to prevent change buffers
-from growing unbounded without disabling the extension entirely.
+For maintenance that must preserve committed changes, set
+`cdc_capture_mode = 'hold'`. Monitor change-buffer growth while refresh is
+paused. After any use of discard mode, reinitialize all affected stream tables
+before relying on their contents.
 
 ```sql
 -- Pause CDC during maintenance

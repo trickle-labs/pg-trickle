@@ -681,9 +681,12 @@ pub(crate) fn role_owns_relation_or_is_superuser(
 
 /// SEC-1: Check that the outer invoker owns the stream table's storage table.
 ///
-/// Uses `pg_catalog.pg_class.relowner` to verify ownership against the outer
-/// caller role rather than `current_user`, so SECURITY DEFINER APIs enforce the
-/// documented invoker ownership model. Superusers bypass the check.
+/// Uses the current `pg_class` row for the stored schema/name rather than the
+/// catalog's persisted relation OID. Logical restores can remap that OID
+/// while preserving the stream table name. Ownership is checked against the
+/// outer caller role rather than `current_user`, so SECURITY DEFINER APIs
+/// enforce the documented invoker ownership model. Superusers bypass the
+/// check.
 pub(super) fn check_stream_table_ownership(
     pgt_relid: pgrx::pg_sys::Oid,
     schema: &str,
@@ -694,11 +697,22 @@ pub(super) fn check_stream_table_ownership(
 
 fn check_stream_table_ownership_for(
     caller_oid: pgrx::pg_sys::Oid,
-    pgt_relid: pgrx::pg_sys::Oid,
+    _pgt_relid: pgrx::pg_sys::Oid,
     schema: &str,
     table_name: &str,
 ) -> Result<(), PgTrickleError> {
-    let is_owner_or_superuser = role_owns_relation_or_is_superuser(caller_oid, pgt_relid)?;
+    let current_relid = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT c.oid
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relname = $2",
+        &[schema.into(), table_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let is_owner_or_superuser = current_relid
+        .map(|relid| role_owns_relation_or_is_superuser(caller_oid, relid))
+        .transpose()?
+        .unwrap_or(false);
 
     if !is_owner_or_superuser {
         return Err(PgTrickleError::PermissionDenied(format!(

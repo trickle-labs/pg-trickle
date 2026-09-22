@@ -1582,8 +1582,33 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 **Notes:**
 - Blocked if the ST is `SUSPENDED` — use `pgtrickle.resume_stream_table(name)` first.
 - Uses an advisory lock to prevent concurrent refreshes of the same ST.
+- If another refresh owns the lock, returns without refreshing and emits a NOTICE.
 - For `DIFFERENTIAL` mode, generates and applies a delta query. For `FULL` mode, truncates and reloads.
 - Records the refresh in `pgtrickle.pgt_refresh_history` with `initiated_by = 'MANUAL'`.
+
+---
+
+### pgtrickle.write_and_refresh
+
+Executes SQL with the caller's privileges, then attempts a manual refresh in
+the same transaction.
+
+```sql
+pgtrickle.write_and_refresh(sql text, stream_table_name text) → void
+```
+
+```sql
+SELECT pgtrickle.write_and_refresh(
+    'INSERT INTO orders (id, amount) VALUES (42, 100)',
+    'order_totals'
+);
+```
+
+The refresh sees the caller's writes when it runs. If another refresh owns the
+lock, the function raises an error and the caller's write is rolled back; a
+successful return therefore means the refresh completed. Other SQL or refresh
+errors also abort the transaction. The caller must have the required source
+privileges and permission to refresh the stream table.
 
 ---
 
@@ -4948,7 +4973,7 @@ table management.
 | `pgtrickle.explain_stream_table(st_name text)` | `text` | Shows the effective refresh mode, delta plan, fallback reasons, and current state flags for a stream table. |
 | `pgtrickle.explain_dag()` | `text` (DOT) | Returns a Graphviz DOT representation of the full dependency graph. |
 | `pgtrickle.stream_table_lineage(st_name text)` | `SetOf row` | Returns the lineage graph for a single stream table — direct and transitive source tables with metadata. |
-| `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / `hold`), and a human-readable explanation. |
+| `pgtrickle.cdc_pause_status()` | `SetOf row` | Shows whether CDC is paused, the capture mode (`discard` / lossless `hold`), and a human-readable explanation. |
 | `pgtrickle.cluster_worker_summary()` | `SetOf row` | Shows active background workers across all pg_trickle-enabled databases (requires `pg_monitor`). |
 | `pgtrickle.drain()` | — | Initiates a graceful drain: the scheduler finishes in-flight refreshes then stops. Useful before `pg_upgrade` or a rolling restart. |
 | `pgtrickle.resume_after_drain()` | `bool` | Explicitly re-enables scheduler dispatch after a persistent drain request. |

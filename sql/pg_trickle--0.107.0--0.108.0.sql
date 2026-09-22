@@ -75,6 +75,10 @@ GRANT EXECUTE ON FUNCTION pgtrickle.request_output_delta_resnapshot(UUID) TO PUB
 GRANT EXECUTE ON FUNCTION pgtrickle.validate_output_delta_consumer(UUID) TO PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgtrickle.qualify_output_delta_recovery(UUID, TEXT) FROM PUBLIC;
 
+-- Regenerate existing trigger bodies so cdc_capture_mode='hold' is lossless
+-- for sources created before this upgrade.
+SELECT pgtrickle.rebuild_cdc_triggers();
+
 INSERT INTO pgtrickle.pgt_schema_version (version, description)
 VALUES (
     '0.108.0',

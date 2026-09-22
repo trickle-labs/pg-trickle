@@ -10,6 +10,109 @@ mod e2e;
 
 use e2e::E2eDb;
 
+#[tokio::test]
+async fn test_compaction_shared_source_preserves_consumer_boundaries() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE compact_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO compact_src SELECT generate_series(1, 100)")
+        .await;
+    let query = "SELECT id FROM compact_src";
+    for name in ["compact_fast", "compact_slow"] {
+        db.create_st(name, query, "1h", "DIFFERENTIAL").await;
+    }
+
+    db.execute("INSERT INTO compact_src VALUES (101)").await;
+    db.refresh_st("compact_fast").await;
+    assert_eq!(db.count("compact_fast").await, 101);
+    db.execute("DELETE FROM compact_src WHERE id = 101").await;
+    db.execute_seq(&[
+        "SET pg_trickle.compact_threshold = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('compact_slow')",
+    ])
+    .await;
+    db.refresh_st("compact_fast").await;
+
+    for name in ["compact_fast", "compact_slow"] {
+        db.assert_st_matches_query(name, query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_shared_stream_preserves_consumer_boundaries() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE compact_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO compact_src SELECT generate_series(1, 100)")
+        .await;
+    db.create_st(
+        "compact_upstream",
+        "SELECT id FROM compact_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let query = "SELECT id FROM compact_upstream";
+    for name in ["compact_fast", "compact_slow"] {
+        db.create_st(name, query, "1h", "DIFFERENTIAL").await;
+    }
+
+    db.execute("INSERT INTO compact_src VALUES (101)").await;
+    db.refresh_st("compact_upstream").await;
+    db.refresh_st("compact_fast").await;
+    assert_eq!(db.count("compact_fast").await, 101);
+    db.execute("DELETE FROM compact_src WHERE id = 101").await;
+    db.refresh_st("compact_upstream").await;
+    db.execute_seq(&[
+        "SET pg_trickle.compact_threshold = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('compact_slow')",
+    ])
+    .await;
+    db.refresh_st("compact_fast").await;
+
+    for name in ["compact_fast", "compact_slow"] {
+        db.assert_st_matches_query(name, query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_compaction_keyless_source_and_stream_preserve_duplicates() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE compact_src (val INT)").await;
+    db.execute("INSERT INTO compact_src SELECT generate_series(1, 100)")
+        .await;
+    db.create_st(
+        "compact_upstream",
+        "SELECT val FROM compact_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let query = "SELECT val, COUNT(*) AS cnt FROM compact_upstream GROUP BY val";
+    db.create_st("compact_counts", query, "1h", "DIFFERENTIAL")
+        .await;
+
+    db.execute("INSERT INTO compact_src VALUES (101), (101), (101)")
+        .await;
+    db.execute_seq(&[
+        "SET pg_trickle.compact_threshold = 1",
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('compact_upstream')",
+        "SELECT pgtrickle.refresh_stream_table('compact_counts')",
+    ])
+    .await;
+
+    db.assert_st_matches_query("compact_upstream", "SELECT val FROM compact_src")
+        .await;
+    db.assert_st_matches_query("compact_counts", query).await;
+    let count: i64 = db
+        .query_scalar("SELECT cnt FROM compact_counts WHERE val = 101")
+        .await;
+    assert_eq!(count, 3);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // D-4.1 — Fan-out: 10 STs from one source share a single change buffer
 // ═══════════════════════════════════════════════════════════════════════════

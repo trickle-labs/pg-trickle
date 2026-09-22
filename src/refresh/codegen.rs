@@ -297,8 +297,6 @@ pub(crate) fn drain_pending_cleanups() {
         }
     }
 
-    let use_truncate = crate::config::pg_trickle_cleanup_use_truncate();
-
     for oid in all_oids {
         // CITUS-4: Compute stable buffer name for this source OID.
         let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
@@ -388,22 +386,6 @@ pub(crate) fn drain_pending_cleanups() {
             }
         };
 
-        let can_truncate = if use_truncate {
-            // Safe to TRUNCATE only if ALL entries are at or below the safe LSN.
-            Spi::get_one::<bool>(&format!(
-                "SELECT NOT EXISTS(\
-                   SELECT 1 FROM \"{schema}\".{buf_name} \
-                   WHERE lsn > '{safe_lsn}'::pg_lsn \
-                   LIMIT 1\
-                 )",
-                schema = change_schema,
-            ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false)
-        } else {
-            false
-        };
-
         // Task 3.3: Partitioned buffer cleanup via DETACH + DROP.
         if crate::cdc::is_buffer_partitioned(&change_schema, oid) {
             match crate::cdc::detach_consumed_partitions(&change_schema, oid, &safe_lsn) {
@@ -474,51 +456,30 @@ pub(crate) fn drain_pending_cleanups() {
             upsert_cleanup_status(oid, &buf_name, operation, msg, backlog_rows);
         };
 
-        if can_truncate {
-            match Spi::run(&format!(
-                "TRUNCATE \"{schema}\".{buf_name}",
-                schema = change_schema,
-            )) {
-                Ok(()) => {
-                    match crate::cdc::restore_registered_sentinel(
-                        &change_schema,
-                        &buf_name,
-                        "BASE",
-                        oid as i64,
-                    ) {
-                        Ok(()) => {
-                            CLEANUP_FAILURE_COUNTS.with(|m| {
-                                m.borrow_mut().remove(&oid);
-                            });
-                            clear_cleanup_status(oid);
-                        }
-                        Err(e) => record_cleanup_failure(oid, "SENTINEL_RESTORE", &e.to_string()),
-                    }
-                }
-                Err(e) => record_cleanup_failure(oid, "TRUNCATE", &e.to_string()),
+        let delete_sql = format!(
+            "DELETE FROM \"{schema}\".{buf_name} \
+             WHERE action IN ('I', 'D', 'T') \
+               AND lsn <= '{safe_lsn}'::pg_lsn",
+            schema = change_schema,
+        );
+        match Spi::run(&delete_sql) {
+            Ok(()) => {
+                CLEANUP_FAILURE_COUNTS.with(|m| {
+                    m.borrow_mut().remove(&oid);
+                });
+                clear_cleanup_status(oid);
             }
-        } else {
-            let delete_sql = format!(
-                "DELETE FROM \"{schema}\".{buf_name} \
-                 WHERE action IN ('I', 'D') \
-                   AND lsn <= '{safe_lsn}'::pg_lsn",
-                schema = change_schema,
-            );
-            match Spi::run(&delete_sql) {
-                Ok(()) => {
-                    CLEANUP_FAILURE_COUNTS.with(|m| {
-                        m.borrow_mut().remove(&oid);
-                    });
-                    clear_cleanup_status(oid);
-                }
-                Err(e) => record_cleanup_failure(oid, "DELETE", &e.to_string()),
-            }
+            Err(e) => record_cleanup_failure(oid, "DELETE", &e.to_string()),
         }
     }
 }
 
 /// Frontier-based cleanup: delete stale change buffer rows using the persisted
 /// frontier in `pgt_stream_tables` rather than thread-local state.
+///
+/// Use a bounded DELETE even when all visible rows are consumed. An uncommitted
+/// writer can be invisible to an emptiness check and commit while TRUNCATE waits
+/// for its lock, losing an unconsumed change. DELETE also preserves the sentinel.
 ///
 /// This complements `drain_pending_cleanups` by handling the case where the
 /// deferred cleanup was queued on a different PostgreSQL backend process
@@ -533,8 +494,6 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
     if source_oids.is_empty() {
         return;
     }
-
-    let use_truncate = crate::config::pg_trickle_cleanup_use_truncate();
 
     let values_list = source_oids
         .iter()
@@ -603,7 +562,7 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
         let has_stale = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
                SELECT 1 FROM \"{schema}\".{buf_name} \
-               WHERE lsn <= '{safe_lsn}'::pg_lsn \
+               WHERE action IN ('I', 'D', 'T') AND lsn <= '{safe_lsn}'::pg_lsn \
                LIMIT 1\
              )",
             schema = change_schema,
@@ -650,67 +609,23 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
             continue;
         }
 
-        let can_truncate = if use_truncate {
-            Spi::get_one::<bool>(&format!(
-                "SELECT NOT EXISTS(\
-                   SELECT 1 FROM \"{schema}\".{buf_name} \
-                   WHERE lsn > '{safe_lsn}'::pg_lsn \
-                   LIMIT 1\
-                 )",
+        let delete_sql = format!(
+            "DELETE FROM \"{schema}\".{buf_name} \
+             WHERE action IN ('I', 'D', 'T') \
+               AND lsn <= '{safe_lsn}'::pg_lsn",
+            schema = change_schema,
+        );
+        if let Err(e) = Spi::run(&delete_sql) {
+            pgrx::debug1!("[pg_trickle] Frontier-based cleanup DELETE failed: {}", e);
+            let backlog_rows = Spi::get_one::<i64>(&format!(
+                "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
                 schema = change_schema,
             ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false)
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
+            upsert_cleanup_status(oid, &buf_name, "DELETE", &e.to_string(), backlog_rows);
         } else {
-            false
-        };
-
-        if can_truncate {
-            if let Err(e) = Spi::run(&format!(
-                "TRUNCATE \"{schema}\".{buf_name}",
-                schema = change_schema,
-            )) {
-                pgrx::debug1!("[pg_trickle] Frontier-based cleanup TRUNCATE failed: {}", e);
-                let backlog_rows = Spi::get_one::<i64>(&format!(
-                    "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
-                    schema = change_schema,
-                ))
-                .unwrap_or(Some(0))
-                .unwrap_or(0);
-                upsert_cleanup_status(oid, &buf_name, "TRUNCATE", &e.to_string(), backlog_rows);
-            } else {
-                if let Err(e) = crate::cdc::restore_registered_sentinel(
-                    change_schema,
-                    &buf_name,
-                    "BASE",
-                    oid as i64,
-                ) {
-                    pgrx::debug1!(
-                        "[pg_trickle] Frontier-based cleanup sentinel restore failed: {}",
-                        e
-                    );
-                }
-                clear_cleanup_status(oid);
-            }
-        } else {
-            let delete_sql = format!(
-                "DELETE FROM \"{schema}\".{buf_name} \
-                 WHERE action IN ('I', 'D') \
-                   AND lsn <= '{safe_lsn}'::pg_lsn",
-                schema = change_schema,
-            );
-            if let Err(e) = Spi::run(&delete_sql) {
-                pgrx::debug1!("[pg_trickle] Frontier-based cleanup DELETE failed: {}", e);
-                let backlog_rows = Spi::get_one::<i64>(&format!(
-                    "SELECT count(*)::bigint FROM \"{schema}\".{buf_name}",
-                    schema = change_schema,
-                ))
-                .unwrap_or(Some(0))
-                .unwrap_or(0);
-                upsert_cleanup_status(oid, &buf_name, "DELETE", &e.to_string(), backlog_rows);
-            } else {
-                clear_cleanup_status(oid);
-            }
+            clear_cleanup_status(oid);
         }
     }
 }

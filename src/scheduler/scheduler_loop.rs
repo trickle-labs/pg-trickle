@@ -761,6 +761,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             return;
         }
 
+        // Lossless CDC pause: keep capture active, but do not consume buffers
+        // until the operator lifts the pause.
+        if config::pg_trickle_cdc_paused()
+            && config::pg_trickle_cdc_capture_mode() == config::CdcCaptureMode::Hold
+        {
+            continue;
+        }
+
         // v0.90.0: settle completed visibility XIDs before refreshing the
         // bounded SLA summaries. Missing commit timestamps remain NULL and
         // therefore cannot become fabricated freshness evidence.
@@ -1523,6 +1531,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             //
             // If fanout is disabled we fall back to the per-group per-member
             // path used in earlier versions.
+            let mut failed_poll_sts = HashSet::new();
             let fanout_cache: Option<std::collections::HashSet<i64>> =
                 if !all_groups_load_deferred && config::pg_trickle_enable_change_buffer_fanout() {
                     // Collect all active STs referenced in the consistency groups.
@@ -1543,14 +1552,31 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let sts: Vec<_> = all_pgt_ids
                         .iter()
                         .filter_map(|&id| load_st_by_id(id))
+                        .filter(|st| check_schedule(st, dag_ref) || st.needs_reinit)
                         .collect();
 
-                    Some(batched_has_source_changes(&sts))
+                    match batched_has_source_changes(&sts) {
+                        Ok((changes, failed)) => {
+                            failed_poll_sts = failed;
+                            Some(changes)
+                        }
+                        Err(e) => {
+                            warning!("pg_trickle: failed to detect source changes: {}", e);
+                            return;
+                        }
+                    }
                 } else {
                     None
                 };
 
             for group in &groups {
+                // Keep an atomic group intact when one source is unavailable;
+                // independent healthy groups may still refresh this tick.
+                if group.members.iter().any(|member| {
+                    matches!(member, NodeId::StreamTable(id) if failed_poll_sts.contains(id))
+                }) {
+                    continue;
+                }
                 // Committed changes remain buffered while ordinary scheduled work yields
                 // to application load. Repairs, explicit freshness targets, initial
                 // population, IMMEDIATE work, and full buffers bypass deferral.
@@ -1581,9 +1607,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         .members
                         .iter()
                         .filter_map(|member| match member {
-                            NodeId::StreamTable(id) => {
-                                load_st_by_id(*id).map(|st| (*id, has_table_source_changes(&st)))
-                            }
+                            NodeId::StreamTable(id) => load_st_by_id(*id).map(|st| {
+                                let due = check_schedule(&st, dag_ref) || st.needs_reinit;
+                                (*id, due && has_table_source_changes(&st))
+                            }),
                             _ => None,
                         })
                         .collect(),

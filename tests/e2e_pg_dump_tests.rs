@@ -3,7 +3,7 @@ use e2e::E2eDb;
 use std::process::Command;
 
 #[tokio::test]
-async fn test_pg_dump_restore_fails_closed() {
+async fn test_pg_dump_restore_recreates_oid_shifted_dag() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE source (id INT PRIMARY KEY, val TEXT)")
@@ -18,8 +18,22 @@ async fn test_pg_dump_restore_fails_closed() {
         "DIFFERENTIAL",
     )
     .await;
+    db.create_st(
+        "dump_test_downstream",
+        "SELECT id, val FROM dump_test_st",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
 
     assert_eq!(db.count("public.dump_test_st").await, 2);
+    assert_eq!(db.count("public.dump_test_downstream").await, 2);
+    let upstream_ddl: String = db
+        .query_scalar("SELECT pgtrickle.export_definition('public.dump_test_st')")
+        .await;
+    let downstream_ddl: String = db
+        .query_scalar("SELECT pgtrickle.export_definition('public.dump_test_downstream')")
+        .await;
     let source_recovery: String = db
         .query_scalar("SELECT pgtrickle.validate_recovery()")
         .await;
@@ -211,8 +225,9 @@ async fn test_pg_dump_restore_fails_closed() {
             .expect("inspect restored capture state");
     assert_eq!(capture_state, "QUARANTINED");
 
-    // The legacy bulk restore helper remains disabled; use the explicit
-    // adoption and protected-reinitialization workflow above instead.
+    // The legacy bulk restore helper remains disabled. The supported workflow
+    // explicitly adopts the database, drops restored stream tables, and
+    // recreates them from definitions resolved against the restored OIDs.
     let restore_error = sqlx::query("SELECT pgtrickle.restore_stream_tables()")
         .execute(&restored_pool)
         .await
@@ -223,4 +238,68 @@ async fn test_pg_dump_restore_fails_closed() {
             .contains("restore_stream_tables() is disabled"),
         "unexpected restore error: {restore_error}"
     );
+
+    let adoption: String = sqlx::query_scalar("SELECT pgtrickle.recover_capture_instance()")
+        .fetch_one(&restored_pool)
+        .await
+        .expect("adopt restored capture instance");
+    assert!(adoption.contains("capture ownership adopted"));
+
+    sqlx::query(
+        "SELECT pgtrickle.bulk_drop_stream_tables(
+             ARRAY['public.dump_test_st', 'public.dump_test_downstream'])",
+    )
+    .execute(&restored_pool)
+    .await
+    .expect("drop restored stream-table DAG");
+
+    let recreate_upstream = upstream_ddl
+        .split_once('\n')
+        .map_or_else(|| upstream_ddl.clone(), |(_, ddl)| ddl.to_string());
+    let recreate_downstream = downstream_ddl
+        .split_once('\n')
+        .map_or_else(|| downstream_ddl.clone(), |(_, ddl)| ddl.to_string());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(recreate_upstream))
+        .execute(&restored_pool)
+        .await
+        .expect("recreate upstream stream table");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(recreate_downstream))
+        .execute(&restored_pool)
+        .await
+        .expect("recreate downstream stream table");
+    sqlx::query("SELECT pgtrickle.rebuild_cdc_triggers()")
+        .execute(&restored_pool)
+        .await
+        .expect("rebuild restored CDC triggers");
+
+    sqlx::query("INSERT INTO source VALUES (3, 'three')")
+        .execute(&restored_pool)
+        .await
+        .expect("write after logical restore recreation");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('dump_test_st')")
+        .execute(&restored_pool)
+        .await
+        .expect("refresh recreated upstream stream table");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('dump_test_downstream')")
+        .execute(&restored_pool)
+        .await
+        .expect("refresh recreated downstream stream table");
+
+    let recovery_report: String = sqlx::query_scalar("SELECT pgtrickle.validate_recovery()")
+        .fetch_one(&restored_pool)
+        .await
+        .expect("validate recreated capture state");
+    assert!(
+        recovery_report.contains("\"status\":\"SAFE\""),
+        "recreated DAG must validate SAFE: {recovery_report}"
+    );
+    let (upstream_count, downstream_count): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM dump_test_st),
+                (SELECT count(*) FROM dump_test_downstream)",
+    )
+    .fetch_one(&restored_pool)
+    .await
+    .expect("inspect recreated stream tables");
+    assert_eq!(upstream_count, 3);
+    assert_eq!(downstream_count, 3);
 }

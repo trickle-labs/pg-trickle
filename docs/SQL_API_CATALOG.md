@@ -180,4 +180,4 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.watermarks()` | `pgtrickle` | `SetOf row` | Return the current watermark state for all registered sources. |
 | `pgtrickle.worker_allocation_status()` | `pgtrickle` | `SetOf row` | Columns: - `db_name`: The current database name. |
 | `pgtrickle.worker_pool_status()` | `pgtrickle` | `SetOf row` | Exposed as `pgtrickle.worker_pool_status()`. |
-| `pgtrickle.write_and_refresh()` | `pgtrickle` | `` | Calling `pgtrickle.write_and_refresh(sql, name)` guarantees the refresh sees the writes from `sql` because both run in the same transaction. |
+| `pgtrickle.write_and_refresh()` | `pgtrickle` | `` | Calling `pgtrickle.write_and_refresh(sql, name)` guarantees that the refresh completes after seeing the writes from `sql`. |

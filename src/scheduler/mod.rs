@@ -2629,19 +2629,67 @@ fn upstream_change_state(
 /// matched.
 pub(crate) fn batched_has_source_changes(
     sts: &[StreamTableMeta],
-) -> std::collections::HashSet<i64> {
+) -> Result<(HashSet<i64>, HashSet<i64>), crate::error::PgTrickleError> {
     use std::collections::HashSet;
     use std::fmt::Write;
 
     if sts.is_empty() {
-        return HashSet::new();
+        return Ok((HashSet::new(), HashSet::new()));
     }
 
     let change_schema = config::pg_trickle_change_buffer_schema();
+    let quoted_change_schema = change_schema.replace('"', "\"\"");
+    let mut polled_sources = HashMap::new();
+    let mut failed_sts = HashSet::new();
     let mut arms: Vec<String> = Vec::with_capacity(sts.len());
 
     for st in sts {
-        let source_oids = get_source_oids_for_st(st.pgt_id);
+        let mut source_oids = Vec::new();
+        // Poll before freezing change visibility, including when the buffer is
+        // empty. Shared sources need only one snapshot comparison per tick.
+        for dep in crate::catalog::StDependency::get_for_st(st.pgt_id)? {
+            if matches!(
+                dep.source_type.as_str(),
+                "TABLE" | "FOREIGN_TABLE" | "MATVIEW"
+            ) {
+                source_oids.push(dep.source_relid);
+            }
+            if matches!(dep.source_type.as_str(), "FOREIGN_TABLE" | "MATVIEW") {
+                let succeeded = polled_sources.entry(dep.source_relid).or_insert_with(|| {
+                    // A remote failure must roll back partial snapshot/buffer
+                    // writes without aborting healthy streams in this tick.
+                    let subtxn = SubTransaction::begin();
+                    // SPI already guards its PostgreSQL calls. An additional
+                    // FFI boundary around Rust code would put a C trampoline
+                    // between a nested SPI panic and its Rust catch handler.
+                    let result = pgrx::PgTryBuilder::new(AssertUnwindSafe(|| {
+                        if dep.source_type == "FOREIGN_TABLE" {
+                            cdc::poll_foreign_table_changes(dep.source_relid, &quoted_change_schema)
+                        } else {
+                            cdc::poll_matview_changes(dep.source_relid, &quoted_change_schema)
+                        }
+                        .map_err(|e| e.to_string())
+                    }))
+                    .catch_others(|error| Err(format!("{error:?}")))
+                    .execute();
+                    if let Err(message) = result {
+                        subtxn.rollback();
+                        warning!(
+                            "pg_trickle: source {} polling failed: {}",
+                            dep.source_relid.to_u32(),
+                            message
+                        );
+                        false
+                    } else {
+                        subtxn.commit();
+                        true
+                    }
+                });
+                if !*succeeded {
+                    failed_sts.insert(st.pgt_id);
+                }
+            }
+        }
         if source_oids.is_empty() {
             continue;
         }
@@ -2667,7 +2715,7 @@ pub(crate) fn batched_has_source_changes(
     }
 
     if arms.is_empty() {
-        return HashSet::new();
+        return Ok((HashSet::new(), failed_sts));
     }
 
     // Execute once: collect all pgt_ids with pending changes.
@@ -2676,13 +2724,14 @@ pub(crate) fn batched_has_source_changes(
         arms = arms.join(" UNION ALL "),
     );
 
-    let ids: HashSet<i64> = Spi::get_one::<Vec<i64>>(&sql) // nosemgrep: rust.spi.get-one.dynamic-format — change_schema is config-derived, OIDs are system values
-        .unwrap_or(None)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let ids: HashSet<i64> =
+        Spi::get_one::<Vec<i64>>(&sql) // nosemgrep: rust.spi.get-one.dynamic-format — change_schema is config-derived, OIDs are system values
+            .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
-    ids
+    Ok((ids, failed_sts))
 }
 
 /// Returns `true` if any TABLE or FOREIGN_TABLE upstream source has rows in
@@ -3131,6 +3180,20 @@ fn refresh_single_st(
         return;
     }
 
+    let needs_refresh = check_schedule(&st, dag_ref);
+    if !needs_refresh && !st.needs_reinit {
+        return;
+    }
+
+    if check_skip_needed(&st) {
+        log!(
+            "pg_trickle: skipping {}.{} — previous refresh still running",
+            st.pgt_schema,
+            st.pgt_name,
+        );
+        return;
+    }
+
     // Revalidate persisted explicit incremental definitions before scheduling.
     // This closes the upgrade path where a query was accepted by an older
     // binary but is FULL-only under the current semantic admission matrix.
@@ -3159,20 +3222,6 @@ fn refresh_single_st(
                 mark_error
             );
         }
-        return;
-    }
-
-    let needs_refresh = check_schedule(&st, dag_ref);
-    if !needs_refresh && !st.needs_reinit {
-        return;
-    }
-
-    if check_skip_needed(&st) {
-        log!(
-            "pg_trickle: skipping {}.{} — previous refresh still running",
-            st.pgt_schema,
-            st.pgt_name,
-        );
         return;
     }
 

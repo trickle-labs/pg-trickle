@@ -179,35 +179,30 @@ are ordinary PostgreSQL tables — RLS can be applied to them with `ALTER TABLE
 
 ## CDC Buffer Access
 
-The `pgtrickle_changes` schema contains one unlogged table per source table
-OID. These tables are only meant for internal pg_trickle use:
+The `pgtrickle_changes` schema contains change buffers per tracked source.
+Buffers are WAL-logged by default. These tables are for internal pg_trickle use:
 
 - **Do not grant** `SELECT`, `INSERT`, `UPDATE`, or `DELETE` on
   `pgtrickle_changes.*` to application users.
-- **Do not include** `pgtrickle_changes.*` in logical replication publications
-  (they are UNLOGGED by default and thus not replicatable).
-- The scheduler reads and truncates change buffer tables during each refresh.
+- **Do not include** `pgtrickle_changes.*` in application logical replication
+  publications. Use the supported output publication APIs instead.
+- The scheduler reads change buffers and deletes consumed rows during cleanup.
   External reads during active refresh may observe partial or inconsistent
   intermediate state.
 
 ---
 
-## TRUNCATE Semantics
+## Change buffer cleanup
 
-When a FULL refresh completes, pg_trickle uses `TRUNCATE pgtrickle_changes.changes_<oid>`
-(or `DELETE`, depending on the `pg_trickle.cleanup_use_truncate` GUC) to clear
-the change buffer after consuming all pending changes.
+Ordinary change buffers use bounded `DELETE` to remove consumed rows while
+preserving pending changes and the buffer sentinel. The
+`pg_trickle.cleanup_use_truncate` GUC remains accepted for compatibility but
+has no effect.
 
-**TRUNCATE behaviour:**
-
-- Acquires `ACCESS EXCLUSIVE` lock on the change buffer table for the duration
-  of the TRUNCATE. This briefly blocks concurrent DML on the **change buffer**
-  (not the source table). Source table DML is unaffected.
-- Is WAL-logged if the change buffer table is `LOGGED`, or simply resets the
-  relation's fork if `UNLOGGED` (the default).
-- When `pg_trickle.cdc_paused = on`, CDC trigger bodies return `NULL`
-  regardless of this setting — the change buffer is not written, so there
-  is nothing to TRUNCATE.
+A check followed by `TRUNCATE` could discard a concurrent writer's committed
+change that was invisible to the check. Bounded `DELETE` avoids that race and
+an exclusive table lock during ordinary buffer cleanup. Partitioned buffers
+retain their separate partition cleanup path.
 
 ### `cdc_paused` vs `drain()` semantics
 
@@ -218,7 +213,7 @@ the change buffer after consuming all pending changes.
 | `pg_trickle.enabled = off` | Disable the entire scheduler | Accumulates | Stale |
 
 When resuming from `cdc_paused`, call
-`SELECT pgtrickle.reinitialize('schema.stream_table')` to restore consistency,
+`SELECT pgtrickle.reinitialize_stream_table('schema.stream_table')` to restore consistency,
 since changes that arrived during the pause were discarded.
 
 ---

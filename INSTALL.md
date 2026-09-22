@@ -451,45 +451,38 @@ application schema:
 - **`pgtrickle`** — stream table catalog, dependency graph, and refresh history
 - **`pgtrickle_changes`** — change-buffer tables (one per CDC-enabled source)
 
-Include both schemas explicitly when using `pg_dump`:
+Use a full-database dump to include application data and extension configuration:
 
 ```bash
-pg_dump \
-  --schema=public \
-  --schema=pgtrickle \
-  --schema=pgtrickle_changes \
-  mydb > mydb_backup.sql
+pg_dump --format=custom --file=mydb.dump mydb
 ```
 
-If your application data lives in schemas other than `public`, include those
-schemas too. Omitting `pgtrickle_changes` means any unprocessed CDC rows are
-lost on restore, forcing the next differential refresh to fall back to FULL mode.
+Logical dumps preserve durable configuration, but restored relation OIDs and
+capture ownership cannot be reused automatically.
 
 ### Restoring
 
-Restore normally:
+Stop scheduling and application writes before restoring into a fresh database:
 
 ```bash
-psql -d mydb_restored -f mydb_backup.sql
+createdb mydb_restored
+pg_restore --dbname=mydb_restored --jobs=4 mydb.dump
 ```
 
-After restore, run the health check to validate catalog integrity:
+After restore, inspect the capture ownership and recovery state:
 
 ```sql
-SELECT * FROM pgtrickle.health_check();
+SELECT * FROM pgtrickle.pgt_status();
+SELECT pgtrickle.capture_instance_status();
+SELECT pgtrickle.validate_recovery();
 ```
 
-### OID Re-assignment After Restore
-
-Change-buffer tables in `pgtrickle_changes` are named by storage-table OID (e.g.
-`changes_12345`). OIDs may differ after restore if tables were created in a
-different order. Run `pg_trickle_repair_stream_table()` on each stream table
-immediately after restore to reconcile any OID mismatches:
-
-```sql
-SELECT pgtrickle.repair_stream_table(pgt_schema || '.' || pgt_name)
-FROM pgtrickle.pgt_stream_tables;
-```
+Keep refresh and writes disabled until recovery is complete. A changed database
+identity requires explicit superuser adoption with
+`pgtrickle.recover_capture_instance()`. `repair_stream_table()` does not remap
+source relation OIDs after a logical restore. Follow the
+[backup and restore guide](docs/BACKUP_AND_RESTORE.md) to rebuild affected stream
+tables and validate the restored database before resuming service.
 
 ---
 
