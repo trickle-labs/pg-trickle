@@ -8,6 +8,7 @@ from scripts.release_evidence import (
     canonical_digest,
     validate_attempts,
     validate_case_evidence,
+    validate_case_log,
     validate_installation,
 )
 from scripts.run_release_suite import machine_case_attempts
@@ -53,6 +54,20 @@ class ReleaseEvidenceTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "non-passing attempt"):
             validate_attempts(result, {"required": True})
+
+    def test_failed_machine_event_cannot_be_dropped_from_result(self) -> None:
+        name = "pg_trickle::e2e_example_tests$test_required_case"
+        output = "\n".join(
+            f'{{"type":"test","event":"{event}","name":"{name}"}}'
+            for event in ("failed", "ok")
+        )
+        result = {
+            "suite_id": "example",
+            "attempts": [{"cases": [{"id": CASE, "status": "passed"}]}],
+            "observed_cases": [{"id": CASE, "status": "passed"}],
+        }
+        with self.assertRaisesRegex(ValueError, "machine events"):
+            validate_case_log(result, {"required_cases": [CASE]}, output)
 
     def test_installed_payload_mismatch_is_rejected(self) -> None:
         files = [{"path": "usr/lib/postgresql/18/lib/pg_trickle.so", "bytes": 3, "sha256": "abc"}]

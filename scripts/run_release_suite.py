@@ -258,6 +258,8 @@ def main() -> int:
             if machine_results is not None:
                 passed, failed, skipped = machine_results
                 executed = passed + failed
+                if "--ignored" in command:
+                    skipped = 0  # nextest reports ignored discovery even when those tests run.
             elif summaries:
                 passed, failed, ignored = (sum(int(row[index]) for row in summaries) for index in range(3))
                 executed = passed + failed

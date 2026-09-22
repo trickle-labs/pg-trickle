@@ -14,6 +14,11 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+if __package__:
+    from .run_release_suite import machine_case_attempts
+else:
+    from run_release_suite import machine_case_attempts
+
 
 RESULT_STATES = {"passed", "failed", "skipped", "unavailable", "stale", "historical"}
 
@@ -112,6 +117,17 @@ def validate_case_evidence(result: dict[str, object], spec: dict[str, object]) -
             raise ValueError(f"required case {case['id']!r} did not pass")
     if len(observed_ids) != len(set(observed_ids)) or set(observed_ids) != set(required):
         raise ValueError(f"suite {result.get('suite_id')!r} has missing or unexpected observed cases")
+
+
+def validate_case_log(result: dict[str, object], spec: dict[str, object], output: str) -> None:
+    required = spec.get("required_cases", [])
+    if not required:
+        return
+    observed_attempts = machine_case_attempts(output, required)
+    if not observed_attempts or [item.get("cases") for item in result["attempts"]] != observed_attempts:
+        raise ValueError(f"suite {result.get('suite_id')!r} case attempts differ from machine events in its log")
+    if result["observed_cases"] != observed_attempts[-1]:
+        raise ValueError(f"suite {result.get('suite_id')!r} observed cases differ from machine events in its log")
 
 
 def validate_attempts(result: dict[str, object], spec: dict[str, object]) -> None:
@@ -430,6 +446,7 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
         log_digest = hashlib.sha256(log_path.read_bytes()).hexdigest()
         if log_bytes == 0 or log.get("bytes") != log_bytes or log.get("sha256") != log_digest:
             raise ValueError(f"suite {suite_id!r} retained log is empty or has a mismatched digest")
+        validate_case_log(result, spec, log_path.read_text(encoding="utf-8", errors="replace"))
         retained_logs[log["path"]] = {
             "name": suite_id,
             "path": log["path"],

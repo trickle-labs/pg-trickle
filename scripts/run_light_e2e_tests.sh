@@ -483,6 +483,9 @@ fi
 
 
 if [[ "${PGT_RELEASE_MACHINE_FORMAT:-0}" == "1" ]]; then
+    if [[ "$ignored_only" == true ]]; then
+        cargo_args+=(--run-ignored only)
+    fi
     NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${cargo_args[@]}" \
         --message-format libtest-json-plus \
         --retries "${PGT_RELEASE_NEXTEST_RETRIES:-2}"
