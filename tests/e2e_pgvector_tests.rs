@@ -505,13 +505,14 @@ async fn test_vector_avg_shard_additive_correctness() {
     .await;
 
     let q = "SELECT shard, avg(vec) AS centroid, count(*) AS cnt FROM shard_src GROUP BY shard";
+    let expected_q = "SELECT shard, avg(vec)::vector(4) AS centroid, count(*) AS cnt FROM shard_src GROUP BY shard";
     let create_sql = format!(
         "SELECT pgtrickle.create_stream_table('shard_avg_st', $${q}$$, '1m', 'DIFFERENTIAL')"
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create_sql])
         .await;
 
-    db.assert_st_matches_query("shard_avg_st", q).await;
+    db.assert_st_matches_query("shard_avg_st", expected_q).await;
 
     // Verify shard 1 centroid: avg([1,2,3,4],[3,4,5,6]) = [2,3,4,5]
     let s1_centroid: Option<String> = db
@@ -529,7 +530,7 @@ async fn test_vector_avg_shard_additive_correctness() {
     db.execute("INSERT INTO shard_src (shard, vec) VALUES (1, '[5,6,7,8]')")
         .await;
     db.refresh_st("shard_avg_st").await;
-    db.assert_st_matches_query("shard_avg_st", q).await;
+    db.assert_st_matches_query("shard_avg_st", expected_q).await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
