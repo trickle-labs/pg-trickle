@@ -146,15 +146,9 @@ SELECT pgtrickle.alter_stream_table('public.orders_mv', schedule => '5s');
 pg_trickle deletes change-buffer rows once every stream table that
 references the source has consumed them.  Slow stream tables block cleanup.
 
-**Recipe — Enable truncate-based cleanup (faster for large buffers):**
-
-```sql
-ALTER SYSTEM SET pg_trickle.cleanup_use_truncate = on;
-SELECT pg_reload_conf();
-```
-
-Uses `TRUNCATE` instead of `DELETE` when cleaning up entire partitioned
-change-buffer tables.  Avoids bloat from frequent deletes.
+Ordinary buffers use bounded `DELETE` for cleanup. Monitor dead tuples and
+autovacuum on busy buffers. `pg_trickle.cleanup_use_truncate` remains accepted
+for compatibility but has no effect. Partitioned buffers use partition cleanup.
 
 ---
 

@@ -59,6 +59,96 @@ async fn wait_for_n_refreshes(
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
+/// Snapshot-polled sources must be polled before the fanout cache freezes
+/// change visibility, even when their buffers were initially empty.
+#[tokio::test]
+async fn test_scheduler_fanout_shared_matview_changes_refresh_both_consumers() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.enable_change_buffer_fanout", "on", "on")
+        .await;
+    db.execute("CREATE TABLE fanout_mv_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO fanout_mv_src VALUES (1, 10)").await;
+    db.execute("CREATE MATERIALIZED VIEW fanout_mv AS SELECT * FROM fanout_mv_src")
+        .await;
+    for name in ["fanout_mv_a", "fanout_mv_b"] {
+        db.create_st(name, "SELECT id, val FROM fanout_mv", "1s", "FULL")
+            .await;
+    }
+
+    // A failed remote poll must not starve the independent MATVIEW group.
+    db.execute("CREATE EXTENSION postgres_fdw").await;
+    let db_name: String = db.query_scalar("SELECT current_database()").await;
+    db.execute(&format!(
+        "CREATE SERVER fanout_remote FOREIGN DATA WRAPPER postgres_fdw \
+         OPTIONS (dbname '{db_name}', host '127.0.0.1', port '5432')"
+    ))
+    .await;
+    db.execute(
+        "CREATE USER MAPPING FOR CURRENT_USER SERVER fanout_remote OPTIONS (user 'postgres')",
+    )
+    .await;
+    db.execute("CREATE TABLE fanout_remote_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO fanout_remote_src VALUES (1, 10)")
+        .await;
+    db.execute("CREATE FOREIGN TABLE fanout_ft (id INT, val INT) SERVER fanout_remote OPTIONS (table_name 'fanout_remote_src')")
+        .await;
+    db.create_st(
+        "fanout_ft_st",
+        "SELECT id, val FROM fanout_ft",
+        "1s",
+        "FULL",
+    )
+    .await;
+    db.execute("ALTER SERVER fanout_remote OPTIONS (SET port '1')")
+        .await;
+    db.execute("UPDATE fanout_remote_src SET val = 30").await;
+
+    // Updating and then deleting the only row verifies both nonempty and
+    // empty snapshots; no manual ST refresh may supply the missing polling.
+    for mutation in [
+        "UPDATE fanout_mv_src SET val = 20",
+        "DELETE FROM fanout_mv_src",
+    ] {
+        db.execute(mutation).await;
+        db.execute("REFRESH MATERIALIZED VIEW fanout_mv").await;
+        assert!(
+            db.wait_for_condition(
+                "both fanout consumers match the materialized view",
+                "SELECT NOT EXISTS (
+                    (SELECT id, val FROM fanout_mv_a EXCEPT ALL SELECT id, val FROM fanout_mv)
+                    UNION ALL
+                    (SELECT id, val FROM fanout_mv EXCEPT ALL SELECT id, val FROM fanout_mv_a)
+                    UNION ALL
+                    (SELECT id, val FROM fanout_mv_b EXCEPT ALL SELECT id, val FROM fanout_mv)
+                    UNION ALL
+                    (SELECT id, val FROM fanout_mv EXCEPT ALL SELECT id, val FROM fanout_mv_b)
+                )",
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+            .await,
+            "fanout polling must refresh both consumers after {mutation}"
+        );
+    }
+    // The failed source remains retryable and catches up after recovery.
+    db.execute("ALTER SERVER fanout_remote OPTIONS (SET port '5432')")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "foreign source recovers after polling failure",
+            "SELECT EXISTS (SELECT 1 FROM fanout_ft_st WHERE val = 30)",
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+        )
+        .await
+    );
+}
+
 /// PERF-1: The change-buffer fanout cache must not suppress legitimate refresh
 /// triggers.
 ///

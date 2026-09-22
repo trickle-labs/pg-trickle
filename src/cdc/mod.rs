@@ -1413,6 +1413,21 @@ pub fn compact_change_buffer(
         return Ok(CompactionResult::BelowThreshold);
     }
 
+    // ponytail: keep shared/keyless histories intact; compact them only with
+    // a multiplicity-preserving algorithm that respects every consumer frontier.
+    let can_compact = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conrelid = $1 AND contype = 'p' AND NOT condeferrable)
+            AND (SELECT count(DISTINCT pgt_id) FROM pgtrickle.pgt_dependencies
+                 WHERE source_relid = $1) = 1",
+        &[pg_sys::Oid::from(source_oid).into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !can_compact {
+        return Ok(CompactionResult::BelowThreshold);
+    }
+
     // Advisory lock keyed on source OID to serialise with refresh.
     // Use a fixed namespace offset to avoid collisions with other locks.
     let lock_key = 0x5047_5400_i64 | (source_oid as i64);
@@ -1527,6 +1542,30 @@ pub fn compact_st_change_buffer(
     .unwrap_or(0);
 
     if pending_count <= threshold {
+        return Ok(0);
+    }
+
+    // A bag-valued ST may emit several rows with the same identity. Also keep
+    // shared histories intact when consumers have different frontier positions.
+    // ponytail: skip these cases until compaction preserves multiplicities and
+    // every consumer's frontier boundary.
+    let can_compact = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM pgtrickle.pgt_stream_tables st
+             JOIN pg_index i ON i.indrelid = st.pgt_relid
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+             WHERE st.pgt_id = $1 AND a.attname = '__pgt_row_id'
+               AND i.indisunique AND i.indisvalid AND i.indimmediate
+               AND i.indnkeyatts = 1 AND i.indpred IS NULL AND i.indexprs IS NULL
+         ) AND (SELECT count(DISTINCT dep.pgt_id)
+                FROM pgtrickle.pgt_dependencies dep
+                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_relid = dep.source_relid
+                WHERE st.pgt_id = $1) = 1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if !can_compact {
         return Ok(0);
     }
 

@@ -35,7 +35,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.change_buffer_schema` | `text` | `"pgtrickle_changes"` | Schema name for change buffer tables. |
 | `pg_trickle.citus_st_lock_lease_ms` | `int4` | `60000` | Default: 60 000 ms (60 seconds). |
 | `pg_trickle.citus_worker_retry_ticks` | `int4` | `5` | Default: 5 ticks. |
-| `pg_trickle.cleanup_use_truncate` | `bool` | `true` | Set to false if the TRUNCATE AccessExclusiveLock on the change buffer is problematic for concurrent DML on the source table. |
+| `pg_trickle.cleanup_use_truncate` | `bool` | `true` | Compatibility setting. |
 | `pg_trickle.columnar_backend` | `text` | `"none"` | When set, `create_stream_table()` uses the specified columnar backend and routes differential refresh to the `delete_insert` strategy (columnar backends are append-only). |
 | `pg_trickle.commit_timestamp_tracking` | `bool` | `false` | Default: `false` (disabled to avoid overhead when `track_commit_timestamp` is off). |
 | `pg_trickle.compact_threshold` | `int4` | `100000` | Set to 0 to disable compaction. |

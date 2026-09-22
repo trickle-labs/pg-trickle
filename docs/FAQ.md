@@ -1407,25 +1407,28 @@ For WAL-mode sources, replication slots created after the backup point will not 
 
 ### Can I inspect the change buffer tables directly?
 
-**Yes.** Change buffers are ordinary tables in the `pgtrickle_changes` schema, named `changes_<source_oid>`:
+Administrators can inspect change buffers in the configured change-buffer
+schema. Resolve their stable names through `pgt_change_tracking` instead of
+assuming that the name contains the current source OID.
+
+In psql, inspect recent changes for `public.orders`:
 
 ```sql
--- List all change buffer tables
-SELECT tablename FROM pg_tables WHERE schemaname = 'pgtrickle_changes';
-
--- Inspect recent changes for a source table (find OID first)
-SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = 'orders' AND n.nspname = 'public';
-
--- Then query the buffer
-SELECT action, lsn, txid, old_data, new_data
-FROM pgtrickle_changes.changes_16384
-ORDER BY lsn DESC LIMIT 10;
+SELECT format(
+    'SELECT action, lsn, source_xid, __pgt_row_id FROM %I.%I ORDER BY change_id DESC LIMIT 10',
+    current_setting('pg_trickle.change_buffer_schema'),
+    'changes_' || source_stable_name
+)
+FROM pgtrickle.pgt_change_tracking
+WHERE source_relid = 'public.orders'::regclass
+\gexec
 ```
 
-The `action` column contains: `I` (insert), `U` (update), `D` (delete), or `T` (truncate).
+Actions are `I` for insert, `D` for delete, `T` for source truncate, and `S` for
+the recovery sentinel. Updates produce a delete/insert pair. User columns are
+stored as typed values alongside this metadata.
 
-**Warning:** Do not modify buffer tables directly. The refresh engine manages buffer cleanup (truncation) after each successful refresh. Manual changes will corrupt the frontier tracking.
+**Warning:** Do not modify buffer tables directly. The refresh engine deletes consumed rows during ordinary buffer cleanup. Manual changes will corrupt the frontier tracking.
 
 ### How does pg_trickle prevent its own refresh writes from re-triggering CDC?
 
@@ -1665,7 +1668,7 @@ Yes. `pg_trickle.min_schedule_seconds` (default: 60) is a safety guardrail, not 
 
 **WAL amplification.** Every differential refresh writes a `MERGE` to the WAL. At 1-second intervals across many stream tables, WAL generation rises sharply, increasing replication lag and storage costs.
 
-**Lock contention.** Each refresh acquires locks on the change buffer table. With `cleanup_use_truncate = true` (the default), this is an `AccessExclusiveLock`. Sub-second schedules can starve concurrent `INSERT`/`UPDATE`/`DELETE` statements on the source tables.
+**Cleanup cost.** Each refresh deletes consumed change-buffer rows. Sub-second schedules increase cleanup overhead and dead-tuple churn. `cleanup_use_truncate` is a compatibility setting and does not change cleanup behavior.
 
 **Cascading refresh load.** If a refresh takes longer than the schedule interval (e.g., an 800 ms refresh on a 1-second schedule), the next refresh fires almost immediately upon completion. With chained or diamond-shaped ST graphs, the entire topological chain must complete within the interval to avoid falling behind.
 
@@ -1741,19 +1744,13 @@ For a detailed explanation of how this column is computed and why it exists, see
 
 ### How much disk space do change buffer tables consume?
 
-Each change buffer table stores one row per source-table change (INSERT, UPDATE, DELETE, or TRUNCATE marker). The row size depends on the source table's column count and data types:
+Inserts and deletes each produce one typed change row. Updates produce a
+delete/insert pair. Buffers also contain source-truncate markers and a recovery
+sentinel. Storage depends on captured column values, row identities, indexes,
+and dead tuples. Measure the actual relations with `pg_total_relation_size`
+instead of using a JSONB-based size multiplier.
 
-| Component | Approximate size |
-|---|---|
-| `action` column (char) | 1 byte |
-| `old_data` / `new_data` (JSONB) | 1–10 KB per row (depends on source columns) |
-| `lsn` (pg_lsn) | 8 bytes |
-| `txid` (xid8) | 8 bytes |
-| **Index** (on lsn) | ~40 bytes per row |
-
-**Rule of thumb:** Buffer tables consume roughly **2–3× the raw row size** of the source change, because both OLD and NEW values are stored as JSONB.
-
-Buffer tables are cleaned up (truncated or deleted) after each successful refresh. If you suspect buffer bloat, check:
+Ordinary buffer tables use bounded `DELETE` to remove consumed rows after successful refreshes. Partitioned buffers use partition cleanup. If you suspect buffer bloat, check:
 
 ```sql
 SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) AS size
@@ -1842,21 +1839,15 @@ There is no hard limit. Practical limits depend on:
 
 ### What is the TRUNCATE vs DELETE cleanup trade-off for change buffers?
 
-After each successful refresh, the engine cleans up processed change records from the buffer table. The `pg_trickle.cleanup_use_truncate` GUC (default: `true`) controls the method:
+Ordinary change buffers always use bounded `DELETE` to remove consumed rows.
+The `pg_trickle.cleanup_use_truncate` GUC remains accepted for compatibility,
+but neither value enables `TRUNCATE`.
 
-| Method | Pros | Cons |
-|---|---|---|
-| `TRUNCATE` (default) | Instant — O(1) regardless of row count. Reclaims disk space immediately. | Takes an `ACCESS EXCLUSIVE` lock on the buffer table, briefly blocking concurrent INSERTs from CDC triggers (~0.1 ms typical). |
-| `DELETE` | Row-level lock only — no blocking of concurrent CDC writes. | O(N) — proportional to the number of processed rows. Dead tuples require VACUUM to reclaim space. |
-
-**When to switch to DELETE:** If your source table has extremely high write throughput (>10K writes/sec) and you observe brief stalls in DML latency during refresh cleanup, switch to DELETE:
-
-```sql
-ALTER SYSTEM SET pg_trickle.cleanup_use_truncate = false;
-SELECT pg_reload_conf();
-```
-
-For most workloads, TRUNCATE is the better choice because buffer tables are typically emptied completely after each refresh.
+A check followed by `TRUNCATE` could discard committed changes from concurrent
+writers that were invisible to the check. Bounded `DELETE` preserves those
+changes and avoids an exclusive table lock during ordinary buffer cleanup.
+Monitor dead tuples and autovacuum on busy buffers. Partitioned buffers retain
+their separate partition cleanup path.
 
 ---
 
@@ -2551,7 +2542,7 @@ below lists the most-used parameters; for the complete reference see
 | [`pg_trickle.max_concurrent_refreshes`](CONFIGURATION.md#pg_trickle-max_concurrent_refreshes) | int | `4` | Max parallel refresh workers (1–32) |
 | [`pg_trickle.user_triggers`](CONFIGURATION.md#pg_trickle-user_triggers) | text | `auto` | User trigger handling: `auto` (detect), `off` (suppress), `on` (deprecated alias for `auto`) |
 | [`pg_trickle.differential_max_change_ratio`](CONFIGURATION.md#pg_trickle-differential_max_change_ratio) | float | `0.15` | Change ratio threshold for adaptive FULL fallback (0.0–1.0) |
-| [`pg_trickle.cleanup_use_truncate`](CONFIGURATION.md#pg_trickle-cleanup_use_truncate) | bool | `true` | Use TRUNCATE instead of DELETE for buffer cleanup |
+| [`pg_trickle.cleanup_use_truncate`](CONFIGURATION.md#pg_trickle-cleanup_use_truncate) | bool | `true` | Compatibility setting with no effect; ordinary buffers use bounded DELETE |
 
 All GUCs are `SUSET` context (superuser SET) and take effect without restart,
 except `shared_preload_libraries` which requires a PostgreSQL restart.

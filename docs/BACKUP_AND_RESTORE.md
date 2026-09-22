@@ -100,13 +100,18 @@ SELECT pgtrickle.capture_instance_status();
 SELECT pgtrickle.validate_recovery();
 ```
 
-If the database identity changed, run the explicit superuser adoption command
-and then rebuild every affected stream table:
+If the database identity changed, run the explicit superuser adoption command:
 
 ```sql
 SELECT pgtrickle.recover_capture_instance();
-SELECT pgtrickle.reinitialize_stream_table('public.my_stream_table');
 ```
+
+Adoption does not remap source relation OIDs. If a logical restore changed those
+OIDs, recreate the affected stream tables from their saved definitions in
+dependency order. Neither `repair_stream_table()` nor
+`reinitialize_stream_table()` repairs that mapping. Reinitialization is suitable
+only when the registered relations still identify the intended source tables.
+Keep application writes and scheduling stopped until recovery validation passes.
 
 Do not guess from similarly named relations or reuse the source database's
 capture slots and frontiers.

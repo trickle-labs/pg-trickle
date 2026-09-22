@@ -39,14 +39,8 @@ pub static PGS_SPILL_THRESHOLD_BLOCKS: GucSetting<i32> = GucSetting::<i32>::new(
 /// next cycle. The counter resets after each non-spilling refresh.
 pub static PGS_SPILL_CONSECUTIVE_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(3);
 
-/// Whether to use TRUNCATE instead of DELETE for change buffer cleanup
-/// when the entire buffer is consumed by a refresh.
-///
-/// TRUNCATE is O(1) regardless of row count, versus per-row DELETE which
-/// must update indexes. This saves 3–5ms per refresh at 10%+ change rates.
-///
-/// Set to false if the TRUNCATE AccessExclusiveLock on the change buffer
-/// is problematic for concurrent DML on the source table.
+/// Compatibility setting. Cleanup always uses bounded DELETE to preserve
+/// concurrent CDC writes; this setting no longer enables TRUNCATE.
 pub static PGS_CLEANUP_USE_TRUNCATE: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// CDC mechanism selection.
@@ -421,8 +415,8 @@ pub fn register_cdc_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_trickle.cleanup_use_truncate",
-        c"Use TRUNCATE for change buffer cleanup when all rows are consumed.",
-        c"When true and the entire change buffer is consumed by a refresh, uses TRUNCATE (O(1)) instead of per-row DELETE. Disable if the AccessExclusiveLock is problematic.",
+        c"Compatibility setting; cleanup always uses bounded DELETE.",
+        c"Retained for configuration compatibility. TRUNCATE cleanup is disabled because it can discard concurrent committed changes.",
         &PGS_CLEANUP_USE_TRUNCATE,
         GucContext::Suset,
         GucFlags::default(),
@@ -729,7 +723,7 @@ pub fn pg_trickle_spill_consecutive_limit() -> i32 {
     PGS_SPILL_CONSECUTIVE_LIMIT.get()
 }
 
-/// Returns whether TRUNCATE cleanup is enabled.
+/// Returns the compatibility setting; cleanup no longer uses TRUNCATE.
 pub fn pg_trickle_cleanup_use_truncate() -> bool {
     PGS_CLEANUP_USE_TRUNCATE.get()
 }

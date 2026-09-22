@@ -33,7 +33,7 @@ see [CONFIGURATION.md](CONFIGURATION.md) and
 | `pg_trickle.analyze_before_delta` | `true` | Planner picks bad plans on stale stats | Keep `true`; set `false` only if ANALYZE overhead is measurable |
 | `pg_trickle.aggregate_fast_path` | `true` | Aggregation refreshes are slow | Keep `true` (uses explicit DML instead of MERGE for simple aggregates) |
 | `pg_trickle.scheduler_interval_ms` | `1000` | Scheduler CPU overhead is high | Raise to `5000`–`10000` on clusters with 100+ stream tables |
-| `pg_trickle.cleanup_use_truncate` | `true` | Change buffer cleanup causes lock contention | Set `false` if TRUNCATE AccessExclusiveLock conflicts with source DML |
+| `pg_trickle.cleanup_use_truncate` | `true` | Compatibility setting only | Both values use bounded DELETE for ordinary buffers; monitor dead tuples and autovacuum |
 | `pg_trickle.tiered_scheduling` | `true` | Cold stream tables waste CPU cycles | Keep `true` (prevents cold STs from refreshing at full speed) |
 | `pg_trickle.max_delta_estimate_rows` | `0` | OOM or excessive temp spill on large deltas | Set to `100000`–`500000` to cap delta size and trigger FULL fallback |
 

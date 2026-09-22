@@ -130,6 +130,9 @@ COPY --from=builder \
     /artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/ \
     /usr/lib/postgresql/18/lib/
 
+# Existing databases need the migration chain when switching image versions.
+COPY sql/pg_trickle--*--*.sql /usr/share/postgresql/18/extension/
+
 # Configure pg_trickle in the default postgresql.conf template so any
 # cluster created from this image has the extension auto-loaded with
 # sensible defaults.  The full set of defaults is documented in

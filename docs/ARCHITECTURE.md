@@ -795,10 +795,10 @@ Runtime behavior is controlled by a growing set of GUC (Grand Unified Configurat
 | `pg_trickle.change_buffer_schema` | `pgtrickle_changes` | Schema for change buffer tables |
 | `pg_trickle.max_concurrent_refreshes` | `4` | Maximum parallel refresh workers |
 | `pg_trickle.differential_max_change_ratio` | `0.15` | Change-to-table-size ratio above which DIFFERENTIAL falls back to FULL |
-| `pg_trickle.cleanup_use_truncate` | `true` | Use `TRUNCATE` instead of `DELETE` for change buffer cleanup when the entire buffer is consumed |
+| `pg_trickle.cleanup_use_truncate` | `true` | Compatibility setting with no effect; ordinary change buffers use bounded `DELETE` |
 | `pg_trickle.user_triggers` | `'auto'` | User-defined trigger handling: `auto` / `off` (`on` accepted as deprecated alias for `auto`) |
 | `pg_trickle.block_source_ddl` | `true` | Block column-affecting DDL on tracked source tables instead of reinit |
-| `pg_trickle.cdc_mode` | `'auto'` | CDC mechanism: `auto` / `trigger` / `wal` |
+| `pg_trickle.cdc_mode` | `'trigger'` | CDC mechanism: `auto` / `trigger` / `wal` |
 | `pg_trickle.wal_transition_timeout` | `300` | Max seconds to wait for WAL decoder catch-up during transition |
 | `pg_trickle.slot_lag_warning_threshold_mb` | `100` | Warning threshold for WAL slot retention used by `slot_lag_warning` and `health_check()` |
 | `pg_trickle.slot_lag_critical_threshold_mb` | `1024` | Critical threshold for WAL slot retention used by `check_cdc_health()` alerts |

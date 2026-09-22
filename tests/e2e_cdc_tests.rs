@@ -94,6 +94,26 @@ async fn test_sf10_truncate_then_insert_post_truncate_rows_captured() {
     // Final ground-truth check: ST contents must exactly match the source
     db.assert_st_matches_query("public.sf10_st", "SELECT id, val FROM sf10_src")
         .await;
+
+    // A later differential refresh must reclaim the consumed TRUNCATE marker
+    // while preserving the sentinel used to detect buffer loss.
+    db.execute("INSERT INTO sf10_src VALUES (30, 'next')").await;
+    db.execute_seq(&[
+        "SET pg_trickle.refresh_strategy = 'differential'",
+        "SELECT pgtrickle.refresh_stream_table('sf10_st')",
+    ])
+    .await;
+    let buffer = db
+        .change_buffer_table(db.table_oid("sf10_src").await as i64)
+        .await;
+    let truncate_markers: i64 = db
+        .query_scalar(&format!("SELECT count(*) FROM {buffer} WHERE action = 'T'"))
+        .await;
+    let sentinels: i64 = db
+        .query_scalar(&format!("SELECT count(*) FROM {buffer} WHERE action = 'S'"))
+        .await;
+    assert_eq!(truncate_markers, 0);
+    assert_eq!(sentinels, 1);
 }
 
 #[tokio::test]

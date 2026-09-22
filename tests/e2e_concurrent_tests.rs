@@ -9,6 +9,82 @@ mod e2e;
 
 use e2e::E2eDb;
 
+/// Deferred cleanup may target a source from an earlier refresh on this
+/// backend. Refreshing an unrelated stream must not truncate that buffer
+/// while a source writer is still uncommitted and invisible to cleanup.
+#[tokio::test]
+async fn test_cleanup_concurrent_writer_preserves_pending_change() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cleanup_a (id INT PRIMARY KEY)")
+        .await;
+    db.execute("CREATE TABLE cleanup_b (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO cleanup_a VALUES (1)").await;
+    db.execute("INSERT INTO cleanup_b VALUES (1)").await;
+    db.create_st(
+        "cleanup_st_a",
+        "SELECT id FROM cleanup_a",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "cleanup_st_b",
+        "SELECT id FROM cleanup_b",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Keep the backend so B's refresh drains A's deferred cleanup queue.
+    let mut refresh = db.pool.acquire().await.unwrap();
+    sqlx::raw_sql(
+        "SET pg_trickle.cleanup_use_truncate = on;
+         SET pg_trickle.compact_threshold = 0;
+         SET pg_trickle.refresh_strategy = 'differential';
+         SET statement_timeout = '5s'",
+    )
+    .execute(&mut *refresh)
+    .await
+    .unwrap();
+    db.execute("INSERT INTO cleanup_a VALUES (2)").await;
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('cleanup_st_a')")
+        .execute(&mut *refresh)
+        .await
+        .unwrap();
+    assert_eq!(db.count("cleanup_st_a").await, 2);
+
+    db.execute("INSERT INTO cleanup_b VALUES (2)").await;
+    let mut writer = db.pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO cleanup_a VALUES (3)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+
+    let result = sqlx::query("SELECT pgtrickle.refresh_stream_table('cleanup_st_b')")
+        .execute(&mut *refresh)
+        .await;
+    writer.commit().await.unwrap();
+    result.expect("deferred cleanup must not wait for an unrelated buffer writer");
+
+    let buffer = db
+        .change_buffer_table(db.table_oid("cleanup_a").await as i64)
+        .await;
+    let pending: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action = 'I' AND id = 3"
+        ))
+        .await;
+    assert_eq!(pending, 1, "the committed change must survive cleanup");
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('cleanup_st_a')")
+        .execute(&mut *refresh)
+        .await
+        .unwrap();
+    db.assert_st_matches_query("cleanup_st_a", "SELECT id FROM cleanup_a")
+        .await;
+    assert_eq!(db.count("cleanup_st_a").await, 3);
+}
+
 /// TEST-10-01 (v0.49.0): Poll `pg_stat_activity` until the given backend is
 /// seen in a non-idle state (i.e. its query has started executing), then
 /// return.  Falls back to a short sleep after `timeout_secs` to prevent

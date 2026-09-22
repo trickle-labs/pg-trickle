@@ -64,8 +64,8 @@ every 5 s, with 50% compaction and 1 KB rows:
 ```
 
 That is the *peak* size of the buffer between refreshes. After the
-refresh, the consumed rows are deleted (or `TRUNCATE`d depending on
-`pg_trickle.cleanup_use_truncate`).
+refresh, bounded `DELETE` removes consumed rows from ordinary buffers.
+Dead tuples require vacuuming. Partitioned buffers use partition cleanup.
 
 **Alerts.** Set `pg_trickle.buffer_alert_threshold` (default
 `100000` rows) so a `WARNING` is logged before a buffer becomes
