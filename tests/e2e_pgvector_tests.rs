@@ -47,24 +47,27 @@ async fn test_pgvector_avg_centroid_insert() {
     .await;
 
     let q = "SELECT user_id, avg(embedding) AS centroid FROM embeddings GROUP BY user_id";
+    // pgvector's avg(vector) is undimensioned; F4 materializes the source dimension.
+    let expected_q =
+        "SELECT user_id, avg(embedding)::vector(3) AS centroid FROM embeddings GROUP BY user_id";
     let create_sql = format!(
         "SELECT pgtrickle.create_stream_table('centroid_st', $${q}$$, '1m', 'DIFFERENTIAL')"
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create_sql])
         .await;
-    db.assert_st_matches_query("centroid_st", q).await;
+    db.assert_st_matches_query("centroid_st", expected_q).await;
 
     // INSERT new embedding for user 1
     db.execute("INSERT INTO embeddings (user_id, embedding) VALUES (1, '[1,1,0]')")
         .await;
     db.refresh_st("centroid_st").await;
-    db.assert_st_matches_query("centroid_st", q).await;
+    db.assert_st_matches_query("centroid_st", expected_q).await;
 
     // INSERT new user
     db.execute("INSERT INTO embeddings (user_id, embedding) VALUES (3, '[0,1,1]')")
         .await;
     db.refresh_st("centroid_st").await;
-    db.assert_st_matches_query("centroid_st", q).await;
+    db.assert_st_matches_query("centroid_st", expected_q).await;
 }
 
 #[tokio::test]
@@ -89,18 +92,22 @@ async fn test_pgvector_avg_centroid_update() {
     .await;
 
     let q = "SELECT user_id, avg(embedding) AS centroid FROM emb_upd GROUP BY user_id";
+    let expected_q =
+        "SELECT user_id, avg(embedding)::vector(3) AS centroid FROM emb_upd GROUP BY user_id";
     let create_sql = format!(
         "SELECT pgtrickle.create_stream_table('centroid_upd_st', $${q}$$, '1m', 'DIFFERENTIAL')"
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create_sql])
         .await;
-    db.assert_st_matches_query("centroid_upd_st", q).await;
+    db.assert_st_matches_query("centroid_upd_st", expected_q)
+        .await;
 
     // UPDATE embedding
     db.execute("UPDATE emb_upd SET embedding = '[0,0,1]' WHERE user_id = 1 AND id = 1")
         .await;
     db.refresh_st("centroid_upd_st").await;
-    db.assert_st_matches_query("centroid_upd_st", q).await;
+    db.assert_st_matches_query("centroid_upd_st", expected_q)
+        .await;
 }
 
 #[tokio::test]
@@ -125,23 +132,28 @@ async fn test_pgvector_avg_centroid_delete() {
     .await;
 
     let q = "SELECT user_id, avg(embedding) AS centroid FROM emb_del GROUP BY user_id";
+    let expected_q =
+        "SELECT user_id, avg(embedding)::vector(3) AS centroid FROM emb_del GROUP BY user_id";
     let create_sql = format!(
         "SELECT pgtrickle.create_stream_table('centroid_del_st', $${q}$$, '1m', 'DIFFERENTIAL')"
     );
     db.execute_seq(&["SET pg_trickle.enable_vector_agg = on", &create_sql])
         .await;
-    db.assert_st_matches_query("centroid_del_st", q).await;
+    db.assert_st_matches_query("centroid_del_st", expected_q)
+        .await;
 
     // DELETE one row from user 1
     db.execute("DELETE FROM emb_del WHERE user_id = 1 AND id = 1")
         .await;
     db.refresh_st("centroid_del_st").await;
-    db.assert_st_matches_query("centroid_del_st", q).await;
+    db.assert_st_matches_query("centroid_del_st", expected_q)
+        .await;
 
     // DELETE entire user group
     db.execute("DELETE FROM emb_del WHERE user_id = 2").await;
     db.refresh_st("centroid_del_st").await;
-    db.assert_st_matches_query("centroid_del_st", q).await;
+    db.assert_st_matches_query("centroid_del_st", expected_q)
+        .await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
