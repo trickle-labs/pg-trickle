@@ -169,9 +169,10 @@ pub fn poll_foreign_table_changes(
          SELECT {src_col_list} FROM {source_table} WITH NO DATA"
     ))
     .map_err(|e| PgTrickleError::SpiError(format!("Failed to create polling snapshot: {e}")))?;
+    // nosemgrep: rust.spi.run.dynamic-format — relation and columns are catalog-derived and quoted.
     Spi::run(&format!(
         "INSERT INTO {poll_table} ({src_col_list}) SELECT {src_col_list} FROM {source_table}"
-    )) // nosemgrep: semgrep.rust.spi.run.dynamic-format — relation and columns are catalog-derived and quoted.
+    ))
     .map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to materialize polling snapshot: {e}"))
     })?;
