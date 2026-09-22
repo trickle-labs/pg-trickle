@@ -365,7 +365,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: light-e2e-package
-          path: target/release
+          path: target/release/pg_trickle-pg18
 
       - name: Prove package identity and required case controls
         run: |
