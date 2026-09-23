@@ -1002,22 +1002,31 @@ pub(crate) fn emit_creation_warnings(warnings: &[CreationWarning]) {
     }
 }
 
-/// Validate a rewritten query and parse it for DVM. This runs the LIMIT 0
-/// check, TopK detection, unsupported construct rejection, DVM parsing,
-/// volatility checks, and source relation extraction.
+/// Validate a rewritten query and parse it for DVM. Output typmods come from
+/// the original query because canonical view inlining can discard them.
+/// This runs the LIMIT 0 check, TopK detection, unsupported construct
+/// rejection, DVM parsing, volatility checks, and source relation extraction.
 ///
 /// When `is_auto` is true and the query cannot be maintained incrementally,
 /// `refresh_mode` is downgraded to `RefreshMode::Full` instead of returning
 /// an error.
 fn validate_and_parse_query(
     query: &str,
+    output_schema_query: &str,
     refresh_mode: &mut RefreshMode,
     is_auto: bool,
     had_nested_window_rewrite: bool,
     stream_owner_oid: pg_sys::Oid,
 ) -> Result<ValidatedQuery, PgTrickleError> {
     // Validate the defining query and extract output columns
-    let (columns, query_volatility) = validate_defining_query(query)?;
+    let (mut columns, query_volatility) = validate_defining_query(query)?;
+    if output_schema_query != query {
+        let typmods =
+            crate::api::helpers::query_output_typmods(output_schema_query, columns.len())?;
+        for (column, typmod) in columns.iter_mut().zip(typmods) {
+            column.typmod = typmod;
+        }
+    }
 
     // TopK detection — must run BEFORE reject_limit_offset
     let topk_info = crate::dvm::detect_topk_pattern(query)?;
@@ -4500,14 +4509,17 @@ mod tests {
             ColumnDef {
                 name: "region".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "sale_date".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "amount".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
         ];
         assert!(validate_partition_key("sale_date,region", &columns).is_ok());
@@ -4519,10 +4531,12 @@ mod tests {
             ColumnDef {
                 name: "region".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "sale_date".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
         ];
         let err = validate_partition_key("sale_date,nonexistent", &columns);
@@ -4593,10 +4607,12 @@ mod tests {
             ColumnDef {
                 name: "region".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "amount".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
         ];
         assert!(validate_partition_key("LIST:region", &columns).is_ok());
@@ -4608,10 +4624,12 @@ mod tests {
             ColumnDef {
                 name: "region".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "category".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
         ];
         let err = validate_partition_key("LIST:region,category", &columns);
@@ -4628,6 +4646,7 @@ mod tests {
         let columns = vec![ColumnDef {
             name: "amount".to_string(),
             type_oid: PgOid::Invalid,
+            typmod: -1,
         }];
         let err = validate_partition_key("LIST:region", &columns);
         assert!(err.is_err());
@@ -4746,10 +4765,12 @@ mod tests {
             ColumnDef {
                 name: "customer_id".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "amount".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
         ];
         assert!(validate_partition_key("HASH:customer_id", &columns).is_ok());
@@ -4760,6 +4781,7 @@ mod tests {
         let columns = vec![ColumnDef {
             name: "id".to_string(),
             type_oid: PgOid::Invalid,
+            typmod: -1,
         }];
         assert!(validate_partition_key("HASH:id:8", &columns).is_ok());
     }
@@ -4770,10 +4792,12 @@ mod tests {
             ColumnDef {
                 name: "a".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
             ColumnDef {
                 name: "b".to_string(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             },
         ];
         let err = validate_partition_key("HASH:a,b", &columns);
@@ -4790,6 +4814,7 @@ mod tests {
         let columns = vec![ColumnDef {
             name: "amount".to_string(),
             type_oid: PgOid::Invalid,
+            typmod: -1,
         }];
         let err = validate_partition_key("HASH:customer_id", &columns);
         assert!(err.is_err());
@@ -4805,6 +4830,7 @@ mod tests {
         let columns = vec![ColumnDef {
             name: "id".to_string(),
             type_oid: PgOid::Invalid,
+            typmod: -1,
         }];
         let err = validate_partition_key("HASH:id:1", &columns);
         assert!(err.is_err());
@@ -4820,6 +4846,7 @@ mod tests {
         let columns = vec![ColumnDef {
             name: "id".to_string(),
             type_oid: PgOid::Invalid,
+            typmod: -1,
         }];
         let err = validate_partition_key("HASH:id:257", &columns);
         assert!(err.is_err());

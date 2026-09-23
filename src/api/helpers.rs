@@ -4,6 +4,9 @@
 //! DDL generation, auxiliary column injection, and utility functions.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_OUTPUT_SCHEMA_VIEW: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn resolve_source_oid(source: &str) -> Result<pg_sys::Oid, PgTrickleError> {
     let oid = Spi::get_one_with_args::<pg_sys::Oid>("SELECT $1::regclass::oid", &[source.into()])
@@ -1024,6 +1027,7 @@ pub(crate) fn strip_partition_mode_prefix(partition_key: &str) -> &str {
 pub struct ColumnDef {
     pub name: String,
     pub type_oid: PgOid,
+    pub typmod: i32,
 }
 
 /// Return whether a complete V2 identity is safe as a direct B-tree key.
@@ -1518,8 +1522,11 @@ pub(crate) fn validate_defining_query(
             } else {
                 PgOid::from(pg_sys::exprType(tle.expr as *const pg_sys::Node))
             };
-
-            columns.push(ColumnDef { name, type_oid });
+            columns.push(ColumnDef {
+                name,
+                type_oid,
+                typmod: -1,
+            });
         }
 
         if columns.is_empty() {
@@ -1528,9 +1535,70 @@ pub(crate) fn validate_defining_query(
             ));
         }
 
+        let typmods = query_output_typmods(query, columns.len())?;
+        for (column, typmod) in columns.iter_mut().zip(typmods) {
+            column.typmod = typmod;
+        }
+
         let volatility = analyzed_query_volatility(query_node);
 
         Ok((columns, volatility?))
+    }
+}
+
+/// Read exact output typmods without executing the defining query body.
+pub(crate) fn query_output_typmods(
+    query: &str,
+    column_count: usize,
+) -> Result<Vec<i32>, PgTrickleError> {
+    let view_name = format!(
+        "__pgt_validate_output_{}_{}",
+        std::process::id(),
+        NEXT_OUTPUT_SCHEMA_VIEW.fetch_add(1, Ordering::Relaxed)
+    );
+    let qualified_view = format!("pg_temp.{}", quote_identifier(&view_name));
+    // nosemgrep: rust.spi.run.dynamic-format — view_name is generated locally; query was already parse-analyzed above.
+    Spi::run(&format!(
+        "CREATE TEMPORARY VIEW {qualified_view} AS {query}"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(format!("failed to inspect output schema: {e}")))?;
+
+    let result = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT a.atttypmod::int4 \
+                 FROM pg_catalog.pg_attribute a \
+                 WHERE a.attrelid = pg_catalog.to_regclass($1) \
+                   AND a.attnum > 0 \
+                   AND NOT a.attisdropped \
+                 ORDER BY a.attnum",
+                None,
+                &[format!("pg_temp.{view_name}").into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut typmods = Vec::with_capacity(column_count);
+        for row in rows {
+            typmods.push(
+                row.get::<i32>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(-1),
+            );
+        }
+        if typmods.len() != column_count {
+            return Err(PgTrickleError::InternalError(format!(
+                "defining query output schema returned {} columns, expected {column_count}",
+                typmods.len()
+            )));
+        }
+        Ok(typmods)
+    });
+
+    // nosemgrep: rust.spi.run.dynamic-format — qualified_view is generated locally.
+    let cleanup = Spi::run(&format!("DROP VIEW IF EXISTS {qualified_view}"))
+        .map_err(|e| PgTrickleError::SpiError(format!("failed to clean output schema view: {e}")));
+    match cleanup {
+        Ok(()) => result,
+        Err(error) => Err(error),
     }
 }
 
@@ -2518,14 +2586,14 @@ pub(super) fn build_create_table_sql(
     let col_defs: Vec<String> = columns
         .iter()
         .map(|c| {
-            // Use regtype to get the type name from the OID
+            // Preserve typmods such as numeric(10,2) from the defining query.
             let type_name = match c.type_oid {
                 PgOid::Invalid => "text".to_string(),
                 oid => {
-                    // Try to resolve the type name via SPI
+                    // Try to resolve the type name and typmod via SPI.
                     Spi::get_one_with_args::<String>(
-                        "SELECT $1::regtype::text",
-                        &[oid.value().into()],
+                        "SELECT pg_catalog.format_type($1, $2)",
+                        &[oid.value().into(), c.typmod.into()],
                     )
                     .unwrap_or(Some("text".to_string()))
                     .unwrap_or_else(|| "text".to_string())
@@ -2738,6 +2806,7 @@ pub(crate) fn normalize_full_set_operation_storage(
                 row_identity_is_bounded(&[ColumnDef {
                     name: column.clone(),
                     type_oid: type_oid.into(),
+                    typmod: -1,
                 }])
             })
         });
@@ -3841,6 +3910,7 @@ mod tests {
             &[ColumnDef {
                 name: "dept".into(),
                 type_oid: PgOid::Invalid,
+                typmod: -1,
             }],
             false,
             false,

@@ -97,7 +97,7 @@ async fn test_mixed_view_upstream_differential_full_dml() {
     db.refresh_st("mu_st_products").await;
     db.assert_st_matches_query(
         "mu_st_products",
-        "SELECT id, name, price::NUMERIC AS price FROM mu_active_products",
+        "SELECT id, name, price FROM mu_active_products",
     )
     .await;
 }
@@ -168,7 +168,7 @@ async fn test_mixed_multiple_views_joined_in_st() {
 
     db.assert_st_matches_query(
         "mu_st_gold_large",
-        "SELECT c.name, o.amount::NUMERIC AS amount
+        "SELECT c.name, o.amount
          FROM mu_gold_customers c
          JOIN mu_large_orders o ON c.id = o.customer_id",
     )
@@ -1092,7 +1092,7 @@ async fn test_mixed_multi_schema_tables_and_views() {
 
     db.assert_st_matches_query(
         "sensor_averages",
-        "SELECT sensor_id, AVG(value)::numeric AS avg_value, COUNT(*) AS reading_count
+        "SELECT sensor_id, AVG(value)::numeric(10,2) AS avg_value, COUNT(*) AS reading_count
          FROM analytics.v_recent_readings GROUP BY sensor_id",
     )
     .await;

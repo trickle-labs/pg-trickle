@@ -415,20 +415,27 @@ start_shared_light_e2e_container() {
     local run_id="$PGT_LIGHT_E2E_RUN_ID"
     local ext_dir="${PGT_EXTENSION_DIR}"
 
-    echo "Starting shared light-E2E PostgreSQL container..."
+    echo "Creating shared light-E2E PostgreSQL container..."
     local cid
-    cid=$(docker run -d \
+    cid=$(docker create \
         --platform "${DOCKER_PLATFORM}" \
         -e POSTGRES_PASSWORD=postgres \
         -e POSTGRES_DB=postgres \
         -p 5432 \
-        -v "${ext_dir}:/tmp/pg_ext:ro" \
         --shm-size=512m \
         --label com.pgtrickle.test=true \
         --label com.pgtrickle.suite=light-e2e \
         --label "com.pgtrickle.run-id=${run_id}" \
         postgres:18.3 \
         -c track_commit_timestamp=on)
+
+    # Install the candidate before the postmaster is started. This makes the
+    # first process that loads pg_trickle the process being attested.
+    docker cp "$ext_dir/usr/share/postgresql/18/extension/." \
+        "$cid:/usr/share/postgresql/18/extension/"
+    docker cp "$ext_dir/usr/lib/postgresql/18/lib/." \
+        "$cid:/usr/lib/postgresql/18/lib/"
+    docker start "$cid" >/dev/null
 
     # pg_isready can report ready before PostgreSQL initialization completes.
     # Wait until a real SQL query succeeds instead.
@@ -447,12 +454,12 @@ start_shared_light_e2e_container() {
     pg_version=$(docker exec "$cid" psql -U postgres -d postgres -Atc 'SHOW server_version')
     echo "PGT_ACTUAL_POSTGRESQL_VERSION=${pg_version}"
 
-    # Install pg_trickle into the container
-    docker exec "$cid" sh -c \
-        "cp /tmp/pg_ext/usr/share/postgresql/18/extension/pg_trickle* \
-            /usr/share/postgresql/18/extension/ && \
-         cp /tmp/pg_ext/usr/lib/postgresql/18/lib/pg_trickle* \
-            /usr/lib/postgresql/18/lib/"
+    if [[ -n "${PGT_RELEASE_ATTESTATION_PATH:-}" ]]; then
+        python3 scripts/release_install_attestation.py \
+            --container "$cid" \
+            --candidate-root "$PGT_EXTENSION_DIR" \
+            --output "$PGT_RELEASE_ATTESTATION_PATH"
+    fi
 
     local port
     port=$(docker inspect \
@@ -475,7 +482,15 @@ if [[ -n "$test_filter" ]]; then
 fi
 
 
-if command -v cargo-nextest >/dev/null 2>&1 && [[ "${PGT_DISABLE_NEXTEST:-0}" != "1" ]]; then
+if [[ "${PGT_RELEASE_MACHINE_FORMAT:-0}" == "1" ]]; then
+    if [[ "$ignored_only" == true ]]; then
+        cargo_args+=(--run-ignored only)
+    fi
+    NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${cargo_args[@]}" \
+        --message-format libtest-json-plus \
+        --no-fail-fast \
+        --retries "${PGT_RELEASE_NEXTEST_RETRIES:-2}"
+elif command -v cargo-nextest >/dev/null 2>&1 && [[ "${PGT_DISABLE_NEXTEST:-0}" != "1" ]]; then
     if [[ "$ignored_only" == true ]]; then
         cargo nextest run "${cargo_args[@]}" --run-ignored only --nocapture
     else

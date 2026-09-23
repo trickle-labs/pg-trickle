@@ -124,6 +124,34 @@ fn coverage_mount() -> Option<Mount> {
 }
 
 #[cfg(not(feature = "light-e2e"))]
+fn attest_release_installation(container_id: &str) {
+    let (Some(output), Some(candidate_root)) = (
+        std::env::var_os("PGT_RELEASE_ATTESTATION_PATH"),
+        std::env::var_os("PGT_EXTENSION_DIR"),
+    ) else {
+        return;
+    };
+
+    let completed = std::process::Command::new("python3")
+        .args([
+            "scripts/release_install_attestation.py",
+            "--container",
+            container_id,
+            "--candidate-root",
+        ])
+        .arg(candidate_root)
+        .args(["--output"])
+        .arg(output)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run release installation attestation: {error}"));
+    assert!(
+        completed.status.success(),
+        "release installation attestation failed: {}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+}
+
+#[cfg(not(feature = "light-e2e"))]
 /// Verify an image exists locally before attempting to start a container.
 ///
 /// testcontainers falls back to a Docker Hub pull when the image is not
@@ -502,6 +530,7 @@ async fn shared_container() -> &'static SharedContainer {
             // Each per-test database is cloned from this template which avoids
             // running the full extension DDL on every individual test.
             let template_db_name = create_extension_template(&admin_connection_string, port).await;
+            attest_release_installation(container.id());
 
             SharedContainer {
                 admin_connection_string,
@@ -718,6 +747,8 @@ impl E2eDb {
 
         let pool = Self::connect_with_retry(&connection_string, 15).await;
 
+        attest_release_installation(container.id());
+
         E2eDb {
             pool,
             connection_string,
@@ -772,6 +803,8 @@ impl E2eDb {
         );
 
         let pool = Self::connect_with_retry(&connection_string, 15).await;
+
+        attest_release_installation(container.id());
 
         let db = E2eDb {
             pool,

@@ -204,13 +204,12 @@ pub(crate) fn drop_for_stream(pgt_id: i64) -> Result<(), PgTrickleError> {
             continue;
         }
         let qualified = qualified_state_relation(pgt_id);
-        // nosemgrep: rust.spi.run.dynamic-format -- qualified is built only from
-        // quote_identifier-escaped identifiers and validated above.
+        // nosemgrep: rust.spi.run.dynamic-format — qualified is quote_identifier-escaped and validated above.
         Spi::run(&format!(
             "ALTER EXTENSION pg_trickle DROP TABLE {qualified}"
         ))
         .map_err(spi_error)?;
-        // nosemgrep: rust.spi.run.dynamic-format -- see above.
+        // nosemgrep: rust.spi.run.dynamic-format — qualified is quote_identifier-escaped and validated above.
         Spi::run(&format!("DROP TABLE {qualified}")).map_err(spi_error)?;
     }
 

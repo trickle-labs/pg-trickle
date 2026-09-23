@@ -548,6 +548,7 @@ impl StreamTableMeta {
     /// Look up a stream table by schema-qualified name.
     pub fn get_by_name(schema: &str, name: &str) -> Result<Self, PgTrickleError> {
         Spi::connect(|client| {
+            // nosemgrep: rust.spi.connect_mut.dynamic-format — fixed SQL and bound values; no identifier interpolation.
             let table = client
                 .select(
                     &format!("{STREAM_TABLE_SELECT} WHERE pgt_schema = $1 AND pgt_name = $2"),
@@ -567,6 +568,7 @@ impl StreamTableMeta {
     /// Look up a stream table by its storage table OID.
     pub fn get_by_relid(relid: pg_sys::Oid) -> Result<Self, PgTrickleError> {
         Spi::connect(|client| {
+            // nosemgrep: rust.spi.connect_mut.dynamic-format — fixed SQL and bound values; no identifier interpolation.
             let table = client
                 .select(
                     &format!("{STREAM_TABLE_SELECT} WHERE pgt_relid = $1"),
@@ -591,6 +593,7 @@ impl StreamTableMeta {
     /// Returns `Ok(Some(meta))` if found, `Ok(None)` if the row doesn't exist.
     pub fn get_by_id(pgt_id: i64) -> Result<Option<Self>, PgTrickleError> {
         Spi::connect(|client| {
+            // nosemgrep: rust.spi.connect_mut.dynamic-format — fixed SQL and bound values; no identifier interpolation.
             let table = client
                 .select(
                     &format!("{STREAM_TABLE_SELECT} WHERE pgt_id = $1"),
@@ -630,6 +633,7 @@ impl StreamTableMeta {
     /// Get all active stream tables.
     pub fn get_all_active() -> Result<Vec<Self>, PgTrickleError> {
         Spi::connect(|client| {
+            // nosemgrep: rust.spi.connect_mut.dynamic-format — fixed SQL and bound values; no identifier interpolation.
             let table = client
                 .select(
                     &format!("{STREAM_TABLE_SELECT} WHERE status = 'ACTIVE'"),

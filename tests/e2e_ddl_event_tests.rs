@@ -571,11 +571,8 @@ async fn test_alter_column_type_suspends_with_reason_code() {
         .query_scalar("SELECT pgtrickle.reinitialize_stream_table('ddl_type_st')")
         .await;
     db.refresh_st("ddl_type_st").await;
-    db.assert_st_matches_query(
-        "public.ddl_type_st",
-        "SELECT id, score::INT FROM ddl_type_src",
-    )
-    .await;
+    db.assert_st_matches_query("public.ddl_type_st", "SELECT id, score FROM ddl_type_src")
+        .await;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -829,7 +826,7 @@ async fn test_widen_varchar_type_suspends() {
         "DIFFERENTIAL",
     )
     .await;
-    db.assert_st_matches_query("se_widen_st", "SELECT id, label::VARCHAR FROM se_widen_src")
+    db.assert_st_matches_query("se_widen_st", "SELECT id, label FROM se_widen_src")
         .await;
 
     // Widen the column — backward-compatible change
@@ -856,7 +853,7 @@ async fn test_widen_varchar_type_suspends() {
     db.execute("INSERT INTO se_widen_src VALUES (2, 'a_longer_label_than_fifty_characters_xxxxxxxxxxxxxxxxxx')")
         .await;
     db.refresh_st("se_widen_st").await;
-    db.assert_st_matches_query("se_widen_st", "SELECT id, label::VARCHAR FROM se_widen_src")
+    db.assert_st_matches_query("se_widen_st", "SELECT id, label FROM se_widen_src")
         .await;
     assert_eq!(db.count("public.se_widen_st").await, 2);
 }

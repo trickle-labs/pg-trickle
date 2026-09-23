@@ -52,7 +52,7 @@ jobs:
 
       - name: Run Semgrep ruleset
         # STAB-3: Blocking — unsuppressed findings fail the CI check.
-        run: semgrep scan --config .semgrep/pg_trickle.yml --sarif --output semgrep.sarif
+        run: semgrep scan --error --config .semgrep/pg_trickle.yml --sarif --output semgrep.sarif
 
       - name: Filter suppressed findings from SARIF
         # Semgrep 1.x includes nosemgrep-suppressed results in SARIF output with

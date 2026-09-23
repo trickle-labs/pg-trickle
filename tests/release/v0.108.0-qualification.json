@@ -1,8 +1,52 @@
 {
-  "contract_version": 2,
+  "contract_version": 3,
   "release_version": "0.108.0",
   "source_versions": ["0.106.1", "0.107.0"],
   "postgresql_major": 18,
+  "build_kind": "exact-release",
+  "feature_scope": "default-release",
+  "build_provenance": {
+    "workflow": "release.yml",
+    "cargo_profile": "release",
+    "instrumentation": "none"
+  },
+  "candidate_identity": {"required": true},
+  "required_cases": [
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_same_count_different_content",
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_duplicate_multiplicity_mismatch",
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_schema_mismatch",
+    "e2e_sensitivity_baseline_tests::test_oracle_detects_missing_user_column",
+    "e2e_failure_recovery_tests::test_lock_timeout_during_refresh",
+    "e2e_failure_recovery_tests::test_statement_timeout_during_refresh_recovers",
+    "e2e_failure_recovery_tests::test_cancel_backend_during_refresh_recovers",
+    "e2e_dvm_failpoint_tests::test_dvm_failpoint_preserves_last_committed_result_and_recovers"
+  ],
+  "required_shards": [
+    {
+      "id": "sensitivity-baseline",
+      "suite_id": "sensitivity-baseline",
+      "index": 1,
+      "count": 2,
+      "required_cases": [
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_same_count_different_content",
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_duplicate_multiplicity_mismatch",
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_schema_mismatch",
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_missing_user_column"
+      ]
+    },
+    {
+      "id": "failure-recovery",
+      "suite_id": "recovery",
+      "index": 2,
+      "count": 2,
+      "required_cases": [
+        "e2e_failure_recovery_tests::test_lock_timeout_during_refresh",
+        "e2e_failure_recovery_tests::test_statement_timeout_during_refresh_recovers",
+        "e2e_failure_recovery_tests::test_cancel_backend_during_refresh_recovers",
+        "e2e_dvm_failpoint_tests::test_dvm_failpoint_preserves_last_committed_result_and_recovers"
+      ]
+    }
+  ],
   "database_settings": {
     "fsync": "on",
     "synchronous_commit": "on",
@@ -86,9 +130,37 @@
       "upgrade": false,
       "requires_postgresql": true,
       "suite_version": "0.108.0",
-      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_failure_recovery_tests",
-      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_failure_recovery_tests"],
-      "workload": "rollback, exception, invalidation, clone, and connection recovery"
+      "command": "bash scripts/run_e2e_tests.sh --test e2e_failure_recovery_tests --test e2e_dvm_failpoint_tests -E test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers)$/)",
+      "command_argv": ["bash", "scripts/run_e2e_tests.sh", "--test", "e2e_failure_recovery_tests", "--test", "e2e_dvm_failpoint_tests", "-E", "test(/^(test_lock_timeout_during_refresh|test_statement_timeout_during_refresh_recovers|test_cancel_backend_during_refresh_recovers|test_dvm_failpoint_preserves_last_committed_result_and_recovers)$/)"],
+      "e2e_image": "pg_trickle_release_candidate:local",
+      "shard": {"id": "failure-recovery", "index": 2, "count": 2},
+      "required_cases": [
+        "e2e_failure_recovery_tests::test_lock_timeout_during_refresh",
+        "e2e_failure_recovery_tests::test_statement_timeout_during_refresh_recovers",
+        "e2e_failure_recovery_tests::test_cancel_backend_during_refresh_recovers",
+        "e2e_dvm_failpoint_tests::test_dvm_failpoint_preserves_last_committed_result_and_recovers"
+      ],
+      "workload": "witnessed timeout, lock, cancellation, and scheduler failpoint recovery against the candidate package"
+    },
+    {
+      "id": "sensitivity-baseline",
+      "kind": "test",
+      "artifact_id": "linux-amd64",
+      "required": true,
+      "runtime": true,
+      "upgrade": false,
+      "requires_postgresql": true,
+      "suite_version": "0.108.0",
+      "command": "bash scripts/run_light_e2e_tests.sh --test e2e_sensitivity_baseline_tests",
+      "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_sensitivity_baseline_tests"],
+      "shard": {"id": "sensitivity-baseline", "index": 1, "count": 2},
+      "required_cases": [
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_same_count_different_content",
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_duplicate_multiplicity_mismatch",
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_schema_mismatch",
+        "e2e_sensitivity_baseline_tests::test_oracle_detects_missing_user_column"
+      ],
+      "workload": "public-result value, bag, schema, and visible-user-column oracle controls"
     },
     {
       "id": "wal-admission",
@@ -127,6 +199,7 @@
       "suite_version": "0.108.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_upgrade_tests --filter test_upgrade_drop_recreate_roundtrip",
       "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_upgrade_tests", "--filter", "test_upgrade_drop_recreate_roundtrip"],
+      "required_cases": ["e2e_upgrade_tests::test_upgrade_drop_recreate_roundtrip"],
       "workload": "supported drop-and-recreate extension path with the packaged candidate"
     },
     {
@@ -153,6 +226,7 @@
       "suite_version": "0.108.0",
       "command": "bash scripts/run_light_e2e_tests.sh --test e2e_failure_recovery_tests --filter test_recovery_clone_isolation_requires_explicit_adoption --ignored",
       "command_argv": ["bash", "scripts/run_light_e2e_tests.sh", "--test", "e2e_failure_recovery_tests", "--filter", "test_recovery_clone_isolation_requires_explicit_adoption", "--ignored"],
+      "required_cases": ["e2e_failure_recovery_tests::test_recovery_clone_isolation_requires_explicit_adoption"],
       "workload": "database clone identity mismatch, quarantine, and explicit local adoption"
     },
     {
@@ -325,6 +399,11 @@
       "suite_version": "0.108.0",
       "command": "bash scripts/run_v107_resource_tests.sh",
       "command_argv": ["bash", "scripts/run_v107_resource_tests.sh"],
+      "required_cases": [
+        "e2e_coverage_error_tests::test_wb2_wide_table_gt63_cols_differential_refresh",
+        "e2e_buffer_growth_tests::test_buffer_growth_triggers_full_fallback",
+        "e2e_failure_recovery_tests::test_cancel_backend_during_refresh_recovers"
+      ],
       "workload": "wide rows, oversized change buffers, FULL fallback, and cancellation recovery"
     },
     {
@@ -338,6 +417,14 @@
       "suite_version": "0.108.0",
       "command": "bash scripts/run_v107_support_tests.sh",
       "command_argv": ["bash", "scripts/run_v107_support_tests.sh"],
+      "required_cases": [
+        "e2e_stmt_cdc_tests::test_stmt_cdc_default_trigger_is_statement_level",
+        "e2e_cte_tests::test_recursive_cte_non_monotone_agg_subquery_recomputation",
+        "e2e_window_incremental_tests::test_row_number_rejected_candidate_converges_via_partition_recompute",
+        "e2e_dvm_composition_tests::test_v0873_mandatory_composition_matrix",
+        "e2e_diff_full_equivalence_tests::test_diff_full_equivalence_intersect",
+        "e2e_v078_tests::test_dvm1_case_in_list_mutable_full_fallback"
+      ],
       "workload": "statement capture, recursive-result, partition and group recomputation, and visible FULL fallbacks"
     },
     {
@@ -479,7 +566,7 @@
   "evidence": {
     "schema_version": 3,
     "allowed_result_states": ["passed", "failed", "skipped", "unavailable", "stale", "historical"],
-    "required_suite_fields": [
+      "required_suite_fields": [
       "candidate_commit",
       "artifact_digest",
       "platform",
@@ -490,6 +577,18 @@
       "effective_workload",
       "executed_tests",
       "skipped_tests",
+      "candidate_identity",
+      "build_kind",
+      "feature_scope",
+      "command_argv",
+      "selected_cases",
+      "observed_cases",
+      "shard",
+      "attempts",
+      "retry_count",
+      "candidate_payload",
+      "installation_observations",
+      "server_configuration",
       "status",
       "log"
     ]

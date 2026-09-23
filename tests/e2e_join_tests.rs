@@ -187,9 +187,7 @@ async fn test_inner_join_simultaneous_both_sides_update_large() {
     let q = "SELECT l.id, l.category, l.value, r.label AS label_r
              FROM ij_big_left l
              JOIN ij_big_right r ON l.category = r.category";
-    let expected_q = "SELECT l.id, l.category, l.value::NUMERIC, r.label AS label_r
-                      FROM ij_big_left l
-                      JOIN ij_big_right r ON l.category = r.category";
+    let expected_q = q;
     db.create_st("ij_big_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("ij_big_st", expected_q).await;
 

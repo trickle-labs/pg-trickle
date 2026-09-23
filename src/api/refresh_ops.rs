@@ -1033,6 +1033,7 @@ fn upstream_st_source_positions(
                     reason: "required stream-table change buffer is missing".to_string(),
                 });
             }
+            // nosemgrep: rust.spi.get_one_with_args.dynamic-format — change_schema is escaped and the table suffix is a catalog-derived integer.
             let lsn = Spi::get_one_with_args::<String>(
                 &format!(
                     "SELECT LEAST(COALESCE(MAX(lsn), '0/0'::pg_lsn), $1::pg_lsn)::text \
