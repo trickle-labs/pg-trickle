@@ -380,7 +380,7 @@ jobs:
           name: release-proof-controls
           path: target/release-proof/
           retention-days: 30
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   # ── Light-E2E tests (stock postgres container, PR-friendly) ──────────────
   # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.3

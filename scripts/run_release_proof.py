@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -37,6 +38,25 @@ def run_writer(
     for result in results:
         command.extend(("--suite-result", str(result)))
     return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+
+
+def verify_retained_evidence(output: Path, evidence_path: Path) -> None:
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    references = list(evidence.get("retained_logs", []))
+    measurements = evidence.get("retained_measurements", [])
+    references.extend(measurements)
+    for measurement in measurements:
+        references.extend(measurement.get("attachments", []))
+    for reference in references:
+        path = (ROOT / reference["path"]).resolve()
+        if not path.is_relative_to(output.resolve()) or not path.is_file():
+            raise RuntimeError(f"retained evidence is missing from the uploaded proof bundle: {reference}")
+        data = path.read_bytes()
+        if (
+            len(data) != reference.get("bytes")
+            or hashlib.sha256(data).hexdigest() != reference.get("sha256")
+        ):
+            raise RuntimeError(f"retained evidence changed before upload: {reference['path']}")
 
 
 def main() -> None:
@@ -140,31 +160,160 @@ def main() -> None:
         raise RuntimeError(completed.stderr)
     if json.loads(evidence.read_text(encoding="utf-8"))["status"] != "passed":
         raise RuntimeError("runner-produced evidence did not pass")
+    verify_retained_evidence(output, evidence)
 
     negative = output / "negative-controls"
     negative.mkdir()
     baseline = {path.stem: json.loads(path.read_text(encoding="utf-8")) for path in results}
-    missing_case = copy.deepcopy(baseline["sensitivity-baseline"])
-    missing_case["observed_cases"].pop()
+
+    def reject_record(name: str, suite: str, record: dict[str, object], expected_error: str) -> None:
+        changed = negative / f"{name}.json"
+        changed.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        inputs = [changed if path.stem == suite else path for path in results]
+        rejection = run_writer(
+            contract_path,
+            artifact,
+            inputs,
+            negative / f"{name}-evidence.json",
+            args.candidate_commit,
+        )
+        (negative / f"{name}.stderr").write_text(rejection.stderr, encoding="utf-8")
+        if rejection.returncode == 0 or expected_error not in rejection.stderr:
+            raise RuntimeError(f"{name} control was not rejected as expected: {rejection.stderr}")
+
+    empty_selection = copy.deepcopy(baseline["sensitivity-baseline"])
+    empty_selection["selected_cases"] = []
+    reject_record("empty-case-selection", "sensitivity-baseline", empty_selection, "empty case selection")
+
+    required_cases = contract.get("required_cases", [])
+    for index, case_id in enumerate(required_cases, start=1):
+        suite = next(
+            item["id"]
+            for item in contract["required_suites"]
+            if case_id in item.get("required_cases", [])
+        )
+        omitted = copy.deepcopy(baseline[suite])
+        omitted["selected_cases"] = [case for case in omitted["selected_cases"] if case != case_id]
+        reject_record(f"omitted-case-{index}", suite, omitted, case_id)
+
+    missing_observed_suite = "sensitivity-baseline"
+    missing_observed_case = copy.deepcopy(baseline[missing_observed_suite])
+    missing_observed_case["observed_cases"].pop()
+    reject_record(
+        "missing-observed-case",
+        missing_observed_suite,
+        missing_observed_case,
+        "missing or unexpected observed cases",
+    )
+
     skipped_case = copy.deepcopy(baseline["recovery"])
     skipped_case["skipped_tests"] = 1
     wrong_version = copy.deepcopy(baseline["recovery"])
     wrong_version["postgresql_version"] = "18.30"
     controls = (
-        ("missing-case", "sensitivity-baseline", missing_case, "missing or unexpected observed cases"),
         ("skipped-case", "recovery", skipped_case, "unexpected skipped tests"),
         ("wrong-server-version", "recovery", wrong_version, "PostgreSQL version differs from its server"),
     )
     for name, suite, record, expected_error in controls:
-        changed = negative / f"{name}.json"
-        changed.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        inputs = [changed if path.stem == suite else path for path in results]
-        rejection = run_writer(
-            contract_path, artifact, inputs, negative / f"{name}-evidence.json", args.candidate_commit
+        reject_record(name, suite, record, expected_error)
+
+    identity_controls = (
+        ("wrong-candidate-commit", "candidate_commit", "b" * 40, "different candidate commit"),
+        ("wrong-artifact-id", "artifact_id", "linux-arm64", "references an unavailable artifact"),
+        ("wrong-artifact-digest", "artifact_digest", "0" * 64, "artifact digest does not match"),
+        ("wrong-platform", "platform", "linux-arm64", "wrong artifact or platform"),
+        ("wrong-build-kind", "build_kind", "instrumented", "wrong build kind"),
+        ("wrong-feature-scope", "feature_scope", "instrumented", "wrong feature scope"),
+        ("wrong-suite-version", "suite_version", "0.0.0", "suite_version does not match"),
+    )
+    for name, field, value, expected_error in identity_controls:
+        changed = copy.deepcopy(baseline["sensitivity-baseline"])
+        changed[field] = value
+        reject_record(name, "sensitivity-baseline", changed, expected_error)
+
+    identity_mismatch = copy.deepcopy(baseline["sensitivity-baseline"])
+    identity_mismatch["candidate_identity"]["feature_scope"] = "instrumented"
+    reject_record(
+        "wrong-artifact-candidate-identity",
+        "sensitivity-baseline",
+        identity_mismatch,
+        "candidate identity does not match the artifact",
+    )
+
+    instrumented = copy.deepcopy(baseline["sensitivity-baseline"])
+    instrumented["build_kind"] = "instrumented"
+    instrumented["candidate_identity"]["build_kind"] = "instrumented"
+    instrumented["candidate_identity"]["build_provenance"]["instrumentation"] = "asan"
+    for observation in instrumented["installation_observations"]:
+        observation["build_kind"] = "instrumented"
+    reject_record("instrumented-result", "sensitivity-baseline", instrumented, "wrong build kind")
+
+    for index, field in enumerate(contract["evidence"]["required_suite_fields"], start=1):
+        missing_field = copy.deepcopy(baseline["sensitivity-baseline"])
+        missing_field.pop(field, None)
+        expected_error = (
+            "unknown or duplicate suite result" if field == "suite_id" else "missing required evidence fields"
         )
-        (negative / f"{name}.stderr").write_text(rejection.stderr, encoding="utf-8")
-        if rejection.returncode == 0 or expected_error not in rejection.stderr:
-            raise RuntimeError(f"{name} control was not rejected as expected: {rejection.stderr}")
+        reject_record(f"missing-evidence-field-{index}", "sensitivity-baseline", missing_field, expected_error)
+
+    unavailable = negative / "unavailable-runtime"
+    unavailable.mkdir()
+    unavailable_contract = copy.deepcopy(contract)
+    unavailable_suite = next(item for item in unavailable_contract["required_suites"] if item["id"] == "recovery")
+    unavailable_suite["command_argv"] = [
+        "bash", "-c", "printf '%s\\n' 'Docker daemon unavailable for qualification'; exit 125",
+    ]
+    unavailable_suite["command"] = " ".join(unavailable_suite["command_argv"])
+    unavailable_contract_path = unavailable / "qualification.json"
+    unavailable_contract_path.write_text(json.dumps(unavailable_contract, indent=2) + "\n", encoding="utf-8")
+    unavailable_result = unavailable / "recovery.json"
+    runner = subprocess.run(
+        [
+            sys.executable, "scripts/run_release_suite.py",
+            "--qualification", str(unavailable_contract_path), "--suite", "recovery",
+            "--artifact", str(artifact), "--candidate-commit", args.candidate_commit,
+            "--log", str(unavailable / "recovery.log"), "--result", str(unavailable_result),
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    unavailable_record = json.loads(unavailable_result.read_text(encoding="utf-8"))
+    if (
+        runner.returncode == 0
+        or unavailable_record["status"] == "passed"
+        or "Docker daemon unavailable for qualification" not in (unavailable / "recovery.log").read_text(encoding="utf-8")
+    ):
+        raise RuntimeError("unavailable infrastructure control passed or lost its diagnostic")
+    unavailable_inputs = [unavailable_result if path.stem == "recovery" else path for path in results]
+    rejection = run_writer(
+        unavailable_contract_path,
+        artifact,
+        unavailable_inputs,
+        unavailable / "RELEASE-EVIDENCE.json",
+        args.candidate_commit,
+    )
+    (unavailable / "writer.stderr").write_text(rejection.stderr, encoding="utf-8")
+    if rejection.returncode == 0 or "executed zero tests" not in rejection.stderr:
+        raise RuntimeError(f"unavailable infrastructure was not rejected: {rejection.stderr}")
+
+    manual_pass = subprocess.run(
+        [
+            sys.executable, "scripts/release_evidence.py", "--output", str(negative / "manual-pass.json"),
+            "--version", "0.108.0", "--candidate-commit", args.candidate_commit,
+            "--qualification", str(contract_path), "--artifact", str(artifact),
+            "--suite", "sensitivity-baseline=passed",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    (negative / "manual-pass.stderr").write_text(manual_pass.stderr, encoding="utf-8")
+    if manual_pass.returncode == 0 or "manually declared suite results" not in manual_pass.stderr:
+        raise RuntimeError(f"manual suite pass declaration was not rejected: {manual_pass.stderr}")
     missing_shard = run_writer(
         contract_path, artifact, results[:1] + results[2:],
         negative / "missing-shard-evidence.json", args.candidate_commit,

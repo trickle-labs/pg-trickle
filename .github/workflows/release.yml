@@ -503,15 +503,10 @@ jobs:
 
       - name: Collect release files
         run: |
-          test -s qualification-logs/RELEASE-EVIDENCE.json
-          jq -e '.status == "passed"' qualification-logs/RELEASE-EVIDENCE.json
-          jq -r '.retained_logs[].path' qualification-logs/RELEASE-EVIDENCE.json | while read -r path; do
-            test -s "$path"
-          done
-          mkdir -p release-files
-          find artifacts/ -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
-            -exec cp {} release-files/ \;
-          tar czf release-files/qualification-evidence.tar.gz qualification-logs
+          python3 scripts/stage_release_assets.py \
+            --evidence-dir qualification-logs \
+            --artifact-dir artifacts \
+            --output-dir release-files
           echo "Release files:"
           ls -lh release-files/
 

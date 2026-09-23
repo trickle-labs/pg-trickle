@@ -165,7 +165,15 @@ def check_support_contract() -> None:
     )
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     shared.require("release-candidate.json" in workflow, "release archives do not carry candidate identity")
-    shared.require("jq -e '.status == \"passed\"'" in workflow, "publication does not revalidate passed release evidence")
+    stager = (ROOT / "scripts/stage_release_assets.py").read_text(encoding="utf-8")
+    shared.require(
+        'manifest.get("status") != "passed"' in stager,
+        "publication does not revalidate passed release evidence",
+    )
+    shared.require(
+        "scripts/stage_release_assets.py" in workflow,
+        "publication does not stage and verify release evidence assets",
+    )
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     shared.require("release-qualification-contract" in ci, "PR CI does not run the release evidence contract gate")
     shared.require(

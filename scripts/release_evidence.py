@@ -303,6 +303,21 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
         raise ValueError("qualification release version does not match evidence version")
     if contract.get("evidence", {}).get("schema_version") != 3:
         raise ValueError("structured suite results require evidence schema version 3")
+    legacy_inputs = {
+        "--suite": args.suite,
+        "--skipped": args.skipped,
+        "--required-suite": args.required_suite,
+        "--log": args.logs,
+        "--postgresql-version": args.postgresql_version,
+        "--suite-version": args.suite_version,
+        "--workload": args.workload,
+    }
+    supplied_legacy_inputs = sorted(name for name, values in legacy_inputs.items() if values)
+    if supplied_legacy_inputs:
+        raise ValueError(
+            "structured evidence rejects manually declared suite results; "
+            f"use runner-produced --suite-result records (received {supplied_legacy_inputs})"
+        )
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_commit):
         raise ValueError("candidate commit must be a 40-character lowercase hexadecimal SHA")
 
