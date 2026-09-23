@@ -242,7 +242,10 @@ def validate_installation(
             raise ValueError(f"runtime suite {result.get('suite_id')!r} has incomplete postmaster identity") from error
         if not math.isfinite(start_epoch) or not math.isfinite(minimum_epoch) or start_epoch <= 0:
             raise ValueError(f"runtime suite {result.get('suite_id')!r} has invalid postmaster timestamps")
-        if server.get("fresh_postmaster") is not (start_epoch >= minimum_epoch):
+        if (
+            server.get("fresh_postmaster") is not True
+            or server.get("fresh_postmaster") is not (start_epoch >= minimum_epoch)
+        ):
             raise ValueError(f"runtime suite {result.get('suite_id')!r} did not use a fresh PostgreSQL process")
         if not str(server.get("server_version", "")).startswith("18."):
             raise ValueError(f"runtime suite {result.get('suite_id')!r} used an unsupported PostgreSQL server")
@@ -529,6 +532,12 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
         expected_shards = {item["id"]: item for item in required_shards}
         if len(expected_shards) != len(required_shards):
             raise ValueError("qualification contract has duplicate required shard identifiers")
+        allocated_cases: dict[str, str] = {}
+        for shard in required_shards:
+            for case_id in shard.get("required_cases", []):
+                if case_id in allocated_cases:
+                    raise ValueError(f"required case {case_id!r} is assigned to multiple shards")
+                allocated_cases[case_id] = shard["id"]
         shard_suite_ids = {item["suite_id"] for item in required_shards}
         observed_shards: dict[str, dict[str, object]] = {}
         assigned_cases: dict[str, str] = {}

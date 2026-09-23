@@ -217,6 +217,15 @@ def main() -> None:
     for name, suite, record, expected_error in controls:
         reject_record(name, suite, record, expected_error)
 
+    prestarted_server = copy.deepcopy(baseline["recovery"])
+    server = prestarted_server["installation_observations"][0]["server"]
+    server["postmaster_start_epoch"] = float(server["minimum_postmaster_start_epoch"]) - 1
+    server["fresh_postmaster"] = False
+    reject_record(
+        "prestarted-server", "recovery", prestarted_server,
+        "did not use a fresh PostgreSQL process",
+    )
+
     identity_controls = (
         ("wrong-candidate-commit", "candidate_commit", "b" * 40, "different candidate commit"),
         ("wrong-artifact-id", "artifact_id", "linux-arm64", "references an unavailable artifact"),
@@ -296,7 +305,7 @@ def main() -> None:
         args.candidate_commit,
     )
     (unavailable / "writer.stderr").write_text(rejection.stderr, encoding="utf-8")
-    if rejection.returncode == 0 or "executed zero tests" not in rejection.stderr:
+    if rejection.returncode == 0 or "unexpected skipped tests" not in rejection.stderr:
         raise RuntimeError(f"unavailable infrastructure was not rejected: {rejection.stderr}")
 
     manual_pass = subprocess.run(
@@ -321,6 +330,29 @@ def main() -> None:
     (negative / "missing-shard.stderr").write_text(missing_shard.stderr, encoding="utf-8")
     if missing_shard.returncode == 0 or "required qualification shards are missing" not in missing_shard.stderr:
         raise RuntimeError(f"missing-shard control was not rejected: {missing_shard.stderr}")
+
+    duplicate_shard = copy.deepcopy(baseline["recovery"])
+    duplicate_shard["shard"]["id"] = baseline["sensitivity-baseline"]["shard"]["id"]
+    reject_record(
+        "duplicate-shard", "recovery", duplicate_shard,
+        "unknown or duplicate qualification shard",
+    )
+
+    overlapping_contract = copy.deepcopy(contract)
+    overlapping_shards = overlapping_contract["required_shards"]
+    overlapping_case = overlapping_shards[0]["required_cases"][0]
+    overlapping_shards[1]["required_cases"][0] = overlapping_case
+    overlapping_contract_path = negative / "overlapping-shards-qualification.json"
+    overlapping_contract_path.write_text(
+        json.dumps(overlapping_contract, indent=2) + "\n", encoding="utf-8"
+    )
+    overlap = run_writer(
+        overlapping_contract_path, artifact, results,
+        negative / "overlapping-shards-evidence.json", args.candidate_commit,
+    )
+    (negative / "overlapping-shards.stderr").write_text(overlap.stderr, encoding="utf-8")
+    if overlap.returncode == 0 or f"required case {overlapping_case!r} is assigned to multiple shards" not in overlap.stderr:
+        raise RuntimeError(f"overlapping-shard control was not rejected: {overlap.stderr}")
 
     # Install A while declaring a distinct, still loadable B. The test cases
     # must pass, but neither the runner nor the evidence writer may accept B.
