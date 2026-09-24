@@ -877,7 +877,6 @@ fn pgt_ivm_apply_delta(
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
-
     // RLS-3: fail closed if row-level security was enabled on the
     // triggering source after this ST was created (admission only checks
     // at CREATE/ALTER time). The transition tables IMMEDIATE mode uses
@@ -891,6 +890,12 @@ fn pgt_ivm_apply_delta(
              'DIFFERENTIAL' mode, or disable row-level security on the source.",
             st.pgt_schema, st.pgt_name, rls_source,
         )));
+    }
+    if matches!(
+        st.status,
+        crate::dag::StStatus::Suspended | crate::dag::StStatus::Error
+    ) {
+        return Ok(());
     }
 
     // ── Task 5.2: TopK micro-refresh in IMMEDIATE mode ──────────────
@@ -975,7 +980,6 @@ fn pgt_ivm_apply_delta_enr(
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
-
     // RLS-3: see pgt_ivm_apply_delta — fail closed rather than silently
     // mis-apply a delta once RLS is enabled on the triggering source.
     if let Some(rls_source) = crate::cdc::first_rls_enabled_source(&[source_oid_u32])? {
@@ -985,6 +989,12 @@ fn pgt_ivm_apply_delta_enr(
              'DIFFERENTIAL' mode, or disable row-level security on the source.",
             st.pgt_schema, st.pgt_name, rls_source,
         )));
+    }
+    if matches!(
+        st.status,
+        crate::dag::StStatus::Suspended | crate::dag::StStatus::Error
+    ) {
+        return Ok(());
     }
 
     if st.topk_limit.is_some() {
@@ -1338,6 +1348,12 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
+    if matches!(
+        st.status,
+        crate::dag::StStatus::Suspended | crate::dag::StStatus::Error
+    ) {
+        return Ok(());
+    }
 
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the IVM executor to modify the storage table.
