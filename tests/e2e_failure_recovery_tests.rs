@@ -348,7 +348,7 @@ async fn test_failure_witness_controls_reject_missing_fault() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_control_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '500ms'"],
+        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
     )
     .await;
     assert!(
@@ -517,7 +517,7 @@ async fn test_statement_timeout_during_refresh_recovers() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_timeout_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '250ms'"],
+        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
     )
     .await;
     let witness =
@@ -975,7 +975,7 @@ async fn test_no_resource_leak_after_timeout() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_leak_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '250ms'"],
+        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
     )
     .await;
     let witness =
