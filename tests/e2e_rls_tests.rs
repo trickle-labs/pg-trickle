@@ -357,6 +357,8 @@ async fn test_rls_enabled_after_immediate_creation_fails_closed() {
         .await;
     db.execute("CREATE POLICY p ON rls_imm_late_src USING (tenant_id = 10)")
         .await;
+    let (status, _, _, _) = db.pgt_status("rls_imm_late_st").await;
+    assert_eq!(status, "SUSPENDED");
 
     // The IVM trigger fires synchronously inside this INSERT and must fail
     // closed instead of silently applying a possibly-wrong delta.

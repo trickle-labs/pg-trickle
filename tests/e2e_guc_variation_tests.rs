@@ -263,7 +263,7 @@ async fn test_guc_max_grouping_set_branches_raised_allows_large_cube() {
 
 #[tokio::test]
 async fn test_guc_foreign_table_polling_off_rejects_differential() {
-    // With polling disabled (default), foreign tables should be rejected
+    // With polling disabled, foreign tables should be rejected
     // in DIFFERENTIAL mode.
     //
     // Acquire the cluster-wide GUC lock to prevent this test from running
@@ -272,10 +272,6 @@ async fn test_guc_foreign_table_polling_off_rejects_differential() {
     let _polling_lock = FOREIGN_TABLE_POLLING_LOCK.lock().await;
     let db = E2eDb::new().await.with_extension().await;
     let db_name: String = db.query_scalar("SELECT current_database()").await;
-
-    // Ensure the GUC is off (guards against a previous test leaving it on).
-    db.alter_system_set_and_wait("pg_trickle.foreign_table_polling", "off", "off")
-        .await;
 
     // Set up a loopback foreign server via postgres_fdw.
     db.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
@@ -298,9 +294,10 @@ async fn test_guc_foreign_table_polling_off_rejects_differential() {
     )
     .await;
 
-    // Polling is off by default — DIFFERENTIAL should be rejected.
+    // Pin the session setting on the connection that creates the stream table.
     let result = db
-        .try_execute(
+        .try_execute_with_config(
+            &["SET pg_trickle.foreign_table_polling = off"],
             "SELECT pgtrickle.create_stream_table('ft_diff_st', \
              $$ SELECT id, val FROM ft_remote_src $$, '1m', 'DIFFERENTIAL')",
         )
