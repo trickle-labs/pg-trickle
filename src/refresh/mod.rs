@@ -773,6 +773,10 @@ pub(crate) fn test_atomicity_barrier(
     if chaos_table != st.pgt_name || (chaos_phase != phase && !control_at_finalize) {
         return None;
     }
+    // A no-data refresh has no applied state whose finalization can fail.
+    if observed_rows == 0 && matches!(phase, "after_apply" | "during_finalize") {
+        return None;
+    }
 
     let lock_phase = match phase {
         "input_boundary" => 1,

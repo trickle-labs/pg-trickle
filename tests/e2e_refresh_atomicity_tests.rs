@@ -489,7 +489,7 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
     .await;
     release_barrier(&mut scheduler_barrier, scheduler_id, phase).await;
     let (failed_id, action, message) = wait_for_scheduler_failure(&db, scheduler_id).await;
-    assert_eq!(action, "DIFFERENTIAL");
+    assert_eq!(action, "DIFFERENTIAL", "failure {failed_id}: {message}");
     assert!(message.contains("PGT_TEST_FAILPOINT_REACHED"), "{message}");
     assert!(message.contains(phase), "{message}");
     assert!(message.contains("observed_rows=1"), "{message}");
