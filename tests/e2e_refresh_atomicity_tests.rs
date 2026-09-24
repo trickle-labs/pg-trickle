@@ -331,7 +331,7 @@ async fn wait_for_scheduler_recovery(db: &E2eDb, id: i64, failed_id: i64) {
             "SELECT EXISTS (
                  SELECT 1 FROM pgtrickle.pgt_refresh_history
                  WHERE pgt_id = $1 AND refresh_id > $2 AND status = 'COMPLETED'
-                   AND initiated_by = 'SCHEDULER' AND action = 'DIFFERENTIAL')",
+                   AND initiated_by = 'SCHEDULER' AND action = 'REINITIALIZE')",
         )
         .bind(id)
         .bind(failed_id)
@@ -348,9 +348,9 @@ async fn wait_for_scheduler_recovery(db: &E2eDb, id: i64, failed_id: i64) {
     }
 }
 
-async fn assert_recovered_differential(db: &E2eDb, name: &str, query: &str) {
+async fn assert_recovered_action(db: &E2eDb, name: &str, query: &str, expected_action: &str) {
     if let Err(diff) = oracle::compare_st_to_query(db, &format!("public.{name}"), query).await {
-        panic!("recovered differential output differs from committed source: {diff}");
+        panic!("recovered output differs from committed source: {diff}");
     }
     let history: (String, String) = sqlx::query_as(
         "SELECT action, initiated_by FROM pgtrickle.pgt_refresh_history h
@@ -362,7 +362,7 @@ async fn assert_recovered_differential(db: &E2eDb, name: &str, query: &str) {
     .fetch_one(&db.pool)
     .await
     .expect("successful recovery history should exist");
-    assert_eq!(history.0, "DIFFERENTIAL", "fixture must stay differential");
+    assert_eq!(history.0, expected_action);
     assert!(matches!(history.1.as_str(), "MANUAL" | "SCHEDULER"));
 }
 
@@ -454,7 +454,7 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
     )
     .await;
     db.refresh_st(&manual).await;
-    assert_recovered_differential(&db, &manual, &query).await;
+    assert_recovered_action(&db, &manual, &query, "DIFFERENTIAL").await;
 
     // The scheduled fixture starts at the current committed source result.
     db.create_st(&scheduler, &query, "1s", "DIFFERENTIAL").await;
@@ -508,7 +508,8 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
     ))
     .await;
     wait_for_scheduler_recovery(&db, scheduler_id, failed_id).await;
-    assert_recovered_differential(&db, &scheduler, &query).await;
+    // resume_stream_table marks capture state for reinitialization before the scheduler resumes.
+    assert_recovered_action(&db, &scheduler, &query, "REINITIALIZE").await;
 }
 
 #[tokio::test]
@@ -569,7 +570,7 @@ async fn test_refresh_caller_rollback_preserves_committed_state() {
     assert_committed_checkpoint(&db, id, &format!("public.{stream}"), checkpoint, &baseline).await;
 
     db.refresh_st(stream).await;
-    assert_recovered_differential(&db, stream, &query).await;
+    assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
 }
 
 #[tokio::test]
@@ -646,7 +647,7 @@ async fn test_refresh_savepoint_rollback_preserves_outer_transaction() {
     assert_committed_checkpoint(&db, id, &format!("public.{stream}"), checkpoint, &baseline).await;
 
     db.refresh_st(stream).await;
-    assert_recovered_differential(&db, stream, &query).await;
+    assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
 }
 
 #[tokio::test]
@@ -702,7 +703,7 @@ async fn test_refresh_two_callers_publish_one_consistent_result() {
         .expect("first refresh task panicked")
         .expect("first refresh should complete");
     clear_chaos(&db).await;
-    assert_recovered_differential(&db, stream, &query).await;
+    assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
 }
 
 #[tokio::test]
@@ -1129,5 +1130,5 @@ async fn test_refresh_early_progress_control_is_detected() {
         .await
         .expect("restore frontier after semantic control");
     db.refresh_st(stream).await;
-    assert_recovered_differential(&db, stream, &query).await;
+    assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
 }
