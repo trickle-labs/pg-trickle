@@ -437,10 +437,12 @@ start_shared_light_e2e_container() {
         "$cid:/usr/lib/postgresql/18/lib/"
     docker start "$cid" >/dev/null
 
-    # pg_isready can report ready before PostgreSQL initialization completes.
-    # Wait until a real SQL query succeeds instead.
+    # The official image starts a temporary postmaster during initdb. Wait for
+    # its init-complete marker before probing SQL so the probe cannot hit the
+    # socket gap between the temporary and final postmaster.
     local i=0
-    until docker exec "$cid" psql -U postgres -d postgres -Atqc 'SELECT 1' >/dev/null 2>&1; do
+    until docker logs "$cid" 2>&1 | grep -F 'PostgreSQL init process complete; ready for start up.' >/dev/null \
+        && docker exec "$cid" psql -U postgres -d postgres -Atqc 'SELECT 1' >/dev/null 2>&1; do
         i=$((i + 1))
         if [[ $i -gt 120 ]]; then
             echo "ERROR: shared light-E2E container failed to become ready" >&2

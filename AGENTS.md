@@ -113,3 +113,17 @@ Use the relevant recipe from the [justfile](justfile):
   atomicity when changing trigger-based capture.
 - For design plans, read [plans/PLAN.md](plans/PLAN.md).
 - For dbt work, follow [dbt-pgtrickle/AGENTS.md](dbt-pgtrickle/AGENTS.md).
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues; use `gh` for operations. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context layout. See `docs/agents/domain.md`.
