@@ -27,7 +27,7 @@ async fn test_immediate_resume_rebuilds_without_cdc_buffer() {
         "IMMEDIATE",
     )
     .await;
-    db.execute("ALTER TABLE imm_resume_src OWNER TO CURRENT_USER")
+    db.execute("SELECT pgtrickle.pause_stream_table('imm_resume_st')")
         .await;
     let (status, _, _, _) = db.pgt_status("imm_resume_st").await;
     assert_eq!(status, "SUSPENDED");
