@@ -559,7 +559,9 @@ pub static PGS_TEST_CHAOS_FOR_TABLE: GucSetting<Option<std::ffi::CString>> =
 
 /// TEST-MODE only. Selects the refresh phase used by `test_chaos_for_table`.
 /// Supported phases are `before_apply` (default), `input_boundary`,
-/// `after_apply`, and `during_finalize`.
+/// `after_apply`, `during_finalize`, `control_early_progress`, and
+/// `control_partial_finalization`. The control phases run through the
+/// finalization barrier without injecting a failure.
 pub static PGS_TEST_CHAOS_PHASE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
@@ -1265,8 +1267,11 @@ pub fn register_scheduler_gucs() {
         c"pg_trickle.test_chaos_phase",
         c"TEST-MODE: select the refresh barrier or failure phase.",
         c"Used with pg_trickle.test_chaos_for_table. Supported values are \
-          before_apply, input_boundary, after_apply, and during_finalize. \
-          after_apply and during_finalize inject a failure after their barrier. \
+          before_apply, input_boundary, after_apply, during_finalize, \
+          control_early_progress, and control_partial_finalization. \
+          after_apply and during_finalize inject a failure after their barrier; \
+          control phases run the finalization barrier without failure and inject \
+          their named semantic control. \
           Requires SELECT pg_reload_conf() after ALTER SYSTEM SET. Default: \
           before_apply. Do not set in production.",
         &PGS_TEST_CHAOS_PHASE,

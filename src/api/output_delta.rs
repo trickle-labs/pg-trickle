@@ -623,21 +623,26 @@ pub(crate) fn finalize(
     };
     let graph_refresh_id = crate::refresh::current_graph_refresh_id();
     let source_boundary_digest = crate::refresh::current_source_boundary_digest();
-    Spi::run_with_args(
-        "INSERT INTO pgtrickle.pgt_output_delta_batches (pgt_id, database_instance_id, batch_token, producing_refresh_id, graph_refresh_id, mode, row_count, rows_inserted, rows_deleted, output_contract_digest, row_identity_version, source_boundary_digest) SELECT $1, database_instance_id, $2, $3, $4, $5, $6, $7, $8, output_contract_digest, row_identity_version, $9 FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
-        &[
-            meta.pgt_id.into(),
-            token.into(),
-            refresh_id.into(),
-            graph_refresh_id.into(),
-            mode.into(),
-            payload_rows.into(),
-            inserted.into(),
-            deleted.into(),
-            source_boundary_digest.into(),
-        ],
-    )
-    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let control_partial_finalization = crate::config::pg_trickle_test_chaos_for_table()
+        == meta.pgt_name
+        && crate::config::pg_trickle_test_chaos_phase() == "control_partial_finalization";
+    if !control_partial_finalization {
+        Spi::run_with_args(
+            "INSERT INTO pgtrickle.pgt_output_delta_batches (pgt_id, database_instance_id, batch_token, producing_refresh_id, graph_refresh_id, mode, row_count, rows_inserted, rows_deleted, output_contract_digest, row_identity_version, source_boundary_digest) SELECT $1, database_instance_id, $2, $3, $4, $5, $6, $7, $8, output_contract_digest, row_identity_version, $9 FROM pgtrickle.pgt_output_delta_logs WHERE pgt_id = $1",
+            &[
+                meta.pgt_id.into(),
+                token.into(),
+                refresh_id.into(),
+                graph_refresh_id.into(),
+                mode.into(),
+                payload_rows.into(),
+                inserted.into(),
+                deleted.into(),
+                source_boundary_digest.into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_output_delta_logs SET log_head = $1 WHERE pgt_id = $2",
         &[token.into(), meta.pgt_id.into()],

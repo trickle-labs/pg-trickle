@@ -765,7 +765,12 @@ pub(crate) fn test_atomicity_barrier(
         return None;
     }
     let chaos_phase = crate::config::pg_trickle_test_chaos_phase();
-    if chaos_table != st.pgt_name || chaos_phase != phase {
+    let control_at_finalize = phase == "during_finalize"
+        && matches!(
+            chaos_phase.as_str(),
+            "control_early_progress" | "control_partial_finalization"
+        );
+    if chaos_table != st.pgt_name || (chaos_phase != phase && !control_at_finalize) {
         return None;
     }
 
@@ -798,7 +803,7 @@ pub(crate) fn test_atomicity_barrier(
     ) {
         pgrx::error!("PGT_TEST_BARRIER_FAILED phase={} error={}", phase, error);
     }
-    if matches!(phase, "after_apply" | "during_finalize") {
+    if !control_at_finalize && matches!(phase, "after_apply" | "during_finalize") {
         let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
             .ok()
             .flatten()

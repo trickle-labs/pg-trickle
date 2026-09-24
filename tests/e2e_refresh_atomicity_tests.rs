@@ -959,8 +959,8 @@ async fn test_refresh_partial_finalization_control_is_detected() {
     let id = pgt_id(&db, stream).await;
     let checkpoint = "public.atomic_delta_checkpoint";
     snapshot_table(&db, &root, checkpoint).await;
-    let baseline = progress(&db, id).await;
-    let baseline_delta = delta_progress(&db, id, &consumer.delta_relation).await;
+    let mut baseline = progress(&db, id).await;
+    let mut baseline_delta = delta_progress(&db, id, &consumer.delta_relation).await;
     db.execute(&format!(
         "INSERT INTO public.{source} VALUES (2, 'pending')"
     ))
@@ -1025,39 +1025,92 @@ async fn test_refresh_partial_finalization_control_is_detected() {
         panic!("failed finalization published output-delta state: {mismatch}");
     }
 
-    // Semantic negative control: simulate an independently committed log-head
-    // write from a broken finalizer while its matching batch has rolled back.
+    reference_clients::refresh_graph(&db.pool, &root, &graph).await;
+    if let Err(diff) = oracle::compare_st_to_query(&db, &root, &query).await {
+        panic!("output-delta fixture did not recover to committed input: {diff}");
+    }
+    db.execute(&format!("DROP TABLE {checkpoint}")).await;
+    snapshot_table(&db, &root, checkpoint).await;
+    baseline = progress(&db, id).await;
+    baseline_delta = delta_progress(&db, id, &consumer.delta_relation).await;
+
+    // Drop the batch insert inside the real finalizer while its payload and
+    // log-head writes continue; the committed checkpoint oracle must catch it.
+    db.execute(&format!(
+        "INSERT INTO public.{source} VALUES (3, 'control-pending')"
+    ))
+    .await;
+    set_chaos(&db, stream, "control_partial_finalization").await;
+    let (mut blocker, blocker_pid) = hold_barrier(&db, id, "during_finalize").await;
+    let pool = db.pool.clone();
+    let root_for_task = root.clone();
+    let graph_for_task = graph.clone();
+    let refresh = tokio::spawn(async move {
+        sqlx::query(
+            "SELECT * FROM pgtrickle.refresh_graph_strict(ARRAY[$1::regclass], $2::bytea, 'ALLOW')",
+        )
+        .bind(root_for_task)
+        .bind(graph_for_task)
+        .fetch_one(&pool)
+        .await
+    });
+    let witness = wait_for_barrier(
+        &db,
+        id,
+        "during_finalize",
+        blocker_pid,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(witness.application_name.contains("rows=1"));
+    assert_committed_checkpoint(&db, id, &root, checkpoint, &baseline).await;
+    if let Err(mismatch) = check_delta_progress(
+        &baseline_delta,
+        &delta_progress(&db, id, &consumer.delta_relation).await,
+    ) {
+        panic!("uncommitted output-delta control became visible: {mismatch}");
+    }
+    release_barrier(&mut blocker, id, "during_finalize").await;
+    refresh
+        .await
+        .expect("partial-finalization control task panicked")
+        .expect("semantic control refresh should commit");
+    clear_chaos(&db).await;
+    if let Err(diff) = oracle::compare_st_to_query(&db, &root, &query).await {
+        panic!("control refresh output should match committed input: {diff}");
+    }
+    let control_delta = delta_progress(&db, id, &consumer.delta_relation).await;
+    let detected = check_delta_progress(&baseline_delta, &control_delta)
+        .expect_err("checkpoint oracle must reject the partial-finalization control");
+    assert!(detected.contains("log_head"), "{detected}");
+    assert!(detected.contains("batch_count"), "{detected}");
+    assert!(detected.contains("payload_rows"), "{detected}");
+
     sqlx::query(
-        "UPDATE pgtrickle.pgt_output_delta_logs SET log_head = log_head + 1 WHERE pgt_id = $1",
+        "DELETE FROM pgtrickle.pgt_output_delta_batches WHERE pgt_id = $1 AND batch_token > $2",
     )
     .bind(id)
+    .bind(baseline_delta.log_head)
     .execute(&db.pool)
     .await
-    .expect("inject isolated partial-finalization control");
-    let control_delta = delta_progress(&db, id, &consumer.delta_relation).await;
-    assert_eq!(control_delta.log_head, baseline_delta.log_head + 1);
-    assert_eq!(control_delta.batch_count, baseline_delta.batch_count);
-    assert_eq!(control_delta.payload_rows, baseline_delta.payload_rows);
-    let detected = check_delta_progress(&baseline_delta, &control_delta)
-        .expect_err("checkpoint check must reject an independently advanced log head");
-    assert!(detected.contains("log_head"), "{detected}");
+    .expect("remove control batch state");
+    sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {} WHERE batch_token > $1",
+        consumer.delta_relation
+    )))
+    .bind(baseline_delta.log_head)
+    .execute(&db.pool)
+    .await
+    .expect("remove control payload state");
     sqlx::query("UPDATE pgtrickle.pgt_output_delta_logs SET log_head = $1 WHERE pgt_id = $2")
         .bind(baseline_delta.log_head)
         .bind(id)
         .execute(&db.pool)
         .await
-        .expect("restore output-delta control state");
-
-    reference_clients::refresh_graph(&db.pool, &root, &graph).await;
-    if let Err(diff) = oracle::compare_st_to_query(&db, &root, &query).await {
-        panic!("output-delta fixture did not recover to committed input: {diff}");
-    }
-    let recovered_delta = delta_progress(&db, id, &consumer.delta_relation).await;
-    assert_eq!(recovered_delta.log_head, baseline_delta.log_head + 1);
-    assert_eq!(recovered_delta.batch_count, baseline_delta.batch_count + 1);
+        .expect("restore output-delta control checkpoint");
     assert_eq!(
-        recovered_delta.payload_rows,
-        baseline_delta.payload_rows + 1
+        delta_progress(&db, id, &consumer.delta_relation).await,
+        baseline_delta
     );
 }
 
@@ -1083,14 +1136,6 @@ async fn test_refresh_early_progress_control_is_detected() {
         "INSERT INTO public.{source} VALUES (2, 'pending')"
     ))
     .await;
-    let source_oid: String = sqlx::query_scalar(
-        "SELECT source_relid::text FROM pgtrickle.pgt_dependencies
-         WHERE pgt_id = $1 AND source_type = 'TABLE' LIMIT 1",
-    )
-    .bind(id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("fixture source dependency should exist");
     set_chaos(&db, stream, "after_apply").await;
     let (mut barrier, blocker_pid) = hold_barrier(&db, id, "after_apply").await;
     let (refresh, _) = start_manual_refresh(&db, stream).await;
@@ -1105,23 +1150,28 @@ async fn test_refresh_early_progress_control_is_detected() {
     clear_chaos(&db).await;
     assert_committed_checkpoint(&db, id, &format!("public.{stream}"), checkpoint, &baseline).await;
 
-    // A separate committed frontier-only write models the partial-finalizer
-    // defect after the real refresh transaction has released its row lock.
-    sqlx::query(
-        "UPDATE pgtrickle.pgt_stream_tables
-         SET frontier = jsonb_set(frontier,
-             ARRAY['sources', $2, 'lsn'], to_jsonb(pg_current_wal_lsn()::text), false)
-         WHERE pgt_id = $1",
+    set_chaos(&db, stream, "control_early_progress").await;
+    let (mut barrier, blocker_pid) = hold_barrier(&db, id, "during_finalize").await;
+    let (refresh, _) = start_manual_refresh(&db, stream).await;
+    let witness = wait_for_barrier(
+        &db,
+        id,
+        "during_finalize",
+        blocker_pid,
+        Duration::from_secs(10),
     )
-    .bind(id)
-    .bind(source_oid)
-    .execute(&db.pool)
-    .await
-    .expect("commit only the stored progress in the negative control");
-
+    .await;
+    assert!(witness.application_name.contains("rows=1"));
+    assert_committed_checkpoint(&db, id, &format!("public.{stream}"), checkpoint, &baseline).await;
+    release_barrier(&mut barrier, id, "during_finalize").await;
+    refresh
+        .await
+        .expect("early-progress control task panicked")
+        .expect("semantic control refresh should commit");
+    clear_chaos(&db).await;
     let error = checkpoint_mismatch(&db, id, &format!("public.{stream}"), checkpoint, &baseline)
         .await
-        .expect_err("early progress control must be detected");
+        .expect_err("checkpoint oracle must reject the early-progress control");
     assert!(error.contains("frontier changed without output"), "{error}");
     sqlx::query("UPDATE pgtrickle.pgt_stream_tables SET frontier = $1::jsonb WHERE pgt_id = $2")
         .bind(baseline.frontier.as_deref())
