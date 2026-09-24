@@ -877,6 +877,12 @@ fn pgt_ivm_apply_delta(
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
+    if matches!(
+        st.status,
+        crate::dag::StStatus::Suspended | crate::dag::StStatus::Error
+    ) {
+        return Ok(());
+    }
 
     // RLS-3: fail closed if row-level security was enabled on the
     // triggering source after this ST was created (admission only checks
@@ -975,6 +981,12 @@ fn pgt_ivm_apply_delta_enr(
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
+    if matches!(
+        st.status,
+        crate::dag::StStatus::Suspended | crate::dag::StStatus::Error
+    ) {
+        return Ok(());
+    }
 
     // RLS-3: see pgt_ivm_apply_delta — fail closed rather than silently
     // mis-apply a delta once RLS is enabled on the triggering source.
@@ -1338,6 +1350,12 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
+    if matches!(
+        st.status,
+        crate::dag::StStatus::Suspended | crate::dag::StStatus::Error
+    ) {
+        return Ok(());
+    }
 
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the IVM executor to modify the storage table.

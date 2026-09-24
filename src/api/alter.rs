@@ -2461,14 +2461,24 @@ pub(crate) fn alter_stream_table_impl(
 
         if let Some(status_str) = status {
             let new_status = StStatus::from_str(&status_str.to_uppercase())?;
-            StreamTableMeta::update_status(st.pgt_id, new_status)?;
-            if new_status == StStatus::Active {
-                // Reset errors when resuming
-                Spi::run_with_args(
-                "UPDATE pgtrickle.pgt_stream_tables SET consecutive_errors = 0, updated_at = now() WHERE pgt_id = $1",
-                &[st.pgt_id.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let current_status = StreamTableMeta::get_by_name(&schema, &table_name)?.status;
+            match (current_status, new_status) {
+                (StStatus::Active, StStatus::Suspended) => {
+                    pause_stream_table_impl(&qualified_name)?
+                }
+                (StStatus::Suspended | StStatus::Error, StStatus::Active) => {
+                    resume_stream_table_impl(&qualified_name)?;
+                }
+                _ => {
+                    StreamTableMeta::update_status(st.pgt_id, new_status)?;
+                    if new_status == StStatus::Active {
+                        Spi::run_with_args(
+                            "UPDATE pgtrickle.pgt_stream_tables SET consecutive_errors = 0, updated_at = now() WHERE pgt_id = $1",
+                            &[st.pgt_id.into()],
+                        )
+                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                    }
+                }
             }
         }
 
@@ -3122,12 +3132,26 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     cdc::lock_source_relations(&source_oids)?;
     // Restore capture before exposing the consumer as ACTIVE. Changes made
     // while the source was inactive are intentionally repaired by FULL refresh.
-    for dep in &deps {
-        if matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE") {
-            cdc::refresh_capture_body_for_source(dep.source_relid, true)?;
+    if !st.refresh_mode.is_immediate() {
+        for dep in &deps {
+            if matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE") {
+                cdc::refresh_capture_body_for_source(dep.source_relid, true)?;
+            }
         }
     }
     StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
+    if st.refresh_mode.is_immediate() {
+        // IMMEDIATE has no scheduler cycle to repair writes made while paused.
+        // Rebuild under the source locks before exposing the table as ACTIVE.
+        let st = reinit_rewrite_if_needed(&st)?;
+        // IMMEDIATE sources have no CDC buffers to snapshot into a frontier.
+        execute_manual_full_refresh(&st, &schema, &table_name, &[])?;
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = false WHERE pgt_id = $1",
+            &[st.pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
          SET status = 'ACTIVE', consecutive_errors = 0, \

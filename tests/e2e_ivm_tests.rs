@@ -204,6 +204,119 @@ async fn test_ivm_truncate_clears_and_repopulates() {
     assert_eq!(count, 0, "ST should be empty after base table TRUNCATE");
 }
 
+#[tokio::test]
+async fn test_ivm_suspended_writes_preserve_state_and_resume_rebuilds() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE ivm_paused_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO ivm_paused_src VALUES (1, 'one')")
+        .await;
+    let query = "SELECT id, val FROM ivm_paused_src";
+    create_immediate_st(&db, "ivm_paused_st", query).await;
+
+    db.execute("SELECT pgtrickle.pause_stream_table('ivm_paused_st')")
+        .await;
+    db.execute("INSERT INTO ivm_paused_src VALUES (2, 'two')")
+        .await;
+    db.execute("UPDATE ivm_paused_src SET val = 'changed' WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM ivm_paused_src WHERE id = 2").await;
+    db.execute("TRUNCATE ivm_paused_src").await;
+    db.execute("INSERT INTO ivm_paused_src VALUES (3, 'three')")
+        .await;
+
+    let (status, _, _, _) = db.pgt_status("ivm_paused_st").await;
+    assert_eq!(status, "SUSPENDED");
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ivm_paused_st'",
+        )
+        .await;
+    assert!(needs_reinit);
+    assert_eq!(db.count("public.ivm_paused_st").await, 1);
+
+    db.execute("SELECT pgtrickle.resume_stream_table('ivm_paused_st')")
+        .await;
+    db.assert_st_matches_query("ivm_paused_st", query).await;
+    let (status, _, _, _) = db.pgt_status("ivm_paused_st").await;
+    assert_eq!(status, "ACTIVE");
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ivm_paused_st'",
+        )
+        .await;
+    assert!(!needs_reinit);
+
+    db.execute("INSERT INTO ivm_paused_src VALUES (4, 'four')")
+        .await;
+    db.assert_st_matches_query("ivm_paused_st", query).await;
+}
+
+#[tokio::test]
+async fn test_ivm_ambiguous_suspension_survives_delta_and_alter_resume() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE ivm_ambiguous_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO ivm_ambiguous_src VALUES (1)").await;
+    let query = "SELECT id FROM ivm_ambiguous_src";
+    create_immediate_st(&db, "ivm_ambiguous_st", query).await;
+
+    db.alter_st("ivm_ambiguous_st", "status => 'SUSPENDED'")
+        .await;
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET refresh_reason = 'SOURCE_DEPENDENCY_AMBIGUOUS', last_error_message = 'dependency changed' WHERE pgt_name = 'ivm_ambiguous_st'")
+        .await;
+    db.execute("INSERT INTO ivm_ambiguous_src VALUES (2)").await;
+
+    let (status, _, _, _) = db.pgt_status("ivm_ambiguous_st").await;
+    assert_eq!(status, "SUSPENDED");
+    let needs_reinit: bool = db
+        .query_scalar("SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ivm_ambiguous_st'")
+        .await;
+    assert!(needs_reinit);
+    let reason: String = db
+        .query_scalar("SELECT refresh_reason::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ivm_ambiguous_st'")
+        .await;
+    assert_eq!(reason, "SOURCE_DEPENDENCY_AMBIGUOUS");
+    let error: String = db
+        .query_scalar("SELECT last_error_message FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ivm_ambiguous_st'")
+        .await;
+    assert_eq!(error, "dependency changed");
+
+    db.alter_st("ivm_ambiguous_st", "status => 'ACTIVE'").await;
+    db.assert_st_matches_query("ivm_ambiguous_st", query).await;
+}
+
+#[tokio::test]
+async fn test_ivm_legacy_delta_skips_suspended_table() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE ivm_legacy_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO ivm_legacy_src VALUES (1)").await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.ivm_use_enr = off"],
+        "SELECT pgtrickle.create_stream_table('ivm_legacy_st', 'SELECT id FROM ivm_legacy_src', NULL, 'IMMEDIATE')",
+    )
+    .await
+    .expect("create legacy IVM stream table");
+
+    db.execute("SELECT pgtrickle.pause_stream_table('ivm_legacy_st')")
+        .await;
+    db.execute("INSERT INTO ivm_legacy_src VALUES (2)").await;
+    let (status, _, _, _) = db.pgt_status("ivm_legacy_st").await;
+    assert_eq!(status, "SUSPENDED");
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ivm_legacy_st'",
+        )
+        .await;
+    assert!(needs_reinit);
+
+    db.execute("SELECT pgtrickle.resume_stream_table('ivm_legacy_st')")
+        .await;
+    db.assert_st_matches_query("ivm_legacy_st", "SELECT id FROM ivm_legacy_src")
+        .await;
+}
+
 // ── DROP Cleanup ───────────────────────────────────────────────────────
 
 #[tokio::test]
