@@ -11,6 +11,140 @@
 mod e2e;
 
 use e2e::E2eDb;
+use std::time::Duration;
+
+#[tokio::test]
+async fn test_immediate_resume_rebuilds_without_cdc_buffer() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE imm_resume_src (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute("INSERT INTO imm_resume_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "imm_resume_st",
+        "SELECT id, v FROM imm_resume_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.execute("ALTER TABLE imm_resume_src OWNER TO CURRENT_USER")
+        .await;
+    let (status, _, _, _) = db.pgt_status("imm_resume_st").await;
+    assert_eq!(status, "SUSPENDED");
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'imm_resume_st'",
+        )
+        .await;
+    db.execute(&format!(
+        "DROP TRIGGER pgt_ivm_after_upd_{pgt_id} ON imm_resume_src"
+    ))
+    .await;
+
+    db.execute("SELECT pgtrickle.resume_stream_table('imm_resume_st')")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "IMMEDIATE resume rebuild",
+            "SELECT NOT needs_reinit AND is_populated FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'imm_resume_st'",
+            Duration::from_secs(20),
+            Duration::from_millis(100),
+        )
+        .await,
+        "resumed IMMEDIATE table should be rebuilt by the scheduler"
+    );
+    db.assert_st_matches_query("imm_resume_st", "SELECT id, v FROM imm_resume_src")
+        .await;
+    db.execute("UPDATE imm_resume_src SET v = 20 WHERE id = 1")
+        .await;
+    db.assert_st_matches_query("imm_resume_st", "SELECT id, v FROM imm_resume_src")
+        .await;
+    let buffers: i64 = db
+        .query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace = 'pgtrickle_changes'::regnamespace AND relname LIKE 'changes_%' AND relname NOT LIKE 'changes_pgt_%' AND relkind IN ('r', 'p')")
+        .await;
+    assert_eq!(buffers, 0, "IMMEDIATE resume must not create CDC storage");
+    let cdc_triggers: i64 = db
+        .query_scalar("SELECT count(*) FROM pg_trigger WHERE tgrelid = 'imm_resume_src'::regclass AND tgname LIKE 'pg_trickle_cdc_%'")
+        .await;
+    assert_eq!(cdc_triggers, 0);
+}
+
+#[tokio::test]
+async fn test_immediate_repair_and_reinitialize_restore_ivm_without_cdc() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE imm_repair_src (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute("INSERT INTO imm_repair_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "imm_repair_st",
+        "SELECT id, v FROM imm_repair_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'imm_repair_st'",
+        )
+        .await;
+    db.execute(&format!(
+        "DROP TRIGGER pgt_ivm_after_upd_{pgt_id} ON imm_repair_src"
+    ))
+    .await;
+
+    let summary: String = db
+        .query_scalar("SELECT pgtrickle.repair_stream_table('imm_repair_st')")
+        .await;
+    assert!(summary.contains("ivm triggers rebuilt"), "{summary}");
+    db.refresh_st_with_retry("imm_repair_st").await;
+    db.execute("UPDATE imm_repair_src SET v = 20 WHERE id = 1")
+        .await;
+    db.assert_st_matches_query("imm_repair_st", "SELECT id, v FROM imm_repair_src")
+        .await;
+
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('imm_repair_st')")
+        .await;
+    db.execute("UPDATE imm_repair_src SET v = 30 WHERE id = 1")
+        .await;
+    db.assert_st_matches_query("imm_repair_st", "SELECT id, v FROM imm_repair_src")
+        .await;
+    let buffers: i64 = db
+        .query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace = 'pgtrickle_changes'::regnamespace AND relname LIKE 'changes_%' AND relname NOT LIKE 'changes_pgt_%' AND relkind IN ('r', 'p')")
+        .await;
+    assert_eq!(buffers, 0, "IMMEDIATE recovery must not create CDC storage");
+    let cdc_triggers: i64 = db
+        .query_scalar("SELECT count(*) FROM pg_trigger WHERE tgrelid = 'imm_repair_src'::regclass AND tgname LIKE 'pg_trickle_cdc_%'")
+        .await;
+    assert_eq!(cdc_triggers, 0);
+}
+
+#[tokio::test]
+async fn test_immediate_repair_preserves_shared_deferred_cdc() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE imm_shared_src (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute("INSERT INTO imm_shared_src VALUES (1, 10)")
+        .await;
+    let query = "SELECT id, v FROM imm_shared_src";
+    db.create_st("imm_shared_st", query, "1m", "IMMEDIATE")
+        .await;
+    db.create_st("deferred_shared_st", query, "1m", "DIFFERENTIAL")
+        .await;
+
+    db.execute("SELECT pgtrickle.repair_stream_table('imm_shared_st')")
+        .await;
+    let buffers: i64 = db
+        .query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace = 'pgtrickle_changes'::regnamespace AND relname LIKE 'changes_%' AND relname NOT LIKE 'changes_pgt_%' AND relkind IN ('r', 'p')")
+        .await;
+    assert_eq!(buffers, 1, "deferred consumer still needs CDC storage");
+    db.execute("UPDATE imm_shared_src SET v = 20 WHERE id = 1")
+        .await;
+    db.refresh_st_with_retry("deferred_shared_st").await;
+    db.assert_st_matches_query("deferred_shared_st", query)
+        .await;
+    db.assert_st_matches_query("imm_shared_st", query).await;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // R1: Basic repair_stream_table invocation

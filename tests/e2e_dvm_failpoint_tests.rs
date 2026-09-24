@@ -57,6 +57,7 @@ async fn wait_for_scheduler_failure(
              WHERE st.pgt_name = $1
                AND h.status = 'FAILED'
                AND h.initiated_by = 'SCHEDULER'
+               AND h.action = 'DIFFERENTIAL'
              ORDER BY h.refresh_id DESC
              LIMIT 1",
         )

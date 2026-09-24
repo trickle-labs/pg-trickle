@@ -2644,6 +2644,11 @@ pub(crate) fn batched_has_source_changes(
     let mut arms: Vec<String> = Vec::with_capacity(sts.len());
 
     for st in sts {
+        // A reinitialization needs the full source query, not CDC rows. In
+        // particular, IMMEDIATE sources have no change buffer to inspect.
+        if st.needs_reinit || st.refresh_mode.is_immediate() {
+            continue;
+        }
         let mut source_oids = Vec::new();
         // Poll before freezing change visibility, including when the buffer is
         // empty. Shared sources need only one snapshot comparison per tick.
@@ -2740,6 +2745,9 @@ pub(crate) fn batched_has_source_changes(
 /// PERF-6: Uses a single batched EXISTS query instead of one SPI round-trip
 /// per source table.
 fn has_table_source_changes(st: &StreamTableMeta) -> bool {
+    if st.needs_reinit || st.refresh_mode.is_immediate() {
+        return false;
+    }
     if let Err(e) = refresh::poll_foreign_table_sources_for_st(st) {
         log!(
             "pg_trickle: failed to poll foreign table sources for {}.{} while checking upstream changes: {}",
