@@ -412,7 +412,9 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
             RefreshOutcome::Success => {
                 refreshed_count += 1;
             }
-            RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+            RefreshOutcome::RetryableFailure
+            | RefreshOutcome::PermanentFailure
+            | RefreshOutcome::AtomicityTestFailure(_) => {
                 log!(
                     "pg_trickle refresh worker: atomic group rollback — member {}.{} failed (job {})",
                     st.pgt_schema,
@@ -597,7 +599,9 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
                     RefreshOutcome::Success => {
                         any_refreshed = true;
                     }
-                    RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                    RefreshOutcome::RetryableFailure
+                    | RefreshOutcome::PermanentFailure
+                    | RefreshOutcome::AtomicityTestFailure(_) => {
                         log!(
                             "pg_trickle refresh worker: fixpoint iteration {} failed on {}.{}",
                             iteration + 1,
@@ -1298,7 +1302,9 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
                     }
                 }
             }
-            RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+            RefreshOutcome::RetryableFailure
+            | RefreshOutcome::PermanentFailure
+            | RefreshOutcome::AtomicityTestFailure(_) => {
                 log!(
                     "pg_trickle refresh worker: fused chain abort — member {}.{} failed (job {})",
                     st.pgt_schema,
@@ -1326,7 +1332,7 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
 // ── Refresh Outcome ────────────────────────────────────────────────────────
 
 /// Outcome of a refresh attempt, used by the retry logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RefreshOutcome {
     /// Refresh succeeded — reset retry state.
     Success,
@@ -1334,6 +1340,8 @@ enum RefreshOutcome {
     RetryableFailure,
     /// Refresh failed with a permanent error — don't retry, count toward suspension.
     PermanentFailure,
+    /// A TEST-MODE fault must roll back the refresh subtransaction before failure is recorded.
+    AtomicityTestFailure(String),
 }
 
 // ── Crash Recovery ─────────────────────────────────────────────────────────
@@ -3023,7 +3031,9 @@ fn iterate_to_fixpoint(
                         let retry = retry_states.entry(pgt_id).or_default();
                         retry.reset();
                     }
-                    RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                    RefreshOutcome::RetryableFailure
+                    | RefreshOutcome::PermanentFailure
+                    | RefreshOutcome::AtomicityTestFailure(_) => {
                         log!(
                             "pg_trickle: SCC fixpoint aborted — {}.{} failed at iteration {}",
                             st.pgt_schema,
@@ -3402,10 +3412,14 @@ fn refresh_single_st(
             })
         }
     }));
-    let result = match result {
+    let (outcome, failure) = match result {
+        Ok(RefreshOutcome::AtomicityTestFailure(message)) => {
+            subtxn.rollback();
+            (None, Some((message, Some("40001".to_owned()))))
+        }
         Ok(outcome) => {
             subtxn.commit();
-            outcome
+            (Some(outcome), None)
         }
         Err(panic_payload) => {
             // Restore PG_exception_stack. For PG errors, pg_guard_ffi_boundary
@@ -3417,75 +3431,82 @@ fn refresh_single_st(
                 pgrx::pg_sys::PG_exception_stack = saved_pg_exception_stack;
             }
             subtxn.rollback();
-            let (error_msg, sqlstate) = dispatch::extract_panic_details(&panic_payload);
-            log!(
-                "pg_trickle: refresh panicked for {}.{}: {} — setting error state",
-                st.pgt_schema,
-                st.pgt_name,
-                error_msg,
-            );
-            let failure = crate::error::classify_refresh_failure(sqlstate.as_deref(), &error_msg);
-            if let Ok(Some(now)) = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
-                && let Ok(refresh_id) = RefreshRecord::insert(
-                    pgt_id,
-                    now,
-                    action.as_str(),
-                    "RUNNING",
-                    0,
-                    0,
-                    None,
-                    Some("SCHEDULER"),
-                    None,
-                    0,
-                    None,
-                    false,
-                    tick_watermark,
-                )
-            {
-                let _ = RefreshRecord::complete_with_failure(
-                    refresh_id,
-                    "FAILED",
-                    &failure.message,
-                    failure.kind.code(),
-                    failure.sqlstate.as_deref(),
-                    failure.retryable,
-                );
-            }
-            if failure.retryable {
-                let reduce_memory = failure.kind == crate::error::RefreshFailureKind::OutOfMemory
-                    && config::pg_trickle_self_heal_oom();
-                let increase_lock_backoff = failure.kind
-                    == crate::error::RefreshFailureKind::LockTimeout
-                    && config::pg_trickle_self_heal_lock_timeout();
-                if failure.counts_toward_suspension
-                    && let Ok(count) = StreamTableMeta::record_scheduled_failure(
-                        pgt_id,
-                        failure.kind.code(),
-                        true,
-                        reduce_memory,
-                        increase_lock_backoff,
-                    )
-                    && count >= config::pg_trickle_max_consecutive_errors()
-                {
-                    let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
-                    monitor::alert_auto_suspended(
-                        &st.pgt_schema,
-                        &st.pgt_name,
-                        count,
-                        st.pooler_compatibility_mode,
-                    );
-                }
-                RefreshOutcome::RetryableFailure
-            } else {
-                let _ = StreamTableMeta::set_typed_error(
-                    pgt_id,
-                    &failure.message,
-                    failure.kind.code(),
-                    false,
-                );
-                RefreshOutcome::PermanentFailure
-            }
+            let error = dispatch::extract_panic_details(&panic_payload);
+            (None, Some(error))
         }
+    };
+    let result = if let Some((error_msg, sqlstate)) = failure {
+        log!(
+            "pg_trickle: refresh failed transactionally for {}.{}: {} — setting error state",
+            st.pgt_schema,
+            st.pgt_name,
+            error_msg,
+        );
+        let failure = crate::error::classify_refresh_failure(sqlstate.as_deref(), &error_msg);
+        if let Ok(Some(now)) = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
+            && let Ok(refresh_id) = RefreshRecord::insert(
+                pgt_id,
+                now,
+                action.as_str(),
+                "RUNNING",
+                0,
+                0,
+                None,
+                Some("SCHEDULER"),
+                None,
+                0,
+                None,
+                false,
+                tick_watermark,
+            )
+        {
+            let _ = RefreshRecord::complete_with_failure(
+                refresh_id,
+                "FAILED",
+                &failure.message,
+                failure.kind.code(),
+                failure.sqlstate.as_deref(),
+                failure.retryable,
+            );
+        }
+        if failure.retryable {
+            let reduce_memory = failure.kind == crate::error::RefreshFailureKind::OutOfMemory
+                && config::pg_trickle_self_heal_oom();
+            let increase_lock_backoff = failure.kind
+                == crate::error::RefreshFailureKind::LockTimeout
+                && config::pg_trickle_self_heal_lock_timeout();
+            if failure.counts_toward_suspension
+                && let Ok(count) = StreamTableMeta::record_scheduled_failure(
+                    pgt_id,
+                    failure.kind.code(),
+                    true,
+                    reduce_memory,
+                    increase_lock_backoff,
+                )
+                && count >= config::pg_trickle_max_consecutive_errors()
+            {
+                let _ = StreamTableMeta::update_status(pgt_id, StStatus::Suspended);
+                monitor::alert_auto_suspended(
+                    &st.pgt_schema,
+                    &st.pgt_name,
+                    count,
+                    st.pooler_compatibility_mode,
+                );
+            }
+            RefreshOutcome::RetryableFailure
+        } else {
+            let _ = StreamTableMeta::set_typed_error(
+                pgt_id,
+                &failure.message,
+                failure.kind.code(),
+                false,
+            );
+            RefreshOutcome::PermanentFailure
+        }
+    } else if let Some(outcome) = outcome {
+        outcome
+    } else {
+        RefreshOutcome::RetryableFailure
     };
 
     let retry = retry_states.entry(pgt_id).or_default();
@@ -3566,6 +3587,9 @@ fn refresh_single_st(
         }
         RefreshOutcome::PermanentFailure => {
             retry.reset();
+        }
+        RefreshOutcome::AtomicityTestFailure(_) => {
+            retry.record_failure(retry_policy, now_ms);
         }
     }
 
@@ -3791,7 +3815,9 @@ fn execute_scheduled_refresh(
     // D-3 TEST-MODE: exercise the real scheduler failure path after the
     // attempt is recorded but before refresh apply.  The normal refresh
     // error branch persists the FAILED history row and retry state.
-    let test_failure = if config::pg_trickle_test_chaos_for_table() == st.pgt_name {
+    let test_failure = if config::pg_trickle_test_chaos_for_table() == st.pgt_name
+        && config::pg_trickle_test_chaos_phase() == "before_apply"
+    {
         const SERIALIZATION_FAILURE_SQLSTATE: u32 = 527_283_932;
         let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
             .ok()
@@ -3972,6 +3998,10 @@ fn execute_scheduled_refresh(
             return RefreshOutcome::PermanentFailure;
         }
     };
+
+    if action == RefreshAction::Differential {
+        let _ = refresh::test_atomicity_barrier(st, "input_boundary", 0);
+    }
 
     let augment_frontier = |frontier: &mut version::Frontier| {
         for (upstream_pgt_id, lsn) in &st_source_positions {
@@ -4211,6 +4241,15 @@ fn execute_scheduled_refresh(
     match result {
         Ok((rows_inserted, rows_deleted)) => {
             let rows_updated = refresh::take_last_rows_updated();
+            if action == RefreshAction::Differential
+                && let Some(message) = refresh::test_atomicity_barrier(
+                    st,
+                    "after_apply",
+                    rows_inserted + rows_updated + rows_deleted,
+                )
+            {
+                return RefreshOutcome::AtomicityTestFailure(message);
+            }
             let frontier = match StreamTableMeta::get_frontier(st.pgt_id) {
                 Ok(Some(frontier)) => frontier,
                 Ok(None) => {
@@ -4253,6 +4292,9 @@ fn execute_scheduled_refresh(
                 &st.pgt_schema,
                 &st.pgt_name,
             ) {
+                if let crate::error::PgTrickleError::TestAtomicityFailpoint(message) = &e {
+                    return RefreshOutcome::AtomicityTestFailure(message.clone());
+                }
                 log!(
                     "pg_trickle: finalization failed for pgt_id={}: {}",
                     st.pgt_id,
@@ -4777,7 +4819,7 @@ mod tests {
     #[test]
     fn test_refresh_outcome_clone() {
         let outcome = RefreshOutcome::RetryableFailure;
-        let cloned = outcome;
+        let cloned = outcome.clone();
         assert_eq!(outcome, cloned);
     }
 

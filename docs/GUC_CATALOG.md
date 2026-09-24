@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**150 configuration parameters** extracted from `src/config/`.
+**151 configuration parameters** extracted from `src/config/`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -145,6 +145,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.template_cache_max_entries` | `int4` | `0` | When the cache reaches this size, the least-recently-used entry is evicted. |
 | `pg_trickle.temporal_stream_tables` | `bool` | `false` | Default: `false` (standard non-temporal storage). |
 | `pg_trickle.test_chaos_for_table` | `text` | `None` | Activate with: `ALTER SYSTEM SET pg_trickle.test_chaos_for_table = 'name'` followed by `SELECT pg_reload_conf()`. |
+| `pg_trickle.test_chaos_phase` | `text` | `None` | TEST-MODE only. |
 | `pg_trickle.tick_watermark_enabled` | `bool` | `true` | Disable only if you need stream tables to always advance to the very latest available LSN regardless of cross-source consistency. |
 | `pg_trickle.tiered_scheduling` | `bool` | `true` | Default changed to `true` in v0.12.0 (PERF-3) — prevents large deployments from wasting CPU refreshing cold STs at full speed. |
 | `pg_trickle.trace_id` | `text` | `None` | Set to `NULL` to disable trace ID injection (default). |

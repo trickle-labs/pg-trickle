@@ -6,7 +6,7 @@ set -euo pipefail
 failure_schedule_repetition() {
     local attempts="${FAILURE_RECOVERY_ATTEMPTS:-10}"
     local artifact_dir="${FAILURE_RECOVERY_ARTIFACT_DIR:-${RUNNER_TEMP:-target}/failure-recovery-repetition}"
-    local filter='test(test_statement_timeout_during_refresh_recovers) | test(test_lock_timeout_during_refresh) | test(test_cancel_backend_during_refresh_recovers) | test(test_dvm_failpoint_preserves_last_committed_result_and_recovers)'
+    local filter='test(test_statement_timeout_during_refresh_recovers) | test(test_lock_timeout_during_refresh) | test(test_cancel_backend_during_refresh_recovers) | test(test_dvm_failpoint_preserves_last_committed_result_and_recovers) | test(test_refresh_after_apply_failure_rolls_back) | test(test_refresh_finalization_failure_rolls_back)'
     local summary="${artifact_dir}/summary.tsv"
     local status=0
 
@@ -19,6 +19,7 @@ failure_schedule_repetition() {
         ./scripts/run_e2e_tests.sh \
             --test e2e_failure_recovery_tests \
             --test e2e_dvm_failpoint_tests \
+            --test e2e_refresh_atomicity_tests \
             --retries 0 \
             --no-capture \
             -E "$filter" >"$log_file" 2>&1

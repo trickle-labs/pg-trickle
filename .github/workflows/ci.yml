@@ -1596,8 +1596,11 @@ jobs:
               - 'src/refresh/**'
               - 'sql/*.sql'
             failure_recovery_changed:
+              - 'src/api/refresh_ops.rs'
+              - 'src/config/scheduler.rs'
               - 'src/scheduler/**'
               - 'tests/e2e_failure_recovery_tests.rs'
+              - 'tests/e2e_refresh_atomicity_tests.rs'
               - 'tests/e2e_dvm_failpoint_tests.rs'
               - 'tests/e2e_cleanup_chaos_tests.rs'
               - 'scripts/run_failure_recovery_repetition.sh'

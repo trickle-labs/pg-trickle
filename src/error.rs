@@ -267,6 +267,10 @@ pub enum PgTrickleError {
     #[error("SPI permission error: {0}")]
     SpiPermissionError(String),
 
+    /// A TEST-MODE atomicity failpoint reached a deliberate rollback boundary.
+    #[error("{0}")]
+    TestAtomicityFailpoint(String),
+
     // ── Watermark errors ─────────────────────────────────────────────────
     /// A watermark advancement was rejected because the new value is older
     /// than the current watermark (monotonicity violation).
@@ -801,7 +805,9 @@ impl PgTrickleError {
             // F34: Permission errors are user-facing, not system-level.
             PgTrickleError::SpiPermissionError(_) => PgTrickleErrorKind::User,
 
-            PgTrickleError::InternalError(_) => PgTrickleErrorKind::Internal,
+            PgTrickleError::InternalError(_) | PgTrickleError::TestAtomicityFailpoint(_) => {
+                PgTrickleErrorKind::Internal
+            }
 
             PgTrickleError::ChangedColsBitmaskFailed(_)
             | PgTrickleError::PublicationRebuildFailed(_) => PgTrickleErrorKind::System,

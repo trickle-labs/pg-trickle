@@ -1867,7 +1867,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         RefreshOutcome::Success => {
                             refreshed_ids.push(pgt_id);
                         }
-                        RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                        RefreshOutcome::RetryableFailure
+                        | RefreshOutcome::PermanentFailure
+                        | RefreshOutcome::AtomicityTestFailure(_) => {
                             warning!(
                                 "pg_trickle: diamond group rollback — member {}.{} failed",
                                 st.pgt_schema,

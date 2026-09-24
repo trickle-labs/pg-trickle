@@ -557,6 +557,12 @@ pub static PGS_VALIDATE_DELTA_INVARIANTS: GucSetting<bool> = GucSetting::<bool>:
 pub static PGS_TEST_CHAOS_FOR_TABLE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
+/// TEST-MODE only. Selects the refresh phase used by `test_chaos_for_table`.
+/// Supported phases are `before_apply` (default), `input_boundary`,
+/// `after_apply`, and `during_finalize`.
+pub static PGS_TEST_CHAOS_PHASE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
 // ── v0.81.0 GUC statics ───────────────────────────────────────────────────
 
 /// QW-8 (v0.81.0): Enable OOM-triggered self-healing.
@@ -1246,13 +1252,24 @@ pub fn register_scheduler_gucs() {
     // D-3: Test-mode chaos injection GUC.
     GucRegistry::define_string_guc(
         c"pg_trickle.test_chaos_for_table",
-        c"TEST-MODE: inject a refresh failure for a named stream table (v0.79.0).",
-        c"When set to a non-empty stream table name, the scheduler injects a retryable \
-          serialization failure immediately before refresh apply on every eligible tick. \
-          This exercises failure history, retry, and auto-suspension handling. Requires \
-          SELECT pg_reload_conf() after ALTER SYSTEM SET. Default: empty string \
-          (disabled). Do not set in production.",
+        c"TEST-MODE: enable refresh fault and barrier controls for a stream table.",
+        c"When set to a non-empty stream table name, test_chaos_phase selects the \
+          refresh phase to observe or fail. Requires SELECT pg_reload_conf() after \
+          ALTER SYSTEM SET. Default: empty string (disabled). Do not set in production.",
         &PGS_TEST_CHAOS_FOR_TABLE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_trickle.test_chaos_phase",
+        c"TEST-MODE: select the refresh barrier or failure phase.",
+        c"Used with pg_trickle.test_chaos_for_table. Supported values are \
+          before_apply, input_boundary, after_apply, and during_finalize. \
+          after_apply and during_finalize inject a failure after their barrier. \
+          Requires SELECT pg_reload_conf() after ALTER SYSTEM SET. Default: \
+          before_apply. Do not set in production.",
+        &PGS_TEST_CHAOS_PHASE,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1560,6 +1577,15 @@ pub fn pg_trickle_test_chaos_for_table() -> String {
         .get()
         .and_then(|cs| cs.to_str().ok().map(|s| s.to_string()))
         .unwrap_or_default()
+}
+
+/// Returns the configured test-mode refresh phase, defaulting to before-apply.
+pub fn pg_trickle_test_chaos_phase() -> String {
+    PGS_TEST_CHAOS_PHASE
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(str::to_ascii_lowercase))
+        .filter(|phase| !phase.is_empty())
+        .unwrap_or_else(|| "before_apply".to_string())
 }
 
 // ── v0.81.0 accessor functions ────────────────────────────────────────────
