@@ -198,11 +198,18 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
             // project expressions like COALESCE(a.k, b.k) can reference them.
             // Without this, wrapping the join snapshot as "full_join" hides
             // the inner aliases, causing "missing FROM-clause entry" errors.
+            let child_columns = child.output_columns();
             let selects: Vec<String> = expressions
                 .iter()
                 .zip(aliases.iter())
                 .map(|(expr, alias)| {
-                    let expr_sql = rewrite_project_expr_for_snapshot(expr, child).to_sql();
+                    let expr = crate::dvm::operators::project::rewrite_aggregate_projection_expr(
+                        expr,
+                        &child_columns,
+                        child,
+                    )
+                    .unwrap_or_else(|| rewrite_project_expr_for_snapshot(expr, child));
+                    let expr_sql = expr.to_sql();
                     let alias_ident = quote_ident(alias);
                     if expr_sql == *alias {
                         alias_ident
@@ -852,11 +859,18 @@ pub fn build_pre_change_snapshot_sql(
             // like COALESCE(a.k, b.k) can reference them directly. Without this,
             // wrapping the join snapshot as a subquery (e.g., aliased "full_join")
             // hides the inner aliases, causing "missing FROM-clause entry" errors.
+            let child_columns = child.output_columns();
             let selects: Vec<String> = expressions
                 .iter()
                 .zip(aliases.iter())
                 .map(|(expr, alias)| {
-                    let expr_sql = rewrite_project_expr_for_snapshot(expr, child).to_sql();
+                    let expr = crate::dvm::operators::project::rewrite_aggregate_projection_expr(
+                        expr,
+                        &child_columns,
+                        child,
+                    )
+                    .unwrap_or_else(|| rewrite_project_expr_for_snapshot(expr, child));
+                    let expr_sql = expr.to_sql();
                     let alias_ident = quote_ident(alias);
                     if expr_sql == *alias {
                         alias_ident
