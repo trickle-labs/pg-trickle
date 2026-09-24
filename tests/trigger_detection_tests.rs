@@ -1,7 +1,7 @@
 //! Integration tests for user-trigger detection logic.
 //!
 //! Validates the SQL queries used by `has_user_triggers()` and the trigger
-//! detection plumbing against a real PostgreSQL 18.3 container. These tests
+//! detection plumbing against a real PostgreSQL 18.6 container. These tests
 //! do NOT require the pg_trickle extension — they exercise the raw SQL
 //! patterns used internally.
 //!

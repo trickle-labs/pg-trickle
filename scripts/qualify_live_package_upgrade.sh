@@ -30,7 +30,7 @@ mkdir "$WORK_DIR/previous"
 tar xzf "$WORK_DIR/$ARCHIVE_NAME" -C "$WORK_DIR/previous" --strip-components=1
 
 CONTAINER_ID="$(docker create \
-    -e POSTGRES_PASSWORD=postgres postgres:18.3 \
+    -e POSTGRES_PASSWORD=postgres postgres:18.6 \
     -c shared_preload_libraries=pg_trickle \
     -c track_commit_timestamp=on \
     -c wal_level=logical \

@@ -83,7 +83,7 @@ Cluster and Database deployment examples.
 ### 4. GHCR Docker image (recommended for local dev)
 
 pg_trickle is published as a ready-to-run Docker image on the GitHub Container
-Registry. PostgreSQL 18.3 and pg_trickle are pre-installed and all sensible GUC
+Registry. PostgreSQL 18.6 and pg_trickle are pre-installed and all sensible GUC
 defaults (`wal_level`, `shared_preload_libraries`, memory, scheduler settings)
 are baked in — no configuration file editing needed.
 
@@ -105,7 +105,7 @@ Available tags:
 |-----|---------|
 | `latest` | Most recent release |
 | `pg18` | Floating alias for the latest PostgreSQL 18 build |
-| `<version>-pg18.3` | Immutable tag, e.g. `0.13.0-pg18.3` |
+| `<version>-pg18.6` | Immutable tag, e.g. `0.13.0-pg18.6` |
 
 Override any GUC at runtime without rebuilding:
 
@@ -129,7 +129,7 @@ docker run -d \
 ```
 
 **Alternative — manual mount from a release archive:**
-If you prefer to use the stock `postgres:18.3` image rather than the pre-built
+If you prefer to use the stock `postgres:18.6` image rather than the pre-built
 image, extract the extension files from a release archive and mount them:
 
 ```bash
@@ -140,7 +140,7 @@ docker run --rm \
   -v $PWD/lib/pg_trickle.so:/usr/lib/postgresql/18/lib/pg_trickle.so:ro \
   -v $PWD/extension/:/tmp/ext/:ro \
   -e POSTGRES_PASSWORD=postgres \
-  postgres:18.3 \
+  postgres:18.6 \
   sh -c 'cp /tmp/ext/* /usr/share/postgresql/18/extension/ && \
          exec postgres -c shared_preload_libraries=pg_trickle'
 ```

@@ -208,21 +208,21 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
-      - name: Restore Docker image cache (postgres:18.3-alpine)
+      - name: Restore Docker image cache (postgres:18.6-alpine)
         uses: actions/cache@v6
         id: cache-docker-postgres-alpine
         with:
-          path: /tmp/docker-images/postgres-18.3-alpine.tar
-          key: docker-postgres-18.3-alpine
+          path: /tmp/docker-images/postgres-18.6-alpine.tar
+          key: docker-postgres-18.6-alpine
 
-      - name: Load or pull postgres:18.3-alpine
+      - name: Load or pull postgres:18.6-alpine
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3-alpine.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3-alpine.tar
+          if [ -f /tmp/docker-images/postgres-18.6-alpine.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6-alpine.tar
           else
-            docker pull postgres:18.3-alpine
+            docker pull postgres:18.6-alpine
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3-alpine --output /tmp/docker-images/postgres-18.3-alpine.tar
+            docker save postgres:18.6-alpine --output /tmp/docker-images/postgres-18.6-alpine.tar
           fi
 
       - name: Run integration tests
@@ -383,7 +383,7 @@ jobs:
           if-no-files-found: error
 
   # ── Light-E2E tests (stock postgres container, PR-friendly) ──────────────
-  # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.3
+  # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.6
   # container. No custom Docker image build needed. The curated allowlist
   # lives in scripts/run_light_e2e_tests.sh and is split across three shards
   # to reduce PR wall-clock time.
@@ -427,8 +427,8 @@ jobs:
           name: light-e2e-package
           path: target/release
 
-      - name: Pull postgres:18.3 image
-        run: docker pull postgres:18.3
+      - name: Pull postgres:18.6 image
+        run: docker pull postgres:18.6
 
       - name: Run light-E2E test suite
         run: |
@@ -466,21 +466,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Restore Docker image cache (postgres:18.3)
+      - name: Restore Docker image cache (postgres:18.6)
         uses: actions/cache@v6
         id: cache-docker-postgres-smoke
         with:
-          path: /tmp/docker-images/postgres-18.3.tar
-          key: docker-postgres-18.3
+          path: /tmp/docker-images/postgres-18.6.tar
+          key: docker-postgres-18.6
 
-      - name: Load or pull postgres:18.3
+      - name: Load or pull postgres:18.6
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3.tar
+          if [ -f /tmp/docker-images/postgres-18.6.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6.tar
           else
-            docker pull postgres:18.3
+            docker pull postgres:18.6
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+            docker save postgres:18.6 --output /tmp/docker-images/postgres-18.6.tar
           fi
 
       - name: Log in to GHCR
@@ -539,21 +539,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Restore Docker image cache (postgres:18.3)
+      - name: Restore Docker image cache (postgres:18.6)
         uses: actions/cache@v6
         id: cache-docker-postgres-e2e
         with:
-          path: /tmp/docker-images/postgres-18.3.tar
-          key: docker-postgres-18.3
+          path: /tmp/docker-images/postgres-18.6.tar
+          key: docker-postgres-18.6
 
-      - name: Load or pull postgres:18.3
+      - name: Load or pull postgres:18.6
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3.tar
+          if [ -f /tmp/docker-images/postgres-18.6.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6.tar
           else
-            docker pull postgres:18.3
+            docker pull postgres:18.6
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+            docker save postgres:18.6 --output /tmp/docker-images/postgres-18.6.tar
           fi
 
       - name: Log in to GHCR
@@ -719,9 +719,9 @@ jobs:
         if: steps.changes.outputs.run_upgrade_slice == 'true'
         uses: ./.github/actions/setup-pgrx
 
-      - name: Pull postgres:18.3 image
+      - name: Pull postgres:18.6 image
         if: steps.changes.outputs.run_upgrade_slice == 'true'
-        run: docker pull postgres:18.3
+        run: docker pull postgres:18.6
 
       - name: Determine latest upgrade pair
         if: steps.changes.outputs.run_upgrade_slice == 'true'
@@ -1017,21 +1017,21 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
-      - name: Restore Docker image cache (postgres:18.3)
+      - name: Restore Docker image cache (postgres:18.6)
         uses: actions/cache@v6
         id: cache-docker-postgres-dag-calc
         with:
-          path: /tmp/docker-images/postgres-18.3.tar
-          key: docker-postgres-18.3
+          path: /tmp/docker-images/postgres-18.6.tar
+          key: docker-postgres-18.6
 
-      - name: Load or pull postgres:18.3
+      - name: Load or pull postgres:18.6
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3.tar
+          if [ -f /tmp/docker-images/postgres-18.6.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6.tar
           else
-            docker pull postgres:18.3
+            docker pull postgres:18.6
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+            docker save postgres:18.6 --output /tmp/docker-images/postgres-18.6.tar
           fi
 
       - name: Build E2E Docker image
@@ -1065,21 +1065,21 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
-      - name: Restore Docker image cache (postgres:18.3)
+      - name: Restore Docker image cache (postgres:18.6)
         uses: actions/cache@v6
         id: cache-docker-postgres-dag-par
         with:
-          path: /tmp/docker-images/postgres-18.3.tar
-          key: docker-postgres-18.3
+          path: /tmp/docker-images/postgres-18.6.tar
+          key: docker-postgres-18.6
 
-      - name: Load or pull postgres:18.3
+      - name: Load or pull postgres:18.6
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3.tar
+          if [ -f /tmp/docker-images/postgres-18.6.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6.tar
           else
-            docker pull postgres:18.3
+            docker pull postgres:18.6
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+            docker save postgres:18.6 --output /tmp/docker-images/postgres-18.6.tar
           fi
 
       - name: Build E2E Docker image
@@ -1294,7 +1294,7 @@ jobs:
   #
   # Uses a transitional approach: builds the scratch-based extension image
   # (cnpg/Dockerfile.ext-build), then creates a composite image combining
-  # the extension with postgres:18.3 for the smoke test. This validates
+  # the extension with postgres:18.6 for the smoke test. This validates
   # that the extension image layout is correct and the extension works.
   #
   # Once kind supports Kubernetes 1.33 with ImageVolume feature gate, this
@@ -1338,17 +1338,17 @@ jobs:
 
       - name: Build composite image for smoke test
         run: |
-          # Transitional: combine extension image with postgres:18.3
+          # Transitional: combine extension image with postgres:18.6
           # until kind supports K8s 1.33 ImageVolume feature gate.
           # This image is NOT shipped — only used for CI validation.
           #
           # CNPG runs containers as UID 26 (postgres in RHEL/CNPG operand
-          # images). The Docker Hub postgres:18.3 image uses UID 999.
+          # images). The Docker Hub postgres:18.6 image uses UID 999.
           # Remap so initdb (which CNPG runs as UID 26) can resolve its
           # user identity from /etc/passwd.
           cat > /tmp/Dockerfile.cnpg-smoke <<'DOCKERFILE'
           FROM pg_trickle-ext:ci AS ext
-          FROM postgres:18.3
+          FROM postgres:18.6
           RUN sed -i 's/^postgres:x:999:999:/postgres:x:26:26:/' /etc/passwd && \
               sed -i 's/^postgres:x:999:/postgres:x:26:/' /etc/group && \
               chown -R 26:26 /var/lib/postgresql /var/run/postgresql
@@ -1357,10 +1357,10 @@ jobs:
           COPY sql/archive/pg_trickle--0.107.0.sql /usr/share/postgresql/18/extension/
           DOCKERFILE
 
-          docker build -t pg_trickle:18.3 -f /tmp/Dockerfile.cnpg-smoke .
+          docker build -t pg_trickle:18.6 -f /tmp/Dockerfile.cnpg-smoke .
 
       - name: Load image into kind
-        run: kind load docker-image pg_trickle:18.3 --name cnpg-test
+        run: kind load docker-image pg_trickle:18.6 --name cnpg-test
 
       - name: Install CNPG operator
         run: |
@@ -1390,7 +1390,7 @@ jobs:
             name: pg-trickle-demo
           spec:
             instances: 1
-            imageName: pg_trickle:18.3
+            imageName: pg_trickle:18.6
             imagePullPolicy: Never
             bootstrap:
               initdb:
@@ -1628,21 +1628,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Restore Docker image cache (postgres:18.3)
+      - name: Restore Docker image cache (postgres:18.6)
         uses: actions/cache@v6
         id: cache-docker-postgres-dvm
         with:
-          path: /tmp/docker-images/postgres-18.3.tar
-          key: docker-postgres-18.3
+          path: /tmp/docker-images/postgres-18.6.tar
+          key: docker-postgres-18.6
 
-      - name: Load or pull postgres:18.3
+      - name: Load or pull postgres:18.6
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3.tar
+          if [ -f /tmp/docker-images/postgres-18.6.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6.tar
           else
-            docker pull postgres:18.3
+            docker pull postgres:18.6
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+            docker save postgres:18.6 --output /tmp/docker-images/postgres-18.6.tar
           fi
 
       - name: Log in to GHCR

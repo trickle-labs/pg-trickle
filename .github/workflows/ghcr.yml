@@ -4,7 +4,7 @@
 #
 # Published image: ghcr.io/trickle-labs/pg_trickle
 # Tags produced:
-#   <version>-pg18.3          — immutable, e.g. 0.13.0-pg18.3
+#   <version>-pg18.6          — immutable, e.g. 0.13.0-pg18.6
 #   latest                    — moves to the most recent release
 #   pg18                      — floating alias for the latest 18.x build
 #
@@ -34,7 +34,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/pg_trickle
-  PG_MINOR: "18.3"
+  PG_MINOR: "18.6"
 
 permissions:
   contents: read

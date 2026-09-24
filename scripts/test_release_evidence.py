@@ -108,7 +108,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "installed_payload_digest": canonical_digest([{"path": files[0]["path"], "bytes": 4, "sha256": "def"}]),
                 "candidate_files": files,
                 "installed_files": [{"path": files[0]["path"], "bytes": 4, "sha256": "def"}],
-                "server": {"fresh_postmaster": True, "server_version": "18.3"},
+                "server": {"fresh_postmaster": True, "server_version": "18.6"},
             }],
         }
         with self.assertRaisesRegex(ValueError, "installed payload"):

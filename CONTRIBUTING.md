@@ -116,7 +116,7 @@ PR CI runs a three-tier gate:
 - **Unit tests (Linux only)**
 - **Integration tests**
 - **Light E2E** — curated PR-friendly end-to-end coverage split across three
-  shards and executed against stock `postgres:18.3`
+  shards and executed against stock `postgres:18.6`
 
 Full E2E, TPC-H tests, benchmarks, dbt, CNPG smoke, and the extra macOS /
 Windows unit jobs stay off the PR critical path and run on push-to-main,
@@ -267,13 +267,13 @@ scripts/update_base_image_digests.sh
 ```
 
 The script resolves the current `linux/amd64` digest for
-`postgres:18.3-bookworm`, patches all Dockerfiles in-place, and prints the
+`postgres:18.6-bookworm`, patches all Dockerfiles in-place, and prints the
 commit command. Run this script **quarterly** or when a PostgreSQL patch release
 is needed. Include the digest-update commit in the release PR.
 
 If you are building for `linux/arm64` or another platform, edit the
 `TARGET_PLATFORM` variable in the script or pin to the manifest index digest
-(returned by `docker manifest inspect postgres:18.3-bookworm --verbose`).
+(returned by `docker manifest inspect postgres:18.6-bookworm --verbose`).
 
 ## License
 

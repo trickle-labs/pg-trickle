@@ -426,7 +426,7 @@ start_shared_light_e2e_container() {
         --label com.pgtrickle.test=true \
         --label com.pgtrickle.suite=light-e2e \
         --label "com.pgtrickle.run-id=${run_id}" \
-        postgres:18.3 \
+        postgres:18.6 \
         -c track_commit_timestamp=on)
 
     # Install the candidate before the postmaster is started. This makes the

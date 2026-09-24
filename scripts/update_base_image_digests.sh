@@ -2,7 +2,7 @@
 # OPS-10-03: Update base image SHA256 digests in Dockerfiles.
 #
 # Run this script quarterly or when a PostgreSQL patch release is needed.
-# It resolves the current manifest-list (index) digest for postgres:18.3-bookworm
+# It resolves the current manifest-list (index) digest for postgres:18.6-bookworm
 # and patches the relevant Dockerfiles in-place.
 #
 # IMPORTANT: We pin the manifest-list digest (not a per-platform digest) so
@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-BASE_IMAGE="postgres:18.3-bookworm"
+BASE_IMAGE="postgres:18.6-bookworm"
 
 # Resolve the manifest-list (OCI image index) digest — platform-agnostic.
 # This digest works for all architectures; Docker/buildx picks the right

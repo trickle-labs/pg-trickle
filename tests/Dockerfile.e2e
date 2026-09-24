@@ -3,7 +3,7 @@
 # Multi-stage Dockerfile for pg_trickle E2E integration tests.
 #
 # Stage 1 (builder): Compiles the extension from source.
-# Stage 2 (runtime): Copies the compiled artifacts into a clean postgres:18.3.
+# Stage 2 (runtime): Copies the compiled artifacts into a clean postgres:18.6.
 #
 # Usage:
 #   # Fast build — uses pre-built builder image (Rust + cargo-pgrx pre-baked):
@@ -11,7 +11,7 @@
 #   just build-e2e-image       # ~2-3 min cold, ~30s warm
 #
 #   # Self-contained build (no pre-built builder, downloads everything, ~10 min):
-#   BUILDER_IMAGE=postgres:18.3 just build-e2e-image
+#   BUILDER_IMAGE=postgres:18.6 just build-e2e-image
 #
 # The build context must be the project root (parent of tests/).
 #
@@ -25,7 +25,7 @@
 
 # ── Stage 1: Build the extension ────────────────────────────────────────────
 # Default to the pre-built builder image (see tests/Dockerfile.builder).
-# Override with BUILDER_IMAGE=postgres:18.3 for a self-contained build.
+# Override with BUILDER_IMAGE=postgres:18.6 for a self-contained build.
 ARG BUILDER_IMAGE=pg_trickle_builder:pg18
 FROM ${BUILDER_IMAGE} AS builder
 
@@ -80,7 +80,7 @@ RUN echo "=== Package artifacts ===" && \
 FROM postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 
 LABEL org.opencontainers.image.title="pg_trickle E2E test image"
-LABEL org.opencontainers.image.description="PostgreSQL 18.3 with pg_trickle extension for integration testing"
+LABEL org.opencontainers.image.description="PostgreSQL 18.6 with pg_trickle extension for integration testing"
 
 # F4 (v0.37.0): Install pgvector for vector aggregate E2E tests.
 # pgvector is available from the official PostgreSQL APT repository.

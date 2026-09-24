@@ -1,7 +1,7 @@
 # pg_trickle Observability Demo Stack
 #
 # Starts:
-#   - PostgreSQL 18.3 with pg_trickle pre-installed
+#   - PostgreSQL 18.6 with pg_trickle pre-installed
 #   - postgres_exporter (Prometheus custom queries for pg_trickle)
 #   - Prometheus (scrapes metrics every 15 s, evaluates alert rules)
 #   - Grafana (pre-provisioned pg_trickle Overview dashboard)

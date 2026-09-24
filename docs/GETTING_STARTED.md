@@ -59,7 +59,7 @@ This tutorial walks through a concrete org-chart example so you can see this flo
 
 > **Playground:** The fastest way to experiment is the [playground](PLAYGROUND.md) — a Docker Compose environment with sample tables and stream tables pre-loaded. `cd playground && docker compose up -d` and you're running.
 
-> **Quick start with Docker:** Pull the pre-built GHCR image — PostgreSQL 18.3 + pg_trickle ready to run, no configuration needed:
+> **Quick start with Docker:** Pull the pre-built GHCR image — PostgreSQL 18.6 + pg_trickle ready to run, no configuration needed:
 > ```bash
 > docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 ghcr.io/trickle-labs/pg_trickle:latest
 > ```
