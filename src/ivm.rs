@@ -280,6 +280,25 @@ impl IvmTriggerNames {
     }
 }
 
+/// Check that every trigger needed for synchronous maintenance can fire.
+pub fn ivm_triggers_ready(source_oid: pg_sys::Oid, pgt_id: i64) -> Result<bool, PgTrickleError> {
+    let names = IvmTriggerNames::new(pgt_id, source_oid.to_u32());
+    for name in names.all_triggers() {
+        let ready = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger \
+             WHERE tgrelid = $1 AND tgname = $2 \
+               AND NOT tgisinternal AND tgenabled IN ('O', 'A'))",
+            &[source_oid.into(), name.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+        if !ready {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Install IVM triggers on a source table for an IMMEDIATE-mode stream table.
 ///
 /// Creates statement-level BEFORE and AFTER triggers for INSERT, UPDATE,

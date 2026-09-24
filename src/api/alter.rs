@@ -3132,11 +3132,14 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     cdc::lock_source_relations(&source_oids)?;
     // Restore capture before exposing the consumer as ACTIVE. Changes made
     // while the source was inactive are intentionally repaired by FULL refresh.
-    if !st.refresh_mode.is_immediate() {
-        for dep in &deps {
-            if matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE") {
-                cdc::refresh_capture_body_for_source(dep.source_relid, true)?;
-            }
+    for dep in &deps {
+        if dep.source_type == "TABLE" && st.refresh_mode.is_immediate() {
+            ensure_immediate_ivm_triggers(&st, dep.source_relid)?;
+        }
+        if dep.source_type == "FOREIGN_TABLE"
+            || (dep.source_type == "TABLE" && !st.refresh_mode.is_immediate())
+        {
+            cdc::refresh_capture_body_for_source(dep.source_relid, true)?;
         }
     }
     StreamTableMeta::mark_for_reinitialize(st.pgt_id)?;
@@ -3170,6 +3173,21 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         st.pgt_id
     );
     Ok(())
+}
+
+fn ensure_immediate_ivm_triggers(
+    st: &StreamTableMeta,
+    source_oid: pg_sys::Oid,
+) -> Result<bool, PgTrickleError> {
+    if crate::ivm::ivm_triggers_ready(source_oid, st.pgt_id)? {
+        return Ok(false);
+    }
+    crate::ivm::cleanup_ivm_triggers(source_oid, st.pgt_id)?;
+    let lock_mode = refresh::with_stream_owner(st, || {
+        Ok(crate::ivm::IvmLockMode::for_query(&st.defining_query))
+    })?;
+    crate::ivm::setup_ivm_triggers(source_oid, st.pgt_id, st.pgt_relid, lock_mode)?;
+    Ok(true)
 }
 
 /// Repair a potentially broken stream table by reinitializing its storage,
@@ -3268,6 +3286,7 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
 
     // Step 5: Rebuild missing CDC triggers / change-buffer tables.
     let mut cdc_rebuilt = false;
+    let mut has_deferred_source = false;
     let mut missing_dependency = false;
     for dep in &deps {
         if dep.source_type != "TABLE" {
@@ -3291,6 +3310,18 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
             ));
             continue;
         }
+
+        if st.refresh_mode.is_immediate() && ensure_immediate_ivm_triggers(&st, source_oid)? {
+            actions.push(format!(
+                "ivm triggers rebuilt for OID {}",
+                source_oid.to_u32()
+            ));
+        }
+
+        if StDependency::effective_requested_mode_for_source(source_oid)?.is_none() {
+            continue;
+        }
+        has_deferred_source = true;
 
         // Rebuild change-buffer table if absent.
         let buf_name = cdc::buffer_base_name_for_oid(source_oid);
@@ -3354,7 +3385,7 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
         )));
     }
 
-    if !cdc_rebuilt && deps.iter().any(|d| d.source_type == "TABLE") {
+    if !cdc_rebuilt && has_deferred_source {
         actions.push("cdc_infrastructure: verified OK".to_string());
     }
 
