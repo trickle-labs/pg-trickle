@@ -26,6 +26,16 @@ struct DeltaProgress {
     payload_rows: i64,
 }
 
+fn check_delta_progress(expected: &DeltaProgress, actual: &DeltaProgress) -> Result<(), String> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(format!(
+            "output-delta checkpoint differs: expected {expected:?}, observed {actual:?}"
+        ))
+    }
+}
+
 #[derive(Debug)]
 struct BarrierWitness {
     pid: i32,
@@ -990,11 +1000,10 @@ async fn test_refresh_partial_finalization_control_is_detected() {
     .await;
     assert!(witness.application_name.contains("rows=1"));
     assert_committed_checkpoint(&db, id, &root, checkpoint, &baseline).await;
-    assert_eq!(
-        delta_progress(&db, id, &consumer.delta_relation).await,
-        baseline_delta,
-        "uncommitted output-delta batch must remain invisible"
-    );
+    let blocked_delta = delta_progress(&db, id, &consumer.delta_relation).await;
+    if let Err(mismatch) = check_delta_progress(&baseline_delta, &blocked_delta) {
+        panic!("uncommitted output-delta batch must remain invisible: {mismatch}");
+    }
 
     let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
         .bind(lock_id)
@@ -1010,10 +1019,10 @@ async fn test_refresh_partial_finalization_control_is_detected() {
     assert!(error.to_string().contains("PGT_TEST_FAILPOINT_REACHED"));
     clear_chaos(&db).await;
     assert_committed_checkpoint(&db, id, &root, checkpoint, &baseline).await;
-    assert_eq!(
-        delta_progress(&db, id, &consumer.delta_relation).await,
-        baseline_delta
-    );
+    let failed_delta = delta_progress(&db, id, &consumer.delta_relation).await;
+    if let Err(mismatch) = check_delta_progress(&baseline_delta, &failed_delta) {
+        panic!("failed finalization published output-delta state: {mismatch}");
+    }
 
     // Semantic negative control: simulate an independently committed log-head
     // write from a broken finalizer while its matching batch has rolled back.
@@ -1028,6 +1037,9 @@ async fn test_refresh_partial_finalization_control_is_detected() {
     assert_eq!(control_delta.log_head, baseline_delta.log_head + 1);
     assert_eq!(control_delta.batch_count, baseline_delta.batch_count);
     assert_eq!(control_delta.payload_rows, baseline_delta.payload_rows);
+    let detected = check_delta_progress(&baseline_delta, &control_delta)
+        .expect_err("checkpoint check must reject an independently advanced log head");
+    assert!(detected.contains("log_head"), "{detected}");
     sqlx::query("UPDATE pgtrickle.pgt_output_delta_logs SET log_head = $1 WHERE pgt_id = $2")
         .bind(baseline_delta.log_head)
         .bind(id)
