@@ -112,10 +112,13 @@ use crate::{cdc, config, wal_decoder};
 /// ```
 ///
 /// > **Internal**: This function is called by PostgreSQL trigger machinery,
-/// > not directly by users.  It is exposed as `pg_extern` only because
-/// > PostgreSQL requires C-callable functions for event triggers.
-#[pg_extern(schema = "pgtrickle", name = "_on_ddl_end", sql = false)]
-fn pg_trickle_on_ddl_end() {
+/// > not directly by users. The C wrapper reads the event's parsed command.
+#[pg_guard]
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
+    fcinfo: pg_sys::FunctionCallInfo,
+) -> pg_sys::Datum {
+    let owner_only = is_owner_only_alter_table(fcinfo);
     // Query the event trigger context for affected objects.
     // pg_event_trigger_ddl_commands() is only available inside an
     // event trigger context — calling it elsewhere will error.
@@ -125,12 +128,48 @@ fn pg_trickle_on_ddl_end() {
             // Not inside an event trigger context, or SPI error.
             // This can happen during CREATE EXTENSION itself — safe to ignore.
             pgrx::debug1!("pg_trickle_ddl_tracker: could not read DDL commands: {}", e);
-            return;
+            return pg_sys::Datum::null();
         }
     };
 
     for cmd in &commands {
-        handle_ddl_command(cmd);
+        handle_ddl_command(cmd, owner_only);
+    }
+    pg_sys::Datum::null()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pg_finfo_pg_trickle_on_ddl_end_wrapper() -> &'static pg_sys::Pg_finfo_record {
+    static V1: pg_sys::Pg_finfo_record = pg_sys::Pg_finfo_record { api_version: 1 };
+    &V1
+}
+
+/// The event trigger's parse tree identifies the subcommand without parsing SQL text.
+fn is_owner_only_alter_table(fcinfo: pg_sys::FunctionCallInfo) -> bool {
+    // SAFETY: PostgreSQL calls this function as an event trigger. Its fcinfo,
+    // EventTriggerData, parse tree, and command list live through this call.
+    unsafe {
+        let Some(call) = fcinfo.as_ref() else {
+            return false;
+        };
+        let Some(event) = (call.context as *const pg_sys::EventTriggerData).as_ref() else {
+            return false;
+        };
+        let Some(node) = event.parsetree.as_ref() else {
+            return false;
+        };
+        if node.type_ != pg_sys::NodeTag::T_AlterTableStmt {
+            return false;
+        }
+        let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
+        if pg_sys::list_length(stmt.cmds) != 1 {
+            return false;
+        }
+        let cmd = pg_sys::list_nth(stmt.cmds, 0) as *const pg_sys::AlterTableCmd;
+        cmd.as_ref().is_some_and(|cmd| {
+            cmd.type_ == pg_sys::NodeTag::T_AlterTableCmd
+                && cmd.subtype == pg_sys::AlterTableType::AT_ChangeOwner
+        })
     }
 }
 
@@ -282,11 +321,11 @@ fn collect_ddl_commands() -> Result<Vec<DdlCommand>, PgTrickleError> {
 ///
 /// A17 (v0.36.0): dispatches on `cmd.kind` (pre-classified typed enum) rather
 /// than calling `classify_ddl_event()` at dispatch time.
-fn handle_ddl_command(cmd: &DdlCommand) {
+fn handle_ddl_command(cmd: &DdlCommand, owner_only: bool) {
     match cmd.kind {
         DdlCommandKind::AlterTable => {
             let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
-            handle_alter_table(cmd.objid, identity);
+            handle_alter_table(cmd.objid, identity, owner_only);
         }
         DdlCommandKind::CreateTable => {
             handle_created_table(cmd);
@@ -804,7 +843,7 @@ fn handle_policy_change(cmd: &DdlCommand) {
 
 /// Handle ALTER TABLE on an object that may be an upstream dependency or
 /// a ST storage table itself.
-fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
+fn handle_alter_table(objid: pg_sys::Oid, identity: &str, owner_only: bool) {
     // Check if this OID is an upstream source of any ST.
     // Fail closed when relevance cannot be determined: allowing the DDL could
     // leave a tracked source's CDC and downstream stream tables inconsistent.
@@ -848,6 +887,22 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     let mut reinit_pgt_ids = Vec::new();
     let mut suspended_pgt_ids = Vec::new();
     for pgt_id in &affected_pgt_ids {
+        // Only this exact subcommand can be proved harmless from the saved owner.
+        // Older snapshots lack the owner and retain the conservative behavior.
+        if owner_only
+            && crate::catalog::get_column_snapshot(*pgt_id, objid)
+                .ok()
+                .flatten()
+                .and_then(|snapshot| snapshot.0.get("owner").and_then(|v| v.as_u64()))
+                .zip(
+                    crate::catalog::query_source_owner(objid)
+                        .ok()
+                        .map(u64::from),
+                )
+                .is_some_and(|(old, current)| old == current)
+        {
+            continue;
+        }
         // ALTER TABLE also covers owner and row-security changes. Those values
         // are part of the external contract, so invalidate the generation in
         // the same transaction as the DDL.
@@ -1084,6 +1139,15 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     }
 
     let total = reinit_pgt_ids.len() + cascade_ids.len();
+    let suspended = suspended_pgt_ids.len() + suspended_cascade_ids.len();
+    if suspended > 0 {
+        pgrx::warning!(
+            "pg_trickle_ddl_tracker: ALTER TABLE on {} → {} ST(s) suspended",
+            identity,
+            suspended,
+        );
+        shmem::bump_cache_generation();
+    }
     if total > 0 {
         log!(
             "pg_trickle_ddl_tracker: ALTER TABLE on {} → {} ST(s) marked for reinitialize",
@@ -1092,7 +1156,7 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
         );
         // G8.1: Notify other backends to flush their delta/MERGE template caches.
         shmem::bump_cache_generation();
-    } else {
+    } else if suspended == 0 {
         log!(
             "pg_trickle_ddl_tracker: ALTER TABLE on {} → benign for all {} dependent ST(s), \
              no reinitialize needed",
@@ -1123,6 +1187,13 @@ fn suspend_for_source_ddl(pgt_id: i64, code: AlterReasonCode, identity: &str) {
             reason,
             identity,
             e
+        );
+    } else {
+        pgrx::warning!(
+            "pg_trickle_ddl_tracker: ST {} suspended ({}) after source DDL on {}",
+            pgt_id,
+            reason,
+            identity,
         );
     }
 }
@@ -1794,7 +1865,7 @@ pub enum SchemaChangeKind {
     /// because pre-existing rows in newly attached partitions are not captured by
     /// CDC triggers.
     PartitionChange,
-    /// Other DDL (comment, owner change, etc.) — no reinitialize needed.
+    /// Other DDL with unchanged tracked columns; safety still requires review.
     Benign,
 }
 

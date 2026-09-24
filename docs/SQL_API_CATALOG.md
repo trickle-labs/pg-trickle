@@ -4,14 +4,13 @@
 
 # SQL API Reference — pg_trickle
 
-**170 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**169 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
 
 | Function | Schema | Returns | Description |
 |----------|--------|---------|-------------|
-| `pgtrickle._on_ddl_end()` | `pgtrickle` | `` | > **Internal**: This function is called by PostgreSQL trigger machinery, > not directly by users. |
 | `pgtrickle._on_sql_drop()` | `pgtrickle` | `` | > **Internal**: This function is called by PostgreSQL trigger machinery, > not directly by users. |
 | `pgtrickle._signal_launcher_rescan()` | `pgtrickle` | `` | Also safe to call manually if the launcher needs a nudge. |
 | `pgtrickle.ack_output_delta()` | `pgtrickle` | `text` | Advance a consumer cursor transactionally. |

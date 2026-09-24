@@ -10,6 +10,63 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_ddl_same_owner_keeps_immediate_stream_table_active() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE evt_owner_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO evt_owner_src VALUES (1, 'before')")
+        .await;
+    db.create_st(
+        "evt_owner_st",
+        "SELECT id, val FROM evt_owner_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    db.execute("ALTER TABLE evt_owner_src OWNER TO CURRENT_USER")
+        .await;
+    db.execute("ALTER TABLE evt_owner_src OWNER TO CURRENT_USER")
+        .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'evt_owner_st'",
+        )
+        .await;
+    assert_eq!(status, "ACTIVE");
+
+    db.execute("UPDATE evt_owner_src SET val = 'after' WHERE id = 1")
+        .await;
+    db.assert_st_matches_query("public.evt_owner_st", "SELECT id, val FROM evt_owner_src")
+        .await;
+}
+
+#[tokio::test]
+async fn test_ddl_changed_owner_suspends_stream_table() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE evt_new_owner NOLOGIN").await;
+    db.execute("CREATE TABLE evt_changed_owner_src (id INT PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "evt_changed_owner_st",
+        "SELECT id FROM evt_changed_owner_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    db.execute("ALTER TABLE evt_changed_owner_src OWNER TO evt_new_owner")
+        .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status || ':' || refresh_reason FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'evt_changed_owner_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED:SOURCE_DEPENDENCY_AMBIGUOUS");
+}
+
+#[tokio::test]
 async fn test_ddl_hooks_dependency_lookup_timeout_fail_closed() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE evt_lock_unrelated (id INT)").await;

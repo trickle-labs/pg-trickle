@@ -2088,12 +2088,14 @@ pub fn build_column_snapshot(
     // PT2: Include partition child count so the fingerprint changes when
     // ATTACH/DETACH PARTITION modifies the partition structure.
     let partition_child_count = query_partition_child_count(source_oid)?;
+    let owner = query_source_owner(source_oid)?;
 
     let snapshot_obj = serde_json::json!({
         "columns": entries,
         "rls_enabled": rls_enabled,
         "rls_forced": rls_forced,
         "partition_child_count": partition_child_count,
+        "owner": owner,
     });
 
     let json_str = serde_json::to_string(&snapshot_obj)
@@ -2110,6 +2112,23 @@ pub fn build_column_snapshot(
 
     let snapshot = pgrx::JsonB(snapshot_obj);
     Ok((snapshot, fingerprint))
+}
+
+/// Return the owner OID of a source relation.
+#[cfg(not(test))]
+pub fn query_source_owner(source_oid: pg_sys::Oid) -> Result<u32, PgTrickleError> {
+    Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT relowner FROM pg_class WHERE oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .map(|owner| owner.to_u32())
+    .ok_or_else(|| PgTrickleError::InternalError(format!("source {source_oid:?} has no owner")))
+}
+
+#[cfg(test)]
+pub fn query_source_owner(_source_oid: pg_sys::Oid) -> Result<u32, PgTrickleError> {
+    Ok(0)
 }
 
 /// Query the current RLS state of a table from `pg_class`.
