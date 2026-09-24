@@ -7,7 +7,7 @@
 //! - T-A44-4: WAL per-source status view accuracy
 //! - T-A44-10: D+I change buffer schema CDC correctness
 //!
-//! These tests use the light E2E path (stock postgres:18.3 container).
+//! These tests use the light E2E path (stock postgres:18.6 container).
 
 mod e2e;
 

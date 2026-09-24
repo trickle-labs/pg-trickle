@@ -1,7 +1,7 @@
 //! Integration tests that replace the former `#[pg_test]` tests.
 //!
 //! These tests verify that the pg_trickle catalog schema, tables, views, and
-//! hash function logic work correctly inside a real PostgreSQL 18.3
+//! hash function logic work correctly inside a real PostgreSQL 18.6
 //! container managed by Testcontainers.
 //!
 //! Replaces the previous `#[pg_test]` tests from `lib.rs`:

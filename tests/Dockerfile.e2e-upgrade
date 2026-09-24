@@ -36,7 +36,7 @@ ARG FROM_VERSION=0.6.0
 ARG TO_VERSION=0.7.0
 
 LABEL org.opencontainers.image.title="pg_trickle upgrade E2E test image"
-LABEL org.opencontainers.image.description="PostgreSQL 18.3 with pg_trickle for upgrade path testing (${FROM_VERSION} → ${TO_VERSION})"
+LABEL org.opencontainers.image.description="PostgreSQL 18.6 with pg_trickle for upgrade path testing (${FROM_VERSION} → ${TO_VERSION})"
 
 # Copy ALL archived install SQL files. This overwrites pgrx-generated
 # install scripts (which contain functions from the *current* source) with

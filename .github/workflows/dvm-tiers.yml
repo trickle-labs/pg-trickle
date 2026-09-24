@@ -68,21 +68,21 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
-      - name: Restore Docker image cache (postgres:18.3)
+      - name: Restore Docker image cache (postgres:18.6)
         uses: actions/cache@v6
         id: cache-docker-postgres-dvm
         with:
-          path: /tmp/docker-images/postgres-18.3.tar
-          key: docker-postgres-18.3
+          path: /tmp/docker-images/postgres-18.6.tar
+          key: docker-postgres-18.6
 
-      - name: Load or pull postgres:18.3
+      - name: Load or pull postgres:18.6
         run: |
-          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
-            docker load --input /tmp/docker-images/postgres-18.3.tar
+          if [ -f /tmp/docker-images/postgres-18.6.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.6.tar
           else
-            docker pull postgres:18.3
+            docker pull postgres:18.6
             mkdir -p /tmp/docker-images
-            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+            docker save postgres:18.6 --output /tmp/docker-images/postgres-18.6.tar
           fi
 
       - name: Log in to GHCR

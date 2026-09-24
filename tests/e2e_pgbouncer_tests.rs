@@ -5,7 +5,7 @@
 //! in transaction-pool mode.
 //!
 //! Infrastructure:
-//! - A PostgreSQL 18.3 container with the pg_trickle extension
+//! - A PostgreSQL 18.6 container with the pg_trickle extension
 //! - A PgBouncer container in transaction-pool mode on a shared Docker
 //!   network, proxying connections to the PostgreSQL container.
 //!

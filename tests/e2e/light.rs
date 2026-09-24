@@ -7,7 +7,7 @@
 //! 1. `cargo pgrx package` produces compiled extension artifacts in
 //!    `target/release/pg_trickle-pg18/`.
 //! 2. The artifacts are bind-mounted to `/tmp/pg_ext` inside a stock
-//!    `postgres:18.3` container.
+//!    `postgres:18.6` container.
 //! 3. An `exec` copies the files to the standard PostgreSQL extension
 //!    directories.
 //! 4. `CREATE EXTENSION pg_trickle` loads the extension on-demand.
@@ -259,7 +259,7 @@ async fn shared_container() -> &'static SharedContainer {
             let ext_dir = find_extension_dir();
             let run_id = std::env::var("PGT_LIGHT_E2E_RUN_ID").ok();
 
-            let mut image = GenericImage::new("postgres", "18.3")
+            let mut image = GenericImage::new("postgres", "18.6")
                 .with_exposed_port(5432_u16.tcp())
                 .with_wait_for(WaitFor::message_on_stderr(
                     "database system is ready to accept connections",
@@ -278,7 +278,7 @@ async fn shared_container() -> &'static SharedContainer {
 
             let container = image.start().await.expect(
                 "Failed to start shared light-e2e container.\n\
-                     Ensure Docker is running and postgres:18.3 is available.",
+                     Ensure Docker is running and postgres:18.6 is available.",
             );
 
             container
@@ -313,7 +313,7 @@ async fn shared_container() -> &'static SharedContainer {
         .await
 }
 
-/// A test database backed by a stock PostgreSQL 18.3 container with
+/// A test database backed by a stock PostgreSQL 18.6 container with
 /// the compiled pg_trickle extension bind-mounted and installed
 /// **without** `shared_preload_libraries`.
 ///
@@ -350,7 +350,7 @@ impl Drop for E2eDb {
 
 #[allow(dead_code)]
 impl E2eDb {
-    /// Start a fresh PostgreSQL 18.3 container, install the extension
+    /// Start a fresh PostgreSQL 18.6 container, install the extension
     /// artifacts via bind-mount, and create the extension.
     pub async fn new() -> Self {
         let shared = shared_container().await;

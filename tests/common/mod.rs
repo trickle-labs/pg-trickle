@@ -14,7 +14,7 @@ pub const CATALOG_DDL: &str = include!(concat!(
     "/tests/generated/schema.rs"
 ));
 
-/// A test database backed by a Testcontainers PostgreSQL 18.3 instance.
+/// A test database backed by a Testcontainers PostgreSQL 18.6 instance.
 ///
 /// The container is automatically cleaned up when `TestDb` is dropped.
 pub struct TestDb {
@@ -24,13 +24,13 @@ pub struct TestDb {
 
 #[allow(dead_code)]
 impl TestDb {
-    /// Start a fresh PostgreSQL 18.3 container and connect to it.
+    /// Start a fresh PostgreSQL 18.6 container and connect to it.
     pub async fn new() -> Self {
         let container = Postgres::default()
-            .with_tag("18.3-alpine")
+            .with_tag("18.6-alpine")
             .start()
             .await
-            .expect("Failed to start PostgreSQL 18.3 container");
+            .expect("Failed to start PostgreSQL 18.6 container");
 
         let port = container
             .get_host_port_ipv4(5432)

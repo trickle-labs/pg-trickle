@@ -132,7 +132,7 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Self-healing repair** — `pgtrickle.repair_stream_table(name)` rebuilds any missing CDC triggers and change buffer tables, resets the refresh frontier, and clears fuse state — use after PITR restores or operator-level DDL.
 - **CNPG / Kubernetes ready** — purpose-built Docker images and CloudNativePG manifests included; a `lifecycle.preStop` drain hook (`pgtrickle.drain(timeout_s => 120)`) ensures clean rolling upgrades.
 - **SQL-injection safe Citus paths** — all `dblink` call sites escape connection strings and queries via `pg_catalog.quote_literal`, eliminating injection risk through attacker-controlled hostnames or slot names.
-- **Reproducible production image.** GHCR and Docker Hub builds share `Dockerfile.ghcr`, which pins the PostgreSQL 18.3 base image to an exact SHA256 digest. `scripts/update_base_image_digests.sh` refreshes the pin.
+- **Reproducible production image.** GHCR and Docker Hub builds share `Dockerfile.ghcr`, which pins the PostgreSQL 18.6 base image to an exact SHA256 digest. `scripts/update_base_image_digests.sh` refreshes the pin.
 
 ### Observability
 

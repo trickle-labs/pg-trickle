@@ -15,7 +15,7 @@ use e2e::E2eDb;
 async fn test_container_starts_with_extension_image() {
     let db = E2eDb::new().await;
 
-    // Verify PostgreSQL 18.3 is running
+    // Verify PostgreSQL 18.6 is running
     let version: String = db.query_scalar("SELECT version()").await;
     assert!(
         version.contains("PostgreSQL 18"),
