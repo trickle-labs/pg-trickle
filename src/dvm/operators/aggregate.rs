@@ -300,6 +300,12 @@ fn child_to_from_sql(
                 .iter()
                 .zip(aliases.iter())
                 .map(|(expr, alias)| {
+                    let expr = crate::dvm::operators::project::rewrite_aggregate_projection_expr(
+                        expr,
+                        &child_columns,
+                        child,
+                    )
+                    .unwrap_or_else(|| expr.clone());
                     let sql = expr.to_sql();
                     if sql == *alias {
                         quote_ident(alias)

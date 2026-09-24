@@ -78,6 +78,48 @@ async fn test_scalar_subquery_where_differential() {
     db.assert_st_matches_query("ss_where_st", q).await;
 }
 
+#[tokio::test]
+async fn test_scalar_subquery_nested_max_from_derived_table_refresh_succeeds() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE supplier (\
+            s_suppkey INT PRIMARY KEY, s_name TEXT, s_address TEXT, s_phone TEXT\
+        )",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE lineitem (\
+            l_orderkey INT, l_linenumber INT, l_suppkey INT,\
+            l_extendedprice NUMERIC, l_discount NUMERIC, l_shipdate DATE,\
+            PRIMARY KEY (l_orderkey, l_linenumber)\
+        )",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO supplier VALUES \
+         (1, 'one', 'addr1', 'phone1'), (2, 'two', 'addr2', 'phone2')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO lineitem VALUES \
+         (1, 1, 1, 100, 0, '1996-02-01'),\
+         (2, 1, 2, 200, 0, '1996-02-01')",
+    )
+    .await;
+
+    let query = include_str!("tpch/queries/q15.sql");
+    db.create_st("q15_nested_scalar_st", query, "24h", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("q15_nested_scalar_st", query)
+        .await;
+
+    db.execute("UPDATE lineitem SET l_extendedprice = 300 WHERE l_orderkey = 1")
+        .await;
+    db.refresh_st("q15_nested_scalar_st").await;
+    db.assert_st_matches_query("q15_nested_scalar_st", query)
+        .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Correlated scalar subquery
 // ═══════════════════════════════════════════════════════════════════════

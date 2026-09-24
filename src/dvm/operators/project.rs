@@ -12,7 +12,9 @@ use std::fmt::Write as FmtWrite;
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{has_source_alias, snapshot_join_column_name};
-use crate::dvm::parser::{Expr, OpTree, join_pk_expr_indices, unwrap_transparent};
+use crate::dvm::parser::{
+    AggExpr, AggFunc, Expr, OpTree, join_pk_expr_indices, unwrap_transparent,
+};
 use crate::dvm::row_identity_domain;
 use crate::dvm::schema::{ColumnProvenance, RelationColumn, RelationSchema};
 use crate::error::PgTrickleError;
@@ -701,6 +703,12 @@ fn resolve_expr_to_child_inner(
     child_cols: &[String],
     child: Option<&OpTree>,
 ) -> String {
+    if let Some(rewritten) =
+        child.and_then(|tree| rewrite_aggregate_projection_expr(expr, child_cols, tree))
+    {
+        return resolve_expr_to_child_inner(&rewritten, child_cols, child);
+    }
+
     #[allow(clippy::match_same_arms)]
     match expr {
         Expr::ColumnRef {
@@ -741,6 +749,93 @@ fn resolve_expr_to_child_inner(
         }
         _ => expr.to_sql(),
     }
+}
+
+pub(crate) fn rewrite_aggregate_projection_expr(
+    expr: &Expr,
+    child_cols: &[String],
+    child: &OpTree,
+) -> Option<Expr> {
+    if let Some(column_name) = aggregate_output_column(expr, child_cols, unwrap_transparent(child))
+    {
+        return Some(Expr::ColumnRef {
+            table_alias: None,
+            column_name,
+        });
+    }
+
+    match expr {
+        Expr::BinaryOp { op, left, right } => {
+            let rewritten_left = rewrite_aggregate_projection_expr(left, child_cols, child);
+            let rewritten_right = rewrite_aggregate_projection_expr(right, child_cols, child);
+            (rewritten_left.is_some() || rewritten_right.is_some()).then(|| Expr::BinaryOp {
+                op: op.clone(),
+                left: Box::new(rewritten_left.unwrap_or_else(|| (**left).clone())),
+                right: Box::new(rewritten_right.unwrap_or_else(|| (**right).clone())),
+            })
+        }
+        Expr::FuncCall { func_name, args } => {
+            let rewritten_args = args
+                .iter()
+                .map(|arg| rewrite_aggregate_projection_expr(arg, child_cols, child))
+                .collect::<Vec<_>>();
+            rewritten_args
+                .iter()
+                .any(Option::is_some)
+                .then(|| Expr::FuncCall {
+                    func_name: func_name.clone(),
+                    args: args
+                        .iter()
+                        .zip(rewritten_args)
+                        .map(|(arg, rewritten)| rewritten.unwrap_or_else(|| arg.clone()))
+                        .collect(),
+                })
+        }
+        _ => None,
+    }
+}
+
+fn aggregate_output_column(expr: &Expr, child_cols: &[String], child: &OpTree) -> Option<String> {
+    let OpTree::Aggregate { aggregates, .. } = child else {
+        return None;
+    };
+    let mut matches = aggregates
+        .iter()
+        .filter(|agg| child_cols.contains(&agg.alias) && aggregate_call_matches_expr(expr, agg));
+    let column = matches.next()?.alias.clone();
+    matches.next().is_none().then_some(column)
+}
+
+fn aggregate_call_matches_expr(expr: &Expr, agg: &AggExpr) -> bool {
+    match expr {
+        Expr::FuncCall { func_name, args } => aggregate_call_matches(func_name, args, agg),
+        Expr::Raw(sql) => {
+            let expected = crate::dvm::operators::aggregate::agg_to_rescan_sql(agg);
+            sql.trim().eq_ignore_ascii_case(expected.trim())
+        }
+        _ => false,
+    }
+}
+
+fn aggregate_call_matches(func_name: &str, args: &[Expr], agg: &AggExpr) -> bool {
+    if !agg.function.sql_name().eq_ignore_ascii_case(func_name) {
+        return false;
+    }
+    if matches!(agg.function, AggFunc::CountStar) {
+        return args.len() == 1 && matches!(args[0], Expr::Star { .. });
+    }
+
+    let expected_args = agg
+        .argument
+        .iter()
+        .chain(agg.second_arg.iter())
+        .map(Expr::to_sql)
+        .collect::<Vec<_>>();
+    args.len() == expected_args.len()
+        && args
+            .iter()
+            .zip(expected_args)
+            .all(|(actual, expected)| actual.to_sql() == expected)
 }
 
 fn resolve_column_name_to_child(
@@ -904,6 +999,45 @@ mod tests {
         );
         let result = diff_project(&mut ctx, &tree).unwrap();
         assert_eq!(result.columns, vec!["id", "name"]);
+    }
+
+    #[test]
+    fn test_project_aggregate_call_resolves_to_aggregate_output() {
+        let child = aggregate(
+            vec![],
+            vec![AggExpr {
+                function: AggFunc::Max,
+                argument: Some(Expr::ColumnRef {
+                    table_alias: Some("q".into()),
+                    column_name: "total_revenue".into(),
+                }),
+                alias: "max".into(),
+                is_distinct: false,
+                second_arg: None,
+                filter: None,
+                order_within_group: None,
+                statistical_support: None,
+            }],
+            scan(1, "t", "public", "q", &["total_revenue"]),
+        );
+        let expression = Expr::FuncCall {
+            func_name: "max".into(),
+            args: vec![Expr::ColumnRef {
+                table_alias: Some("q".into()),
+                column_name: "total_revenue".into(),
+            }],
+        };
+
+        assert_eq!(
+            resolve_expr_to_child_in_tree(&expression, &["max".into()], &child),
+            "\"max\""
+        );
+
+        let raw_expression = Expr::Raw("max(\"q\".\"total_revenue\")".into());
+        assert_eq!(
+            resolve_expr_to_child_in_tree(&raw_expression, &["max".into()], &child),
+            "\"max\""
+        );
     }
 
     #[test]
