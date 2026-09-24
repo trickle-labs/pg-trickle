@@ -457,26 +457,44 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
     assert_recovered_action(&db, &manual, &query, "DIFFERENTIAL").await;
 
     // The scheduled fixture starts at the current committed source result.
-    db.create_st(&scheduler, &query, "1s", "DIFFERENTIAL").await;
+    db.create_st(&scheduler, &query, "1h", "DIFFERENTIAL").await;
     db.refresh_st(&scheduler).await;
     let scheduler_id = pgt_id(&db, &scheduler).await;
     let scheduler_checkpoint = format!("public.{scheduler}_checkpoint");
     snapshot_table(&db, &format!("public.{scheduler}"), &scheduler_checkpoint).await;
-    let scheduler_progress = progress(&db, scheduler_id).await;
     set_chaos(&db, &scheduler, phase).await;
     let (mut scheduler_barrier, scheduler_blocker) = hold_barrier(&db, scheduler_id, phase).await;
-    db.execute(&format!(
+    let mut schedule_change = db
+        .pool
+        .begin()
+        .await
+        .expect("begin scheduler setup transaction");
+    sqlx::query(AssertSqlSafe(format!(
+        "SELECT pgtrickle.alter_stream_table('{scheduler}', schedule => '1s')"
+    )))
+    .execute(&mut *schedule_change)
+    .await
+    .expect("make scheduler refresh due");
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO public.{source} VALUES (3, 'scheduler-pending')"
-    ))
-    .await;
+    )))
+    .execute(&mut *schedule_change)
+    .await
+    .expect("commit pending source change");
+    schedule_change
+        .commit()
+        .await
+        .expect("commit scheduler setup transaction");
     let scheduler_witness = wait_for_barrier(
         &db,
         scheduler_id,
         phase,
         scheduler_blocker,
-        Duration::from_secs(30),
+        Duration::from_secs(90),
     )
     .await;
+    // Compare rollback to the last committed boundary; a no-data scheduler tick may finish first.
+    let scheduler_progress = progress(&db, scheduler_id).await;
     assert!(scheduler_witness.pid > 0);
     assert!(scheduler_witness.blockers.contains(&scheduler_blocker));
     assert_committed_checkpoint(

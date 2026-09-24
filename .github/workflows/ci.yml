@@ -1688,7 +1688,9 @@ jobs:
             --test e2e_rls_wal_tests
 
       - name: Repeat failure-recovery schedules
-        if: needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
+        if: >
+          always() &&
+          needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
         run: bash ./scripts/run_failure_recovery_repetition.sh
 
       - name: Upload failure-recovery witnesses
