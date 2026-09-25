@@ -6,7 +6,7 @@ set -euo pipefail
 failure_schedule_repetition() {
     local attempts="${FAILURE_RECOVERY_ATTEMPTS:-10}"
     local artifact_dir="${FAILURE_RECOVERY_ARTIFACT_DIR:-${RUNNER_TEMP:-target}/failure-recovery-repetition}"
-    local filter='test(test_statement_timeout_during_refresh_recovers) | test(test_lock_timeout_during_refresh) | test(test_cancel_backend_during_refresh_recovers) | test(test_dvm_failpoint_preserves_last_committed_result_and_recovers) | test(test_refresh_after_apply_failure_rolls_back) | test(test_refresh_finalization_failure_rolls_back)'
+    local filter='test(test_statement_timeout_during_refresh_recovers) | test(test_lock_timeout_during_refresh) | test(test_cancel_backend_during_refresh_recovers) | test(test_dvm_failpoint_preserves_last_committed_result_and_recovers) | test(test_refresh_after_apply_failure_rolls_back) | test(test_refresh_finalization_failure_rolls_back) | test(test_refresh_caller_rollback_preserves_committed_state) | test(test_refresh_savepoint_rollback_preserves_outer_transaction) | test(test_refresh_two_callers_publish_one_consistent_result) | test(test_refresh_concurrent_writer_preserves_next_batch) | test(test_refresh_auxiliary_state_failure_rolls_back) | test(test_refresh_partial_finalization_control_is_detected) | test(test_refresh_early_progress_control_is_detected)'
     local summary="${artifact_dir}/summary.tsv"
     local status=0
 

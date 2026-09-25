@@ -232,7 +232,7 @@ def main() -> int:
                     "PGT_RELEASE_ATTESTATION_PATH": str(attestation_path),
                     "PGT_RELEASE_MIN_POSTMASTER_START_EPOCH": str(attempt_started_at),
                     "PGT_RELEASE_MACHINE_FORMAT": "1",
-                    "PGT_RELEASE_NEXTEST_RETRIES": "2",
+                    "PGT_RELEASE_NEXTEST_RETRIES": str(suite.get("nextest_retries", 2)),
                 }
             )
             if suite.get("e2e_image"):

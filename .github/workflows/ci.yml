@@ -1673,7 +1673,9 @@ jobs:
 
       - name: Run full E2E test suite
         if: needs.detect-e2e-gates.outputs.dvm_changed == 'true'
-        run: cargo nextest run --profile ci --test 'e2e_*'
+        # These scheduler failure schedules run in the dedicated no-retry
+        # repetition step below, isolated from the full-suite container load.
+        run: cargo nextest run --profile ci --test 'e2e_*' -E 'not binary(/^e2e_refresh_atomicity_tests$/)'
 
       - name: Run security-focused E2E tests
         if: >
