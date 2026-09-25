@@ -65,10 +65,16 @@ async fn test_v107_auto_wal_transition_captures_changes() {
     let _ = db
         .wait_for_auto_refresh("v107_wal_stream", Duration::from_secs(30))
         .await;
+    let before_insert: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'v107_wal_stream'",
+        )
+        .await;
     db.execute("INSERT INTO v107_wal_source VALUES (2, 'captured'), (3, 'also captured')")
         .await;
     assert!(
-        db.wait_for_auto_refresh("v107_wal_stream", Duration::from_secs(60))
+        db.wait_for_auto_refresh_since("v107_wal_stream", before_insert, Duration::from_secs(60),)
             .await,
         "WAL changes must schedule a refresh"
     );

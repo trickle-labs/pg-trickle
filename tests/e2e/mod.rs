@@ -1075,14 +1075,15 @@ impl E2eDb {
     /// Wait for the background scheduler to auto-refresh a ST.
     ///
     /// Polls `data_timestamp` until it advances past the initial value
-    /// or the timeout expires. Returns `true` if a refresh was detected.
+    /// read when this method is called, or the timeout expires. If a source
+    /// write may already have been refreshed, capture the timestamp before
+    /// that write and use [`Self::wait_for_auto_refresh_since`].
     #[must_use]
     pub async fn wait_for_auto_refresh(
         &self,
         pgt_name: &str,
         timeout: std::time::Duration,
     ) -> bool {
-        let start = std::time::Instant::now();
         let initial_ts: Option<String> = self
             .query_scalar_opt(&format!(
                 "SELECT data_timestamp::text \
@@ -1090,6 +1091,22 @@ impl E2eDb {
             ))
             .await;
 
+        self.wait_for_auto_refresh_since(pgt_name, initial_ts, timeout)
+            .await
+    }
+
+    /// Wait for an auto-refresh newer than a previously captured timestamp.
+    ///
+    /// Capture `initial_ts` before changing a source so a fast refresh cannot
+    /// complete before [`Self::wait_for_auto_refresh`] records its baseline.
+    #[must_use]
+    pub async fn wait_for_auto_refresh_since(
+        &self,
+        pgt_name: &str,
+        initial_ts: Option<String>,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let start = std::time::Instant::now();
         loop {
             if start.elapsed() > timeout {
                 return false;
