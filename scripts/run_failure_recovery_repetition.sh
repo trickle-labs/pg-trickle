@@ -15,8 +15,10 @@ failure_schedule_repetition() {
 
     for attempt in $(seq 1 "$attempts"); do
         local log_file="${artifact_dir}/attempt-${attempt}.log"
+        # Keep witnessed barriers uncontended while several PostgreSQL containers are active.
         set +e
         ./scripts/run_e2e_tests.sh \
+            --test-threads 1 \
             --test e2e_failure_recovery_tests \
             --test e2e_dvm_failpoint_tests \
             --test e2e_refresh_atomicity_tests \
