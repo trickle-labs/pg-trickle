@@ -24,6 +24,15 @@ REQUIRED_CASES = {
     "e2e_failure_recovery_tests::test_statement_timeout_during_refresh_recovers",
     "e2e_failure_recovery_tests::test_cancel_backend_during_refresh_recovers",
     "e2e_dvm_failpoint_tests::test_dvm_failpoint_preserves_last_committed_result_and_recovers",
+    "e2e_refresh_atomicity_tests::test_refresh_after_apply_failure_rolls_back",
+    "e2e_refresh_atomicity_tests::test_refresh_finalization_failure_rolls_back",
+    "e2e_refresh_atomicity_tests::test_refresh_caller_rollback_preserves_committed_state",
+    "e2e_refresh_atomicity_tests::test_refresh_savepoint_rollback_preserves_outer_transaction",
+    "e2e_refresh_atomicity_tests::test_refresh_two_callers_publish_one_consistent_result",
+    "e2e_refresh_atomicity_tests::test_refresh_concurrent_writer_preserves_next_batch",
+    "e2e_refresh_atomicity_tests::test_refresh_auxiliary_state_failure_rolls_back",
+    "e2e_refresh_atomicity_tests::test_refresh_partial_finalization_control_is_detected",
+    "e2e_refresh_atomicity_tests::test_refresh_early_progress_control_is_detected",
 }
 EXPECTED_SUITES = shared.EXPECTED_SUITES | {
     "support-contract",

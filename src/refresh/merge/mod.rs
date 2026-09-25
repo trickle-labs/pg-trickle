@@ -725,6 +725,15 @@ pub fn execute_differential_refresh_with_tuning(
     set_effective_mode("DIFFERENTIAL");
     validate_differential_refresh_inputs(st, prev_frontier)?;
 
+    // TEST-MODE semantic control: report a pending row without applying its
+    // delta so the real finalizer advances progress against unchanged output.
+    if crate::config::pg_trickle_test_chaos_for_table() == st.pgt_name
+        && crate::config::pg_trickle_test_chaos_phase() == "control_early_progress"
+    {
+        set_merge_strategy("merge");
+        return Ok((1, 0));
+    }
+
     // Persist upgraded strategy metadata. Production v0.89 plans retain
     // partition recomputation; tests may explicitly enable the rejected
     // state-backed benchmark candidate.

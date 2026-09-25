@@ -754,6 +754,72 @@ pub(crate) fn is_full_fallback(
     requested_action == RefreshAction::Differential && effective_action == RefreshAction::Full
 }
 
+/// Pause or fail at a named atomicity checkpoint in TEST-MODE.
+pub(crate) fn test_atomicity_barrier(
+    st: &StreamTableMeta,
+    phase: &str,
+    observed_rows: i64,
+) -> Option<String> {
+    let chaos_table = crate::config::pg_trickle_test_chaos_for_table();
+    if chaos_table.is_empty() {
+        return None;
+    }
+    let chaos_phase = crate::config::pg_trickle_test_chaos_phase();
+    let control_at_finalize = phase == "during_finalize"
+        && matches!(
+            chaos_phase.as_str(),
+            "control_early_progress" | "control_partial_finalization"
+        );
+    if chaos_table != st.pgt_name || (chaos_phase != phase && !control_at_finalize) {
+        return None;
+    }
+    // A no-data refresh has no applied state whose finalization can fail.
+    if observed_rows == 0 && matches!(phase, "after_apply" | "during_finalize") {
+        return None;
+    }
+
+    let lock_phase = match phase {
+        "input_boundary" => 1,
+        "after_apply" => 2,
+        "during_finalize" => 3,
+        _ => return None,
+    };
+    let Ok(lock_id) = i32::try_from(st.pgt_id) else {
+        pgrx::error!("PGT_TEST_BARRIER_ID_OUT_OF_RANGE pgt_id={}", st.pgt_id);
+    };
+    let app_name = format!(
+        "pgt_atomicity:{}:{}:rows={}",
+        st.pgt_id, phase, observed_rows
+    );
+    if let Err(error) = Spi::get_one_with_args::<String>(
+        "SELECT set_config('application_name', $1, true)",
+        &[app_name.into()],
+    ) {
+        pgrx::error!(
+            "PGT_TEST_BARRIER_SETUP_FAILED phase={} error={}",
+            phase,
+            error
+        );
+    }
+    if let Err(error) = Spi::get_one_with_args::<bool>(
+        "SELECT pg_advisory_xact_lock($1, $2) IS NULL",
+        &[lock_id.into(), lock_phase.into()],
+    ) {
+        pgrx::error!("PGT_TEST_BARRIER_FAILED phase={} error={}", phase, error);
+    }
+    if !control_at_finalize && matches!(phase, "after_apply" | "during_finalize") {
+        let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
+            .ok()
+            .flatten()
+            .unwrap_or(-1);
+        return Some(format!(
+            "PGT_TEST_FAILPOINT_REACHED table={}.{} phase={} backend_pid={} observed_rows={}",
+            st.pgt_schema, st.pgt_name, phase, backend_pid, observed_rows,
+        ));
+    }
+    None
+}
+
 /// Finalize a successful refresh in the caller's existing transaction.
 ///
 /// Required durable operations deliberately propagate errors.  A failed
@@ -774,6 +840,11 @@ pub fn finalize_success(
             stage: "downstream CDC capture".to_string(),
             reason: "executor did not prove downstream capture completion".to_string(),
         });
+    }
+
+    let rows_changed = execution.rows_inserted + execution.rows_updated + execution.rows_deleted;
+    if let Some(message) = test_atomicity_barrier(st, "after_apply", rows_changed) {
+        return Err(PgTrickleError::TestAtomicityFailpoint(message));
     }
 
     StreamTableMeta::store_frontier(st.pgt_id, &execution.frontier)?;
@@ -887,13 +958,15 @@ pub fn finalize_success(
         StreamTableMeta::update_effective_refresh_mode(st.pgt_id, execution.effective_mode)?;
     }
 
-    let rows_changed = execution.rows_inserted + execution.rows_updated + execution.rows_deleted;
     crate::api::output_delta::finalize(
         st,
         refresh_id,
         rows_changed,
         execution.downstream_capture_complete && history_action == RefreshAction::Differential,
     )?;
+    if let Some(message) = test_atomicity_barrier(st, "during_finalize", rows_changed) {
+        return Err(PgTrickleError::TestAtomicityFailpoint(message));
+    }
     if rows_changed > 0 {
         let outbox_attached =
             crate::api::outbox::get_outbox_table_name(st.pgt_id).map_err(|e| {

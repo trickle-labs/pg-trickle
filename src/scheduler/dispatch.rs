@@ -271,6 +271,11 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     }));
 
     let outcome = match outcome {
+        Ok(RefreshOutcome::AtomicityTestFailure(message)) => (
+            RefreshOutcome::RetryableFailure,
+            Some(message),
+            Some("40001".to_owned()),
+        ),
         Ok(o) => (o, None, None),
         Err(panic_payload) => {
             // ERR-1d: The refresh transaction panicked (PG ERROR). Extract
@@ -343,10 +348,11 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     let (outcome, panic_error_msg, panic_sqlstate) = outcome;
 
     // Persist outcome to the job table
-    let (status, retryable) = match outcome {
+    let (status, retryable) = match &outcome {
         RefreshOutcome::Success => (JobStatus::Succeeded, None),
         RefreshOutcome::RetryableFailure => (JobStatus::RetryableFailed, Some(true)),
         RefreshOutcome::PermanentFailure => (JobStatus::PermanentFailed, Some(false)),
+        RefreshOutcome::AtomicityTestFailure(_) => (JobStatus::RetryableFailed, Some(true)),
     };
 
     let failure = panic_error_msg
@@ -355,12 +361,15 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     let outcome_code = failure
         .as_ref()
         .map(|f| f.kind.code())
-        .or_else(|| match outcome {
+        .or_else(|| match &outcome {
             RefreshOutcome::RetryableFailure => {
                 Some(crate::error::RefreshFailureKind::UnknownRetryable.code())
             }
             RefreshOutcome::PermanentFailure => {
                 Some(crate::error::RefreshFailureKind::Permanent.code())
+            }
+            RefreshOutcome::AtomicityTestFailure(_) => {
+                Some(crate::error::RefreshFailureKind::Serialization.code())
             }
             RefreshOutcome::Success => None,
         });

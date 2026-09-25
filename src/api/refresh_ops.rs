@@ -108,8 +108,6 @@ fn refresh_stream_table_impl(
         ));
     }
 
-    crate::api::recovery::assert_capture_ready()?;
-
     if crate::config::pg_trickle_cdc_paused()
         && crate::config::pg_trickle_cdc_capture_mode() == crate::config::CdcCaptureMode::Hold
     {
@@ -173,6 +171,11 @@ fn refresh_stream_table_impl(
             schema, table_name,
         )));
     }
+
+    // Check the global capture gate only after acquiring the stream-table
+    // lock. The gate refreshes a shared catalog row; doing it first lets a
+    // competing caller block there before it can report RefreshSkipped.
+    crate::api::recovery::assert_capture_ready()?;
 
     // PB1 row-lock: acquire FOR UPDATE SKIP LOCKED on the catalog row so
     // the background scheduler's check_skip_needed() sees this manual
@@ -920,11 +923,9 @@ fn execute_manual_differential_refresh(
     }
 
     refresh::poll_foreign_table_sources_for_st(st)?;
-    crate::cdc::lock_source_relations(source_oids)?;
-
-    // Get current WAL positions for non-ST sources (reuses source_oids — G-N3)
-    // The source lock is the visibility proof for this manual refresh: no
-    // source transaction can add a change-buffer row after this bound.
+    // Get current WAL positions for non-ST sources (reuses source_oids — G-N3).
+    // The immutable bound limits the delta read; source writes after it remain
+    // available to the next refresh.
     let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
     let mut safe_bound = refresh_safe_bound()?;
     if !graph_bound_is_set() {
@@ -948,6 +949,7 @@ fn execute_manual_differential_refresh(
     for (upstream_pgt_id, lsn) in upstream_st_source_positions(st, &safe_bound)? {
         new_frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
     }
+    let _ = refresh::test_atomicity_barrier(st, "input_boundary", 0);
     // A bounded buffer position can trail the stored frontier. Never replay
     // deltas by letting a differential frontier move backward.
     new_frontier.merge_from(&prev_frontier);
@@ -980,6 +982,12 @@ fn execute_manual_differential_refresh(
             }
             Err(e) => return Err(e),
         };
+
+    if let Some(message) =
+        refresh::test_atomicity_barrier(st, "after_apply", rows_inserted + rows_deleted)
+    {
+        pgrx::error!("{}", message);
+    }
 
     // Store the new frontier and mark refresh complete in a single SPI call (S3).
     // Matches scheduler behavior: only update data_timestamp when rows were

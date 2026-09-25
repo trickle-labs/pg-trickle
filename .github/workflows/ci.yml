@@ -1596,8 +1596,11 @@ jobs:
               - 'src/refresh/**'
               - 'sql/*.sql'
             failure_recovery_changed:
+              - 'src/api/refresh_ops.rs'
+              - 'src/config/scheduler.rs'
               - 'src/scheduler/**'
               - 'tests/e2e_failure_recovery_tests.rs'
+              - 'tests/e2e_refresh_atomicity_tests.rs'
               - 'tests/e2e_dvm_failpoint_tests.rs'
               - 'tests/e2e_cleanup_chaos_tests.rs'
               - 'scripts/run_failure_recovery_repetition.sh'
@@ -1670,7 +1673,9 @@ jobs:
 
       - name: Run full E2E test suite
         if: needs.detect-e2e-gates.outputs.dvm_changed == 'true'
-        run: cargo nextest run --profile ci --test 'e2e_*'
+        # These scheduler failure schedules run in the dedicated no-retry
+        # repetition step below, isolated from the full-suite container load.
+        run: cargo nextest run --profile ci --test 'e2e_*' -E 'not binary(/^e2e_refresh_atomicity_tests$/)'
 
       - name: Run security-focused E2E tests
         if: >
@@ -1685,7 +1690,9 @@ jobs:
             --test e2e_rls_wal_tests
 
       - name: Repeat failure-recovery schedules
-        if: needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
+        if: >
+          always() &&
+          needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true'
         run: bash ./scripts/run_failure_recovery_repetition.sh
 
       - name: Upload failure-recovery witnesses
