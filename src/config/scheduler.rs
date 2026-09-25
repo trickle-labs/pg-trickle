@@ -548,8 +548,10 @@ pub static PGS_VALIDATE_DELTA_INVARIANTS: GucSetting<bool> = GucSetting::<bool>:
 
 /// D-3 (v0.79.0): TEST-MODE only. When set to a stream table name, the
 /// scheduler injects a retryable failure immediately before refresh apply for
-/// that table on every eligible tick. The normal scheduler error path records
-/// the failed attempt and can trigger auto-suspension. Default: `None`
+/// that table on every eligible tick. When set to `wal:<source_oid>:<text>`,
+/// the WAL receipt boundary witness selected by `test_chaos_phase` is enabled
+/// for matching receipt data from that source. The normal scheduler error path
+/// records the failed attempt and can trigger auto-suspension. Default: `None`
 /// (disabled).
 ///
 /// Activate with: `ALTER SYSTEM SET pg_trickle.test_chaos_for_table = 'name'`
@@ -557,11 +559,13 @@ pub static PGS_VALIDATE_DELTA_INVARIANTS: GucSetting<bool> = GucSetting::<bool>:
 pub static PGS_TEST_CHAOS_FOR_TABLE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
-/// TEST-MODE only. Selects the refresh phase used by `test_chaos_for_table`.
-/// Supported phases are `before_apply` (default), `input_boundary`,
-/// `after_apply`, `during_finalize`, `control_early_progress`, and
-/// `control_partial_finalization`. The control phases run through the
-/// finalization barrier without injecting a failure.
+/// TEST-MODE only. Selects the refresh or WAL receipt phase used by
+/// `test_chaos_for_table`. Refresh phases are `before_apply` (default),
+/// `input_boundary`, `after_apply`, `during_finalize`,
+/// `control_early_progress`, and `control_partial_finalization`. WAL phases
+/// are `before_receipt`, `before_replay`, `before_ack`, and
+/// `after_slot_advance`. The control phases run through the finalization
+/// barrier without injecting a failure.
 pub static PGS_TEST_CHAOS_PHASE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
@@ -1254,9 +1258,10 @@ pub fn register_scheduler_gucs() {
     // D-3: Test-mode chaos injection GUC.
     GucRegistry::define_string_guc(
         c"pg_trickle.test_chaos_for_table",
-        c"TEST-MODE: enable refresh fault and barrier controls for a stream table.",
-        c"When set to a non-empty stream table name, test_chaos_phase selects the \
-          refresh phase to observe or fail. Requires SELECT pg_reload_conf() after \
+        c"TEST-MODE: enable refresh fault and barrier controls for a stream table or WAL source.",
+        c"When set to a stream table name, test_chaos_phase selects the refresh \
+          phase to observe or fail. When set to wal:<source_oid>:<text>, it selects a \
+          WAL receipt boundary witness for matching receipt data. Requires SELECT pg_reload_conf() after \
           ALTER SYSTEM SET. Default: empty string (disabled). Do not set in production.",
         &PGS_TEST_CHAOS_FOR_TABLE,
         GucContext::Suset,
@@ -1268,7 +1273,8 @@ pub fn register_scheduler_gucs() {
         c"TEST-MODE: select the refresh barrier or failure phase.",
         c"Used with pg_trickle.test_chaos_for_table. Supported values are \
           before_apply, input_boundary, after_apply, during_finalize, \
-          control_early_progress, and control_partial_finalization. \
+          control_early_progress, control_partial_finalization, \
+          before_receipt, before_replay, before_ack, and after_slot_advance. \
           after_apply and during_finalize inject a failure after their barrier; \
           control phases run the finalization barrier without failure and inject \
           their named semantic control. \

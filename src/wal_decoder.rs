@@ -668,6 +668,7 @@ fn store_wal_receipt(
     data: &str,
     source_change: bool,
 ) -> Result<(), PgTrickleError> {
+    test_wal_receipt_barrier(source_oid, "before_receipt", Some(data))?;
     Spi::run_with_args(
         "INSERT INTO pgtrickle.pgt_wal_receipts \
              (source_relid, slot_name, lsn, source_xid, data, source_change) \
@@ -798,6 +799,54 @@ fn update_acknowledged_watermark(source_oid: pg_sys::Oid, lsn: &str) -> Result<(
     .map_err(|e| PgTrickleError::SpiError(format!("update acknowledged WAL watermark: {e}")))
 }
 
+/// Test-only witness for the durable receipt boundaries.
+///
+/// The existing refresh chaos GUC targets a stream table. A `wal:<oid>:<text>`
+/// target selects this path instead and blocks the scheduler transaction on a
+/// transaction-scoped advisory lock when the receipt contains `<text>`.
+fn test_wal_receipt_barrier(
+    source_oid: pg_sys::Oid,
+    phase: &str,
+    data: Option<&str>,
+) -> Result<(), PgTrickleError> {
+    let configured = crate::config::pg_trickle_test_chaos_for_table();
+    if !configured.starts_with("wal:") {
+        return Ok(());
+    }
+
+    let target_prefix = format!("wal:{}:", source_oid.to_u32());
+    let Some(token) = configured.strip_prefix(&target_prefix) else {
+        return Ok(());
+    };
+    if token.is_empty()
+        || !data.is_some_and(|receipt_data| receipt_data.contains(token))
+        || crate::config::pg_trickle_test_chaos_phase() != phase
+    {
+        return Ok(());
+    }
+
+    let phase_code = match phase {
+        "before_receipt" => 1_i64,
+        "before_replay" => 2,
+        "before_ack" => 3,
+        "after_slot_advance" => 4,
+        _ => return Ok(()),
+    };
+    let lock_key = i64::from(source_oid.to_u32()) * 10 + phase_code;
+    let application_name = format!("pgt_wal_receipt:{}:{}", source_oid.to_u32(), phase);
+    Spi::get_one_with_args::<String>(
+        "SELECT set_config('application_name', $1, true)",
+        &[application_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("set WAL receipt witness: {e}")))?;
+    Spi::get_one_with_args::<bool>(
+        "SELECT pg_advisory_xact_lock($1::bigint) IS NULL",
+        &[lock_key.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("wait at WAL receipt witness: {e}")))?;
+    Ok(())
+}
+
 /// Replay receipts into the ordinary change buffers and mark them APPLIED.
 /// This transaction is separate from slot acknowledgement, so a crash cannot
 /// lose a receipt between buffer application and the acknowledgement step.
@@ -818,6 +867,9 @@ pub fn replay_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleE
             let receipts = load_wal_receipts(dep.source_relid, "RECEIVED", receipt_limit)?;
             if receipts.is_empty() {
                 return Ok(());
+            }
+            for receipt in receipts.iter().filter(|receipt| receipt.source_change) {
+                test_wal_receipt_barrier(dep.source_relid, "before_replay", Some(&receipt.data))?;
             }
 
             let pk_columns = cdc::resolve_pk_columns(dep.source_relid)?;
@@ -965,6 +1017,9 @@ fn acknowledge_receipt_batch(
                     source_oid.to_u32()
                 )));
             }
+            for receipt in &expected {
+                test_wal_receipt_barrier(source_oid, "after_slot_advance", Some(&receipt.data))?;
+            }
         }
     }
 
@@ -992,6 +1047,9 @@ pub fn acknowledge_pending_wal_receipts(change_schema: &str) -> Result<(), PgTri
             let receipts = load_wal_receipts(dep.source_relid, "APPLIED", receipt_limit)?;
             if receipts.is_empty() {
                 return Ok(());
+            }
+            for receipt in receipts.iter().filter(|receipt| receipt.source_change) {
+                test_wal_receipt_barrier(dep.source_relid, "before_ack", Some(&receipt.data))?;
             }
             acknowledge_receipt_batch(dep.source_relid, &receipts)
         })();
