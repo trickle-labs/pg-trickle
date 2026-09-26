@@ -452,6 +452,20 @@ jobs:
           echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: Run separate unsafe-boundary ASan qualification
+        id: unsafe-asan
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p qualification-logs/unsafe-asan
+          docker build --platform=linux/amd64 \
+            -f tests/Dockerfile.e2e-asan \
+            -t pg_trickle_e2e_asan:contract . 2>&1 | \
+            tee qualification-logs/unsafe-asan/image-build.log
+          PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
+            cargo test --test e2e_unsafe_boundary_tests --features pg18 -- --test-threads=1 --nocapture 2>&1 | \
+            tee qualification-logs/unsafe-asan/workloads.log
+
       - name: Write candidate-bound release evidence
         if: always()
         run: |
@@ -480,8 +494,8 @@ jobs:
       - name: Require all qualification suites to pass
         if: always()
         run: |
-          if [[ "${{ steps.qualify.outputs.failed }}" != "0" ]]; then
-            echo "One or more v0.108.1 package qualification suites failed."
+          if [[ "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+            echo "One or more v0.108.1 package or separate instrumented qualification suites failed."
             exit 1
           fi
 

@@ -1576,6 +1576,7 @@ jobs:
       dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
       security_changed: ${{ steps.filter.outputs.security_changed }}
       failure_recovery_changed: ${{ steps.filter.outputs.failure_recovery_changed }}
+      unsafe_boundary_changed: ${{ steps.filter.outputs.unsafe_boundary_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1605,6 +1606,40 @@ jobs:
               - 'tests/e2e_cleanup_chaos_tests.rs'
               - 'scripts/run_failure_recovery_repetition.sh'
               - '.github/workflows/ci.yml'
+            unsafe_boundary_changed:
+              - 'src/error.rs'
+              - 'src/refresh/pipeline.rs'
+              - 'src/api/security_context.rs'
+              - 'src/scheduler/dispatch.rs'
+              - 'tests/e2e_unsafe_boundary_tests.rs'
+              - 'tests/e2e/mod.rs'
+              - 'tests/Dockerfile.e2e-asan'
+              - 'tests/fixtures/asan_probe.c'
+              - 'tests/fixtures/asan_pg18_leak.supp'
+              - 'tests/fixtures/initdb-asan-wrapper.sh'
+              - '.github/workflows/ci.yml'
+
+  unsafe-boundary-asan:
+    name: Unsafe boundary ASan qualification
+    needs: detect-e2e-gates
+    if: >
+      github.event_name == 'pull_request' &&
+      needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Build and run the required instrumented slice
+        run: |
+          docker build --platform=linux/amd64 \
+            -f tests/Dockerfile.e2e-asan \
+            -t pg_trickle_e2e_asan:contract .
+          PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
+            cargo test --test e2e_unsafe_boundary_tests --features pg18 -- --test-threads=1 --nocapture
 
   e2e-sensitive-gate:
     name: Sensitive E2E gate

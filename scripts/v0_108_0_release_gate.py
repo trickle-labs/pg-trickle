@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -132,6 +134,27 @@ def check_support_contract() -> None:
     shared.require(qualification.get("build_kind") == "exact-release", "qualification does not require exact release builds")
     shared.require(qualification.get("feature_scope") == "default-release", "qualification feature scope drifted")
     shared.require(qualification.get("candidate_identity", {}).get("required") is True, "candidate identity is optional")
+    instrumented = qualification.get("instrumented_qualification", {})
+    expected_unsafe_cases = {
+        "e2e_unsafe_boundary_tests::test_instrumented_pg18_boot_and_assertions_enabled",
+        "e2e_unsafe_boundary_tests::test_instrumented_invalid_memory_probe_is_detected",
+        "e2e_unsafe_boundary_tests::test_pipeline_copy_null_and_toasted_rows_survive_refresh",
+        "e2e_unsafe_boundary_tests::test_owner_context_pg_error_restores_state_and_continues",
+        "e2e_unsafe_boundary_tests::test_caller_context_pg_error_restores_state_and_continues",
+        "e2e_unsafe_boundary_tests::test_dispatch_worker_cancel_cleanup_and_restart_recovers",
+        "e2e_unsafe_boundary_tests::test_zz_instrumented_diagnostics_are_clean",
+    }
+    shared.require(
+        instrumented.get("separate_from_exact_release_package") is True
+        and instrumented.get("platform") == "linux/amd64"
+        and instrumented.get("postgresql") == "18.6"
+        and instrumented.get("assertions") == "--enable-cassert"
+        and instrumented.get("instrumentation")
+        == "AddressSanitizer on PostgreSQL and pg_trickle"
+        and "--nocapture" in instrumented.get("test_command_argv", [])
+        and set(instrumented.get("required_cases", [])) == expected_unsafe_cases,
+        "unsafe boundary qualification is missing cases or is conflated with exact-release evidence",
+    )
     suites = {suite["id"]: suite for suite in qualification["required_suites"]}
     for suite_id, test_binary in (
         ("delta-v1", "e2e_v108_conformance_tests"),
@@ -210,6 +233,12 @@ def check_support_contract() -> None:
     )
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     shared.require("release-candidate.json" in workflow, "release archives do not carry candidate identity")
+    shared.require(
+        "Run separate unsafe-boundary ASan qualification" in workflow
+        and "qualification-logs/unsafe-asan" in workflow
+        and "steps.unsafe-asan.outcome" in workflow,
+        "release qualification does not require and retain a separate unsafe-boundary instrumented run",
+    )
     stager = (ROOT / "scripts/stage_release_assets.py").read_text(encoding="utf-8")
     shared.require(
         'manifest.get("status") != "passed"' in stager,
@@ -224,6 +253,67 @@ def check_support_contract() -> None:
     shared.require(
         ".github/workflows/release.yml" in ci and "tests/release/**" in ci,
         "PR CI does not trigger for release contract changes",
+    )
+    unsafe_filter = ci.split("unsafe_boundary_changed:\n", 1)[1].split(
+        "\n\n  unsafe-boundary-asan:", 1
+    )[0]
+    unsafe_patterns = re.findall(r"^\s+- '([^']+)'$", unsafe_filter, re.MULTILINE)
+    for path in (
+        "src/error.rs",
+        "src/refresh/pipeline.rs",
+        "src/api/security_context.rs",
+        "src/scheduler/dispatch.rs",
+        "tests/e2e/mod.rs",
+        "tests/fixtures/asan_pg18_leak.supp",
+        "tests/fixtures/initdb-asan-wrapper.sh",
+    ):
+        fixture_selected = any(fnmatch.fnmatchcase(path, pattern) for pattern in unsafe_patterns)
+        shared.require(
+            fixture_selected and "unsafe_boundary_changed" in ci,
+            f"changed-file fixture {path} does not select unsafe boundary checks",
+        )
+        disabled_patterns = [pattern for pattern in unsafe_patterns if pattern != path]
+        shared.require(
+            not any(fnmatch.fnmatchcase(path, pattern) for pattern in disabled_patterns),
+            f"disabled route negative control still selects {path}",
+        )
+    asan_dockerfile = (ROOT / "tests/Dockerfile.e2e-asan").read_text(encoding="utf-8")
+    initdb_wrapper = (ROOT / "tests/fixtures/initdb-asan-wrapper.sh").read_text(encoding="utf-8")
+    asan_suppressions = (ROOT / "tests/fixtures/asan_pg18_leak.supp").read_text(encoding="utf-8")
+    shared.require(
+        "ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1" in asan_dockerfile
+        and "LSAN_OPTIONS=suppressions=/etc/asan/asan_pg18_leak.supp:print_suppressions=1" in asan_dockerfile
+        and initdb_wrapper.count("detect_leaks=0") == 1
+        and "$(basename \"$0\").asan-helper" in initdb_wrapper
+        and "for helper in initdb pg_ctl psql; do" in asan_dockerfile
+        and "${helper}.asan-helper" in asan_dockerfile
+        and "/usr/local/pgsql/bin/postgres" not in asan_dockerfile
+        and "ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0" in initdb_wrapper,
+        "instrumented image must scope leak detection off to initdb, pg_ctl, psql, and the temporary bootstrap server, and retain it for workload servers",
+    )
+    suppression_entries = re.findall(r"^[ \t]*leak:\S+[ \t]*$", asan_suppressions, re.MULTILINE)
+    shared.require(
+        suppression_entries == ["leak:save_ps_display_args", "leak:do_ereport"]
+        and "PostgreSQL 18.6" in asan_suppressions
+        and "save_ps_display_args" in asan_suppressions
+        and "pgrx-pg-sys 0.18.0" in asan_suppressions
+        and "do_ereport" in asan_suppressions
+        and "PostgreSQL ERROR longjmps through Rust" in asan_suppressions
+        and len(re.findall(r"^[ \t]*leak:\S+[ \t]*$", asan_suppressions, re.MULTILINE)) == 2,
+        "instrumented image must suppress only the documented PostgreSQL and pgrx 0.18 process-lifetime allocations",
+    )
+    shared.require(
+        "unsafe-boundary-asan:" in ci
+        and "needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'" in ci
+        and "tests/e2e_unsafe_boundary_tests" in ci
+        and "--test-threads=1 --nocapture" in ci
+        and "--test-threads=1 --nocapture" in workflow,
+        "unsafe boundary changes do not run their instrumented E2E slice",
+    )
+    shared.require(
+        'echo "listen_addresses = \'*\'" >> /usr/local/pgsql/share/postgresql.conf.sample' in asan_dockerfile
+        and 'listening on IPv4 address \\"0.0.0.0\\"' in (ROOT / "tests/e2e/mod.rs").read_text(encoding="utf-8"),
+        "ASan E2E image does not expose its final PostgreSQL listener through Testcontainers port mapping",
     )
 
 
