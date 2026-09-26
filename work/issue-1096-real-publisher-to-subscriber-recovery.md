@@ -1,0 +1,63 @@
+# Acceptance contract: #1096
+
+Contract revision: v1
+Source: [#1096 issue snapshot](sources/issue-1096.json), [#1096 v1 contract snapshot](sources/issue-1096-contract-v1.md), [#1090 issue snapshot](sources/issue-1090.json), [#1091 comparator prerequisite](sources/issue-1091.json), [#1092 interruption prerequisite](sources/issue-1092.json), [#1093 release-evidence contract](sources/issue-1093-contract-v1.md), [#1093 source/proof snapshot](sources/issue-1093.json)
+Source attribution: GitHub issues [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096) ("Demonstrate real publisher-to-subscriber recovery") and [#1090](https://github.com/trickle-labs/pg-trickle/issues/1090) ("[Quality] Trustworthy results, recovery, and releases"); captured records are linked above.
+Parent: [#1090 v1 captured contract](sources/issue-1090-contract-v1.md) v1
+Parent snapshot: [Exact #1090 v1 contract snapshot](sources/issue-1090-contract-v1.md); SHA-256 of the delimited `acceptance-contract:1090:v1` block: `c5645654a11745aee1b64549f457348a145cc9dd10d009b351c2ea89c256d982`.
+Contribution: Refines #1090 v1:Q1090-R01, Q1090-R02, Q1090-R03, and Q1090-R05 for real publisher-to-subscriber recovery and honest qualification wording.
+Prerequisites: [#1091 issue/proof snapshot](sources/issue-1091.json) records the 11/11 proven subscriber-result comparator outcome (merged PR #1100); [#1092 issue/proof snapshot](sources/issue-1092.json) records PROVEN observed process/session interruption controls (merged PR #1101). [#1093 contract and proof snapshot](sources/issue-1093-contract-v1.md) and [#1093 source/proof record](sources/issue-1093.json) define and demonstrate the release-evidence path used by Q1096-R09.
+
+Intended outcome: Demonstrate that a real subscriber receives committed changes after interruption. Use two dedicated PostgreSQL instances and the extension's publication API. Check initial synchronization and insert, update, and delete delivery. Exercise subscriber unavailability, publisher restart, and one observed interruption during catch-up. Retain intended data directories and compare against a known committed checkpoint. Correct existing subscriber and crash-recovery wording that exceeds what current tests execute.
+
+Advisory learnings: None; `docs/retrospective-learnings.md` is absent.
+
+## Evidence context
+
+Extend [publication recovery tests](https://github.com/trickle-labs/pg-trickle/blob/main/tests/e2e_publication_crash_recovery_tests.rs).
+Reuse the retained-container restart pattern in
+[window recovery tests](https://github.com/trickle-labs/pg-trickle/blob/main/tests/e2e_window_state_recovery_tests.rs).
+Proposed topology cases use two dedicated PostgreSQL instances on a test-owned
+Docker network. The subscriber connects to the publisher's network address, not
+the host's loopback address. Create the publication through
+`pgtrickle.stream_table_to_publication`, discover its actual catalog binding,
+and create a matching subscriber relation and real `CREATE SUBSCRIPTION`.
+Expected subscriber payloads come from J, not a publisher row count.
+
+## Acceptance matrix
+
+| ID | Source | Requirement | Boundaries / counterexamples | Seam | Oracle | Planned evidence | Plan state |
+|---|---|---|---|---|---|---|---|
+| Q1096-R01 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC4 | Existing qualification wording describes only the behavior currently exercised. | Current test claims a subscriber or postmaster restart while only terminating publisher idle connections. | Existing qualification text and test claims | Behavior the current qualification tests actually execute | `publication_claims_review` checks the test header/name, current qualification `publication-recovery.workload`, and related changelog/roadmap completion claims. Describe existing evidence as publisher connection-recovery/publication-registration smoke until topology rows pass; qualify the optional registration assertion honestly. Preserve historical intent but correct unsupported completion claims. | planned |
+| Q1096-R02 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC1 | Initial synchronization reaches exact expected rows on an actual subscriber. | Only the publisher is queried or no subscription exists. | Publication API, subscription SQL and subscriber query | Independent committed checkpoint J | `test_publication_initial_sync_matches_checkpoint`. Require distinct instance identities, a real enabled subscription, ready table synchronization, and exact initial J payloads on the subscriber within the bound. | planned |
+| Q1096-R03 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC1 | Insert, update, and delete changes reach the subscriber exactly. | Inserts arrive but old values or deleted rows remain. | Publication API, subscription SQL and subscriber query | Literal J rows and schema after DML | `test_publication_committed_dml_reaches_subscriber`. Commit/refresh J's first batch on publisher, wait for the recorded boundary, and require subscriber rows `{(1,a,11),(3,a,30)}` with exact multiplicity and schema. Deliver one subsequent batch to prove continued live replication. | planned |
+| Q1096-R04 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC1 | Subscriber unavailability does not lose committed published changes. | Restarted subscriber skips the accumulated backlog. | Subscriber stop/restart and subscriber query | Journaled publisher batch and retained subscriber identity | `test_publication_subscriber_unavailability_catches_up`. Stop subscriber, commit and refresh the next journaled publisher batch, witness outstanding slot work, restart the same subscriber data directory, and require exact checkpoint convergence within 120 seconds. | planned |
+| Q1096-R05 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC1 | Publisher restart preserves the publication's ability to deliver committed changes. | Publication/slot binding disappears or a resumed subscriber misses a pre-restart commit. | Publisher restart and subscriber query | Journaled batches and retained publisher identity | `test_publication_publisher_restart_catches_up`. Record durable checkpoint and both identities, kill/start the publisher container retaining PGDATA, check retained publication/slot bindings, and require exact subscriber convergence plus a newly committed post-restart batch. | planned |
+| Q1096-R06 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC1 | An observed interruption during catch-up still converges exactly. | Interruption happens only after catch-up finished or before it started. | Subscription catch-up, interruption and subscriber query | Ordered committed J checkpoints | `test_publication_interrupted_catchup_converges`. Queue distinguishable committed batches, witness at least one delivered batch while later work remains, then interrupt subscriber progress. Restart its retained instance and require the final journal checkpoint within the bound. Add the observable catch-up barrier as the first implementation task. | planned |
+| Q1096-R07 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), AC2 | Missing/corrupt changes and disabled subscriber progress are detected. | Count-only comparison hides altered payloads, or a disabled subscription is treated as success. | Subscriber query and bounded checkpoint wait | Expected J rows and declared catch-up deadline | `test_publication_bad_delivery_controls_are_detected`, with omitted row, altered value, and disabled-subscription variants. The first two fail exact comparison at the declared boundary; disabled progress fails the bounded checkpoint wait. Keep baseline delivery passing. | planned |
+| Q1096-R08 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), AC2 | Topology setup failure cannot fall back to publisher-only success. | Publication or subscription creation errors are ignored. | Publication/subscription setup API | Required real publication and subscription creation | `test_publication_setup_failure_is_nonpassing`. Force each creation step to fail independently; require a setup failure identifying the step and no subscriber qualification result. | planned |
+| Q1096-R09 | [#1096](https://github.com/trickle-labs/pg-trickle/issues/1096), W/AC3 | Candidate qualification runs the real topology with retained identity and interruption evidence. | A developer-image topology result is attached to a different candidate or the restart creates fresh data. | Candidate release evidence and two-server topology | Candidate manifest, retained server identities and J comparison | `check_publication_topology_evidence` through [#1093 contract snapshot](sources/issue-1093-contract-v1.md) and its [source/proof record](sources/issue-1093.json). Require candidate installed-file observations on each extension-bearing server, both server versions/identities/logs, retained data identities, publication/subscription/slot names, journal boundary, witnessed interruption, and exact subscriber comparison. | planned |
+
+## Unresolved gaps
+
+- None. Catch-up barrier is planned first.
+
+## Open questions
+
+- None.
+
+## Out of scope
+
+- General high-availability and exhaustive failover matrices.
+
+## Change notes
+
+- Initial contract, v1. Existing matrix IDs Q1096-R01–Q1096-R09 retain their meanings; GitHub issue history preserves the prior matrix. The original acceptance checkboxes remain source criteria, not proof.
+
+## Implementation handoff
+
+Hand off to an explicitly authorized `/implement-contract` invocation. Implement the smallest complete solution inside the spec envelope. Preserve requirement IDs and promised outcomes.
+
+## Proof handoff
+
+Evaluate every requirement against this contract revision and one fixed candidate. Record actual evidence and verdicts in a separate proof report.

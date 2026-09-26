@@ -33,6 +33,10 @@ REQUIRED_CASES = {
     "e2e_refresh_atomicity_tests::test_refresh_auxiliary_state_failure_rolls_back",
     "e2e_refresh_atomicity_tests::test_refresh_partial_finalization_control_is_detected",
     "e2e_refresh_atomicity_tests::test_refresh_early_progress_control_is_detected",
+    "e2e_publication_crash_recovery_tests::test_publication_recovery_initial_sync_dml_and_setup_failures",
+    "e2e_publication_crash_recovery_tests::test_publication_recovery_subscriber_restart_catches_up",
+    "e2e_publication_crash_recovery_tests::test_publication_recovery_publisher_crash_retains_slot_and_catches_up",
+    "e2e_publication_crash_recovery_tests::test_publication_recovery_interrupted_catchup_and_negative_controls",
 }
 EXPECTED_SUITES = shared.EXPECTED_SUITES | {
     "support-contract",
@@ -139,6 +143,30 @@ def check_support_contract() -> None:
             and test_binary in suite.get("command_argv", []),
             f"{suite_id} does not run its v0.108 packaged conformance binary",
         )
+    publication_suite = suites["publication-recovery"]
+    light_runner = (ROOT / "scripts/run_light_e2e_tests.sh").read_text(encoding="utf-8")
+    machine_format_runner = light_runner.split(
+        'if [[ "${PGT_RELEASE_MACHINE_FORMAT:-0}" == "1" ]]; then', 1
+    )[1].split("\nelif ", 1)[0]
+    shared.require(
+        'capture_args+=(--no-capture)' in machine_format_runner,
+        "release machine-format no-capture suites must use Nextest serial mode",
+    )
+    publication_cases = {
+        "e2e_publication_crash_recovery_tests::test_publication_recovery_initial_sync_dml_and_setup_failures",
+        "e2e_publication_crash_recovery_tests::test_publication_recovery_subscriber_restart_catches_up",
+        "e2e_publication_crash_recovery_tests::test_publication_recovery_publisher_crash_retains_slot_and_catches_up",
+        "e2e_publication_crash_recovery_tests::test_publication_recovery_interrupted_catchup_and_negative_controls",
+    }
+    shared.require(
+        publication_suite.get("e2e_image") == "pg_trickle_release_candidate:local"
+        and publication_suite.get("command_argv")
+        == ["bash", "scripts/run_light_e2e_tests.sh", "--no-capture", "--test", "e2e_publication_crash_recovery_tests"]
+        and set(publication_suite.get("required_cases", [])) == publication_cases
+        and len(publication_suite.get("required_cases", [])) == len(publication_cases)
+        and publication_suite.get("shard") == {"id": "publication-topology", "index": 3, "count": 3},
+        "publication recovery does not run serially against the exact candidate package",
+    )
     shared.require(
         suites["graph-v1"].get("e2e_image") == "pg_trickle_release_candidate:local"
         and suites["graph-v1"].get("command_argv")
@@ -160,7 +188,7 @@ def check_support_contract() -> None:
         "required release case identities are incomplete or renamed",
     )
     shared.require(
-        set(shards) == {"sensitivity-baseline", "failure-recovery"}
+        set(shards) == {"sensitivity-baseline", "failure-recovery", "publication-topology"}
         and {case for shard in shards.values() for case in shard["required_cases"]} == REQUIRED_CASES
         and all(len(shard["required_cases"]) == len(set(shard["required_cases"])) for shard in shards.values()),
         "required release case shards are incomplete or ambiguous",
@@ -169,7 +197,9 @@ def check_support_contract() -> None:
         set(suites["sensitivity-baseline"].get("required_cases", []))
         == set(shards["sensitivity-baseline"]["required_cases"])
         and set(suites["recovery"].get("required_cases", []))
-        == set(shards["failure-recovery"]["required_cases"]),
+        == set(shards["failure-recovery"]["required_cases"])
+        and set(publication_suite.get("required_cases", []))
+        == set(shards["publication-topology"]["required_cases"]),
         "required case suites do not match their shards",
     )
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

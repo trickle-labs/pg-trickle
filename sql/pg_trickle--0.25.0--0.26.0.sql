@@ -28,7 +28,7 @@
 -- ERR-1: Typed DiagnosticError variant (code-only)
 -- ERR-2: Typed PublicationError variant (code-only)
 -- ERR-3: Scheduler timestamp errors with HINT (code-only)
--- ERR-4: Crash-recovery E2E test for publication downstream (code-only)
+-- ERR-4: Historical test covered publisher connection recovery only (no subscriber or postmaster restart)
 --
 -- No SQL schema objects were added, modified, or removed in this release.
 -- This file is intentionally empty beyond this comment block.

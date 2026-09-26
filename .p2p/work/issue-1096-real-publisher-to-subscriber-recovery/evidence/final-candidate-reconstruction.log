@@ -1,0 +1,6 @@
+candidate=snapshot:sha256:6d5632462facd43596182422371ede5cac6751577f1ee8287c82190eaa63a140
+base=edf700efdbb80983fe12c0e10f84fa271b818faf base_files=1541 candidate_files=1552
+added=11 removed=0 modified=10
+modified paths: .gitignore, CHANGELOG.md, roadmap/v0.26.0.md-full.md, scripts/run_light_e2e_tests.sh, scripts/v0_105_1_release_gate.py, scripts/v0_105_2_release_gate.py, scripts/v0_108_0_release_gate.py, sql/pg_trickle--0.25.0--0.26.0.sql, tests/e2e_publication_crash_recovery_tests.rs, tests/release/v0.108.0-qualification.json
+added paths: work/issue-1096-real-publisher-to-subscriber-recovery.md, work/sources/issue-1090-contract-v1.md, work/sources/issue-1090.json, work/sources/issue-1091.json, work/sources/issue-1092.json, work/sources/issue-1093-contract-v1.md, work/sources/issue-1093.json, work/sources/issue-1096-contract-v1.md, work/sources/issue-1096.json, work/sources/pr-1100.json, work/sources/pr-1101.json
+reconstruction: all candidate file bytes, modes, and paths match the saved snapshot and current workspace
