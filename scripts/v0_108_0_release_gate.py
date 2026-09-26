@@ -183,6 +183,12 @@ def check_support_contract() -> None:
         "archive and upgrade completeness do not cover the release boundary",
     )
     shards = {shard["id"]: shard for shard in qualification.get("required_shards", [])}
+    for shard in qualification.get("required_shards", []):
+        shared.require(
+            suites[shard["suite_id"]].get("shard")
+            == {key: shard[key] for key in ("id", "index", "count")},
+            f"{shard['id']} suite metadata does not match release shard contract",
+        )
     shared.require(
         set(qualification.get("required_cases", [])) == REQUIRED_CASES,
         "required release case identities are incomplete or renamed",

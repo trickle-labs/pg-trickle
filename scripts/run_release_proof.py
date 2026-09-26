@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 QUALIFICATION = ROOT / "tests/release/v0.108.0-qualification.json"
-SUITES = ("sensitivity-baseline", "recovery", "upgrade-chain", "recreation")
+SUITES = ("sensitivity-baseline", "recovery", "publication-recovery", "upgrade-chain", "recreation")
 
 
 def archive_package(package: Path, archive: Path) -> None:
