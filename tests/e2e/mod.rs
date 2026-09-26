@@ -439,12 +439,19 @@ async fn shared_container() -> &'static SharedContainer {
             let (img_name, img_tag) = e2e_image();
             assert_docker_image_exists(&img_name, &img_tag).await;
             let run_id = std::env::var("PGT_E2E_RUN_ID").ok();
+            // The official PostgreSQL entrypoint briefly starts a private
+            // bootstrap server whose log has the ordinary ready message. The
+            // ASan image is leak-checked at runtime, so wait for its final
+            // TCP listener instead of racing that temporary server shutdown.
+            let ready_log = if img_name.contains("_asan") {
+                "listening on IPv4 address \"0.0.0.0\""
+            } else {
+                "database system is ready to accept connections"
+            };
 
             let mut image = GenericImage::new(img_name, img_tag)
                 .with_exposed_port(5432_u16.tcp())
-                .with_wait_for(WaitFor::message_on_stderr(
-                    "database system is ready to accept connections",
-                ))
+                .with_wait_for(WaitFor::message_on_stderr(ready_log))
                 .with_env_var("POSTGRES_PASSWORD", "postgres")
                 .with_env_var("POSTGRES_DB", "postgres")
                 .with_label("com.pgtrickle.test", "true")

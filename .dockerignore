@@ -26,6 +26,11 @@ scripts/
 
 # Keep the specific Dockerfiles used by builds
 !tests/Dockerfile.e2e
+!tests/Dockerfile.e2e-asan
+!tests/fixtures/
+!tests/fixtures/asan_probe.c
+!tests/fixtures/asan_pg18_leak.supp
+!tests/fixtures/initdb-asan-wrapper.sh
 !tests/pg_tide.control
 !tests/pg_tide--0.46.0.sql
 !tests/pg_tide--0.54.0.sql

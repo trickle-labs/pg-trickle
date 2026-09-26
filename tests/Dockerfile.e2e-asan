@@ -1,0 +1,83 @@
+# Test-only Linux x86_64 PostgreSQL 18.6 and pg_trickle AddressSanitizer build.
+FROM postgres:18.6-bookworm
+
+ARG PG_VERSION=18.6
+ARG RUST_NIGHTLY=nightly-2025-09-01
+ENV DEBIAN_FRONTEND=noninteractive \
+    PGRX_HOME=/root/.pgrx \
+    PATH=/usr/local/pgsql/bin:/root/.cargo/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/pgsql/lib \
+    ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bison build-essential clang curl flex git libicu-dev liblz4-dev \
+    libreadline-dev libssl-dev libxml2-dev libxml2-utils libzstd-dev \
+    pkg-config python3-dev zlib1g-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
+      "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" && \
+    mkdir -p /tmp/postgresql && tar -xjf /tmp/postgresql.tar.bz2 --strip-components=1 -C /tmp/postgresql && \
+    cd /tmp/postgresql && \
+    CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
+    LDFLAGS='-fsanitize=address' ./configure --prefix=/usr/local/pgsql \
+      --enable-cassert --with-icu --with-llvm=no --with-openssl && \
+    make -j"$(nproc)" && make install && \
+    rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain "${RUST_NIGHTLY}" && \
+    rustup component add rust-src --toolchain "${RUST_NIGHTLY}" && \
+    cargo install cargo-pgrx --version 0.18.0 --locked && \
+    cargo pgrx init --pg18 /usr/local/pgsql/bin/pg_config
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY README.md ./
+COPY benches/ benches/
+COPY src/ src/
+COPY sql/ sql/
+COPY pg_trickle.control ./
+RUN cargo +"${RUST_NIGHTLY}" pgrx package --pg-config /usr/local/pgsql/bin/pg_config \
+      --target x86_64-unknown-linux-gnu && \
+    RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes' \
+      cargo +"${RUST_NIGHTLY}" build --lib --release --features pg18 --no-default-features \
+        --target x86_64-unknown-linux-gnu && \
+    cp target/x86_64-unknown-linux-gnu/release/libpg_trickle.so \
+      target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/local/pgsql/lib/pg_trickle.so && \
+    cp -a target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/. /usr/local/pgsql/
+
+COPY tests/fixtures/asan_probe.c /tmp/asan_probe.c
+COPY tests/fixtures/initdb-asan-wrapper.sh /tmp/initdb-asan-wrapper.sh
+ENV LSAN_OPTIONS=suppressions=/etc/asan/asan_pg18_leak.supp:print_suppressions=1
+COPY tests/fixtures/asan_pg18_leak.supp /etc/asan/
+COPY tests/pg_tide.control \
+    tests/pg_tide--0.46.0.sql \
+    tests/pg_tide--0.53.0.sql \
+    tests/pg_tide--0.54.0.sql \
+    /usr/local/pgsql/share/extension/
+RUN cp -a /usr/local/pgsql/local/pgsql/. /usr/local/pgsql/ && \
+    rm -rf /usr/local/pgsql/local && \
+    for helper in initdb pg_ctl psql; do \
+      mv "/usr/local/pgsql/bin/${helper}" "/usr/local/pgsql/bin/${helper}.asan-helper" && \
+      install -m 0755 /tmp/initdb-asan-wrapper.sh "/usr/local/pgsql/bin/${helper}" || exit 1; \
+    done && \
+    rm /tmp/initdb-asan-wrapper.sh && \
+    install -d -m 0755 /etc/asan && \
+    cc -O0 -g -fsanitize=address -fno-omit-frame-pointer \
+      /tmp/asan_probe.c -o /usr/local/bin/asan_probe && \
+    rm /tmp/asan_probe.c && \
+    echo "shared_preload_libraries = 'pg_trickle'" >> /usr/local/pgsql/share/postgresql.conf.sample && \
+    echo "listen_addresses = '*'" >> /usr/local/pgsql/share/postgresql.conf.sample && \
+    echo "track_commit_timestamp = on" >> /usr/local/pgsql/share/postgresql.conf.sample && \
+    echo "wal_level = logical" >> /usr/local/pgsql/share/postgresql.conf.sample && \
+    echo "max_replication_slots = 10" >> /usr/local/pgsql/share/postgresql.conf.sample && \
+      echo "max_worker_processes = 128" >> /usr/local/pgsql/share/postgresql.conf.sample && \
+      echo "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;" > /docker-entrypoint-initdb.d/00-create-pg-trickle.sql && \
+      chown -R postgres:postgres /usr/local/pgsql
+
+LABEL org.opencontainers.image.title="pg_trickle PostgreSQL 18.6 ASan E2E" \
+      org.opencontainers.image.description="Test-only cassert and AddressSanitizer image"
+
+USER postgres
+EXPOSE 5432
