@@ -1,44 +1,38 @@
-# REVIEWED: GitHub issue #1096
+# REVIEWED: issue #1096 — PR #1117 repair
 
-**Outcome:** REVIEWED
-
-**Contract:** `work/issue-1096-real-publisher-to-subscriber-recovery.md`, revision v1, SHA-256 `b7788d82e9d17a04574f298295bc8c0582adb61195505a76b370a3f9779da622`.
-
-**Candidate:** `snapshot:sha256:6d5632462facd43596182422371ede5cac6751577f1ee8287c82190eaa63a140`  
-**Candidate manifest:** `.git/p2p-issue-1096-readonly/candidate.json`, SHA-256 `e300048623e660f02317b1a679f2a442095141daa5298514dce7361070bb4616`.
-
-**Comparison base:** `edf700efdbb80983fe12c0e10f84fa271b818faf`; archive SHA-256 `ee8650687d9fdd6cf520a559140024ea3960b18f6a18377910d102611286d52e`.
-
-**Comparison:** Reconstructed the 1,552-entry candidate in disposable scratch and compared it with all 1,541 entries in the base archive. The candidate has 10 modified files, 11 additions, and no deletions. Its paths, bytes, and modes match the saved manifest and workspace. Protected input hashes match the requested values.
+Contract: `work/issue-1096-real-publisher-to-subscriber-recovery.md` v1, SHA-256 `b7788d82e9d17a04574f298295bc8c0582adb61195505a76b370a3f9779da622`  
+Parent context: #1090 v1, snapshot SHA-256 `c5645654a11745aee1b64549f457348a145cc9dd10d009b351c2ea89c256d982`; prerequisites #1091/#1092 and release-evidence contract #1093  
+Candidate: commit `710e657f17548fb7446e1b2384b595c3a530e162`; recoverable as PR head `issue/1096`  
+Comparison: base `edf700efdbb80983fe12c0e10f84fa271b818faf`; complete base-to-candidate PR change set  
+Stability: candidate, contract, and base remained unchanged. P2P validation ties `candidate.json` to the exact commit and base. The CI package was built from merge commit `2e84d8b58f2a48b66d72479b71010f66efd66451`, whose parents are the recorded base and candidate.
+Coverage: Q1096-R01 through Q1096-R09, plus the full four-file CI repair delta. The existing implementation and test suite were covered by the previous review; I confirmed their tracked content was unchanged from `f2eede5ea148c87b4d9612118ee5e85c04167df1`, then rechecked the current base-to-head scope and the surrounding runners, contract metadata, release gate, and runtime evidence.
 
 ## Contract fidelity
 
-- **Q1096-R01 — Covered.** The legacy case is named and described as publisher connection-recovery smoke. Its optional publication-registration assertion is qualified, and the changelog, roadmap, migration comment, and v0.105 release gates no longer claim subscriber or postmaster recovery.
-- **Q1096-R02 — Covered.** The test creates separate PostgreSQL containers on a Docker network, resolves the publication's catalog binding, creates a real subscription, waits for table readiness, and compares the subscriber's initial rows.
-- **Q1096-R03 — Covered.** The subscriber is checked after insert, update, and delete, then after a subsequent batch, with exact values and multiplicity.
-- **Q1096-R04 — Covered.** The subscriber is stopped while a refreshed batch accumulates. The test observes slot backlog, restarts the same container, asserts retained cluster and data-directory identity, and checks exact convergence.
-- **Q1096-R05 — Covered.** The publisher is killed and restarted in its retained container. The test checks publisher identity plus publication and slot retention, then verifies exact catch-up and a post-restart batch.
-- **Q1096-R06 — Covered.** A blocked logical apply worker is observed while later changes remain pending. The subscriber is interrupted, restarted in the same container, and checked against the final exact checkpoint.
-- **Q1096-R07 — Covered.** The exact-row comparator rejects missing and altered rows. Disabling the subscription leaves rows unchanged and slot work outstanding; re-enabling it converges to the expected rows.
-- **Q1096-R08 — Covered.** Missing stream-table registration and an unreachable publisher each fail setup; failed subscription creation leaves no orphan subscription or publisher-only pass path.
-- **Q1096-R09 — Covered for this local candidate-package run.** The v0.108.0 gate requires all four topology cases, the candidate image, the publication-topology shard, and `--no-capture` in the machine-format runner.
+No material findings. The repair moves the publication recovery test binary from automatic stock-PostgreSQL light sharding to the package runtime proof runner. The required publication suite remains required, executes against the release candidate package, and keeps its four required case IDs. The recovery and sensitivity shard metadata now matches the three-shard contract. The new release-gate assertion rejects future suite/shard metadata mismatches. The fresh artifact records publication shard 3/3, all four cases passed, nine tests executed, zero skipped; all 21 release required cases and all five suites passed.
 
-## Prior finding F1
+## Scope and simplicity
 
-The earlier concurrency finding is resolved. The candidate passes Nextest `--no-capture` on the machine-format branch, and the v0.108 gate requires that argument. Nextest documents `--no-capture` as serial execution; the final run log also shows each test starting after the previous test passes. [Nextest reporting documentation](https://nexte.st/docs/reporting/)
+No material findings. The repair changes only `scripts/run_light_e2e_tests.sh`, `scripts/run_release_proof.py`, `scripts/v0_108_0_release_gate.py`, and `tests/release/v0.108.0-qualification.json`: one test-target removal from the stock runner, one package suite addition, a six-line consistency assertion, and shard count corrections. It adds no dependency, product runtime behavior, or optional gate.
 
-## Evidence reviewed
+## Engineering quality
 
-- `final-machine-format-e2e.log` (SHA-256 `75daf4cc01470c9dad4abedce54ef3e52b8193bb4afb8f9e06ec6dcb454f8476`): machine-format Nextest run, 9 passed, 0 failed; the four topology tests passed sequentially.
-- `final-machine-format-attestations.json` (SHA-256 `918a4ba80e34acab43f47bb6d19c8301ddc6bcc2da136a2b8aa787a006fdac4b`): nine server observations, including eight topology servers. All report the same 150-file candidate and installed payload digest, `df3bd1d53fb3d5cdc05e4bfa3181695eafd0f6ee062f305e0e9059b1b3644430`.
-- `release-qualification-gate.log`: v0.108.0 qualification, evidence, publication, and negative-control gates passed.
-- `fmt-lint.log`: formatting and lint passed; Clippy reported zero warnings.
-- `final-candidate-reconstruction.log` (SHA-256 `80a8982785f738993f0cdafe4d6196dbbb764c44f6938408b7bcf51693005edd`): records the candidate reconstruction and comparison.
+No material findings. The publication topology suite now runs in the environment it requires: the candidate package image. The normal light-E2E shards continue to pass. Release evidence preserves candidate identity, package and payload digests, suite/case statuses, shard position, installed-file manifests, and server observations. The exact-row, slot-boundary, restart, and failure-control assertions remain in the existing test code. No required test or failure condition was weakened.
 
-## Findings
+## Checks and limitations
 
-None.
+- Fresh GitHub CI run [36252436204](https://github.com/trickle-labs/pg-trickle/actions/runs/36252436204) and associated PR workflows completed successfully for head `710e657f…`. This includes release evidence runtime controls, all three light-E2E shards, benchmark regression, integration, unit, Windows compile, package setup, shipping-image upgrade, and release contract checks. Schedule/manual-only jobs were skipped as configured.
+- Release artifact `release-proof-controls` (ID 10909823446) reports Linux amd64/PostgreSQL 18.6, candidate package digest `44401b1e…`, all required suites/cases passing, no incomplete suites, and exact equality of candidate/installed payload manifests across nine installation observations. The package identity is the PR workflow's synthetic merge commit with the reviewed head and comparison base as parents.
+- Evidence retained under `.p2p/work/issue-1096-real-publisher-to-subscriber-recovery/evidence/`: `pr1117-release-evidence.json`, `pr1117-publication-recovery-installation.json`, `pr1117-publication-recovery.log`, and `pr1117-publication-recovery-job.log`.
+- `just fmt` and `just lint` passed locally; the current PR Lint workflow passed with Clippy warnings denied. The release contract gate, JSON parse, `bash -n`, and `git diff --check` also passed.
+- No review finding depends on a published release; this candidate qualifies the PR package.
 
-## Limitations
+## Handoff
 
-The run qualifies a local, uncommitted candidate package on PostgreSQL 18.6 Linux ARM64. Its attestation has null candidate commit, artifact ID, artifact digest, and platform fields, so it does not establish qualification of a published release artifact. This is an implementation review, not an acceptance proof or merge-readiness decision.
+No findings. The current candidate has matching fresh proof and review reports; acceptance evidence is complete for commit `710e657f17548fb7446e1b2384b595c3a530e162`. Review only; this is not merge approval.
+
+Report storage: `.p2p/work/issue-1096-real-publisher-to-subscriber-recovery/review.md`, read back and verified.
+
+## Next steps
+
+1. `/merge-readiness https://github.com/trickle-labs/pg-trickle/pull/1117; review .p2p/work/issue-1096-real-publisher-to-subscriber-recovery/review.md; proof .p2p/work/issue-1096-real-publisher-to-subscriber-recovery/proof.md`
