@@ -114,6 +114,21 @@ async fn test_immediate_repair_and_reinitialize_restore_ivm_without_cdc() {
         )
         .await;
     assert!(diagnostic.contains("missing or disabled"), "{diagnostic}");
+    let health_severity: String = db
+        .query_scalar(
+            "SELECT severity FROM pgtrickle.health_check() \
+             WHERE check_name = 'immediate_ivm_triggers'",
+        )
+        .await;
+    assert_eq!(health_severity, "ERROR");
+    let broken_immediate_tables: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(broken_immediate_tables, 1);
+    let health_status: String = db
+        .query_scalar("SELECT status FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(health_status, "CRITICAL");
 
     let summary: String = db
         .query_scalar("SELECT pgtrickle.repair_stream_table('imm_repair_st')")
@@ -131,6 +146,10 @@ async fn test_immediate_repair_and_reinitialize_restore_ivm_without_cdc() {
         "SELECT id, v * 2 AS doubled FROM imm_repair_src",
     )
     .await;
+    let healthy_immediate_tables: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(healthy_immediate_tables, 0);
 
     db.execute("SELECT pgtrickle.reinitialize_stream_table('imm_repair_st')")
         .await;

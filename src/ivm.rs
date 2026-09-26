@@ -110,23 +110,19 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-/// Cache key for IVM delta templates: (pgt_id, source_oid, has_new, has_old, use_enr).
+/// Cache key for IVM delta templates: (pgt_id, source_oid, has_new, has_old).
 ///
 /// The delta SQL varies by which transition tables are present:
 /// - INSERT: has_new=true, has_old=false
 /// - UPDATE: has_new=true, has_old=true
 /// - DELETE: has_new=false, has_old=true
 ///
-/// The `use_enr` flag determines whether the SQL references ENR names
-/// (`__pgt_newtable`/`__pgt_oldtable`) or OID-suffixed temp table names.
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct IvmCacheKey {
     pgt_id: i64,
     source_oid: u32,
     has_new: bool,
     has_old: bool,
-    /// PERF-4 (v0.31.0): true = ENR names, false = temp-table names.
-    use_enr: bool,
 }
 
 /// Cached IVM delta template — stores the pre-computed delta SQL,
@@ -324,11 +320,6 @@ pub fn setup_ivm_triggers(
     let oid_u32 = source_oid.to_u32();
     let st_oid_u32 = st_relid.to_u32();
     let names = IvmTriggerNames::new(pgt_id, oid_u32);
-    // PostgreSQL does not expose transition ENRs across the PL/pgSQL-to-Rust SPI
-    // boundary used here. Keep the compatibility GUC but always choose the
-    // temp-table path until the executor can consume ENRs in the trigger frame.
-    let use_enr = false;
-
     // Resolve the fully-qualified source table name.
     let source_table =
         Spi::get_one_with_args::<String>("SELECT $1::oid::regclass::text", &[source_oid.into()])
@@ -413,23 +404,8 @@ pub fn setup_ivm_triggers(
     // ── AFTER triggers (statement-level, with transition tables) ─────
 
     // AFTER INSERT: only NEW table
-    let create_after_ins_fn = if use_enr {
-        format!(
-            "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
-         SET search_path = pgtrickle_changes, pgtrickle, public, pg_catalog, pg_temp -- nosemgrep: security-definer-after-trigger-includes-public-for-user-delta-sql
-         AS $$
-         BEGIN
-             PERFORM pgtrickle.pgt_ivm_apply_delta_enr({pgt_id}, {oid_u32}, true, false);
-             RETURN NULL;
-         END;
-         $$",
-            fn = names.after_ins_fn,
-        )
-    } else {
-        format!(
-            "CREATE OR REPLACE FUNCTION {fn}()
+    let create_after_ins_fn = format!(
+        "CREATE OR REPLACE FUNCTION {fn}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, public, pg_catalog, pg_temp -- nosemgrep: security-definer-after-trigger-includes-public-for-user-delta-sql
@@ -442,9 +418,8 @@ pub fn setup_ivm_triggers(
              RETURN NULL;
          END;
          $$",
-            fn = names.after_ins_fn,
-        )
-    };
+        fn = names.after_ins_fn,
+    );
     Spi::run(&create_after_ins_fn).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to create IVM AFTER INSERT function: {}", e))
     })?;
@@ -466,23 +441,8 @@ pub fn setup_ivm_triggers(
     })?;
 
     // AFTER UPDATE: both OLD and NEW tables
-    let create_after_upd_fn = if use_enr {
-        format!(
-            "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
-         SET search_path = pgtrickle_changes, pgtrickle, public, pg_catalog, pg_temp -- nosemgrep: security-definer-after-trigger-includes-public-for-user-delta-sql
-         AS $$
-         BEGIN
-             PERFORM pgtrickle.pgt_ivm_apply_delta_enr({pgt_id}, {oid_u32}, true, true);
-             RETURN NULL;
-         END;
-         $$",
-            fn = names.after_upd_fn,
-        )
-    } else {
-        format!(
-            "CREATE OR REPLACE FUNCTION {fn}()
+    let create_after_upd_fn = format!(
+        "CREATE OR REPLACE FUNCTION {fn}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, public, pg_catalog, pg_temp -- nosemgrep: security-definer-after-trigger-includes-public-for-user-delta-sql
@@ -498,9 +458,8 @@ pub fn setup_ivm_triggers(
              RETURN NULL;
          END;
          $$",
-            fn = names.after_upd_fn,
-        )
-    };
+        fn = names.after_upd_fn,
+    );
     Spi::run(&create_after_upd_fn).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to create IVM AFTER UPDATE function: {}", e))
     })?;
@@ -522,23 +481,8 @@ pub fn setup_ivm_triggers(
     })?;
 
     // AFTER DELETE: only OLD table
-    let create_after_del_fn = if use_enr {
-        format!(
-            "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
-         SET search_path = pgtrickle_changes, pgtrickle, public, pg_catalog, pg_temp -- nosemgrep: security-definer-after-trigger-includes-public-for-user-delta-sql
-         AS $$
-         BEGIN
-             PERFORM pgtrickle.pgt_ivm_apply_delta_enr({pgt_id}, {oid_u32}, false, true);
-             RETURN NULL;
-         END;
-         $$",
-            fn = names.after_del_fn,
-        )
-    } else {
-        format!(
-            "CREATE OR REPLACE FUNCTION {fn}()
+    let create_after_del_fn = format!(
+        "CREATE OR REPLACE FUNCTION {fn}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER -- nosemgrep: sql.security-definer.present
          SET search_path = pgtrickle_changes, pgtrickle, public, pg_catalog, pg_temp -- nosemgrep: security-definer-after-trigger-includes-public-for-user-delta-sql
@@ -551,9 +495,8 @@ pub fn setup_ivm_triggers(
              RETURN NULL;
          END;
          $$",
-            fn = names.after_del_fn,
-        )
-    };
+        fn = names.after_del_fn,
+    );
     Spi::run(&create_after_del_fn).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to create IVM AFTER DELETE function: {}", e))
     })?;
@@ -808,7 +751,6 @@ fn prepare_ivm_owner_transition_tables(
     source_oid: u32,
     has_new: bool,
     has_old: bool,
-    copy_from_enr: bool,
 ) -> Result<(), PgTrickleError> {
     let owner = quote_identifier(&crate::refresh::stream_owner_name(st)?);
     for (has_table, kind) in [(has_new, "new"), (has_old, "old")] {
@@ -817,15 +759,6 @@ fn prepare_ivm_owner_transition_tables(
         }
         let name = format!("__pgt_{kind}table_{source_oid}");
         let table = format!("pg_temp.{}", quote_identifier(&name));
-        if copy_from_enr {
-            Spi::run(&format!("DROP TABLE IF EXISTS {table}")) // nosemgrep: rust.spi.run.dynamic-format — table is derived from a numeric source OID.
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            // nosemgrep: rust.spi.run.dynamic-format — table and kind are internal identifiers.
-            Spi::run(&format!(
-                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM __pgt_{kind}table"
-            ))
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        }
         let privileges = if kind == "new" {
             "SELECT, DELETE"
         } else {
@@ -934,11 +867,11 @@ fn pgt_ivm_apply_delta(
         return apply_topk_micro_refresh(&st);
     }
 
-    prepare_ivm_owner_transition_tables(&st, source_oid_u32, has_new, has_old, false)?;
+    prepare_ivm_owner_transition_tables(&st, source_oid_u32, has_new, has_old)?;
 
     // Try to get cached delta SQL template.
     let (delta_sql, user_columns, is_deduplicated) =
-        get_or_compute_ivm_delta(pgt_id, source_oid_u32, has_new, has_old, &st, false)?;
+        get_or_compute_ivm_delta(pgt_id, source_oid_u32, has_new, has_old, &st)?;
 
     let st_qualified = format!(
         "\"{}\".\"{}\"",
@@ -1224,19 +1157,14 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
 ///
 /// Uses a thread-local cache to avoid re-parsing and re-differentiating
 /// the defining query on every trigger invocation. Cache entries are
-/// keyed by (pgt_id, source_oid, has_new, has_old, use_enr) and invalidated when
-/// the defining query changes or the shared cache generation advances.
-///
-/// When `use_enr = true` (PERF-4), the generated SQL references the ENR names
-/// `__pgt_newtable` / `__pgt_oldtable` directly. When `false`, it uses the
-/// OID-suffixed temp-table names `__pgt_newtable_{source_oid}` / etc.
+/// keyed by (pgt_id, source_oid, has_new, has_old) and invalidated when the
+/// defining query changes or the shared cache generation advances.
 fn get_or_compute_ivm_delta(
     pgt_id: i64,
     source_oid: u32,
     has_new: bool,
     has_old: bool,
     st: &crate::catalog::StreamTableMeta,
-    use_enr: bool,
 ) -> Result<(String, Vec<String>, bool), PgTrickleError> {
     use crate::dvm::diff::{DeltaSource, DiffContext, TransitionTableNames};
     use crate::dvm::parser::parse_defining_query_full;
@@ -1250,7 +1178,6 @@ fn get_or_compute_ivm_delta(
         source_oid,
         has_new,
         has_old,
-        use_enr,
     };
 
     // Cross-session invalidation: flush if the shared generation counter
@@ -1282,27 +1209,18 @@ fn get_or_compute_ivm_delta(
     let op_tree = result.tree;
     let cte_registry = result.cte_registry;
 
-    // Build transition table names.
-    // PERF-4: when use_enr = true, reference the ENR names directly.
+    // Build transition table names for the copied trigger transition rows.
     let mut tables = HashMap::new();
     tables.insert(
         source_oid,
         TransitionTableNames {
             new_name: if has_new {
-                if use_enr {
-                    Some("__pgt_newtable".to_string())
-                } else {
-                    Some(format!("__pgt_newtable_{source_oid}"))
-                }
+                Some(format!("__pgt_newtable_{source_oid}"))
             } else {
                 None
             },
             old_name: if has_old {
-                if use_enr {
-                    Some("__pgt_oldtable".to_string())
-                } else {
-                    Some(format!("__pgt_oldtable_{source_oid}"))
-                }
+                Some(format!("__pgt_oldtable_{source_oid}"))
             } else {
                 None
             },
