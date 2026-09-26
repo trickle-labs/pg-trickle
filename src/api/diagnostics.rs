@@ -572,10 +572,50 @@ pub(super) fn explain_refresh_mode_impl(
         );
     });
 
-    let downgrade_reason: Option<String> = match (configured.as_str(), effective_opt.as_deref()) {
+    let missing_ivm_source = if configured == "IMMEDIATE" {
+        let st = StreamTableMeta::get_by_name(&schema, &table_name).unwrap_or_else(|e| {
+            pgrx::error!(
+                "{}",
+                crate::error::PgTrickleError::DiagnosticError(format!(
+                    "explain_refresh_mode: failed to load stream table metadata: {e}"
+                ))
+            )
+        });
+        StDependency::get_for_st(st.pgt_id)
+            .unwrap_or_else(|e| {
+                pgrx::error!(
+                    "{}",
+                    crate::error::PgTrickleError::DiagnosticError(format!(
+                        "explain_refresh_mode: failed to load dependencies: {e}"
+                    ))
+                )
+            })
+            .into_iter()
+            .filter(|dep| crate::ivm::is_ivm_trigger_source(&dep.source_type))
+            .find_map(
+                |dep| match crate::ivm::ivm_triggers_ready(dep.source_relid, st.pgt_id) {
+                    Ok(true) => None,
+                    Ok(false) => Some(dep.source_relid.to_u32()),
+                    Err(e) => pgrx::error!(
+                        "{}",
+                        crate::error::PgTrickleError::DiagnosticError(format!(
+                            "explain_refresh_mode: failed to inspect IVM triggers: {e}"
+                        ))
+                    ),
+                },
+            )
+    } else {
+        None
+    };
+
+    let downgrade_reason: Option<String> = match (
+        configured.as_str(),
+        effective_opt.as_deref(),
+        missing_ivm_source,
+    ) {
         // AUTO mode chose FULL — explain why we can't know for certain,
         // but point operators to the refresh history for details.
-        ("AUTO" | "DIFFERENTIAL", Some("FULL")) => Some(
+        ("AUTO" | "DIFFERENTIAL", Some("FULL"), _) => Some(
             "The most recent refresh used FULL mode. Possible causes: defining query \
              contains a CTE or unsupported operator, adaptive change-ratio threshold \
              was exceeded, or aggregate saturation occurred. \
@@ -583,13 +623,17 @@ pub(super) fn explain_refresh_mode_impl(
                 .to_string(),
         ),
         // DIFFERENTIAL configured but actual was APPEND_ONLY — informational.
-        ("DIFFERENTIAL" | "AUTO", Some("APPEND_ONLY")) => Some(
+        ("DIFFERENTIAL" | "AUTO", Some("APPEND_ONLY"), _) => Some(
             "The most recent refresh used the APPEND_ONLY INSERT fast-path because \
              no DELETE or UPDATE was detected in the change buffer."
                 .to_string(),
         ),
         // IMMEDIATE mode — effective_mode is always NULL (triggers handle it).
-        ("IMMEDIATE", _) => Some(
+        ("IMMEDIATE", _, Some(source_oid)) => Some(format!(
+            "IMMEDIATE mode is not maintainable because required IVM triggers are missing or \
+             disabled on source OID {source_oid}. Run pgtrickle.repair_stream_table('{name}')."
+        )),
+        ("IMMEDIATE", _, None) => Some(
             "IMMEDIATE mode is maintained by in-transaction IVM triggers; \
              the background scheduler does not run refreshes for this table."
                 .to_string(),

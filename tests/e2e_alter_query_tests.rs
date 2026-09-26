@@ -97,6 +97,116 @@ async fn test_alter_query_same_schema() {
 }
 
 #[tokio::test]
+async fn test_alter_query_preserves_immediate_cascade_triggers() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE aq_cascade_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO aq_cascade_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "aq_cascade_upstream",
+        "SELECT id, val FROM aq_cascade_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.create_st(
+        "aq_cascade_downstream",
+        "SELECT id, val * 2 AS result FROM aq_cascade_upstream",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    db.alter_st(
+        "aq_cascade_downstream",
+        "query => $$ SELECT id, val * 3 AS result FROM aq_cascade_upstream $$",
+    )
+    .await;
+    db.execute("INSERT INTO aq_cascade_src VALUES (2, 20)")
+        .await;
+    let result: i32 = db
+        .query_scalar("SELECT result FROM aq_cascade_downstream WHERE id = 2")
+        .await;
+    assert_eq!(result, 60);
+
+    db.alter_st(
+        "aq_cascade_upstream",
+        "query => $$ SELECT id, val * 2 AS val FROM aq_cascade_src WHERE val >= 0 $$",
+    )
+    .await;
+    let existing_result: i32 = db
+        .query_scalar("SELECT result FROM aq_cascade_downstream WHERE id = 1")
+        .await;
+    assert_eq!(
+        existing_result, 60,
+        "ALTER QUERY must rebuild existing downstream rows"
+    );
+    db.execute("INSERT INTO aq_cascade_src VALUES (3, 30)")
+        .await;
+    let result: i32 = db
+        .query_scalar("SELECT result FROM aq_cascade_downstream WHERE id = 3")
+        .await;
+    assert_eq!(result, 180);
+}
+
+#[tokio::test]
+async fn test_alter_query_rebuilds_stream_change_buffer_schema() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE aq_buffer_src (id INT PRIMARY KEY, val INT, extra INT)")
+        .await;
+    db.execute("INSERT INTO aq_buffer_src VALUES (1, 10, 100)")
+        .await;
+    db.create_st(
+        "aq_buffer_upstream",
+        "SELECT id, val FROM aq_buffer_src",
+        "5m",
+        "FULL",
+    )
+    .await;
+    db.create_st(
+        "aq_buffer_downstream",
+        "SELECT id, val FROM aq_buffer_upstream",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    db.alter_st(
+        "aq_buffer_upstream",
+        "query => $$ SELECT id, val, extra FROM aq_buffer_src $$",
+    )
+    .await;
+
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'aq_buffer_upstream'",
+        )
+        .await;
+    let has_extra: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute \
+             WHERE attrelid = 'pgtrickle_changes.changes_pgt_{pgt_id}'::regclass \
+               AND attname = 'extra' AND NOT attisdropped)"
+        ))
+        .await;
+    assert!(
+        has_extra,
+        "ALTER QUERY must rebuild the output buffer schema"
+    );
+
+    db.execute("UPDATE aq_buffer_src SET val = 20, extra = 200 WHERE id = 1")
+        .await;
+    db.refresh_st_with_retry("aq_buffer_upstream").await;
+    db.refresh_st_with_retry("aq_buffer_downstream").await;
+    db.assert_st_matches_query("aq_buffer_downstream", "SELECT id, val FROM aq_buffer_src")
+        .await;
+}
+
+#[tokio::test]
 async fn test_alter_query_same_schema_differential() {
     let db = E2eDb::new().await.with_extension().await;
 

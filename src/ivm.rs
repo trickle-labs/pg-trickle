@@ -15,12 +15,11 @@
 //!
 //! 2. **Statement-level AFTER triggers** with transition tables
 //!    (`REFERENCING NEW TABLE AS ... OLD TABLE AS ...`).
-//!    When `pg_trickle.ivm_use_enr = true` (default, PG18+), the trigger
-//!    body calls `pgt_ivm_apply_delta_enr` which references the ENR names
-//!    directly. When false (legacy mode), the trigger body copies
-//!    transition table data into temp tables
-//!    (`__pgt_newtable_<oid>` / `__pgt_oldtable_<oid>`), then calls
-//!    `pgt_ivm_apply_delta`.
+//!    Trigger bodies copy transition data into temp tables
+//!    (`__pgt_newtable_<oid>` / `__pgt_oldtable_<oid>`), then call
+//!    `pgt_ivm_apply_delta`. The direct ENR path remains disabled because
+//!    PostgreSQL does not expose transition ENRs across the PL/pgSQL-to-Rust
+//!    SPI boundary.
 //!
 //! 3. **Delta computation** reuses the existing DVM engine with
 //!    `DeltaSource::TransitionTable` — the `Scan` operator reads
@@ -299,6 +298,11 @@ pub fn ivm_triggers_ready(source_oid: pg_sys::Oid, pgt_id: i64) -> Result<bool, 
     Ok(true)
 }
 
+/// Whether a dependency relation can host synchronous IVM triggers.
+pub fn is_ivm_trigger_source(source_type: &str) -> bool {
+    matches!(source_type, "TABLE" | "STREAM_TABLE")
+}
+
 /// Install IVM triggers on a source table for an IMMEDIATE-mode stream table.
 ///
 /// Creates statement-level BEFORE and AFTER triggers for INSERT, UPDATE,
@@ -320,6 +324,10 @@ pub fn setup_ivm_triggers(
     let oid_u32 = source_oid.to_u32();
     let st_oid_u32 = st_relid.to_u32();
     let names = IvmTriggerNames::new(pgt_id, oid_u32);
+    // PostgreSQL does not expose transition ENRs across the PL/pgSQL-to-Rust SPI
+    // boundary used here. Keep the compatibility GUC but always choose the
+    // temp-table path until the executor can consume ENRs in the trigger frame.
+    let use_enr = false;
 
     // Resolve the fully-qualified source table name.
     let source_table =
@@ -403,11 +411,6 @@ pub fn setup_ivm_triggers(
     })?;
 
     // ── AFTER triggers (statement-level, with transition tables) ─────
-
-    // PERF-4 (v0.31.0): Choose trigger body based on ENR mode GUC.
-    // When use_enr = true, reference ENRs directly (no CTAS to temp table).
-    // When use_enr = false, use legacy temp-table copy approach.
-    let use_enr = crate::config::pg_trickle_ivm_use_enr();
 
     // AFTER INSERT: only NEW table
     let create_after_ins_fn = if use_enr {
@@ -789,6 +792,13 @@ fn apply_ivm_owner_delta(
 
         Ok(delta_count)
     });
+    let result = result.and_then(|delta_count| {
+        if delta_count > 0 && crate::refresh::has_downstream_st_consumers(st.pgt_id) {
+            let public_columns = crate::refresh::get_st_user_columns(st);
+            crate::refresh::capture_delta_to_st_buffer(st, &public_columns)?;
+        }
+        Ok(delta_count)
+    });
     crate::refresh::drop_owner_temp_table(st, delta_table);
     result
 }
@@ -936,7 +946,7 @@ fn pgt_ivm_apply_delta(
         st.pgt_name.replace('"', "\"\""),
     );
 
-    let delta_table = format!("__pgt_ivm_delta_{pgt_id}");
+    let delta_table = format!("__pgt_delta_{pgt_id}");
     let delta_count = apply_ivm_owner_delta(
         &st,
         &delta_sql,
@@ -971,15 +981,12 @@ fn pgt_ivm_apply_delta(
     Ok(())
 }
 
-/// PERF-4 (v0.31.0): SQL-callable function: apply IVM delta using ENR names.
+/// Compatibility entry point for trigger functions created with ENR mode.
 ///
-/// ENR variant of `pgt_ivm_apply_delta`. Called from AFTER trigger bodies
-/// when `pg_trickle.ivm_use_enr = true`. References the ephemeral named
-/// relations (ENRs) `__pgt_newtable` / `__pgt_oldtable` directly, eliminating
-/// the `CREATE TEMP TABLE … AS SELECT * FROM __pgt_newtable` copy overhead.
-///
-/// Requires PostgreSQL 18+ which propagates ENRs to nested SPI calls within
-/// trigger execution contexts.
+/// PostgreSQL does not expose a PL/pgSQL trigger's transition relations to
+/// nested SPI calls in Rust. Existing ENR-backed trigger functions therefore
+/// fall back to a protected full refresh; newly created functions use the
+/// temp-table delta path directly.
 #[pg_extern(schema = "pgtrickle")]
 fn pgt_ivm_apply_delta_enr(
     pgt_id: i64,
@@ -990,12 +997,7 @@ fn pgt_ivm_apply_delta_enr(
     use crate::catalog::StreamTableMeta;
 
     ensure_ivm_abort_callback_registered();
-
-    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
     let source_oid_u32 = source_oid as u32;
-
     let st = StreamTableMeta::get_by_id(pgt_id)?.ok_or_else(|| {
         PgTrickleError::NotFound(format!("Stream table with pgt_id={pgt_id} not found"))
     })?;
@@ -1015,50 +1017,19 @@ fn pgt_ivm_apply_delta_enr(
     ) {
         return Ok(());
     }
-
-    if st.topk_limit.is_some() {
-        return apply_topk_micro_refresh(&st);
-    }
-
-    prepare_ivm_owner_transition_tables(&st, source_oid_u32, has_new, has_old, true)?;
-
-    // Owner execution uses the filtered OID-suffixed copies staged above.
-    let (delta_sql, user_columns, is_deduplicated) =
-        get_or_compute_ivm_delta(pgt_id, source_oid_u32, has_new, has_old, &st, false)?;
-
-    let st_qualified = format!(
-        "\"{}\".\"{}\"",
-        st.pgt_schema.replace('"', "\"\""),
-        st.pgt_name.replace('"', "\"\""),
-    );
-
-    let delta_table = format!("__pgt_ivm_delta_enr_{pgt_id}");
-    let delta_count = apply_ivm_owner_delta(
+    let _ = (has_new, has_old);
+    let deps = crate::catalog::StDependency::get_for_st(pgt_id)?;
+    let source_oids = deps
+        .iter()
+        .filter(|dep| is_ivm_trigger_source(&dep.source_type) || dep.source_type == "FOREIGN_TABLE")
+        .map(|dep| dep.source_relid)
+        .collect::<Vec<_>>();
+    crate::api::refresh_ops::execute_manual_full_refresh_without_source_locks(
         &st,
-        &delta_sql,
-        &user_columns,
-        &delta_table,
-        is_deduplicated,
+        &st.pgt_schema,
+        &st.pgt_name,
+        &source_oids,
     )?;
-    drop_ivm_transition_copies(source_oid_u32, has_new, has_old);
-
-    // EC-01b: reconcile cross-cycle phantom rows in IMMEDIATE mode (ENR path).
-    run_immediate_phantom_cleanup(&st, &st_qualified)?;
-
-    if delta_count > 0 {
-        let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()")
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-            .ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into()))?;
-        StreamTableMeta::update_after_refresh(pgt_id, now, delta_count)?;
-    }
-
-    pgrx::debug1!(
-        "[pg_trickle] IVM delta (ENR) applied for pgt_id={}, source_oid={}, delta_rows={}",
-        pgt_id,
-        source_oid_u32,
-        delta_count,
-    );
-
     Ok(())
 }
 
@@ -1101,6 +1072,31 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
     let columns = crate::refresh::with_stream_owner(st, || {
         crate::dvm::get_defining_query_columns(&st.defining_query)
     })?;
+    let capture_columns = if crate::refresh::has_downstream_st_consumers(st.pgt_id) {
+        crate::refresh::get_st_user_columns(st)
+    } else {
+        Vec::new()
+    };
+    if !capture_columns.is_empty() {
+        let col_list = capture_columns
+            .iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pre_select = format!("SELECT __pgt_row_id, {col_list} FROM {st_qualified}");
+        crate::refresh::prepare_owner_temp_table(
+            st,
+            &format!("__pgt_pre_{}", st.pgt_id),
+            &pre_select,
+        )?;
+        crate::refresh::with_stream_owner(st, || {
+            Spi::run(&format!(
+                "INSERT INTO pg_temp.{} {pre_select}",
+                quote_identifier(&format!("__pgt_pre_{}", st.pgt_id)),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
+    }
 
     // Materialize the new top-K into a temp table.
     let new_topk_basename = format!("__pgt_ivm_topk_{}", st.pgt_id);
@@ -1204,7 +1200,16 @@ fn apply_topk_micro_refresh(st: &crate::catalog::StreamTableMeta) -> Result<(), 
 
         Ok(())
     });
+    let result = result.and_then(|()| {
+        if !capture_columns.is_empty() {
+            crate::refresh::capture_full_refresh_diff_to_st_buffer(st, &capture_columns)?;
+        }
+        Ok(())
+    });
     crate::refresh::drop_owner_temp_table(st, &new_topk_basename);
+    if !capture_columns.is_empty() {
+        crate::refresh::drop_owner_temp_table(st, &format!("__pgt_pre_{}", st.pgt_id));
+    }
     result?;
 
     pgrx::debug1!(
@@ -1957,6 +1962,15 @@ mod tests {
         // Verify no duplicates
         let set: std::collections::HashSet<&str> = all.iter().copied().collect();
         assert_eq!(set.len(), 8);
+    }
+
+    #[test]
+    fn test_ivm_trigger_sources_include_tables_and_stream_tables() {
+        assert!(is_ivm_trigger_source("TABLE"));
+        assert!(is_ivm_trigger_source("STREAM_TABLE"));
+        assert!(!is_ivm_trigger_source("VIEW"));
+        assert!(!is_ivm_trigger_source("MATVIEW"));
+        assert!(!is_ivm_trigger_source("FOREIGN_TABLE"));
     }
 
     #[test]

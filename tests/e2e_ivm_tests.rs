@@ -374,6 +374,38 @@ async fn test_ivm_topk_immediate_within_threshold() {
     assert_eq!(db.count("public.top_scores").await, 3);
 }
 
+#[tokio::test]
+async fn test_ivm_topk_captures_changes_for_deferred_child() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_chain_src (id INT PRIMARY KEY, score INT)")
+        .await;
+    db.execute("INSERT INTO topk_chain_src VALUES (1, 30), (2, 20), (3, 10)")
+        .await;
+    create_immediate_st(
+        &db,
+        "topk_chain_upstream",
+        "SELECT id, score FROM topk_chain_src ORDER BY score DESC LIMIT 2",
+    )
+    .await;
+    db.create_st(
+        "topk_chain_child",
+        "SELECT id, score FROM topk_chain_upstream",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    db.execute("INSERT INTO topk_chain_src VALUES (4, 40)")
+        .await;
+    db.refresh_st_with_retry("topk_chain_child").await;
+    db.assert_st_matches_query(
+        "topk_chain_child",
+        "SELECT id, score FROM topk_chain_src ORDER BY score DESC LIMIT 2",
+    )
+    .await;
+}
+
 // ── Manual Refresh ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -474,6 +506,178 @@ async fn test_ivm_alter_differential_to_immediate() {
         3,
         "INSERT should propagate immediately after switch to IMMEDIATE"
     );
+}
+
+#[tokio::test]
+async fn test_ivm_alter_stream_table_source_to_immediate() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE sw_st_base (id INT PRIMARY KEY, val INT)")
+        .await;
+    create_immediate_st(&db, "sw_st_upstream", "SELECT id, val FROM sw_st_base").await;
+    db.create_st(
+        "sw_st_explicit",
+        "SELECT id, val * 2 AS doubled FROM sw_st_upstream",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "sw_st_target",
+        "SELECT id, val * 3 AS tripled FROM sw_st_upstream",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let upstream_pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'sw_st_upstream'",
+        )
+        .await;
+    let buffer_name = format!("pgtrickle_changes.changes_pgt_{upstream_pgt_id}");
+    let buffer_exists: bool = db
+        .query_scalar(&format!("SELECT to_regclass('{buffer_name}') IS NOT NULL"))
+        .await;
+    assert!(buffer_exists);
+
+    db.alter_st("sw_st_explicit", "refresh_mode => 'IMMEDIATE'")
+        .await;
+    db.alter_st("sw_st_target", "target_freshness => 'on_commit'")
+        .await;
+
+    let (_, explicit_mode, _, _) = db.pgt_status("sw_st_explicit").await;
+    let (_, target_mode, _, _) = db.pgt_status("sw_st_target").await;
+    assert_eq!(explicit_mode, "IMMEDIATE");
+    assert_eq!(target_mode, "IMMEDIATE");
+    let buffer_exists: bool = db
+        .query_scalar(&format!("SELECT to_regclass('{buffer_name}') IS NOT NULL"))
+        .await;
+    assert!(
+        !buffer_exists,
+        "an upstream buffer with no deferred consumers should be removed"
+    );
+
+    db.execute("INSERT INTO sw_st_base VALUES (1, 10)").await;
+    let doubled: i32 = db
+        .query_scalar("SELECT doubled FROM sw_st_explicit WHERE id = 1")
+        .await;
+    let tripled: i32 = db
+        .query_scalar("SELECT tripled FROM sw_st_target WHERE id = 1")
+        .await;
+    assert_eq!(doubled, 20);
+    assert_eq!(tripled, 30);
+
+    db.alter_st(
+        "sw_st_explicit",
+        "refresh_mode => 'DIFFERENTIAL', schedule => '10m'",
+    )
+    .await;
+    let explicit_pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'sw_st_explicit'",
+        )
+        .await;
+    let trigger_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pg_trigger \
+             WHERE tgrelid = 'sw_st_upstream'::regclass \
+               AND tgname LIKE 'pgt_ivm_%_{explicit_pgt_id}'"
+        ))
+        .await;
+    assert_eq!(
+        trigger_count, 0,
+        "switching back to DIFFERENTIAL should remove downstream IVM triggers"
+    );
+    let buffer_exists: bool = db
+        .query_scalar(&format!("SELECT to_regclass('{buffer_name}') IS NOT NULL"))
+        .await;
+    assert!(
+        buffer_exists,
+        "switching to DIFFERENTIAL should restore the upstream buffer"
+    );
+    db.execute("INSERT INTO sw_st_base VALUES (2, 20)").await;
+    db.refresh_st_with_retry("sw_st_explicit").await;
+    let doubled: i32 = db
+        .query_scalar("SELECT doubled FROM sw_st_explicit WHERE id = 2")
+        .await;
+    assert_eq!(doubled, 40);
+}
+
+#[tokio::test]
+async fn test_full_upstream_refresh_propagates_to_immediate_child_without_buffer() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE full_imm_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.create_st(
+        "full_imm_upstream",
+        "SELECT id, val FROM full_imm_src",
+        "5m",
+        "FULL",
+    )
+    .await;
+    create_immediate_st(
+        &db,
+        "full_imm_child",
+        "SELECT id, val * 2 AS doubled FROM full_imm_upstream",
+    )
+    .await;
+
+    db.execute("INSERT INTO full_imm_src VALUES (1, 10)").await;
+    db.refresh_st_with_retry("full_imm_upstream").await;
+    let doubled: i32 = db
+        .query_scalar("SELECT doubled FROM full_imm_child WHERE id = 1")
+        .await;
+    assert_eq!(doubled, 20);
+
+    let upstream_pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'full_imm_upstream'",
+        )
+        .await;
+    let buffer_exists: bool = db
+        .query_scalar(&format!(
+            "SELECT to_regclass('pgtrickle_changes.changes_pgt_{upstream_pgt_id}') IS NOT NULL"
+        ))
+        .await;
+    assert!(
+        !buffer_exists,
+        "IMMEDIATE children must not allocate a CDC buffer"
+    );
+}
+
+#[tokio::test]
+async fn test_immediate_aggregate_captures_public_columns_for_deferred_child() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE imm_diff_src (id INT PRIMARY KEY, grp TEXT, amount INT)")
+        .await;
+    db.execute("INSERT INTO imm_diff_src VALUES (1, 'a', 10)")
+        .await;
+    create_immediate_st(
+        &db,
+        "imm_diff_upstream",
+        "SELECT grp, SUM(amount) AS total FROM imm_diff_src GROUP BY grp",
+    )
+    .await;
+    db.create_st(
+        "imm_diff_child",
+        "SELECT grp, total FROM imm_diff_upstream",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    db.execute("INSERT INTO imm_diff_src VALUES (2, 'a', 5)")
+        .await;
+    db.refresh_st_with_retry("imm_diff_child").await;
+    let total: i64 = db
+        .query_scalar("SELECT total::bigint FROM imm_diff_child WHERE grp = 'a'")
+        .await;
+    assert_eq!(total, 15);
 }
 
 #[tokio::test]
@@ -880,57 +1084,93 @@ async fn test_ivm_alter_to_immediate_allows_window() {
 async fn test_ivm_cascading_immediate_sts() {
     let db = E2eDb::new().await.with_extension().await;
 
-    // base_table → ST_A (IMMEDIATE) → ST_B (IMMEDIATE)
-    db.execute("CREATE TABLE cascade_base (id INT PRIMARY KEY, val INT, category TEXT)")
+    for (suffix, use_enr) in [("temp", false), ("enr", true)] {
+        let base = format!("cascade_base_{suffix}");
+        let a = format!("cascade_a_{suffix}");
+        let b = format!("cascade_b_{suffix}");
+        let c = format!("cascade_c_{suffix}");
+        let set_enr = format!("SET pg_trickle.ivm_use_enr = {use_enr}");
+        let create_base = format!("CREATE TABLE {base} (id INT PRIMARY KEY, val INT)");
+        let seed_base = format!("INSERT INTO {base} VALUES (1, 10), (2, 20)");
+        let create_a = format!(
+            "SELECT pgtrickle.create_stream_table('{a}', \
+             $$SELECT id, val FROM {base} WHERE val > 0$$, NULL, 'IMMEDIATE')"
+        );
+        let create_b = format!(
+            "SELECT pgtrickle.create_stream_table('{b}', \
+             $$SELECT id, val * 10 AS val10 FROM {a}$$, NULL, 'IMMEDIATE')"
+        );
+        let create_c = format!(
+            "SELECT pgtrickle.create_stream_table('{c}', \
+             $$SELECT id, val10 + 1 AS val11 FROM {b}$$, NULL, 'IMMEDIATE')"
+        );
+        db.execute_seq(&[
+            &set_enr,
+            &create_base,
+            &seed_base,
+            &create_a,
+            &create_b,
+            &create_c,
+            "RESET pg_trickle.ivm_use_enr",
+        ])
         .await;
-    db.execute("INSERT INTO cascade_base VALUES (1, 10, 'X'), (2, 20, 'Y')")
+
+        for (source, downstream) in [(&a, &b), (&b, &c)] {
+            let trigger_count: i64 = db
+                .query_scalar(&format!(
+                    "SELECT count(*) FROM pg_trigger t \
+                     JOIN pgtrickle.pgt_stream_tables st \
+                       ON st.pgt_name = '{downstream}' \
+                     WHERE t.tgrelid = '{source}'::regclass \
+                       AND t.tgname LIKE 'pgt_ivm_%_' || st.pgt_id"
+                ))
+                .await;
+            assert_eq!(
+                trigger_count, 8,
+                "{downstream} should have all IVM triggers installed on {source}"
+            );
+        }
+
+        let insert = format!("INSERT INTO {base} VALUES (3, 30)");
+        let check_insert = format!(
+            "DO $check$ BEGIN \
+               ASSERT (SELECT val11 FROM {c} WHERE id = 3) = 301; \
+             END $check$"
+        );
+        let update = format!("UPDATE {base} SET val = 40 WHERE id = 3");
+        let check_update = format!(
+            "DO $check$ BEGIN \
+               ASSERT (SELECT val11 FROM {c} WHERE id = 3) = 401; \
+             END $check$"
+        );
+        let delete = format!("DELETE FROM {base} WHERE id = 3");
+        let check_delete = format!(
+            "DO $check$ BEGIN \
+               ASSERT NOT EXISTS (SELECT FROM {c} WHERE id = 3); \
+             END $check$"
+        );
+        let truncate = format!("TRUNCATE {base}");
+        let check_truncate = format!(
+            "DO $check$ BEGIN \
+               ASSERT NOT EXISTS (SELECT FROM {a}); \
+               ASSERT NOT EXISTS (SELECT FROM {b}); \
+               ASSERT NOT EXISTS (SELECT FROM {c}); \
+             END $check$"
+        );
+        db.execute_seq(&[
+            "BEGIN",
+            &insert,
+            &check_insert,
+            &update,
+            &check_update,
+            &delete,
+            &check_delete,
+            &truncate,
+            &check_truncate,
+            "ROLLBACK",
+        ])
         .await;
-
-    // ST_A: simple filter on base table.
-    create_immediate_st(
-        &db,
-        "cascade_a",
-        "SELECT id, val, category FROM cascade_base WHERE val > 5",
-    )
-    .await;
-    assert_eq!(db.count("public.cascade_a").await, 2);
-
-    // ST_B: aggregate on ST_A.
-    create_immediate_st(
-        &db,
-        "cascade_b",
-        "SELECT category, SUM(val) AS total FROM cascade_a GROUP BY category",
-    )
-    .await;
-    assert_eq!(db.count("public.cascade_b").await, 2);
-
-    // INSERT into base — should propagate to ST_A, then cascade to ST_B.
-    db.execute("INSERT INTO cascade_base VALUES (3, 30, 'X')")
-        .await;
-
-    assert_eq!(
-        db.count("public.cascade_a").await,
-        3,
-        "ST_A should have 3 rows after INSERT"
-    );
-
-    // Cascading IVM triggers propagate the INSERT from cascade_base → ST_A,
-    // but the second-level cascade (ST_A → ST_B) may not fire synchronously
-    // because the IVM delta application uses SPI INSERT which may not
-    // propagate transition tables through nested trigger levels in all cases.
-    // Do an explicit refresh of ST_B to ensure correctness.
-    db.refresh_st("cascade_b").await;
-
-    assert_eq!(
-        db.count("public.cascade_b").await,
-        2,
-        "ST_B should still have 2 category groups"
-    );
-
-    let total_x: String = db
-        .query_scalar("SELECT total::text FROM public.cascade_b WHERE category = 'X'")
-        .await;
-    assert_eq!(total_x, "40", "SUM for category X should be 10+30=40");
+    }
 }
 
 // ── Concurrent IMMEDIATE Mode Tests ────────────────────────────────────

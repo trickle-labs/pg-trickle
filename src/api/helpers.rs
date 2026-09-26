@@ -2119,22 +2119,45 @@ pub(super) fn detect_select_star(query: &str) -> bool {
 
         if let Some(end) = from_offset {
             let select_list = &after_select[..end];
-            // Check for bare `*` or `table.*` at top-level (depth 0)
-            let mut depth = 0i32;
-            let chars: Vec<char> = select_list.chars().collect();
-            for &ch in chars.iter() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    '*' if depth == 0 => {
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
+            return split_top_level_commas(select_list).iter().any(|item| {
+                let item = strip_select_modifier(item);
+                item == "*" || item.ends_with(".*")
+            });
         }
     }
     false
+}
+
+fn strip_select_modifier(item: &str) -> &str {
+    let mut item = item.trim_start();
+    if let Some(rest) = item.strip_prefix("ALL") {
+        return rest.trim_start();
+    }
+    let Some(rest) = item.strip_prefix("DISTINCT") else {
+        return item;
+    };
+    item = rest.trim_start();
+    let Some(rest) = item.strip_prefix("ON") else {
+        return item;
+    };
+    item = rest.trim_start();
+    if !item.starts_with('(') {
+        return item;
+    }
+    let mut depth = 0i32;
+    for (index, ch) in item.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return item[index + 1..].trim_start();
+                }
+            }
+            _ => {}
+        }
+    }
+    item
 }
 
 // ── OP-6: Volatile function detection ──────────────────────────────────────
@@ -4124,6 +4147,19 @@ mod tests {
     #[test]
     fn test_detect_select_star_explicit_cols() {
         assert!(!detect_select_star("SELECT id, name FROM t"));
+    }
+
+    #[test]
+    fn test_detect_select_star_multiplication_ignored() {
+        assert!(!detect_select_star("SELECT id, val * 10 AS val10 FROM t"));
+        assert!(!detect_select_star("SELECT 10 * val AS val10 FROM t"));
+    }
+
+    #[test]
+    fn test_detect_select_star_after_multiline_modifiers() {
+        assert!(detect_select_star("SELECT DISTINCT\n* FROM t"));
+        assert!(detect_select_star("SELECT ALL\n* FROM t"));
+        assert!(detect_select_star("SELECT DISTINCT ON (id)\n* FROM t"));
     }
 
     // ── detect_volatile_functions (OP-6) ────────────────────────────────

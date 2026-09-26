@@ -1,8 +1,8 @@
-//! TEST-3 (v0.31.0): PERF-4 ENR parity tests.
+//! TEST-3 (v0.31.0): ENR compatibility-setting parity tests.
 //!
 //! Verifies that IMMEDIATE-mode stream tables produce identical results
-//! whether `pg_trickle.ivm_use_enr = true` (ENR-based, default) or
-//! `pg_trickle.ivm_use_enr = false` (legacy temp-table approach).
+//! whether `pg_trickle.ivm_use_enr = true` or false. The setting is retained
+//! for compatibility while both values use the safe temp-table approach.
 //!
 //! These tests exercise INSERT, UPDATE, and DELETE on stream tables created
 //! in both modes and assert row-level correctness parity.
@@ -13,20 +13,16 @@ use e2e::E2eDb;
 
 /// Helper: create an IMMEDIATE-mode stream table with the given ENR mode setting.
 async fn create_immediate_st_with_enr(db: &E2eDb, name: &str, query: &str, use_enr: bool) {
-    // Set the ENR mode before creating the stream table so the trigger bodies
-    // are generated with the correct mode.
-    db.execute(&format!(
+    let set_enr = format!(
         "SET pg_trickle.ivm_use_enr = {}",
         if use_enr { "true" } else { "false" }
-    ))
-    .await;
-    let sql = format!(
+    );
+    let create = format!(
         "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
          NULL, 'IMMEDIATE')"
     );
-    db.execute(&sql).await;
-    // Reset to default after creation.
-    db.execute("RESET pg_trickle.ivm_use_enr").await;
+    db.execute_seq(&[&set_enr, &create, "RESET pg_trickle.ivm_use_enr"])
+        .await;
 }
 
 // ── INSERT parity ────────────────────────────────────────────────────────────
@@ -137,6 +133,45 @@ async fn test_ivm_enr_parity_delete() {
         "ENR and temp-table modes should produce identical row counts after DELETE"
     );
     assert_eq!(count_enr, 2);
+}
+
+#[tokio::test]
+async fn test_legacy_enr_entry_point_falls_back_to_full_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE enr_legacy_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO enr_legacy_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "enr_legacy_st",
+        "SELECT id, val FROM enr_legacy_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'enr_legacy_st'",
+        )
+        .await;
+    let source_oid: i32 = db
+        .query_scalar("SELECT 'enr_legacy_src'::regclass::oid::int")
+        .await;
+
+    db.execute(&format!(
+        "DROP TRIGGER pgt_ivm_after_upd_{pgt_id} ON enr_legacy_src"
+    ))
+    .await;
+    db.execute("UPDATE enr_legacy_src SET val = 20 WHERE id = 1")
+        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.pgt_ivm_apply_delta_enr({pgt_id}, {source_oid}, true, true)"
+    ))
+    .await;
+
+    db.assert_st_matches_query("enr_legacy_st", "SELECT id, val FROM enr_legacy_src")
+        .await;
 }
 
 // ── Aggregate parity ──────────────────────────────────────────────────────────

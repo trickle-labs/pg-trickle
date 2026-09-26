@@ -1369,15 +1369,20 @@ pub fn ensure_st_change_buffer(
     create_st_change_buffer_table(upstream_pgt_id, change_schema, &columns)
 }
 
-/// Count how many downstream STs depend on a given upstream ST.
+/// Count consumers that require a stream-table change buffer.
 pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
-    // The upstream ST's pgt_relid is stored as source_relid in pgt_dependencies.
-    // pgt_id is a plain i64, not user-supplied input.
+    // IMMEDIATE dependants consume changes through IVM triggers, not this
+    // buffer. Output-delta consumers still require the same durable capture.
     let sql = format!(
         "SELECT COUNT(*)::bigint FROM pgtrickle.pgt_dependencies \
          WHERE source_relid = (\
-           SELECT pgt_relid FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {pgt_id}\
-         ) AND source_type = 'STREAM_TABLE'"
+             SELECT pgt_relid FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {pgt_id}\
+         ) AND source_type = 'STREAM_TABLE' \
+           AND EXISTS (\
+             SELECT 1 FROM pgtrickle.pgt_stream_tables downstream \
+             WHERE downstream.pgt_id = pgt_dependencies.pgt_id \
+               AND downstream.refresh_mode <> 'IMMEDIATE'\
+           )"
     );
     let graph_consumers = Spi::get_one::<i64>(&sql).unwrap_or(Some(0)).unwrap_or(0);
     graph_consumers + i64::from(crate::api::output_delta::has_consumer(pgt_id))

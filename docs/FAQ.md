@@ -436,7 +436,7 @@ Use **IMMEDIATE** when:
 | ❌ Write amplification | Every DML statement on a base table also executes IVM trigger logic, adding latency to the original transaction. |
 | ❌ Serialized concurrent writes | An `ExclusiveLock` is taken on the stream table during maintenance, serializing writers. |
 | ❌ Limited SQL support | Window functions, `LATERAL` joins, scalar subqueries, and TopK (`ORDER BY … LIMIT`) are not supported — use `DIFFERENTIAL` instead. Recursive CTEs are supported with bounded semi-naive / DRed maintenance. |
-| ❌ Cascading limitations | Cascading IMMEDIATE stream tables work but may require manual refresh for deep chains. |
+| ❌ Cascading write cost | Cascading IMMEDIATE stream tables update synchronously at every level, so write latency grows with chain depth. |
 | ❌ No throttling | The refresh cannot be delayed or rate-limited. |
 
 **Deferred mode (`FULL` / `DIFFERENTIAL`)**
