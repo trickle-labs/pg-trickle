@@ -1,0 +1,17 @@
+capability outputs check passed: /Users/grove/projects/pg-trickle1/docs/capability-manifest.json, /Users/grove/projects/pg-trickle1/docs/SUPPORT_SUMMARY.md
+Cargo version: 0.108.0
+  OK  Cargo.lock package version = 0.108.0
+  OK  archive SQL exists: sql/archive/pg_trickle--0.108.0.sql
+  OK  upgrade script exists: sql/pg_trickle--0.107.0--0.108.0.sql
+  OK  ci.yml upgrade matrix uses auto-discovery
+  OK  ci.yml upgrade-check uses auto-discovery loop
+  OK  justfile upgrade defaults = 0.108.0
+  OK  e2e upgrade test defaults follow env!("CARGO_PKG_VERSION")
+  OK  META.json .version = 0.108.0
+  OK  META.json .provides.pg_trickle.version = 0.108.0
+  OK  capability manifest release version = 0.108.0
+  OK  pg_trickle.control default_version is template-safe (@CARGO_VERSION@)
+  OK  Dockerfile.ghcr ARG VERSION defaults = 0.108.0
+
+All version checks passed for v0.108.0.
+v0.108.0 qualification, evidence, publication, and negative-control gates passed

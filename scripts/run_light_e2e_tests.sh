@@ -140,7 +140,6 @@ LIGHT_E2E_TESTS=(
     e2e_v104_conformance_tests
     e2e_dvm_composition_tests
     e2e_failure_recovery_tests
-    e2e_publication_crash_recovery_tests
     e2e_pg_dump_tests
     e2e_v107_operator_route_tests
     e2e_buffer_growth_tests
@@ -158,6 +157,7 @@ Options:
   --test <name>             Run only the named light-E2E test target
   --filter <name>           Run only one Rust test function in the selected target
   --ignored                 Run only ignored tests
+  --no-capture              Show output and run selected tests serially
   --list                    Print selected test targets and exit
   --shard-index <n>         1-based shard index
   --shard-count <n>         Total shard count
@@ -293,6 +293,7 @@ package_before_run=false
 package_only=false
 list_only=false
 ignored_only=false
+no_capture=false
 shard_index=1
 shard_count=1
 requested_tests=()
@@ -320,6 +321,9 @@ while (($# > 0)); do
             ;;
         --ignored)
             ignored_only=true
+            ;;
+        --no-capture)
+            no_capture=true
             ;;
         --shard-index)
             shift
@@ -488,19 +492,33 @@ if [[ "${PGT_RELEASE_MACHINE_FORMAT:-0}" == "1" ]]; then
     if [[ "$ignored_only" == true ]]; then
         cargo_args+=(--run-ignored only)
     fi
-    NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${cargo_args[@]}" \
+    capture_args=()
+    if [[ "$no_capture" == true ]]; then
+        capture_args+=(--no-capture)
+    fi
+    NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run "${cargo_args[@]}" "${capture_args[@]}" \
         --message-format libtest-json-plus \
         --no-fail-fast \
         --retries "${PGT_RELEASE_NEXTEST_RETRIES:-2}"
 elif command -v cargo-nextest >/dev/null 2>&1 && [[ "${PGT_DISABLE_NEXTEST:-0}" != "1" ]]; then
+    capture_args=()
+    if [[ "$no_capture" == true ]]; then
+        capture_args+=(--no-capture)
+    fi
     if [[ "$ignored_only" == true ]]; then
-        cargo nextest run "${cargo_args[@]}" --run-ignored only --nocapture
+        cargo nextest run "${cargo_args[@]}" "${capture_args[@]}" --run-ignored only
     else
-        cargo nextest run "${cargo_args[@]}"
+        cargo nextest run "${cargo_args[@]}" "${capture_args[@]}"
     fi
 else
+    capture_args=()
+    if [[ "$no_capture" == true ]]; then
+        capture_args+=(--nocapture)
+    fi
     if [[ "$ignored_only" == true ]]; then
         cargo test "${cargo_args[@]}" -- --ignored --test-threads=1 --nocapture
+    elif [[ "$no_capture" == true ]]; then
+        cargo test "${cargo_args[@]}" -- --test-threads=1 "${capture_args[@]}"
     else
         cargo test "${cargo_args[@]}" -- --test-threads=1
     fi

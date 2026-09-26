@@ -1,0 +1,21 @@
+cargo fmt
+cargo fmt -- --check
+cargo clippy --all-targets --features pg18 -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.82s
+bash scripts/check_security_definer.sh
+Checking Rust sources (src/**/*.rs)...
+Checking SQL migration files (sql/*.sql, excluding sql/archive/)...
+
+SECURITY DEFINER check: 84 location(s) checked, 0 error(s).
+All checks passed.
+python3 scripts/check_privilege_boundaries.py
+check_privilege_boundaries: all checks passed
+docs-lint passed
+DOC-1 passed: 162 exported function(s) covered by SQL docs (233 in SQL_REFERENCE.md, 173 in SQL_API_CATALOG.md)
+stable error identifier check passed (6 entries)
+bash scripts/check_sql_builder.sh
+SEC-003: SQL builder audit PASSED
+python3 scripts/check_fuzz_targets.py
+OK: 11 targets are inventory-driven in smoke and nightly
+python3 scripts/check_monitoring_contract.py
+monitoring contract passed

@@ -122,7 +122,7 @@ def main() -> None:
     require_test(ROOT / "tests/e2e_diff_full_equivalence_tests.rs", "test_diff_full_equivalence_inner_join")
     require_test(ROOT / "tests/e2e_failure_recovery_tests.rs", "test_statement_timeout_during_refresh_recovers")
     require_test(ROOT / "tests/e2e_failure_recovery_tests.rs", "test_recovery_clone_isolation_requires_explicit_adoption")
-    require_test(ROOT / "tests/e2e_publication_crash_recovery_tests.rs", "test_err4_publication_subscriber_catches_up_after_disruption")
+    require_test(ROOT / "tests/e2e_publication_crash_recovery_tests.rs", "test_err4_publisher_connection_recovery_smoke")
     require_test(ROOT / "tests/e2e_v098_stability_tests.rs", "test_v103_wal_admission_is_receipt_backed")
     require_test(ROOT / "tests/e2e_upgrade_tests.rs", "test_upgrade_quiesce_preserves_pending_deltas")
 

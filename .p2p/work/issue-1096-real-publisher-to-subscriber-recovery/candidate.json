@@ -1,0 +1,40 @@
+{
+  "work_item": "work/issue-1096-real-publisher-to-subscriber-recovery.md",
+  "work_item_sha256": "b7788d82e9d17a04574f298295bc8c0582adb61195505a76b370a3f9779da622",
+  "comparison_base": "edf700efdbb80983fe12c0e10f84fa271b818faf",
+  "binding_inputs": [
+    {
+      "path": "work/sources/issue-1090-contract-v1.md",
+      "sha256": "0ad7a2c5dae2acc49bf3652c70d2ee5780685f92caa33271a6ccf176fcc7b8d8"
+    },
+    {
+      "path": "work/sources/issue-1090.json",
+      "sha256": "07a0d8f3d0992dfc13af90ebcc01d179c4673df2a2337d852db276feac3667e5"
+    },
+    {
+      "path": "work/sources/issue-1091.json",
+      "sha256": "db1777d61101f1a5324e2056c282750975bcf24dc8f77f02578ae5b7e810ff8c"
+    },
+    {
+      "path": "work/sources/issue-1092.json",
+      "sha256": "e2625089607a2bf2b1731c66980d0da6c122a2d0f0e51214e2cd56d08e690329"
+    },
+    {
+      "path": "work/sources/issue-1093-contract-v1.md",
+      "sha256": "bf9f6d71cec96e5b0628c68a304659b62ee6754f4391ed7929220f96954f264d"
+    },
+    {
+      "path": "work/sources/issue-1093.json",
+      "sha256": "5093653748586a7802862ba0a398e1d439193a7738ee80a710eb47fe80eb7b16"
+    },
+    {
+      "path": "work/sources/issue-1096-contract-v1.md",
+      "sha256": "fb08270f9f448555e2e4c4de9c599be6ac3ca02db84fc3675980ca9a74eca92f"
+    },
+    {
+      "path": "work/sources/issue-1096.json",
+      "sha256": "ae8471fd4f2d2b34cb67f6ad4b4f0bad59ccd20d2b5b8e0e344a26350ca25356"
+    }
+  ],
+  "commit": "710e657f17548fb7446e1b2384b595c3a530e162"
+}

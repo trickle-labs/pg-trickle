@@ -5632,9 +5632,10 @@ Error messages throughout the extension now include more context — table names
 operation types, and hints such as "check system clock" on timestamp failures.
 This makes it easier to diagnose problems from logs alone.
 
-A new crash-recovery test verifies that a publication subscriber that was
-active when the database was killed catches up with **zero data loss** after
-restart.
+The v0.26.0 publication recovery test covered publisher connection-pool
+recovery and stream-table contents. It did not create a PostgreSQL subscriber
+or restart a postmaster. Real publisher-to-subscriber restart and catch-up
+coverage is provided by the publication recovery qualification suite (#1096).
 
 ---
 

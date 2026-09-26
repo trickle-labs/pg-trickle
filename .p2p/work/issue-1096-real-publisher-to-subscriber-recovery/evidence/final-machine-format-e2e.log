@@ -1,0 +1,768 @@
+Running light-E2E shard 1/1 with 1 test targets
+  e2e_publication_crash_recovery_tests
+Light-E2E run id: light-e2e-15159-1790426434
+Creating shared light-E2E PostgreSQL container...
+PGT_ACTUAL_POSTGRESQL_VERSION=18.6 (Debian 18.6-1.pgdg13+2)
+Shared container c5ced7c5b139 ready on port 60187
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+────────────
+ Nextest run ID 431382b2-78b2-4e21-b565-d9d3189f86e8 with nextest profile: default
+    Starting 9 tests across 1 binary
+       START [         ] (1/9) pg_trickle::e2e_publication_crash_recovery_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+{"type":"suite","event":"started","test_count":9,"nextest":{"crate":"pg_trickle","test_binary":"e2e_publication_crash_recovery_tests","kind":"test"}}
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason"}
+
+running 1 test
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+        PASS [   0.013s] (1/9) pg_trickle::e2e_publication_crash_recovery_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason","exec_time":0.013394}
+       START [         ] (2/9) pg_trickle::e2e_publication_crash_recovery_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations"}
+
+running 1 test
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+        PASS [   0.013s] (2/9) pg_trickle::e2e_publication_crash_recovery_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations","exec_time":0.012502292}
+       START [         ] (3/9) pg_trickle::e2e_publication_crash_recovery_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default"}
+
+running 1 test
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+        PASS [   0.010s] (3/9) pg_trickle::e2e_publication_crash_recovery_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default","exec_time":0.009950958}
+       START [         ] (4/9) pg_trickle::e2e_publication_crash_recovery_tests test_err4_publication_registration_failure_is_clean
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_err4_publication_registration_failure_is_clean"}
+
+running 1 test
+test test_err4_publication_registration_failure_is_clean ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.47s
+
+        PASS [   0.481s] (4/9) pg_trickle::e2e_publication_crash_recovery_tests test_err4_publication_registration_failure_is_clean
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_err4_publication_registration_failure_is_clean","exec_time":0.48050225}
+       START [         ] (5/9) pg_trickle::e2e_publication_crash_recovery_tests test_err4_publisher_connection_recovery_smoke
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_err4_publisher_connection_recovery_smoke"}
+
+running 1 test
+test test_err4_publisher_connection_recovery_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.77s
+
+        PASS [   0.782s] (5/9) pg_trickle::e2e_publication_crash_recovery_tests test_err4_publisher_connection_recovery_smoke
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_err4_publisher_connection_recovery_smoke","exec_time":0.781905167}
+       START [         ] (6/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_initial_sync_dml_and_setup_failures
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_initial_sync_dml_and_setup_failures"}
+
+running 1 test
+[Q1096] case=sync publisher=4a0442c439afdb8894d1390c27c7eaa2b8f6d663526a97aa44e225791cab6d11 subscriber=a0c7b0ef086ce1fba5a3bdb6e91a3281bec1fe62374dc3f7805299a07f4bce3a publication=pgt_pub_p1096_sync_155982584409000_stream subscription=p1096_sync_155982584409000_sub slot=p1096_sync_155982584409000_sub initial_sync=exact
+[Q1096] data publisher=4a0442c439afdb8894d1390c27c7eaa2b8f6d663526a97aa44e225791cab6d11:7689823052030824490:/var/lib/postgresql/18/docker subscriber=a0c7b0ef086ce1fba5a3bdb6e91a3281bec1fe62374dc3f7805299a07f4bce3a:7689823111051268139:/var/lib/postgresql/18/docker publication=pgt_pub_p1096_sync_155982584409000_stream slot=p1096_sync_155982584409000_sub network=pgt_pub_15598_1_550090000
+[Q1096] server=publisher name=p1096_sync_155982584409000_pub container=4a0442c439afdb8894d1390c27c7eaa2b8f6d663526a97aa44e225791cab6d11 logs_begin
+
+The database cluster will be initialized with locale "en_US.utf8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:40:51.199 UTC [52] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:40:51.205 UTC [52] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:40:51.206 UTC [52] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:40:51.208 UTC [58] LOG:  database system was shut down at 2026-09-26 12:40:51 UTC
+2026-09-26 12:40:51.210 UTC [52] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:40:51.404 UTC [52] LOG:  received fast shutdown request
+2026-09-26 12:40:51.407 UTC [52] LOG:  aborting any active transactions
+2026-09-26 12:40:51.408 UTC [52] LOG:  background worker "logical replication launcher" (PID 62) exited with exit code 1
+2026-09-26 12:40:51.409 UTC [56] LOG:  shutting down
+2026-09-26 12:40:51.410 UTC [56] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:40:51.498 UTC [56] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.080 s, total=0.090 s; sync files=269, longest=0.004 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:40:51.505 UTC [52] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+2026-09-26 12:40:50.895 UTC [44] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:40:51.626 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:40:51.635 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:40:51.635 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:40:51.635 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:40:51.636 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:40:51.639 UTC [76] LOG:  database system was shut down at 2026-09-26 12:40:51 UTC
+2026-09-26 12:40:51.641 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:41:18.241 UTC [1882] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.p1096_sync_155982584409000_stream
+2026-09-26 12:41:18.241 UTC [1882] STATEMENT:  SELECT pgtrickle.create_stream_table($1, $2, '1h', 'DIFFERENTIAL')
+2026-09-26 12:41:18.318 UTC [1883] LOG:  logical decoding found consistent point at 0/1D03FE8
+2026-09-26 12:41:18.318 UTC [1883] DETAIL:  There are no running transactions.
+2026-09-26 12:41:18.318 UTC [1883] STATEMENT:  CREATE_REPLICATION_SLOT "p1096_sync_155982584409000_sub" LOGICAL pgoutput (SNAPSHOT 'nothing')
+2026-09-26 12:41:18.328 UTC [1884] LOG:  starting logical decoding for slot "p1096_sync_155982584409000_sub"
+2026-09-26 12:41:18.328 UTC [1884] DETAIL:  Streaming transactions committing after 0/1D04038, reading WAL from 0/1D03FE8.
+2026-09-26 12:41:18.328 UTC [1884] STATEMENT:  START_REPLICATION SLOT "p1096_sync_155982584409000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_sync_155982584409000_stream"')
+2026-09-26 12:41:18.328 UTC [1884] LOG:  logical decoding found consistent point at 0/1D03FE8
+2026-09-26 12:41:18.328 UTC [1884] DETAIL:  There are no running transactions.
+2026-09-26 12:41:18.328 UTC [1884] STATEMENT:  START_REPLICATION SLOT "p1096_sync_155982584409000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_sync_155982584409000_stream"')
+2026-09-26 12:41:18.342 UTC [1885] LOG:  logical decoding found consistent point at 0/1D04038
+2026-09-26 12:41:18.342 UTC [1885] DETAIL:  There are no running transactions.
+2026-09-26 12:41:18.342 UTC [1885] STATEMENT:  CREATE_REPLICATION_SLOT "pg_17428_sync_17419_7689823111051268139" LOGICAL pgoutput (SNAPSHOT 'use')
+2026-09-26 12:41:18.347 UTC [1885] LOG:  starting logical decoding for slot "pg_17428_sync_17419_7689823111051268139"
+2026-09-26 12:41:18.347 UTC [1885] DETAIL:  Streaming transactions committing after 0/1D04070, reading WAL from 0/1D04038.
+2026-09-26 12:41:18.347 UTC [1885] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823111051268139" LOGICAL 0/1D04070 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_sync_155982584409000_stream"')
+2026-09-26 12:41:18.347 UTC [1885] LOG:  logical decoding found consistent point at 0/1D04038
+2026-09-26 12:41:18.347 UTC [1885] DETAIL:  There are no running transactions.
+2026-09-26 12:41:18.347 UTC [1885] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823111051268139" LOGICAL 0/1D04070 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_sync_155982584409000_stream"')
+2026-09-26 12:41:18.583 UTC [82] ERROR:  stream table not found: public.missing_stream_table
+2026-09-26 12:41:18.583 UTC [82] HINT:  Use pgtrickle.pgt_status() to list existing stream tables. Ensure the name is schema-qualified (e.g., 'public.my_table').
+2026-09-26 12:41:18.583 UTC [82] STATEMENT:  SELECT pgtrickle.stream_table_to_publication('missing_stream_table')
+[Q1096] server=publisher logs_end
+[Q1096] server=subscriber name=p1096_sync_155982584409000_sub container=a0c7b0ef086ce1fba5a3bdb6e91a3281bec1fe62374dc3f7805299a07f4bce3a logs_begin
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "en_US.utf8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:41:04.938 UTC [53] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:04.945 UTC [53] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:04.946 UTC [53] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:04.948 UTC [59] LOG:  database system was shut down at 2026-09-26 12:41:04 UTC
+2026-09-26 12:41:04.950 UTC [53] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:41:05.153 UTC [53] LOG:  received fast shutdown request
+2026-09-26 12:41:05.155 UTC [53] LOG:  aborting any active transactions
+2026-09-26 12:41:05.156 UTC [53] LOG:  background worker "logical replication launcher" (PID 63) exited with exit code 1
+2026-09-26 12:41:05.156 UTC [57] LOG:  shutting down
+2026-09-26 12:41:05.158 UTC [57] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:41:05.244 UTC [57] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.077 s, total=0.088 s; sync files=269, longest=0.004 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:41:05.251 UTC [53] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+2026-09-26 12:41:04.625 UTC [45] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:41:05.261 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:05.267 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:05.267 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:41:05.267 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:41:05.268 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:05.271 UTC [77] LOG:  database system was shut down at 2026-09-26 12:41:05 UTC
+2026-09-26 12:41:05.273 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:41:18.322 UTC [1889] LOG:  logical replication apply worker for subscription "p1096_sync_155982584409000_sub" has started
+2026-09-26 12:41:18.330 UTC [1890] LOG:  logical replication table synchronization worker for subscription "p1096_sync_155982584409000_sub", table "p1096_sync_155982584409000_stream" has started
+2026-09-26 12:41:18.348 UTC [1890] LOG:  logical replication table synchronization worker for subscription "p1096_sync_155982584409000_sub", table "p1096_sync_155982584409000_stream" has finished
+2026-09-26 12:41:18.453 UTC [1889] LOG:  conflict detected on relation "public.p1096_sync_155982584409000_stream": conflict=delete_origin_differs
+2026-09-26 12:41:18.453 UTC [1889] DETAIL:  Deleting the row that was modified by a non-existent origin in transaction 832 at 2026-09-26 12:41:18.335837+00.
+	Existing local row (\x020100000001030180000002ff, 2, b, 20); replica identity (__pgt_row_id)=(\x020100000001030180000002ff).
+2026-09-26 12:41:18.453 UTC [1889] CONTEXT:  processing remote data for replication origin "pg_17428" during message type "DELETE" for replication target relation "public.p1096_sync_155982584409000_stream" in transaction 904, finished at 0/1D297D8
+2026-09-26 12:41:18.454 UTC [1889] LOG:  conflict detected on relation "public.p1096_sync_155982584409000_stream": conflict=update_origin_differs
+2026-09-26 12:41:18.454 UTC [1889] DETAIL:  Updating the row that was modified by a non-existent origin in transaction 832 at 2026-09-26 12:41:18.335837+00.
+	Existing local row (\x020100000001030180000001ff, 1, a, 10); remote row (\x020100000001030180000001ff, 1, a, 11); replica identity (__pgt_row_id)=(\x020100000001030180000001ff).
+2026-09-26 12:41:18.454 UTC [1889] CONTEXT:  processing remote data for replication origin "pg_17428" during message type "UPDATE" for replication target relation "public.p1096_sync_155982584409000_stream" in transaction 904, finished at 0/1D297D8
+2026-09-26 12:41:18.586 UTC [83] ERROR:  subscription "p1096_bad" could not connect to the publisher: connection to server at "127.0.0.1", port 1 failed: Connection refused
+		Is the server running on that host and accepting TCP/IP connections?
+2026-09-26 12:41:18.586 UTC [83] STATEMENT:  CREATE SUBSCRIPTION p1096_bad CONNECTION 'host=127.0.0.1 port=1 dbname=postgres user=postgres connect_timeout=1' PUBLICATION "pgt_pub_p1096_sync_155982584409000_stream"
+[Q1096] server=subscriber logs_end
+test test_publication_recovery_initial_sync_dml_and_setup_failures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 28.66s
+
+        PASS [  28.678s] (6/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_initial_sync_dml_and_setup_failures
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_initial_sync_dml_and_setup_failures","exec_time":28.677778459}
+       START [         ] (7/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_interrupted_catchup_and_negative_controls
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_interrupted_catchup_and_negative_controls"}
+
+running 1 test
+[Q1096] case=interrupted_catchup publisher=30b9207e6b87ce2b238950cab302b7518fa4eff7758202570de869c2f72ca333 subscriber=95808bc5c9ed5b445fdcf3ddfd66118e2899a0556f054f079174fa7d6074213b publication=pgt_pub_p1096_interrupted_catchup_164272280998000_stream subscription=p1096_interrupted_catchup_164272280998000_sub slot=p1096_interrupted_catchup_164272280998000_sub initial_sync=exact
+[Q1096] catchup_blocked worker_pid=1894 blocker_pid=83 delivered_ids=1,2,4 pending_ids=50,6 slot=p1096_interrupted_catchup_164272280998000_sub target_lsn=0/1D41910
+[Q1096] interrupted_catchup final_checkpoint_lsn=0/1D41910 exact=true slot_caught_up=true
+[Q1096] negative_controls missing_row=detected altered_value=detected disabled_progress=detected disabled_slot_backlog=true
+[Q1096] data publisher=30b9207e6b87ce2b238950cab302b7518fa4eff7758202570de869c2f72ca333:7689823175247085610:/var/lib/postgresql/18/docker subscriber=95808bc5c9ed5b445fdcf3ddfd66118e2899a0556f054f079174fa7d6074213b:7689823234158133291:/var/lib/postgresql/18/docker publication=pgt_pub_p1096_interrupted_catchup_164272280998000_stream slot=p1096_interrupted_catchup_164272280998000_sub network=pgt_pub_16427_1_240496000
+[Q1096] server=publisher name=p1096_interrupted_catchup_164272280998000_pub container=30b9207e6b87ce2b238950cab302b7518fa4eff7758202570de869c2f72ca333 logs_begin
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:41:19.891 UTC [52] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:19.897 UTC [52] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:19.898 UTC [52] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:19.901 UTC [58] LOG:  database system was shut down at 2026-09-26 12:41:19 UTC
+2026-09-26 12:41:19.903 UTC [52] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:41:20.109 UTC [52] LOG:  received fast shutdown request
+2026-09-26 12:41:20.111 UTC [52] LOG:  aborting any active transactions
+2026-09-26 12:41:20.112 UTC [52] LOG:  background worker "logical replication launcher" (PID 62) exited with exit code 1
+2026-09-26 12:41:20.113 UTC [56] LOG:  shutting down
+2026-09-26 12:41:20.113 UTC [56] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:41:20.202 UTC [56] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.009 s, sync=0.079 s, total=0.090 s; sync files=269, longest=0.008 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:41:20.209 UTC [52] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+2026-09-26 12:41:19.571 UTC [44] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:41:20.217 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:20.224 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:20.224 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:41:20.224 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:41:20.225 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:20.229 UTC [76] LOG:  database system was shut down at 2026-09-26 12:41:20 UTC
+2026-09-26 12:41:20.231 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:41:46.676 UTC [1892] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.p1096_interrupted_catchup_164272280998000_stream
+2026-09-26 12:41:46.676 UTC [1892] STATEMENT:  SELECT pgtrickle.create_stream_table($1, $2, '1h', 'DIFFERENTIAL')
+2026-09-26 12:41:46.745 UTC [1893] LOG:  logical decoding found consistent point at 0/1D042A0
+2026-09-26 12:41:46.745 UTC [1893] DETAIL:  There are no running transactions.
+2026-09-26 12:41:46.745 UTC [1893] STATEMENT:  CREATE_REPLICATION_SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL pgoutput (SNAPSHOT 'nothing')
+2026-09-26 12:41:46.755 UTC [1894] LOG:  starting logical decoding for slot "p1096_interrupted_catchup_164272280998000_sub"
+2026-09-26 12:41:46.755 UTC [1894] DETAIL:  Streaming transactions committing after 0/1D042D8, reading WAL from 0/1D042A0.
+2026-09-26 12:41:46.755 UTC [1894] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:46.755 UTC [1894] LOG:  logical decoding found consistent point at 0/1D042A0
+2026-09-26 12:41:46.755 UTC [1894] DETAIL:  There are no running transactions.
+2026-09-26 12:41:46.755 UTC [1894] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:46.768 UTC [1895] LOG:  logical decoding found consistent point at 0/1D042D8
+2026-09-26 12:41:46.768 UTC [1895] DETAIL:  There are no running transactions.
+2026-09-26 12:41:46.768 UTC [1895] STATEMENT:  CREATE_REPLICATION_SLOT "pg_17428_sync_17419_7689823234158133291" LOGICAL pgoutput (SNAPSHOT 'use')
+2026-09-26 12:41:46.772 UTC [1895] LOG:  starting logical decoding for slot "pg_17428_sync_17419_7689823234158133291"
+2026-09-26 12:41:46.772 UTC [1895] DETAIL:  Streaming transactions committing after 0/1D04310, reading WAL from 0/1D042D8.
+2026-09-26 12:41:46.772 UTC [1895] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823234158133291" LOGICAL 0/1D04310 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:46.772 UTC [1895] LOG:  logical decoding found consistent point at 0/1D042D8
+2026-09-26 12:41:46.772 UTC [1895] DETAIL:  There are no running transactions.
+2026-09-26 12:41:46.772 UTC [1895] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823234158133291" LOGICAL 0/1D04310 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:47.307 UTC [1896] LOG:  0/1D29FB8 has been already streamed, forwarding to 0/1D2A160
+2026-09-26 12:41:47.307 UTC [1896] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/1D29FB8 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:47.307 UTC [1896] LOG:  starting logical decoding for slot "p1096_interrupted_catchup_164272280998000_sub"
+2026-09-26 12:41:47.307 UTC [1896] DETAIL:  Streaming transactions committing after 0/1D2A160, reading WAL from 0/1D042D8.
+2026-09-26 12:41:47.307 UTC [1896] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/1D29FB8 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:47.307 UTC [1896] LOG:  logical decoding found consistent point at 0/1D042D8
+2026-09-26 12:41:47.307 UTC [1896] DETAIL:  There are no running transactions.
+2026-09-26 12:41:47.307 UTC [1896] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/1D29FB8 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:49.504 UTC [1897] LOG:  0/1D41910 has been already streamed, forwarding to 0/1D41C38
+2026-09-26 12:41:49.504 UTC [1897] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/1D41910 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:49.504 UTC [1897] LOG:  starting logical decoding for slot "p1096_interrupted_catchup_164272280998000_sub"
+2026-09-26 12:41:49.504 UTC [1897] DETAIL:  Streaming transactions committing after 0/1D41C38, reading WAL from 0/1D042D8.
+2026-09-26 12:41:49.504 UTC [1897] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/1D41910 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+2026-09-26 12:41:49.504 UTC [1897] LOG:  logical decoding found consistent point at 0/1D042D8
+2026-09-26 12:41:49.504 UTC [1897] DETAIL:  There are no running transactions.
+2026-09-26 12:41:49.504 UTC [1897] STATEMENT:  START_REPLICATION SLOT "p1096_interrupted_catchup_164272280998000_sub" LOGICAL 0/1D41910 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_interrupted_catchup_164272280998000_stream"')
+[Q1096] server=publisher logs_end
+[Q1096] server=subscriber name=p1096_interrupted_catchup_164272280998000_sub container=95808bc5c9ed5b445fdcf3ddfd66118e2899a0556f054f079174fa7d6074213b logs_begin
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:41:33.599 UTC [53] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:33.605 UTC [53] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:33.606 UTC [53] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:33.609 UTC [59] LOG:  database system was shut down at 2026-09-26 12:41:33 UTC
+2026-09-26 12:41:33.611 UTC [53] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:41:33.811 UTC [53] LOG:  received fast shutdown request
+2026-09-26 12:41:33.812 UTC [53] LOG:  aborting any active transactions
+2026-09-26 12:41:33.813 UTC [53] LOG:  background worker "logical replication launcher" (PID 63) exited with exit code 1
+2026-09-26 12:41:33.814 UTC [57] LOG:  shutting down
+2026-09-26 12:41:33.815 UTC [57] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:41:33.906 UTC [57] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.010 s, sync=0.080 s, total=0.093 s; sync files=269, longest=0.009 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:41:33.913 UTC [53] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+
+2026-09-26 12:41:33.282 UTC [45] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:41:34.028 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:34.037 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:34.037 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:41:34.037 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:41:34.038 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:34.041 UTC [77] LOG:  database system was shut down at 2026-09-26 12:41:33 UTC
+2026-09-26 12:41:34.043 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:41:46.749 UTC [1894] LOG:  logical replication apply worker for subscription "p1096_interrupted_catchup_164272280998000_sub" has started
+2026-09-26 12:41:46.756 UTC [1895] LOG:  logical replication table synchronization worker for subscription "p1096_interrupted_catchup_164272280998000_sub", table "p1096_interrupted_catchup_164272280998000_stream" has started
+2026-09-26 12:41:46.773 UTC [1895] LOG:  logical replication table synchronization worker for subscription "p1096_interrupted_catchup_164272280998000_sub", table "p1096_interrupted_catchup_164272280998000_stream" has finished
+2026-09-26 12:41:46.941 UTC [1893] FATAL:  terminating connection due to unexpected postmaster exit
+2026-09-26 12:41:46.941 UTC [83] FATAL:  terminating connection due to unexpected postmaster exit
+2026-09-26 12:41:47.202 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:47.210 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:47.210 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:41:47.210 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:41:47.211 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:47.214 UTC [32] LOG:  database system was interrupted; last known up at 2026-09-26 12:41:34 UTC
+2026-09-26 12:41:47.231 UTC [33] FATAL:  the database system is starting up
+2026-09-26 12:41:47.246 UTC [34] FATAL:  the database system is starting up
+2026-09-26 12:41:47.264 UTC [32] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-09-26 12:41:47.265 UTC [32] LOG:  redo starts at 0/1BEE970
+2026-09-26 12:41:47.267 UTC [32] LOG:  invalid record length at 0/1CA8AA0: expected at least 24, got 0
+2026-09-26 12:41:47.267 UTC [32] LOG:  redo done at 0/1CA8A58 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+2026-09-26 12:41:47.272 UTC [35] FATAL:  the database system is not yet accepting connections
+2026-09-26 12:41:47.272 UTC [35] DETAIL:  Consistent recovery state has not been yet reached.
+2026-09-26 12:41:47.284 UTC [30] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-09-26 12:41:47.294 UTC [30] LOG:  checkpoint complete: wrote 130 buffers (0.8%), wrote 5 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.005 s, sync=0.005 s, total=0.012 s; sync files=54, longest=0.003 s, average=0.001 s; distance=744 kB, estimate=744 kB; lsn=0/1CA8AA0, redo lsn=0/1CA8AA0
+2026-09-26 12:41:47.296 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:41:47.301 UTC [40] LOG:  logical replication apply worker for subscription "p1096_interrupted_catchup_164272280998000_sub" has started
+2026-09-26 12:41:47.451 UTC [40] LOG:  logical replication worker for subscription "p1096_interrupted_catchup_164272280998000_sub" will stop because the subscription was disabled
+2026-09-26 12:41:49.494 UTC [44] LOG:  logical replication apply worker for subscription "p1096_interrupted_catchup_164272280998000_sub" has started
+[Q1096] server=subscriber logs_end
+test test_publication_recovery_interrupted_catchup_and_negative_controls ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 31.01s
+
+        PASS [  31.041s] (7/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_interrupted_catchup_and_negative_controls
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_interrupted_catchup_and_negative_controls","exec_time":31.040903542}
+       START [         ] (8/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_publisher_crash_retains_slot_and_catches_up
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_publisher_crash_retains_slot_and_catches_up"}
+
+running 1 test
+[Q1096] case=publisher_restart publisher=e36880dfa86fadf1274825916c515b8ba878712a51f5998dbb66e39144bedf1c subscriber=7409ede05e12f1f7fdfec6e4bb44538d2f025ee0c58612dfb8e56225e67292d5 publication=pgt_pub_p1096_publisher_restart_172292315869000_stream subscription=p1096_publisher_restart_172292315869000_sub slot=p1096_publisher_restart_172292315869000_sub initial_sync=exact
+[Q1096] publisher_crash exact=true publication=pgt_pub_p1096_publisher_restart_172292315869000_stream slot=p1096_publisher_restart_172292315869000_sub retained_identity=true postmaster_before=2026-09-26 12:41:51.365243+00 postmaster_after=2026-09-26 12:42:18.517133+00
+[Q1096] data publisher=e36880dfa86fadf1274825916c515b8ba878712a51f5998dbb66e39144bedf1c:7689823308513800235:/var/lib/postgresql/18/docker subscriber=7409ede05e12f1f7fdfec6e4bb44538d2f025ee0c58612dfb8e56225e67292d5:7689823367570051115:/var/lib/postgresql/18/docker publication=pgt_pub_p1096_publisher_restart_172292315869000_stream slot=p1096_publisher_restart_172292315869000_sub network=pgt_pub_17229_1_277369000
+[Q1096] server=publisher name=p1096_publisher_restart_172292315869000_pub container=e36880dfa86fadf1274825916c515b8ba878712a51f5998dbb66e39144bedf1c logs_begin
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:41:50.922 UTC [53] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:50.929 UTC [53] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:50.929 UTC [53] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:50.932 UTC [59] LOG:  database system was shut down at 2026-09-26 12:41:50 UTC
+2026-09-26 12:41:50.935 UTC [53] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:41:51.139 UTC [53] LOG:  received fast shutdown request
+2026-09-26 12:41:51.140 UTC [53] LOG:  aborting any active transactions
+2026-09-26 12:41:51.141 UTC [53] LOG:  background worker "logical replication launcher" (PID 63) exited with exit code 1
+2026-09-26 12:41:51.141 UTC [57] LOG:  shutting down
+2026-09-26 12:41:51.143 UTC [57] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:41:51.234 UTC [57] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.010 s, sync=0.081 s, total=0.094 s; sync files=269, longest=0.004 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:41:51.241 UTC [53] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:41:51.354 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:41:51.362 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:41:51.362 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:41:51.362 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:41:51.364 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:41:51.367 UTC [77] LOG:  database system was shut down at 2026-09-26 12:41:51 UTC
+2026-09-26 12:41:51.369 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:17.793 UTC [1899] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.p1096_publisher_restart_172292315869000_stream
+2026-09-26 12:42:17.793 UTC [1899] STATEMENT:  SELECT pgtrickle.create_stream_table($1, $2, '1h', 'DIFFERENTIAL')
+2026-09-26 12:42:17.865 UTC [1900] LOG:  logical decoding found consistent point at 0/1D04228
+2026-09-26 12:42:17.865 UTC [1900] DETAIL:  There are no running transactions.
+2026-09-26 12:42:17.865 UTC [1900] STATEMENT:  CREATE_REPLICATION_SLOT "p1096_publisher_restart_172292315869000_sub" LOGICAL pgoutput (SNAPSHOT 'nothing')
+2026-09-26 12:42:17.875 UTC [1901] LOG:  starting logical decoding for slot "p1096_publisher_restart_172292315869000_sub"
+2026-09-26 12:42:17.875 UTC [1901] DETAIL:  Streaming transactions committing after 0/1D04260, reading WAL from 0/1D04228.
+2026-09-26 12:42:17.875 UTC [1901] STATEMENT:  START_REPLICATION SLOT "p1096_publisher_restart_172292315869000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_publisher_restart_172292315869000_stream"')
+2026-09-26 12:42:17.875 UTC [1901] LOG:  logical decoding found consistent point at 0/1D04228
+2026-09-26 12:42:17.875 UTC [1901] DETAIL:  There are no running transactions.
+2026-09-26 12:42:17.875 UTC [1901] STATEMENT:  START_REPLICATION SLOT "p1096_publisher_restart_172292315869000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_publisher_restart_172292315869000_stream"')
+2026-09-26 12:42:17.888 UTC [1902] LOG:  logical decoding found consistent point at 0/1D04260
+2026-09-26 12:42:17.888 UTC [1902] DETAIL:  There are no running transactions.
+2026-09-26 12:42:17.888 UTC [1902] STATEMENT:  CREATE_REPLICATION_SLOT "pg_17428_sync_17419_7689823367570051115" LOGICAL pgoutput (SNAPSHOT 'use')
+2026-09-26 12:42:17.892 UTC [1902] LOG:  starting logical decoding for slot "pg_17428_sync_17419_7689823367570051115"
+2026-09-26 12:42:17.892 UTC [1902] DETAIL:  Streaming transactions committing after 0/1D04298, reading WAL from 0/1D04260.
+2026-09-26 12:42:17.892 UTC [1902] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823367570051115" LOGICAL 0/1D04298 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_publisher_restart_172292315869000_stream"')
+2026-09-26 12:42:17.892 UTC [1902] LOG:  logical decoding found consistent point at 0/1D04260
+2026-09-26 12:42:17.892 UTC [1902] DETAIL:  There are no running transactions.
+2026-09-26 12:42:17.892 UTC [1902] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823367570051115" LOGICAL 0/1D04298 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_publisher_restart_172292315869000_stream"')
+2026-09-26 12:42:18.502 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:18.511 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:18.511 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:42:18.511 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:42:18.515 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:18.520 UTC [32] LOG:  database system was interrupted; last known up at 2026-09-26 12:41:51 UTC
+2026-09-26 12:42:18.571 UTC [32] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-09-26 12:42:18.573 UTC [32] LOG:  redo starts at 0/1BEE970
+2026-09-26 12:42:18.576 UTC [32] LOG:  invalid record length at 0/1D2A260: expected at least 24, got 0
+2026-09-26 12:42:18.576 UTC [32] LOG:  redo done at 0/1D293E8 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+2026-09-26 12:42:18.592 UTC [30] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-09-26 12:42:18.612 UTC [30] LOG:  checkpoint complete: wrote 254 buffers (1.6%), wrote 5 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.012 s, total=0.021 s; sync files=108, longest=0.005 s, average=0.001 s; distance=1262 kB, estimate=1262 kB; lsn=0/1D2A260, redo lsn=0/1D2A260
+2026-09-26 12:42:18.615 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:19.092 UTC [40] LOG:  starting logical decoding for slot "p1096_publisher_restart_172292315869000_sub"
+2026-09-26 12:42:19.092 UTC [40] DETAIL:  Streaming transactions committing after 0/1D04260, reading WAL from 0/1D04260.
+2026-09-26 12:42:19.092 UTC [40] STATEMENT:  START_REPLICATION SLOT "p1096_publisher_restart_172292315869000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_publisher_restart_172292315869000_stream"')
+2026-09-26 12:42:19.092 UTC [40] LOG:  logical decoding found consistent point at 0/1D04260
+2026-09-26 12:42:19.092 UTC [40] DETAIL:  There are no running transactions.
+2026-09-26 12:42:19.092 UTC [40] STATEMENT:  START_REPLICATION SLOT "p1096_publisher_restart_172292315869000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_publisher_restart_172292315869000_stream"')
+[Q1096] server=publisher logs_end
+[Q1096] server=subscriber name=p1096_publisher_restart_172292315869000_sub container=7409ede05e12f1f7fdfec6e4bb44538d2f025ee0c58612dfb8e56225e67292d5 logs_begin
+The database cluster will be initialized with locale "en_US.utf8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:42:04.668 UTC [53] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:04.674 UTC [53] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:04.675 UTC [53] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:04.678 UTC [59] LOG:  database system was shut down at 2026-09-26 12:42:04 UTC
+2026-09-26 12:42:04.680 UTC [53] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:42:04.887 UTC [53] LOG:  received fast shutdown request
+2026-09-26 12:42:04.889 UTC [53] LOG:  aborting any active transactions
+2026-09-26 12:42:04.891 UTC [53] LOG:  background worker "logical replication launcher" (PID 63) exited with exit code 1
+2026-09-26 12:42:04.891 UTC [57] LOG:  shutting down
+2026-09-26 12:42:04.891 UTC [57] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:42:04.990 UTC [57] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.090 s, total=0.100 s; sync files=269, longest=0.007 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:42:04.997 UTC [53] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+
+2026-09-26 12:42:04.345 UTC [45] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:42:05.112 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:05.120 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:05.121 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:42:05.121 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:42:05.124 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:05.128 UTC [77] LOG:  database system was shut down at 2026-09-26 12:42:04 UTC
+2026-09-26 12:42:05.131 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:17.869 UTC [1890] LOG:  logical replication apply worker for subscription "p1096_publisher_restart_172292315869000_sub" has started
+2026-09-26 12:42:17.876 UTC [1891] LOG:  logical replication table synchronization worker for subscription "p1096_publisher_restart_172292315869000_sub", table "p1096_publisher_restart_172292315869000_stream" has started
+2026-09-26 12:42:17.893 UTC [1891] LOG:  logical replication table synchronization worker for subscription "p1096_publisher_restart_172292315869000_sub", table "p1096_publisher_restart_172292315869000_stream" has finished
+2026-09-26 12:42:18.006 UTC [1] LOG:  received fast shutdown request
+2026-09-26 12:42:18.007 UTC [1] LOG:  aborting any active transactions
+2026-09-26 12:42:18.007 UTC [1890] FATAL:  terminating logical replication worker due to administrator command
+2026-09-26 12:42:18.009 UTC [1] LOG:  background worker "logical replication launcher" (PID 81) exited with exit code 1
+2026-09-26 12:42:18.010 UTC [1] LOG:  background worker "logical replication apply worker" (PID 1890) exited with exit code 1
+2026-09-26 12:42:18.010 UTC [75] LOG:  shutting down
+2026-09-26 12:42:18.011 UTC [75] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:42:18.022 UTC [75] LOG:  checkpoint complete: wrote 118 buffers (0.7%), wrote 5 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.006 s, total=0.012 s; sync files=47, longest=0.003 s, average=0.001 s; distance=702 kB, estimate=702 kB; lsn=0/1C9E300, redo lsn=0/1C9E300
+2026-09-26 12:42:18.030 UTC [1] LOG:  database system is shut down
+2026-09-26 12:42:19.043 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:19.055 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:19.055 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:42:19.055 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:42:19.056 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:19.061 UTC [32] LOG:  database system was shut down at 2026-09-26 12:42:18 UTC
+2026-09-26 12:42:19.061 UTC [32] LOG:  recovered replication state of node 1 to 0/0
+2026-09-26 12:42:19.080 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:19.085 UTC [37] LOG:  logical replication apply worker for subscription "p1096_publisher_restart_172292315869000_sub" has started
+[Q1096] server=subscriber logs_end
+test test_publication_recovery_publisher_crash_retains_slot_and_catches_up ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 29.80s
+
+        PASS [  29.822s] (8/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_publisher_crash_retains_slot_and_catches_up
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_publisher_crash_retains_slot_and_catches_up","exec_time":29.822285542}
+       START [         ] (9/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_subscriber_restart_catches_up
+{"type":"test","event":"started","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_subscriber_restart_catches_up"}
+
+running 1 test
+[Q1096] case=subscriber_restart publisher=582ff99ffaea4a46062bd929707754d907180d8bc8791be4069b97f9d77fb860 subscriber=9bbb07517c4d93c60004973dd78ac85373fafbe24487e3e09c3b674d138d9587 publication=pgt_pub_p1096_subscriber_restart_180412143849000_stream subscription=p1096_subscriber_restart_180412143849000_sub slot=p1096_subscriber_restart_180412143849000_sub initial_sync=exact
+[Q1096] subscriber_down slot=p1096_subscriber_restart_180412143849000_sub outstanding_lsn=0/1D29F50
+[Q1096] subscriber_restart exact=true postmaster_before=2026-09-26 12:42:34.538552+00 postmaster_after=2026-09-26 12:42:47.99548+00 slot_caught_up=true
+[Q1096] data publisher=582ff99ffaea4a46062bd929707754d907180d8bc8791be4069b97f9d77fb860:7689823436699090986:/var/lib/postgresql/18/docker subscriber=9bbb07517c4d93c60004973dd78ac85373fafbe24487e3e09c3b674d138d9587:7689823494327541803:/var/lib/postgresql/18/docker publication=pgt_pub_p1096_subscriber_restart_180412143849000_stream slot=p1096_subscriber_restart_180412143849000_sub network=pgt_pub_18041_1_103584000
+[Q1096] server=publisher name=p1096_subscriber_restart_180412143849000_pub container=582ff99ffaea4a46062bd929707754d907180d8bc8791be4069b97f9d77fb860 logs_begin
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:42:20.742 UTC [52] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:20.749 UTC [52] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:20.750 UTC [52] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:20.752 UTC [58] LOG:  database system was shut down at 2026-09-26 12:42:20 UTC
+2026-09-26 12:42:20.754 UTC [52] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:42:20.961 UTC [52] LOG:  received fast shutdown request
+2026-09-26 12:42:20.963 UTC [52] LOG:  aborting any active transactions
+2026-09-26 12:42:20.964 UTC [52] LOG:  background worker "logical replication launcher" (PID 62) exited with exit code 1
+2026-09-26 12:42:20.965 UTC [56] LOG:  shutting down
+2026-09-26 12:42:20.965 UTC [56] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:42:21.048 UTC [56] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.074 s, total=0.084 s; sync files=269, longest=0.004 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:42:21.055 UTC [52] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+2026-09-26 12:42:20.435 UTC [44] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:42:21.072 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:21.079 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:21.079 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:42:21.079 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:42:21.080 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:21.083 UTC [76] LOG:  database system was shut down at 2026-09-26 12:42:21 UTC
+2026-09-26 12:42:21.085 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:47.432 UTC [1894] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.p1096_subscriber_restart_180412143849000_stream
+2026-09-26 12:42:47.432 UTC [1894] STATEMENT:  SELECT pgtrickle.create_stream_table($1, $2, '1h', 'DIFFERENTIAL')
+2026-09-26 12:42:47.507 UTC [1895] LOG:  logical decoding found consistent point at 0/1D04268
+2026-09-26 12:42:47.507 UTC [1895] DETAIL:  There are no running transactions.
+2026-09-26 12:42:47.507 UTC [1895] STATEMENT:  CREATE_REPLICATION_SLOT "p1096_subscriber_restart_180412143849000_sub" LOGICAL pgoutput (SNAPSHOT 'nothing')
+2026-09-26 12:42:47.516 UTC [1896] LOG:  starting logical decoding for slot "p1096_subscriber_restart_180412143849000_sub"
+2026-09-26 12:42:47.516 UTC [1896] DETAIL:  Streaming transactions committing after 0/1D042A0, reading WAL from 0/1D04268.
+2026-09-26 12:42:47.516 UTC [1896] STATEMENT:  START_REPLICATION SLOT "p1096_subscriber_restart_180412143849000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_subscriber_restart_180412143849000_stream"')
+2026-09-26 12:42:47.516 UTC [1896] LOG:  logical decoding found consistent point at 0/1D04268
+2026-09-26 12:42:47.516 UTC [1896] DETAIL:  There are no running transactions.
+2026-09-26 12:42:47.516 UTC [1896] STATEMENT:  START_REPLICATION SLOT "p1096_subscriber_restart_180412143849000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_subscriber_restart_180412143849000_stream"')
+2026-09-26 12:42:47.530 UTC [1897] LOG:  logical decoding found consistent point at 0/1D042A0
+2026-09-26 12:42:47.530 UTC [1897] DETAIL:  There are no running transactions.
+2026-09-26 12:42:47.530 UTC [1897] STATEMENT:  CREATE_REPLICATION_SLOT "pg_17428_sync_17419_7689823494327541803" LOGICAL pgoutput (SNAPSHOT 'use')
+2026-09-26 12:42:47.533 UTC [1897] LOG:  starting logical decoding for slot "pg_17428_sync_17419_7689823494327541803"
+2026-09-26 12:42:47.533 UTC [1897] DETAIL:  Streaming transactions committing after 0/1D042D8, reading WAL from 0/1D042A0.
+2026-09-26 12:42:47.533 UTC [1897] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823494327541803" LOGICAL 0/1D042D8 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_subscriber_restart_180412143849000_stream"')
+2026-09-26 12:42:47.533 UTC [1897] LOG:  logical decoding found consistent point at 0/1D042A0
+2026-09-26 12:42:47.533 UTC [1897] DETAIL:  There are no running transactions.
+2026-09-26 12:42:47.533 UTC [1897] STATEMENT:  START_REPLICATION SLOT "pg_17428_sync_17419_7689823494327541803" LOGICAL 0/1D042D8 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_subscriber_restart_180412143849000_stream"')
+2026-09-26 12:42:48.027 UTC [1898] LOG:  starting logical decoding for slot "p1096_subscriber_restart_180412143849000_sub"
+2026-09-26 12:42:48.027 UTC [1898] DETAIL:  Streaming transactions committing after 0/1D04310, reading WAL from 0/1D042A0.
+2026-09-26 12:42:48.027 UTC [1898] STATEMENT:  START_REPLICATION SLOT "p1096_subscriber_restart_180412143849000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_subscriber_restart_180412143849000_stream"')
+2026-09-26 12:42:48.027 UTC [1898] LOG:  logical decoding found consistent point at 0/1D042A0
+2026-09-26 12:42:48.027 UTC [1898] DETAIL:  There are no running transactions.
+2026-09-26 12:42:48.027 UTC [1898] STATEMENT:  START_REPLICATION SLOT "p1096_subscriber_restart_180412143849000_sub" LOGICAL 0/0 (proto_version '4', streaming 'parallel', origin 'any', publication_names '"pgt_pub_p1096_subscriber_restart_180412143849000_stream"')
+[Q1096] server=publisher logs_end
+[Q1096] server=subscriber name=p1096_subscriber_restart_180412143849000_sub container=9bbb07517c4d93c60004973dd78ac85373fafbe24487e3e09c3b674d138d9587 logs_begin
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-26 12:42:34.204 UTC [53] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:34.210 UTC [53] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:34.211 UTC [53] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:34.214 UTC [59] LOG:  database system was shut down at 2026-09-26 12:42:34 UTC
+2026-09-26 12:42:34.217 UTC [53] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+waiting for server to shut down....2026-09-26 12:42:34.420 UTC [53] LOG:  received fast shutdown request
+2026-09-26 12:42:34.422 UTC [53] LOG:  aborting any active transactions
+2026-09-26 12:42:34.423 UTC [53] LOG:  background worker "logical replication launcher" (PID 63) exited with exit code 1
+2026-09-26 12:42:34.423 UTC [57] LOG:  shutting down
+2026-09-26 12:42:34.424 UTC [57] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:42:34.508 UTC [57] LOG:  checkpoint complete: wrote 395 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.075 s, total=0.085 s; sync files=269, longest=0.004 s, average=0.001 s; distance=3817 kB, estimate=3817 kB; lsn=0/1BEE8F8, redo lsn=0/1BEE8F8
+2026-09-26 12:42:34.515 UTC [53] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+
+2026-09-26 12:42:33.883 UTC [45] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-26 12:42:34.528 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:34.534 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:34.535 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:42:34.535 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:42:34.537 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:34.540 UTC [77] LOG:  database system was shut down at 2026-09-26 12:42:34 UTC
+2026-09-26 12:42:34.542 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:47.511 UTC [1895] LOG:  logical replication apply worker for subscription "p1096_subscriber_restart_180412143849000_sub" has started
+2026-09-26 12:42:47.518 UTC [1896] LOG:  logical replication table synchronization worker for subscription "p1096_subscriber_restart_180412143849000_sub", table "p1096_subscriber_restart_180412143849000_stream" has started
+2026-09-26 12:42:47.534 UTC [1896] LOG:  logical replication table synchronization worker for subscription "p1096_subscriber_restart_180412143849000_sub", table "p1096_subscriber_restart_180412143849000_stream" has finished
+2026-09-26 12:42:47.648 UTC [1] LOG:  received fast shutdown request
+2026-09-26 12:42:47.651 UTC [1] LOG:  aborting any active transactions
+2026-09-26 12:42:47.651 UTC [1895] FATAL:  terminating logical replication worker due to administrator command
+2026-09-26 12:42:47.653 UTC [1] LOG:  background worker "logical replication apply worker" (PID 1895) exited with exit code 1
+2026-09-26 12:42:47.653 UTC [1] LOG:  background worker "logical replication launcher" (PID 81) exited with exit code 1
+2026-09-26 12:42:47.653 UTC [75] LOG:  shutting down
+2026-09-26 12:42:47.654 UTC [75] LOG:  checkpoint starting: shutdown immediate
+2026-09-26 12:42:47.665 UTC [75] LOG:  checkpoint complete: wrote 118 buffers (0.7%), wrote 5 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.003 s, sync=0.007 s, total=0.012 s; sync files=47, longest=0.003 s, average=0.001 s; distance=702 kB, estimate=702 kB; lsn=0/1C9E4A0, redo lsn=0/1C9E4A0
+2026-09-26 12:42:47.672 UTC [1] LOG:  database system is shut down
+2026-09-26 12:42:47.983 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-26 12:42:47.991 UTC [1] LOG:  starting PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-26 12:42:47.991 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-26 12:42:47.991 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-26 12:42:47.993 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-26 12:42:47.997 UTC [32] LOG:  database system was shut down at 2026-09-26 12:42:47 UTC
+2026-09-26 12:42:47.997 UTC [32] LOG:  recovered replication state of node 1 to 0/0
+2026-09-26 12:42:48.001 UTC [33] FATAL:  the database system is starting up
+2026-09-26 12:42:48.014 UTC [34] FATAL:  the database system is starting up
+2026-09-26 12:42:48.015 UTC [1] LOG:  database system is ready to accept connections
+2026-09-26 12:42:48.021 UTC [39] LOG:  logical replication apply worker for subscription "p1096_subscriber_restart_180412143849000_sub" has started
+[Q1096] server=subscriber logs_end
+test test_publication_recovery_subscriber_restart_catches_up ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 28.78s
+
+        PASS [  28.807s] (9/9) pg_trickle::e2e_publication_crash_recovery_tests test_publication_recovery_subscriber_restart_catches_up
+{"type":"test","event":"ok","name":"pg_trickle::e2e_publication_crash_recovery_tests$test_publication_recovery_subscriber_restart_catches_up","exec_time":28.806553084}
+{"type":"suite","event":"ok","passed":9,"failed":0,"ignored":0,"measured":0,"filtered_out":0,"exec_time":119.645775294,"nextest":{"crate":"pg_trickle","test_binary":"e2e_publication_crash_recovery_tests","kind":"test"}}
+────────────
+     Summary [ 119.648s] 9 tests run: 9 passed, 0 skipped
+Cleaning up light-E2E containers for run light-e2e-15159-1790426434
