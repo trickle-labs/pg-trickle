@@ -27,6 +27,10 @@ struct Identity {
     volume_identity: String,
 }
 
+fn identity_matches(expected: &Identity, actual: &Identity) -> bool {
+    expected == actual
+}
+
 fn phase_code(phase: &str) -> i64 {
     match phase {
         "before_receipt" => 1,
@@ -159,6 +163,20 @@ async fn identity_pool(pool: &PgPool, sentinel_table: &str, container_id: &str) 
     }
 }
 
+async fn create_identity_sentinel(db: &E2eDb, table: &str, value: &str) {
+    db.execute(&format!(
+        "CREATE TABLE public.{table} (id INT PRIMARY KEY, value TEXT NOT NULL)"
+    ))
+    .await;
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO public.{table} (id, value) VALUES (1, $1)"
+    )))
+    .bind(value)
+    .execute(&db.pool)
+    .await
+    .expect("commit recovery sentinel");
+}
+
 async fn setup_wal_fixture(case_name: &str) -> Fixture {
     let stem = case_name.replace('-', "_");
     let db = E2eDb::new_dedicated().await.with_extension().await;
@@ -182,14 +200,8 @@ async fn setup_wal_fixture(case_name: &str) -> Fixture {
         "CREATE TABLE public.{journal} (id INT PRIMARY KEY, value TEXT NOT NULL)"
     ))
     .await;
-    db.execute(&format!(
-        "CREATE TABLE public.{sentinel_table} (id INT PRIMARY KEY, value TEXT NOT NULL)"
-    ))
-    .await;
-    db.execute(&format!(
-        "INSERT INTO public.{sentinel_table} VALUES (1, 'retained-{stem}')"
-    ))
-    .await;
+    let sentinel: String = db.query_scalar("SELECT gen_random_uuid()::text").await;
+    create_identity_sentinel(&db, &sentinel_table, &sentinel).await;
     commit_row(&db, &source, &journal, 1, "baseline").await;
 
     db.execute(&format!(
@@ -227,8 +239,8 @@ async fn setup_wal_fixture(case_name: &str) -> Fixture {
     let slot = format!("pgtrickle_{stable_name}");
     let identity = identity(&db, &sentinel_table, db.container_id()).await;
     eprintln!(
-        "[Q1095] case={case_name} source_oid={oid} capture=WAL slot={slot} system_identifier={} volume={}",
-        identity.system_identifier, identity.volume_identity
+        "[Q1095] case={case_name} source_oid={oid} capture=WAL slot={slot} sentinel={} system_identifier={} volume={}",
+        identity.sentinel, identity.system_identifier, identity.volume_identity
     );
     Fixture {
         db,
@@ -261,11 +273,6 @@ async fn clear_wal_phase(db: &E2eDb) {
         "before_apply",
     )
     .await;
-}
-
-async fn disable_scheduler(db: &E2eDb) {
-    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
-        .await;
 }
 
 async fn hold_wal_barrier(db: &E2eDb, oid: i64, phase: &str) -> (PoolConnection<Postgres>, i32) {
@@ -335,11 +342,10 @@ async fn restart_and_check_named(fixture: &Fixture, sentinel_table: &str) -> PgP
     assert!(output.status.success(), "docker restart failed");
     let pool = fixture.db.reconnect_after_restart().await;
     let after = identity_pool(&pool, sentinel_table, fixture.db.container_id()).await;
-    assert_eq!(after.container_id, fixture.identity.container_id);
-    assert_eq!(after.system_identifier, fixture.identity.system_identifier);
-    assert_eq!(after.database_oid, fixture.identity.database_oid);
-    assert_eq!(after.sentinel, fixture.identity.sentinel);
-    assert_eq!(after.volume_identity, fixture.identity.volume_identity);
+    assert!(
+        identity_matches(&fixture.identity, &after),
+        "recovery must use the retained database identity"
+    );
     pool
 }
 
@@ -377,7 +383,7 @@ async fn wait_for_exact(pool: &PgPool, stream: &str, journal: &str) {
     }
 }
 
-async fn matching_receipts(db: &E2eDb, oid: i64, status: &str, value: &str) -> i64 {
+async fn matching_receipts(pool: &PgPool, oid: i64, status: &str, value: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts
           WHERE source_relid = $1 AND status = $2 AND data LIKE $3",
@@ -385,7 +391,7 @@ async fn matching_receipts(db: &E2eDb, oid: i64, status: &str, value: &str) -> i
     .bind(oid)
     .bind(status)
     .bind(format!("%{value}%"))
-    .fetch_one(&db.pool)
+    .fetch_one(pool)
     .await
     .expect("inspect WAL receipts")
 }
@@ -404,10 +410,10 @@ async fn matching_receipt_lsn(db: &E2eDb, oid: i64, status: &str, value: &str) -
     .expect("inspect WAL receipt LSN")
 }
 
-async fn wait_for_receipt(db: &E2eDb, oid: i64, status: &str, value: &str) {
+async fn wait_for_receipt(pool: &PgPool, oid: i64, status: &str, value: &str) {
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {
-        if matching_receipts(db, oid, status, value).await > 0 {
+        if matching_receipts(pool, oid, status, value).await > 0 {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -418,7 +424,7 @@ async fn wait_for_receipt(db: &E2eDb, oid: i64, status: &str, value: &str) {
                    FROM pgtrickle.pgt_wal_receipts WHERE source_relid = $1",
             )
             .bind(oid)
-            .fetch_one(&db.pool)
+            .fetch_one(pool)
             .await
             .expect("inspect WAL receipt counts");
             panic!(
@@ -484,6 +490,7 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
     let fixture = setup_wal_fixture(phase).await;
     let sentinel_table = format!("wal_{}_identity", phase.replace('-', "_"));
     let value = format!("{phase}-committed");
+    let next_value = format!("{phase}-next-batch");
     let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     set_wal_phase(&fixture.db, fixture.oid, phase, &value).await;
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, &value).await;
@@ -491,13 +498,21 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
 
     if phase == "before_receipt" {
         assert_eq!(
-            matching_receipts(&fixture.db, fixture.oid, "RECEIVED", &value).await,
+            matching_receipts(&fixture.db.pool, fixture.oid, "RECEIVED", &value).await,
             0
         );
     } else {
-        wait_for_receipt(&fixture.db, fixture.oid, status, &value).await;
+        wait_for_receipt(&fixture.db.pool, fixture.oid, status, &value).await;
         if phase == "after_slot_advance" {
             assert!(receipt_slot_reached(&fixture.db, &fixture.slot, fixture.oid, &value).await);
+            commit_row(
+                &fixture.db,
+                &fixture.source,
+                &fixture.journal,
+                3,
+                &next_value,
+            )
+            .await;
         }
     }
     terminate_backend(&fixture.db, worker_pid).await;
@@ -518,6 +533,11 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
     .expect("inspect recovered receipt state");
     assert!(acknowledged > 0, "recovery must acknowledge {value}");
 
+    if phase == "after_slot_advance" {
+        wait_for_receipt(&pool, fixture.oid, "ACKNOWLEDGED", &next_value).await;
+        wait_for_exact(&pool, &fixture.stream, &fixture.journal).await;
+    }
+
     if restart_twice {
         pool.close().await;
         let output = tokio::process::Command::new("docker")
@@ -528,7 +548,7 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
         assert!(output.status.success(), "second docker restart failed");
         let pool = fixture.db.reconnect_after_restart().await;
         let after = identity_pool(&pool, &sentinel_table, fixture.db.container_id()).await;
-        assert_eq!(after, fixture.identity);
+        assert!(identity_matches(&fixture.identity, &after));
         wait_for_exact(&pool, &fixture.stream, &fixture.journal).await;
     }
 }
@@ -551,6 +571,29 @@ async fn test_wal_recovery_after_apply_before_ack_does_not_reapply() {
 #[tokio::test]
 async fn test_wal_recovery_after_slot_advance_finishes_acknowledgement() {
     run_interruption_case("after_slot_advance", "APPLIED", false).await;
+}
+
+#[tokio::test]
+async fn test_wal_recovery_identity_rejects_fresh_volume() {
+    let retained = E2eDb::new_dedicated().await;
+    let sentinel: String = retained
+        .query_scalar("SELECT gen_random_uuid()::text")
+        .await;
+    create_identity_sentinel(&retained, "recovery_identity", &sentinel).await;
+    let expected = identity(&retained, "recovery_identity", retained.container_id()).await;
+
+    let replacement = E2eDb::new_dedicated().await;
+    create_identity_sentinel(&replacement, "recovery_identity", &sentinel).await;
+    let actual = identity(
+        &replacement,
+        "recovery_identity",
+        replacement.container_id(),
+    )
+    .await;
+
+    assert_eq!(actual.sentinel, expected.sentinel);
+    assert_ne!(actual.volume_identity, expected.volume_identity);
+    assert!(!identity_matches(&expected, &actual));
 }
 
 #[tokio::test]
@@ -603,7 +646,7 @@ async fn test_trigger_to_wal_handoff_preserves_pending_commits() {
         .await;
     let slot = format!("pgtrickle_{stable_name}");
     commit_row(&db, source, journal, 3, "after-wal").await;
-    wait_for_receipt(&db, oid, "ACKNOWLEDGED", "after-wal").await;
+    wait_for_receipt(&db.pool, oid, "ACKNOWLEDGED", "after-wal").await;
     wait_for_exact(&db.pool, stream, journal).await;
     db.assert_st_matches_query(stream, &format!("SELECT id, value FROM public.{journal}"))
         .await;
@@ -615,7 +658,7 @@ async fn test_trigger_to_wal_handoff_preserves_pending_commits() {
         "handoff must retain the WAL slot {slot}"
     );
     assert!(
-        matching_receipts(&db, oid, "ACKNOWLEDGED", "after-wal").await > 0,
+        matching_receipts(&db.pool, oid, "ACKNOWLEDGED", "after-wal").await > 0,
         "the post-handoff commit must have an acknowledged WAL receipt"
     );
     eprintln!("[Q1095] trigger_to_wal source_oid={oid} slot={slot} capture=WAL");
@@ -794,7 +837,7 @@ async fn run_loss_control(fixture: Fixture, label: &str) {
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, value).await;
     let worker_pid =
         wait_for_wal_barrier(&fixture.db, fixture.oid, "before_replay", blocker_pid).await;
-    wait_for_receipt(&fixture.db, fixture.oid, "RECEIVED", value).await;
+    wait_for_receipt(&fixture.db.pool, fixture.oid, "RECEIVED", value).await;
     let receipt_lsn = matching_receipt_lsn(&fixture.db, fixture.oid, "RECEIVED", value).await;
     fixture
         .db
@@ -806,12 +849,35 @@ async fn run_loss_control(fixture: Fixture, label: &str) {
         .await;
     discard_buffered_source_changes(&fixture).await;
     consume_slot_copy(&fixture).await;
+    let acknowledged_before_apply: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+          WHERE source_relid = $1 AND lsn = $2::pg_lsn \
+            AND status = 'ACKNOWLEDGED' AND source_change)",
+    )
+    .bind(fixture.oid)
+    .bind(&receipt_lsn)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .expect("inspect early acknowledgement control");
+    let no_buffered_change = {
+        let buffer = fixture.db.change_buffer_table(fixture.oid).await;
+        fixture
+            .db
+            .query_scalar::<bool>(&format!(
+                "SELECT NOT EXISTS(SELECT 1 FROM {buffer} WHERE action <> 'S')"
+            ))
+            .await
+    };
+    assert!(
+        acknowledged_before_apply && no_buffered_change,
+        "control must acknowledge the receipt before replay with no buffered copy"
+    );
+    assert!(slot_reached(&fixture.db, &fixture.slot, &receipt_lsn).await);
     assert_mismatch(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
-    disable_scheduler(&fixture.db).await;
+    clear_wal_phase(&fixture.db).await;
     terminate_backend(&fixture.db, worker_pid).await;
     release_wal_barrier(&mut barrier, fixture.oid, "before_replay").await;
     drop(barrier);
-    clear_wal_phase(&fixture.db).await;
     assert!(
         slot_reached(&fixture.db, &fixture.slot, &receipt_lsn).await,
         "early acknowledgement must advance the slot past the receipt"
@@ -827,7 +893,7 @@ async fn run_dropped_receipt_control(fixture: Fixture) {
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, value).await;
     let worker_pid =
         wait_for_wal_barrier(&fixture.db, fixture.oid, "before_replay", blocker_pid).await;
-    wait_for_receipt(&fixture.db, fixture.oid, "RECEIVED", value).await;
+    wait_for_receipt(&fixture.db.pool, fixture.oid, "RECEIVED", value).await;
     let receipt_lsn = matching_receipt_lsn(&fixture.db, fixture.oid, "RECEIVED", value).await;
     fixture
         .db
@@ -838,12 +904,22 @@ async fn run_dropped_receipt_control(fixture: Fixture) {
     .await;
     discard_buffered_source_changes(&fixture).await;
     consume_slot_copy(&fixture).await;
+    let buffer = fixture.db.change_buffer_table(fixture.oid).await;
+    let no_buffered_change: bool = fixture
+        .db
+        .query_scalar(&format!(
+            "SELECT NOT EXISTS(SELECT 1 FROM {buffer} WHERE action <> 'S')"
+        ))
+        .await;
+    assert!(
+        no_buffered_change,
+        "control must remove the buffered recovery copy"
+    );
     assert_mismatch(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
-    disable_scheduler(&fixture.db).await;
+    clear_wal_phase(&fixture.db).await;
     terminate_backend(&fixture.db, worker_pid).await;
     release_wal_barrier(&mut barrier, fixture.oid, "before_replay").await;
     drop(barrier);
-    clear_wal_phase(&fixture.db).await;
     assert!(
         slot_reached(&fixture.db, &fixture.slot, &receipt_lsn).await,
         "dropped receipt must be past the slot boundary"
@@ -874,7 +950,7 @@ async fn run_clean_replay_control(fixture: Fixture) {
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, value).await;
     let worker_pid =
         wait_for_wal_barrier(&fixture.db, fixture.oid, "before_replay", blocker_pid).await;
-    wait_for_receipt(&fixture.db, fixture.oid, "RECEIVED", value).await;
+    wait_for_receipt(&fixture.db.pool, fixture.oid, "RECEIVED", value).await;
     terminate_backend(&fixture.db, worker_pid).await;
     release_wal_barrier(&mut barrier, fixture.oid, "before_replay").await;
     drop(barrier);
