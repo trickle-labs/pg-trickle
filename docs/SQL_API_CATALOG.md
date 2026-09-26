@@ -101,7 +101,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.pg_trickle_hash()` | `pgtrickle` | `bigint` | NULL input is mapped to a deterministic sentinel (`\x00NULL\x00`) so that rows with NULL-valued group keys receive a non-NULL `__pgt_row_id`. |
 | `pgtrickle.pg_trickle_hash_multi()` | `pgtrickle` | `bigint` | Hash multiple text values using the versioned composite framing. |
 | `pgtrickle.pgt_ivm_apply_delta()` | `pgtrickle` | `void` | Delta SQL templates are cached per (pgt_id, source_oid, has_new, has_old) to avoid re-parsing the defining query on every trigger invocation. |
-| `pgtrickle.pgt_ivm_apply_delta_enr()` | `pgtrickle` | `void` | Requires PostgreSQL 18+ which propagates ENRs to nested SPI calls within trigger execution contexts. |
+| `pgtrickle.pgt_ivm_apply_delta_enr()` | `pgtrickle` | `void` | PostgreSQL does not expose a PL/pgSQL trigger's transition relations to nested SPI calls in Rust. |
 | `pgtrickle.pgt_ivm_handle_truncate()` | `pgtrickle` | `void` | Truncates the stream table (equivalent to a full refresh with empty base table for simple views). |
 | `pgtrickle.pgt_scc_status()` | `pgtrickle` | `SetOf row` | Returns one row per SCC, summarising its members, most recent fixpoint iteration count, and last convergence time. |
 | `pgtrickle.pgt_status()` | `pgtrickle` | `SetOf row` | Returns a summary row per stream table including schedule configuration, data timestamp, and computed staleness interval. |

@@ -1930,6 +1930,7 @@ WHERE severity != 'OK';
 ```
 
 Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
+`immediate_ivm_triggers` (missing or disabled synchronous-maintenance triggers),
 `consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag`
 (retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB),
 `worker_pool` (all worker tokens in use — parallel mode only), `job_queue`
@@ -4025,12 +4026,13 @@ SELECT * FROM pgtrickle.quick_health;
 | `stale_tables` | `bigint` | Stream tables whose data is older than their schedule interval |
 | `scheduler_running` | `boolean` | Whether a pg_trickle scheduler backend is detected in `pg_stat_activity` |
 | `status` | `text` | Overall status: `EMPTY`, `OK`, `WARNING`, or `CRITICAL` |
+| `broken_immediate_tables` | `bigint` | IMMEDIATE stream tables missing or having disabled IVM triggers |
 
 **Status values:**
 - `EMPTY` — No stream tables exist.
 - `OK` — All stream tables are healthy and up-to-date.
 - `WARNING` — Some tables have errors or are stale.
-- `CRITICAL` — At least one stream table is `SUSPENDED`.
+- `CRITICAL` — At least one stream table is `SUSPENDED` or an IMMEDIATE table is missing IVM triggers.
 
 ---
 

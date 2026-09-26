@@ -352,18 +352,10 @@ pub static PGS_WAL_MAX_LAG_BYTES: GucSetting<i32> = GucSetting::<i32>::new(65_53
 /// Recommended value: 104857600 (100 MB).
 pub static PGS_PUBLICATION_LAG_WARN_BYTES: GucSetting<i32> = GucSetting::<i32>::new(0);
 
-/// PERF-4 (v0.31.0): Use ENR (Ephemeral Named Relations) directly in IVM trigger
-/// bodies instead of copying transition data to temp tables.
+/// Reserved compatibility setting for direct ENR-based IVM maintenance.
 ///
-/// When true (default), the AFTER trigger function bodies skip the
-/// `CREATE TEMP TABLE ... AS SELECT * FROM __pgt_newtable` step and pass
-/// the ENR names directly to the delta-apply function. This eliminates a
-/// per-statement heap allocation for INSERT/UPDATE/DELETE on IMMEDIATE-mode
-/// stream tables.
-///
-/// When false, the legacy temp-table copy behaviour is used.
-/// Requires PostgreSQL 18+ (ENRs are only available in PG 18 trigger
-/// contexts).
+/// Transition ENRs are not available across the PL/pgSQL-to-Rust SPI boundary,
+/// so pg_trickle currently uses the temp-table path regardless of this value.
 pub static PGS_IVM_USE_ENR: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Register all CDC-related GUC variables.
@@ -694,11 +686,9 @@ pub fn register_cdc_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_trickle.ivm_use_enr",
-        c"PERF-4: Use ENR-based transition tables in IVM trigger bodies (PG18+).",
-        c"When true, IMMEDIATE-mode trigger functions reference ENRs directly \
-           instead of copying transition data to temp tables. \
-           Requires PostgreSQL 18+ with ENR propagation to nested SPI calls. \
-           Defaults to false (legacy temp-table approach) for compatibility.",
+        c"Reserved compatibility setting for ENR-based IVM trigger bodies.",
+        c"Transition ENRs are not available across the PL/pgSQL-to-Rust SPI boundary, \
+           so pg_trickle currently uses the temp-table path regardless of this value.",
         &PGS_IVM_USE_ENR,
         GucContext::Suset,
         GucFlags::default(),

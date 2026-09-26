@@ -624,6 +624,18 @@ fn atomic_swap_shadow_table(
             "shadow swap identity changed for {schema}.{table_name}"
         )));
     }
+    let downstreams = StDependency::get_downstream_pgt_ids(old_relid)?
+        .into_iter()
+        .map(|downstream_id| {
+            StreamTableMeta::get_by_id(downstream_id)?.ok_or_else(|| {
+                PgTrickleError::InternalError(format!(
+                    "dependency references missing stream table pgt_id={downstream_id}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, PgTrickleError>>()?;
+    let change_schema = config::pg_trickle_change_buffer_schema();
+    let had_change_buffer = cdc::has_st_change_buffer(pgt_id, &change_schema);
     let old = format!(
         "{}.{}",
         quote_identifier(schema),
@@ -674,6 +686,28 @@ fn atomic_swap_shadow_table(
         &[new_relid.into(), old_relid.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    for downstream in &downstreams {
+        if downstream.refresh_mode.is_immediate() {
+            crate::ivm::cleanup_ivm_triggers(old_relid, downstream.pgt_id)?;
+            let lock_mode = refresh::with_stream_owner(downstream, || {
+                Ok(crate::ivm::IvmLockMode::for_query(
+                    &downstream.defining_query,
+                ))
+            })?;
+            crate::ivm::setup_ivm_triggers(
+                new_relid,
+                downstream.pgt_id,
+                downstream.pgt_relid,
+                lock_mode,
+            )?;
+        }
+    }
+    if had_change_buffer {
+        cdc::drop_st_change_buffer_table(pgt_id, &change_schema)?;
+    }
+    if cdc::count_downstream_st_consumers(pgt_id) > 0 {
+        cdc::ensure_st_change_buffer(pgt_id, new_relid, &change_schema)?;
+    }
     let backup = format!(
         "{}.{}",
         quote_identifier(schema),
@@ -690,7 +724,45 @@ fn atomic_swap_shadow_table(
         "ALTER INDEX {}.{shadow_index} RENAME TO {stream_index}",
         quote_identifier(schema)
     ))
-    .map_err(|e| PgTrickleError::SpiError(format!("failed to rename row-id index: {e}")))
+    .map_err(|e| PgTrickleError::SpiError(format!("failed to rename row-id index: {e}")))?;
+
+    // ALTER QUERY replaces the upstream contents without producing source
+    // deltas. Rebuild active direct dependants now; IMMEDIATE triggers carry
+    // each rebuild through any deeper synchronous chain.
+    for downstream in downstreams
+        .into_iter()
+        .filter(|downstream| downstream.status == StStatus::Active)
+    {
+        let deps = StDependency::get_for_st(downstream.pgt_id)?;
+        let source_oids = deps
+            .iter()
+            .filter(|dep| {
+                crate::ivm::is_ivm_trigger_source(&dep.source_type)
+                    || dep.source_type == "FOREIGN_TABLE"
+            })
+            .map(|dep| dep.source_relid)
+            .collect::<Vec<_>>();
+        execute_manual_full_refresh(
+            &downstream,
+            &downstream.pgt_schema,
+            &downstream.pgt_name,
+            &source_oids,
+        )?;
+    }
+    Ok(())
+}
+
+fn drop_st_change_buffer_if_unused(source_relid: pg_sys::Oid) -> Result<(), PgTrickleError> {
+    let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(source_relid) else {
+        return Ok(());
+    };
+    if cdc::count_downstream_st_consumers(upstream_pgt_id) == 0 {
+        let change_schema = config::pg_trickle_change_buffer_schema();
+        if cdc::has_st_change_buffer(upstream_pgt_id, &change_schema) {
+            cdc::drop_st_change_buffer_table(upstream_pgt_id, &change_schema)?;
+        }
+    }
+    Ok(())
 }
 
 /// Perform an in-place query migration on an existing stream table.
@@ -780,16 +852,21 @@ fn alter_stream_table_query(
         .unwrap_or("state reuse was not proven")
         .to_string();
 
-    // Lock every old and new base source before changing catalog or storage.
+    // Lock every old and new triggerable source before changing catalog or storage.
     let mut source_oids = old_deps
         .iter()
-        .filter(|dep| matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+        .filter(|dep| {
+            crate::ivm::is_ivm_trigger_source(&dep.source_type)
+                || dep.source_type == "FOREIGN_TABLE"
+        })
         .map(|dep| dep.source_relid)
         .collect::<Vec<_>>();
     source_oids.extend(
         vq.source_relids
             .iter()
-            .filter(|(_, source_type)| matches!(source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+            .filter(|(_, source_type)| {
+                crate::ivm::is_ivm_trigger_source(source_type) || source_type == "FOREIGN_TABLE"
+            })
             .map(|(oid, _)| *oid),
     );
     source_oids.sort_unstable_by_key(|oid| oid.to_u32());
@@ -809,25 +886,23 @@ fn alter_stream_table_query(
 
     // Remove CDC/IVM triggers from sources that are no longer needed
     for (source_oid, source_type) in &dep_diff.removed {
-        if source_type == "TABLE" {
-            if refresh_mode.is_immediate() {
-                if let Err(e) = crate::ivm::cleanup_ivm_triggers(*source_oid, st.pgt_id) {
-                    pgrx::warning!(
-                        "Failed to clean up IVM triggers for removed source {}: {}",
-                        source_oid.to_u32(),
-                        e
-                    );
-                }
-            } else {
-                let old_dep = old_deps.iter().find(|d| d.source_relid == *source_oid);
-                let cdc_mode = old_dep.map(|d| d.cdc_mode).unwrap_or(CdcMode::Trigger);
-                if let Err(e) = cleanup_cdc_for_source(*source_oid, cdc_mode, Some(st.pgt_id)) {
-                    pgrx::warning!(
-                        "Failed to clean up CDC for removed source {}: {}",
-                        source_oid.to_u32(),
-                        e
-                    );
-                }
+        if refresh_mode.is_immediate() && crate::ivm::is_ivm_trigger_source(source_type) {
+            if let Err(e) = crate::ivm::cleanup_ivm_triggers(*source_oid, st.pgt_id) {
+                pgrx::warning!(
+                    "Failed to clean up IVM triggers for removed source {}: {}",
+                    source_oid.to_u32(),
+                    e
+                );
+            }
+        } else if source_type == "TABLE" {
+            let old_dep = old_deps.iter().find(|d| d.source_relid == *source_oid);
+            let cdc_mode = old_dep.map(|d| d.cdc_mode).unwrap_or(CdcMode::Trigger);
+            if let Err(e) = cleanup_cdc_for_source(*source_oid, cdc_mode, Some(st.pgt_id)) {
+                pgrx::warning!(
+                    "Failed to clean up CDC for removed source {}: {}",
+                    source_oid.to_u32(),
+                    e
+                );
             }
         }
     }
@@ -1015,17 +1090,15 @@ fn alter_stream_table_query(
     // Set up CDC/IVM triggers for newly added sources
     let change_schema = config::pg_trickle_change_buffer_schema();
     for (source_oid, source_type) in &dep_diff.added {
-        if source_type == "TABLE" {
-            if refresh_mode.is_immediate() {
-                let lock_mode = vq
-                    .parsed_tree
-                    .as_ref()
-                    .map(|parsed| crate::ivm::IvmLockMode::for_tree(&parsed.tree))
-                    .unwrap_or(crate::ivm::IvmLockMode::Exclusive);
-                crate::ivm::setup_ivm_triggers(*source_oid, st.pgt_id, new_pgt_relid, lock_mode)?;
-            } else {
-                setup_cdc_for_source(*source_oid, st.pgt_id, &change_schema)?;
-            }
+        if refresh_mode.is_immediate() && crate::ivm::is_ivm_trigger_source(source_type) {
+            let lock_mode = vq
+                .parsed_tree
+                .as_ref()
+                .map(|parsed| crate::ivm::IvmLockMode::for_tree(&parsed.tree))
+                .unwrap_or(crate::ivm::IvmLockMode::Exclusive);
+            crate::ivm::setup_ivm_triggers(*source_oid, st.pgt_id, new_pgt_relid, lock_mode)?;
+        } else if source_type == "TABLE" {
+            setup_cdc_for_source(*source_oid, st.pgt_id, &change_schema)?;
         } else if source_type == "FOREIGN_TABLE" && !refresh_mode.is_immediate() {
             cdc::setup_foreign_table_polling(*source_oid, st.pgt_id, &change_schema)?;
         } else if source_type == "MATVIEW" && !refresh_mode.is_immediate() {
@@ -1035,6 +1108,20 @@ fn alter_stream_table_query(
             && let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(*source_oid)
         {
             cdc::ensure_st_change_buffer(upstream_pgt_id, *source_oid, &change_schema)?;
+        }
+    }
+
+    if refresh_mode.is_immediate() {
+        let lock_mode = vq
+            .parsed_tree
+            .as_ref()
+            .map(|parsed| crate::ivm::IvmLockMode::for_tree(&parsed.tree))
+            .unwrap_or(crate::ivm::IvmLockMode::Exclusive);
+        for (source_oid, source_type) in &dep_diff.kept {
+            if crate::ivm::is_ivm_trigger_source(source_type) {
+                crate::ivm::cleanup_ivm_triggers(*source_oid, st.pgt_id)?;
+                crate::ivm::setup_ivm_triggers(*source_oid, st.pgt_id, new_pgt_relid, lock_mode)?;
+            }
         }
     }
 
@@ -1092,7 +1179,7 @@ fn alter_stream_table_query(
     let source_oids: Vec<pg_sys::Oid> = vq
         .source_relids
         .iter()
-        .filter(|(_, t)| t == "TABLE")
+        .filter(|(_, source_type)| crate::ivm::is_ivm_trigger_source(source_type))
         .map(|(o, _)| *o)
         .collect();
 
@@ -2167,6 +2254,7 @@ pub(crate) fn alter_stream_table_impl(
     // individual re-parse call site; every catalog write below already uses
     // fully qualified `pgtrickle.*` identifiers, so nothing here depends on
     // search_path being the pinned definer path.
+    let mut requested_refresh_mode = refresh_mode;
     with_invoker_search_path(&caller_search_path, || {
         if let Some(raw_target) = target_freshness {
             if schedule.is_some() {
@@ -2184,11 +2272,7 @@ pub(crate) fn alter_stream_table_impl(
             }
             if target.mode == TargetFreshnessMode::OnCommit {
                 crate::dvm::validate_immediate_mode_support(&st.defining_query)?;
-                Spi::run_with_args(
-                "UPDATE pgtrickle.pgt_stream_tables SET refresh_mode = 'IMMEDIATE', requested_refresh_mode = 'IMMEDIATE', updated_at = now() WHERE pgt_id = $1",
-                &[st.pgt_id.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                requested_refresh_mode = Some("IMMEDIATE");
             }
             apply_target_freshness(st.pgt_id, target)?;
             st = StreamTableMeta::get_by_name(&schema, &table_name)?;
@@ -2221,7 +2305,7 @@ pub(crate) fn alter_stream_table_impl(
 
         let (requested_cdc_mode_override, effective_requested_cdc_mode, cdc_mode_source) =
             resolve_requested_cdc_mode_for_st(&st, cdc_mode)?;
-        let target_refresh_mode = match refresh_mode {
+        let target_refresh_mode = match requested_refresh_mode {
             Some(mode_str) => RefreshMode::from_str(mode_str)?,
             None => st.refresh_mode,
         };
@@ -2273,7 +2357,7 @@ pub(crate) fn alter_stream_table_impl(
             }
         }
 
-        if let Some(mode_str) = refresh_mode {
+        if let Some(mode_str) = requested_refresh_mode {
             let new_mode = target_refresh_mode;
             let old_mode = st.refresh_mode;
 
@@ -2304,9 +2388,9 @@ pub(crate) fn alter_stream_table_impl(
                 // ── Tear down OLD mode's infrastructure ─────────────────
                 match old_mode {
                     RefreshMode::Immediate => {
-                        // Drop IVM triggers from source tables.
+                        // Drop IVM triggers from source relations.
                         for dep in &deps {
-                            if dep.source_type == "TABLE"
+                            if crate::ivm::is_ivm_trigger_source(&dep.source_type)
                                 && let Err(e) =
                                     crate::ivm::cleanup_ivm_triggers(dep.source_relid, st.pgt_id)
                             {
@@ -2345,12 +2429,12 @@ pub(crate) fn alter_stream_table_impl(
                 // ── Set up NEW mode's infrastructure ────────────────────
                 match new_mode {
                     RefreshMode::Immediate => {
-                        // Install IVM triggers on source tables.
+                        // Install IVM triggers on source relations.
                         let lock_mode = refresh::with_stream_owner(&st, || {
                             Ok(crate::ivm::IvmLockMode::for_query(&st.defining_query))
                         })?;
                         for dep in &deps {
-                            if dep.source_type == "TABLE" {
+                            if crate::ivm::is_ivm_trigger_source(&dep.source_type) {
                                 crate::ivm::setup_ivm_triggers(
                                     dep.source_relid,
                                     st.pgt_id,
@@ -2374,6 +2458,15 @@ pub(crate) fn alter_stream_table_impl(
                                     setup_cdc_for_source(
                                         dep.source_relid,
                                         st.pgt_id,
+                                        &change_schema,
+                                    )?;
+                                } else if dep.source_type == "STREAM_TABLE"
+                                    && let Some(upstream_pgt_id) =
+                                        StreamTableMeta::pgt_id_for_relid(dep.source_relid)
+                                {
+                                    cdc::ensure_st_change_buffer(
+                                        upstream_pgt_id,
+                                        dep.source_relid,
                                         &change_schema,
                                     )?;
                                 }
@@ -2400,10 +2493,16 @@ pub(crate) fn alter_stream_table_impl(
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+                if old_mode != RefreshMode::Immediate && new_mode.is_immediate() {
+                    for dep in deps.iter().filter(|dep| dep.source_type == "STREAM_TABLE") {
+                        drop_st_change_buffer_if_unused(dep.source_relid)?;
+                    }
+                }
+
                 // ── Full refresh to ensure consistency ──────────────────
                 let source_oids: Vec<pg_sys::Oid> = deps
                     .iter()
-                    .filter(|d| d.source_type == "TABLE")
+                    .filter(|d| crate::ivm::is_ivm_trigger_source(&d.source_type))
                     .map(|d| d.source_relid)
                     .collect();
                 // Re-load ST with updated mode for the refresh dispatch.
@@ -2542,7 +2641,7 @@ pub(crate) fn alter_stream_table_impl(
         }
 
         if let Some(ao) = append_only {
-            let effective_mode = match refresh_mode {
+            let effective_mode = match requested_refresh_mode {
                 Some(mode_str) => RefreshMode::from_str(mode_str)?,
                 None => st.refresh_mode,
             };
@@ -2957,6 +3056,15 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     let caller =
         security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
+    let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+    if st.refresh_mode.is_immediate() {
+        let source_oids = deps
+            .iter()
+            .filter(|dep| crate::ivm::is_ivm_trigger_source(&dep.source_type))
+            .map(|dep| dep.source_relid)
+            .collect::<Vec<_>>();
+        cdc::lock_source_relations(&source_oids)?;
+    }
 
     // Serialize all pg_trickle lifecycle operations for this stream and
     // validate the publication before dropping any public object.
@@ -2979,8 +3087,14 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
         publication::drop_validated_publication(&caller, &validated)?;
     }
 
-    // Get dependencies before deleting catalog entries
-    let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+    if st.refresh_mode.is_immediate() {
+        for dep in deps
+            .iter()
+            .filter(|dep| crate::ivm::is_ivm_trigger_source(&dep.source_type))
+        {
+            crate::ivm::cleanup_ivm_triggers(dep.source_relid, st.pgt_id)?;
+        }
+    }
 
     // Flush any deferred change-buffer cleanup entries that reference
     // source OIDs about to be cleaned up.  This prevents
@@ -3025,35 +3139,18 @@ pub(crate) fn execute_drop_stream_table(qualified_name: &str) -> Result<(), PgTr
     // sources no longer tracked by any ST. For IMMEDIATE-mode STs, clean
     // up IVM triggers instead.
     for dep in &deps {
-        if dep.source_type == "TABLE" {
-            if st.refresh_mode.is_immediate() {
-                if let Err(e) = crate::ivm::cleanup_ivm_triggers(dep.source_relid, st.pgt_id) {
-                    pgrx::warning!(
-                        "Failed to clean up IVM triggers for oid {}: {}",
-                        dep.source_relid.to_u32(),
-                        e
-                    );
-                }
-            } else {
-                cleanup_cdc_for_source(dep.source_relid, dep.cdc_mode, None)?;
-            }
-        } else if dep.source_type == "STREAM_TABLE" {
+        if !st.refresh_mode.is_immediate() && dep.source_type == "TABLE" {
+            cleanup_cdc_for_source(dep.source_relid, dep.cdc_mode, None)?;
+        }
+        if dep.source_type == "STREAM_TABLE" {
             // ST-ST-1: If this was the last downstream consumer of an
             // upstream ST's change buffer, drop the buffer.
-            let upstream_pgt_id =
-                crate::catalog::StreamTableMeta::pgt_id_for_relid(dep.source_relid);
-            if let Some(up_id) = upstream_pgt_id {
-                let consumers = cdc::count_downstream_st_consumers(up_id);
-                if consumers == 0 {
-                    let change_schema = config::pg_trickle_change_buffer_schema();
-                    if let Err(e) = cdc::drop_st_change_buffer_table(up_id, &change_schema) {
-                        pgrx::warning!(
-                            "Failed to drop ST change buffer for upstream pgt_id {}: {}",
-                            up_id,
-                            e
-                        );
-                    }
-                }
+            if let Err(e) = drop_st_change_buffer_if_unused(dep.source_relid) {
+                pgrx::warning!(
+                    "Failed to drop unused ST change buffer for source oid {}: {}",
+                    dep.source_relid.to_u32(),
+                    e
+                );
             }
         }
     }
@@ -3126,14 +3223,17 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let deps = StDependency::get_for_st(st.pgt_id)?;
     let source_oids: Vec<_> = deps
         .iter()
-        .filter(|dep| matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+        .filter(|dep| {
+            crate::ivm::is_ivm_trigger_source(&dep.source_type)
+                || dep.source_type == "FOREIGN_TABLE"
+        })
         .map(|dep| dep.source_relid)
         .collect();
     cdc::lock_source_relations(&source_oids)?;
     // Restore capture before exposing the consumer as ACTIVE. Changes made
     // while the source was inactive are intentionally repaired by FULL refresh.
     for dep in &deps {
-        if dep.source_type == "TABLE" && st.refresh_mode.is_immediate() {
+        if st.refresh_mode.is_immediate() && crate::ivm::is_ivm_trigger_source(&dep.source_type) {
             ensure_immediate_ivm_triggers(&st, dep.source_relid)?;
         }
         if dep.source_type == "FOREIGN_TABLE"
@@ -3208,20 +3308,31 @@ fn ensure_immediate_ivm_triggers(
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn repair_stream_table(name: &str) -> String {
-    match repair_stream_table_impl(name) {
+    match repair_stream_table_impl(name, true) {
         Ok(summary) => summary,
         Err(e) => raise_error_with_context(e),
     }
 }
 
-fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
+fn repair_stream_table_impl(name: &str, refresh_immediate: bool) -> Result<String, PgTrickleError> {
     crate::api::recovery::assert_capture_ready()?;
     let caller =
         security_context::capture_caller_context(security_context::EntryContext::SecurityDefiner)?;
     let (schema, table_name, st) =
         super::helpers::resolve_owned_stream_table_with_caller(name, &caller)?;
+    let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+    let source_oids = deps
+        .iter()
+        .filter(|dep| {
+            crate::ivm::is_ivm_trigger_source(&dep.source_type)
+                || dep.source_type == "FOREIGN_TABLE"
+        })
+        .map(|dep| dep.source_relid)
+        .collect::<Vec<_>>();
+    cdc::lock_source_relations(&source_oids)?;
 
-    // Step 1: Acquire a transaction-scoped advisory lock.
+    // Match source-write lock ordering: relation locks precede the stream's
+    // advisory and catalog-row locks.
     Spi::run_with_args(
         "SELECT pg_catalog.pg_advisory_xact_lock($1)",
         &[st.pgt_id.into()],
@@ -3245,7 +3356,6 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     actions.push("window state reset: scheduled protected rebuild".to_string());
     crate::setop_state::drop_for_stream(st.pgt_id)?;
     let change_schema = config::pg_trickle_change_buffer_schema();
-    let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
 
     // Step 2: catalog verification is implicit — get_by_name() already
     // returned st above; if missing, it would have errored.
@@ -3289,7 +3399,7 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
     let mut has_deferred_source = false;
     let mut missing_dependency = false;
     for dep in &deps {
-        if dep.source_type != "TABLE" {
+        if !crate::ivm::is_ivm_trigger_source(&dep.source_type) {
             continue;
         }
         let source_oid = dep.source_relid;
@@ -3311,11 +3421,22 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
             continue;
         }
 
-        if st.refresh_mode.is_immediate() && ensure_immediate_ivm_triggers(&st, source_oid)? {
-            actions.push(format!(
-                "ivm triggers rebuilt for OID {}",
-                source_oid.to_u32()
-            ));
+        if st.refresh_mode.is_immediate() {
+            if ensure_immediate_ivm_triggers(&st, source_oid)? {
+                actions.push(format!(
+                    "ivm triggers rebuilt for OID {}",
+                    source_oid.to_u32()
+                ));
+            }
+            continue;
+        }
+
+        if dep.source_type == "STREAM_TABLE" {
+            if let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(source_oid) {
+                cdc::ensure_st_change_buffer(upstream_pgt_id, source_oid, &change_schema)?;
+                has_deferred_source = true;
+            }
+            continue;
         }
 
         if StDependency::effective_requested_mode_for_source(source_oid)?.is_none() {
@@ -3389,6 +3510,17 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
         actions.push("cdc_infrastructure: verified OK".to_string());
     }
 
+    if st.refresh_mode.is_immediate() && refresh_immediate {
+        let st = reinit_rewrite_if_needed(&st)?;
+        execute_manual_full_refresh(&st, &schema, &table_name, &source_oids)?;
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = false WHERE pgt_id = $1",
+            &[st.pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        actions.push("immediate storage rebuilt under source locks".to_string());
+    }
+
     // Step 6: Verify all dependencies still exist — already done in step 5
     // (any missing source OIDs were recorded above).
 
@@ -3425,7 +3557,7 @@ fn repair_stream_table_impl(name: &str) -> Result<String, PgTrickleError> {
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn reinitialize_stream_table(name: &str) -> String {
     let result = (|| {
-        let summary = repair_stream_table_impl(name)?;
+        let summary = repair_stream_table_impl(name, false)?;
         let caller = security_context::capture_caller_context(
             security_context::EntryContext::SecurityDefiner,
         )?;
@@ -3553,7 +3685,10 @@ fn pause_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let deps = StDependency::get_for_st(st.pgt_id)?;
     let source_oids: Vec<_> = deps
         .iter()
-        .filter(|dep| matches!(dep.source_type.as_str(), "TABLE" | "FOREIGN_TABLE"))
+        .filter(|dep| {
+            crate::ivm::is_ivm_trigger_source(&dep.source_type)
+                || dep.source_type == "FOREIGN_TABLE"
+        })
         .map(|dep| dep.source_relid)
         .collect();
     cdc::lock_source_relations(&source_oids)?;

@@ -81,6 +81,7 @@ fn build_window_state_health_rows(
 /// Checks performed:
 /// - `scheduler_running`    — background worker is alive
 /// - `error_tables`         — any stream tables in ERROR/SUSPENDED status
+/// - `immediate_ivm_triggers` — any IMMEDIATE stream table missing active IVM triggers
 /// - `stale_tables`         — any stream tables where last_refresh_at age exceeds schedule (scheduler behind)
 /// - `needs_reinit`         — any stream tables awaiting reinitialization
 /// - `consecutive_errors`   — any stream tables accumulating errors (not yet suspended)
@@ -553,6 +554,89 @@ fn health_check() -> TableIterator<
         };
         rows.push(("ring_overflow_trend".to_string(), sev.to_string(), detail));
     });
+
+    let immediate_sources: Vec<(i64, String, pg_sys::Oid)> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT st.pgt_id, st.pgt_schema::text || '.' || st.pgt_name::text, \
+                        dep.source_relid \
+                 FROM pgtrickle.pgt_stream_tables st \
+                 JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id \
+                 WHERE st.refresh_mode = 'IMMEDIATE' \
+                   AND dep.source_type IN ('TABLE', 'STREAM_TABLE') \
+                 ORDER BY st.pgt_id, dep.source_relid",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut sources = Vec::new();
+        for row in result {
+            sources.push((
+                row.get::<i64>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "health_check: missing stream table id".to_string(),
+                        )
+                    })?,
+                row.get::<String>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "health_check: missing stream table name".to_string(),
+                        )
+                    })?,
+                row.get::<pg_sys::Oid>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "health_check: missing source relation id".to_string(),
+                        )
+                    })?,
+            ));
+        }
+        Ok::<_, PgTrickleError>(sources)
+    })
+    .unwrap_or_else(|e| {
+        pgrx::error!(
+            "health_check: failed to inspect IMMEDIATE dependencies: {}",
+            e
+        )
+    });
+    let mut broken_immediate_tables = Vec::new();
+    for (pgt_id, name, source_oid) in immediate_sources {
+        match crate::ivm::ivm_triggers_ready(source_oid, pgt_id) {
+            Ok(true) => {}
+            Ok(false) if !broken_immediate_tables.contains(&name) => {
+                broken_immediate_tables.push(name);
+            }
+            Ok(false) => {}
+            Err(e) => pgrx::error!(
+                "health_check: failed to inspect IMMEDIATE triggers for {}: {}",
+                name,
+                e
+            ),
+        }
+    }
+    rows.push((
+        "immediate_ivm_triggers".to_string(),
+        if broken_immediate_tables.is_empty() {
+            "OK"
+        } else {
+            "ERROR"
+        }
+        .to_string(),
+        if broken_immediate_tables.is_empty() {
+            "All IMMEDIATE stream tables have enabled IVM triggers".to_string()
+        } else {
+            format!(
+                "{} IMMEDIATE stream table(s) are missing or have disabled IVM triggers: {}. \
+                 Run pgtrickle.repair_stream_table() for each affected stream table.",
+                broken_immediate_tables.len(),
+                broken_immediate_tables.join(", ")
+            )
+        },
+    ));
 
     // Registry-only window checks stay bounded by the number of semantic
     // window specifications. They never scan a dynamic state relation.

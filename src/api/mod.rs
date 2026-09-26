@@ -1988,7 +1988,7 @@ fn setup_trigger_infrastructure(
     let change_schema = config::pg_trickle_change_buffer_schema();
     if refresh_mode.is_immediate() {
         for (source_oid, source_type) in source_relids {
-            if source_type == "TABLE" {
+            if crate::ivm::is_ivm_trigger_source(source_type) {
                 crate::ivm::setup_ivm_triggers(*source_oid, pgt_id, pgt_relid, ivm_lock_mode)?;
             }
         }

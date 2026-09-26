@@ -77,8 +77,15 @@ async fn test_immediate_repair_and_reinitialize_restore_ivm_without_cdc() {
     db.execute("INSERT INTO imm_repair_src VALUES (1, 10)")
         .await;
     db.create_st(
-        "imm_repair_st",
+        "imm_repair_upstream",
         "SELECT id, v FROM imm_repair_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.create_st(
+        "imm_repair_st",
+        "SELECT id, v * 2 AS doubled FROM imm_repair_upstream",
         "1m",
         "IMMEDIATE",
     )
@@ -88,27 +95,71 @@ async fn test_immediate_repair_and_reinitialize_restore_ivm_without_cdc() {
             "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'imm_repair_st'",
         )
         .await;
-    db.execute(&format!(
-        "DROP TRIGGER pgt_ivm_after_upd_{pgt_id} ON imm_repair_src"
-    ))
-    .await;
+    for operation in ["ins", "upd", "del"] {
+        db.execute(&format!(
+            "DROP TRIGGER pgt_ivm_after_{operation}_{pgt_id} ON imm_repair_upstream"
+        ))
+        .await;
+    }
+    db.execute("UPDATE imm_repair_src SET v = 15 WHERE id = 1")
+        .await;
+    let stale_value: i32 = db
+        .query_scalar("SELECT doubled FROM imm_repair_st WHERE id = 1")
+        .await;
+    assert_eq!(stale_value, 20);
+
+    let diagnostic: String = db
+        .query_scalar(
+            "SELECT downgrade_reason FROM pgtrickle.explain_refresh_mode('imm_repair_st')",
+        )
+        .await;
+    assert!(diagnostic.contains("missing or disabled"), "{diagnostic}");
+    let health_severity: String = db
+        .query_scalar(
+            "SELECT severity FROM pgtrickle.health_check() \
+             WHERE check_name = 'immediate_ivm_triggers'",
+        )
+        .await;
+    assert_eq!(health_severity, "ERROR");
+    let broken_immediate_tables: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(broken_immediate_tables, 1);
+    let health_status: String = db
+        .query_scalar("SELECT status FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(health_status, "CRITICAL");
 
     let summary: String = db
         .query_scalar("SELECT pgtrickle.repair_stream_table('imm_repair_st')")
         .await;
     assert!(summary.contains("ivm triggers rebuilt"), "{summary}");
-    db.refresh_st_with_retry("imm_repair_st").await;
+    db.assert_st_matches_query(
+        "imm_repair_st",
+        "SELECT id, v * 2 AS doubled FROM imm_repair_src",
+    )
+    .await;
     db.execute("UPDATE imm_repair_src SET v = 20 WHERE id = 1")
         .await;
-    db.assert_st_matches_query("imm_repair_st", "SELECT id, v FROM imm_repair_src")
+    db.assert_st_matches_query(
+        "imm_repair_st",
+        "SELECT id, v * 2 AS doubled FROM imm_repair_src",
+    )
+    .await;
+    let healthy_immediate_tables: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
         .await;
+    assert_eq!(healthy_immediate_tables, 0);
 
     db.execute("SELECT pgtrickle.reinitialize_stream_table('imm_repair_st')")
         .await;
     db.execute("UPDATE imm_repair_src SET v = 30 WHERE id = 1")
         .await;
-    db.assert_st_matches_query("imm_repair_st", "SELECT id, v FROM imm_repair_src")
-        .await;
+    db.assert_st_matches_query(
+        "imm_repair_st",
+        "SELECT id, v * 2 AS doubled FROM imm_repair_src",
+    )
+    .await;
     let buffers: i64 = db
         .query_scalar("SELECT count(*) FROM pg_class WHERE relnamespace = 'pgtrickle_changes'::regnamespace AND relname LIKE 'changes_%' AND relname NOT LIKE 'changes_pgt_%' AND relkind IN ('r', 'p')")
         .await;
