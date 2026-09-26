@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import fnmatch
 import json
@@ -53,6 +54,17 @@ EXPECTED_SUITES = shared.EXPECTED_SUITES | {
     "delta-qualification-default-off",
     "sensitivity-baseline",
 }
+
+
+def missing_unsafe_asan_cases(output: str, required_cases: set[str]) -> list[str]:
+    passed = {
+        name.rsplit("::", 1)[-1]
+        for name, status in re.findall(
+            r"^test (\S+) \.\.\. (ok|FAILED|ignored)$", output, re.MULTILINE
+        )
+        if status == "ok"
+    }
+    return sorted(case for case in required_cases if case.rsplit("::", 1)[-1] not in passed)
 
 
 def check_support_contract() -> None:
@@ -155,6 +167,27 @@ def check_support_contract() -> None:
         and set(instrumented.get("required_cases", [])) == expected_unsafe_cases,
         "unsafe boundary qualification is missing cases or is conflated with exact-release evidence",
     )
+    cases = sorted(expected_unsafe_cases)
+    first_case = cases[0]
+    first_name = first_case.rsplit("::", 1)[-1]
+    complete_output = "\n".join(
+        f"test {case.rsplit('::', 1)[-1]} ... ok" for case in cases
+    )
+    missing_output = "\n".join(
+        f"test {case.rsplit('::', 1)[-1]} ... ok" for case in cases[1:]
+    )
+    shared.require(
+        not missing_unsafe_asan_cases(complete_output, expected_unsafe_cases)
+        and missing_unsafe_asan_cases(missing_output, expected_unsafe_cases) == [first_case]
+        and missing_unsafe_asan_cases(
+            complete_output.replace(
+                f"test {first_name} ... ok", f"test {first_name} ... FAILED"
+            ),
+            expected_unsafe_cases,
+        )
+        == [first_case],
+        "unsafe boundary case-output check failed its pass, omission, or failure control",
+    )
     suites = {suite["id"]: suite for suite in qualification["required_suites"]}
     for suite_id, test_binary in (
         ("delta-v1", "e2e_v108_conformance_tests"),
@@ -236,7 +269,9 @@ def check_support_contract() -> None:
     shared.require(
         "Run separate unsafe-boundary ASan qualification" in workflow
         and "qualification-logs/unsafe-asan" in workflow
-        and "steps.unsafe-asan.outcome" in workflow,
+        and "steps.unsafe-asan.outcome" in workflow
+        and "Require every declared instrumented case to pass" in workflow
+        and "--unsafe-asan-log qualification-logs/unsafe-asan/workloads.log" in workflow,
         "release qualification does not require and retain a separate unsafe-boundary instrumented run",
     )
     stager = (ROOT / "scripts/stage_release_assets.py").read_text(encoding="utf-8")
@@ -318,6 +353,13 @@ def check_support_contract() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--unsafe-asan-log",
+        type=Path,
+        help="verify every required instrumented test passed in this Cargo test log",
+    )
+    args = parser.parse_args()
     shared.VERSION = VERSION
     shared.PREVIOUS_VERSION = "0.107.0"
     shared.EXPECTED_SOURCE_VERSIONS = ["0.106.1", "0.107.0"]
@@ -325,6 +367,17 @@ def main() -> None:
     shared.GATE_SCRIPT = "v0_108_0_release_gate.py"
     shared.EXPECTED_SUITES = EXPECTED_SUITES
     check_support_contract()
+    if args.unsafe_asan_log is not None:
+        qualification = json.loads(
+            (ROOT / "tests/release/v0.108.0-qualification.json").read_text(encoding="utf-8")
+        )
+        required_cases = set(qualification["instrumented_qualification"]["required_cases"])
+        output = args.unsafe_asan_log.read_text(encoding="utf-8")
+        missing = missing_unsafe_asan_cases(output, required_cases)
+        shared.require(
+            not missing,
+            f"instrumented ASan cases missing or not passed: {missing}",
+        )
     subprocess.run(
         [sys.executable, "-m", "unittest", "scripts.test_release_evidence"],
         cwd=ROOT,
