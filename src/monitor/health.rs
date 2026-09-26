@@ -188,59 +188,6 @@ fn health_check() -> TableIterator<
         };
         rows.push(("error_tables".to_string(), sev, detail));
 
-        let broken_immediate_tables: Vec<String> = client
-            .select(
-                "SELECT DISTINCT st.pgt_schema::text || '.' || st.pgt_name::text \
-                 FROM pgtrickle.pgt_stream_tables st \
-                 JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id \
-                 CROSS JOIN LATERAL (VALUES \
-                     ('pgt_ivm_before_insert_' || st.pgt_id::text), \
-                     ('pgt_ivm_before_update_' || st.pgt_id::text), \
-                     ('pgt_ivm_before_delete_' || st.pgt_id::text), \
-                     ('pgt_ivm_before_trunc_' || st.pgt_id::text), \
-                     ('pgt_ivm_after_ins_' || st.pgt_id::text), \
-                     ('pgt_ivm_after_upd_' || st.pgt_id::text), \
-                     ('pgt_ivm_after_del_' || st.pgt_id::text), \
-                     ('pgt_ivm_after_trunc_' || st.pgt_id::text) \
-                 ) required(trigger_name) \
-                 WHERE st.refresh_mode = 'IMMEDIATE' \
-                   AND dep.source_type IN ('TABLE', 'STREAM_TABLE') \
-                   AND NOT EXISTS ( \
-                       SELECT 1 FROM pg_catalog.pg_trigger t \
-                       WHERE t.tgrelid = dep.source_relid \
-                         AND t.tgname = required.trigger_name \
-                         AND NOT t.tgisinternal \
-                         AND t.tgenabled IN ('O', 'A') \
-                   ) \
-                 ORDER BY 1",
-                None,
-                &[],
-            )
-            .unwrap_or_else(|e| {
-                pgrx::error!("health_check: failed to inspect IMMEDIATE triggers: {}", e)
-            })
-            .filter_map(|row| row.get::<String>(1).unwrap_or(None))
-            .collect();
-        rows.push((
-            "immediate_ivm_triggers".to_string(),
-            if broken_immediate_tables.is_empty() {
-                "OK"
-            } else {
-                "ERROR"
-            }
-            .to_string(),
-            if broken_immediate_tables.is_empty() {
-                "All IMMEDIATE stream tables have enabled IVM triggers".to_string()
-            } else {
-                format!(
-                    "{} IMMEDIATE stream table(s) are missing or have disabled IVM triggers: {}. \
-                     Run pgtrickle.repair_stream_table() for each affected stream table.",
-                    broken_immediate_tables.len(),
-                    broken_immediate_tables.join(", ")
-                )
-            },
-        ));
-
         // v0.91.0: source-DDL suspensions are actionable errors, not generic
         // refresh failures. Keep the durable reason code visible alongside the
         // repair command so operators do not accidentally resume stale state.
@@ -607,6 +554,89 @@ fn health_check() -> TableIterator<
         };
         rows.push(("ring_overflow_trend".to_string(), sev.to_string(), detail));
     });
+
+    let immediate_sources: Vec<(i64, String, pg_sys::Oid)> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT st.pgt_id, st.pgt_schema::text || '.' || st.pgt_name::text, \
+                        dep.source_relid \
+                 FROM pgtrickle.pgt_stream_tables st \
+                 JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id \
+                 WHERE st.refresh_mode = 'IMMEDIATE' \
+                   AND dep.source_type IN ('TABLE', 'STREAM_TABLE') \
+                 ORDER BY st.pgt_id, dep.source_relid",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut sources = Vec::new();
+        for row in result {
+            sources.push((
+                row.get::<i64>(1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "health_check: missing stream table id".to_string(),
+                        )
+                    })?,
+                row.get::<String>(2)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "health_check: missing stream table name".to_string(),
+                        )
+                    })?,
+                row.get::<pg_sys::Oid>(3)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .ok_or_else(|| {
+                        PgTrickleError::InternalError(
+                            "health_check: missing source relation id".to_string(),
+                        )
+                    })?,
+            ));
+        }
+        Ok::<_, PgTrickleError>(sources)
+    })
+    .unwrap_or_else(|e| {
+        pgrx::error!(
+            "health_check: failed to inspect IMMEDIATE dependencies: {}",
+            e
+        )
+    });
+    let mut broken_immediate_tables = Vec::new();
+    for (pgt_id, name, source_oid) in immediate_sources {
+        match crate::ivm::ivm_triggers_ready(source_oid, pgt_id) {
+            Ok(true) => {}
+            Ok(false) if !broken_immediate_tables.contains(&name) => {
+                broken_immediate_tables.push(name);
+            }
+            Ok(false) => {}
+            Err(e) => pgrx::error!(
+                "health_check: failed to inspect IMMEDIATE triggers for {}: {}",
+                name,
+                e
+            ),
+        }
+    }
+    rows.push((
+        "immediate_ivm_triggers".to_string(),
+        if broken_immediate_tables.is_empty() {
+            "OK"
+        } else {
+            "ERROR"
+        }
+        .to_string(),
+        if broken_immediate_tables.is_empty() {
+            "All IMMEDIATE stream tables have enabled IVM triggers".to_string()
+        } else {
+            format!(
+                "{} IMMEDIATE stream table(s) are missing or have disabled IVM triggers: {}. \
+                 Run pgtrickle.repair_stream_table() for each affected stream table.",
+                broken_immediate_tables.len(),
+                broken_immediate_tables.join(", ")
+            )
+        },
+    ));
 
     // Registry-only window checks stay bounded by the number of semantic
     // window specifications. They never scan a dynamic state relation.

@@ -1708,23 +1708,16 @@ WITH broken_immediate AS (
     SELECT count(DISTINCT st.pgt_id)::bigint AS table_count
     FROM pgtrickle.pgt_stream_tables st
     JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id
-    CROSS JOIN LATERAL (VALUES
-        ('pgt_ivm_before_insert_' || st.pgt_id::text),
-        ('pgt_ivm_before_update_' || st.pgt_id::text),
-        ('pgt_ivm_before_delete_' || st.pgt_id::text),
-        ('pgt_ivm_before_trunc_' || st.pgt_id::text),
-        ('pgt_ivm_after_ins_' || st.pgt_id::text),
-        ('pgt_ivm_after_upd_' || st.pgt_id::text),
-        ('pgt_ivm_after_del_' || st.pgt_id::text),
-        ('pgt_ivm_after_trunc_' || st.pgt_id::text)
-    ) required(trigger_name)
     WHERE st.refresh_mode = 'IMMEDIATE'
       AND dep.source_type IN ('TABLE', 'STREAM_TABLE')
-      AND NOT EXISTS (
-          SELECT 1
+      AND 8 <> (
+          SELECT count(*)
           FROM pg_catalog.pg_trigger t
           WHERE t.tgrelid = dep.source_relid
-            AND t.tgname = required.trigger_name
+            AND t.tgname ~ (
+                '^pgt_ivm_(before_(insert|update|delete|trunc)|after_(ins|upd|del|trunc))_'
+                || st.pgt_id::text || '$'
+            )
             AND NOT t.tgisinternal
             AND t.tgenabled IN ('O', 'A')
       )
