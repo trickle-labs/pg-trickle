@@ -37,7 +37,7 @@ commits = [
     "d0b7b7792ac68fd6506ca75ada270b7005b48340",
 ]
 paths = [
-    '''^justfile$''',
+    '''(^|/)justfile$''',
 ]
 
 [[allowlists]]
@@ -47,6 +47,6 @@ commits = [
     "266229f902c49e5ae4177101002ccffe37355305",
 ]
 paths = [
-    '''^\.p2p/work/issue-1119-immediate-downstream-consistency/evidence/issue-1119-repair-final2-upgrade\.log$''',
-    '''^\.p2p/work/issue-1119-immediate-downstream-consistency/evidence/issue-1119-repair6-e2e-image\.log$''',
+    '''(^|/)\.p2p/work/issue-1119-immediate-downstream-consistency/evidence/issue-1119-repair-final2-upgrade\.log$''',
+    '''(^|/)\.p2p/work/issue-1119-immediate-downstream-consistency/evidence/issue-1119-repair6-e2e-image\.log$''',
 ]
