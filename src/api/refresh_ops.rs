@@ -104,6 +104,7 @@ fn e2e_security_context_state() -> Vec<String> {
     [
         "SELECT pg_backend_pid()::text",
         "SELECT current_user::text",
+        "SELECT current_setting('role')",
         "SELECT current_setting('search_path')",
         "SELECT current_setting('row_security')",
     ]
