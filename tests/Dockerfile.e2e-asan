@@ -29,6 +29,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain "${RUST_NIGHTLY}" && \
     rustup component add rust-src --toolchain "${RUST_NIGHTLY}" && \
     cargo install cargo-pgrx --version 0.18.0 --locked && \
+    /usr/local/pgsql/bin/pg_config --version && \
     cargo pgrx init --pg18 /usr/local/pgsql/bin/pg_config
 
 WORKDIR /build
