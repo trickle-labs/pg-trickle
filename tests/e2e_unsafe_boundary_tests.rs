@@ -177,14 +177,14 @@ async fn test_pipeline_copy_null_and_toasted_rows_survive_refresh() {
     );
 }
 
-async fn session_state(conn: &mut PgConnection) -> (String, String, String) {
+async fn session_state(conn: &mut PgConnection) -> (String, String, String, String) {
     let row = sqlx::query(
-        "SELECT current_user::text, current_setting('search_path'), current_setting('row_security')",
+        "SELECT current_user::text, current_setting('role'), current_setting('search_path'), current_setting('row_security')",
     )
     .fetch_one(conn)
     .await
     .expect("read same-backend authorization state");
-    (row.get(0), row.get(1), row.get(2))
+    (row.get(0), row.get(1), row.get(2), row.get(3))
 }
 
 async fn assert_allowed_and_denied(conn: &mut PgConnection, prefix: &str) {
@@ -262,13 +262,13 @@ async fn assert_in_backend_context_restored(
         .expect("witness has post-catch state");
     assert_eq!(
         before.len(),
-        4,
-        "state includes PID, role, path, and row_security"
+        5,
+        "state includes PID, current_user, role, path, and row_security"
     );
     assert_eq!(
         after.len(),
-        4,
-        "state includes PID, role, path, and row_security"
+        5,
+        "state includes PID, current_user, role, path, and row_security"
     );
     assert_eq!(
         before[0].as_str().and_then(|pid| pid.parse::<i32>().ok()),
