@@ -25,7 +25,8 @@ RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
     make -j"$(nproc)" && make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain "${RUST_NIGHTLY}" && \
     rustup component add rust-src --toolchain "${RUST_NIGHTLY}" && \
     cargo install cargo-pgrx --version 0.18.0 --locked && \
@@ -39,7 +40,8 @@ COPY benches/ benches/
 COPY src/ src/
 COPY sql/ sql/
 COPY pg_trickle.control ./
-RUN cargo +"${RUST_NIGHTLY}" pgrx package --features pg18,e2e-unsafe-test-hooks \
+RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
+    cargo +"${RUST_NIGHTLY}" pgrx package --features pg18,e2e-unsafe-test-hooks \
       --pg-config /usr/local/pgsql/bin/pg_config \
       --target x86_64-unknown-linux-gnu && \
     RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes' \
