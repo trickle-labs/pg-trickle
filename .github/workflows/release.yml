@@ -506,7 +506,7 @@ jobs:
         run: |
           suite_args=()
           for result in qualification-logs/results/*.json; do
-            [[ -f "$result" ]] && suite_args+=(--suite-result "$result")
+            [[ -f "$result" && "$result" != *.installation.json ]] && suite_args+=(--suite-result "$result")
           done
           VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
