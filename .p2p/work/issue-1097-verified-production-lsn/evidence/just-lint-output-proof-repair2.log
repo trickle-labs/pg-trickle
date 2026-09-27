@@ -1,0 +1,33 @@
+cargo fmt -- --check
+cargo clippy --all-targets --features pg18 -- -D warnings
+    Checking pg_trickle v0.108.0 (/Users/grove/projects/pg-trickle2)
+error: The Verus types 'nat' and 'int' can only be used in ghost code (e.g., in a 'spec' or 'proof' function, inside a 'proof' block, or when assigning to a 'ghost' or 'tracked' variable)
+   --> src/../verification/lsn.rs:608:38
+    |
+608 |     let output = buffer@.subrange(0, high_digits as int + 9);
+    |                                      ^^^^^^^^^^^
+
+error: The Verus types 'nat' and 'int' can only be used in ghost code (e.g., in a 'spec' or 'proof' function, inside a 'proof' block, or when assigning to a 'ghost' or 'tracked' variable)
+   --> src/../verification/lsn.rs:626:32
+    |
+626 |     lsn_bytes_value_at(output, high_digits as int);
+    |                                ^^^^^^^^^^^
+
+error[E0599]: no method named `view` found for array `[u8; 17]` in the current scope
+   --> src/../verification/lsn.rs:608:24
+    |
+608 |     let output = buffer@.subrange(0, high_digits as int + 9);
+    |                        ^ method not found in `[u8; 17]`
+
+error[E0425]: cannot find function `lsn_bytes_value_at` in this scope
+   --> src/../verification/lsn.rs:626:5
+    |
+626 |     lsn_bytes_value_at(output, high_digits as int);
+    |     ^^^^^^^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0425, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `pg_trickle` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_trickle` (lib test) due to 4 previous errors
+error: recipe `clippy` failed on line 56 with exit code 101

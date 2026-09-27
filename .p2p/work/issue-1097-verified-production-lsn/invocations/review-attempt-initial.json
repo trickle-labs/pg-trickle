@@ -1,0 +1,12 @@
+{
+  "stage": "review-implementation",
+  "host": "codex exec",
+  "sandbox_requested": "read-only",
+  "default_sandbox_exit_code": 1,
+  "default_stderr": "review-stderr.log",
+  "escalated_exec_session_id": 17429,
+  "escalated_attempt": "interrupted before thread.started because stdin remained open",
+  "output_jsonl": "review-output-escalated.jsonl",
+  "stderr": "review-stderr-escalated.log",
+  "valid_stage_report": false
+}

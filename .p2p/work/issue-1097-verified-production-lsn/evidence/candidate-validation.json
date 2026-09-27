@@ -1,0 +1,30 @@
+{
+  "validation": "passed",
+  "work_item": "work/issue-1097-verified-production-lsn.md",
+  "work_item_sha256": "dae07ec8c073477626add9b70a114891b5bbe7431e9790537c075bd731cc4259",
+  "candidate": "snapshot:sha256:361e2afe069e25ceb27988a01809dd9f840150e5e86307d48e422be6dce3bac9",
+  "comparison_base": "2dfe8dae90452120cf6760b71dd0def8c241756b",
+  "binding_inputs": [
+    {
+      "path": "work/sources/issue-1090-parent-contract-v1.md",
+      "sha256": "c5645654a11745aee1b64549f457348a145cc9dd10d009b351c2ea89c256d982"
+    },
+    {
+      "path": "work/sources/issue-1090-parent-source-snapshot.json",
+      "sha256": "c65c99edb02da9d1640f3dff9189a971a2bd3414956af30ceccf273c536bab06"
+    },
+    {
+      "path": "work/sources/issue-1091-prerequisite-snapshot.json",
+      "sha256": "9e457f926f0593fc8960373c649607fe16cdd523411b2cefef83fa898ac44ef9"
+    },
+    {
+      "path": "work/sources/issue-1093-prerequisite-snapshot.json",
+      "sha256": "2610c30baa257b13b1884472d059349f719c531c2af186b696c4e5d12de5fa85"
+    },
+    {
+      "path": "work/sources/issue-1097.json",
+      "sha256": "013f52ebc05d3766582a87d6ba23af51af2fc84c481abb28431584ae5be4210d"
+    }
+  ],
+  "manifest_entries": 1566
+}

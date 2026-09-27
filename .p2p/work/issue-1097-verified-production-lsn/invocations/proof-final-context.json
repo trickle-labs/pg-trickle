@@ -1,0 +1,21 @@
+{
+  "stage": "prove",
+  "skill_file": "/Users/grove/.agents/skills/prove/SKILL.md",
+  "host": "codex exec",
+  "sandbox": "read-only",
+  "stdin": "/dev/null",
+  "ephemeral": true,
+  "codex_thread_id": "01a0e0cc-1b32-7023-90e3-c5537e1b685c",
+  "exec_session_id": 29969,
+  "exit_code": 0,
+  "candidate": "snapshot:sha256:3e8a030c39c44af4c090e4677ddcacd5a4659d422ff17a20e86edbb902df1018",
+  "comparison_base": "6dc7e07c6bf53df2bf2327c4146cb140ca433f64",
+  "contract_sha256": "dae07ec8c073477626add9b70a114891b5bbe7431e9790537c075bd731cc4259",
+  "output_jsonl": "proof-final-output.jsonl",
+  "output_sha256": "40829521293bd8fc2cd463a79b5f9dda58eb179724cdc41a1fa41dc2468f789b",
+  "stderr": "proof-final-stderr.log",
+  "stderr_sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721",
+  "returned_report": "proof-final-last.md",
+  "report_sha256": "93f9b0f55562fae2f217ab07b206ef6327c40b54c7eeeef8e945421d1d30ceff",
+  "saved_report": "/Users/grove/projects/pg-trickle2/.p2p/work/issue-1097-verified-production-lsn/proof.md"
+}

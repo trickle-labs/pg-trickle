@@ -1,0 +1,23 @@
+tree f4b30ccf0b21eea9b38208ebcfb02f42a8bdf488
+parent 20c1476b6a8ad4a57cfc5441069f333afc110511
+author Geir O. Grønmo <grove@geirove.org> 1790456103 +0200
+committer GitHub <noreply@github.com> 1790456103 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJquDEnCRC1aQ7uu5UhlAAA+hAQAI+SfQ/ijpjb0dCN7bc1FkSY
+ oCpVnazGmoIUJ8COBP6l09PaLUPGzj9MqH+wjXBmd9yONm6Va/FmFeV8zE4B0jiH
+ s79K23o36l9O2JrkHaxM4/M5qsrqkOA4oUtW91i4TW8epdIMU2N8PyFdFNW4QY2m
+ CmGFyRebp2vGw11R1Aiuhra7yfCWsZS8DhPcso6keKjwyqlwkRm5fK/mduUhHUyo
+ WEENmszsuSdguJJeNR4+IeQORPEhfAj4brt6gUEDLmPhHL37xoiv96AepZ4ZUf7e
+ GR2fGqk+XdANDPpHvBHqah/pf3NHE3Gf910cuR+qQYoDuR//Ro+vNiFNA6XW6YEA
+ wfScnBGNT89JCnc9D2N4J4B4VVwOO8TPbWfTehdRL7rv/8p+hDzYBWTuthCu9on8
+ pbmknxDU+x9OkSvhHNToeOFqWMUJAae/SbofG7Q7epP+/Z66I0+1xpt/6nguv0/E
+ LUwxVp3xgsSxY0S0Gt2F7Zc9MjZfx55hukDLSu+m5/v7wrKWSkGMqwSMxXVR2m+W
+ rwgc1MKUdaXPDAtIjWehYiAdNKEIqVH1IxV0+xngunOyN2t6dnRfREjf9ZJsK0DH
+ hA2i13kKTV4/y8ypVX37qgLsbx+SJ2mRWdOOPLBeiONmkhm1woTYbRnTU419ABPn
+ qJCmOlolDXRB8580a/qh
+ =BSU7
+ -----END PGP SIGNATURE-----
+ 
+
+docs: plan acceptance for issue 1119 (#1120)

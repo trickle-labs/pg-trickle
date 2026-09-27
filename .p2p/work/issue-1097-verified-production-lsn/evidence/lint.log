@@ -1,0 +1,103 @@
+cargo fmt -- --check
+cargo clippy --all-targets --features pg18 -- -D warnings
+    Updating git repository `https://github.com/verus-lang/verus`
+    Updating git repository `https://github.com/mystor/synstructure.git`
+     Locking 7 packages to latest Rust 1.98.1 compatible versions
+      Adding builtin v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+      Adding builtin_macros v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+      Adding prettyplease_verus v0.2.29 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+      Adding state_machines_macros v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+      Adding syn_verus v2.0.96 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+      Adding synstructure v0.13.0 (https://github.com/mystor/synstructure.git?rev=1079497eb2bea252433dac53afe41291d8779641#1079497e)
+      Adding vstd v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling syn_verus v2.0.96 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling indexmap v1.9.3
+   Compiling prettyplease_verus v0.2.29 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling hashbrown v0.12.3
+   Compiling unicode-xid v0.2.6
+   Compiling vstd v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+    Checking builtin v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling pg_trickle v0.108.0 (/Users/grove/projects/pg-trickle2)
+   Compiling synstructure v0.13.0 (https://github.com/mystor/synstructure.git?rev=1079497eb2bea252433dac53afe41291d8779641#1079497e)
+   Compiling state_machines_macros v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling builtin_macros v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+error: expected curly braces
+   --> src/../verification/lsn.rs:201:9
+    |
+201 |         invariant forall|prefix_index: int|
+    |         ^^^^^^^^^
+
+error: unused import: `super::*`
+   --> src/../verification/lsn.rs:292:9
+    |
+292 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `-D unused-imports` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:308:21
+    |
+308 |             assert!(Lsn::parse(value).is_err(), "accepted {value:?}");
+    |                     ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:311:13
+    |
+311 |             Lsn::parse("FFFFFFFF/FFFFFFFF").unwrap().position(),
+    |             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:319:29
+    |
+319 |             let formatted = Lsn::from_position(value).format();
+    |                             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:320:24
+    |
+320 |             assert_eq!(Lsn::parse(&formatted).unwrap().position(), value);
+    |                        ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:322:20
+    |
+322 |         assert_eq!(Lsn::from_position(0).format(), "0/00000000");
+    |                    ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:323:20
+    |
+323 |         assert_eq!(Lsn::from_position(1_u64 << 32).format(), "1/00000000");
+    |                    ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:324:20
+    |
+324 |         assert_eq!(Lsn::from_position(u64::MAX).format(), "FFFFFFFF/FFFFFFFF");
+    |                    ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:330:29
+    |
+330 |             let formatted = Lsn::from_position(position).format();
+    |                             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:331:29
+    |
+331 |             prop_assert_eq!(Lsn::parse(&formatted).map(Lsn::position), Ok(position));
+    |                             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:331:56
+    |
+331 |             prop_assert_eq!(Lsn::parse(&formatted).map(Lsn::position), Ok(position));
+    |                                                        ^^^ use of undeclared type `Lsn`
+
+error: could not compile `pg_trickle` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `pg_trickle` (lib test) due to 12 previous errors
+error: recipe `clippy` failed on line 56 with exit code 101

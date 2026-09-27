@@ -2329,7 +2329,7 @@ fn compute_safe_cleanup_lsn(consumer_frontiers: &[&str]) -> Option<String> {
     }
     let mut min = valid[0];
     for &lsn in &valid[1..] {
-        min = crate::version::lsn_min(min, lsn);
+        min = crate::version::lsn_min(min, lsn).expect("valid test LSN");
     }
     Some(min.to_string())
 }
@@ -2340,9 +2340,17 @@ fn retained_after_cleanup(entry_lsns: &[&str], safe_lsn: &str) -> Vec<String> {
     entry_lsns
         .iter()
         .copied()
-        .filter(|lsn| crate::version::lsn_gt(lsn, safe_lsn))
+        .filter(|lsn| test_lsn_gt(lsn, safe_lsn))
         .map(|s| s.to_string())
         .collect()
+}
+
+fn test_lsn_gt(a: &str, b: &str) -> bool {
+    crate::version::lsn_gt(a, b).expect("valid test LSN")
+}
+
+fn test_lsn_gte(a: &str, b: &str) -> bool {
+    crate::version::lsn_gte(a, b).expect("valid test LSN")
 }
 
 #[test]
@@ -2423,7 +2431,7 @@ fn test_multi_frontier_cleanup_never_deletes_unconsumed() {
         // but the critical invariant is: entries above the MIN frontier are retained.
         assert!(
             retained.iter().any(|e| e == consumer_lsn)
-                || crate::version::lsn_gt(&safe_lsn, consumer_lsn)
+                || test_lsn_gt(&safe_lsn, consumer_lsn)
                 || safe_lsn == consumer_lsn,
             "consumer at {} should find its entries retained or already consumed",
             consumer_lsn
@@ -2434,7 +2442,7 @@ fn test_multi_frontier_cleanup_never_deletes_unconsumed() {
     let min_consumer = "0/200";
     for entry in &retained {
         assert!(
-            crate::version::lsn_gt(entry, min_consumer),
+            test_lsn_gt(entry, min_consumer),
             "retained entry {} should be above safe threshold {}",
             entry,
             min_consumer
@@ -2471,7 +2479,7 @@ proptest! {
             // Invariant 1: Every retained entry is strictly above the threshold.
             for entry in &retained {
                 prop_assert!(
-                    crate::version::lsn_gt(entry, threshold),
+                    test_lsn_gt(entry, threshold),
                     "retained entry {} should be > threshold {}",
                     entry,
                     threshold
@@ -2486,7 +2494,7 @@ proptest! {
                 .collect();
             for entry in &deleted {
                 prop_assert!(
-                    !crate::version::lsn_gt(entry, threshold),
+                    !test_lsn_gt(entry, threshold),
                     "deleted entry {} should be <= threshold {}",
                     entry,
                     threshold
@@ -2498,7 +2506,7 @@ proptest! {
             // (This is the "no premature deletion" property.)
             for consumer_lsn in &frontier_refs {
                 for entry in &entry_refs {
-                    if crate::version::lsn_gt(entry, consumer_lsn) {
+                    if test_lsn_gt(entry, consumer_lsn) {
                         // This entry hasn't been consumed by this consumer yet.
                         // It should be retained.
                         prop_assert!(
@@ -2528,7 +2536,7 @@ proptest! {
                 .iter()
                 .enumerate()
                 .min_by(|(_, a), (_, b)| {
-                    let pa = crate::version::lsn_gt(a, b);
+                    let pa = test_lsn_gt(a, b);
                     if pa { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less }
                 })
                 .map(|(i, _)| i)
@@ -2536,7 +2544,7 @@ proptest! {
 
             // Advance the slowest consumer.
             let mut advanced = base_frontiers.clone();
-            let old_val = crate::version::lsn_gt(&advanced[min_idx], "0/0");
+            let old_val = test_lsn_gt(&advanced[min_idx], "0/0");
             if old_val {
                 // Parse and advance
                 let parts: Vec<&str> = advanced[min_idx].split('/').collect();
@@ -2547,7 +2555,7 @@ proptest! {
             let new_frontier_refs: Vec<&str> = advanced.iter().map(|s| s.as_str()).collect();
             if let Some(ref new_threshold) = compute_safe_cleanup_lsn(&new_frontier_refs) {
                 prop_assert!(
-                    crate::version::lsn_gte(new_threshold, old_threshold),
+                    test_lsn_gte(new_threshold, old_threshold),
                     "advancing slowest consumer should not lower threshold: old={}, new={}",
                     old_threshold,
                     new_threshold
@@ -2573,7 +2581,7 @@ proptest! {
 
             if let Some(ref new_threshold) = compute_safe_cleanup_lsn(&new_frontier_refs) {
                 prop_assert!(
-                    !crate::version::lsn_gt(new_threshold, old_threshold),
+                    !test_lsn_gt(new_threshold, old_threshold),
                     "adding consumer at 0/1 should not raise threshold: old={}, new={}",
                     old_threshold,
                     new_threshold

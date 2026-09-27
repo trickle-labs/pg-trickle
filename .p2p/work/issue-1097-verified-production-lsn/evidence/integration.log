@@ -1,0 +1,554 @@
+cargo nextest run --test catalog_tests --test catalog_compat_tests --test extension_tests --test monitoring_tests --test smoke_tests --test resilience_tests --test scenario_tests --test trigger_detection_tests --test workflow_tests --test property_tests
+   Compiling pg_trickle v0.108.0 (/Users/grove/projects/pg-trickle2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.08s
+────────────
+ Nextest run ID bf26f44b-226a-4795-9ceb-c52ab09a24c2 with nextest profile: default
+    Starting 161 tests across 10 binaries
+        PASS [   0.018s] (  1/161) pg_trickle::catalog_compat_tests test_catalog_ddl_no_phantom_tables
+  TRY 1 FAIL [   0.024s] (───────) pg_trickle::catalog_compat_tests test_advisory_lock_roundtrip
+  stdout ───
+
+    running 1 test
+    test test_advisory_lock_roundtrip ... FAILED
+
+    failures:
+
+    failures:
+        test_advisory_lock_roundtrip
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'test_advisory_lock_roundtrip' (99094624) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.025s] (───────) pg_trickle::catalog_compat_tests test_array_length_returns_int4
+  stdout ───
+
+    running 1 test
+    test test_array_length_returns_int4 ... FAILED
+
+    failures:
+
+    failures:
+        test_array_length_returns_int4
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'test_array_length_returns_int4' (99094629) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.024s] (───────) pg_trickle::catalog_compat_tests test_nspname_lookup_for_nonexistent_relation_returns_empty
+  stdout ───
+
+    running 1 test
+    test test_nspname_lookup_for_nonexistent_relation_returns_empty ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_lookup_for_nonexistent_relation_returns_empty
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'test_nspname_lookup_for_nonexistent_relation_returns_empty' (99094621) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.025s] (───────) pg_trickle::catalog_compat_tests test_pg_available_extensions_shape
+  stdout ───
+
+    running 1 test
+    test test_pg_available_extensions_shape ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_available_extensions_shape
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_available_extensions_shape' (99094634) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.024s] (───────) pg_trickle::catalog_compat_tests test_pg_get_viewdef_complex_view
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_complex_view ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_complex_view
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_complex_view' (99094620) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.025s] (───────) pg_trickle::catalog_compat_tests test_nspname_via_search_path_resolution
+  stdout ───
+
+    running 1 test
+    test test_nspname_via_search_path_resolution ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_via_search_path_resolution
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_via_search_path_resolution' (99094633) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.025s] (───────) pg_trickle::catalog_compat_tests test_array_length_bigint_cast_comparison
+  stdout ───
+
+    running 1 test
+    test test_array_length_bigint_cast_comparison ... FAILED
+
+    failures:
+
+    failures:
+        test_array_length_bigint_cast_comparison
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_array_length_bigint_cast_comparison' (99094638) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.025s] (───────) pg_trickle::catalog_compat_tests test_nspname_text_cast_works
+  stdout ───
+
+    running 1 test
+    test test_nspname_text_cast_works ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_text_cast_works
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'test_nspname_text_cast_works' (99094626) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.029s] (  2/161) pg_trickle::catalog_compat_tests test_catalog_ddl_no_phantom_columns
+  TRY 1 FAIL [   0.018s] (───────) pg_trickle::catalog_compat_tests test_pg_get_viewdef_cte_view
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_cte_view ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_cte_view
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_cte_view' (99094651) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.016s] (───────) pg_trickle::catalog_compat_tests test_advisory_lock_roundtrip
+  stdout ───
+
+    running 1 test
+    test test_advisory_lock_roundtrip ... FAILED
+
+    failures:
+
+    failures:
+        test_advisory_lock_roundtrip
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_advisory_lock_roundtrip' (99094660) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.015s] (───────) pg_trickle::catalog_compat_tests test_array_length_bigint_cast_comparison
+  stdout ───
+
+    running 1 test
+    test test_array_length_bigint_cast_comparison ... FAILED
+
+    failures:
+
+    failures:
+        test_array_length_bigint_cast_comparison
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_array_length_bigint_cast_comparison' (99094665) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.016s] (───────) pg_trickle::catalog_compat_tests test_pg_get_viewdef_complex_view
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_complex_view ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_complex_view
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_complex_view' (99094664) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.016s] (───────) pg_trickle::catalog_compat_tests test_nspname_lookup_for_nonexistent_relation_returns_empty
+  stdout ───
+
+    running 1 test
+    test test_nspname_lookup_for_nonexistent_relation_returns_empty ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_lookup_for_nonexistent_relation_returns_empty
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_lookup_for_nonexistent_relation_returns_empty' (99094668) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.016s] (───────) pg_trickle::catalog_compat_tests test_nspname_via_search_path_resolution
+  stdout ───
+
+    running 1 test
+    test test_nspname_via_search_path_resolution ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_via_search_path_resolution
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_via_search_path_resolution' (99094671) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.016s] (───────) pg_trickle::catalog_compat_tests test_nspname_text_cast_works
+  stdout ───
+
+    running 1 test
+    test test_nspname_text_cast_works ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_text_cast_works
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_text_cast_works' (99094673) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.018s] (───────) pg_trickle::catalog_compat_tests test_array_length_returns_int4
+  stdout ───
+
+    running 1 test
+    test test_array_length_returns_int4 ... FAILED
+
+    failures:
+
+    failures:
+        test_array_length_returns_int4
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_array_length_returns_int4' (99094670) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.020s] (───────) pg_trickle::catalog_compat_tests test_pg_available_extensions_shape
+  stdout ───
+
+    running 1 test
+    test test_pg_available_extensions_shape ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_available_extensions_shape
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_available_extensions_shape' (99094681) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.022s] (───────) pg_trickle::catalog_compat_tests test_pg_get_viewdef_returns_trimmed_definition
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_returns_trimmed_definition ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_returns_trimmed_definition
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_returns_trimmed_definition' (99094686) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.015s] (  3/161) pg_trickle::catalog_compat_tests test_advisory_lock_roundtrip
+  stdout ───
+
+    running 1 test
+    test test_advisory_lock_roundtrip ... FAILED
+
+    failures:
+
+    failures:
+        test_advisory_lock_roundtrip
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_advisory_lock_roundtrip' (99094698) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 9 tests still running
+  TRY 2 FAIL [   0.020s] (───────) pg_trickle::catalog_compat_tests test_pg_get_viewdef_cte_view
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_cte_view ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_cte_view
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_cte_view' (99094696) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.015s] (  4/161) pg_trickle::catalog_compat_tests test_nspname_via_search_path_resolution
+  stdout ───
+
+    running 1 test
+    test test_nspname_via_search_path_resolution ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_via_search_path_resolution
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_via_search_path_resolution' (99094703) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.016s] (  5/161) pg_trickle::catalog_compat_tests test_array_length_bigint_cast_comparison
+  stdout ───
+
+    running 1 test
+    test test_array_length_bigint_cast_comparison ... FAILED
+
+    failures:
+
+    failures:
+        test_array_length_bigint_cast_comparison
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_array_length_bigint_cast_comparison' (99094702) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.016s] (  6/161) pg_trickle::catalog_compat_tests test_nspname_text_cast_works
+  stdout ───
+
+    running 1 test
+    test test_nspname_text_cast_works ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_text_cast_works
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_text_cast_works' (99094708) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.017s] (  7/161) pg_trickle::catalog_compat_tests test_pg_get_viewdef_complex_view
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_complex_view ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_complex_view
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_complex_view' (99094711) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.017s] (  8/161) pg_trickle::catalog_compat_tests test_nspname_lookup_for_nonexistent_relation_returns_empty
+  stdout ───
+
+    running 1 test
+    test test_nspname_lookup_for_nonexistent_relation_returns_empty ... FAILED
+
+    failures:
+
+    failures:
+        test_nspname_lookup_for_nonexistent_relation_returns_empty
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_nspname_lookup_for_nonexistent_relation_returns_empty' (99094713) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.017s] (  9/161) pg_trickle::catalog_compat_tests test_array_length_returns_int4
+  stdout ───
+
+    running 1 test
+    test test_array_length_returns_int4 ... FAILED
+
+    failures:
+
+    failures:
+        test_array_length_returns_int4
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_array_length_returns_int4' (99094716) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.015s] ( 10/161) pg_trickle::catalog_compat_tests test_pg_available_extensions_shape
+  stdout ───
+
+    running 1 test
+    test test_pg_available_extensions_shape ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_available_extensions_shape
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_available_extensions_shape' (99094719) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.015s] (───────) pg_trickle::catalog_compat_tests test_pg_get_viewdef_returns_trimmed_definition
+  stdout ───
+
+    running 1 test
+    test test_pg_get_viewdef_returns_trimmed_definition ... FAILED
+
+    failures:
+
+    failures:
+        test_pg_get_viewdef_returns_trimmed_definition
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'test_pg_get_viewdef_returns_trimmed_definition' (99094721) panicked at tests/common/mod.rs:33:14:
+    Failed to start PostgreSQL 18.6 container: Client(CreateContainer(HyperLegacyError { err: hyper_util::client::legacy::Error(Connect, Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }) }))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.071s] 10/161 tests run: 2 passed, 8 failed, 0 skipped
+  TRY 3 FAIL [   0.015s] (  3/161) pg_trickle::catalog_compat_tests test_advisory_lock_roundtrip
+  TRY 3 FAIL [   0.015s] (  4/161) pg_trickle::catalog_compat_tests test_nspname_via_search_path_resolution
+  TRY 3 FAIL [   0.016s] (  5/161) pg_trickle::catalog_compat_tests test_array_length_bigint_cast_comparison
+  TRY 3 FAIL [   0.016s] (  6/161) pg_trickle::catalog_compat_tests test_nspname_text_cast_works
+  TRY 3 FAIL [   0.017s] (  7/161) pg_trickle::catalog_compat_tests test_pg_get_viewdef_complex_view
+  TRY 3 FAIL [   0.017s] (  8/161) pg_trickle::catalog_compat_tests test_nspname_lookup_for_nonexistent_relation_returns_empty
+  TRY 3 FAIL [   0.017s] (  9/161) pg_trickle::catalog_compat_tests test_array_length_returns_int4
+  TRY 3 FAIL [   0.015s] ( 10/161) pg_trickle::catalog_compat_tests test_pg_available_extensions_shape
+warning: 151/161 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+error: recipe `test-integration` failed on line 223 with exit code 100

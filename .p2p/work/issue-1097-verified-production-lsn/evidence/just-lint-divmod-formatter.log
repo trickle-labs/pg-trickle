@@ -1,0 +1,83 @@
+cargo fmt -- --check
+cargo clippy --all-targets --features pg18 -- -D warnings
+    Checking pg_trickle v0.108.0 (/Users/grove/projects/pg-trickle2)
+error: expected `,`
+   --> src/../verification/lsn.rs:303:40
+    |
+303 |         assert(high as int < 4294967296);
+    |                                        ^
+
+error: unused import: `super::*`
+   --> src/../verification/lsn.rs:640:9
+    |
+640 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `-D unused-imports` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:656:21
+    |
+656 |             assert!(Lsn::parse(value).is_err(), "accepted {value:?}");
+    |                     ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:659:13
+    |
+659 |             Lsn::parse("FFFFFFFF/FFFFFFFF").unwrap().position(),
+    |             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:667:29
+    |
+667 |             let formatted = Lsn::from_position(value).format();
+    |                             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:668:24
+    |
+668 |             assert_eq!(Lsn::parse(&formatted).unwrap().position(), value);
+    |                        ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:670:20
+    |
+670 |         assert_eq!(Lsn::from_position(0).format(), "0/00000000");
+    |                    ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:671:20
+    |
+671 |         assert_eq!(Lsn::from_position(1_u64 << 32).format(), "1/00000000");
+    |                    ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:672:20
+    |
+672 |         assert_eq!(Lsn::from_position(u64::MAX).format(), "FFFFFFFF/FFFFFFFF");
+    |                    ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:678:29
+    |
+678 |             let formatted = Lsn::from_position(position).format();
+    |                             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:679:29
+    |
+679 |             prop_assert_eq!(Lsn::parse(&formatted).map(Lsn::position), Ok(position));
+    |                             ^^^ use of undeclared type `Lsn`
+
+error[E0433]: cannot find type `Lsn` in this scope
+   --> src/../verification/lsn.rs:679:56
+    |
+679 |             prop_assert_eq!(Lsn::parse(&formatted).map(Lsn::position), Ok(position));
+    |                                                        ^^^ use of undeclared type `Lsn`
+
+error: could not compile `pg_trickle` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `pg_trickle` (lib test) due to 12 previous errors
+error: recipe `clippy` failed on line 56 with exit code 101

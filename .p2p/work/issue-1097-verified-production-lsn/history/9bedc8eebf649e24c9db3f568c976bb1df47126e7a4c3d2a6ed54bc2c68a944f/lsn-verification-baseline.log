@@ -1,0 +1,8 @@
+error: Unsupported constant type
+  --> verification/lsn.rs:22:6
+   |
+22 |     (b'0' <= byte && byte <= b'9')
+   |      ^^^^
+
+error: aborting due to 1 previous error
+

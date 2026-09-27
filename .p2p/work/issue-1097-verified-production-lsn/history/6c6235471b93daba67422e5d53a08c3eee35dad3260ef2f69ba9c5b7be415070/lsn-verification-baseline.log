@@ -1,0 +1,146 @@
+error: assertion failed
+   --> verification/lsn.rs:525:13
+    |
+525 | /             lsn_bytes_value(value@.subrange(0, length as int))
+526 | |                 == high as int * 4294967296 + low as int
+    | |________________________________________________________^ assertion failed
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:234:13
+    |
+234 |             Ok(parsed) => valid_lsn_bytes(bytes@)
+    |             ^^^^^^^^^^ failed this postcondition
+...
+240 |     Lsn::parse_bytes_prefix(bytes, bytes.len())
+    |     ------------------------------------------- at the end of the function body
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:293:9
+    |
+293 |         while high_value > 0
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:303:9
+    |
+303 |         while index < high_digits
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:314:5
+    |
+314 |     while index < 8
+    |     ^^^^^^^^^^^^^^^
+
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:273:1
+    |
+273 | pub fn format_bytes(position: u64) -> (formatted: ([u8; 17], usize))
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:276:9
+    |
+276 |         forall|index: int| 0 <= index < formatted.1 ==> formatted.0@[index] < 128,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ failed this postcondition
+...
+322 |     (buffer, high_digits + 9)
+    |     ------------------------- at the end of the function body
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:277:9
+    |
+277 | /         forall|index: int| 0 <= index < formatted.1
+278 | |             ==> formatted.0@[index] == 0x2Fu8 || uppercase_hex_byte(formatted.0@[index]),
+    | |________________________________________________________________________________________^ failed this postcondition
+...
+322 |       (buffer, high_digits + 9)
+    |       ------------------------- at the end of the function body
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:285:16
+    |
+285 |     let high = (position >> 32) as u32;
+    |                ^^^^^^^^^^^^^^^^
+
+[rust_verify/src/verifier.rs:98:17] &note = "failed precondition"
+[rust_verify/src/verifier.rs:98:17] &sp.as_string = "vstd/std_specs/core.rs:230:9: 230:54 (#0)"
+error: precondition not satisfied
+   --> verification/lsn.rs:297:13
+    |
+297 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:297:20
+    |
+297 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |                    ^^^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:297:39
+    |
+263 |     requires nibble <= 15
+    |              ------------ failed precondition
+...
+297 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:297:53
+    |
+297 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |                                                     ^^^^^^^^^^^^^^^^^
+
+[rust_verify/src/verifier.rs:98:17] &note = "failed precondition"
+[rust_verify/src/verifier.rs:98:17] &sp.as_string = "vstd/std_specs/core.rs:230:9: 230:54 (#0)"
+error: precondition not satisfied
+   --> verification/lsn.rs:307:13
+    |
+307 |             buffer[index] = buffer[high_start + index];
+    |             ^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:307:29
+    |
+307 |             buffer[index] = buffer[high_start + index];
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /opt/verus/vstd/array.rs:75:14
+    |
+75  |         0 <= i < N,
+    |              - failed precondition
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:307:36
+    |
+307 |             buffer[index] = buffer[high_start + index];
+    |                                    ^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:312:15
+    |
+312 |     let low = position as u32;
+    |               ^^^^^^^^
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:319:16
+    |
+319 |         buffer[high_digits + 1 + index] = hex_character(((low >> shift) & 15) as u8);
+    |                ^^^^^^^^^^^^^^^
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:319:16
+    |
+319 |         buffer[high_digits + 1 + index] = hex_character(((low >> shift) & 15) as u8);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:319:57
+    |
+319 |         buffer[high_digits + 1 + index] = hex_character(((low >> shift) & 15) as u8);
+    |                                                         ^^^^^^^^^^^^^^^^^^^^^
+
+verification results:: 24 verified, 6 errors
+error: aborting due to 12 previous errors
+

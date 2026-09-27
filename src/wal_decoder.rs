@@ -927,16 +927,8 @@ fn slot_has_reached(slot_name: &str, lsn: &str) -> Result<bool, PgTrickleError> 
 }
 
 fn lsn_position(lsn: &str) -> Result<u64, PgTrickleError> {
-    let (hi, lo) = lsn
-        .split_once('/')
-        .ok_or_else(|| PgTrickleError::WalTransitionError(format!("malformed WAL LSN '{lsn}'")))?;
-    let high = u64::from_str_radix(hi, 16).map_err(|e| {
-        PgTrickleError::WalTransitionError(format!("malformed WAL LSN '{lsn}': {e}"))
-    })?;
-    let low = u64::from_str_radix(lo, 16).map_err(|e| {
-        PgTrickleError::WalTransitionError(format!("malformed WAL LSN '{lsn}': {e}"))
-    })?;
-    Ok((high << 32) | low)
+    crate::version::lsn_to_u64(lsn)
+        .map_err(|e| PgTrickleError::WalTransitionError(format!("malformed WAL LSN '{lsn}': {e}")))
 }
 
 fn acknowledge_receipt_batch(
@@ -1789,7 +1781,11 @@ pub fn check_and_complete_transition(
         })?;
     let lag_bytes = get_slot_lag_bytes(slot_name)?;
 
-    if crate::version::lsn_gte(&confirmed_lsn, required_lsn) {
+    if crate::version::lsn_gte(&confirmed_lsn, required_lsn).map_err(|e| {
+        PgTrickleError::WalTransitionError(format!(
+            "invalid WAL transition LSN comparison ('{confirmed_lsn}', '{required_lsn}'): {e}"
+        ))
+    })? {
         // Decoder has committed the exact handoff LSN — complete the transition.
         complete_wal_transition(source_oid, pgt_id, change_schema)?;
         return Ok(());

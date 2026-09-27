@@ -1,0 +1,8 @@
+error: cannot call function `lsn::Lsn::parse_bytes` with mode exec
+  --> verification/lsn.rs:85:15
+   |
+85 |         match Lsn::parse_bytes(bytes) {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error
+

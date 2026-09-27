@@ -841,7 +841,14 @@ fn try_fused_chain_refresh(
         }
         // A bounded buffer position can trail the stored frontier. Never replay
         // deltas by letting a differential frontier move backward.
-        new_frontier.merge_from(&prev_frontier);
+        new_frontier
+            .merge_from(&prev_frontier)
+            .map_err(|e| PgTrickleError::CdcStateInvalid {
+                pgt_id,
+                source_name: "stored frontier".to_string(),
+                buffer: "pgtrickle.pgt_stream_tables.frontier".to_string(),
+                reason: format!("invalid LSN in stored frontier: {e}"),
+            })?;
 
         // Determine refresh action.
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
@@ -4140,7 +4147,15 @@ fn execute_scheduled_refresh(
                     augment_frontier(&mut new_frontier);
                     // A bounded buffer position can trail the stored frontier. Never replay
                     // deltas by letting a differential frontier move backward.
-                    new_frontier.merge_from(&prev_frontier);
+                    if let Err(e) = new_frontier.merge_from(&prev_frontier) {
+                        pgrx::warning!(
+                            "pg_trickle: refusing refresh for {}.{} because its stored frontier has an invalid LSN: {}",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            e
+                        );
+                        return RefreshOutcome::PermanentFailure;
+                    }
 
                     let tuning = st.runtime_tuning();
                     match refresh::execute_differential_refresh_with_tuning(

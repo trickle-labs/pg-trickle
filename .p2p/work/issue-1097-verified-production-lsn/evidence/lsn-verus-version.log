@@ -1,0 +1,6 @@
+Verus
+  Version: 0.2025.06.23.2e59154
+  Profile: release
+  Platform: linux_x86_64
+  Toolchain: 1.86.0-x86_64-unknown-linux-gnu
+

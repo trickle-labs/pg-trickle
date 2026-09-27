@@ -1,0 +1,23 @@
+cargo fmt -- --check
+cargo clippy --all-targets --features pg18 -- -D warnings
+    Checking pg_trickle v0.108.0 (/Users/grove/projects/pg-trickle2)
+error[E0658]: attributes on expressions are experimental
+   --> src/../verification/lsn.rs:547:15
+    |
+547 |     let low = #[verifier::truncate] position as u32;
+    |               ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: see issue #15701 <https://github.com/rust-lang/rust/issues/15701> for more information
+
+error[E0433]: cannot find module or crate `verifier` in this scope
+   --> src/../verification/lsn.rs:547:17
+    |
+547 |     let low = #[verifier::truncate] position as u32;
+    |                 ^^^^^^^^ use of unresolved module or unlinked crate `verifier`
+
+Some errors have detailed explanations: E0433, E0658.
+For more information about an error, try `rustc --explain E0433`.
+error: could not compile `pg_trickle` (lib) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pg_trickle` (lib test) due to 3 previous errors
+error: recipe `clippy` failed on line 56 with exit code 101

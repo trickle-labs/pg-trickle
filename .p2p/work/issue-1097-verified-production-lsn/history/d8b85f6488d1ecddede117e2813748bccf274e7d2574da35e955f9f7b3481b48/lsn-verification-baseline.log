@@ -1,0 +1,169 @@
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:337:5
+    |
+337 |     while index < end
+    |     ^^^^^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:363:13
+    |
+84  |     requires 0 <= length <= 8
+    |                   ------ failed precondition
+...
+363 |             pow16_bound((index - start + 1) as int);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: assertion failed
+   --> verification/lsn.rs:365:20
+    |
+365 |             assert(index - start < 8);
+    |                    ^^^^^^^^^^^^^^^^^ assertion failed
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:398:13
+    |
+398 |             Ok(parsed) => valid_lsn_bytes(value@.subrange(0, length as int))
+    |             ^^^^^^^^^^ failed this postcondition
+...
+472 |         Ok(Self(pack_halves(high, low)))
+    |         -------------------------------- at the end of the function body
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:203:13
+    |
+203 |             Ok(parsed) => valid_lsn_bytes(bytes@)
+    |             ^^^^^^^^^^ failed this postcondition
+...
+209 |     Lsn::parse_bytes_prefix(bytes, bytes.len())
+    |     ------------------------------------------- at the end of the function body
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:262:9
+    |
+262 |         while high_value > 0
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:272:9
+    |
+272 |         while index < high_digits
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:283:5
+    |
+283 |     while index < 8
+    |     ^^^^^^^^^^^^^^^
+
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:242:1
+    |
+242 | pub fn format_bytes(position: u64) -> (formatted: ([u8; 17], usize))
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:245:9
+    |
+245 |         forall|index: int| 0 <= index < formatted.1 ==> formatted.0@[index] < 128,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ failed this postcondition
+...
+291 |     (buffer, high_digits + 9)
+    |     ------------------------- at the end of the function body
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:246:9
+    |
+246 | /         forall|index: int| 0 <= index < formatted.1
+247 | |             ==> formatted.0@[index] == 0x2Fu8 || uppercase_hex_byte(formatted.0@[index]),
+    | |________________________________________________________________________________________^ failed this postcondition
+...
+291 |       (buffer, high_digits + 9)
+    |       ------------------------- at the end of the function body
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:254:16
+    |
+254 |     let high = (position >> 32) as u32;
+    |                ^^^^^^^^^^^^^^^^
+
+[rust_verify/src/verifier.rs:98:17] &note = "failed precondition"
+[rust_verify/src/verifier.rs:98:17] &sp.as_string = "vstd/std_specs/core.rs:230:9: 230:54 (#0)"
+error: precondition not satisfied
+   --> verification/lsn.rs:266:13
+    |
+266 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:266:20
+    |
+266 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |                    ^^^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:266:39
+    |
+232 |     requires nibble <= 15
+    |              ------------ failed precondition
+...
+266 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:266:53
+    |
+266 |             buffer[7 - high_digits] = hex_character((high_value & 15) as u8);
+    |                                                     ^^^^^^^^^^^^^^^^^
+
+[rust_verify/src/verifier.rs:98:17] &note = "failed precondition"
+[rust_verify/src/verifier.rs:98:17] &sp.as_string = "vstd/std_specs/core.rs:230:9: 230:54 (#0)"
+error: precondition not satisfied
+   --> verification/lsn.rs:276:13
+    |
+276 |             buffer[index] = buffer[high_start + index];
+    |             ^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:276:29
+    |
+276 |             buffer[index] = buffer[high_start + index];
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /opt/verus/vstd/array.rs:75:14
+    |
+75  |         0 <= i < N,
+    |              - failed precondition
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:276:36
+    |
+276 |             buffer[index] = buffer[high_start + index];
+    |                                    ^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:281:15
+    |
+281 |     let low = position as u32;
+    |               ^^^^^^^^
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:288:16
+    |
+288 |         buffer[high_digits + 1 + index] = hex_character(((low >> shift) & 15) as u8);
+    |                ^^^^^^^^^^^^^^^
+
+error: possible arithmetic underflow/overflow
+   --> verification/lsn.rs:288:16
+    |
+288 |         buffer[high_digits + 1 + index] = hex_character(((low >> shift) & 15) as u8);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:288:57
+    |
+288 |         buffer[high_digits + 1 + index] = hex_character(((low >> shift) & 15) as u8);
+    |                                                         ^^^^^^^^^^^^^^^^^^^^^
+
+verification results:: 21 verified, 7 errors
+error: aborting due to 14 previous errors
+

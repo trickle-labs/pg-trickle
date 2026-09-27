@@ -71,6 +71,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 # ── Build the real extension with coverage instrumentation ──────────────────
 COPY src/ src/
+COPY verification/ verification/
 COPY pg_trickle.control ./
 
 # Enable LLVM source-based code coverage.

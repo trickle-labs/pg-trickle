@@ -47,9 +47,22 @@ pub(super) fn compute_coordinator_tick_watermark(
 
             match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
                 Ok((safe_lsn, write_lsn, current_oldest_xmin, age_secs)) => {
+                    let safe_u64 = match version::lsn_to_u64(&safe_lsn) {
+                        Ok(position) => position,
+                        Err(e) => {
+                            warning!("pg_trickle: refusing invalid safe LSN: {}", e);
+                            return (None, current_oldest_xmin, age_secs);
+                        }
+                    };
+                    let write_u64 = match version::lsn_to_u64(&write_lsn) {
+                        Ok(position) => position,
+                        Err(e) => {
+                            warning!("pg_trickle: refusing invalid write LSN: {}", e);
+                            return (None, current_oldest_xmin, age_secs);
+                        }
+                    };
                     // Persist for next tick and for dynamic workers under a
                     // single lock so workers never see xmin/LSN out of sync.
-                    let safe_u64 = version::lsn_to_u64(&safe_lsn);
                     shmem::set_database_last_tick_holdback_state(
                         database_oid,
                         current_oldest_xmin,
@@ -57,7 +70,6 @@ pub(super) fn compute_coordinator_tick_watermark(
                     );
 
                     // Update holdback gauge metrics.
-                    let write_u64 = version::lsn_to_u64(&write_lsn);
                     let holdback_bytes = write_u64.saturating_sub(safe_u64);
                     shmem::update_holdback_metrics(holdback_bytes, age_secs);
 
@@ -79,14 +91,22 @@ pub(super) fn compute_coordinator_tick_watermark(
                         e
                     );
                     let safe_lsn = match prev_watermark_lsn {
-                        Some(prev) => {
-                            // Re-use last known-safe watermark.
-                            let u = version::lsn_to_u64(prev);
-                            shmem::update_database_scheduler(database_oid, |slot| {
-                                slot.last_tick_safe_lsn_u64 = u;
-                            });
-                            Some(prev.to_string())
-                        }
+                        Some(prev) => match version::lsn_to_u64(prev) {
+                            Ok(u) => {
+                                // Re-use last known-safe watermark.
+                                shmem::update_database_scheduler(database_oid, |slot| {
+                                    slot.last_tick_safe_lsn_u64 = u;
+                                });
+                                Some(prev.to_string())
+                            }
+                            Err(e) => {
+                                warning!(
+                                    "pg_trickle: ignoring invalid previous frontier LSN: {}",
+                                    e
+                                );
+                                None
+                            }
+                        },
                         None => None,
                     };
                     shmem::update_holdback_metrics(0, 0);
@@ -99,8 +119,21 @@ pub(super) fn compute_coordinator_tick_watermark(
             let prev_oldest_xmin = shmem::database_last_tick_oldest_xmin(database_oid);
             match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
                 Ok((mandatory_lsn, candidate_lsn, current_oldest_xmin, age_secs)) => {
-                    let mandatory = version::lsn_to_u64(&mandatory_lsn);
-                    let capped = version::lsn_to_u64(&candidate_lsn).saturating_sub(offset_bytes);
+                    let mandatory = match version::lsn_to_u64(&mandatory_lsn) {
+                        Ok(position) => position,
+                        Err(e) => {
+                            warning!("pg_trickle: refusing invalid mandatory LSN: {}", e);
+                            return (None, current_oldest_xmin, age_secs);
+                        }
+                    };
+                    let candidate = match version::lsn_to_u64(&candidate_lsn) {
+                        Ok(position) => position,
+                        Err(e) => {
+                            warning!("pg_trickle: refusing invalid candidate LSN: {}", e);
+                            return (None, current_oldest_xmin, age_secs);
+                        }
+                    };
+                    let capped = candidate.saturating_sub(offset_bytes);
                     let safe_lsn = version::u64_to_lsn(mandatory.min(capped));
                     shmem::set_database_last_tick_holdback_state(
                         database_oid,
@@ -108,7 +141,7 @@ pub(super) fn compute_coordinator_tick_watermark(
                         mandatory.min(capped),
                     );
                     shmem::update_holdback_metrics(
-                        version::lsn_to_u64(&candidate_lsn).saturating_sub(mandatory.min(capped)),
+                        candidate.saturating_sub(mandatory.min(capped)),
                         age_secs,
                     );
                     (Some(safe_lsn), current_oldest_xmin, age_secs)

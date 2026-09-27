@@ -1,0 +1,80 @@
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:459:9
+    |
+459 |         while index < high_digits
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:359:1
+    |
+359 | pub fn format_bytes(position: u64) -> (formatted: ([u8; 17], usize))
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:371:16
+    |
+371 |     let high = (position >> 32) as u32;
+    |                ^^^^^^^^^^^^^^^^
+
+note: recommendation not met
+   --> verification/lsn.rs:469:49
+    |
+469 |                     ==> buffer@[digit_index] == high_suffix[digit_index],
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /opt/verus/vstd/seq.rs:62:18
+    |
+62  |             0 <= i < self.len(),
+    |                  - recommendation not met
+
+error: assertion failed
+   --> verification/lsn.rs:482:20
+    |
+482 |             assert(digit_byte == high_suffix[old_index as int]);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+note: recommendation not met
+   --> verification/lsn.rs:482:34
+    |
+482 |             assert(digit_byte == high_suffix[old_index as int]);
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /opt/verus/vstd/seq.rs:62:18
+    |
+62  |             0 <= i < self.len(),
+    |                  - recommendation not met
+
+error: assertion failed
+   --> verification/lsn.rs:494:21
+    |
+494 | /                     hex_value(new_prefix) * pow16((high_digits - old_index - 1) as int)
+495 | |                         + hex_value(new_source)
+496 | |                         == (hex_value(old_prefix) * 16 + hex_digit_value(digit_byte))
+497 | |                             * pow16((high_digits - old_index - 1) as int)
+498 | |                             + (hex_value(old_source) - hex_digit_value(digit_byte)
+499 | |                                 * pow16((high_digits - old_index - 1) as int))
+    | |______________________________________________________________________________^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:502:21
+    |
+502 | /                     hex_value(new_prefix) * pow16((high_digits - old_index - 1) as int)
+503 | |                         + hex_value(new_source)
+504 | |                     == high as int
+    | |__________________________________^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:509:16
+    |
+509 |         assert(hex_value(buffer@.subrange(0, high_digits as int)) == high as int);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:577:12
+    |
+577 |     assert(low_value == 0);
+    |            ^^^^^^^^^^^^^^ assertion failed
+
+verification results:: 36 verified, 3 errors
+error: aborting due to 5 previous errors
+

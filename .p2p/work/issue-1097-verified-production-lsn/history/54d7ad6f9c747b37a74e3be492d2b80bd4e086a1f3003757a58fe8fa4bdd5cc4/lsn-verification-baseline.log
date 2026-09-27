@@ -1,0 +1,58 @@
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:298:9
+    |
+298 |         while high_value > 0
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:278:1
+    |
+278 | pub fn format_bytes(position: u64) -> (formatted: ([u8; 17], usize))
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:290:16
+    |
+290 |     let high = (position >> 32) as u32;
+    |                ^^^^^^^^^^^^^^^^
+
+error: invariant not satisfied before loop
+   --> verification/lsn.rs:301:17
+    |
+301 |                 high_value == high >> (4 * high_digits),
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: assertion failed
+   --> verification/lsn.rs:306:20
+    |
+306 |             assert(high_digits < 8);
+    |                    ^^^^^^^^^^^^^^^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:308:20
+    |
+308 |             assert((high_value & 15) <= 15);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+error: invariant not satisfied before loop
+   --> verification/lsn.rs:322:17
+    |
+322 | /                 forall|digit_index: int| high_start as int <= digit_index < 8
+323 | |                     ==> uppercase_hex_byte(buffer@[digit_index]),
+    | |________________________________________________________________^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:336:15
+    |
+336 |     let low = position as u32;
+    |               ^^^^^^^^
+
+error: assertion failed
+   --> verification/lsn.rs:352:16
+    |
+352 |         assert(((low >> shift) & 15) <= 15);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+verification results:: 27 verified, 3 errors
+error: aborting due to 5 previous errors
+

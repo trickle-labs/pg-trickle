@@ -1,0 +1,110 @@
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:138:1
+    |
+138 | pub proof fn hex_value_prepend(byte: u8, suffix: Seq<u8>)
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: assertion failed
+   --> verification/lsn.rs:158:16
+    |
+158 |         assert(hex_value(prefixed) == hex_digit_value(byte));
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:183:13
+    |
+183 | /             hex_value(prefixed)
+184 | |                 == hex_digit_value(byte) * pow16(suffix.len() as int) + hex_value(suffix)
+    | |_________________________________________________________________________________________^ assertion failed
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:365:9
+    |
+365 |         while high_value > 0
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+note: while loop: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:447:5
+    |
+447 |     while index < 8
+    |     ^^^^^^^^^^^^^^^
+
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:344:1
+    |
+344 | pub fn format_bytes(position: u64) -> (formatted: ([u8; 17], usize))
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:347:9
+    |
+347 |         forall|index: int| 0 <= index < formatted.1 ==> formatted.0@[index] < 128,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ failed this postcondition
+...
+501 |     (buffer, high_digits + 9)
+    |     ------------------------- at the end of the function body
+
+error: postcondition not satisfied
+   --> verification/lsn.rs:348:9
+    |
+348 | /         forall|index: int| 0 <= index < formatted.1
+349 | |             ==> formatted.0@[index] == 0x2Fu8 || uppercase_hex_byte(formatted.0@[index]),
+    | |________________________________________________________________________________________^ failed this postcondition
+...
+501 |       (buffer, high_digits + 9)
+    |       ------------------------- at the end of the function body
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:356:16
+    |
+356 |     let high = (position >> 32) as u32;
+    |                ^^^^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:380:21
+    |
+106 |         forall|index: int| 0 <= index < bytes.len() ==> valid_hex_byte(bytes[index]),
+    |         ---------------------------------------------------------------------------- failed precondition
+...
+380 |                     hex_value_bound(suffix);
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: precondition not satisfied
+   --> verification/lsn.rs:399:17
+    |
+142 |         forall|index: int| 0 <= index < suffix.len() ==> valid_hex_byte(suffix[index]),
+    |         ------------------------------------------------------------------------------ failed precondition
+...
+399 |                 hex_value_prepend(digit_byte, old_suffix);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: assertion failed
+   --> verification/lsn.rs:405:21
+    |
+405 | /                     next_value as int * pow16((old_digits + 1) as int)
+406 | |                         + hex_value(new_suffix)
+407 | |                         == (next_value as int * 16 + digit_value as int)
+408 | |                             * pow16(old_digits as int) + hex_value(old_suffix)
+    | |______________________________________________________________________________^ assertion failed
+
+error: precondition not satisfied
+   --> verification/lsn.rs:485:13
+    |
+142 |         forall|index: int| 0 <= index < suffix.len() ==> valid_hex_byte(suffix[index]),
+    |         ------------------------------------------------------------------------------ failed precondition
+...
+485 |             hex_value_prepend(digit_byte, old_suffix);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: assertion failed
+   --> verification/lsn.rs:489:17
+    |
+489 | /                 next_value as int * pow16((old_index + 1) as int)
+490 | |                     + hex_value(new_suffix)
+491 | |                     == (next_value as int * 16 + digit_value as int)
+492 | |                         * pow16(old_index as int) + hex_value(old_suffix)
+    | |_________________________________________________________________________^ assertion failed
+
+verification results:: 29 verified, 4 errors
+error: aborting due to 9 previous errors
+

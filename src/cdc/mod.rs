@@ -3250,7 +3250,7 @@ pub struct FrontierProbe {
 }
 
 /// State carried between successful probes in one scheduler backend.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FrontierProbeState {
     pub previous_candidate_lsn: Option<String>,
     pub writer_fences: HashMap<u64, Option<String>>,
@@ -3269,54 +3269,84 @@ pub enum SafeFrontierDecision {
 pub fn transition_writer_fences(
     state: &mut FrontierProbeState,
     probe: &FrontierProbe,
-) -> SafeFrontierDecision {
-    let previous_candidate = state.previous_candidate_lsn.clone();
-    let previous_fences = std::mem::take(&mut state.writer_fences);
-    state.writer_fences = probe
+) -> Result<SafeFrontierDecision, crate::lsn::LsnParseError> {
+    let candidate = crate::lsn::Lsn::parse(&probe.candidate_lsn)?;
+    let previous_candidate = state
+        .previous_candidate_lsn
+        .as_deref()
+        .map(|lsn| Ok((lsn.to_string(), crate::lsn::Lsn::parse(lsn)?)))
+        .transpose()?;
+    let last_safe = state
+        .last_safe_lsn
+        .as_deref()
+        .map(|lsn| Ok((lsn.to_string(), crate::lsn::Lsn::parse(lsn)?)))
+        .transpose()?;
+    let previous_fences = state
+        .writer_fences
+        .iter()
+        .map(|(xid, fence)| {
+            Ok((
+                *xid,
+                fence
+                    .as_deref()
+                    .map(|lsn| Ok((lsn.to_string(), crate::lsn::Lsn::parse(lsn)?)))
+                    .transpose()?,
+            ))
+        })
+        .collect::<Result<HashMap<_, _>, crate::lsn::LsnParseError>>()?;
+
+    let next_fences = probe
         .active_xids
         .iter()
         .map(|xid| {
-            let fence = match previous_fences.get(xid) {
-                Some(fence) => fence.clone(),
-                None => previous_candidate.clone(),
-            };
-            (*xid, fence)
+            (
+                *xid,
+                previous_fences
+                    .get(xid)
+                    .cloned()
+                    .unwrap_or_else(|| previous_candidate.clone()),
+            )
         })
+        .collect::<HashMap<_, _>>();
+    let has_unproven_fence = next_fences.values().any(Option::is_none);
+    let fence_positions = next_fences.values().flatten().cloned().collect::<Vec<_>>();
+
+    state.writer_fences = next_fences
+        .iter()
+        .map(|(xid, fence)| (*xid, fence.as_ref().map(|(text, _)| text.clone())))
         .collect();
     state.previous_candidate_lsn = Some(probe.candidate_lsn.clone());
 
-    if state.writer_fences.values().any(Option::is_none) {
-        return match state.last_safe_lsn.clone() {
-            Some(lsn) => SafeFrontierDecision::HoldAt(lsn),
+    if has_unproven_fence {
+        return Ok(match last_safe {
+            Some((lsn, _)) => SafeFrontierDecision::HoldAt(lsn),
             None => SafeFrontierDecision::HoldExisting,
-        };
+        });
     }
 
-    let bound = state
-        .writer_fences
-        .values()
-        .filter_map(|fence| fence.as_deref())
-        .min_by(|a, b| crate::version::lsn_to_u64(a).cmp(&crate::version::lsn_to_u64(b)))
-        .map_or_else(
-            || probe.candidate_lsn.clone(),
-            |fence| crate::version::lsn_min(&probe.candidate_lsn, fence).to_string(),
-        );
+    let (bound_text, bound) = fence_positions
+        .into_iter()
+        .min_by_key(|(_, position)| position.position())
+        .map_or((probe.candidate_lsn.clone(), candidate), |fence| {
+            if candidate <= fence.1 {
+                (probe.candidate_lsn.clone(), candidate)
+            } else {
+                fence
+            }
+        });
 
-    let safe = match state.last_safe_lsn.as_deref() {
-        Some(last) if crate::version::lsn_gt(last, &bound) => last.to_string(),
-        _ => bound,
+    let last_safe_position = last_safe.as_ref().map(|(_, position)| *position);
+    let (safe, safe_position) = match last_safe {
+        Some((last, position)) if position > bound => (last, position),
+        _ => (bound_text, bound),
     };
-    let decision = if state
-        .last_safe_lsn
-        .as_deref()
-        .is_some_and(|last| last == safe)
-    {
+    let decision = if last_safe_position == Some(safe_position) {
         SafeFrontierDecision::HoldAt(safe.clone())
     } else {
         SafeFrontierDecision::AdvanceTo(safe.clone())
     };
     state.last_safe_lsn = Some(safe);
-    decision
+    Ok(decision)
 }
 
 /// Pure-logic holdback classifier — no SPI calls, fully unit-testable.
@@ -3488,17 +3518,31 @@ pub fn compute_safe_upper_bound(
         ))
     })?;
     crate::shmem::record_holdback_probe(probe_start.elapsed().as_millis() as u64, false);
+    if let Some(previous) = prev_watermark_lsn {
+        crate::lsn::Lsn::parse(previous).map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+            context: "previous frontier watermark".to_string(),
+            reason: format!("malformed LSN '{previous}': {e}"),
+        })?;
+    }
     let write_lsn = probe.candidate_lsn.clone();
     let current_oldest_xmin = probe.active_xids.iter().copied().min().unwrap_or(0);
     let decision = FRONTIER_PROBE_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if state.last_safe_lsn.is_none()
-            && let Some(previous) = prev_watermark_lsn.filter(|lsn| is_valid_lsn(lsn))
+        let mut next_state = (*state).clone();
+        if next_state.last_safe_lsn.is_none()
+            && let Some(previous) = prev_watermark_lsn
         {
-            state.last_safe_lsn = Some(previous.to_string());
+            next_state.last_safe_lsn = Some(previous.to_string());
         }
-        transition_writer_fences(&mut state, &probe)
-    });
+        let decision = transition_writer_fences(&mut next_state, &probe).map_err(|e| {
+            PgTrickleError::SafeFrontierUnavailable {
+                context: "frontier probe state".to_string(),
+                reason: format!("malformed LSN in holdback state: {e}"),
+            }
+        })?;
+        *state = next_state;
+        Ok::<_, PgTrickleError>(decision)
+    })?;
     let safe_lsn = match decision {
         SafeFrontierDecision::AdvanceTo(lsn) | SafeFrontierDecision::HoldAt(lsn) => lsn,
         SafeFrontierDecision::HoldExisting => {
@@ -3513,13 +3557,7 @@ pub fn compute_safe_upper_bound(
 }
 
 fn is_valid_lsn(lsn: &str) -> bool {
-    let Some((hi, lo)) = lsn.split_once('/') else {
-        return false;
-    };
-    !hi.is_empty()
-        && !lo.is_empty()
-        && u64::from_str_radix(hi, 16).is_ok_and(|value| value <= u32::MAX as u64)
-        && u64::from_str_radix(lo, 16).is_ok_and(|value| value <= u32::MAX as u64)
+    crate::lsn::Lsn::parse(lsn).is_ok()
 }
 
 #[cfg(test)]
@@ -3533,11 +3571,15 @@ mod tests {
         }
     }
 
+    fn transition(state: &mut FrontierProbeState, probe: &FrontierProbe) -> SafeFrontierDecision {
+        transition_writer_fences(state, probe).expect("valid test LSN")
+    }
+
     #[test]
     fn writer_fences_hold_first_unknown_writer() {
         let mut state = FrontierProbeState::default();
         assert_eq!(
-            transition_writer_fences(&mut state, &probe("0/10", &[42])),
+            transition(&mut state, &probe("0/10", &[42])),
             SafeFrontierDecision::HoldExisting
         );
         assert_eq!(state.last_safe_lsn, None);
@@ -3547,15 +3589,15 @@ mod tests {
     fn writer_fences_allow_progress_after_writer_disappears() {
         let mut state = FrontierProbeState::default();
         assert_eq!(
-            transition_writer_fences(&mut state, &probe("0/10", &[])),
+            transition(&mut state, &probe("0/10", &[])),
             SafeFrontierDecision::AdvanceTo("0/10".into())
         );
         assert_eq!(
-            transition_writer_fences(&mut state, &probe("0/20", &[42])),
+            transition(&mut state, &probe("0/20", &[42])),
             SafeFrontierDecision::HoldAt("0/10".into())
         );
         assert_eq!(
-            transition_writer_fences(&mut state, &probe("0/30", &[])),
+            transition(&mut state, &probe("0/30", &[])),
             SafeFrontierDecision::AdvanceTo("0/30".into())
         );
     }
@@ -3563,12 +3605,29 @@ mod tests {
     #[test]
     fn writer_fences_fence_replacement_at_previous_candidate() {
         let mut state = FrontierProbeState::default();
-        transition_writer_fences(&mut state, &probe("0/10", &[]));
-        transition_writer_fences(&mut state, &probe("0/20", &[1]));
+        transition(&mut state, &probe("0/10", &[]));
+        transition(&mut state, &probe("0/20", &[1]));
         assert_eq!(
-            transition_writer_fences(&mut state, &probe("0/30", &[2])),
+            transition(&mut state, &probe("0/30", &[2])),
             SafeFrontierDecision::AdvanceTo("0/20".into())
         );
+    }
+
+    #[test]
+    fn writer_fences_invalid_position_preserves_state() {
+        let mut state = FrontierProbeState {
+            previous_candidate_lsn: Some("0/10".to_string()),
+            writer_fences: HashMap::from([(42, Some("invalid".to_string()))]),
+            last_safe_lsn: Some("0/8".to_string()),
+        };
+        let result = transition_writer_fences(&mut state, &probe("0/20", &[42]));
+        assert!(result.is_err());
+        assert_eq!(state.previous_candidate_lsn.as_deref(), Some("0/10"));
+        assert_eq!(
+            state.writer_fences.get(&42).and_then(Option::as_deref),
+            Some("invalid")
+        );
+        assert_eq!(state.last_safe_lsn.as_deref(), Some("0/8"));
     }
 
     // ── trigger_name_for_source tests ───────────────────────────────

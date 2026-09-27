@@ -1,0 +1,8 @@
+error: Unsupported constant type
+   --> verification/lsn.rs:111:22
+    |
+111 |     if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 }
+    |                      ^^^^
+
+error: aborting due to 1 previous error
+
