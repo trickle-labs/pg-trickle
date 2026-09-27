@@ -11,8 +11,9 @@ useDefault = true
 
 # ── Global allowlist: paths that commonly contain example credentials ─────────
 
-[allowlist]
+[[allowlists]]
 description = "Example credentials in docs, tests, and CI config files"
+condition = "OR"
 paths = [
     '''docs/.*\.md''',
     '''blog/.*\.md''',
