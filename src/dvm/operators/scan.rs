@@ -449,16 +449,16 @@ fn diff_scan_change_buffer(
         } else {
             ""
         };
-        let output_identity = if is_st_source {
+        let output_identity = if is_st_source && ctx.st_scan_payload_identity {
             "sub.payload_identity"
         } else {
             "sub.content_hash"
         };
 
         // CTE: Decompose events into atomic +1/-1 rows. Group stream-table
-        // events by source identity and payload to preserve multiplicity, but
-        // emit the scanned payload identity so irrelevant source updates do
-        // not change the downstream row identity.
+        // events by source identity and payload to preserve multiplicity.
+        // Row-wise target plans use payload identity; plans that combine rows
+        // retain the stable source identity.
         // A44-10 (D+I schema): No UPDATE UNION ALL branches needed —
         // UPDATEs arrive as D-row + I-row pairs from the trigger/WAL decoder.
         let decomp_cte = ctx.next_cte_name(&format!("kl_decomp_{alias}"));
@@ -1278,6 +1278,7 @@ mod tests {
     fn test_diff_scan_stream_table_keyless_uses_payload_identity() {
         let mut ctx = test_ctx();
         ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(100, 42)]));
+        ctx.st_scan_payload_identity = true;
         let tree = scan(100, "orders", "public", "o", &["id", "amount"]);
         let result = diff_scan(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
@@ -1285,6 +1286,18 @@ mod tests {
         assert_sql_contains(&sql, "sub.payload_identity AS __pgt_row_id");
         assert_sql_contains(&sql, "GROUP BY content_hash, payload_identity");
         assert_sql_contains(&sql, "payload_identity");
+    }
+
+    #[test]
+    fn test_diff_scan_stream_table_keyless_preserves_identity_for_combining_plan() {
+        let mut ctx = test_ctx();
+        ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(100, 42)]));
+        let tree = scan(100, "orders", "public", "o", &["id", "amount"]);
+        let result = diff_scan(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "sub.content_hash AS __pgt_row_id");
+        assert_sql_contains(&sql, "GROUP BY content_hash, payload_identity");
     }
 
     #[test]

@@ -575,6 +575,17 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
     }
 }
 
+/// Whether one scan feeds only row-wise operators, with no grouping or joins.
+fn is_rowwise_scan_tree(tree: &parser::OpTree) -> bool {
+    match tree {
+        parser::OpTree::Scan { .. } => true,
+        parser::OpTree::Filter { child, .. }
+        | parser::OpTree::Project { child, .. }
+        | parser::OpTree::Subquery { child, .. } => is_rowwise_scan_tree(child),
+        _ => false,
+    }
+}
+
 /// Result returned by [`generate_delta_query`], bundling the delta SQL
 /// together with metadata extracted from the single parse so callers
 /// do not need to re-parse the defining query.
@@ -711,6 +722,7 @@ fn generate_delta_query_impl(
     // which includes auxiliary columns (e.g. __pgt_count) for aggregate/distinct.
     let st_user_cols = result.tree.output_columns();
     let is_scan_chain = is_scan_chain_tree(&result.tree);
+    let st_scan_payload_identity = is_rowwise_scan_tree(&result.tree);
     let has_pgt_count = result.tree.needs_pgt_count();
     let mut ctx = DiffContext::new(prev_frontier.clone(), new_frontier.clone())
         .with_pgt_name(pgt_schema, pgt_name)
@@ -722,6 +734,7 @@ fn generate_delta_query_impl(
     ctx.st_user_columns = Some(st_user_cols);
     ctx.window_state_row_relation = window_state_row_relation.map(str::to_owned);
     ctx.merge_safe_dedup = is_scan_chain;
+    ctx.st_scan_payload_identity = st_scan_payload_identity;
     ctx.st_has_pgt_count = has_pgt_count;
 
     // P2-5: Resolve CDC column ordinals for each source table so the
@@ -1018,6 +1031,7 @@ pub fn generate_delta_query_cached(
         // Generate template with placeholder tokens instead of literal LSNs.
         // Use dummy frontiers — the actual LSN values come from placeholders.
         let is_scan_chain = is_scan_chain_tree(&result.tree);
+        let st_scan_payload_identity = is_rowwise_scan_tree(&result.tree);
         let st_user_cols = result.tree.output_columns();
         let has_pgt_count = result.tree.needs_pgt_count();
         let mut ctx = DiffContext::new(Frontier::new(), Frontier::new())
@@ -1027,6 +1041,7 @@ pub fn generate_delta_query_cached(
             .with_defining_query(defining_query);
         ctx.st_user_columns = Some(st_user_cols);
         ctx.merge_safe_dedup = is_scan_chain;
+        ctx.st_scan_payload_identity = st_scan_payload_identity;
         ctx.st_has_pgt_count = has_pgt_count;
 
         // P2-5: Resolve CDC column ordinals for bitmask filter.
@@ -2659,6 +2674,31 @@ mod tests {
         let s = scan(1, "t", "public", "t", &["id"]);
         let d = distinct(s);
         assert!(!is_scan_chain_tree(&d));
+    }
+
+    #[test]
+    fn test_is_rowwise_scan_tree_allows_computed_projection_and_filter() {
+        let s = scan(1, "t", "public", "t", &["id", "name"]);
+        let p = project(
+            vec![crate::dvm::parser::Expr::Raw("left(name, 1)".to_string())],
+            vec!["initial"],
+            s,
+        );
+        let f = filter(binop("=", colref("initial"), lit("'A'")), p);
+
+        assert!(is_rowwise_scan_tree(&f));
+    }
+
+    #[test]
+    fn test_is_rowwise_scan_tree_rejects_aggregate_and_join() {
+        let s = scan(1, "t", "public", "t", &["id", "amount"]);
+        let agg = aggregate(vec![colref("id")], vec![sum_col("amount", "total")], s);
+        assert!(!is_rowwise_scan_tree(&agg));
+
+        let l = scan(1, "t1", "public", "t1", &["id"]);
+        let r = scan(2, "t2", "public", "t2", &["id"]);
+        let j = inner_join(eq_cond("t1", "id", "t2", "id"), l, r);
+        assert!(!is_rowwise_scan_tree(&j));
     }
 
     // ── Cache ops: invalidate / get / is_deduplicated ───────────────

@@ -133,6 +133,9 @@ pub struct DiffContext {
     /// Only set to true when the top-level operator is a scan-chain
     /// (Scan/Filter/Project — no aggregate/join/union above it).
     pub merge_safe_dedup: bool,
+    /// Use a keyless source's payload as its identity when the target plan
+    /// applies only row-wise operators to one scan.
+    pub st_scan_payload_identity: bool,
     /// When true, the current diff node is inside a SemiJoin or AntiJoin
     /// ancestor.  Inner joins inside a SemiJoin context must use L₁
     /// (post-change snapshot) instead of L₀ via EXCEPT ALL to avoid the
@@ -646,6 +649,7 @@ impl DiffContext {
             defining_query: None,
             st_user_columns: None,
             merge_safe_dedup: false,
+            st_scan_payload_identity: false,
             inside_semijoin: false,
             inside_intermediate: false,
             st_has_pgt_count: false,
