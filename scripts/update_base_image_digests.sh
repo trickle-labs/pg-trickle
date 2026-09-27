@@ -43,6 +43,7 @@ DOCKERFILES=(
   "${REPO_ROOT}/Dockerfile.demo"
   "${REPO_ROOT}/Dockerfile.ghcr"
   "${REPO_ROOT}/tests/Dockerfile.e2e"
+  "${REPO_ROOT}/tests/Dockerfile.e2e-asan"
 )
 
 PATTERN="FROM ${BASE_IMAGE%%@*}"   # strip any existing @sha256: suffix
@@ -60,5 +61,5 @@ done
 
 echo ""
 echo "Done. Commit the updated Dockerfiles:"
-echo "  git add Dockerfile.demo Dockerfile.ghcr tests/Dockerfile.e2e"
+echo "  git add Dockerfile.demo Dockerfile.ghcr tests/Dockerfile.e2e tests/Dockerfile.e2e-asan"
 echo "  git commit -m 'chore(docker): update base image digest to ${DIGEST}'"

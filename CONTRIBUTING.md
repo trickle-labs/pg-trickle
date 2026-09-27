@@ -256,7 +256,8 @@ documentation will be asked to add it before merge.
 ## Updating base image digests
 
 Docker base images are pinned to exact SHA256 digests in all Dockerfiles
-(`Dockerfile.demo`, `Dockerfile.ghcr`, `tests/Dockerfile.e2e`) for
+(`Dockerfile.demo`, `Dockerfile.ghcr`, `tests/Dockerfile.e2e`,
+`tests/Dockerfile.e2e-asan`) for
 reproducibility and supply-chain security (OPS-10-03).
 
 To update the digests when a new PostgreSQL patch release is available:
