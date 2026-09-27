@@ -26,6 +26,7 @@ scripts/
 
 # Keep the specific Dockerfiles used by builds
 !tests/Dockerfile.e2e
+!tests/Dockerfile.e2e-base-lite
 !tests/pg_tide.control
 !tests/pg_tide--0.46.0.sql
 !tests/pg_tide--0.54.0.sql

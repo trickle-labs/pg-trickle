@@ -1,0 +1,21 @@
+{
+  "stage": "review-implementation",
+  "skill_file": "/Users/grove/.agents/skills/review-implementation/SKILL.md",
+  "host": "codex exec",
+  "sandbox": "read-only",
+  "stdin": "/dev/null",
+  "ephemeral": true,
+  "codex_thread_id": "01a0e092-3405-7ad2-b4a5-af1c0b2b35b4",
+  "exec_session_id": 19811,
+  "exit_code": 0,
+  "candidate": "snapshot:sha256:3e8a030c39c44af4c090e4677ddcacd5a4659d422ff17a20e86edbb902df1018",
+  "comparison_base": "6dc7e07c6bf53df2bf2327c4146cb140ca433f64",
+  "contract_sha256": "dae07ec8c073477626add9b70a114891b5bbe7431e9790537c075bd731cc4259",
+  "output_jsonl": "review-output-eof.jsonl",
+  "output_sha256": "2fd3118c14952b6363f059bebbfce94ac1012f3b2d075bd006d59b273c5dd36b",
+  "stderr": "review-stderr-eof.log",
+  "stderr_sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721",
+  "returned_report": "review-last-eof.md",
+  "report_sha256": "9e4fb205e82b56e2b9da8ce07bfc7d01cfc7725edc8566d8bb91732f6ff0d98f",
+  "saved_report": "/Users/grove/projects/pg-trickle2/.p2p/work/issue-1097-verified-production-lsn/review.md"
+}

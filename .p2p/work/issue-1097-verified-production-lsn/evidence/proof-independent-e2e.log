@@ -1,0 +1,9 @@
+
+running 4 tests
+test test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers ... ok
+test test_lsn_scheduler_cdc_holdback_recovers_after_long_writer ... ok
+test test_lsn_scheduler_preserves_malformed_frontier_and_recovers ... ok
+test test_lsn_wal_transition_rejects_malformed_and_preserves_results ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 41.60s
+

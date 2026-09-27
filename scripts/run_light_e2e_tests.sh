@@ -145,6 +145,7 @@ LIGHT_E2E_TESTS=(
     e2e_buffer_growth_tests
     e2e_dvm_negative_control_tests
     e2e_v078_tests
+    e2e_lsn_contract_tests
 )
 
 usage() {

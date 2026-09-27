@@ -1,0 +1,8 @@
+error: `core::str::impl&%0::as_bytes` is not supported (note: you may be able to add a Verus specification to this function with `assume_specification`) (note: the vstd library provides some specification for the Rust std library, but it is currently limited)
+   --> verification/lsn.rs:248:27
+    |
+248 |         Self::parse_bytes(value.as_bytes())
+    |                           ^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error
+

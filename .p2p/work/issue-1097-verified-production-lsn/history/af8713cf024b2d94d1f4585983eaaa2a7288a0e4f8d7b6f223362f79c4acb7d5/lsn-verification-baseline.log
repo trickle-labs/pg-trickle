@@ -1,0 +1,57 @@
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+   --> verification/lsn.rs:359:1
+    |
+359 | pub fn format_bytes(position: u64) -> (formatted: ([u8; 17], usize))
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: recommendation not met: value may be out of range of the target type (use `#[verifier::truncate]` on the cast to silence this warning)
+   --> verification/lsn.rs:371:16
+    |
+371 |     let high = (position >> 32) as u32;
+    |                ^^^^^^^^^^^^^^^^
+
+note: recommendation not met
+   --> verification/lsn.rs:472:49
+    |
+472 |                     ==> buffer@[digit_index] == high_suffix[digit_index],
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /opt/verus/vstd/seq.rs:62:18
+    |
+62  |             0 <= i < self.len(),
+    |                  - recommendation not met
+
+note: recommendation not met
+   --> verification/lsn.rs:475:28
+    |
+475 |                         == high_suffix[digit_index],
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /opt/verus/vstd/seq.rs:62:18
+    |
+62  |             0 <= i < self.len(),
+    |                  - recommendation not met
+
+error: assertion failed
+   --> verification/lsn.rs:483:20
+    |
+483 |             assert(high_suffix.len() == high_digits as int);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:528:16
+    |
+528 |         assert(hex_value(buffer@.subrange(0, high_digits as int)) == high as int);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+error: assertion failed
+   --> verification/lsn.rs:667:12
+    |
+667 |       assert(lsn_bytes_value(output)
+    |  ____________^
+668 | |         == high as int * 4294967296 + low as int);
+    | |________________________________________________^ assertion failed
+
+verification results:: 39 verified, 2 errors
+error: aborting due to 3 previous errors
+

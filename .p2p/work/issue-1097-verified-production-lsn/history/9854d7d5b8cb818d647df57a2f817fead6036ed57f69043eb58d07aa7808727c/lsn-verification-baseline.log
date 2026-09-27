@@ -1,0 +1,10 @@
+error: in exec code, the index operator is only supported for usize index
+   --> verification/lsn.rs:270:32
+    |
+270 |         let high = parse_half(&value[..separator])?;
+    |                                ^^^^^^-----------^
+    |                                      |
+    |                                      expected usize, found core::ops::range::RangeTo<usize>
+
+error: aborting due to 1 previous error
+

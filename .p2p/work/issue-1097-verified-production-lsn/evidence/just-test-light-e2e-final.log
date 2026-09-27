@@ -1,0 +1,1432 @@
+bash ./scripts/run_light_e2e_tests.sh --package
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Builder image platform mismatch: got linux/amd64, need linux/arm64
+  Building it now for Light E2E packaging …
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.builder
+#1 transferring dockerfile: 2.02kB 0.0s done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.9s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+#3 resolve docker.io/docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32 0.0s done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/postgres:18.6
+#4 DONE 0.8s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 527B 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-0 1/5] FROM docker.io/library/postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+#6 resolve docker.io/library/postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722 0.0s done
+#6 DONE 0.0s
+
+#7 [stage-0 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         curl         build-essential         libreadline-dev         zlib1g-dev         pkg-config         libssl-dev         libclang-dev         clang         postgresql-server-dev-18         ca-certificates         git     && rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [stage-0 3/5] RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs     | sh -s -- -y --default-toolchain stable
+#8 CACHED
+
+#9 [stage-0 4/5] RUN --mount=type=cache,target=/root/.cargo/registry     --mount=type=cache,target=/root/.cargo/git     cargo install --locked cargo-pgrx --version 0.18.0
+#9 CACHED
+
+#10 [stage-0 5/5] RUN cargo pgrx init --pg18 /usr/bin/pg_config
+#10 CACHED
+
+#11 exporting to image
+#11 exporting layers done
+#11 exporting manifest sha256:13a0e4f063461bdd973d20be180eb785dda652c3a6424c96ee5821faa9685eb2 done
+#11 exporting config sha256:bf24094c803c6723f6b0d1fe9782e7d22cffc64c45ea9988520e658697530752 done
+#11 exporting attestation manifest sha256:861da1dd31b9d52044e2d875295662861902eafac45afb51a7cf8edc633f5441 done
+#11 exporting manifest list sha256:a33faad959513d97c59ab1f8a136474f3ba13f5738eb98933ae2e3c755c135ce done
+#11 naming to docker.io/library/pg_trickle_builder:pg18 done
+#11 unpacking to docker.io/library/pg_trickle_builder:pg18
+#11 unpacking to docker.io/library/pg_trickle_builder:pg18 14.1s done
+#11 DONE 14.2s
+Packaging Linux extension artifacts in builder image: pg_trickle_builder:pg18
+[32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/usr/bin/pg_config[39m
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde_core v1.0.229
+   Compiling cfg-if v1.0.4
+   Compiling thiserror v2.0.20
+   Compiling eyre v0.6.12
+   Compiling writeable v0.6.3
+   Compiling memchr v2.8.0
+   Compiling litemap v0.8.2
+   Compiling serde v1.0.229
+   Compiling utf8_iter v1.0.4
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling zmij v1.0.21
+   Compiling typenum v1.20.0
+   Compiling shlex v1.3.0
+   Compiling serde_json v1.0.151
+   Compiling smallvec v1.15.1
+   Compiling autocfg v1.5.0
+   Compiling glob v0.3.3
+   Compiling getrandom v0.4.2
+   Compiling indenter v0.3.4
+   Compiling once_cell v1.21.4
+   Compiling winnow v1.0.2
+   Compiling clang-sys v1.8.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling cmov v0.5.3
+   Compiling rand_core v0.10.1
+   Compiling syn v2.0.117
+   Compiling syn v3.0.5
+   Compiling hybrid-array v0.4.10
+   Compiling anyhow v1.0.103
+   Compiling ctutils v0.4.2
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling cc v1.2.60
+   Compiling aho-corasick v1.1.5
+   Compiling winnow v0.7.15
+   Compiling percent-encoding v2.3.2
+   Compiling const-oid v0.10.2
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling is_ci v1.2.0
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling regex-syntax v0.8.10
+   Compiling minimal-lexical v0.2.1
+   Compiling owo-colors v4.3.0
+   Compiling nom v7.1.3
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling digest v0.11.2
+   Compiling supports-color v3.0.2
+   Compiling libloading v0.8.9
+   Compiling form_urlencoded v1.2.2
+   Compiling anstyle v1.0.14
+   Compiling allocator-api2 v0.2.21
+   Compiling itoa v1.0.18
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling unicode-width v0.2.2
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling bindgen v0.72.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling either v1.15.0
+   Compiling thiserror-impl v2.0.20
+   Compiling serde_derive v1.0.229
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+   Compiling regex-automata v0.4.14
+   Compiling fnv v1.0.7
+   Compiling itertools v0.13.0
+   Compiling hashbrown v0.17.0
+   Compiling cexpr v0.6.0
+   Compiling tinyvec v1.11.0
+   Compiling annotate-snippets v0.11.5
+   Compiling synstructure v0.13.2
+   Compiling darling_core v0.20.11
+   Compiling pathsearch v0.2.0
+   Compiling syn_verus v2.0.96 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling bitflags v2.11.1
+   Compiling rustc-hash v2.1.2
+   Compiling bytes v1.11.1
+   Compiling foldhash v0.1.5
+   Compiling regex v1.12.3
+   Compiling same-file v1.0.6
+   Compiling hashbrown v0.15.5
+   Compiling walkdir v2.5.0
+   Compiling indexmap v2.14.0
+   Compiling unicode-normalization v0.1.25
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling darling_macro v0.20.11
+   Compiling cargo_toml v0.22.3
+   Compiling cpufeatures v0.3.0
+   Compiling chacha20 v0.10.0
+   Compiling zerofrom v0.1.7
+   Compiling unicode-segmentation v1.13.2
+   Compiling yoke v0.8.2
+   Compiling futures-sink v0.3.32
+   Compiling futures-core v0.3.32
+   Compiling parking_lot_core v0.9.12
+   Compiling unicode-properties v0.1.4
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling fixedbitset v0.5.7
+   Compiling unicode-bidi v0.3.18
+   Compiling pin-project-lite v0.2.17
+   Compiling convert_case v0.8.0
+   Compiling petgraph v0.8.3
+   Compiling darling v0.20.11
+   Compiling rand v0.10.1
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling stringprep v0.1.5
+   Compiling icu_locale_core v2.2.0
+   Compiling sha2 v0.11.0
+   Compiling icu_provider v2.2.0
+   Compiling cee-scape v0.2.0
+   Compiling md-5 v0.11.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling hmac v0.13.0
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling num-traits v0.2.19
+   Compiling indexmap v1.9.3
+   Compiling base64 v0.22.1
+   Compiling fallible-iterator v0.2.0
+   Compiling prettyplease_verus v0.2.29 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling siphasher v1.0.2
+   Compiling idna_adapter v1.2.1
+   Compiling scopeguard v1.2.0
+   Compiling idna v1.1.0
+   Compiling unescape v0.1.0
+   Compiling byteorder v1.5.0
+   Compiling radium v0.7.0
+   Compiling pgrx-sql-entity-graph v0.18.0
+   Compiling lock_api v0.4.14
+   Compiling url v2.5.8
+   Compiling postgres-protocol v0.6.12
+   Compiling phf_shared v0.13.1
+   Compiling tokio v1.53.1
+   Compiling pgrx-pg-config v0.18.0
+   Compiling derive_builder_core v0.20.2
+   Compiling heck v0.5.0
+   Compiling unicode-xid v0.2.6
+   Compiling pgrx-bindgen v0.18.0
+   Compiling hashbrown v0.12.3
+   Compiling futures-task v0.3.32
+   Compiling tap v1.0.1
+   Compiling wyz v0.5.1
+   Compiling futures-util v0.3.32
+   Compiling derive_builder_macro v0.20.2
+   Compiling strum_macros v0.27.2
+   Compiling pgrx-pg-sys v0.18.0
+   Compiling synstructure v0.13.0 (https://github.com/mystor/synstructure.git?rev=1079497eb2bea252433dac53afe41291d8779641#1079497e)
+   Compiling postgres-types v0.2.14
+   Compiling phf v0.13.1
+   Compiling parking_lot v0.12.5
+   Compiling futures-channel v0.3.32
+   Compiling enum-map-derive v0.17.0
+   Compiling async-trait v0.1.89
+   Compiling whoami v2.1.1
+   Compiling funty v2.0.0
+   Compiling half v1.8.3
+   Compiling log v0.4.29
+   Compiling pgrx-macros v0.18.0
+   Compiling iana-time-zone v0.1.65
+   Compiling vstd v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling chrono v0.4.45
+   Compiling bitvec v1.0.1
+   Compiling enum-map v2.7.3
+   Compiling tokio-util v0.7.18
+   Compiling serde_cbor v0.11.2
+   Compiling tokio-postgres v0.7.18
+   Compiling strum v0.27.2
+   Compiling state_machines_macros v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling builtin_macros v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling derive_builder v0.20.2
+   Compiling uuid v1.23.1
+   Compiling seahash v4.1.0
+   Compiling pg_trickle v0.108.0 (/build)
+   Compiling builtin v0.1.0 (https://github.com/verus-lang/verus?rev=2e59154#2e591548)
+   Compiling croner v3.0.1
+   Compiling postgres v0.19.14
+   Compiling lru v0.18.4
+   Compiling xxhash-rust v0.8.18
+   Compiling pgrx v0.18.0
+    Finished `release` profile [optimized] target(s) in 3m 12s
+[32m[1m  Discovered[0m[39m [36m[1m186[0m[39m SQL entities: [36m[1m1[0m[39m schemas ([36m[1m1[0m[39m unique), [36m[1m168[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m17[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m0[0m[39m triggers
+[32m[1m     Writing[0m[39m SQL entities to /tmp/pgt-light-target/release/pg_trickle-pg18/usr/share/postgresql/18/extension/pg_trickle--0.108.0.sql
+Running light-E2E shard 1/1 with 91 test targets
+  e2e_cte_tests
+  e2e_topk_tests
+  e2e_expression_tests
+  e2e_watermark_gating_tests
+  e2e_create_tests
+  e2e_error_tests
+  e2e_window_tests
+  e2e_refresh_tests
+  e2e_ivm_tests
+  e2e_aggregate_coverage_tests
+  e2e_property_tests
+  e2e_phase4_ergonomics_tests
+  e2e_view_tests
+  e2e_lateral_tests
+  e2e_diamond_tests
+  e2e_alter_tests
+  e2e_create_or_replace_tests
+  e2e_cdc_tests
+  e2e_coverage_parser_tests
+  e2e_pipeline_dag_tests
+  e2e_lateral_subquery_tests
+  e2e_all_subquery_tests
+  e2e_smoke_tests
+  e2e_coverage_error_tests
+  e2e_getting_started_tests
+  e2e_drop_tests
+  e2e_lifecycle_tests
+  e2e_dag_topology_tests
+  e2e_stmt_cdc_tests
+  e2e_dag_error_tests
+  e2e_multi_window_tests
+  e2e_having_transition_tests
+  e2e_dag_operations_tests
+  e2e_monitoring_tests
+  e2e_set_operation_tests
+  e2e_keyless_duplicate_tests
+  e2e_full_join_tests
+  e2e_multi_cycle_dag_tests
+  e2e_concurrent_tests
+  e2e_mixed_mode_dag_tests
+  e2e_guard_trigger_tests
+  e2e_rows_from_tests
+  e2e_sublink_or_tests
+  e2e_snapshot_consistency_tests
+  e2e_dag_immediate_tests
+  e2e_dag_concurrent_tests
+  e2e_scalar_subquery_tests
+  e2e_partition_tests
+  e2e_mixed_pg_objects_tests
+  e2e_tier_scheduling_tests
+  e2e_unlogged_buffer_tests
+  e2e_null_group_by_tests
+  e2e_cdc_edge_case_tests
+  e2e_join_tests
+  e2e_alter_query_tests
+  e2e_append_only_tests
+  e2e_diff_full_equivalence_tests
+  e2e_multi_column_in_tests
+  e2e_ddl_event_tests
+  e2e_diagnostics_tests
+  e2e_schema_evolution_tests
+  e2e_differential_gaps_tests
+  e2e_multi_cycle_tests
+  e2e_guc_variation_tests
+  e2e_immediate_concurrency_tests
+  e2e_merge_template_tests
+  e2e_rls_tests
+  e2e_ownership_tests
+  e2e_ec01_property_tests
+  e2e_sensitivity_baseline_tests
+  e2e_sqlancer_tests
+  e2e_dvm_corpus_tests
+  e2e_v0878_security_tests
+  e2e_v08710_security_tests
+  e2e_v08711_snapshot_security_tests
+  e2e_v08712_publication_security_tests
+  e2e_v096_tests
+  e2e_row_id_v2_tests
+  e2e_window_state_catalog_tests
+  e2e_window_incremental_tests
+  e2e_v098_stability_tests
+  e2e_v100_graph_tests
+  e2e_v104_conformance_tests
+  e2e_dvm_composition_tests
+  e2e_failure_recovery_tests
+  e2e_pg_dump_tests
+  e2e_v107_operator_route_tests
+  e2e_buffer_growth_tests
+  e2e_dvm_negative_control_tests
+  e2e_v078_tests
+  e2e_lsn_contract_tests
+Light-E2E run id: light-e2e-28480-1790471275
+Creating shared light-E2E PostgreSQL container...
+PGT_ACTUAL_POSTGRESQL_VERSION=18.6 (Debian 18.6-1.pgdg13+2)
+Shared container 1346954ae896 ready on port 61510
+   Compiling pg_trickle v0.108.0 (/Users/grove/projects/pg-trickle2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 14s
+────────────
+ Nextest run ID a3cd4116-2f9d-4fc6-b719-f8ce976aab1a with nextest profile: default
+    Starting 1448 tests across 91 binaries (18 tests skipped)
+        PASS [   0.026s] (   1/1448) pg_trickle::e2e_aggregate_coverage_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.026s] (   2/1448) pg_trickle::e2e_aggregate_coverage_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.027s] (   3/1448) pg_trickle::e2e_aggregate_coverage_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.602s] (   4/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_array_agg_differential
+        PASS [   0.757s] (   5/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_avg_distinct_numeric_differential
+        PASS [   0.979s] (   6/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_bit_and_or_differential
+        PASS [   1.186s] (   7/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_avg_differential
+        PASS [   0.820s] (   8/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_bool_and_or_every_differential
+        PASS [   0.819s] (   9/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_count_differential
+        PASS [   0.901s] (  10/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_count_distinct_differential
+        PASS [   0.817s] (  11/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_distinct_bound_exceeded_falls_back_to_full
+        PASS [   0.814s] (  12/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_distinct_unsupported_forms_use_full_or_reject_diff
+        PASS [   0.889s] (  13/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_json_agg_differential
+        PASS [   0.814s] (  14/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_json_object_agg_differential
+        PASS [   0.887s] (  15/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_jsonb_agg_differential
+        PASS [   0.916s] (  16/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_jsonb_object_agg_differential
+        PASS [   0.926s] (  17/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_min_max_differential
+        PASS [   0.937s] (  18/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_mixed_dml_stress
+        PASS [   0.899s] (  19/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_mode_differential
+        PASS [   0.931s] (  20/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_percentile_cont_differential
+        PASS [   0.859s] (  21/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_percentile_disc_differential
+        PASS [   0.881s] (  22/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_string_agg_differential
+        PASS [   0.022s] (  23/1448) pg_trickle::e2e_all_subquery_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  24/1448) pg_trickle::e2e_all_subquery_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] (  25/1448) pg_trickle::e2e_all_subquery_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.967s] (  26/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_sum_differential
+        PASS [   0.919s] (  27/1448) pg_trickle::e2e_aggregate_coverage_tests test_agg_sum_distinct_differential
+        PASS [   1.130s] (  28/1448) pg_trickle::e2e_aggregate_coverage_tests test_vector_aggregate_selected_for_bounded_mixed_pages_and_text_key_falls_back
+        PASS [   0.831s] (  29/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_differential_inner_insert
+        PASS [   0.953s] (  30/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_differential_outer_change
+        PASS [   0.921s] (  31/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_empty_inner
+        PASS [   0.672s] (  32/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_equals_operator
+        PASS [   0.935s] (  33/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_full_refresh
+        PASS [   0.024s] (  34/1448) pg_trickle::e2e_alter_query_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  35/1448) pg_trickle::e2e_alter_query_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] (  36/1448) pg_trickle::e2e_alter_query_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.778s] (  37/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_less_than_differential
+        PASS [   0.851s] (  38/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_not_equals_operator
+        PASS [   1.015s] (  39/1448) pg_trickle::e2e_all_subquery_tests test_all_subquery_null_in_inner
+        PASS [   0.808s] (  40/1448) pg_trickle::e2e_alter_query_tests test_alter_query_add_column
+        PASS [   0.935s] (  41/1448) pg_trickle::e2e_alter_query_tests test_alter_query_catalog_updated
+        PASS [   0.897s] (  42/1448) pg_trickle::e2e_alter_query_tests test_alter_query_change_sources
+        PASS [   0.813s] (  43/1448) pg_trickle::e2e_alter_query_tests test_alter_query_cycle_detection
+        PASS [   1.006s] (  44/1448) pg_trickle::e2e_alter_query_tests test_alter_query_data_correctness_with_dml_cycle
+        PASS [   1.037s] (  45/1448) pg_trickle::e2e_alter_query_tests test_alter_query_invalid_query
+        PASS [   1.028s] (  46/1448) pg_trickle::e2e_alter_query_tests test_alter_query_oid_changes_for_semantic_same_schema_change
+        PASS [   1.020s] (  47/1448) pg_trickle::e2e_alter_query_tests test_alter_query_pgt_count_transition
+        PASS [   0.941s] (  48/1448) pg_trickle::e2e_alter_query_tests test_alter_query_remove_column
+        PASS [   0.923s] (  49/1448) pg_trickle::e2e_alter_query_tests test_alter_query_remove_source
+        PASS [   0.915s] (  50/1448) pg_trickle::e2e_alter_query_tests test_alter_query_same_schema
+        PASS [   0.941s] (  51/1448) pg_trickle::e2e_alter_query_tests test_alter_query_same_schema_differential
+        PASS [   1.055s] (  52/1448) pg_trickle::e2e_alter_query_tests test_alter_query_type_change_compatible
+        PASS [   1.048s] (  53/1448) pg_trickle::e2e_alter_query_tests test_alter_query_type_change_incompatible
+        PASS [   0.025s] (  54/1448) pg_trickle::e2e_alter_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  55/1448) pg_trickle::e2e_alter_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] (  56/1448) pg_trickle::e2e_alter_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.063s] (  57/1448) pg_trickle::e2e_alter_query_tests test_alter_query_view_inlining
+        PASS [   1.066s] (  58/1448) pg_trickle::e2e_alter_query_tests test_alter_query_with_mode_change
+        PASS [   0.943s] (  59/1448) pg_trickle::e2e_alter_query_tests test_explain_alter_is_read_only_and_classifies_changes
+        PASS [   0.819s] (  60/1448) pg_trickle::e2e_alter_tests test_alter_nonexistent_fails
+        PASS [   0.946s] (  61/1448) pg_trickle::e2e_alter_tests test_alter_refresh_mode
+        PASS [   0.911s] (  62/1448) pg_trickle::e2e_alter_tests test_alter_resume
+        PASS [   1.054s] (  63/1448) pg_trickle::e2e_alter_tests test_alter_schedule
+        PASS [   1.109s] (  64/1448) pg_trickle::e2e_alter_tests test_alter_schedule_compound_duration
+        PASS [   1.026s] (  65/1448) pg_trickle::e2e_alter_tests test_alter_schedule_from_cron_to_duration
+        PASS [   1.043s] (  66/1448) pg_trickle::e2e_alter_tests test_alter_schedule_invalid_cron_fails
+        PASS [   0.930s] (  67/1448) pg_trickle::e2e_alter_tests test_alter_schedule_to_cron
+        PASS [   0.941s] (  68/1448) pg_trickle::e2e_alter_tests test_alter_schedule_to_cron_alias
+        PASS [   0.022s] (  69/1448) pg_trickle::e2e_append_only_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  70/1448) pg_trickle::e2e_append_only_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] (  71/1448) pg_trickle::e2e_append_only_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.952s] (  72/1448) pg_trickle::e2e_alter_tests test_alter_suspend
+        PASS [   0.958s] (  73/1448) pg_trickle::e2e_alter_tests test_alter_to_immediate_ignores_global_wal_cdc_guc
+        PASS [   1.154s] (  74/1448) pg_trickle::e2e_alter_tests test_alter_to_immediate_rejects_explicit_wal_cdc_mode
+        PASS [   1.100s] (  75/1448) pg_trickle::e2e_append_only_tests test_alter_append_only_rejected_for_full_mode
+        PASS [   1.173s] (  76/1448) pg_trickle::e2e_append_only_tests test_alter_enable_append_only
+        PASS [   1.162s] (  77/1448) pg_trickle::e2e_append_only_tests test_append_only_basic_insert_path
+        PASS [   0.974s] (  78/1448) pg_trickle::e2e_append_only_tests test_append_only_data_correctness
+        PASS [   0.988s] (  79/1448) pg_trickle::e2e_append_only_tests test_append_only_fallback_on_delete
+        PASS [   0.961s] (  80/1448) pg_trickle::e2e_append_only_tests test_append_only_fallback_on_update
+        PASS [   0.954s] (  81/1448) pg_trickle::e2e_append_only_tests test_append_only_no_data_cycle
+        PASS [   0.027s] (  82/1448) pg_trickle::e2e_buffer_growth_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  83/1448) pg_trickle::e2e_buffer_growth_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] (  84/1448) pg_trickle::e2e_buffer_growth_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.030s] (  85/1448) pg_trickle::e2e_cdc_edge_case_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  86/1448) pg_trickle::e2e_cdc_edge_case_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] (  87/1448) pg_trickle::e2e_cdc_edge_case_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.895s] (  88/1448) pg_trickle::e2e_append_only_tests test_append_only_rejected_for_full_mode
+        PASS [   0.864s] (  89/1448) pg_trickle::e2e_append_only_tests test_append_only_rejected_for_immediate_mode
+        PASS [   0.884s] (  90/1448) pg_trickle::e2e_append_only_tests test_append_only_rejected_for_keyless_source
+        PASS [   0.902s] (  91/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_composite_pk_aggregate
+        PASS [   1.032s] (  92/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_composite_pk_bulk_operations
+        PASS [   1.035s] (  93/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_composite_pk_insert_update_delete
+        PASS [   1.225s] (  94/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_composite_pk_with_null_aggregate
+        PASS [   1.030s] (  95/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_domain_types
+        PASS [   0.021s] (  96/1448) pg_trickle::e2e_cdc_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (  97/1448) pg_trickle::e2e_cdc_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] (  98/1448) pg_trickle::e2e_cdc_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.045s] (  99/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_generated_column_aggregate
+        PASS [   1.078s] ( 100/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_generated_column_insert_update
+        PASS [   0.869s] ( 101/1448) pg_trickle::e2e_cdc_edge_case_tests test_cdc_null_non_pk_columns
+        PASS [   0.840s] ( 102/1448) pg_trickle::e2e_cdc_tests test_buffer_cleanup_after_refresh
+        PASS [   0.868s] ( 103/1448) pg_trickle::e2e_cdc_tests test_f15_select_star_falls_back_to_full_capture
+        PASS [   0.858s] ( 104/1448) pg_trickle::e2e_cdc_tests test_f15_selective_cdc_buffer_expands_for_second_stream_table
+        PASS [   0.890s] ( 105/1448) pg_trickle::e2e_cdc_tests test_f15_selective_cdc_buffer_has_only_referenced_columns
+        PASS [   0.967s] ( 106/1448) pg_trickle::e2e_cdc_tests test_full_refresh_partitioned_table
+        PASS [   0.992s] ( 107/1448) pg_trickle::e2e_cdc_tests test_inv_cache1_change_buffer_sequence_cache_is_one
+        PASS [   0.987s] ( 108/1448) pg_trickle::e2e_cdc_tests test_multiple_sources_independent_buffers
+        PASS [   1.068s] ( 109/1448) pg_trickle::e2e_cdc_tests test_sec1_unprivileged_dml_captured_by_differential_cdc
+        PASS [   1.135s] ( 110/1448) pg_trickle::e2e_cdc_tests test_sec2_unprivileged_dml_captured_by_immediate_cdc
+        PASS [   1.106s] ( 111/1448) pg_trickle::e2e_cdc_tests test_sf10_truncate_then_insert_post_truncate_rows_captured
+        PASS [   1.027s] ( 112/1448) pg_trickle::e2e_cdc_tests test_t4_truncate_lsn_insert_ordering_regression
+        PASS [   0.948s] ( 113/1448) pg_trickle::e2e_cdc_tests test_t4b_truncate_then_insert_separate_transactions
+        PASS [   0.874s] ( 114/1448) pg_trickle::e2e_cdc_tests test_trigger_captures_bulk_insert
+        PASS [   0.938s] ( 115/1448) pg_trickle::e2e_cdc_tests test_trigger_captures_delete
+        PASS [   1.007s] ( 116/1448) pg_trickle::e2e_cdc_tests test_trigger_captures_insert
+        PASS [   1.258s] ( 117/1448) pg_trickle::e2e_cdc_tests test_trigger_captures_partitioned_table_dml
+        PASS [   1.162s] ( 118/1448) pg_trickle::e2e_cdc_tests test_trigger_captures_update
+        PASS [   0.034s] ( 119/1448) pg_trickle::e2e_concurrent_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.018s] ( 120/1448) pg_trickle::e2e_concurrent_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 121/1448) pg_trickle::e2e_concurrent_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.174s] ( 122/1448) pg_trickle::e2e_cdc_tests test_trigger_lsn_ordering
+        PASS [   1.223s] ( 123/1448) pg_trickle::e2e_cdc_tests test_trigger_survives_source_insert_delete_cycle
+        PASS [   0.974s] ( 124/1448) pg_trickle::e2e_cdc_tests test_trigger_typed_columns_captured
+        PASS [   1.162s] ( 125/1448) pg_trickle::e2e_concurrent_tests test_cleanup_concurrent_writer_preserves_pending_change
+        PASS [   1.376s] ( 126/1448) pg_trickle::e2e_concurrent_tests test_conc1_alter_while_refresh_no_deadlock
+        PASS [   1.309s] ( 127/1448) pg_trickle::e2e_concurrent_tests test_conc2_drop_while_refresh_no_orphans
+        PASS [   1.128s] ( 128/1448) pg_trickle::e2e_concurrent_tests test_conc3_parallel_workers_no_duplicate_pick
+        PASS [   1.008s] ( 129/1448) pg_trickle::e2e_concurrent_tests test_conc4_canary_promotion_consistent_metadata
+        PASS [   0.785s] ( 130/1448) pg_trickle::e2e_concurrent_tests test_concurrent_inserts_during_refresh
+        PASS [   0.889s] ( 131/1448) pg_trickle::e2e_concurrent_tests test_concurrent_refresh_multiple_sts_same_source
+        PASS [   1.061s] ( 132/1448) pg_trickle::e2e_concurrent_tests test_concurrent_refresh_same_st_no_corruption
+        PASS [   0.988s] ( 133/1448) pg_trickle::e2e_concurrent_tests test_create_two_sts_simultaneously
+        PASS [   1.419s] ( 134/1448) pg_trickle::e2e_concurrent_tests test_ddl_during_concurrent_refresh
+        PASS [   1.116s] ( 135/1448) pg_trickle::e2e_concurrent_tests test_full_refresh_racing_with_dml
+        PASS [   0.029s] ( 136/1448) pg_trickle::e2e_coverage_error_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.022s] ( 137/1448) pg_trickle::e2e_coverage_error_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 138/1448) pg_trickle::e2e_coverage_error_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.349s] ( 139/1448) pg_trickle::e2e_concurrent_tests test_pb1_concurrent_refresh_skip_locked_no_corruption
+        PASS [   0.780s] ( 140/1448) pg_trickle::e2e_concurrent_tests test_write_and_refresh_rejects_lock_skip_and_rolls_back_write
+        PASS [   1.641s] ( 141/1448) pg_trickle::e2e_concurrent_tests test_refresh_and_drop_race
+        PASS [   1.000s] ( 142/1448) pg_trickle::e2e_coverage_error_tests test_advisory_lock_blocks_concurrent_refresh
+        PASS [   0.755s] ( 143/1448) pg_trickle::e2e_coverage_error_tests test_alter_source_change_column_type
+        PASS [   0.764s] ( 144/1448) pg_trickle::e2e_coverage_error_tests test_alter_source_drop_column_in_query
+        PASS [   0.818s] ( 145/1448) pg_trickle::e2e_coverage_error_tests test_alter_source_drop_column_not_in_query
+        PASS [   1.048s] ( 146/1448) pg_trickle::e2e_coverage_error_tests test_cycle_detection_st_depending_on_st
+        PASS [   1.069s] ( 147/1448) pg_trickle::e2e_coverage_error_tests test_explain_st_differential_shows_dvm_info
+        PASS [   1.003s] ( 148/1448) pg_trickle::e2e_coverage_error_tests test_explain_st_returns_properties
+        PASS [   1.347s] ( 149/1448) pg_trickle::e2e_coverage_error_tests test_invalid_schedule_below_minimum
+        PASS [   0.025s] ( 150/1448) pg_trickle::e2e_coverage_parser_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 151/1448) pg_trickle::e2e_coverage_parser_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 152/1448) pg_trickle::e2e_coverage_parser_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.297s] ( 153/1448) pg_trickle::e2e_coverage_error_tests test_slot_health_returns_rows
+        PASS [   1.317s] ( 154/1448) pg_trickle::e2e_coverage_error_tests test_slot_health_with_no_sts
+        PASS [   1.443s] ( 155/1448) pg_trickle::e2e_coverage_error_tests test_wb2_wide_table_gt63_cols_differential_refresh
+        PASS [   1.051s] ( 156/1448) pg_trickle::e2e_coverage_parser_tests test_aggregate_with_having_differential_mode
+        PASS [   1.063s] ( 157/1448) pg_trickle::e2e_coverage_parser_tests test_aggregate_with_having_full_mode
+        PASS [   1.080s] ( 158/1448) pg_trickle::e2e_coverage_parser_tests test_case_expression_in_aggregate
+        PASS [   1.024s] ( 159/1448) pg_trickle::e2e_coverage_parser_tests test_case_expression_in_defining_query
+        PASS [   0.965s] ( 160/1448) pg_trickle::e2e_coverage_parser_tests test_left_join_with_null_handling
+        PASS [   0.974s] ( 161/1448) pg_trickle::e2e_coverage_parser_tests test_multi_condition_join
+        PASS [   0.957s] ( 162/1448) pg_trickle::e2e_coverage_parser_tests test_subquery_in_from_clause
+        PASS [   0.863s] ( 163/1448) pg_trickle::e2e_coverage_parser_tests test_subquery_in_from_with_join
+        PASS [   0.018s] ( 164/1448) pg_trickle::e2e_create_or_replace_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.013s] ( 165/1448) pg_trickle::e2e_create_or_replace_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 166/1448) pg_trickle::e2e_create_or_replace_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.863s] ( 167/1448) pg_trickle::e2e_coverage_parser_tests test_window_nth_value
+        PASS [   0.862s] ( 168/1448) pg_trickle::e2e_coverage_parser_tests test_window_range_frame
+        PASS [   0.878s] ( 169/1448) pg_trickle::e2e_coverage_parser_tests test_window_rows_between_frame
+        PASS [   0.844s] ( 170/1448) pg_trickle::e2e_create_or_replace_tests test_cor_alters_config_schedule
+        PASS [   0.875s] ( 171/1448) pg_trickle::e2e_create_or_replace_tests test_cor_creates_when_not_exists
+        PASS [   0.869s] ( 172/1448) pg_trickle::e2e_create_or_replace_tests test_cor_full_refresh_mode
+        PASS [   0.883s] ( 173/1448) pg_trickle::e2e_create_or_replace_tests test_cor_immediate_mode
+        PASS [   0.895s] ( 174/1448) pg_trickle::e2e_create_or_replace_tests test_cor_invalid_query_fails
+        PASS [   0.908s] ( 175/1448) pg_trickle::e2e_create_or_replace_tests test_cor_mode_switch_differential_to_full
+        PASS [   0.889s] ( 176/1448) pg_trickle::e2e_create_or_replace_tests test_cor_noop_when_identical
+        PASS [   0.891s] ( 177/1448) pg_trickle::e2e_create_or_replace_tests test_cor_replaces_query_and_config
+        PASS [   0.898s] ( 178/1448) pg_trickle::e2e_create_or_replace_tests test_cor_replaces_query_incompatible
+        PASS [   0.916s] ( 179/1448) pg_trickle::e2e_create_or_replace_tests test_cor_replaces_query_new_columns
+        PASS [   0.939s] ( 180/1448) pg_trickle::e2e_create_or_replace_tests test_cor_replaces_query_same_schema
+        PASS [   0.022s] ( 181/1448) pg_trickle::e2e_create_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 182/1448) pg_trickle::e2e_create_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 183/1448) pg_trickle::e2e_create_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.896s] ( 184/1448) pg_trickle::e2e_create_or_replace_tests test_cor_whitespace_noop
+        PASS [   0.897s] ( 185/1448) pg_trickle::e2e_create_or_replace_tests test_if_not_exists_creates
+        PASS [   0.890s] ( 186/1448) pg_trickle::e2e_create_or_replace_tests test_if_not_exists_noop
+        PASS [   0.963s] ( 187/1448) pg_trickle::e2e_create_tests test_backward_compat_differential
+        PASS [   0.948s] ( 188/1448) pg_trickle::e2e_create_tests test_backward_compat_full
+        PASS [   0.894s] ( 189/1448) pg_trickle::e2e_create_tests test_create_auto_mode_differentiable
+        PASS [   0.912s] ( 190/1448) pg_trickle::e2e_create_tests test_create_auto_mode_not_differentiable
+        PASS [   0.941s] ( 191/1448) pg_trickle::e2e_create_tests test_create_cdc_trigger_installed
+        PASS [   1.025s] ( 192/1448) pg_trickle::e2e_create_tests test_create_change_buffer_exists
+        PASS [   1.066s] ( 193/1448) pg_trickle::e2e_create_tests test_create_change_tracking_recorded
+        PASS [   1.013s] ( 194/1448) pg_trickle::e2e_create_tests test_create_custom_schedule
+        PASS [   0.871s] ( 195/1448) pg_trickle::e2e_create_tests test_create_dependencies_recorded
+        PASS [   0.986s] ( 196/1448) pg_trickle::e2e_create_tests test_create_differential_mode
+        PASS [   0.986s] ( 197/1448) pg_trickle::e2e_create_tests test_create_duplicate_name_fails
+        PASS [   0.991s] ( 198/1448) pg_trickle::e2e_create_tests test_create_explicit_differential_not_differentiable
+        PASS [   0.974s] ( 199/1448) pg_trickle::e2e_create_tests test_create_full_mode
+        PASS [   0.867s] ( 200/1448) pg_trickle::e2e_create_tests test_create_ignores_global_wal_cdc_for_immediate
+        PASS [   0.947s] ( 201/1448) pg_trickle::e2e_create_tests test_create_immediate_rejects_explicit_wal_cdc_mode
+        PASS [   0.998s] ( 202/1448) pg_trickle::e2e_create_tests test_create_invalid_query_fails
+        PASS [   0.970s] ( 203/1448) pg_trickle::e2e_create_tests test_create_invalid_refresh_mode_fails
+        PASS [   1.042s] ( 204/1448) pg_trickle::e2e_create_tests test_create_no_initialize
+        PASS [   0.999s] ( 205/1448) pg_trickle::e2e_create_tests test_create_no_mode_specified
+        PASS [   1.009s] ( 206/1448) pg_trickle::e2e_create_tests test_create_null_schedule
+        PASS [   1.188s] ( 207/1448) pg_trickle::e2e_create_tests test_create_schema_qualified
+        PASS [   1.034s] ( 208/1448) pg_trickle::e2e_create_tests test_create_simple_select
+        PASS [   1.054s] ( 209/1448) pg_trickle::e2e_create_tests test_create_with_aggregation
+        PASS [   1.035s] ( 210/1448) pg_trickle::e2e_create_tests test_create_with_compound_duration
+        PASS [   0.963s] ( 211/1448) pg_trickle::e2e_create_tests test_create_with_cron_alias
+        PASS [   1.117s] ( 212/1448) pg_trickle::e2e_create_tests test_create_with_cron_expression
+        PASS [   1.059s] ( 213/1448) pg_trickle::e2e_create_tests test_create_with_days_duration
+        PASS [   1.050s] ( 214/1448) pg_trickle::e2e_create_tests test_create_with_filter
+        PASS [   1.018s] ( 215/1448) pg_trickle::e2e_create_tests test_create_with_hours_duration
+        PASS [   1.001s] ( 216/1448) pg_trickle::e2e_create_tests test_create_with_invalid_cron_fails
+        PASS [   1.065s] ( 217/1448) pg_trickle::e2e_create_tests test_create_with_invalid_duration_fails
+        PASS [   1.123s] ( 218/1448) pg_trickle::e2e_create_tests test_create_with_join
+        PASS [   1.109s] ( 219/1448) pg_trickle::e2e_create_tests test_create_with_seconds_duration
+        PASS [   1.266s] ( 220/1448) pg_trickle::e2e_create_tests test_cross_join_differential_mode
+        PASS [   0.031s] ( 221/1448) pg_trickle::e2e_cte_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 222/1448) pg_trickle::e2e_cte_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.010s] ( 223/1448) pg_trickle::e2e_cte_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.119s] ( 224/1448) pg_trickle::e2e_create_tests test_cross_join_full_mode
+        PASS [   1.119s] ( 225/1448) pg_trickle::e2e_create_tests test_cross_join_with_where_clause
+        PASS [   1.329s] ( 226/1448) pg_trickle::e2e_create_tests test_nested_cross_join
+        PASS [   0.853s] ( 227/1448) pg_trickle::e2e_cte_tests test_chained_ctes_differential_refresh
+        PASS [   0.985s] ( 228/1448) pg_trickle::e2e_cte_tests test_chained_ctes_full_mode
+        PASS [   1.033s] ( 229/1448) pg_trickle::e2e_cte_tests test_cte_aggregation_inside_body
+        PASS [   1.655s] ( 230/1448) pg_trickle::e2e_cte_tests test_cte_aggregate_join_kinds_handle_simultaneous_dml
+        PASS [   1.277s] ( 231/1448) pg_trickle::e2e_cte_tests test_cte_aliases_survive_group_rescans
+        PASS [   0.693s] ( 232/1448) pg_trickle::e2e_cte_tests test_cte_differential_matches_full_results
+        PASS [   1.680s] ( 233/1448) pg_trickle::e2e_cte_tests test_cte_chained_left_join_rescans_with_pruned_columns_stay_correct
+        PASS [   0.827s] ( 234/1448) pg_trickle::e2e_cte_tests test_cte_differential_mixed_dml
+        PASS [   1.007s] ( 235/1448) pg_trickle::e2e_cte_tests test_cte_differential_refresh_deletes
+        PASS [   0.836s] ( 236/1448) pg_trickle::e2e_cte_tests test_cte_differential_refresh_inserts
+        PASS [   0.903s] ( 237/1448) pg_trickle::e2e_cte_tests test_cte_differential_refresh_updates
+        PASS [   1.031s] ( 238/1448) pg_trickle::e2e_cte_tests test_cte_empty_source
+        PASS [   1.087s] ( 239/1448) pg_trickle::e2e_cte_tests test_cte_idempotent_refresh
+        PASS [   1.026s] ( 240/1448) pg_trickle::e2e_cte_tests test_cte_invalid_query_fails
+        PASS [   1.109s] ( 241/1448) pg_trickle::e2e_cte_tests test_cte_joined_with_base_table
+        PASS [   1.157s] ( 242/1448) pg_trickle::e2e_cte_tests test_cte_large_batch
+        PASS [   0.988s] ( 243/1448) pg_trickle::e2e_cte_tests test_cte_left_join
+        PASS [   1.099s] ( 244/1448) pg_trickle::e2e_cte_tests test_cte_multi_ref_with_different_filters
+        PASS [   1.178s] ( 245/1448) pg_trickle::e2e_cte_tests test_cte_nested_right_join_uses_consistent_old_snapshot
+        PASS [   1.009s] ( 246/1448) pg_trickle::e2e_cte_tests test_cte_referenced_twice_differential
+        PASS [   1.114s] ( 247/1448) pg_trickle::e2e_cte_tests test_cte_referenced_twice_full_mode
+        PASS [   1.050s] ( 248/1448) pg_trickle::e2e_cte_tests test_cte_simple_differential_create
+        PASS [   0.881s] ( 249/1448) pg_trickle::e2e_cte_tests test_cte_simple_full_mode
+        PASS [   1.005s] ( 250/1448) pg_trickle::e2e_cte_tests test_cte_simple_full_refresh
+        PASS [   0.979s] ( 251/1448) pg_trickle::e2e_cte_tests test_cte_single_row_source
+        PASS [   0.925s] ( 252/1448) pg_trickle::e2e_cte_tests test_cte_st_drop_cleans_up
+        PASS [   0.887s] ( 253/1448) pg_trickle::e2e_cte_tests test_cte_st_matches_defining_query_after_refresh
+        PASS [   0.988s] ( 254/1448) pg_trickle::e2e_cte_tests test_cte_with_aggregation_differential
+        PASS [   0.935s] ( 255/1448) pg_trickle::e2e_cte_tests test_cte_with_distinct
+        PASS [   0.996s] ( 256/1448) pg_trickle::e2e_cte_tests test_cte_with_union_all_outside
+        PASS [   1.006s] ( 257/1448) pg_trickle::e2e_cte_tests test_cte_with_where_clause_inside
+        PASS [   0.872s] ( 258/1448) pg_trickle::e2e_cte_tests test_cte_with_where_clause_outside
+        PASS [   0.901s] ( 259/1448) pg_trickle::e2e_cte_tests test_dred_deep_cascade_delete
+        PASS [   0.935s] ( 260/1448) pg_trickle::e2e_cte_tests test_dred_delete_preserves_siblings
+        PASS [   0.948s] ( 261/1448) pg_trickle::e2e_cte_tests test_dred_diamond_rederivation
+        PASS [   1.087s] ( 262/1448) pg_trickle::e2e_cte_tests test_dred_differential_multi_level_path_cascade
+        PASS [   1.060s] ( 263/1448) pg_trickle::e2e_cte_tests test_dred_differential_reparent_updates_depth
+        PASS [   1.011s] ( 264/1448) pg_trickle::e2e_cte_tests test_dred_differential_update_cascades_derived_path
+        PASS [   1.040s] ( 265/1448) pg_trickle::e2e_cte_tests test_dred_sequential_delete_refresh_cycles
+        PASS [   0.857s] ( 266/1448) pg_trickle::e2e_cte_tests test_dred_simultaneous_insert_and_delete
+        PASS [   0.886s] ( 267/1448) pg_trickle::e2e_cte_tests test_dred_update_reparent_via_dred
+        PASS [   0.998s] ( 268/1448) pg_trickle::e2e_cte_tests test_linear_tc_differential_bridge_components
+        PASS [   0.947s] ( 269/1448) pg_trickle::e2e_cte_tests test_linear_tc_differential_cycle_with_union
+        PASS [   0.985s] ( 270/1448) pg_trickle::e2e_cte_tests test_linear_tc_differential_insert_extends_chain
+        PASS [   1.043s] ( 271/1448) pg_trickle::e2e_cte_tests test_linear_tc_dred_delete_edge
+        PASS [   1.046s] ( 272/1448) pg_trickle::e2e_cte_tests test_linear_tc_sequential_refreshes
+        PASS [   0.840s] ( 273/1448) pg_trickle::e2e_cte_tests test_linear_transitive_closure_differential_create
+        PASS [   0.858s] ( 274/1448) pg_trickle::e2e_cte_tests test_linear_transitive_closure_full_mode
+        PASS [   0.774s] ( 275/1448) pg_trickle::e2e_cte_tests test_multiple_ctes_differential
+        PASS [   0.633s] ( 276/1448) pg_trickle::e2e_cte_tests test_multiple_ctes_full_mode
+        PASS [   0.894s] ( 277/1448) pg_trickle::e2e_cte_tests test_recomp_delete_all_then_reinsert
+        PASS [   0.857s] ( 278/1448) pg_trickle::e2e_cte_tests test_recomp_delete_internal_node_cascades
+        PASS [   0.972s] ( 279/1448) pg_trickle::e2e_cte_tests test_recomp_delete_leaf_node
+        PASS [   0.980s] ( 280/1448) pg_trickle::e2e_cte_tests test_recomp_mixed_insert_and_delete
+        PASS [   0.924s] ( 281/1448) pg_trickle::e2e_cte_tests test_recomp_update_non_join_column
+        PASS [   0.956s] ( 282/1448) pg_trickle::e2e_cte_tests test_recomp_update_reparent_subtree
+        PASS [   0.830s] ( 283/1448) pg_trickle::e2e_cte_tests test_recursive_cte_alter_to_differential
+        PASS [   0.930s] ( 284/1448) pg_trickle::e2e_cte_tests test_recursive_cte_differential_insert_deep_tree
+        PASS [   0.947s] ( 285/1448) pg_trickle::e2e_cte_tests test_recursive_cte_differential_mode_succeeds
+        PASS [   0.939s] ( 286/1448) pg_trickle::e2e_cte_tests test_recursive_cte_differential_update
+        PASS [   0.938s] ( 287/1448) pg_trickle::e2e_cte_tests test_recursive_cte_full_mode_succeeds
+        PASS [   0.888s] ( 288/1448) pg_trickle::e2e_cte_tests test_recursive_cte_full_refresh_picks_up_changes
+        PASS [   0.894s] ( 289/1448) pg_trickle::e2e_cte_tests test_recursive_cte_graph_traversal
+        PASS [   0.959s] ( 290/1448) pg_trickle::e2e_cte_tests test_recursive_cte_immediate_mode_delete_triggers_dred
+        PASS [   0.990s] ( 291/1448) pg_trickle::e2e_cte_tests test_recursive_cte_immediate_mode_insert_only
+        PASS [   1.121s] ( 292/1448) pg_trickle::e2e_cte_tests test_recursive_cte_non_monotone_agg_subquery_recomputation
+        PASS [   1.084s] ( 293/1448) pg_trickle::e2e_cte_tests test_recursive_cte_non_monotone_except_in_recursive_term
+        PASS [   2.056s] ( 294/1448) pg_trickle::e2e_cte_tests test_recursive_cte_immediate_mode_depth_guard
+        PASS [   0.811s] ( 295/1448) pg_trickle::e2e_cte_tests test_seminaive_empty_refresh_noop
+        PASS [   0.672s] ( 296/1448) pg_trickle::e2e_cte_tests test_seminaive_insert_leaves_connecting_to_existing
+        PASS [   0.684s] ( 297/1448) pg_trickle::e2e_cte_tests test_seminaive_insert_new_root_nodes
+        PASS [   0.752s] ( 298/1448) pg_trickle::e2e_cte_tests test_seminaive_insert_orphan_excluded
+        PASS [   1.097s] ( 299/1448) pg_trickle::e2e_cte_tests test_seminaive_insert_whole_subtree
+        PASS [   1.044s] ( 300/1448) pg_trickle::e2e_cte_tests test_seminaive_insert_wide_siblings
+        PASS [   1.022s] ( 301/1448) pg_trickle::e2e_cte_tests test_seminaive_large_batch_binary_tree
+        PASS [   1.023s] ( 302/1448) pg_trickle::e2e_cte_tests test_seminaive_matches_full_reexecution
+        PASS [   0.953s] ( 303/1448) pg_trickle::e2e_cte_tests test_seminaive_sequential_insert_refreshes
+        PASS [   1.018s] ( 304/1448) pg_trickle::e2e_cte_tests test_seminaive_then_recomp_sequence
+        PASS [   0.033s] ( 305/1448) pg_trickle::e2e_dag_concurrent_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 306/1448) pg_trickle::e2e_dag_concurrent_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 307/1448) pg_trickle::e2e_dag_concurrent_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.970s] ( 308/1448) pg_trickle::e2e_cte_tests test_subquery_in_from_differential
+        PASS [   1.007s] ( 309/1448) pg_trickle::e2e_cte_tests test_subquery_in_from_full_mode
+        PASS [   1.006s] ( 310/1448) pg_trickle::e2e_cte_tests test_subquery_with_filter_differential
+        PASS [   0.020s] ( 311/1448) pg_trickle::e2e_dag_error_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 312/1448) pg_trickle::e2e_dag_error_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 313/1448) pg_trickle::e2e_dag_error_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.220s] ( 314/1448) pg_trickle::e2e_dag_concurrent_tests test_dml_between_layer_refreshes
+        PASS [   1.095s] ( 315/1448) pg_trickle::e2e_dag_concurrent_tests test_rollback_between_refreshes
+        PASS [   1.100s] ( 316/1448) pg_trickle::e2e_dag_error_tests test_consecutive_errors_tracked_and_reset
+        PASS [   0.827s] ( 317/1448) pg_trickle::e2e_dag_error_tests test_error_in_leaf_does_not_affect_upstream
+        PASS [   2.264s] ( 318/1448) pg_trickle::e2e_dag_concurrent_tests test_concurrent_insert_during_pipeline_refresh
+        PASS [   0.818s] ( 319/1448) pg_trickle::e2e_dag_error_tests test_error_in_middle_layer_does_not_corrupt_siblings
+        PASS [   0.717s] ( 320/1448) pg_trickle::e2e_dag_error_tests test_error_recovery_after_data_fix
+        PASS [   0.025s] ( 321/1448) pg_trickle::e2e_dag_immediate_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 322/1448) pg_trickle::e2e_dag_immediate_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 323/1448) pg_trickle::e2e_dag_immediate_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.020s] ( 324/1448) pg_trickle::e2e_dag_immediate_tests test_immediate_2_layer_explicit_refresh
+        PASS [   1.724s] ( 325/1448) pg_trickle::e2e_dag_error_tests test_prop_failure_then_repair_reconverges
+        PASS [   1.959s] ( 326/1448) pg_trickle::e2e_dag_error_tests test_prop_repeated_failure_sequences_preserve_invariants
+        PASS [   0.796s] ( 327/1448) pg_trickle::e2e_dag_immediate_tests test_immediate_3_layer_propagation
+        PASS [   0.023s] ( 328/1448) pg_trickle::e2e_dag_operations_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   2.134s] ( 329/1448) pg_trickle::e2e_dag_error_tests test_prop_sibling_failure_does_not_corrupt_healthy_branch
+        PASS [   0.017s] ( 330/1448) pg_trickle::e2e_dag_operations_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.014s] ( 331/1448) pg_trickle::e2e_dag_operations_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.709s] ( 332/1448) pg_trickle::e2e_dag_immediate_tests test_immediate_rollback_no_side_effects
+        PASS [   0.809s] ( 333/1448) pg_trickle::e2e_dag_immediate_tests test_immediate_with_differential_downstream
+        PASS [   0.905s] ( 334/1448) pg_trickle::e2e_dag_operations_tests test_alter_query_mid_pipeline
+        PASS [   1.042s] ( 335/1448) pg_trickle::e2e_dag_operations_tests test_alter_mode_mid_pipeline_diff_to_full
+        PASS [   1.178s] ( 336/1448) pg_trickle::e2e_dag_operations_tests test_alter_schedule_mid_pipeline
+        PASS [   1.003s] ( 337/1448) pg_trickle::e2e_dag_operations_tests test_drop_leaf_keeps_pipeline_intact
+        PASS [   0.025s] ( 338/1448) pg_trickle::e2e_dag_topology_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 339/1448) pg_trickle::e2e_dag_topology_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 340/1448) pg_trickle::e2e_dag_topology_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.990s] ( 341/1448) pg_trickle::e2e_dag_operations_tests test_drop_middle_layer_cascades
+        PASS [   1.141s] ( 342/1448) pg_trickle::e2e_dag_operations_tests test_suspend_middle_layer_blocks_downstream
+        PASS [   0.989s] ( 343/1448) pg_trickle::e2e_dag_operations_tests test_suspend_resume_cycle_data_consistency
+        PASS [   1.250s] ( 344/1448) pg_trickle::e2e_dag_topology_tests test_deep_linear_5_layers
+        PASS [   1.057s] ( 345/1448) pg_trickle::e2e_dag_topology_tests test_fanout_4_leaves
+        PASS [   1.333s] ( 346/1448) pg_trickle::e2e_dag_topology_tests test_fanout_then_converge
+        PASS [   1.247s] ( 347/1448) pg_trickle::e2e_dag_topology_tests test_multi_source_diamond
+        PASS [   0.026s] ( 348/1448) pg_trickle::e2e_ddl_event_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 349/1448) pg_trickle::e2e_ddl_event_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 350/1448) pg_trickle::e2e_ddl_event_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.054s] ( 351/1448) pg_trickle::e2e_dag_topology_tests test_wide_fanout_deletion_isolation
+        PASS [   1.004s] ( 352/1448) pg_trickle::e2e_ddl_event_tests test_add_column_on_joined_source_st_survives
+        PASS [   0.649s] ( 353/1448) pg_trickle::e2e_ddl_event_tests test_add_column_on_source_st_still_functional
+        PASS [   0.888s] ( 354/1448) pg_trickle::e2e_ddl_event_tests test_add_column_unused_immediate_st_stays_functional
+        PASS [   0.641s] ( 355/1448) pg_trickle::e2e_ddl_event_tests test_add_column_unused_st_survives_refresh
+        PASS [   3.281s] ( 356/1448) pg_trickle::e2e_dag_topology_tests test_prop_deep_chain_small_trace
+        PASS [   0.686s] ( 357/1448) pg_trickle::e2e_ddl_event_tests test_add_not_null_constraint_suspends_with_reason_code
+        PASS [   1.119s] ( 358/1448) pg_trickle::e2e_ddl_event_tests test_alter_column_type_suspends_with_reason_code
+        PASS [   4.053s] ( 359/1448) pg_trickle::e2e_dag_topology_tests test_prop_fanout_leaf_independence
+        PASS [   1.026s] ( 360/1448) pg_trickle::e2e_ddl_event_tests test_alter_domain_triggers_invalidation
+        PASS [   1.246s] ( 361/1448) pg_trickle::e2e_ddl_event_tests test_alter_policy_suspends_until_repaired
+        PASS [   0.673s] ( 362/1448) pg_trickle::e2e_ddl_event_tests test_alter_source_fires_event_trigger
+        PASS [   0.943s] ( 363/1448) pg_trickle::e2e_ddl_event_tests test_alter_type_enum_triggers_invalidation
+        PASS [   1.040s] ( 364/1448) pg_trickle::e2e_ddl_event_tests test_create_index_on_source_is_benign
+        PASS [   0.996s] ( 365/1448) pg_trickle::e2e_ddl_event_tests test_ddl_changed_owner_suspends_stream_table
+        PASS [   1.195s] ( 366/1448) pg_trickle::e2e_ddl_event_tests test_ddl_hooks_dependency_lookup_timeout_fail_closed
+        PASS [   2.018s] ( 367/1448) pg_trickle::e2e_ddl_event_tests test_block_source_ddl_guc_prevents_alter
+        PASS [   0.834s] ( 368/1448) pg_trickle::e2e_ddl_event_tests test_ddl_same_owner_keeps_immediate_stream_table_active
+        PASS [   0.872s] ( 369/1448) pg_trickle::e2e_ddl_event_tests test_dml_and_compatible_ddl_interleaved
+        PASS [   0.621s] ( 370/1448) pg_trickle::e2e_ddl_event_tests test_drop_function_marks_st_for_reinit
+        PASS [   0.822s] ( 371/1448) pg_trickle::e2e_ddl_event_tests test_drop_referenced_column_produces_error
+        PASS [   0.963s] ( 372/1448) pg_trickle::e2e_ddl_event_tests test_drop_source_fires_event_trigger
+        PASS [   0.995s] ( 373/1448) pg_trickle::e2e_ddl_event_tests test_drop_source_with_multiple_downstream_sts
+        PASS [   1.066s] ( 374/1448) pg_trickle::e2e_ddl_event_tests test_drop_st_storage_by_sql
+        PASS [   0.997s] ( 375/1448) pg_trickle::e2e_ddl_event_tests test_drop_unused_column_st_survives
+        PASS [   1.001s] ( 376/1448) pg_trickle::e2e_ddl_event_tests test_function_change_marks_st_for_reinit
+        PASS [   0.028s] ( 377/1448) pg_trickle::e2e_diagnostics_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.018s] ( 378/1448) pg_trickle::e2e_diagnostics_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 379/1448) pg_trickle::e2e_diagnostics_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.948s] ( 380/1448) pg_trickle::e2e_ddl_event_tests test_rename_source_table
+        PASS [   0.915s] ( 381/1448) pg_trickle::e2e_ddl_event_tests test_rename_unused_column_suspends
+        PASS [   1.000s] ( 382/1448) pg_trickle::e2e_ddl_event_tests test_widen_varchar_type_suspends
+        PASS [   0.879s] ( 383/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_diagnose_errors_classifies_performance_error
+        PASS [   0.972s] ( 384/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_diagnose_errors_classifies_schema_error
+        PASS [   0.943s] ( 385/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_diagnose_errors_classifies_user_error
+        PASS [   0.951s] ( 386/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_diagnose_errors_empty_for_healthy_st
+        PASS [   0.992s] ( 387/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_explain_query_rewrite_grouping_sets_fires
+        PASS [   0.945s] ( 388/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_explain_query_rewrite_simple_select
+        PASS [   0.926s] ( 389/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_explain_query_rewrite_topk_detected
+        PASS [   0.907s] ( 390/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_explain_query_rewrite_view_inlining
+        PASS [   0.962s] ( 391/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_export_definition_basic
+        PASS [   1.010s] ( 392/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_list_auxiliary_columns_count_for_aggregate
+        PASS [   1.000s] ( 393/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_list_auxiliary_columns_purpose_not_empty
+        PASS [   0.997s] ( 394/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_list_auxiliary_columns_row_id_present
+        PASS [   0.934s] ( 395/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_migrate_is_read_only_on_schema_version_drift
+        PASS [   0.899s] ( 396/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_migrate_reports_aligned_versions
+        PASS [   1.056s] ( 397/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_recommend_refresh_mode_all_tables
+        PASS [   1.037s] ( 398/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_recommend_refresh_mode_signals_jsonb
+        PASS [   1.067s] ( 399/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_recommend_refresh_mode_single_table
+        PASS [   1.093s] ( 400/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_recommend_refresh_mode_valid_values
+        PASS [   0.985s] ( 401/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_refresh_efficiency_basic
+        PASS [   0.984s] ( 402/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_refresh_efficiency_shows_mode
+        PASS [   0.946s] ( 403/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_validate_query_always_has_mode_row
+        PASS [   1.007s] ( 404/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_validate_query_full_join_warning
+        PASS [   0.978s] ( 405/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_validate_query_group_rescan_warning
+        PASS [   0.964s] ( 406/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_validate_query_simple_agg_differential
+        PASS [   0.993s] ( 407/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_validate_query_syntax_error_returns_error
+        PASS [   0.022s] ( 408/1448) pg_trickle::e2e_diamond_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 409/1448) pg_trickle::e2e_diamond_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 410/1448) pg_trickle::e2e_diamond_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.913s] ( 411/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_validate_query_topk_mode
+        PASS [   0.898s] ( 412/1448) pg_trickle::e2e_diagnostics_tests test_diagnostics_volatility_uses_resolved_overload
+        PASS [   1.070s] ( 413/1448) pg_trickle::e2e_diagnostics_tests test_st_on_st_manual_refresh_succeeds
+        PASS [   0.970s] ( 414/1448) pg_trickle::e2e_diamond_tests test_diamond_atomic_all_succeed
+        PASS [   0.936s] ( 415/1448) pg_trickle::e2e_diamond_tests test_diamond_consistency_alter
+        PASS [   0.973s] ( 416/1448) pg_trickle::e2e_diamond_tests test_diamond_consistency_create_atomic
+        PASS [   0.825s] ( 417/1448) pg_trickle::e2e_diamond_tests test_diamond_consistency_default
+        PASS [   0.912s] ( 418/1448) pg_trickle::e2e_diamond_tests test_diamond_consistency_in_catalog_view
+        PASS [   1.256s] ( 419/1448) pg_trickle::e2e_diamond_tests test_diamond_flow_simultaneous_multi_source_update
+        PASS [   1.045s] ( 420/1448) pg_trickle::e2e_diamond_tests test_diamond_groups_shows_schedule_policy
+        PASS [   1.000s] ( 421/1448) pg_trickle::e2e_diamond_tests test_diamond_groups_sql_function
+        PASS [   0.950s] ( 422/1448) pg_trickle::e2e_diamond_tests test_diamond_linear_unaffected
+        PASS [   0.691s] ( 423/1448) pg_trickle::e2e_diamond_tests test_diamond_none_mode_no_groups
+        PASS [   0.823s] ( 424/1448) pg_trickle::e2e_diamond_tests test_diamond_schedule_policy_alter
+        PASS [   0.903s] ( 425/1448) pg_trickle::e2e_diamond_tests test_diamond_schedule_policy_convergence_override
+        PASS [   0.894s] ( 426/1448) pg_trickle::e2e_diamond_tests test_diamond_schedule_policy_create_slowest
+        PASS [   0.063s] ( 427/1448) pg_trickle::e2e_diff_full_equivalence_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.021s] ( 428/1448) pg_trickle::e2e_diff_full_equivalence_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 429/1448) pg_trickle::e2e_diff_full_equivalence_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.949s] ( 430/1448) pg_trickle::e2e_diamond_tests test_diamond_schedule_policy_default
+        PASS [   0.980s] ( 431/1448) pg_trickle::e2e_diamond_tests test_diamond_schedule_policy_in_catalog_view
+        PASS [   0.913s] ( 432/1448) pg_trickle::e2e_diamond_tests test_diamond_schedule_policy_invalid_rejected
+        PASS [   0.944s] ( 433/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_aggregate_filter_above_projected_subquery_with_inner_where
+        PASS [   1.211s] ( 434/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_aggregate_avg_stddev
+        PASS [   1.158s] ( 435/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_aggregate_sum_count
+        PASS [   1.200s] ( 436/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_cte_non_recursive
+        PASS [   1.125s] ( 437/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_distinct_on
+        PASS [   0.894s] ( 438/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_except
+        PASS [   1.119s] ( 439/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_exists_and_not_exists_simultaneous_changes
+        PASS [   1.088s] ( 440/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_full_join
+        PASS [   0.966s] ( 441/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_having_clause
+        PASS [   1.031s] ( 442/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_inner_join
+        PASS [   0.804s] ( 443/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_intersect
+        PASS [   0.937s] ( 444/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_lateral_subquery
+        PASS [   1.136s] ( 445/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_left_join
+        PASS [   1.089s] ( 446/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_three_table_join
+        PASS [   1.020s] ( 447/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_topk
+        PASS [   0.030s] ( 448/1448) pg_trickle::e2e_differential_gaps_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.018s] ( 449/1448) pg_trickle::e2e_differential_gaps_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 450/1448) pg_trickle::e2e_differential_gaps_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.012s] ( 451/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_window_rank
+        PASS [   1.089s] ( 452/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_full_equivalence_window_row_number
+        PASS [   0.968s] ( 453/1448) pg_trickle::e2e_diff_full_equivalence_tests test_diff_reinitialize_repairs_one_table_after_committed_source_change
+        PASS [   1.285s] ( 454/1448) pg_trickle::e2e_differential_gaps_tests test_nested_or_cdc_cycle
+        PASS [   1.015s] ( 455/1448) pg_trickle::e2e_differential_gaps_tests test_nested_or_demorgan_and_prefix
+        PASS [   0.983s] ( 456/1448) pg_trickle::e2e_differential_gaps_tests test_nested_or_demorgan_not_and
+        PASS [   1.014s] ( 457/1448) pg_trickle::e2e_differential_gaps_tests test_nested_or_mixed_and_or_under_or
+        PASS [   1.189s] ( 458/1448) pg_trickle::e2e_differential_gaps_tests test_uda_auto_mode_resolves_to_differential
+        PASS [   1.230s] ( 459/1448) pg_trickle::e2e_differential_gaps_tests test_nested_or_two_exists
+        PASS [   1.211s] ( 460/1448) pg_trickle::e2e_differential_gaps_tests test_uda_combined_with_builtin
+        PASS [   1.441s] ( 461/1448) pg_trickle::e2e_differential_gaps_tests test_uda_insert_delete_update_full_cycle
+        PASS [   0.903s] ( 462/1448) pg_trickle::e2e_differential_gaps_tests test_uda_multiple_in_same_query
+        PASS [   1.139s] ( 463/1448) pg_trickle::e2e_differential_gaps_tests test_uda_schema_qualified
+        PASS [   0.035s] ( 464/1448) pg_trickle::e2e_drop_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 465/1448) pg_trickle::e2e_drop_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 466/1448) pg_trickle::e2e_drop_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.064s] ( 467/1448) pg_trickle::e2e_differential_gaps_tests test_uda_simple_differential
+        PASS [   0.976s] ( 468/1448) pg_trickle::e2e_differential_gaps_tests test_uda_with_filter_clause
+        PASS [   1.030s] ( 469/1448) pg_trickle::e2e_differential_gaps_tests test_uda_with_order_by_in_agg
+        PASS [   0.891s] ( 470/1448) pg_trickle::e2e_drop_tests test_drop_nonexistent_fails
+        PASS [   0.954s] ( 471/1448) pg_trickle::e2e_drop_tests test_drop_preserves_source_table
+        PASS [   1.119s] ( 472/1448) pg_trickle::e2e_drop_tests test_drop_preserves_trigger_for_other_st
+        PASS [   1.173s] ( 473/1448) pg_trickle::e2e_drop_tests test_drop_removes_catalog_entry
+        PASS [   1.240s] ( 474/1448) pg_trickle::e2e_drop_tests test_drop_removes_cdc_trigger
+        PASS [   0.039s] ( 475/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::coverage::tests::decision_trace_populates_observed_semantic_coverage
+        PASS [   0.020s] ( 476/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::coverage::tests::mandatory_matrix_covers_declared_p0_pairs
+        PASS [   0.030s] ( 477/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::coverage::tests::mandatory_matrix_has_valid_typed_queries
+        PASS [   0.014s] ( 478/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::coverage::tests::semantic_coverage_report_validator_accepts_complete_observation
+        PASS [   0.014s] ( 479/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::metamorphic::tests::batching_preserves_model_final_state
+        PASS [   0.012s] ( 480/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::metamorphic::tests::inventory_has_at_least_six_families
+        PASS [   0.012s] ( 481/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::metamorphic::tests::update_decomposition_preserves_model_final_state
+        PASS [   0.013s] ( 482/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::mutation::tests::every_intent_is_effective_and_leaf_buckets_are_selectable
+        PASS [   0.011s] ( 483/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::query::tests::invalid_join_arity_is_rejected_before_rendering
+        PASS [   0.012s] ( 484/1448) pg_trickle::e2e_dvm_composition_tests dvm_fuzz::query::tests::wave_a_composition_computes_schema_before_rendering
+        PASS [   0.012s] ( 485/1448) pg_trickle::e2e_dvm_composition_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.012s] ( 486/1448) pg_trickle::e2e_dvm_composition_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 487/1448) pg_trickle::e2e_dvm_composition_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.016s] ( 488/1448) pg_trickle::e2e_dvm_composition_tests test_v0873_generated_queries_have_schemas_and_render_sql
+        PASS [   1.235s] ( 489/1448) pg_trickle::e2e_drop_tests test_drop_removes_change_tracking
+        PASS [   0.014s] ( 490/1448) pg_trickle::e2e_dvm_composition_tests test_v0873_matrix_matches_published_requirements
+        PASS [   0.034s] ( 491/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::coverage::tests::decision_trace_populates_observed_semantic_coverage
+        PASS [   0.018s] ( 492/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::coverage::tests::mandatory_matrix_covers_declared_p0_pairs
+        PASS [   0.020s] ( 493/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::coverage::tests::mandatory_matrix_has_valid_typed_queries
+        PASS [   0.015s] ( 494/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::coverage::tests::semantic_coverage_report_validator_accepts_complete_observation
+        PASS [   0.012s] ( 495/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::metamorphic::tests::batching_preserves_model_final_state
+        PASS [   0.011s] ( 496/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::metamorphic::tests::inventory_has_at_least_six_families
+        PASS [   0.011s] ( 497/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::metamorphic::tests::update_decomposition_preserves_model_final_state
+        PASS [   0.013s] ( 498/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::mutation::tests::every_intent_is_effective_and_leaf_buckets_are_selectable
+        PASS [   0.012s] ( 499/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::query::tests::invalid_join_arity_is_rejected_before_rendering
+        PASS [   0.015s] ( 500/1448) pg_trickle::e2e_dvm_corpus_tests dvm_fuzz::query::tests::wave_a_composition_computes_schema_before_rendering
+        PASS [   0.015s] ( 501/1448) pg_trickle::e2e_dvm_corpus_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.013s] ( 502/1448) pg_trickle::e2e_dvm_corpus_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 503/1448) pg_trickle::e2e_dvm_corpus_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.008s] ( 504/1448) pg_trickle::e2e_drop_tests test_drop_removes_dependencies
+        PASS [   0.037s] ( 505/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::coverage::tests::decision_trace_populates_observed_semantic_coverage
+        PASS [   0.020s] ( 506/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::coverage::tests::mandatory_matrix_covers_declared_p0_pairs
+        PASS [   0.025s] ( 507/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::coverage::tests::mandatory_matrix_has_valid_typed_queries
+        PASS [   0.014s] ( 508/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::coverage::tests::semantic_coverage_report_validator_accepts_complete_observation
+        PASS [   0.012s] ( 509/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::metamorphic::tests::batching_preserves_model_final_state
+        PASS [   0.012s] ( 510/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::metamorphic::tests::inventory_has_at_least_six_families
+        PASS [   0.011s] ( 511/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::metamorphic::tests::update_decomposition_preserves_model_final_state
+        PASS [   0.013s] ( 512/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::mutation::tests::every_intent_is_effective_and_leaf_buckets_are_selectable
+        PASS [   0.011s] ( 513/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::query::tests::invalid_join_arity_is_rejected_before_rendering
+        PASS [   0.012s] ( 514/1448) pg_trickle::e2e_dvm_negative_control_tests dvm_fuzz::query::tests::wave_a_composition_computes_schema_before_rendering
+        PASS [   0.012s] ( 515/1448) pg_trickle::e2e_dvm_negative_control_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.013s] ( 516/1448) pg_trickle::e2e_dvm_negative_control_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 517/1448) pg_trickle::e2e_dvm_negative_control_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.001s] ( 518/1448) pg_trickle::e2e_drop_tests test_drop_removes_storage_table
+        PASS [   0.024s] ( 519/1448) pg_trickle::e2e_ec01_property_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 520/1448) pg_trickle::e2e_ec01_property_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 521/1448) pg_trickle::e2e_ec01_property_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.166s] ( 522/1448) pg_trickle::e2e_dvm_corpus_tests test_dvm_corpus_replays_without_generator
+        PASS [   0.027s] ( 523/1448) pg_trickle::e2e_error_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.019s] ( 524/1448) pg_trickle::e2e_error_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 525/1448) pg_trickle::e2e_error_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.599s] ( 526/1448) pg_trickle::e2e_error_tests test_alter_source_table_add_column
+        PASS [   1.609s] ( 527/1448) pg_trickle::e2e_dvm_negative_control_tests test_negative_controls_are_detected
+        PASS [   0.645s] ( 528/1448) pg_trickle::e2e_error_tests test_concurrent_refresh_safety
+        PASS [   0.785s] ( 529/1448) pg_trickle::e2e_error_tests test_create_st_transaction_abort_leaves_no_orphans
+        PASS [   0.562s] ( 530/1448) pg_trickle::e2e_error_tests test_create_with_negative_schedule
+        PASS [   0.663s] ( 531/1448) pg_trickle::e2e_error_tests test_create_with_zero_schedule
+        PASS [   3.994s] ( 532/1448) pg_trickle::e2e_dvm_composition_tests test_v0873_mandatory_composition_matrix
+        PASS [   0.706s] ( 533/1448) pg_trickle::e2e_error_tests test_cte_with_window_function_full_mode
+        PASS [   0.675s] ( 534/1448) pg_trickle::e2e_error_tests test_cube_accepted_via_rewrite
+        PASS [   0.507s] ( 535/1448) pg_trickle::e2e_error_tests test_drop_source_table_with_active_st
+        PASS [   0.675s] ( 536/1448) pg_trickle::e2e_error_tests test_fetch_first_returns_unsupported_error
+        PASS [   0.677s] ( 537/1448) pg_trickle::e2e_error_tests test_fetch_next_returns_unsupported_error
+        PASS [   0.624s] ( 538/1448) pg_trickle::e2e_error_tests test_for_key_share_rejected
+        PASS [   0.665s] ( 539/1448) pg_trickle::e2e_error_tests test_for_no_key_update_rejected
+        PASS [   0.866s] ( 540/1448) pg_trickle::e2e_error_tests test_for_share_rejected_with_clear_error
+        PASS [   0.914s] ( 541/1448) pg_trickle::e2e_error_tests test_for_update_rejected_with_clear_error
+        PASS [   1.031s] ( 542/1448) pg_trickle::e2e_error_tests test_function_volatility_checks_omitted_default_arguments
+        PASS [   0.708s] ( 543/1448) pg_trickle::e2e_error_tests test_function_volatility_checks_omitted_window_defaults
+        PASS [   0.693s] ( 544/1448) pg_trickle::e2e_error_tests test_function_volatility_resolves_exact_time_bucket_like_overload
+        PASS [   0.572s] ( 545/1448) pg_trickle::e2e_error_tests test_grouping_sets_accepted_via_rewrite
+        PASS [   0.689s] ( 546/1448) pg_trickle::e2e_error_tests test_grouping_sets_differential_mode_also_rewritten
+        PASS [   0.698s] ( 547/1448) pg_trickle::e2e_error_tests test_immutable_function_allowed_in_differential_mode
+        PASS [   0.647s] ( 548/1448) pg_trickle::e2e_error_tests test_invalid_sql_in_defining_query
+        PASS [   0.664s] ( 549/1448) pg_trickle::e2e_error_tests test_io_cast_checks_destination_input_volatility
+        PASS [   0.792s] ( 550/1448) pg_trickle::e2e_error_tests test_json_constructor_checks_hidden_conversion_volatility
+        PASS [   0.884s] ( 551/1448) pg_trickle::e2e_error_tests test_lateral_immutable_srf_uses_differential
+        PASS [   0.861s] ( 552/1448) pg_trickle::e2e_error_tests test_lateral_volatile_srf_argument_rejected_in_differential
+        PASS [   0.722s] ( 553/1448) pg_trickle::e2e_error_tests test_lateral_volatile_subquery_rejected_in_differential
+        PASS [   0.674s] ( 554/1448) pg_trickle::e2e_error_tests test_limit_offset_combined_returns_error
+        PASS [   0.817s] ( 555/1448) pg_trickle::e2e_error_tests test_limit_returns_unsupported_error
+        PASS [   0.803s] ( 556/1448) pg_trickle::e2e_error_tests test_nested_volatile_where_expression_rejected_in_differential_mode
+        PASS [   0.783s] ( 557/1448) pg_trickle::e2e_error_tests test_offset_returns_unsupported_error
+        PASS [   0.686s] ( 558/1448) pg_trickle::e2e_error_tests test_order_by_in_differential_mode_is_accepted
+        PASS [   0.678s] ( 559/1448) pg_trickle::e2e_error_tests test_order_by_with_limit_accepted_as_topk
+        PASS [  10.052s] ( 560/1448) pg_trickle::e2e_ec01_property_tests test_ec01_join_diff_vs_full_converges_under_random_co_deletes
+        PASS [   0.720s] ( 561/1448) pg_trickle::e2e_error_tests test_order_by_without_limit_is_accepted
+        PASS [   0.825s] ( 562/1448) pg_trickle::e2e_error_tests test_percentile_cont_now_supported_in_differential_mode
+        PASS [   0.846s] ( 563/1448) pg_trickle::e2e_error_tests test_refresh_rejected_for_suspended_st
+        PASS [   0.863s] ( 564/1448) pg_trickle::e2e_error_tests test_resume_stream_table_clears_suspended_status
+        PASS [   0.970s] ( 565/1448) pg_trickle::e2e_error_tests test_resume_unknown_stream_table_errors
+        PASS [   0.869s] ( 566/1448) pg_trickle::e2e_error_tests test_rollup_accepted_via_rewrite
+        PASS [   0.863s] ( 567/1448) pg_trickle::e2e_error_tests test_row_comparison_checks_resolved_operator_volatility
+        PASS [   0.987s] ( 568/1448) pg_trickle::e2e_error_tests test_self_referencing_query_fails
+        PASS [   1.170s] ( 569/1448) pg_trickle::e2e_error_tests test_stable_function_falls_back_to_full_in_auto_mode
+        PASS [   1.163s] ( 570/1448) pg_trickle::e2e_error_tests test_subquery_in_defining_query
+        PASS [   1.149s] ( 571/1448) pg_trickle::e2e_error_tests test_tablesample_bernoulli_rejected
+        PASS [   1.089s] ( 572/1448) pg_trickle::e2e_error_tests test_tablesample_system_rejected
+        PASS [   1.141s] ( 573/1448) pg_trickle::e2e_error_tests test_temporal_volatility_uses_resolved_function_and_operator
+        PASS [   0.024s] ( 574/1448) pg_trickle::e2e_expression_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.017s] ( 575/1448) pg_trickle::e2e_expression_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 576/1448) pg_trickle::e2e_expression_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.988s] ( 577/1448) pg_trickle::e2e_error_tests test_volatile_function_rejected_in_differential_mode
+        PASS [   1.204s] ( 578/1448) pg_trickle::e2e_error_tests test_volatile_operator_allowed_in_full_mode
+        PASS [   1.147s] ( 579/1448) pg_trickle::e2e_error_tests test_volatile_operator_rejected_in_differential
+        PASS [   1.013s] ( 580/1448) pg_trickle::e2e_expression_tests test_array_expression_full_mode
+        PASS [   1.243s] ( 581/1448) pg_trickle::e2e_expression_tests test_between_expression_full_mode
+        PASS [   1.105s] ( 582/1448) pg_trickle::e2e_expression_tests test_between_filter_differential_with_inserts
+        PASS [   1.106s] ( 583/1448) pg_trickle::e2e_expression_tests test_boolean_test_expression_full_mode
+        PASS [   1.111s] ( 584/1448) pg_trickle::e2e_expression_tests test_case_when_expression_full_mode
+        PASS [   1.066s] ( 585/1448) pg_trickle::e2e_expression_tests test_case_when_in_select_differential_mode
+        PASS [   1.000s] ( 586/1448) pg_trickle::e2e_expression_tests test_coalesce_expression_full_mode
+        PASS [   1.181s] ( 587/1448) pg_trickle::e2e_expression_tests test_coalesce_in_select_differential_mode
+        PASS [   1.161s] ( 588/1448) pg_trickle::e2e_expression_tests test_combined_case_coalesce_between
+        PASS [   1.171s] ( 589/1448) pg_trickle::e2e_expression_tests test_distinct_on_accepted_via_rewrite
+        PASS [   1.259s] ( 590/1448) pg_trickle::e2e_expression_tests test_exists_subquery_in_where
+        PASS [   1.050s] ( 591/1448) pg_trickle::e2e_expression_tests test_expression_invalid_query_fails
+        PASS [   1.051s] ( 592/1448) pg_trickle::e2e_expression_tests test_filter_clause_supported
+        PASS [   1.198s] ( 593/1448) pg_trickle::e2e_expression_tests test_greatest_least_expression_full_mode
+        PASS [   1.109s] ( 594/1448) pg_trickle::e2e_expression_tests test_ilike_in_where_auto_mode_resolves_to_differential
+        PASS [   1.126s] ( 595/1448) pg_trickle::e2e_expression_tests test_in_list_expression_full_mode
+        PASS [   1.103s] ( 596/1448) pg_trickle::e2e_expression_tests test_in_list_filter_differential_with_inserts
+        PASS [   0.926s] ( 597/1448) pg_trickle::e2e_expression_tests test_is_distinct_from_expression_full_mode
+        PASS [   0.973s] ( 598/1448) pg_trickle::e2e_expression_tests test_is_json_in_where_differential
+        PASS [   0.952s] ( 599/1448) pg_trickle::e2e_expression_tests test_is_json_predicate_full_mode
+        PASS [   0.954s] ( 600/1448) pg_trickle::e2e_expression_tests test_is_json_type_variants_full_mode
+        PASS [   0.961s] ( 601/1448) pg_trickle::e2e_expression_tests test_is_not_true_and_is_unknown
+        PASS [   0.929s] ( 602/1448) pg_trickle::e2e_expression_tests test_json_array_constructor_full_mode
+        PASS [   1.001s] ( 603/1448) pg_trickle::e2e_expression_tests test_json_arrayagg_differential_mode
+        PASS [   1.222s] ( 604/1448) pg_trickle::e2e_expression_tests test_json_arrayagg_full_mode
+        PASS [   1.290s] ( 605/1448) pg_trickle::e2e_expression_tests test_json_constructors_in_differential_mode
+        PASS [   1.233s] ( 606/1448) pg_trickle::e2e_expression_tests test_json_object_constructor_full_mode
+        PASS [   1.241s] ( 607/1448) pg_trickle::e2e_expression_tests test_json_objectagg_differential_mode
+        PASS [   0.943s] ( 608/1448) pg_trickle::e2e_expression_tests test_json_objectagg_full_mode
+        PASS [   0.902s] ( 609/1448) pg_trickle::e2e_expression_tests test_json_table_differential_mode
+        PASS [   0.936s] ( 610/1448) pg_trickle::e2e_expression_tests test_json_table_full_mode
+        PASS [   0.896s] ( 611/1448) pg_trickle::e2e_expression_tests test_like_in_where_auto_mode_resolves_to_differential
+        PASS [   0.904s] ( 612/1448) pg_trickle::e2e_expression_tests test_natural_join_accepted_via_rewrite
+        PASS [   0.887s] ( 613/1448) pg_trickle::e2e_expression_tests test_not_between_expression_full_mode
+        PASS [   0.890s] ( 614/1448) pg_trickle::e2e_expression_tests test_not_in_expression_full_mode
+        PASS [   0.889s] ( 615/1448) pg_trickle::e2e_expression_tests test_nullif_expression_full_mode
+        PASS [   1.087s] ( 616/1448) pg_trickle::e2e_expression_tests test_nullif_in_select_auto_mode_resolves_to_differential
+        PASS [   0.961s] ( 617/1448) pg_trickle::e2e_expression_tests test_plain_distinct_still_works
+        PASS [   0.935s] ( 618/1448) pg_trickle::e2e_expression_tests test_right_join_converted_to_left_join
+        PASS [   0.910s] ( 619/1448) pg_trickle::e2e_expression_tests test_simple_case_expression_full_mode
+        PASS [   0.736s] ( 620/1448) pg_trickle::e2e_expression_tests test_sql_value_function_current_date_full_mode
+        PASS [   0.853s] ( 621/1448) pg_trickle::e2e_expression_tests test_stddev_aggregate_supported_in_differential_mode
+        PASS [   0.021s] ( 622/1448) pg_trickle::e2e_failure_recovery_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 623/1448) pg_trickle::e2e_failure_recovery_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 624/1448) pg_trickle::e2e_failure_recovery_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.096s] ( 625/1448) pg_trickle::e2e_expression_tests test_three_field_column_ref
+        PASS [   0.999s] ( 626/1448) pg_trickle::e2e_expression_tests test_unsupported_aggregate_works_in_full_mode
+        PASS [   0.988s] ( 627/1448) pg_trickle::e2e_expression_tests test_window_frame_rows_between
+        PASS [   1.089s] ( 628/1448) pg_trickle::e2e_failure_recovery_tests test_cancel_backend_during_refresh_recovers
+        PASS [   0.829s] ( 629/1448) pg_trickle::e2e_failure_recovery_tests test_drop_source_and_reinit_recovery
+        PASS [   1.184s] ( 630/1448) pg_trickle::e2e_failure_recovery_tests test_lock_timeout_during_refresh
+        PASS [   0.760s] ( 631/1448) pg_trickle::e2e_failure_recovery_tests test_recovery_after_consecutive_errors_reset
+        PASS [   0.869s] ( 632/1448) pg_trickle::e2e_failure_recovery_tests test_refresh_after_repeated_failures_counter_grows
+        PASS [   0.021s] ( 633/1448) pg_trickle::e2e_full_join_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 634/1448) pg_trickle::e2e_full_join_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 635/1448) pg_trickle::e2e_full_join_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.652s] ( 636/1448) pg_trickle::e2e_failure_recovery_tests test_refresh_after_source_table_truncate
+        PASS [   1.954s] ( 637/1448) pg_trickle::e2e_failure_recovery_tests test_no_resource_leak_after_timeout
+        PASS [   0.866s] ( 638/1448) pg_trickle::e2e_full_join_tests test_full_join_basic_differential
+        PASS [   0.726s] ( 639/1448) pg_trickle::e2e_full_join_tests test_full_join_key_update_migration
+        PASS [   1.672s] ( 640/1448) pg_trickle::e2e_failure_recovery_tests test_statement_timeout_during_refresh_recovers
+        PASS [   0.870s] ( 641/1448) pg_trickle::e2e_full_join_tests test_full_join_multi_column_key_differential
+        PASS [   0.023s] ( 642/1448) pg_trickle::e2e_getting_started_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 643/1448) pg_trickle::e2e_getting_started_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 644/1448) pg_trickle::e2e_getting_started_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.672s] ( 645/1448) pg_trickle::e2e_full_join_tests test_full_join_multi_event_null_transitions_emit_once
+        PASS [   0.868s] ( 646/1448) pg_trickle::e2e_full_join_tests test_full_join_null_keys_differential
+        PASS [   0.631s] ( 647/1448) pg_trickle::e2e_full_join_tests test_full_join_with_aggregate_differential
+        PASS [   0.696s] ( 648/1448) pg_trickle::e2e_getting_started_tests test_getting_started_func_call_group_by_differential_against_base_table
+        PASS [   0.793s] ( 649/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step2_department_tree_initial_data
+        PASS [   0.931s] ( 650/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step3_department_report_initial_data
+        PASS [   0.905s] ( 651/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step3_department_stats_initial_data
+        PASS [   1.070s] ( 652/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step4a_employee_insert_cascades
+        PASS [   1.116s] ( 653/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step4b_department_insert_cascades_all_layers
+        PASS [   1.119s] ( 654/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step4c_department_rename_cascades
+        PASS [   1.074s] ( 655/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step4c_then_4d_combined_regression
+        PASS [   0.020s] ( 656/1448) pg_trickle::e2e_guard_trigger_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 657/1448) pg_trickle::e2e_guard_trigger_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 658/1448) pg_trickle::e2e_guard_trigger_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.218s] ( 659/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step4c_then_4d_sequential_regression
+        PASS [   1.107s] ( 660/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step4d_employee_delete_updates_aggregates
+        PASS [   1.028s] ( 661/1448) pg_trickle::e2e_getting_started_tests test_getting_started_step7_drop_in_order
+        PASS [   0.898s] ( 662/1448) pg_trickle::e2e_guard_trigger_tests test_guard_trigger_allows_managed_refresh
+        PASS [   0.741s] ( 663/1448) pg_trickle::e2e_guard_trigger_tests test_guard_trigger_blocks_direct_delete
+        PASS [   0.024s] ( 664/1448) pg_trickle::e2e_guc_variation_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 665/1448) pg_trickle::e2e_guc_variation_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 666/1448) pg_trickle::e2e_guc_variation_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.886s] ( 667/1448) pg_trickle::e2e_guard_trigger_tests test_guard_trigger_blocks_direct_insert
+        PASS [   0.802s] ( 668/1448) pg_trickle::e2e_guard_trigger_tests test_guard_trigger_blocks_direct_update
+        PASS [   1.008s] ( 669/1448) pg_trickle::e2e_guard_trigger_tests test_guard_trigger_blocks_truncate
+        PASS [   1.026s] ( 670/1448) pg_trickle::e2e_guc_variation_tests test_guc_block_source_ddl_on
+        PASS [   1.079s] ( 671/1448) pg_trickle::e2e_guc_variation_tests test_guc_cleanup_use_truncate_off
+        PASS [   1.082s] ( 672/1448) pg_trickle::e2e_guc_variation_tests test_guc_combined_non_default
+        PASS [   1.174s] ( 673/1448) pg_trickle::e2e_guc_variation_tests test_guc_differential_max_change_ratio_zero
+        PASS [   1.117s] ( 674/1448) pg_trickle::e2e_guc_variation_tests test_guc_foreign_table_polling_full_mode_no_guc_needed
+        PASS [   1.109s] ( 675/1448) pg_trickle::e2e_guc_variation_tests test_guc_foreign_table_polling_off_rejects_differential
+        PASS [   1.011s] ( 676/1448) pg_trickle::e2e_guc_variation_tests test_guc_max_grouping_set_branches_allows_within_limit
+        PASS [   1.077s] ( 677/1448) pg_trickle::e2e_guc_variation_tests test_guc_max_grouping_set_branches_raised_allows_large_cube
+        PASS [   1.257s] ( 678/1448) pg_trickle::e2e_guc_variation_tests test_guc_max_grouping_set_branches_rejects_over_limit
+        PASS [   2.209s] ( 679/1448) pg_trickle::e2e_guc_variation_tests test_guc_foreign_table_polling_on_allows_differential
+        PASS [   0.021s] ( 680/1448) pg_trickle::e2e_having_transition_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 681/1448) pg_trickle::e2e_having_transition_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 682/1448) pg_trickle::e2e_having_transition_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.982s] ( 683/1448) pg_trickle::e2e_guc_variation_tests test_guc_merge_planner_hints_off
+        PASS [   0.961s] ( 684/1448) pg_trickle::e2e_guc_variation_tests test_guc_merge_work_mem_mb_custom
+        PASS [   0.774s] ( 685/1448) pg_trickle::e2e_guc_variation_tests test_guc_prepared_statements_off
+        PASS [   1.016s] ( 686/1448) pg_trickle::e2e_having_transition_tests test_having_count_threshold
+        PASS [   1.055s] ( 687/1448) pg_trickle::e2e_having_transition_tests test_having_group_complete_elimination
+        PASS [   1.004s] ( 688/1448) pg_trickle::e2e_having_transition_tests test_having_group_crosses_threshold_down
+        PASS [   1.042s] ( 689/1448) pg_trickle::e2e_having_transition_tests test_having_group_crosses_threshold_up
+        PASS [   0.025s] ( 690/1448) pg_trickle::e2e_immediate_concurrency_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.017s] ( 691/1448) pg_trickle::e2e_immediate_concurrency_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 692/1448) pg_trickle::e2e_immediate_concurrency_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.963s] ( 693/1448) pg_trickle::e2e_having_transition_tests test_having_multiple_conditions
+        PASS [   0.959s] ( 694/1448) pg_trickle::e2e_having_transition_tests test_having_row_group_migration
+        PASS [   1.007s] ( 695/1448) pg_trickle::e2e_having_transition_tests test_having_threshold_oscillation
+        PASS [   1.101s] ( 696/1448) pg_trickle::e2e_immediate_concurrency_tests test_immediate_concurrent_deletes
+        PASS [   1.155s] ( 697/1448) pg_trickle::e2e_immediate_concurrency_tests test_immediate_concurrent_inserts
+        PASS [   0.025s] ( 698/1448) pg_trickle::e2e_ivm_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 699/1448) pg_trickle::e2e_ivm_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 700/1448) pg_trickle::e2e_ivm_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.364s] ( 701/1448) pg_trickle::e2e_immediate_concurrency_tests test_immediate_concurrent_mixed_dml_stress
+        PASS [   1.229s] ( 702/1448) pg_trickle::e2e_immediate_concurrency_tests test_immediate_concurrent_updates_distinct
+        PASS [   0.645s] ( 703/1448) pg_trickle::e2e_ivm_tests test_ivm_allow_aggregate_in_immediate
+        PASS [   0.606s] ( 704/1448) pg_trickle::e2e_ivm_tests test_ivm_allow_join_in_immediate
+        PASS [   1.498s] ( 705/1448) pg_trickle::e2e_immediate_concurrency_tests test_immediate_concurrent_updates_same_row
+        PASS [   0.815s] ( 706/1448) pg_trickle::e2e_ivm_tests test_ivm_alter_differential_to_immediate
+        PASS [   0.745s] ( 707/1448) pg_trickle::e2e_ivm_tests test_ivm_alter_full_to_immediate
+        PASS [   0.844s] ( 708/1448) pg_trickle::e2e_ivm_tests test_ivm_alter_immediate_to_differential
+        PASS [   0.657s] ( 709/1448) pg_trickle::e2e_ivm_tests test_ivm_alter_immediate_to_full
+        PASS [   0.761s] ( 710/1448) pg_trickle::e2e_ivm_tests test_ivm_alter_to_immediate_allows_recursive_cte
+        PASS [   0.862s] ( 711/1448) pg_trickle::e2e_ivm_tests test_ivm_alter_to_immediate_allows_window
+        PASS [   0.721s] ( 712/1448) pg_trickle::e2e_ivm_tests test_ivm_ambiguous_suspension_survives_delta_and_alter_resume
+        PASS [   0.890s] ( 713/1448) pg_trickle::e2e_ivm_tests test_ivm_cascading_immediate_sts
+        PASS [   1.060s] ( 714/1448) pg_trickle::e2e_ivm_tests test_ivm_concurrent_inserts_immediate
+        PASS [   0.863s] ( 715/1448) pg_trickle::e2e_ivm_tests test_ivm_create_simple_select
+        PASS [   0.881s] ( 716/1448) pg_trickle::e2e_ivm_tests test_ivm_delete_propagates_immediately
+        PASS [   0.847s] ( 717/1448) pg_trickle::e2e_ivm_tests test_ivm_drop_cleans_up_triggers
+        PASS [   0.683s] ( 718/1448) pg_trickle::e2e_ivm_tests test_ivm_insert_propagates_immediately
+        PASS [   0.855s] ( 719/1448) pg_trickle::e2e_ivm_tests test_ivm_lateral_insert_with_mutable_inner_source_is_rejected
+        PASS [   0.861s] ( 720/1448) pg_trickle::e2e_ivm_tests test_ivm_lateral_join_with_mutable_inner_source_is_rejected
+        PASS [   0.910s] ( 721/1448) pg_trickle::e2e_ivm_tests test_ivm_legacy_delta_skips_suspended_table
+        PASS [   0.889s] ( 722/1448) pg_trickle::e2e_ivm_tests test_ivm_manual_refresh_does_full_refresh
+        PASS [   0.928s] ( 723/1448) pg_trickle::e2e_ivm_tests test_ivm_mixed_operations_in_sequence
+        PASS [   0.913s] ( 724/1448) pg_trickle::e2e_ivm_tests test_ivm_multi_row_insert
+        PASS [   0.841s] ( 725/1448) pg_trickle::e2e_ivm_tests test_ivm_recursive_cte_immediate_allowed
+        PASS [   0.870s] ( 726/1448) pg_trickle::e2e_ivm_tests test_ivm_scalar_subquery_create_succeeds
+        PASS [   0.895s] ( 727/1448) pg_trickle::e2e_ivm_tests test_ivm_suspended_writes_preserve_state_and_resume_rebuilds
+        PASS [   0.957s] ( 728/1448) pg_trickle::e2e_ivm_tests test_ivm_topk_immediate_within_threshold
+        PASS [   0.968s] ( 729/1448) pg_trickle::e2e_ivm_tests test_ivm_truncate_clears_and_repopulates
+        PASS [   0.959s] ( 730/1448) pg_trickle::e2e_ivm_tests test_ivm_update_propagates_immediately
+        PASS [   0.020s] ( 731/1448) pg_trickle::e2e_join_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 732/1448) pg_trickle::e2e_join_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 733/1448) pg_trickle::e2e_join_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.995s] ( 734/1448) pg_trickle::e2e_ivm_tests test_ivm_window_function_create_succeeds
+        PASS [   0.975s] ( 735/1448) pg_trickle::e2e_ivm_tests test_ivm_window_insert_propagates
+        PASS [   0.877s] ( 736/1448) pg_trickle::e2e_ivm_tests test_sec002_ivm_trigger_not_shadowed_by_public_pgtrickle
+        PASS [   1.036s] ( 737/1448) pg_trickle::e2e_join_tests test_full_join_both_side_update
+        PASS [   0.901s] ( 738/1448) pg_trickle::e2e_join_tests test_full_join_multi_row_unmatched
+        PASS [   1.120s] ( 739/1448) pg_trickle::e2e_join_tests test_inner_join_update_propagation
+        PASS [   0.785s] ( 740/1448) pg_trickle::e2e_join_tests test_join_r0_key_change_plus_multi_partner_delete
+        PASS [   1.614s] ( 741/1448) pg_trickle::e2e_join_tests test_inner_join_simultaneous_both_sides_update_large
+        PASS [   0.974s] ( 742/1448) pg_trickle::e2e_join_tests test_join_r0_key_change_plus_partner_delete
+        PASS [   0.022s] ( 743/1448) pg_trickle::e2e_keyless_duplicate_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 744/1448) pg_trickle::e2e_keyless_duplicate_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 745/1448) pg_trickle::e2e_keyless_duplicate_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.723s] ( 746/1448) pg_trickle::e2e_join_tests test_join_r0_multi_cycle_after_codelete
+        PASS [   0.988s] ( 747/1448) pg_trickle::e2e_join_tests test_left_join_right_delete_null_transition
+        PASS [   0.934s] ( 748/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_aggregate_with_duplicates
+        PASS [   1.037s] ( 749/1448) pg_trickle::e2e_join_tests test_three_table_join_middle_delete
+        PASS [   0.855s] ( 750/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_delete_all_then_reinsert
+        PASS [   0.734s] ( 751/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_delete_one_duplicate
+        PASS [   0.772s] ( 752/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_duplicate_rows_basic
+        PASS [   0.043s] ( 753/1448) pg_trickle::e2e_lateral_subquery_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.030s] ( 754/1448) pg_trickle::e2e_lateral_subquery_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 755/1448) pg_trickle::e2e_lateral_subquery_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.073s] ( 756/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_mixed_dml_stress
+        PASS [   1.183s] ( 757/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_unique_content
+        PASS [   1.160s] ( 758/1448) pg_trickle::e2e_keyless_duplicate_tests test_keyless_update_one_duplicate
+        PASS [   0.946s] ( 759/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_invalid_query_fails
+        PASS [   0.987s] ( 760/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_correlated_agg_full
+        PASS [   0.951s] ( 761/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_differential_initial
+        PASS [   1.060s] ( 762/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_differential_mixed_dml
+        PASS [   1.311s] ( 763/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_differential_outer_delete
+        PASS [   1.341s] ( 764/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_differential_outer_insert
+        PASS [   1.207s] ( 765/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_empty_result_cross_join
+        PASS [   1.173s] ( 766/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_full_mode_refresh
+        PASS [   1.045s] ( 767/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_left_join_differential
+        PASS [   0.920s] ( 768/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_left_join_full
+        PASS [   0.927s] ( 769/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_multi_row_result
+        PASS [   0.968s] ( 770/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_self_ref_inner_aggregate_change
+        PASS [   1.024s] ( 771/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_top_n_full
+        PASS [   0.032s] ( 772/1448) pg_trickle::e2e_lateral_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 773/1448) pg_trickle::e2e_lateral_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 774/1448) pg_trickle::e2e_lateral_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.203s] ( 775/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_with_group_by
+        PASS [   1.127s] ( 776/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_with_nulls
+        PASS [   1.905s] ( 777/1448) pg_trickle::e2e_lateral_subquery_tests test_lateral_subquery_self_ref_multi_cycle
+        PASS [   0.621s] ( 778/1448) pg_trickle::e2e_lateral_tests test_lateral_differential_delete
+        PASS [   0.631s] ( 779/1448) pg_trickle::e2e_lateral_tests test_lateral_differential_empty_array
+        PASS [   0.628s] ( 780/1448) pg_trickle::e2e_lateral_tests test_lateral_differential_insert
+        PASS [   0.703s] ( 781/1448) pg_trickle::e2e_lateral_tests test_lateral_differential_mixed_dml
+        PASS [   0.970s] ( 782/1448) pg_trickle::e2e_lateral_tests test_lateral_differential_update_array
+        PASS [   1.019s] ( 783/1448) pg_trickle::e2e_lateral_tests test_lateral_full_refresh_picks_up_changes
+        PASS [   1.044s] ( 784/1448) pg_trickle::e2e_lateral_tests test_lateral_group_projection_preserves_constant_on_insert
+        PASS [   1.218s] ( 785/1448) pg_trickle::e2e_lateral_tests test_lateral_immutable_table_function_uses_declared_out_columns_differential
+        PASS [   1.022s] ( 786/1448) pg_trickle::e2e_lateral_tests test_lateral_jsonb_array_elements_differential
+        PASS [   1.000s] ( 787/1448) pg_trickle::e2e_lateral_tests test_lateral_jsonb_array_elements_full_mode
+        PASS [   0.990s] ( 788/1448) pg_trickle::e2e_lateral_tests test_lateral_jsonb_each_differential
+        PASS [   0.798s] ( 789/1448) pg_trickle::e2e_lateral_tests test_lateral_jsonb_each_full_mode
+        PASS [   1.156s] ( 790/1448) pg_trickle::e2e_lateral_tests test_lateral_multiple_refreshes_converge
+        PASS [   1.135s] ( 791/1448) pg_trickle::e2e_lateral_tests test_lateral_unnest_differential
+        PASS [   1.167s] ( 792/1448) pg_trickle::e2e_lateral_tests test_lateral_unnest_full_mode
+        PASS [   0.020s] ( 793/1448) pg_trickle::e2e_lifecycle_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 794/1448) pg_trickle::e2e_lifecycle_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 795/1448) pg_trickle::e2e_lifecycle_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.178s] ( 796/1448) pg_trickle::e2e_lateral_tests test_lateral_with_aggregation_full
+        PASS [   0.898s] ( 797/1448) pg_trickle::e2e_lateral_tests test_lateral_with_where_clause_differential
+        PASS [   0.853s] ( 798/1448) pg_trickle::e2e_lateral_tests test_lateral_with_where_clause_full
+        PASS [   0.862s] ( 799/1448) pg_trickle::e2e_lifecycle_tests test_chained_stream_tables
+        PASS [   0.901s] ( 800/1448) pg_trickle::e2e_lifecycle_tests test_empty_source_table
+        PASS [   1.024s] ( 801/1448) pg_trickle::e2e_lifecycle_tests test_full_lifecycle_create_mutate_refresh_drop
+        PASS [   0.912s] ( 802/1448) pg_trickle::e2e_lifecycle_tests test_high_frequency_mutations
+        PASS [   0.835s] ( 803/1448) pg_trickle::e2e_lifecycle_tests test_multiple_st_on_same_source
+        PASS [   0.911s] ( 804/1448) pg_trickle::e2e_lifecycle_tests test_recreate_after_drop
+        PASS [   0.019s] ( 805/1448) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 806/1448) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 807/1448) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.701s] ( 808/1448) pg_trickle::e2e_lifecycle_tests test_source_with_nulls
+        PASS [   0.019s] ( 809/1448) pg_trickle::e2e_merge_template_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 810/1448) pg_trickle::e2e_merge_template_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 811/1448) pg_trickle::e2e_merge_template_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.941s] ( 812/1448) pg_trickle::e2e_lifecycle_tests test_various_data_types
+        PASS [   0.994s] ( 813/1448) pg_trickle::e2e_lifecycle_tests test_wide_table
+        PASS [   0.963s] ( 814/1448) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+        PASS [   0.980s] ( 815/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_aggregate
+        PASS [   0.933s] ( 816/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_distinct
+        PASS [   0.826s] ( 817/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_filter
+        PASS [   0.856s] ( 818/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_inner_join
+        PASS [   0.957s] ( 819/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_join_agg
+        PASS [   0.958s] ( 820/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_left_join
+        PASS [   0.022s] ( 821/1448) pg_trickle::e2e_mixed_mode_dag_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.013s] ( 822/1448) pg_trickle::e2e_mixed_mode_dag_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 823/1448) pg_trickle::e2e_mixed_mode_dag_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.919s] ( 824/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_scan
+        PASS [   0.810s] ( 825/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_topk
+        PASS [   0.853s] ( 826/1448) pg_trickle::e2e_merge_template_tests test_merge_template_explain_union_all
+        PASS [   1.010s] ( 827/1448) pg_trickle::e2e_mixed_mode_dag_tests test_mixed_3_layer_full_diff_diff
+        PASS [   1.028s] ( 828/1448) pg_trickle::e2e_mixed_mode_dag_tests test_mixed_diff_then_full_2_layer
+        PASS [   0.020s] ( 829/1448) pg_trickle::e2e_mixed_pg_objects_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 830/1448) pg_trickle::e2e_mixed_pg_objects_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 831/1448) pg_trickle::e2e_mixed_pg_objects_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.037s] ( 832/1448) pg_trickle::e2e_mixed_mode_dag_tests test_mixed_full_then_diff_2_layer
+        PASS [   0.961s] ( 833/1448) pg_trickle::e2e_mixed_mode_dag_tests test_mixed_immediate_leaf
+        PASS [   0.802s] ( 834/1448) pg_trickle::e2e_mixed_mode_dag_tests test_mixed_mode_alter_mid_pipeline
+        PASS [   0.779s] ( 835/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_aggregating_view_upstream
+        PASS [   0.747s] ( 836/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_alter_table_add_column_through_view
+        PASS [   1.044s] ( 837/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_alter_table_drop_unused_column
+        PASS [   0.922s] ( 838/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_bulk_insert_through_view
+        PASS [   0.911s] ( 839/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_complex_view_expressions_on_st
+        PASS [   1.152s] ( 840/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_diamond_with_view_branch
+        PASS [   0.843s] ( 841/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_full_chain_table_view_matview_st_st
+        PASS [   1.026s] ( 842/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_drop_upstream_view_st_errors
+        PASS [   0.858s] ( 843/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_matview_on_st_stays_stale_until_refreshed
+        PASS [   0.695s] ( 844/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_matview_on_stream_table
+        PASS [   0.777s] ( 845/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_matview_upstream_full_mode
+        PASS [   1.188s] ( 846/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_midstream_view_between_two_sts
+        PASS [   1.168s] ( 847/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_multi_schema_tables_and_views
+        PASS [   1.252s] ( 848/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_multiple_views_joined_in_st
+        PASS [   1.070s] ( 849/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_nested_views_to_st_chain
+        PASS [   0.980s] ( 850/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_parallel_sts_from_same_view
+        PASS [   1.110s] ( 851/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_partitioned_table_through_view
+        PASS [   1.037s] ( 852/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_regular_table_from_stream_table
+        PASS [   1.174s] ( 853/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_replace_upstream_view
+        PASS [   0.850s] ( 854/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_rolled_back_transaction_no_effect
+        PASS [   0.940s] ( 855/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_table_and_view_combined_upstream
+        PASS [   0.951s] ( 856/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_three_layer_full_chain_correctness
+        PASS [   0.870s] ( 857/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_transaction_atomicity_through_view
+        PASS [   1.083s] ( 858/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_truncate_propagation_through_view
+        PASS [   0.921s] ( 859/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_two_sts_same_base_view_joins_them
+        PASS [   0.881s] ( 860/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_union_all_table_view_matview_full
+        PASS [   0.865s] ( 861/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_upsert_on_conflict_do_nothing
+        PASS [   0.910s] ( 862/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_upsert_on_conflict_through_view
+        PASS [   0.914s] ( 863/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_view_joining_st_with_regular_table
+        PASS [   0.031s] ( 864/1448) pg_trickle::e2e_monitoring_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 865/1448) pg_trickle::e2e_monitoring_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 866/1448) pg_trickle::e2e_monitoring_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.016s] ( 867/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_view_joining_two_independent_sts
+        PASS [   1.067s] ( 868/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_view_on_stream_table
+        PASS [   1.010s] ( 869/1448) pg_trickle::e2e_mixed_pg_objects_tests test_mixed_view_upstream_differential_full_dml
+        PASS [   0.903s] ( 870/1448) pg_trickle::e2e_monitoring_tests test_cache_stats_shape_and_monotonicity
+        PASS [   0.905s] ( 871/1448) pg_trickle::e2e_monitoring_tests test_no_data_refresh_does_not_cause_false_stale
+        PASS [   0.847s] ( 872/1448) pg_trickle::e2e_monitoring_tests test_pg_stat_stream_tables_nodata_not_stale
+        PASS [   0.856s] ( 873/1448) pg_trickle::e2e_monitoring_tests test_pg_stat_stream_tables_stale_null_when_never_refreshed
+        PASS [   0.977s] ( 874/1448) pg_trickle::e2e_monitoring_tests test_pg_stat_stream_tables_view
+        PASS [   0.998s] ( 875/1448) pg_trickle::e2e_monitoring_tests test_pgt_status_multiple_sts
+        PASS [   0.969s] ( 876/1448) pg_trickle::e2e_monitoring_tests test_pgt_status_returns_rows
+        PASS [   1.009s] ( 877/1448) pg_trickle::e2e_monitoring_tests test_refresh_history_records
+        PASS [   0.022s] ( 878/1448) pg_trickle::e2e_multi_column_in_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.021s] ( 879/1448) pg_trickle::e2e_multi_column_in_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 880/1448) pg_trickle::e2e_multi_column_in_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.943s] ( 881/1448) pg_trickle::e2e_monitoring_tests test_stale_detection
+        PASS [   0.936s] ( 882/1448) pg_trickle::e2e_monitoring_tests test_staleness_reflects_last_refresh_at_after_refresh
+        PASS [   1.125s] ( 883/1448) pg_trickle::e2e_monitoring_tests test_stream_tables_info_view
+        PASS [   0.020s] ( 884/1448) pg_trickle::e2e_multi_cycle_dag_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 885/1448) pg_trickle::e2e_multi_cycle_dag_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 886/1448) pg_trickle::e2e_multi_cycle_dag_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.025s] ( 887/1448) pg_trickle::e2e_multi_column_in_tests test_multi_column_in_subquery_auto_rewrite
+        PASS [   1.271s] ( 888/1448) pg_trickle::e2e_multi_column_in_tests test_multi_column_rewritten_as_exists_works
+        PASS [   1.259s] ( 889/1448) pg_trickle::e2e_multi_column_in_tests test_single_column_in_subquery_differential
+        PASS [   1.388s] ( 890/1448) pg_trickle::e2e_multi_cycle_dag_tests test_mc_dag_bulk_mutation_stress
+        PASS [   1.444s] ( 891/1448) pg_trickle::e2e_multi_cycle_dag_tests test_mc_dag_diamond_multi_cycle
+        PASS [   1.227s] ( 892/1448) pg_trickle::e2e_multi_cycle_dag_tests test_mc_dag_group_elimination_revival
+        PASS [   0.023s] ( 893/1448) pg_trickle::e2e_multi_cycle_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 894/1448) pg_trickle::e2e_multi_cycle_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 895/1448) pg_trickle::e2e_multi_cycle_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.211s] ( 896/1448) pg_trickle::e2e_multi_cycle_dag_tests test_mc_dag_insert_heavy_10_cycles
+        PASS [   1.054s] ( 897/1448) pg_trickle::e2e_multi_cycle_dag_tests test_mc_dag_mixed_dml_5_cycles
+        PASS [   0.945s] ( 898/1448) pg_trickle::e2e_multi_cycle_dag_tests test_mc_dag_noop_cycle_no_drift
+        PASS [   0.863s] ( 899/1448) pg_trickle::e2e_multi_cycle_tests test_deep_join_chain_4_tables_differential
+        PASS [   0.682s] ( 900/1448) pg_trickle::e2e_multi_cycle_tests test_ec16_function_body_change_marks_reinit
+        PASS [   0.548s] ( 901/1448) pg_trickle::e2e_multi_cycle_tests test_ec16_function_change_full_refresh_recovery
+        PASS [   0.729s] ( 902/1448) pg_trickle::e2e_multi_cycle_tests test_ec16_no_functions_unaffected
+        PASS [   0.815s] ( 903/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_aggregate_differential
+        PASS [   1.009s] ( 904/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_avg_algebraic
+        PASS [   1.047s] ( 905/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_full_join_differential
+        PASS [   0.818s] ( 906/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_group_elimination_revival
+        PASS [   0.943s] ( 907/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_join_both_sides_changed
+        PASS [   0.984s] ( 908/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_join_differential
+        PASS [   0.934s] ( 909/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_join_key_update
+        PASS [   1.181s] ( 910/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_join_null_key_transitions
+        PASS [   0.922s] ( 911/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_lateral_join_differential
+        PASS [   0.951s] ( 912/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_left_join_differential
+        PASS [   0.841s] ( 913/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_prepared_statement_cache
+        PASS [   0.795s] ( 914/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_recursive_cte_differential
+        PASS [   0.026s] ( 915/1448) pg_trickle::e2e_multi_window_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 916/1448) pg_trickle::e2e_multi_window_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 917/1448) pg_trickle::e2e_multi_window_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.917s] ( 918/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_right_join_differential
+        PASS [   0.801s] ( 919/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_stddev_algebraic
+        PASS [   0.916s] ( 920/1448) pg_trickle::e2e_multi_cycle_tests test_multi_cycle_window_differential
+        PASS [   0.686s] ( 921/1448) pg_trickle::e2e_multi_window_tests test_multi_window_different_partitions_differential
+        PASS [   0.687s] ( 922/1448) pg_trickle::e2e_multi_window_tests test_multi_window_lag_lead_nulls
+        PASS [   0.759s] ( 923/1448) pg_trickle::e2e_multi_window_tests test_window_frame_range_differential
+        PASS [   0.746s] ( 924/1448) pg_trickle::e2e_multi_window_tests test_window_frame_rows_differential
+        PASS [   0.027s] ( 925/1448) pg_trickle::e2e_null_group_by_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] ( 926/1448) pg_trickle::e2e_null_group_by_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 927/1448) pg_trickle::e2e_null_group_by_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.028s] ( 928/1448) pg_trickle::e2e_multi_window_tests test_window_lag_lead_differential
+        PASS [   1.079s] ( 929/1448) pg_trickle::e2e_multi_window_tests test_window_over_aggregate_differential
+        PASS [   1.005s] ( 930/1448) pg_trickle::e2e_multi_window_tests test_window_ranking_functions_differential
+        PASS [   0.960s] ( 931/1448) pg_trickle::e2e_null_group_by_tests test_multi_column_null_group_by_delete
+        PASS [   0.802s] ( 932/1448) pg_trickle::e2e_null_group_by_tests test_null_group_by_count_only
+        PASS [   0.742s] ( 933/1448) pg_trickle::e2e_null_group_by_tests test_null_group_by_full_delete
+        PASS [   0.825s] ( 934/1448) pg_trickle::e2e_null_group_by_tests test_null_group_by_having_threshold_down
+        PASS [   0.022s] ( 935/1448) pg_trickle::e2e_ownership_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 936/1448) pg_trickle::e2e_ownership_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] ( 937/1448) pg_trickle::e2e_ownership_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.818s] ( 938/1448) pg_trickle::e2e_null_group_by_tests test_null_group_by_partial_then_full_delete
+        PASS [   0.894s] ( 939/1448) pg_trickle::e2e_null_group_by_tests test_null_group_by_reappear_after_delete
+        PASS [   1.027s] ( 940/1448) pg_trickle::e2e_null_group_by_tests test_null_group_by_update_into_null
+        PASS [   0.859s] ( 941/1448) pg_trickle::e2e_ownership_tests test_ownership_mixed_owner_cascade_drop_denied_zero_mutations
+        PASS [   0.846s] ( 942/1448) pg_trickle::e2e_ownership_tests test_ownership_nonowner_alter_denied
+        PASS [   0.960s] ( 943/1448) pg_trickle::e2e_ownership_tests test_ownership_nonowner_drop_denied
+        PASS [   0.800s] ( 944/1448) pg_trickle::e2e_ownership_tests test_ownership_nonsuperuser_create_requires_source_select
+        PASS [   0.067s] ( 945/1448) pg_trickle::e2e_partition_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] ( 946/1448) pg_trickle::e2e_partition_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 947/1448) pg_trickle::e2e_partition_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.968s] ( 948/1448) pg_trickle::e2e_ownership_tests test_ownership_nonsuperuser_create_uses_private_infrastructure
+        PASS [   1.124s] ( 949/1448) pg_trickle::e2e_ownership_tests test_ownership_nonsuperuser_lifecycle_without_private_grants
+        PASS [   0.996s] ( 950/1448) pg_trickle::e2e_ownership_tests test_ownership_superuser_override
+        PASS [   1.059s] ( 951/1448) pg_trickle::e2e_partition_tests test_alter_st_add_partition_key
+        PASS [   1.091s] ( 952/1448) pg_trickle::e2e_partition_tests test_alter_st_change_partition_key_to_list
+        PASS [   1.047s] ( 953/1448) pg_trickle::e2e_partition_tests test_alter_st_partition_by_hash
+        PASS [   0.952s] ( 954/1448) pg_trickle::e2e_partition_tests test_alter_st_partition_by_invalid_column_error
+        PASS [   0.973s] ( 955/1448) pg_trickle::e2e_partition_tests test_alter_st_remove_partition_key
+        PASS [   0.994s] ( 956/1448) pg_trickle::e2e_partition_tests test_foreign_table_full_refresh_works
+        PASS [   0.976s] ( 957/1448) pg_trickle::e2e_partition_tests test_partition_attach_triggers_reinit
+        PASS [   1.065s] ( 958/1448) pg_trickle::e2e_partition_tests test_partition_detach_triggers_reinit
+        PASS [   1.057s] ( 959/1448) pg_trickle::e2e_partition_tests test_partition_differential_with_aggregation
+        PASS [   1.014s] ( 960/1448) pg_trickle::e2e_partition_tests test_partition_hash_source
+        PASS [   0.972s] ( 961/1448) pg_trickle::e2e_partition_tests test_partition_list_source
+        PASS [   1.050s] ( 962/1448) pg_trickle::e2e_partition_tests test_partition_range_differential_refresh
+        PASS [   0.940s] ( 963/1448) pg_trickle::e2e_partition_tests test_partition_range_full_refresh
+        PASS [   0.975s] ( 964/1448) pg_trickle::e2e_partition_tests test_partition_with_aggregation
+        PASS [   0.998s] ( 965/1448) pg_trickle::e2e_partition_tests test_partitioned_st_create_and_initial_refresh
+        PASS [   0.928s] ( 966/1448) pg_trickle::e2e_partition_tests test_partitioned_st_default_partition_warning_no_crash
+        PASS [   1.050s] ( 967/1448) pg_trickle::e2e_partition_tests test_partitioned_st_differential_refresh_inserts
+        PASS [   1.109s] ( 968/1448) pg_trickle::e2e_partition_tests test_partitioned_st_differential_refresh_updates_and_deletes
+        PASS [   1.169s] ( 969/1448) pg_trickle::e2e_partition_tests test_partitioned_st_empty_delta_skips_merge
+        PASS [   1.188s] ( 970/1448) pg_trickle::e2e_partition_tests test_partitioned_st_explicit_partitions_no_warning
+        PASS [   1.104s] ( 971/1448) pg_trickle::e2e_partition_tests test_partitioned_st_hash_create_and_refresh
+        PASS [   1.033s] ( 972/1448) pg_trickle::e2e_partition_tests test_partitioned_st_hash_custom_modulus
+        PASS [   0.957s] ( 973/1448) pg_trickle::e2e_partition_tests test_partitioned_st_hash_differential_refresh
+        PASS [   0.837s] ( 974/1448) pg_trickle::e2e_partition_tests test_partitioned_st_hash_multi_column_rejected
+        PASS [   1.057s] ( 975/1448) pg_trickle::e2e_partition_tests test_partitioned_st_hash_updates_and_deletes
+        PASS [   1.030s] ( 976/1448) pg_trickle::e2e_partition_tests test_partitioned_st_list_create_and_refresh
+        PASS [   1.038s] ( 977/1448) pg_trickle::e2e_partition_tests test_partitioned_st_list_differential_refresh
+        PASS [   1.071s] ( 978/1448) pg_trickle::e2e_partition_tests test_partitioned_st_list_multi_column_rejected
+        PASS [   0.910s] ( 979/1448) pg_trickle::e2e_partition_tests test_partitioned_st_list_with_explicit_partitions
+        PASS [   0.930s] ( 980/1448) pg_trickle::e2e_partition_tests test_partitioned_st_multi_column_create_and_refresh
+        PASS [   1.060s] ( 981/1448) pg_trickle::e2e_partition_tests test_partitioned_st_multi_column_differential_refresh
+        PASS [   0.022s] ( 982/1448) pg_trickle::e2e_pg_dump_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 983/1448) pg_trickle::e2e_pg_dump_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.011s] ( 984/1448) pg_trickle::e2e_pg_dump_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.954s] ( 985/1448) pg_trickle::e2e_partition_tests test_partitioned_st_multi_column_invalid_column_error
+        PASS [   0.025s] ( 986/1448) pg_trickle::e2e_phase4_ergonomics_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.014s] ( 987/1448) pg_trickle::e2e_phase4_ergonomics_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] ( 988/1448) pg_trickle::e2e_phase4_ergonomics_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.896s] ( 989/1448) pg_trickle::e2e_partition_tests test_partitioned_st_validate_partition_key_error
+        PASS [   1.141s] ( 990/1448) pg_trickle::e2e_partition_tests test_partitioned_st_partition_key_in_explain_plan
+        PASS [   0.899s] ( 991/1448) pg_trickle::e2e_phase4_ergonomics_tests test_create_if_not_exists_creates_when_missing
+        PASS [   0.816s] ( 992/1448) pg_trickle::e2e_phase4_ergonomics_tests test_create_if_not_exists_ignores_query_difference
+        PASS [   0.990s] ( 993/1448) pg_trickle::e2e_phase4_ergonomics_tests test_create_if_not_exists_noop_when_exists
+        PASS [   0.756s] ( 994/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t1_alter_to_calculated_schedule
+        PASS [   0.684s] ( 995/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t1_calculated_schedule_accepted
+        PASS [   0.720s] ( 996/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t1_default_schedule_is_calculated
+        PASS [   2.223s] ( 997/1448) pg_trickle::e2e_pg_dump_tests test_pg_dump_restore_recreates_oid_shifted_dag
+        PASS [   0.728s] ( 998/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t1_explicit_fixed_schedule_works
+        PASS [   0.772s] ( 999/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t1_null_schedule_rejected
+        PASS [   0.720s] (1000/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t2_diamond_consistency_guc_removed
+        PASS [   0.925s] (1001/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t2_diamond_schedule_policy_guc_removed
+        PASS [   1.034s] (1002/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t3_alter_query_emits_warning
+        PASS [   0.938s] (1003/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t3_alter_refresh_mode_emits_warning
+        PASS [   0.979s] (1004/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t3_alter_same_mode_no_warning
+        PASS [   1.066s] (1005/1448) pg_trickle::e2e_phase4_ergonomics_tests test_erg_t4_no_wal_warning_when_wal_level_logical
+        PASS [   0.868s] (1006/1448) pg_trickle::e2e_phase4_ergonomics_tests test_manual_differential_refresh_records_history
+        PASS [   0.880s] (1007/1448) pg_trickle::e2e_phase4_ergonomics_tests test_manual_refresh_records_completed_status
+        PASS [   0.874s] (1008/1448) pg_trickle::e2e_phase4_ergonomics_tests test_manual_refresh_records_initiated_by_manual
+        PASS [   0.021s] (1009/1448) pg_trickle::e2e_pipeline_dag_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.015s] (1010/1448) pg_trickle::e2e_pipeline_dag_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.013s] (1011/1448) pg_trickle::e2e_pipeline_dag_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.736s] (1012/1448) pg_trickle::e2e_phase4_ergonomics_tests test_quick_health_empty_status
+        PASS [   0.850s] (1013/1448) pg_trickle::e2e_phase4_ergonomics_tests test_quick_health_ok_status
+        PASS [   0.951s] (1014/1448) pg_trickle::e2e_phase4_ergonomics_tests test_quick_health_returns_one_row
+        PASS [   1.096s] (1015/1448) pg_trickle::e2e_pipeline_dag_tests test_ec_pipeline_initial_population
+        PASS [   1.347s] (1016/1448) pg_trickle::e2e_pipeline_dag_tests test_ec_pipeline_insert_order_cascades_all_layers
+        PASS [   1.455s] (1017/1448) pg_trickle::e2e_pipeline_dag_tests test_ec_pipeline_new_product_without_orders_no_revenue_change
+        PASS [   1.326s] (1018/1448) pg_trickle::e2e_pipeline_dag_tests test_ec_pipeline_rename_category_cascades
+        PASS [   1.025s] (1019/1448) pg_trickle::e2e_pipeline_dag_tests test_nx_pipeline_delete_bidder_cascades
+        PASS [   0.790s] (1020/1448) pg_trickle::e2e_pipeline_dag_tests test_nx_pipeline_initial_population
+        PASS [   0.768s] (1021/1448) pg_trickle::e2e_pipeline_dag_tests test_nx_pipeline_insert_new_auction_then_bid
+        PASS [   0.793s] (1022/1448) pg_trickle::e2e_pipeline_dag_tests test_nx_pipeline_insert_new_bid_cascades
+        PASS [   0.978s] (1023/1448) pg_trickle::e2e_pipeline_dag_tests test_nx_pipeline_update_auction_category_cascades
+        PASS [   1.110s] (1024/1448) pg_trickle::e2e_pipeline_dag_tests test_tl_pipeline_delete_all_device_readings
+        PASS [   0.884s] (1025/1448) pg_trickle::e2e_pipeline_dag_tests test_tl_pipeline_initial_population
+        PASS [   0.028s] (1026/1448) pg_trickle::e2e_property_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.027s] (1027/1448) pg_trickle::e2e_property_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.012s] (1028/1448) pg_trickle::e2e_property_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   1.059s] (1029/1448) pg_trickle::e2e_pipeline_dag_tests test_tl_pipeline_insert_readings_cascades
+        PASS [   1.024s] (1030/1448) pg_trickle::e2e_pipeline_dag_tests test_tl_pipeline_new_sensor_lifecycle
+        PASS [   0.873s] (1031/1448) pg_trickle::e2e_pipeline_dag_tests test_tl_pipeline_update_device_location_cascades
+        PASS [   0.980s] (1032/1448) pg_trickle::e2e_property_tests test_property_aggregate_differential
+        PASS [   0.988s] (1033/1448) pg_trickle::e2e_property_tests test_property_composite_pk_differential
+        PASS [   1.008s] (1034/1448) pg_trickle::e2e_property_tests test_property_cte_differential
+        PASS [   1.121s] (1035/1448) pg_trickle::e2e_property_tests test_property_cte_nonrecursive_differential
+        PASS [   1.080s] (1036/1448) pg_trickle::e2e_property_tests test_property_distinct_differential
+        PASS [   1.118s] (1037/1448) pg_trickle::e2e_property_tests test_property_except_differential
+        PASS [   1.055s] (1038/1448) pg_trickle::e2e_property_tests test_property_filter_aggregate_differential
+        PASS [   1.098s] (1039/1448) pg_trickle::e2e_property_tests test_property_filter_differential
+        PASS [   1.390s] (1040/1448) pg_trickle::e2e_property_tests test_property_full_mode
+        PASS [   1.098s] (1041/1448) pg_trickle::e2e_property_tests test_property_having_differential
+        PASS [   1.171s] (1042/1448) pg_trickle::e2e_property_tests test_property_intersect_differential
+        PASS [   1.206s] (1043/1448) pg_trickle::e2e_property_tests test_property_join_aggregate_differential
+        PASS [   0.956s] (1044/1448) pg_trickle::e2e_property_tests test_property_join_differential
+        PASS [   1.056s] (1045/1448) pg_trickle::e2e_property_tests test_property_lateral_join_differential
+        PASS [   1.150s] (1046/1448) pg_trickle::e2e_property_tests test_property_left_join_differential
+        PASS [   1.077s] (1047/1448) pg_trickle::e2e_property_tests test_property_recursive_cte_full
+  Cancelling due to interrupt: 4 tests still running
+   TRY 1 INT [   0.443s] (─────────) pg_trickle::e2e_property_tests test_property_union_all_differential
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 2: SIGINT)
+
+   TRY 1 INT [   0.191s] (─────────) pg_trickle::e2e_property_tests test_property_window_function_full
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 2: SIGINT)
+
+   TRY 1 INT [   0.827s] (─────────) pg_trickle::e2e_property_tests test_property_three_table_join_differential
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 2: SIGINT)
+
+   TRY 1 INT [   0.985s] (─────────) pg_trickle::e2e_property_tests test_property_scan_differential
+  stdout ───
+
+    running 1 test
+
+    (test aborted with signal 2: SIGINT)
+
+────────────
+     Summary [ 211.950s] 1047/1448 tests run: 1047 passed, 18 skipped
+warning: 401/1448 tests were not run due to interrupt
+error: test run failed
+Cleaning up light-E2E containers for run light-e2e-28480-1790471275
+error: recipe `test-light-e2e` failed on line 265 with exit code 100

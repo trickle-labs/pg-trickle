@@ -1,0 +1,45 @@
+error[E0308]: mismatched types
+  --> verification/lsn.rs:83:43
+   |
+83 |     ensures 0 <= hex_value(bytes) < pow16(bytes.len())
+   |                                     ----- ^^^^^^^^^^^ expected `int`, found `nat`
+   |                                     |
+   |                                     arguments to this function are incorrect
+   |
+note: function defined here
+  --> verification/lsn.rs:61:18
+   |
+61 | pub open spec fn pow16(length: int) -> int
+   |                  ^^^^^ -----------
+
+error[E0308]: mismatched types
+  --> verification/lsn.rs:92:22
+   |
+92 |         assert(pow16(bytes.len()) == 16 * pow16(prefix.len()));
+   |                ----- ^^^^^^^^^^^ expected `int`, found `nat`
+   |                |
+   |                arguments to this function are incorrect
+   |
+note: function defined here
+  --> verification/lsn.rs:61:18
+   |
+61 | pub open spec fn pow16(length: int) -> int
+   |                  ^^^^^ -----------
+
+error[E0308]: mismatched types
+  --> verification/lsn.rs:92:49
+   |
+92 |         assert(pow16(bytes.len()) == 16 * pow16(prefix.len()));
+   |                                           ----- ^^^^^^^^^^^^ expected `int`, found `nat`
+   |                                           |
+   |                                           arguments to this function are incorrect
+   |
+note: function defined here
+  --> verification/lsn.rs:61:18
+   |
+61 | pub open spec fn pow16(length: int) -> int
+   |                  ^^^^^ -----------
+
+error: aborting due to 3 previous errors
+
+For more information about this error, try `rustc --explain E0308`.

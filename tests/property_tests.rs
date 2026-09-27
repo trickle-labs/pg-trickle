@@ -37,6 +37,14 @@ fn arb_lsn() -> impl Strategy<Value = String> {
     (0u32..=0xFF, 0u32..=0xFFFF_FFFF).prop_map(|(hi, lo)| format!("{:X}/{:X}", hi, lo))
 }
 
+fn test_lsn_gt(a: &str, b: &str) -> bool {
+    lsn_gt(a, b).expect("generated LSNs are valid")
+}
+
+fn test_lsn_gte(a: &str, b: &str) -> bool {
+    lsn_gte(a, b).expect("generated LSNs are valid")
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
@@ -45,31 +53,31 @@ proptest! {
     #[test]
     fn prop_lsn_reflexive(lsn in arb_lsn()) {
         // a >= a  (reflexive)
-        prop_assert!(lsn_gte(&lsn, &lsn));
+        prop_assert!(test_lsn_gte(&lsn, &lsn));
         // a > a is false (irreflexive for strict)
-        prop_assert!(!lsn_gt(&lsn, &lsn));
+        prop_assert!(!test_lsn_gt(&lsn, &lsn));
     }
 
     #[test]
     fn prop_lsn_antisymmetric(a in arb_lsn(), b in arb_lsn()) {
         // If a > b then NOT b > a
-        if lsn_gt(&a, &b) {
-            prop_assert!(!lsn_gt(&b, &a));
+        if test_lsn_gt(&a, &b) {
+            prop_assert!(!test_lsn_gt(&b, &a));
         }
     }
 
     #[test]
     fn prop_lsn_gte_consistent(a in arb_lsn(), b in arb_lsn()) {
         // lsn_gte(a, b) iff (a == b || lsn_gt(a, b))
-        let expected = a == b || lsn_gt(&a, &b);
-        prop_assert_eq!(lsn_gte(&a, &b), expected);
+        let expected = a == b || test_lsn_gt(&a, &b);
+        prop_assert_eq!(test_lsn_gte(&a, &b), expected);
     }
 
     #[test]
     fn prop_lsn_trichotomy(a in arb_lsn(), b in arb_lsn()) {
         // Exactly one of: a > b, a == b (as LSN), b > a
-        let gt = lsn_gt(&a, &b);
-        let lt = lsn_gt(&b, &a);
+        let gt = test_lsn_gt(&a, &b);
+        let lt = test_lsn_gt(&b, &a);
         let eq = !gt && !lt;
         // At most one is true for gt/lt (already tested).
         // eq is the "neither" case.
@@ -592,13 +600,13 @@ proptest! {
     #[test]
     fn prop_frontier_merge_monotonic(f1 in arb_frontier(), f2 in arb_frontier()) {
         let mut f_merged = f1.clone();
-        f_merged.merge_from(&f2);
+        f_merged.merge_from(&f2).expect("generated frontiers are valid");
 
         for oid in f1.source_oids() {
-            prop_assert!(lsn_gte(&f_merged.get_lsn(oid), &f1.get_lsn(oid)));
+            prop_assert!(test_lsn_gte(&f_merged.get_lsn(oid), &f1.get_lsn(oid)));
         }
         for oid in f2.source_oids() {
-            prop_assert!(lsn_gte(&f_merged.get_lsn(oid), &f2.get_lsn(oid)));
+            prop_assert!(test_lsn_gte(&f_merged.get_lsn(oid), &f2.get_lsn(oid)));
         }
     }
 

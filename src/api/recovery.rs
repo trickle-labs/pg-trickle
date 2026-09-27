@@ -705,11 +705,17 @@ fn validate_recovery_impl() -> Result<serde_json::Value, PgTrickleError> {
                     "frontier for pgt_id={pgt_id} is invalid: {e}"
                 ))
             })?;
-            if frontier
-                .sources
-                .values()
-                .any(|source| crate::version::lsn_gt(&source.lsn, &current_lsn))
-            {
+            let mut ahead = false;
+            for source in frontier.sources.values() {
+                let is_ahead = crate::version::lsn_gt(&source.lsn, &current_lsn).map_err(|e| {
+                    PgTrickleError::InvalidArgument(format!(
+                        "frontier for pgt_id={pgt_id} has invalid LSN '{}': {e}",
+                        source.lsn
+                    ))
+                })?;
+                ahead |= is_ahead;
+            }
+            if ahead {
                 ids.push(pgt_id);
             }
         }

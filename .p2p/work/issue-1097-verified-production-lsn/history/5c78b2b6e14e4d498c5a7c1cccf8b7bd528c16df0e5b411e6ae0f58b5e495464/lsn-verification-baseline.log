@@ -1,0 +1,14 @@
+error: unknown prover name for assert-by (supported provers: 'compute_only', 'compute', 'bit_vector', and 'nonlinear_arith')
+   --> verification/lsn.rs:183:9
+    |
+183 |         assert(
+    |         ^^^^^^
+
+error: unknown prover name for assert-by (supported provers: 'compute_only', 'compute', 'bit_vector', and 'nonlinear_arith')
+   --> verification/lsn.rs:417:17
+    |
+417 |                 assert(
+    |                 ^^^^^^
+
+error: aborting due to 2 previous errors
+

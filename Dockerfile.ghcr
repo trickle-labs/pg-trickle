@@ -95,6 +95,7 @@ FROM build-deps AS builder
 # Overwrite stubs with real source code.  Cargo.toml/Cargo.lock are already
 # present from build-deps and unchanged, so that layer stays cached.
 COPY src/ src/
+COPY verification/ verification/
 COPY pg_trickle.control ./
 
 # Compile the extension.

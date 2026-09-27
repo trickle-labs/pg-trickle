@@ -1,0 +1,23 @@
+{
+  "schema": "pg-trickle-lsn-candidate-binding-v1",
+  "candidate_commit": "snapshot:sha256:f109574ba21ceb6a02739c9feaf03242ed4a3c98afdfb62e259de74e45e27191",
+  "workflow": "local",
+  "workflow_run_id": "local",
+  "source": "verification/lsn.rs",
+  "source_sha256": "3295bf53ed0adb1fdc6d003f797a7e17f85cf24002bf3ea1ff8f10451daec849",
+  "proof_record_schema": "pg-trickle-lsn-verification-v1",
+  "verus_image": "ghcr.io/verus-lang/verus:0.2025.06.23.2e59154@sha256:c4d0471379b23c3c6f52e3d7226c7dad28f488c4288e14c623002bd279a745e0",
+  "compiler_identity": "Verus\n  Version: 0.2025.06.23.2e59154\n  Profile: release\n  Platform: linux_x86_64\n  Toolchain: 1.86.0-x86_64-unknown-linux-gnu",
+  "solver_identity": "Z3 version 4.12.5 - 64 bit",
+  "candidate_package_library_sha256": "89f87d9407010b86c786fe3ec45b3884f7ca43f098c6a15824debd2cbf88a277",
+  "installed_observations": [
+    {
+      "container_id": "d6d89320109d56a1170a694fb119d3ebba5593d6b30d126026978aee35578743",
+      "candidate_sha256": "89f87d9407010b86c786fe3ec45b3884f7ca43f098c6a15824debd2cbf88a277",
+      "installed_sha256": "89f87d9407010b86c786fe3ec45b3884f7ca43f098c6a15824debd2cbf88a277"
+    }
+  ],
+  "runtime_cases": [
+    "e2e_lsn_contract_tests::test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers"
+  ]
+}

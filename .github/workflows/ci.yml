@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'verification/**'
       - 'sql/**'
       - 'scripts/**'
       - 'Cargo.toml'
@@ -35,6 +36,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'verification/**'
       - 'sql/**'
       - 'scripts/**'
       - 'Cargo.toml'
@@ -72,7 +74,31 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Validate release evidence and rejection controls
-        run: python3 scripts/v0_108_0_release_gate.py
+        run: |
+          python3 scripts/v0_108_0_release_gate.py
+          python3 scripts/check_lsn_verification.py --contract-only
+          python3 -m unittest scripts/test_lsn_candidate_binding.py
+
+  lsn-verification:
+    name: Checked LSN proof and semantic mutation control
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pull pinned Verus image
+        run: docker pull ghcr.io/verus-lang/verus:0.2025.06.23.2e59154@sha256:c4d0471379b23c3c6f52e3d7226c7dad28f488c4288e14c623002bd279a745e0
+
+      - name: Run pinned Verus baseline and mutation control
+        run: python3 scripts/check_lsn_verification.py
+
+      - name: Upload exact LSN verification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: lsn-verification-evidence
+          path: .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-verification*
+          retention-days: 30
+          if-no-files-found: error
 
   # ── Unit tests (Linux PR gate) ──────────────────────────────────────────
   unit-tests:
@@ -323,6 +349,7 @@ jobs:
   # every shard, so compiling it in each runner only adds CI cost.
   light-e2e-package:
     name: Package light E2E extension
+    needs: [lsn-verification]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -435,6 +462,77 @@ jobs:
           bash ./scripts/run_light_e2e_tests.sh \
             --shard-index ${{ matrix.shard_index }} \
             --shard-count ${{ matrix.shard_count }}
+
+  lsn-candidate-runtime:
+    name: Checked LSN runtime against verified candidate package
+    needs: [light-e2e-package, lsn-verification]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PGT_RELEASE_ATTESTATION_PATH: target/lsn-install-attestation.json
+      PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
+      PGT_RELEASE_BUILD_KIND: ci-package
+      PGT_RELEASE_FEATURE_SCOPE: pg18
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Download extension package
+        uses: actions/download-artifact@v8
+        with:
+          name: light-e2e-package
+          path: target/release
+
+      - name: Download proof record
+        uses: actions/download-artifact@v8
+        with:
+          name: lsn-verification-evidence
+          path: .p2p/work/issue-1097-verified-production-lsn/evidence
+
+      - name: Pull postgres:18.6 image
+        run: docker pull postgres:18.6
+
+      - name: Run packaged light LSN E2E
+        run: |
+          bash ./scripts/run_light_e2e_tests.sh --test e2e_lsn_contract_tests
+
+      - name: Build full E2E image from the candidate package
+        run: |
+          mkdir -p _e2e_pkg/ext _e2e_pkg/lib
+          cp -r target/release/pg_trickle-pg18/usr/share/postgresql/18/extension/. _e2e_pkg/ext/
+          cp -r target/release/pg_trickle-pg18/usr/lib/postgresql/18/lib/. _e2e_pkg/lib/
+          docker build -f tests/Dockerfile.e2e-base-lite -t pg_trickle_e2e:latest .
+
+      - name: Run packaged full LSN E2E and bind installed library
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+          PGT_RELEASE_ATTESTATION_PATH: target/lsn-full-install-attestation.json
+        run: |
+          ./scripts/run_e2e_tests.sh --test e2e_lsn_contract_tests --no-capture
+          python3 scripts/check_lsn_candidate_binding.py \
+            --proof-record .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-verification.json \
+            --package-dir target/release/pg_trickle-pg18 \
+            --installation target/lsn-full-install-attestation.json \
+            --candidate-commit "$GITHUB_SHA" \
+            --runtime-case e2e_lsn_contract_tests::test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers \
+            --runtime-case e2e_lsn_contract_tests::test_lsn_scheduler_preserves_malformed_frontier_and_recovers \
+            --runtime-case e2e_lsn_contract_tests::test_lsn_scheduler_cdc_holdback_recovers_after_long_writer \
+            --runtime-case e2e_lsn_contract_tests::test_lsn_wal_transition_rejects_malformed_and_preserves_results \
+            --output .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
+
+      - name: Upload candidate binding evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lsn-candidate-binding-evidence
+          path: |
+            target/lsn-install-attestation.json
+            target/lsn-full-install-attestation.json
+            .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
+          retention-days: 30
+          if-no-files-found: warn
 
   # ── A46-14: Full-image PR smoke test ────────────────────────────────────
   # Runs on ordinary PRs and push-to-main. Sensitive PRs use the larger gate

@@ -1,0 +1,17 @@
+Running light-E2E shard 1/1 with 1 test targets
+  e2e_lsn_contract_tests
+Light-E2E run id: light-e2e-58220-1790472671
+Creating shared light-E2E PostgreSQL container...
+PGT_ACTUAL_POSTGRESQL_VERSION=18.6 (Debian 18.6-1.pgdg13+2)
+Shared container e1d5fc1c1c12 ready on port 52212
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+────────────
+ Nextest run ID fcc7ee56-3d40-45ec-a726-c7bd15adc6c1 with nextest profile: default
+    Starting 4 tests across 1 binary
+        PASS [   0.015s] (1/4) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+        PASS [   0.016s] (2/4) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+        PASS [   0.017s] (3/4) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+        PASS [   0.570s] (4/4) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+────────────
+     Summary [   0.572s] 4 tests run: 4 passed, 0 skipped
+Cleaning up light-E2E containers for run light-e2e-58220-1790472671

@@ -1,0 +1,48 @@
+Running unit tests with cargo test (with libpg_stub.dylib)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (target/debug/deps/pg_trickle-740fd75754b0a79f)
+
+running 40 tests
+test cdc::tests::test_build_st_compact_sql_uses_lsn_range ... ok
+test cdc::tests::test_parse_realistic_lsn_bounds ... ok
+test config::tests::test_normalize_frontier_holdback_mode_lsn_bytes ... ok
+test dvm::diff::tests::test_get_lsn_placeholder_vs_literal ... ok
+test dvm::operators::scan::tests::test_diff_scan_lsn_filter ... ok
+test dvm::operators::scan::tests::test_diff_scan_transition_no_lsn_filter ... ok
+test lsn::tests::test_lsn_checked_parse_rejects_malformed_and_overflow ... ok
+test lsn::tests::test_lsn_parse_format_round_trip ... ok
+test lsn::tests::test_lsn_parse_format_round_trip_all_positions ... ok
+test refresh::codegen::tests::test_parameterize_lsn_template_multiple_sources ... ok
+test refresh::codegen::tests::test_parameterize_lsn_template_no_sources ... ok
+test refresh::codegen::tests::test_parameterize_lsn_template_single_source ... ok
+test refresh::unit_tests::test_build_bypass_capture_sql_lsn_override ... ok
+test refresh::unit_tests::test_build_bypass_capture_sql_no_lsn_override ... ok
+test refresh::unit_tests::test_build_execute_params_missing_lsn_uses_zero ... ok
+test refresh::unit_tests::test_resolve_lsn_b3_1_partial_zero_change ... ok
+test refresh::unit_tests::test_resolve_lsn_b3_1_zero_change_pruning ... ok
+test refresh::unit_tests::test_resolve_lsn_missing_oid_defaults ... ok
+test refresh::unit_tests::test_resolve_lsn_multiple_oids ... ok
+test refresh::unit_tests::test_resolve_lsn_no_placeholders ... ok
+test refresh::unit_tests::test_resolve_lsn_placeholders_empty_template ... ok
+test refresh::unit_tests::test_resolve_lsn_placeholders_missing_source_defaults_to_0_0 ... ok
+test refresh::unit_tests::test_resolve_lsn_placeholders_multi_source ... ok
+test refresh::unit_tests::test_resolve_lsn_placeholders_no_sources ... ok
+test refresh::unit_tests::test_resolve_lsn_placeholders_single_source ... ok
+test refresh::unit_tests::test_resolve_lsn_preserves_other_text ... ok
+test refresh::unit_tests::test_resolve_lsn_single_oid ... ok
+test refresh::unit_tests::test_safe_cleanup_lsn_all_zero ... ok
+test refresh::unit_tests::test_safe_cleanup_lsn_empty ... ok
+test refresh::unit_tests::test_safe_cleanup_lsn_multi_consumer_min ... ok
+test refresh::unit_tests::test_safe_cleanup_lsn_single_consumer ... ok
+test refresh::unit_tests::test_safe_cleanup_lsn_skips_zero ... ok
+test version::tests::test_frontier_get_lsn ... ok
+test version::tests::test_frontier_merge_invalid_lsn_leaves_frontier_unchanged ... ok
+test version::tests::test_frontier_persisted_unpadded_lsn_compatibility ... ok
+test version::tests::test_lsn_comparison ... ok
+test version::tests::test_lsn_to_u64_known_values ... ok
+test version::tests::test_lsn_to_u64_round_trip ... ok
+test version::tests::test_u64_to_lsn_format ... ok
+test wal_decoder::tests::test_v103_lsn_position_orders_receipt_high_watermarks ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 2550 filtered out; finished in 0.01s
+

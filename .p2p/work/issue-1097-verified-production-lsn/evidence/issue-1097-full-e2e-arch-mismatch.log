@@ -1,0 +1,87 @@
+Full E2E run id: full-e2e-82502-1790500153
+   Compiling pg_trickle v0.108.0 (/private/tmp/pg-trickle-issue-1097-candidate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.80s
+────────────
+ Nextest run ID c1c15daf-e26b-4c5f-88b9-ea23c2d5d3c5 with nextest profile: default
+    Starting 7 tests across 1 binary
+       START [         ] (1/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+
+running 1 test
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+        PASS [   0.018s] (1/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+       START [         ] (2/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+
+running 1 test
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+        PASS [   0.012s] (2/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+       START [         ] (3/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+
+running 1 test
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+        PASS [   0.012s] (3/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+       START [         ] (4/7) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+running 1 test
+
+thread 'test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers' (109253642) panicked at tests/e2e/mod.rs:471:58:
+Failed to start shared pg_trickle E2E container. Did you run ./tests/build_e2e_image.sh first?: WaitContainer(WaitLog(EndOfStream([b"2026-09-27 09:09:27.768 UTC [46] FATAL:  could not load library \"/usr/lib/postgresql/18/lib/pg_trickle.so\": /usr/lib/postgresql/18/lib/pg_trickle.so: cannot open shared object file: No such file or directory\n", b"child process exited with exit code 1\n", b"initdb: removing contents of data directory \"/var/lib/postgresql/18/docker\"\n"])))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers ... FAILED
+
+failures:
+
+failures:
+    test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.66s
+
+  TRY 1 FAIL [   1.674s] (───) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+ TRY 2 START [         ] (───) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+running 1 test
+
+thread 'test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers' (109254942) panicked at tests/e2e/mod.rs:471:58:
+Failed to start shared pg_trickle E2E container. Did you run ./tests/build_e2e_image.sh first?: WaitContainer(WaitLog(EndOfStream([b"2026-09-27 09:09:29.184 UTC [46] FATAL:  could not load library \"/usr/lib/postgresql/18/lib/pg_trickle.so\": /usr/lib/postgresql/18/lib/pg_trickle.so: cannot open shared object file: No such file or directory\n", b"child process exited with exit code 1\n", b"initdb: removing contents of data directory \"/var/lib/postgresql/18/docker\"\n"])))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers ... FAILED
+
+failures:
+
+failures:
+    test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.37s
+
+  TRY 2 FAIL [   1.403s] (───) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+ TRY 3 START [         ] (───) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+running 1 test
+
+thread 'test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers' (109256020) panicked at tests/e2e/mod.rs:471:58:
+Failed to start shared pg_trickle E2E container. Did you run ./tests/build_e2e_image.sh first?: WaitContainer(WaitLog(EndOfStream([b"2026-09-27 09:09:30.575 UTC [47] FATAL:  could not load library \"/usr/lib/postgresql/18/lib/pg_trickle.so\": /usr/lib/postgresql/18/lib/pg_trickle.so: cannot open shared object file: No such file or directory\n", b"child process exited with exit code 1\n", b"initdb: removing contents of data directory \"/var/lib/postgresql/18/docker\"\n"])))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers ... FAILED
+
+failures:
+
+failures:
+    test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.36s
+
+  TRY 3 FAIL [   1.384s] (4/7) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+  Cancelling due to test failure: 
+────────────
+     Summary [   4.507s] 4/7 tests run: 3 passed, 1 failed, 0 skipped
+  TRY 3 FAIL [   1.384s] (4/7) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+warning: 3/7 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

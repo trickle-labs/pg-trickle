@@ -1,0 +1,63 @@
+Full E2E run id: full-e2e-4612-1790500681
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+────────────
+ Nextest run ID c75b7399-0b75-4b90-b788-92c02acb71ee with nextest profile: default
+    Starting 7 tests across 1 binary
+       START [         ] (1/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+
+running 1 test
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+        PASS [   0.016s] (1/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason
+       START [         ] (2/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+
+running 1 test
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+        PASS [   0.015s] (2/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations
+       START [         ] (3/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+
+running 1 test
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+        PASS [   0.014s] (3/7) pg_trickle::e2e_lsn_contract_tests e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default
+       START [         ] (4/7) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+
+running 1 test
+test test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 15.88s
+
+        PASS [  16.197s] (4/7) pg_trickle::e2e_lsn_contract_tests test_lsn_integrated_callers_preserve_valid_and_invalid_frontiers
+       START [         ] (5/7) pg_trickle::e2e_lsn_contract_tests test_lsn_scheduler_cdc_holdback_recovers_after_long_writer
+
+running 1 test
+test test_lsn_scheduler_cdc_holdback_recovers_after_long_writer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 18.89s
+
+        PASS [  19.208s] (5/7) pg_trickle::e2e_lsn_contract_tests test_lsn_scheduler_cdc_holdback_recovers_after_long_writer
+       START [         ] (6/7) pg_trickle::e2e_lsn_contract_tests test_lsn_scheduler_preserves_malformed_frontier_and_recovers
+
+running 1 test
+test test_lsn_scheduler_preserves_malformed_frontier_and_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 21.27s
+
+        PASS [  21.562s] (6/7) pg_trickle::e2e_lsn_contract_tests test_lsn_scheduler_preserves_malformed_frontier_and_recovers
+       START [         ] (7/7) pg_trickle::e2e_lsn_contract_tests test_lsn_wal_transition_rejects_malformed_and_preserves_results
+
+running 1 test
+test test_lsn_wal_transition_rejects_malformed_and_preserves_results ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 17.96s
+
+        PASS [  18.261s] (7/7) pg_trickle::e2e_lsn_contract_tests test_lsn_wal_transition_rejects_malformed_and_preserves_results
+────────────
+     Summary [  75.275s] 7 tests run: 7 passed, 0 skipped
