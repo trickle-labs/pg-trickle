@@ -26,3 +26,14 @@ paths = [
     '''cnpg/.*''',
     '''\.github/.*''',
 ]
+
+[[allowlists]]
+description = "Removed local Citus sample URL in the justfile history"
+condition = "AND"
+regexTarget = "line"
+regexes = [
+    '''postgresql:[/][/]postgres:[p][o][s][t][g][r][e][s]@localhost:15432[/]postgres''',
+]
+paths = [
+    '''^justfile$''',
+]
