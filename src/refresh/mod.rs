@@ -241,6 +241,7 @@ pub(crate) fn disable_user_triggers(
             crate::sql_builder::ident(&st.pgt_schema),
             crate::sql_builder::ident(&st.pgt_name),
         );
+        // nosemgrep: rust.spi.run.dynamic-format — table is built with quote_ident from catalog identifiers.
         Spi::run(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
             .map_err(|e| PgTrickleError::SpiError(format!("Could not lock {table}: {e}")))?;
 

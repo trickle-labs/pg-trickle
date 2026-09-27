@@ -627,7 +627,7 @@ citus-chaos-up:
     docker compose -f docker/docker-compose.citus.yml up -d --wait
     @echo "Citus chaos cluster is up."
     @echo "Set these environment variables before running just test-citus-chaos:"
-    @echo "  export CITUS_COORDINATOR_URL=postgresql://postgres@localhost:15432/postgres (add the local coordinator password if required)"
+    @echo "  Set CITUS_COORDINATOR_URL to your local coordinator URL (add a password if required)"
     @echo "  export CITUS_COORDINATOR_CONTAINER=citus-coordinator"
     @echo "  export CITUS_WORKER_0_CONTAINER=citus-worker-0"
     @echo "  export CITUS_WORKER_1_CONTAINER=citus-worker-1"
