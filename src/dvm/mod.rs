@@ -1685,8 +1685,12 @@ fn key_cols_have_unsupported_types(defining_query: &str, key_cols: &[String]) ->
 /// row-id computation is too complex (joins, union all).
 pub fn row_id_expr_for_query(defining_query: &str) -> String {
     let tree = parse_defining_query(defining_query).ok();
-    let key_cols = tree.as_ref().and_then(|t| t.row_id_key_columns());
-    let domain = tree.as_ref().map(row_identity_domain).unwrap_or("SCAN_KEY");
+    row_id_expr_for_tree(defining_query, tree.as_ref())
+}
+
+fn row_id_expr_for_tree(defining_query: &str, tree: Option<&parser::OpTree>) -> String {
+    let key_cols = tree.and_then(parser::OpTree::row_id_key_columns);
+    let domain = tree.map(row_identity_domain).unwrap_or("SCAN_KEY");
     match key_cols {
         Some(cols) if domain == "WINDOW_KEY" => window_row_identity_expr("sub", &cols),
         Some(cols) if !key_cols_have_unsupported_types(defining_query, &cols) => {
@@ -1709,7 +1713,7 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
             // Without this, FULL refresh would use row_to_json hashing
             // while DIFF uses '__singleton_group', causing __pgt_row_id
             // mismatch and phantom row insertion.
-            if tree.as_ref().is_some_and(is_scalar_aggregate_root) {
+            if tree.is_some_and(is_scalar_aggregate_root) {
                 "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))"
                     .to_string()
             } else {
@@ -1781,19 +1785,10 @@ pub fn try_union_all_refresh_sql(defining_query: &str) -> Option<String> {
             return None;
         }
 
-        // Build the child hash expression (same formula as the scan diff).
-        let child_hash = if key_cols.len() == 1 {
-            format!(
-                "pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(sub.{}))",
-                diff::quote_ident(&key_cols[0]),
-            )
-        } else {
-            let items: Vec<String> = key_cols
-                .iter()
-                .map(|c| format!("sub.{}", diff::quote_ident(c)))
-                .collect();
-            crate::hash::build_row_identity_expr("SCAN_KEY", &items)
-        };
+        // Keep the branch identity formula aligned with its differential DVM.
+        // A branch can be keyless, a join, a window, or a scalar aggregate;
+        // these use different domains and some need a non-column sentinel.
+        let child_hash = row_id_expr_for_tree(branch_sql, Some(&tree));
 
         // Wrap with branch prefix (matching diff_union_all's idx = i + 1).
         let row_id_expr =
