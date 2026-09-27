@@ -33,6 +33,8 @@ description = "Local Citus sample URL false positive in the initial PR justfile 
 condition = "AND"
 commits = [
     "266229f902c49e5ae4177101002ccffe37355305",
+    "2ef8a9fc89f733ed40a189d879651b0bf3acfc55",
+    "d0b7b7792ac68fd6506ca75ada270b7005b48340",
 ]
 paths = [
     '''^justfile$''',
