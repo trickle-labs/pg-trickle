@@ -13,23 +13,26 @@ use common::TestDb;
 
 // ── Trigger detection query ────────────────────────────────────────────
 //
-// Mirrors the query in src/cdc.rs `has_user_triggers()`:
+// Mirrors the query in src/cdc/rebuild.rs `has_user_triggers()`:
 //   SELECT EXISTS(
 //     SELECT 1 FROM pg_trigger
-//     WHERE tgrelid = $OID
-//       AND NOT tgisinternal
-//       AND tgname NOT LIKE 'pgt_%'
-//       AND tgtype & 1 = 1  -- ROW-level trigger
+//     WHERE tgrelid = $OID AND NOT tgisinternal
+//       AND NOT EXISTS (... pgtrickle IVM maintenance function identity ...)
 //   )
 
 const HAS_USER_TRIGGERS_SQL: &str = r#"
     SELECT EXISTS(
-        SELECT 1 FROM pg_trigger
-        WHERE tgrelid = $1::oid
-          AND NOT tgisinternal
-          AND tgname NOT LIKE 'pgt_%'
-          AND tgname NOT LIKE 'pg_trickle_%'
-          AND tgtype & 1 = 1
+        SELECT 1 FROM pg_catalog.pg_trigger tr
+        WHERE tr.tgrelid = $1::oid
+          AND NOT tr.tgisinternal
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_proc fn
+            JOIN pg_catalog.pg_namespace ns ON ns.oid = fn.pronamespace
+            WHERE fn.oid = tr.tgfoid
+              AND ns.nspname = 'pgtrickle'
+              AND fn.proname::text ~
+                '^(pgt_ivm_before|pgt_ivm_after_(ins|upd|del|trunc))_fn_[0-9]+_[0-9]+$'
+          )
     )
 "#;
 
@@ -87,7 +90,7 @@ async fn test_trigger_detection_with_user_trigger() {
 }
 
 #[tokio::test]
-async fn test_trigger_detection_ignores_pgt_prefix() {
+async fn test_trigger_detection_detects_pgt_prefixed_application_trigger() {
     let db = TestDb::new().await;
 
     db.execute("CREATE TABLE detect_pgs (id INT PRIMARY KEY, val TEXT)")
@@ -97,7 +100,7 @@ async fn test_trigger_detection_ignores_pgt_prefix() {
          BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql",
     )
     .await;
-    // Trigger with pgt_ prefix should be ignored (internal pg_trickle triggers)
+    // A name prefix alone does not make an application trigger internal.
     db.execute(
         "CREATE TRIGGER pgt_cdc_trigger AFTER INSERT ON detect_pgs
          FOR EACH ROW EXECUTE FUNCTION noop_fn()",
@@ -115,13 +118,13 @@ async fn test_trigger_detection_ignores_pgt_prefix() {
         .expect("trigger detection query failed");
 
     assert!(
-        !has_triggers,
-        "pgt_-prefixed triggers should be excluded from detection"
+        has_triggers,
+        "pgt_-prefixed application trigger should be detected"
     );
 }
 
 #[tokio::test]
-async fn test_trigger_detection_ignores_statement_level() {
+async fn test_trigger_detection_detects_statement_level() {
     let db = TestDb::new().await;
 
     db.execute("CREATE TABLE detect_stmt (id INT PRIMARY KEY, val TEXT)")
@@ -131,8 +134,7 @@ async fn test_trigger_detection_ignores_statement_level() {
          BEGIN RETURN NULL; END; $$ LANGUAGE plpgsql",
     )
     .await;
-    // Statement-level trigger (FOR EACH STATEMENT) should NOT be detected
-    // because we check tgtype & 1 = 1 (ROW-level flag)
+    // Application statement triggers also select the explicit DML path.
     db.execute(
         "CREATE TRIGGER stmt_trig AFTER INSERT ON detect_stmt
          FOR EACH STATEMENT EXECUTE FUNCTION noop_stmt_fn()",
@@ -150,8 +152,8 @@ async fn test_trigger_detection_ignores_statement_level() {
         .expect("trigger detection query failed");
 
     assert!(
-        !has_triggers,
-        "Statement-level triggers should not be detected as user row-level triggers"
+        has_triggers,
+        "statement-level application trigger should be detected"
     );
 }
 
@@ -172,19 +174,19 @@ async fn test_trigger_detection_mixed_triggers() {
     )
     .await;
 
-    // Internal pg_trickle trigger (should be ignored)
+    // A prefix alone does not identify a pg_trickle maintenance trigger.
     db.execute(
         "CREATE TRIGGER pgt_internal AFTER INSERT ON detect_mixed
          FOR EACH ROW EXECUTE FUNCTION noop_fn()",
     )
     .await;
-    // Statement-level trigger (should be ignored)
+    // Statement-level application triggers are included too.
     db.execute(
         "CREATE TRIGGER stmt_trig AFTER INSERT ON detect_mixed
          FOR EACH STATEMENT EXECUTE FUNCTION noop_stmt_fn()",
     )
     .await;
-    // User row-level trigger (should be detected)
+    // User row-level trigger should also be detected.
     db.execute(
         "CREATE TRIGGER user_row_trig AFTER UPDATE ON detect_mixed
          FOR EACH ROW EXECUTE FUNCTION noop_fn()",
@@ -203,7 +205,7 @@ async fn test_trigger_detection_mixed_triggers() {
 
     assert!(
         has_triggers,
-        "Should detect the user row-level trigger among mixed triggers"
+        "Should detect application triggers among mixed triggers"
     );
 }
 
@@ -279,13 +281,9 @@ async fn test_trigger_detection_after_drop() {
     assert!(!after, "Should not detect trigger after drop");
 }
 
-/// Regression: `pg_trickle_%` prefixed triggers (CDC triggers installed by
-/// the extension) must NOT be counted as user triggers. Before the fix,
-/// only `pgt_%` was excluded, so `pg_trickle_cdc_<oid>` triggers were
-/// incorrectly detected as user triggers, forcing the slower explicit-DML
-/// refresh path.
+/// Application triggers can use extension-looking names and must still count.
 #[tokio::test]
-async fn test_trigger_detection_ignores_pg_trickle_prefix() {
+async fn test_trigger_detection_detects_pg_trickle_prefixed_application_trigger() {
     let db = TestDb::new().await;
 
     db.execute("CREATE TABLE detect_trickle (id INT PRIMARY KEY, val TEXT)")
@@ -295,7 +293,7 @@ async fn test_trigger_detection_ignores_pg_trickle_prefix() {
          BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql",
     )
     .await;
-    // Simulate the CDC trigger name pattern used by pg_trickle
+    // A matching trigger name attached to an application function is user code.
     db.execute(
         "CREATE TRIGGER pg_trickle_cdc_12345 AFTER INSERT ON detect_trickle
          FOR EACH ROW EXECUTE FUNCTION noop_fn()",
@@ -313,34 +311,26 @@ async fn test_trigger_detection_ignores_pg_trickle_prefix() {
         .expect("trigger detection query failed");
 
     assert!(
-        !has_triggers,
-        "pg_trickle_-prefixed triggers should be excluded from user trigger detection"
+        has_triggers,
+        "pg_trickle_-prefixed application trigger should be detected"
     );
 }
 
-/// Regression: Both `pgt_%` AND `pg_trickle_%` triggers should be excluded,
-/// while a real user trigger alongside them is still detected.
+/// Only actual maintenance function identity, not its trigger name, is excluded.
 #[tokio::test]
-async fn test_trigger_detection_mixed_internal_and_user() {
+async fn test_trigger_detection_excludes_ivm_function_identity() {
     let db = TestDb::new().await;
 
     db.execute("CREATE TABLE detect_all (id INT PRIMARY KEY, val TEXT)")
         .await;
     db.execute(
-        "CREATE OR REPLACE FUNCTION noop_fn() RETURNS TRIGGER AS $$
+        "CREATE OR REPLACE FUNCTION pgtrickle.pgt_ivm_after_ins_fn_1_99999() RETURNS trigger AS $$
          BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql",
     )
     .await;
-    // Internal: pgt_* prefix
     db.execute(
-        "CREATE TRIGGER pgt_change_buffer AFTER INSERT ON detect_all
-         FOR EACH ROW EXECUTE FUNCTION noop_fn()",
-    )
-    .await;
-    // Internal: pg_trickle_* prefix (CDC)
-    db.execute(
-        "CREATE TRIGGER pg_trickle_cdc_99999 AFTER INSERT ON detect_all
-         FOR EACH ROW EXECUTE FUNCTION noop_fn()",
+        "CREATE TRIGGER pgt_ivm_after_ins_1 AFTER INSERT ON detect_all
+         FOR EACH ROW EXECUTE FUNCTION pgtrickle.pgt_ivm_after_ins_fn_1_99999()",
     )
     .await;
 
@@ -348,7 +338,6 @@ async fn test_trigger_detection_mixed_internal_and_user() {
         .query_scalar("SELECT 'detect_all'::regclass::oid::int")
         .await;
 
-    // With only internal triggers, should be false
     let has_triggers: bool = sqlx::query_scalar(HAS_USER_TRIGGERS_SQL)
         .bind(oid)
         .fetch_one(&db.pool)
@@ -356,12 +345,17 @@ async fn test_trigger_detection_mixed_internal_and_user() {
         .expect("query failed");
     assert!(
         !has_triggers,
-        "Only internal triggers present — should not detect user triggers"
+        "the IVM maintenance function should be excluded"
     );
 
-    // Add a real user trigger
     db.execute(
-        "CREATE TRIGGER audit_log_trigger AFTER UPDATE ON detect_all
+        "CREATE OR REPLACE FUNCTION noop_fn() RETURNS TRIGGER AS $$
+         BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql",
+    )
+    .await;
+    // Even an extension-looking application trigger is detected.
+    db.execute(
+        "CREATE TRIGGER pgt_change_buffer AFTER UPDATE ON detect_all
          FOR EACH ROW EXECUTE FUNCTION noop_fn()",
     )
     .await;
@@ -373,6 +367,6 @@ async fn test_trigger_detection_mixed_internal_and_user() {
         .expect("query failed");
     assert!(
         has_triggers_with_user,
-        "Real user trigger should be detected alongside internal triggers"
+        "application function identity should be detected despite trigger name"
     );
 }

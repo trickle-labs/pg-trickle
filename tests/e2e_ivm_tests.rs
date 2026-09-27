@@ -14,6 +14,8 @@
 mod e2e;
 
 use e2e::E2eDb;
+use sqlx::PgPool;
+use std::time::Duration;
 
 // ── Helper ─────────────────────────────────────────────────────────────
 
@@ -24,6 +26,122 @@ async fn create_immediate_st(db: &E2eDb, name: &str, query: &str) {
          NULL, 'IMMEDIATE')"
     );
     db.execute(&sql).await;
+}
+
+async fn table_rows_json(pool: &PgPool, relation: &str) -> String {
+    let query = format!(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), \
+         '[]'::jsonb)::text FROM {relation} AS t"
+    );
+    sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(query))
+        .fetch_one(pool)
+        .await
+        .expect("snapshot table rows")
+}
+
+async fn table_snapshots(pool: &PgPool, relations: &[String]) -> Vec<String> {
+    let mut snapshots = Vec::with_capacity(relations.len());
+    for relation in relations {
+        snapshots.push(table_rows_json(pool, relation).await);
+    }
+    snapshots
+}
+
+async fn fresh_verification_pool(db: &E2eDb) -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(db.connection_string())
+        .await
+        .expect("open a fresh connection for rollback-state verification")
+}
+
+async fn frontier_snapshot(pool: &PgPool, streams: &[&str]) -> String {
+    let streams: Vec<String> = streams.iter().map(|stream| (*stream).to_owned()).collect();
+    sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_array(pgt_name::text, frontier::text) \
+         ORDER BY pgt_name), '[]'::jsonb)::text \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name::text = ANY($1)",
+    )
+    .bind(streams)
+    .fetch_one(pool)
+    .await
+    .expect("snapshot stream frontiers")
+}
+
+async fn trigger_state_snapshot(pool: &PgPool, relation: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_array(tgname::text, tgenabled::text) \
+         ORDER BY tgname), '[]'::jsonb)::text \
+         FROM pg_catalog.pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal",
+    )
+    .bind(relation)
+    .fetch_one(pool)
+    .await
+    .expect("snapshot trigger modes")
+}
+
+fn assert_check_constraint_error(error: sqlx::Error, constraint: &str) {
+    let database_error = error
+        .as_database_error()
+        .expect("injected capture failure must be a PostgreSQL error");
+    assert_eq!(
+        database_error.code().as_deref(),
+        Some("23514"),
+        "expected CHECK violation {constraint}, got: {}",
+        database_error.message()
+    );
+    assert!(
+        database_error.constraint() == Some(constraint)
+            || database_error.message().contains(constraint),
+        "expected CHECK constraint {constraint}, got: {}",
+        database_error.message()
+    );
+}
+
+fn assert_st_matches_sql(st_name: &str, columns: &str, expected_query: &str) -> String {
+    format!(
+        r#"DO $assert$
+        DECLARE same_rows boolean;
+        BEGIN
+            WITH expected AS MATERIALIZED ({expected_query}),
+                 actual AS MATERIALIZED (SELECT {columns} FROM public.{st_name})
+            SELECT NOT EXISTS (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+               AND NOT EXISTS (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+              INTO same_rows;
+            IF NOT same_rows THEN
+                RAISE EXCEPTION 'public.{st_name} does not match its defining query';
+            END IF;
+        END
+        $assert$"#
+    )
+}
+
+async fn assert_st_matches_after_reconnect(
+    db: &E2eDb,
+    st_name: &str,
+    columns: &str,
+    expected_query: &str,
+) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(db.connection_string())
+        .await
+        .expect("open a fresh connection for committed-state check");
+    let query = format!(
+        "WITH expected AS MATERIALIZED ({expected_query}), \
+         actual AS MATERIALIZED (SELECT {columns} FROM public.{st_name}) \
+         SELECT NOT EXISTS (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual) \
+            AND NOT EXISTS (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)"
+    );
+    let same_rows = sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(query))
+        .fetch_one(&pool)
+        .await
+        .expect("compare committed stream table contents");
+    assert!(
+        same_rows,
+        "public.{st_name} differs after a fresh connection"
+    );
+    pool.close().await;
 }
 
 // ── Basic Creation ─────────────────────────────────────────────────────
@@ -647,6 +765,753 @@ async fn test_full_upstream_refresh_propagates_to_immediate_child_without_buffer
         !buffer_exists,
         "IMMEDIATE children must not allocate a CDC buffer"
     );
+}
+
+#[tokio::test]
+async fn test_ivm_full_refresh_preserves_immediate_descendants() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE full_chain_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO full_chain_src VALUES (1, 10), (2, 20)")
+        .await;
+    db.create_st(
+        "full_chain_upstream",
+        "SELECT id, val FROM full_chain_src",
+        "5m",
+        "FULL",
+    )
+    .await;
+    db.refresh_st("full_chain_upstream").await;
+    create_immediate_st(
+        &db,
+        "full_chain_child",
+        "SELECT id, val * 2 AS doubled FROM full_chain_upstream",
+    )
+    .await;
+    create_immediate_st(
+        &db,
+        "full_chain_grandchild",
+        "SELECT id, doubled + 1 AS result FROM full_chain_child",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION full_chain_noop() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER full_chain_app BEFORE INSERT ON full_chain_upstream \
+         FOR EACH ROW EXECUTE FUNCTION full_chain_noop()",
+    )
+    .await;
+
+    let child_check = assert_st_matches_sql(
+        "full_chain_child",
+        "id, doubled",
+        "SELECT id, val * 2 AS doubled FROM full_chain_src",
+    );
+    let grandchild_check = assert_st_matches_sql(
+        "full_chain_grandchild",
+        "id, result",
+        "SELECT id, val * 2 + 1 AS result FROM full_chain_src",
+    );
+    db.execute_seq(&[
+        "BEGIN",
+        "DELETE FROM full_chain_src",
+        "INSERT INTO full_chain_src VALUES (3, 15), (4, 25)",
+        "SELECT pgtrickle.refresh_stream_table('full_chain_upstream')",
+        &child_check,
+        &grandchild_check,
+        "COMMIT",
+    ])
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_chain_child",
+        "id, doubled",
+        "SELECT id, val * 2 AS doubled FROM full_chain_src",
+    )
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_chain_grandchild",
+        "id, result",
+        "SELECT id, val * 2 + 1 AS result FROM full_chain_src",
+    )
+    .await;
+
+    let empty_child_check = assert_st_matches_sql(
+        "full_chain_child",
+        "id, doubled",
+        "SELECT id, val * 2 AS doubled FROM full_chain_src",
+    );
+    let empty_grandchild_check = assert_st_matches_sql(
+        "full_chain_grandchild",
+        "id, result",
+        "SELECT id, val * 2 + 1 AS result FROM full_chain_src",
+    );
+    db.execute_seq(&[
+        "BEGIN",
+        "DELETE FROM full_chain_src",
+        "SELECT pgtrickle.refresh_stream_table('full_chain_upstream')",
+        &empty_child_check,
+        &empty_grandchild_check,
+        "COMMIT",
+    ])
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_chain_child",
+        "id, doubled",
+        "SELECT id, val * 2 AS doubled FROM full_chain_src",
+    )
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_chain_grandchild",
+        "id, result",
+        "SELECT id, val * 2 + 1 AS result FROM full_chain_src",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ivm_scheduled_full_refresh_preserves_immediate_descendants() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.reload_config_and_wait().await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(90)).await,
+        "scheduler should be running"
+    );
+
+    db.execute("CREATE TABLE scheduled_full_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO scheduled_full_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "scheduled_full_upstream",
+        "SELECT id, val FROM scheduled_full_src",
+        "1s",
+        "FULL",
+    )
+    .await;
+    db.refresh_st("scheduled_full_upstream").await;
+    create_immediate_st(
+        &db,
+        "scheduled_full_child",
+        "SELECT id, val * 2 AS doubled FROM scheduled_full_upstream",
+    )
+    .await;
+    create_immediate_st(
+        &db,
+        "scheduled_full_grandchild",
+        "SELECT id, doubled + 1 AS result FROM scheduled_full_child",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION scheduled_full_noop() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER scheduled_full_app BEFORE INSERT ON scheduled_full_upstream \
+         FOR EACH ROW EXECUTE FUNCTION scheduled_full_noop()",
+    )
+    .await;
+    db.execute("CREATE TABLE scheduled_full_audit (event TEXT NOT NULL)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION scheduled_full_audit_trigger() RETURNS trigger \
+         LANGUAGE plpgsql AS $$
+         BEGIN
+           INSERT INTO scheduled_full_audit VALUES (TG_OP);
+           IF TG_LEVEL = 'ROW' THEN RETURN NEW; END IF;
+           RETURN NULL;
+         END
+         $$",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER scheduled_full_audit_insert AFTER INSERT ON scheduled_full_upstream \
+         FOR EACH ROW EXECUTE FUNCTION scheduled_full_audit_trigger()",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER scheduled_full_audit_truncate AFTER TRUNCATE ON scheduled_full_upstream \
+         FOR EACH STATEMENT EXECUTE FUNCTION scheduled_full_audit_trigger()",
+    )
+    .await;
+
+    let initial_ts: Option<String> = db
+        .query_scalar_opt(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'scheduled_full_upstream'",
+        )
+        .await;
+    db.execute("UPDATE scheduled_full_src SET val = 25 WHERE id = 1")
+        .await;
+    assert!(
+        db.wait_for_auto_refresh_since(
+            "scheduled_full_upstream",
+            initial_ts,
+            Duration::from_secs(45),
+        )
+        .await,
+        "scheduler should complete the FULL replacement"
+    );
+    let (action, status, initiated_by): (String, String, Option<String>) = sqlx::query_as(
+        "SELECT h.action, h.status, h.initiated_by \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = 'scheduled_full_upstream' \
+         ORDER BY refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read scheduled FULL history");
+    assert_eq!(action, "FULL");
+    assert_eq!(status, "COMPLETED");
+    assert_eq!(initiated_by.as_deref(), Some("SCHEDULER"));
+    assert_eq!(
+        db.count("scheduled_full_audit").await,
+        0,
+        "scheduled FULL must suppress INSERT and TRUNCATE application triggers"
+    );
+    db.assert_st_matches_query(
+        "scheduled_full_child",
+        "SELECT id, val * 2 AS doubled FROM scheduled_full_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "scheduled_full_grandchild",
+        "SELECT id, val * 2 + 1 AS result FROM scheduled_full_src",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_ivm_truncate_captures_deferred_changes() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.refresh_strategy = 'differential'")
+        .await;
+    db.reload_config_and_wait().await;
+    db.execute("CREATE TABLE ivm_trunc_src (grp TEXT, val INT)")
+        .await;
+    db.execute("INSERT INTO ivm_trunc_src VALUES ('a', 1), ('b', NULL)")
+        .await;
+    create_immediate_st(&db, "ivm_trunc_imm", "SELECT grp, val FROM ivm_trunc_src").await;
+    db.create_st(
+        "ivm_trunc_diff_one",
+        "SELECT grp, val FROM ivm_trunc_imm",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "ivm_trunc_diff_two",
+        "SELECT grp, val FROM ivm_trunc_imm",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    create_immediate_st(
+        &db,
+        "ivm_trunc_agg",
+        "SELECT count(*)::bigint AS row_count, sum(val)::bigint AS total \
+         FROM ivm_trunc_src",
+    )
+    .await;
+    db.create_st(
+        "ivm_trunc_agg_diff",
+        "SELECT row_count, total FROM ivm_trunc_agg",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let configured_mode: String = db
+        .query_scalar(
+            "SELECT refresh_mode::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'ivm_trunc_diff_one'",
+        )
+        .await;
+    assert_eq!(configured_mode, "DIFFERENTIAL");
+    for child in [
+        "ivm_trunc_diff_one",
+        "ivm_trunc_diff_two",
+        "ivm_trunc_agg_diff",
+    ] {
+        db.refresh_st_with_retry(child).await;
+    }
+
+    db.create_st(
+        "ivm_trunc_full",
+        "SELECT grp, val FROM ivm_trunc_src",
+        "5m",
+        "FULL",
+    )
+    .await;
+    db.refresh_st_with_retry("ivm_trunc_full").await;
+    db.create_st(
+        "ivm_trunc_full_diff",
+        "SELECT grp, val FROM ivm_trunc_full",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st_with_retry("ivm_trunc_full_diff").await;
+
+    // A keyless content identity stays present when an identical row is
+    // inserted or removed. Both IVM and FULL capture must preserve the count.
+    db.execute("INSERT INTO ivm_trunc_src VALUES ('a', 1)")
+        .await;
+    db.assert_st_matches_query("ivm_trunc_imm", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+    db.refresh_st_with_retry("ivm_trunc_diff_one").await;
+    db.assert_st_matches_query("ivm_trunc_diff_one", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+    db.refresh_st_with_retry("ivm_trunc_agg_diff").await;
+    db.assert_st_matches_query(
+        "ivm_trunc_agg_diff",
+        "SELECT count(*)::bigint AS row_count, sum(val)::bigint AS total \
+         FROM ivm_trunc_src",
+    )
+    .await;
+    db.refresh_st_with_retry("ivm_trunc_full").await;
+    db.refresh_st_with_retry("ivm_trunc_full_diff").await;
+    db.assert_st_matches_query("ivm_trunc_full_diff", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+    let agg_pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'ivm_trunc_agg'",
+        )
+        .await;
+    let agg_buffer = format!("pgtrickle_changes.changes_pgt_{agg_pgt_id}");
+    let agg_buffer_watermark: i64 = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(MAX(change_id), 0) FROM {agg_buffer}"
+        ))
+        .await;
+
+    db.execute("TRUNCATE ivm_trunc_src").await;
+    assert_eq!(db.count("ivm_trunc_imm").await, 0);
+    let zero_row: bool = db
+        .query_scalar("SELECT row_count = 0 AND total IS NULL FROM ivm_trunc_agg")
+        .await;
+    assert!(zero_row, "scalar aggregate must retain its zero-count row");
+    let agg_buffer_changes = sqlx::query_as::<_, (String, Option<i64>, Option<i64>, String)>(
+        sqlx::AssertSqlSafe(format!(
+            "SELECT action::text, row_count, total, __pgt_row_id::text \
+             FROM {agg_buffer} \
+             WHERE action IN ('I', 'D') \
+               AND change_id > {agg_buffer_watermark} \
+             ORDER BY change_id"
+        )),
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read immediate aggregate change buffer");
+    assert_eq!(
+        agg_buffer_changes.len(),
+        2,
+        "capture the aggregate replacement"
+    );
+    assert_eq!(agg_buffer_changes[0].0, "D");
+    assert_eq!(agg_buffer_changes[0].1, Some(3));
+    assert_eq!(agg_buffer_changes[0].2, Some(2));
+    assert_eq!(agg_buffer_changes[1].0, "I");
+    assert_eq!(agg_buffer_changes[1].1, Some(0));
+    assert_eq!(agg_buffer_changes[1].2, None);
+    assert_eq!(agg_buffer_changes[0].3, agg_buffer_changes[1].3);
+
+    // Consume the empty replacement, then truncate the already-empty source
+    // again to exercise a no-change capture and refresh.
+    db.refresh_st_with_retry("ivm_trunc_diff_one").await;
+    db.assert_st_matches_query("ivm_trunc_diff_one", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+    let (truncate_action, truncate_fallback): (String, bool) = sqlx::query_as(
+        "SELECT h.action, h.was_full_fallback \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = 'ivm_trunc_diff_one' AND h.status = 'COMPLETED' \
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read refresh history for the truncate capture");
+    assert_eq!(
+        truncate_action, "DIFFERENTIAL",
+        "the refresh consuming TRUNCATE capture must be differential"
+    );
+    assert!(
+        !truncate_fallback,
+        "the refresh consuming TRUNCATE capture must not fall back to FULL"
+    );
+    db.refresh_st_with_retry("ivm_trunc_agg_diff").await;
+    db.assert_st_matches_query(
+        "ivm_trunc_agg_diff",
+        "SELECT count(*)::bigint AS row_count, sum(val)::bigint AS total \
+         FROM ivm_trunc_src",
+    )
+    .await;
+    db.execute("TRUNCATE ivm_trunc_src").await;
+    db.refresh_st_with_retry("ivm_trunc_diff_one").await;
+    db.assert_st_matches_query("ivm_trunc_diff_one", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+
+    db.execute("INSERT INTO ivm_trunc_src VALUES ('c', 3), ('c', 3), ('d', NULL)")
+        .await;
+
+    db.refresh_st_with_retry("ivm_trunc_diff_one").await;
+    db.assert_st_matches_query("ivm_trunc_diff_one", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+    let (action, strategy, full_fallback, reason, detail, delta_rows): (
+        String,
+        Option<String>,
+        bool,
+        Option<String>,
+        Option<String>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT h.action, h.merge_strategy_used, h.was_full_fallback, \
+                h.refresh_reason, h.refresh_reason_detail, h.delta_row_count \
+         FROM pgtrickle.pgt_refresh_history h \
+         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+         WHERE st.pgt_name = 'ivm_trunc_diff_one' AND h.status = 'COMPLETED' \
+         ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read downstream refresh history");
+    assert_ne!(
+        strategy.as_deref(),
+        Some("FULL"),
+        "latest refresh: action={action}, fallback={full_fallback}, \
+         reason={reason:?}, detail={detail:?}, delta_rows={delta_rows}"
+    );
+    assert!(
+        !full_fallback,
+        "deferred consumer must use captured differences"
+    );
+    assert_eq!(
+        action, "DIFFERENTIAL",
+        "deferred consumer must execute differential refresh, not just avoid a full fallback"
+    );
+    db.refresh_st_with_retry("ivm_trunc_diff_one").await;
+    db.assert_st_matches_query("ivm_trunc_diff_one", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+
+    // A second consumer catches up later from its own copy of the capture.
+    db.refresh_st_with_retry("ivm_trunc_diff_two").await;
+    db.assert_st_matches_query("ivm_trunc_diff_two", "SELECT grp, val FROM ivm_trunc_src")
+        .await;
+    db.refresh_st_with_retry("ivm_trunc_agg_diff").await;
+    db.assert_st_matches_query(
+        "ivm_trunc_agg_diff",
+        "SELECT count(*)::bigint AS row_count, sum(val)::bigint AS total \
+         FROM ivm_trunc_src",
+    )
+    .await;
+    let aggregate: (i64, Option<i64>) =
+        sqlx::query_as("SELECT row_count, total FROM ivm_trunc_agg_diff")
+            .fetch_one(&db.pool)
+            .await
+            .expect("read refreshed scalar aggregate");
+    assert_eq!(aggregate, (3, Some(6)));
+}
+
+#[tokio::test]
+async fn test_ivm_replacement_failure_rolls_back_and_recovers() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE full_fail_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO full_fail_src VALUES (1, 10)").await;
+    db.create_st(
+        "full_fail_upstream",
+        "SELECT id, val FROM full_fail_src",
+        "5m",
+        "FULL",
+    )
+    .await;
+    db.refresh_st("full_fail_upstream").await;
+    create_immediate_st(
+        &db,
+        "full_fail_imm",
+        "SELECT id, val * 2 AS doubled FROM full_fail_upstream",
+    )
+    .await;
+    db.create_st(
+        "full_fail_deferred",
+        "SELECT id, val FROM full_fail_upstream",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st_with_retry("full_fail_deferred").await;
+    db.execute(
+        "CREATE FUNCTION full_fail_noop() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER full_fail_app BEFORE INSERT ON full_fail_upstream \
+         FOR EACH ROW EXECUTE FUNCTION full_fail_noop()",
+    )
+    .await;
+    let full_pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'full_fail_upstream'",
+        )
+        .await;
+    let full_buffer = format!("pgtrickle_changes.changes_pgt_{full_pgt_id}");
+    let full_relations = [
+        "public.full_fail_src".to_owned(),
+        "public.full_fail_upstream".to_owned(),
+        "public.full_fail_imm".to_owned(),
+        "public.full_fail_deferred".to_owned(),
+        full_buffer.clone(),
+    ];
+    let full_rollback_rows_before = table_snapshots(&db.pool, &full_relations).await;
+    let full_rollback_frontiers_before = frontier_snapshot(
+        &db.pool,
+        &["full_fail_upstream", "full_fail_imm", "full_fail_deferred"],
+    )
+    .await;
+    let full_rollback_triggers_before =
+        trigger_state_snapshot(&db.pool, "public.full_fail_upstream").await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE full_fail_src SET val = 11 WHERE id = 1",
+        "SELECT pgtrickle.refresh_stream_table('full_fail_upstream')",
+        "DO $$ BEGIN IF (SELECT doubled FROM full_fail_imm WHERE id = 1) <> 22 \
+             THEN RAISE EXCEPTION 'IMMEDIATE child missed transactional replacement'; END IF; END $$",
+        "ROLLBACK",
+    ])
+    .await;
+    let full_rollback_pool = fresh_verification_pool(&db).await;
+    assert_eq!(
+        table_snapshots(&full_rollback_pool, &full_relations).await,
+        full_rollback_rows_before,
+        "explicit FULL rollback must retain every base, stream, and buffer row"
+    );
+    assert_eq!(
+        frontier_snapshot(
+            &full_rollback_pool,
+            &["full_fail_upstream", "full_fail_imm", "full_fail_deferred"],
+        )
+        .await,
+        full_rollback_frontiers_before,
+        "explicit FULL rollback must retain every refresh frontier"
+    );
+    assert_eq!(
+        trigger_state_snapshot(&full_rollback_pool, "public.full_fail_upstream").await,
+        full_rollback_triggers_before,
+        "explicit FULL rollback must retain every trigger mode"
+    );
+    full_rollback_pool.close().await;
+
+    db.execute(&format!(
+        "ALTER TABLE {full_buffer} ADD CONSTRAINT reject_full_capture \
+         CHECK (val <> 99)"
+    ))
+    .await;
+    db.execute("UPDATE full_fail_src SET val = 99 WHERE id = 1")
+        .await;
+    let full_rows_before_failure = table_snapshots(&db.pool, &full_relations).await;
+    let full_frontiers_before_failure = frontier_snapshot(
+        &db.pool,
+        &["full_fail_upstream", "full_fail_imm", "full_fail_deferred"],
+    )
+    .await;
+    let full_triggers_before_failure =
+        trigger_state_snapshot(&db.pool, "public.full_fail_upstream").await;
+    let failed_full = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('full_fail_upstream')")
+        .await;
+    assert_check_constraint_error(
+        failed_full.expect_err("a rejected downstream capture must fail the FULL replacement"),
+        "reject_full_capture",
+    );
+    let full_failure_pool = fresh_verification_pool(&db).await;
+    assert_eq!(
+        table_snapshots(&full_failure_pool, &full_relations).await,
+        full_rows_before_failure,
+        "failed FULL capture must retain every base, stream, and buffer row"
+    );
+    assert_eq!(
+        frontier_snapshot(
+            &full_failure_pool,
+            &["full_fail_upstream", "full_fail_imm", "full_fail_deferred"],
+        )
+        .await,
+        full_frontiers_before_failure,
+        "failed FULL capture must retain every refresh frontier"
+    );
+    assert_eq!(
+        trigger_state_snapshot(&full_failure_pool, "public.full_fail_upstream").await,
+        full_triggers_before_failure,
+        "failed FULL capture must restore every trigger mode"
+    );
+    full_failure_pool.close().await;
+
+    db.execute(&format!(
+        "ALTER TABLE {full_buffer} DROP CONSTRAINT reject_full_capture"
+    ))
+    .await;
+    db.refresh_st_with_retry("full_fail_upstream").await;
+    db.refresh_st_with_retry("full_fail_deferred").await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_fail_upstream",
+        "id, val",
+        "SELECT id, val FROM full_fail_src",
+    )
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_fail_imm",
+        "id, doubled",
+        "SELECT id, val * 2 AS doubled FROM full_fail_src",
+    )
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "full_fail_deferred",
+        "id, val",
+        "SELECT id, val FROM full_fail_src",
+    )
+    .await;
+
+    db.execute("CREATE TABLE trunc_fail_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO trunc_fail_src VALUES (1, 10)")
+        .await;
+    create_immediate_st(&db, "trunc_fail_imm", "SELECT id, val FROM trunc_fail_src").await;
+    db.create_st(
+        "trunc_fail_deferred",
+        "SELECT id, val FROM trunc_fail_imm",
+        "5m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st_with_retry("trunc_fail_deferred").await;
+    db.execute("INSERT INTO trunc_fail_src VALUES (2, 20)")
+        .await;
+    let trunc_pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'trunc_fail_imm'",
+        )
+        .await;
+    let trunc_buffer = format!("pgtrickle_changes.changes_pgt_{trunc_pgt_id}");
+    let trunc_relations = [
+        "public.trunc_fail_src".to_owned(),
+        "public.trunc_fail_imm".to_owned(),
+        "public.trunc_fail_deferred".to_owned(),
+        trunc_buffer.clone(),
+    ];
+    let trunc_rollback_rows_before = table_snapshots(&db.pool, &trunc_relations).await;
+    let trunc_rollback_frontiers_before =
+        frontier_snapshot(&db.pool, &["trunc_fail_imm", "trunc_fail_deferred"]).await;
+    let trunc_rollback_triggers_before =
+        trigger_state_snapshot(&db.pool, "public.trunc_fail_src").await;
+
+    db.execute_seq(&[
+        "BEGIN",
+        "TRUNCATE trunc_fail_src",
+        "DO $$ BEGIN IF (SELECT count(*) FROM trunc_fail_imm) <> 0 \
+             THEN RAISE EXCEPTION 'IMMEDIATE truncate did not run'; END IF; END $$",
+        "ROLLBACK",
+    ])
+    .await;
+    let trunc_rollback_pool = fresh_verification_pool(&db).await;
+    assert_eq!(
+        table_snapshots(&trunc_rollback_pool, &trunc_relations).await,
+        trunc_rollback_rows_before,
+        "explicit TRUNCATE rollback must retain every base, stream, and buffer row"
+    );
+    assert_eq!(
+        frontier_snapshot(
+            &trunc_rollback_pool,
+            &["trunc_fail_imm", "trunc_fail_deferred"]
+        )
+        .await,
+        trunc_rollback_frontiers_before,
+        "explicit TRUNCATE rollback must retain every refresh frontier"
+    );
+    assert_eq!(
+        trigger_state_snapshot(&trunc_rollback_pool, "public.trunc_fail_src").await,
+        trunc_rollback_triggers_before,
+        "explicit TRUNCATE rollback must retain every trigger mode"
+    );
+    trunc_rollback_pool.close().await;
+
+    db.execute(&format!(
+        "ALTER TABLE {trunc_buffer} ADD CONSTRAINT reject_truncate_capture \
+         CHECK (val IS DISTINCT FROM 10)"
+    ))
+    .await;
+    let trunc_rows_before_failure = table_snapshots(&db.pool, &trunc_relations).await;
+    let trunc_frontiers_before_failure =
+        frontier_snapshot(&db.pool, &["trunc_fail_imm", "trunc_fail_deferred"]).await;
+    let trunc_triggers_before_failure =
+        trigger_state_snapshot(&db.pool, "public.trunc_fail_src").await;
+    let failed_truncate = db.try_execute("TRUNCATE trunc_fail_src").await;
+    assert_check_constraint_error(
+        failed_truncate.expect_err("a rejected truncate capture must fail the source TRUNCATE"),
+        "reject_truncate_capture",
+    );
+    let trunc_failure_pool = fresh_verification_pool(&db).await;
+    assert_eq!(
+        table_snapshots(&trunc_failure_pool, &trunc_relations).await,
+        trunc_rows_before_failure,
+        "failed TRUNCATE capture must retain every base, stream, and buffer row"
+    );
+    assert_eq!(
+        frontier_snapshot(
+            &trunc_failure_pool,
+            &["trunc_fail_imm", "trunc_fail_deferred"]
+        )
+        .await,
+        trunc_frontiers_before_failure,
+        "failed TRUNCATE capture must retain every refresh frontier"
+    );
+    assert_eq!(
+        trigger_state_snapshot(&trunc_failure_pool, "public.trunc_fail_src").await,
+        trunc_triggers_before_failure,
+        "failed TRUNCATE capture must retain every trigger mode"
+    );
+    trunc_failure_pool.close().await;
+    db.execute(&format!(
+        "ALTER TABLE {trunc_buffer} DROP CONSTRAINT reject_truncate_capture"
+    ))
+    .await;
+    db.execute("TRUNCATE trunc_fail_src").await;
+    db.execute("INSERT INTO trunc_fail_src VALUES (3, 30)")
+        .await;
+    db.refresh_st_with_retry("trunc_fail_deferred").await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "trunc_fail_imm",
+        "id, val",
+        "SELECT id, val FROM trunc_fail_src",
+    )
+    .await;
+    assert_st_matches_after_reconnect(
+        &db,
+        "trunc_fail_deferred",
+        "id, val",
+        "SELECT id, val FROM trunc_fail_src",
+    )
+    .await;
 }
 
 #[tokio::test]

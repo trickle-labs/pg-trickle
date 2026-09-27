@@ -438,11 +438,11 @@ fn diff_scan_change_buffer(
                 .collect::<Vec<_>>(),
         );
 
-        // CTE: Decompose all events into atomic +1/-1 per content image.
-        // An upstream stream table can keep a stable group/key identity while
-        // its values change, so grouping only by content_hash would cancel a
-        // real DELETE+INSERT update.  The payload identity preserves that
-        // update while still cancelling identical INSERT+DELETE pairs.
+        // CTE: Decompose events into atomic +1/-1 rows. Keep the source
+        // identity for grouping, but use visible payload identity for output
+        // so delta IDs match full materialization of this query.
+        // Stable upstream IDs plus payload identity preserve value updates
+        // while still cancelling identical INSERT+DELETE pairs.
         // A44-10 (D+I schema): No UPDATE UNION ALL branches needed —
         // UPDATEs arrive as D-row + I-row pairs from the trigger/WAL decoder.
         let decomp_cte = ctx.next_cte_name(&format!("kl_decomp_{alias}"));
@@ -471,12 +471,12 @@ WHERE {lsn_filter} AND c.action = 'D'",
         let cte_name = ctx.next_cte_name(&format!("scan_{alias}"));
         let sql = format!(
             "\
--- Net inserts: content hashes with net_count > 0
-SELECT sub.content_hash AS __pgt_row_id,
+-- Net inserts: output identities with net_count > 0
+SELECT sub.payload_identity AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {sub_cols}
 FROM (
-    SELECT content_hash,
+    SELECT content_hash, payload_identity,
            {max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
@@ -487,12 +487,12 @@ CROSS JOIN generate_series(1, sub.net_count) gs
 
 UNION ALL
 
--- Net deletes: content hashes with net_count < 0
-SELECT sub.content_hash AS __pgt_row_id,
+-- Net deletes: output identities with net_count < 0
+SELECT sub.payload_identity AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {sub_cols}
 FROM (
-    SELECT content_hash,
+    SELECT content_hash, payload_identity,
            {max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
@@ -1251,6 +1251,9 @@ mod tests {
         assert_sql_contains(&sql, "delta_sign");
         // Should compute net counts
         assert_sql_contains(&sql, "SUM(delta_sign)");
+        // The delta identity must match full materialization of the visible row,
+        // even when an upstream stream table has a stable internal row identity.
+        assert_sql_contains(&sql, "sub.payload_identity AS __pgt_row_id");
     }
 
     #[test]

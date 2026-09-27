@@ -134,12 +134,13 @@ pub(crate) fn execute_full_refresh_target(
             crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
         };
 
-        // Suppress user triggers during TRUNCATE + INSERT to prevent
-        // spurious trigger invocations with wrong semantics.
-        if has_triggers {
-            Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        }
+        // Suppress only application triggers. IVM maintenance triggers must
+        // run during the replacement so IMMEDIATE descendants stay in sync.
+        let suppressed_triggers = if has_triggers {
+            crate::refresh::disable_user_triggers(st)?
+        } else {
+            Vec::new()
+        };
 
         // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
         // defining query so the auxiliary column is populated correctly.
@@ -239,8 +240,7 @@ pub(crate) fn execute_full_refresh_target(
         // Re-enable user triggers and emit NOTIFY so listeners know a FULL
         // refresh occurred.
         if has_triggers {
-            Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            crate::refresh::restore_user_triggers(st, &suppressed_triggers)?;
 
             // PB2/STAB-1: Skip NOTIFY when pooler compatibility mode is enabled.
             if !crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
@@ -2544,31 +2544,23 @@ pub fn execute_differential_refresh_with_tuning(
             // return in the normal flow, so we must handle it here.
             let ao_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
             let ao_suppress = ao_triggers_mode == crate::config::UserTriggersMode::Off
-                && crate::cdc::has_user_triggers(st.pgt_relid).unwrap_or(false);
-            let ao_quoted_table = format!(
-                "\"{}\".\"{}\"",
-                schema.replace('"', "\"\""),
-                name.replace('"', "\"\""),
-            );
-            let ao_disable_sql = format!("ALTER TABLE {} DISABLE TRIGGER USER", ao_quoted_table);
-            let ao_enable_sql = format!("ALTER TABLE {} ENABLE TRIGGER USER", ao_quoted_table);
+                && crate::cdc::has_user_triggers(st.pgt_relid)?;
+            let suppressed_triggers = if ao_suppress {
+                crate::refresh::disable_user_triggers(st)?
+            } else {
+                Vec::new()
+            };
             let rows_inserted = with_stream_owner(st, || {
-                if ao_suppress {
-                    Spi::run(&ao_disable_sql) // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
-                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                }
-                let rows_inserted = Spi::connect_mut(|client| {
+                Spi::connect_mut(|client| {
                     let result = client
                         .update(&insert_sql, None, &[])
                         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                     Ok::<i64, PgTrickleError>(result.len() as i64)
-                })?;
-                if ao_suppress {
-                    Spi::run(&ao_enable_sql) // nosemgrep: rust.spi.run.dynamic-format — table identifier is quote_ident()-escaped.
-                        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-                }
-                Ok(rows_inserted)
+                })
             })?;
+            if ao_suppress {
+                crate::refresh::restore_user_triggers(st, &suppressed_triggers)?;
+            }
 
             let t_insert = t_insert_start.elapsed();
             pgrx::debug1!(
@@ -2644,17 +2636,11 @@ pub fn execute_differential_refresh_with_tuning(
     // suppress them during the MERGE to prevent spurious firing.
     let suppress_triggers =
         user_triggers_mode == crate::config::UserTriggersMode::Off && has_user_triggers;
-    if suppress_triggers {
-        let quoted_table = format!(
-            "\"{}\".\"{}\"",
-            schema.replace('"', "\"\""),
-            name.replace('"', "\"\""),
-        );
-        with_stream_owner(st, || {
-            Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        })?;
-    }
+    let suppressed_triggers = if suppress_triggers {
+        crate::refresh::disable_user_triggers(st)?
+    } else {
+        Vec::new()
+    };
 
     // ── B-3: Strategy selection ──────────────────────────────────────
     // PH-D1: Choose between MERGE and DELETE+INSERT based on the
@@ -3355,20 +3341,13 @@ pub fn execute_differential_refresh_with_tuning(
                     name.replace('"', "\"\""),
                 );
                 let pre_table = format!("__pgt_pre_{}", st.pgt_id);
-                let snapshot_sql = if st.has_keyless_source {
-                    format!(
-                        "INSERT INTO {pre_table} \
-                         SELECT st.__pgt_row_id, {col_list} FROM {qt} st"
-                    )
-                } else {
-                    format!(
-                        "INSERT INTO {pre_table} \
-                         SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
-                         WHERE EXISTS (SELECT 1 FROM {delta_table} d \
-                           WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
-                             AND st.__pgt_row_id = d.__pgt_row_id)"
-                    )
-                };
+                let snapshot_sql = format!(
+                    "INSERT INTO {pre_table} \
+                     SELECT st.__pgt_row_id, {col_list} FROM {qt} st \
+                     WHERE EXISTS (SELECT 1 FROM {delta_table} d \
+                       WHERE pgtrickle.row_probe_v1(st.__pgt_row_id) = pgtrickle.row_probe_v1(d.__pgt_row_id) \
+                         AND st.__pgt_row_id = d.__pgt_row_id)"
+                );
                 if cols.is_empty() {
                     Vec::new()
                 } else if let Err(e) = Spi::run(&snapshot_sql) {
@@ -3563,17 +3542,9 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
-    // Re-enable user triggers if they were suppressed (GUC = 'off').
+    // Restore user-trigger modes if application triggers were suppressed.
     if suppress_triggers {
-        let quoted_table = format!(
-            "\"{}\".\"{}\"",
-            schema.replace('"', "\"\""),
-            name.replace('"', "\"\""),
-        );
-        with_stream_owner(st, || {
-            Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        })?;
+        crate::refresh::restore_user_triggers(st, &suppressed_triggers)?;
     }
 
     let t2 = Instant::now();

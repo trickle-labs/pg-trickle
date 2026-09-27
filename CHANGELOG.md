@@ -37,6 +37,7 @@ The cutoff exists because:
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.108.1 — IMMEDIATE cascade consistency and recovery](#01081--immediate-cascade-consistency-and-recovery)
 - [0.108.0 — Incremental graph and consumer recovery qualification](#01080--incremental-graph-and-consumer-recovery-qualification)
 - [0.107.0 — Verified support and operator procedures](#01070--verified-support-and-operator-procedures)
 - [0.106.1 — Same-pass graph maintenance](#01061--same-pass-graph-maintenance)
@@ -222,6 +223,14 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 ## [Unreleased]
 
 Future changes will be listed here.
+
+## [0.108.1] — IMMEDIATE cascade consistency and recovery
+
+- Keep IMMEDIATE descendants current during manual and scheduled FULL refreshes
+  while preserving application-trigger suppression and trigger enable modes.
+- Capture IMMEDIATE TRUNCATE replacements for downstream DIFFERENTIAL refreshes.
+- Update the upgrade migration and `quick_health` view, and document repair of
+  existing cascades in dependency order.
 
 ## [0.108.0] — Incremental graph and consumer recovery qualification
 

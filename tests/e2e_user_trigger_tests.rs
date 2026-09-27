@@ -9,6 +9,7 @@
 mod e2e;
 
 use e2e::E2eDb;
+use std::time::Duration;
 
 /// Disable the background scheduler for the current test database.
 ///
@@ -460,6 +461,13 @@ async fn test_guc_off_suppresses_triggers() {
 
     // Initial refresh
     db.refresh_st("st_guc_off").await;
+    db.create_st(
+        "st_guc_off_child",
+        "SELECT id, val FROM st_guc_off",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
 
     // Attach trigger
     for sql in audit_trigger_sql("st_guc_off") {
@@ -482,6 +490,8 @@ async fn test_guc_off_suppresses_triggers() {
     // ST should have the data
     let count: i64 = db.count("st_guc_off").await;
     assert_eq!(count, 2, "ST should have 2 rows");
+    db.assert_st_matches_query("st_guc_off_child", "SELECT id, val FROM src_guc_off")
+        .await;
 
     // Audit log should be EMPTY — triggers were suppressed
     let audit_count: i64 = db.count("audit_log").await;
@@ -599,11 +609,29 @@ async fn test_full_refresh_suppresses_triggers() {
     // Create a FULL mode stream table
     db.create_st("st_full", "SELECT id, val FROM src_full", "1m", "FULL")
         .await;
+    db.create_st(
+        "st_full_child",
+        "SELECT id, val FROM st_full",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
 
     // Attach audit trigger
     for sql in audit_trigger_sql("st_full") {
         db.execute(&sql).await;
     }
+    db.execute(
+        "CREATE FUNCTION audit_truncate_fn() RETURNS trigger AS $$
+         BEGIN INSERT INTO audit_log (op) VALUES ('TRUNCATE'); RETURN NULL; END;
+         $$ LANGUAGE plpgsql",
+    )
+    .await;
+    db.execute(
+        "CREATE TRIGGER audit_truncate AFTER TRUNCATE ON st_full \
+         FOR EACH STATEMENT EXECUTE FUNCTION audit_truncate_fn()",
+    )
+    .await;
     db.execute("TRUNCATE audit_log").await;
 
     // Modify source and do a FULL refresh
@@ -613,6 +641,8 @@ async fn test_full_refresh_suppresses_triggers() {
     // ST should have all 3 rows
     let count: i64 = db.count("st_full").await;
     assert_eq!(count, 3, "ST should have 3 rows after FULL refresh");
+    db.assert_st_matches_query("st_full_child", "SELECT id, val FROM src_full")
+        .await;
 
     // Audit log should be EMPTY — FULL refresh suppresses row-level triggers
     let audit_count: i64 = db.count("audit_log").await;
@@ -621,6 +651,308 @@ async fn test_full_refresh_suppresses_triggers() {
         "FULL refresh should suppress row-level triggers, got {} entries",
         audit_count
     );
+
+    db.execute("DELETE FROM src_full").await;
+    db.refresh_st("st_full").await;
+    assert_eq!(db.count("st_full").await, 0);
+    db.assert_st_matches_query("st_full_child", "SELECT id, val FROM src_full")
+        .await;
+    assert_eq!(
+        db.count("audit_log").await,
+        0,
+        "empty FULL refresh must suppress application INSERT and TRUNCATE triggers"
+    );
+}
+
+#[tokio::test]
+async fn test_full_refresh_suppresses_reserved_prefix_only_application_triggers() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("CREATE TABLE prefix_only_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO prefix_only_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "prefix_only_upstream",
+        "SELECT id, val FROM prefix_only_src",
+        "1s",
+        "FULL",
+    )
+    .await;
+    db.create_st(
+        "prefix_only_child",
+        "SELECT id, val * 2 AS doubled FROM prefix_only_upstream",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.execute("CREATE TABLE prefix_only_audit (trigger_name TEXT NOT NULL)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION prefix_only_audit_fn() RETURNS trigger AS $$
+         BEGIN INSERT INTO prefix_only_audit VALUES (TG_NAME); RETURN NEW; END;
+         $$ LANGUAGE plpgsql",
+    )
+    .await;
+    for name in ["pgt_only_app", "pg_trickle_only_app"] {
+        db.execute(&format!(
+            "CREATE TRIGGER {name} AFTER INSERT ON prefix_only_upstream \
+             FOR EACH ROW EXECUTE FUNCTION prefix_only_audit_fn()"
+        ))
+        .await;
+    }
+
+    db.execute("INSERT INTO prefix_only_src VALUES (2, 20)")
+        .await;
+    db.refresh_st("prefix_only_upstream").await;
+    assert_eq!(
+        db.count("prefix_only_audit").await,
+        0,
+        "manual FULL must suppress app triggers even when their names use internal prefixes"
+    );
+    db.assert_st_matches_query(
+        "prefix_only_child",
+        "SELECT id, val * 2 AS doubled FROM prefix_only_src",
+    )
+    .await;
+
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.reload_config_and_wait().await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(90)).await,
+        "scheduler should be running"
+    );
+    let previous_refresh_id: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(max(h.refresh_id), 0) \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'prefix_only_upstream'",
+        )
+        .await;
+    db.execute("INSERT INTO prefix_only_src VALUES (3, 30)")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "scheduled FULL with prefix-only application triggers",
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                 WHERE st.pgt_name = 'prefix_only_upstream' \
+                   AND h.refresh_id > {previous_refresh_id} \
+                   AND h.action = 'FULL' AND h.status = 'COMPLETED' \
+                   AND h.initiated_by = 'SCHEDULER')"
+            ),
+            Duration::from_secs(45),
+            Duration::from_millis(100),
+        )
+        .await,
+        "scheduled FULL history should show the actual refresh"
+    );
+    assert_eq!(
+        db.count("prefix_only_audit").await,
+        0,
+        "scheduled FULL must suppress app triggers even when their names use internal prefixes"
+    );
+    db.assert_st_matches_query(
+        "prefix_only_child",
+        "SELECT id, val * 2 AS doubled FROM prefix_only_src",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_user_triggers_full_refresh_preserves_enabled_states() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("CREATE TABLE full_state_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO full_state_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "full_state_upstream",
+        "SELECT id, val FROM full_state_src",
+        "1s",
+        "FULL",
+    )
+    .await;
+    db.refresh_st("full_state_upstream").await;
+    db.create_st(
+        "full_state_child",
+        "SELECT id, val * 2 AS doubled FROM full_state_upstream",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.execute(
+        "CREATE FUNCTION full_state_noop() RETURNS trigger AS $$
+         BEGIN IF TG_LEVEL = 'ROW' THEN RETURN NEW; END IF; RETURN NULL; END;
+         $$ LANGUAGE plpgsql",
+    )
+    .await;
+    db.execute("CREATE TABLE full_state_audit (trigger_name TEXT NOT NULL)")
+        .await;
+    db.execute(
+        "CREATE FUNCTION full_state_audit_trigger() RETURNS trigger AS $$
+         BEGIN
+           INSERT INTO full_state_audit VALUES (TG_NAME);
+           IF TG_LEVEL = 'ROW' THEN RETURN NEW; END IF;
+           RETURN NULL;
+         END;
+         $$ LANGUAGE plpgsql",
+    )
+    .await;
+    for (name, event) in [
+        (
+            "app_ordinary",
+            "BEFORE INSERT ON full_state_upstream FOR EACH ROW",
+        ),
+        (
+            "app_disabled",
+            "AFTER UPDATE ON full_state_upstream FOR EACH ROW",
+        ),
+        (
+            "app_replica",
+            "AFTER DELETE ON full_state_upstream FOR EACH ROW",
+        ),
+        (
+            "app_always",
+            "AFTER TRUNCATE ON full_state_upstream FOR EACH STATEMENT",
+        ),
+    ] {
+        db.execute(&format!(
+            "CREATE TRIGGER {name} {event} EXECUTE FUNCTION full_state_noop()"
+        ))
+        .await;
+    }
+    db.execute("ALTER TABLE full_state_upstream DISABLE TRIGGER app_disabled")
+        .await;
+    db.execute("ALTER TABLE full_state_upstream ENABLE REPLICA TRIGGER app_replica")
+        .await;
+    db.execute("ALTER TABLE full_state_upstream ENABLE ALWAYS TRIGGER app_always")
+        .await;
+    for name in ["pg_trickle_audit", "pgt_audit"] {
+        db.execute(&format!(
+            "CREATE TRIGGER {name} AFTER INSERT ON full_state_upstream \
+             FOR EACH ROW EXECUTE FUNCTION full_state_audit_trigger()"
+        ))
+        .await;
+    }
+
+    let expected_states =
+        "app_always:A,app_disabled:D,app_ordinary:O,app_replica:R,pg_trickle_audit:O,pgt_audit:O";
+    let actual_states: String = db
+        .query_scalar(
+            "SELECT string_agg(tgname::text || ':' || tgenabled::text, ',' ORDER BY tgname) \
+             FROM pg_catalog.pg_trigger WHERE tgrelid = 'full_state_upstream'::regclass \
+               AND (tgname LIKE 'app_%' OR tgname IN ('pg_trickle_audit', 'pgt_audit'))",
+        )
+        .await;
+    assert_eq!(actual_states, expected_states, "seed trigger modes");
+
+    db.execute("INSERT INTO full_state_src VALUES (2, 20)")
+        .await;
+    db.refresh_st("full_state_upstream").await;
+    let actual_states: String = db
+        .query_scalar(
+            "SELECT string_agg(tgname::text || ':' || tgenabled::text, ',' ORDER BY tgname) \
+             FROM pg_catalog.pg_trigger WHERE tgrelid = 'full_state_upstream'::regclass \
+               AND (tgname LIKE 'app_%' OR tgname IN ('pg_trickle_audit', 'pgt_audit'))",
+        )
+        .await;
+    assert_eq!(actual_states, expected_states, "manual FULL refresh");
+    let audit_rows: i64 = db.count("full_state_audit").await;
+    assert_eq!(
+        audit_rows, 0,
+        "manual FULL suppresses reserved-prefix application triggers"
+    );
+    let maintenance_triggers: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_trigger \
+             WHERE tgrelid = 'full_state_upstream'::regclass \
+               AND tgname LIKE 'pgt_ivm_%' AND tgenabled = 'O'",
+        )
+        .await;
+    assert_eq!(
+        maintenance_triggers, 8,
+        "manual FULL must leave IVM triggers active"
+    );
+    db.assert_st_matches_query(
+        "full_state_child",
+        "SELECT id, val * 2 AS doubled FROM full_state_src",
+    )
+    .await;
+
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.reload_config_and_wait().await;
+    assert!(
+        db.wait_for_scheduler(Duration::from_secs(90)).await,
+        "scheduler should be running"
+    );
+    let previous_refresh_id: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(max(h.refresh_id), 0) \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'full_state_upstream'",
+        )
+        .await;
+    db.execute("INSERT INTO full_state_src VALUES (3, 30)")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "scheduled FULL with application triggers",
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                 JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                 WHERE st.pgt_name = 'full_state_upstream' \
+                   AND h.refresh_id > {previous_refresh_id} \
+                   AND h.action = 'FULL' AND h.status = 'COMPLETED' \
+                   AND h.initiated_by = 'SCHEDULER')"
+            ),
+            Duration::from_secs(45),
+            Duration::from_millis(100),
+        )
+        .await,
+        "scheduled FULL history should show the actual refresh"
+    );
+    let actual_states: String = db
+        .query_scalar(
+            "SELECT string_agg(tgname::text || ':' || tgenabled::text, ',' ORDER BY tgname) \
+             FROM pg_catalog.pg_trigger WHERE tgrelid = 'full_state_upstream'::regclass \
+               AND (tgname LIKE 'app_%' OR tgname IN ('pg_trickle_audit', 'pgt_audit'))",
+        )
+        .await;
+    assert_eq!(actual_states, expected_states, "scheduled FULL refresh");
+    let audit_rows: i64 = db.count("full_state_audit").await;
+    assert_eq!(
+        audit_rows, 0,
+        "scheduled FULL suppresses reserved-prefix application triggers"
+    );
+    let maintenance_triggers: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_trigger \
+             WHERE tgrelid = 'full_state_upstream'::regclass \
+               AND tgname LIKE 'pgt_ivm_%' AND tgenabled = 'O'",
+        )
+        .await;
+    assert_eq!(
+        maintenance_triggers, 8,
+        "scheduled FULL must leave IVM triggers active"
+    );
+    db.assert_st_matches_query(
+        "full_state_child",
+        "SELECT id, val * 2 AS doubled FROM full_state_src",
+    )
+    .await;
 }
 
 // ── BEFORE trigger modifies NEW ────────────────────────────────────────

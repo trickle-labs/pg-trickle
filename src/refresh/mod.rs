@@ -224,6 +224,107 @@ pub(crate) fn stream_owner_name(st: &StreamTableMeta) -> Result<String, PgTrickl
     })
 }
 
+#[derive(Clone)]
+pub(crate) struct UserTriggerState {
+    name: String,
+    enabled: String,
+}
+
+/// Disable enabled application triggers during a FULL replacement, leaving
+/// pg_trickle's IVM triggers active and preserving each trigger's mode.
+pub(crate) fn disable_user_triggers(
+    st: &StreamTableMeta,
+) -> Result<Vec<UserTriggerState>, PgTrickleError> {
+    with_stream_owner(st, || {
+        let table = format!(
+            "{}.{}",
+            crate::sql_builder::ident(&st.pgt_schema),
+            crate::sql_builder::ident(&st.pgt_name),
+        );
+        Spi::run(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
+            .map_err(|e| PgTrickleError::SpiError(format!("Could not lock {table}: {e}")))?;
+
+        let triggers = Spi::connect(|client| {
+            let query = format!(
+                "SELECT tr.tgname::text, tr.tgenabled::text \
+                 FROM pg_catalog.pg_trigger tr \
+                 WHERE tr.tgrelid = $1::oid AND NOT tr.tgisinternal \
+                   AND NOT EXISTS ( \
+                     SELECT 1 \
+                     FROM pg_catalog.pg_proc fn \
+                     JOIN pg_catalog.pg_namespace ns ON ns.oid = fn.pronamespace \
+                     WHERE fn.oid = tr.tgfoid \
+                       AND ns.nspname = 'pgtrickle' \
+                       AND fn.proname::text ~ '{}' \
+                   ) \
+                 ORDER BY tr.tgname",
+                crate::ivm::IVM_TRIGGER_FUNCTION_PATTERN,
+            );
+            let rows = client.select(&query, None, &[st.pgt_relid.into()])?;
+            rows.map(|row| {
+                Ok(UserTriggerState {
+                    name: row.get::<String>(1)?.unwrap_or_default(),
+                    enabled: row.get::<String>(2)?.unwrap_or_default(),
+                })
+            })
+            .collect::<Result<Vec<_>, pgrx::spi::SpiError>>()
+        })
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        for trigger in triggers.iter().filter(|trigger| trigger.enabled != "D") {
+            let trigger_name = crate::sql_builder::ident(&trigger.name);
+            Spi::run(&format!(
+                "ALTER TABLE {table} DISABLE TRIGGER {trigger_name}"
+            ))
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "Could not disable trigger {} on {table}: {e}",
+                    trigger.name
+                ))
+            })?;
+        }
+        Ok(triggers)
+    })
+}
+
+/// Restore application-trigger states saved by [`disable_user_triggers`].
+pub(crate) fn restore_user_triggers(
+    st: &StreamTableMeta,
+    triggers: &[UserTriggerState],
+) -> Result<(), PgTrickleError> {
+    with_stream_owner(st, || {
+        let table = format!(
+            "{}.{}",
+            crate::sql_builder::ident(&st.pgt_schema),
+            crate::sql_builder::ident(&st.pgt_name),
+        );
+        for trigger in triggers.iter().filter(|trigger| trigger.enabled != "D") {
+            let trigger_name = crate::sql_builder::ident(&trigger.name);
+            let mode = match trigger.enabled.as_str() {
+                "O" => "",
+                "R" => "REPLICA ",
+                "A" => "ALWAYS ",
+                other => {
+                    return Err(PgTrickleError::InternalError(format!(
+                        "Unexpected enabled state {other:?} for trigger {} on {table}",
+                        trigger.name
+                    )));
+                }
+            };
+            Spi::run(&format!(
+                "ALTER TABLE {table} ENABLE {mode}TRIGGER {trigger_name}"
+            ))
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "Could not restore trigger {} on {table}: {e}",
+                    trigger.name
+                ))
+            })?;
+        }
+        Ok(())
+    })
+}
+
 pub(crate) fn source_visibility_key(
     source_oid: pgrx::pg_sys::Oid,
 ) -> Result<(String, Vec<String>), PgTrickleError> {

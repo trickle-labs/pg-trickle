@@ -845,6 +845,143 @@ async fn test_upgrade_chain_new_functions_exist() {
     }
 }
 
+/// Existing v0.108.0 installations receive the updated health view through the
+/// real extension migration, with their IMMEDIATE streams and grants retained.
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_quick_health_reports_broken_immediate_cascades() {
+    if !upgrade_image_available() {
+        eprintln!("SKIP: PGS_UPGRADE_FROM not set (need upgrade E2E image)");
+        return;
+    }
+    let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
+    let to_version =
+        std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
+    assert_eq!(from_version, "0.108.0");
+    assert_eq!(to_version, "0.108.1");
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute(&format!(
+        "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
+    ))
+    .await;
+    db.execute("CREATE ROLE quick_health_reader").await;
+    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO quick_health_reader")
+        .await;
+    db.execute("GRANT SELECT ON pgtrickle.quick_health TO quick_health_reader")
+        .await;
+    db.execute("CREATE TABLE upgrade_qh_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO upgrade_qh_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "upgrade_qh_imm",
+        "SELECT id, val FROM upgrade_qh_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+
+    db.execute(&format!(
+        "ALTER EXTENSION pg_trickle UPDATE TO '{to_version}'"
+    ))
+    .await;
+    let installed_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+        .await;
+    assert_eq!(installed_version, to_version);
+
+    let columns: String = db
+        .query_scalar(
+            "SELECT string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position) \
+             FROM information_schema.columns \
+             WHERE table_schema = 'pgtrickle' AND table_name = 'quick_health'",
+        )
+        .await;
+    assert_eq!(
+        columns,
+        "total_stream_tables:bigint,error_tables:bigint,stale_tables:bigint,\
+         scheduler_running:boolean,status:text,broken_immediate_tables:bigint"
+    );
+    let privilege_retained: bool = db
+        .query_scalar(
+            "SELECT has_table_privilege('quick_health_reader', \
+             'pgtrickle.quick_health', 'SELECT')",
+        )
+        .await;
+    assert!(
+        privilege_retained,
+        "CREATE OR REPLACE VIEW must retain grants"
+    );
+    let healthy_count: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(healthy_count, 0);
+
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'upgrade_qh_imm'",
+        )
+        .await;
+    db.execute(&format!(
+        "ALTER TABLE upgrade_qh_src DISABLE TRIGGER pgt_ivm_after_upd_{pgt_id}"
+    ))
+    .await;
+    let broken_count: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    let broken_status: String = db
+        .query_scalar("SELECT status FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(broken_count, 1);
+    assert_eq!(broken_status, "CRITICAL");
+    db.execute("SELECT pgtrickle.repair_stream_table('upgrade_qh_imm')")
+        .await;
+    let repaired_count: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(repaired_count, 0);
+
+    db.execute(&format!(
+        "DROP TRIGGER pgt_ivm_after_ins_{pgt_id} ON upgrade_qh_src"
+    ))
+    .await;
+    let missing_count: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    let missing_status: String = db
+        .query_scalar("SELECT status FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(missing_count, 1);
+    assert_eq!(missing_status, "CRITICAL");
+    db.execute("SELECT pgtrickle.repair_stream_table('upgrade_qh_imm')")
+        .await;
+    db.assert_st_matches_query("upgrade_qh_imm", "SELECT id, val FROM upgrade_qh_src")
+        .await;
+    let healthy_again: i64 = db
+        .query_scalar("SELECT broken_immediate_tables FROM pgtrickle.quick_health")
+        .await;
+    assert_eq!(healthy_again, 0);
+
+    let fresh = E2eDb::new().await.with_extension().await;
+    let upgraded_definition: String = db
+        .query_scalar("SELECT pg_get_viewdef('pgtrickle.quick_health'::regclass, true)")
+        .await;
+    let fresh_definition: String = fresh
+        .query_scalar("SELECT pg_get_viewdef('pgtrickle.quick_health'::regclass, true)")
+        .await;
+    assert_eq!(upgraded_definition, fresh_definition);
+    let fresh_columns: String = fresh
+        .query_scalar(
+            "SELECT string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position) \
+             FROM information_schema.columns \
+             WHERE table_schema = 'pgtrickle' AND table_name = 'quick_health'",
+        )
+        .await;
+    assert_eq!(columns, fresh_columns);
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // L9 — Existing stream tables survive upgrade and refresh
 // ══════════════════════════════════════════════════════════════════════

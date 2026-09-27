@@ -1,0 +1,132 @@
+./tests/build_e2e_image.sh
+  Builder image present (linux/amd64): pg_trickle_builder:pg18
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Building E2E test image: pg_trickle_e2e:latest
+  Project root: /Users/grove/projects/pg-trickle3
+  Dockerfile:   /Users/grove/projects/pg-trickle3/tests/Dockerfile.e2e
+  Builder image: pg_trickle_builder:pg18
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.e2e
+#1 transferring dockerfile: 7.68kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.9s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+#3 resolve docker.io/docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32 done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/pg_trickle_builder:pg18
+#4 ...
+
+#5 [internal] load metadata for docker.io/library/postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+#5 DONE 0.7s
+
+#4 [internal] load metadata for docker.io/library/pg_trickle_builder:pg18
+#4 DONE 1.0s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 527B 0.0s done
+#6 DONE 0.0s
+
+#7 [builder 1/9] FROM docker.io/library/pg_trickle_builder:pg18@sha256:19cdb6062ab6a0f2e2af1e5e58047ada62185f3b81a276a22e74abbbe4408025
+#7 resolve docker.io/library/pg_trickle_builder:pg18@sha256:19cdb6062ab6a0f2e2af1e5e58047ada62185f3b81a276a22e74abbbe4408025 done
+#7 DONE 0.0s
+
+#8 [stage-1 1/8] FROM docker.io/library/postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+#8 resolve docker.io/library/postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af 0.0s done
+#8 DONE 0.0s
+
+#9 [internal] load build context
+#9 transferring context: 6.89MB 0.1s done
+#9 DONE 0.1s
+
+#10 [builder 4/9] RUN mkdir -p src/bin src/dvm/operators benches &&     echo '#![allow(warnings)] fn main() {}' > src/bin/pgrx_embed.rs &&     echo '#![allow(warnings)]' > src/lib.rs &&     echo '' > src/dvm/mod.rs &&     echo '' > src/dvm/operators/mod.rs &&     echo '' > src/ivm.rs &&     echo 'fn main() {}' > benches/refresh_bench.rs &&     echo 'fn main() {}' > benches/diff_operators.rs &&     echo 'fn main() {}' > benches/scheduler_bench.rs &&     echo 'fn main() {}' > benches/pgvector_bench.rs
+#10 CACHED
+
+#11 [builder 2/9] WORKDIR /build
+#11 CACHED
+
+#12 [builder 3/9] COPY Cargo.toml Cargo.lock ./
+#12 CACHED
+
+#13 [builder 5/9] RUN --mount=type=cache,target=/root/.cargo/registry     --mount=type=cache,target=/root/.cargo/git     cargo fetch
+#13 CACHED
+
+#14 [builder 6/9] COPY src/ src/
+#14 DONE 0.1s
+
+#15 [builder 7/9] COPY pg_trickle.control ./
+#15 DONE 0.0s
+
+#16 [builder 8/9] RUN --mount=type=cache,target=/root/.cargo/registry     --mount=type=cache,target=/root/.cargo/git     --mount=type=cache,target=/build/target     cargo pgrx package --pg-config /usr/bin/pg_config &&     mkdir -p /artefacts &&     cp -r target/release/pg_trickle-pg18 /artefacts/
+#16 1.429 [32m[1m       Using[0m[39m [37m[1mPgConfig("pg18")[0m[39m and `pg_config` from [36m/usr/bin/pg_config[39m
+#16 1.532 [32m[1m    Building[0m[39m extension with features [36mpg18[39m
+#16 1.532 [32m[1m     Running[0m[39m command [36m"/root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo" "build" "--lib" "--release" "--features" "pg18" "--no-default-features" "--message-format=json-render-diagnostics"[39m
+#16 1.984    Compiling pg_trickle v0.108.1 (/build)
+#16 190.1     Finished `release` profile [optimized] target(s) in 3m 08s
+#16 190.3 [32m[1m  Installing[0m[39m extension
+#16 190.5 [32m[1m     Copying[0m[39m control file to [36mtarget/release/pg_trickle-pg18/usr/share/postgresql/18/extension/pg_trickle.control[39m
+#16 191.4 [32m[1m     Copying[0m[39m shared library to [36mtarget/release/pg_trickle-pg18/usr/lib/postgresql/18/lib/pg_trickle.so[39m
+#16 191.6 [32m[1m  Discovered[0m[39m [36m[1m186[0m[39m SQL entities: [36m[1m1[0m[39m schemas ([36m[1m1[0m[39m unique), [36m[1m168[0m[39m functions, [36m[1m0[0m[39m types, [36m[1m0[0m[39m enums, [36m[1m17[0m[39m sqls, [36m[1m0[0m[39m ords, [36m[1m0[0m[39m hashes, [36m[1m0[0m[39m aggregates, [36m[1m0[0m[39m triggers
+#16 191.6 [32m[1m     Writing[0m[39m SQL entities to /build/target/release/pg_trickle-pg18/usr/share/postgresql/18/extension/pg_trickle--0.108.1.sql
+#16 191.6 [32m[1m    Finished[0m[39m installing pg_trickle
+#16 DONE 191.8s
+
+#17 [builder 9/9] RUN echo "=== Package artifacts ===" &&     find /artefacts/pg_trickle-pg18 -type f &&     echo "========================="
+#17 0.114 === Package artifacts ===
+#17 0.137 /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/pg_trickle.control
+#17 0.137 /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/pg_trickle--0.108.1.sql
+#17 0.137 /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/pg_trickle--0.108.0.sql
+#17 0.137 /artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/pg_trickle.so
+#17 0.138 =========================
+#17 DONE 0.2s
+
+#18 [stage-1 2/8] RUN apt-get update && apt-get install -y --no-install-recommends     postgresql-18-pgvector     && rm -rf /var/lib/apt/lists/*
+#18 CACHED
+
+#19 [stage-1 3/8] COPY --from=builder     /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/     /usr/share/postgresql/18/extension/
+#19 DONE 0.0s
+
+#20 [stage-1 4/8] COPY --from=builder     /artefacts/pg_trickle-pg18/usr/lib/postgresql/18/lib/     /usr/lib/postgresql/18/lib/
+#20 DONE 0.0s
+
+#21 [stage-1 5/8] COPY tests/pg_tide.control     tests/pg_tide--0.46.0.sql     tests/pg_tide--0.54.0.sql     tests/pg_tide--0.53.0.sql     /usr/share/postgresql/18/extension/
+#21 DONE 0.0s
+
+#22 [stage-1 6/8] RUN echo "" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# pg_trickle E2E test configuration" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "shared_preload_libraries = 'pg_trickle'" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "pg_trickle.enable_output_delta_qualification = on" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "track_commit_timestamp = on" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "wal_level = logical" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "max_replication_slots = 10" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# Each test database spawns one pg_trickle scheduler BGW via the launcher." >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# Default max_worker_processes=8 is too tight when many test databases run" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# concurrently. The full E2E suite runs ~55 test binaries in parallel, each" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# with its own scheduler BGW (e.g. 1 launcher + 55 scheduler workers +  " >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# autovacuum workers). 32 was too low, causing load_dynamic() failures for" >> /usr/share/postgresql/postgresql.conf.sample &&     echo "# the shared 'postgres' DB scheduler used by bgworker/cascade tests." >> /usr/share/postgresql/postgresql.conf.sample &&     echo "max_worker_processes = 128" >> /usr/share/postgresql/postgresql.conf.sample
+#22 DONE 0.1s
+
+#23 [stage-1 7/8] RUN ls -la /usr/share/postgresql/18/extension/pg_trickle* &&     ls -la /usr/lib/postgresql/18/lib/pg_trickle*
+#23 0.145 -rw-r--r-- 1 root root 179260 Sep 27 02:07 /usr/share/postgresql/18/extension/pg_trickle--0.108.0.sql
+#23 0.145 -rw-r--r-- 1 root root 179260 Sep 27 02:07 /usr/share/postgresql/18/extension/pg_trickle--0.108.1.sql
+#23 0.145 -rw-r--r-- 1 root root    205 Sep 27 02:07 /usr/share/postgresql/18/extension/pg_trickle.control
+#23 0.168 -rwxr-xr-x 1 root root 17588616 Sep 27 02:07 /usr/lib/postgresql/18/lib/pg_trickle.so
+#23 DONE 0.2s
+
+#24 [stage-1 8/8] RUN echo "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;"     > /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+#24 DONE 0.1s
+
+#25 exporting to image
+#25 exporting layers
+#25 exporting layers 0.6s done
+#25 exporting manifest sha256:fd50ce9e3db00e035b2b7ad64883690ae6665fa00cb3ba970f7a5ef07cd00af1 done
+#25 exporting config sha256:f02a839661c1697c863a9ed14ca2a00acd20b9f578af548ff52aa6e0b9a9f028 done
+#25 exporting attestation manifest sha256:9fbb2887773cbc573aaf9dca9dc78e9fc9c432f87c559b98f6512bd50ad5083c done
+#25 exporting manifest list sha256:f99d19b7e8857a40fcdbe3f931bc3a853eee0d9b2046c60a5c00b16902b8ad76 done
+#25 naming to docker.io/library/pg_trickle_e2e:latest done
+#25 DONE 0.6s
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ Image built: pg_trickle_e2e:latest
+  Image size: 156 MB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+To test manually:
+  docker run --rm -d --name pgs-e2e -e POSTGRES_PASSWORD=postgres -p 15432:5432 pg_trickle_e2e:latest
+  sleep 3
+  psql -h localhost -p 15432 -U postgres -c "CREATE EXTENSION pg_trickle;"
+  docker stop pgs-e2e
