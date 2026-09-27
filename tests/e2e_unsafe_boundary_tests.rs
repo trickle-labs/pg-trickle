@@ -63,7 +63,7 @@ async fn test_instrumented_pg18_boot_and_assertions_enabled() {
             db.container_id(),
             "sh",
             "-c",
-            &format!("nm -D '{path}' | grep -E '__asan_(init|report)'"),
+            &format!("nm -D '{path}' | grep -E '__asan_report_(load|store)'"),
         ]);
         assert!(
             output.status.success(),

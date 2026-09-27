@@ -48,6 +48,10 @@ jobs:
         env:
           QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
+          if [[ "$QUALIFICATION_ONLY" == "true" && "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "Qualification-only runs must use a branch ref, not a tag."
+            exit 1
+          fi
           EXPECTED_TAG="$GITHUB_REF_NAME"
           if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
             VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"

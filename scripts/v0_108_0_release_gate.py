@@ -278,6 +278,7 @@ def check_support_contract() -> None:
     shared.require("release-candidate.json" in workflow, "release archives do not carry candidate identity")
     shared.require(
         "qualification_only:" in workflow
+        and '"$GITHUB_REF_TYPE" == "tag"' in workflow
         and 'EXPECTED_TAG="v${VERSION}"' in workflow
         and workflow.count(
             "if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}"
