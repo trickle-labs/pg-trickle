@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-QUALIFICATION = ROOT / "tests/release/v0.108.0-qualification.json"
+QUALIFICATION = ROOT / "tests/release/v0.108.1-qualification.json"
 SUITES = ("sensitivity-baseline", "recovery", "publication-recovery", "upgrade-chain", "recreation")
 
 
@@ -32,7 +32,7 @@ def run_writer(
 ) -> subprocess.CompletedProcess[str]:
     command = [
         sys.executable, "scripts/release_evidence.py", "--output", str(output),
-        "--version", "0.108.0", "--candidate-commit", commit,
+        "--version", "0.108.1", "--candidate-commit", commit,
         "--qualification", str(contract), "--artifact", str(artifact),
     ]
     for result in results:
@@ -85,7 +85,7 @@ def main() -> None:
         parser.error("package directory must be outside the output directory")
     shutil.rmtree(output, ignore_errors=True)
     output.mkdir(parents=True)
-    package = output / f"pg_trickle-0.108.0-pg18-{args.platform}"
+    package = output / f"pg_trickle-0.108.1-pg18-{args.platform}"
     shutil.copytree(source / "usr/lib/postgresql/18/lib", package / "lib")
     shutil.copytree(source / "usr/share/postgresql/18/extension", package / "extension")
 
@@ -311,7 +311,7 @@ def main() -> None:
     manual_pass = subprocess.run(
         [
             sys.executable, "scripts/release_evidence.py", "--output", str(negative / "manual-pass.json"),
-            "--version", "0.108.0", "--candidate-commit", args.candidate_commit,
+            "--version", "0.108.1", "--candidate-commit", args.candidate_commit,
             "--qualification", str(contract_path), "--artifact", str(artifact),
             "--suite", "sensitivity-baseline=passed",
         ],

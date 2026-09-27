@@ -65,14 +65,14 @@ jobs:
   # The current release contract runs on every PR so publication cannot
   # introduce untested suite claims or manually asserted passing results.
   release-qualification-contract:
-    name: v0.108.0 release evidence contract
+    name: v0.108.1 release evidence contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
       - name: Validate release evidence and rejection controls
-        run: python3 scripts/v0_108_0_release_gate.py
+        run: python3 scripts/v0_108_1_release_gate.py
 
   # ── Unit tests (Linux PR gate) ──────────────────────────────────────────
   unit-tests:
@@ -1461,7 +1461,7 @@ jobs:
             psql -U postgres -d app -v ON_ERROR_STOP=1 -c "
               CREATE EXTENSION pg_trickle VERSION '0.107.0';
               SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_trickle';
-              ALTER EXTENSION pg_trickle UPDATE TO '0.108.0';
+              ALTER EXTENSION pg_trickle UPDATE TO '0.108.1';
               SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_trickle';
               SHOW pg_trickle.enabled;
               CREATE TABLE cnpg_test_src (id INT PRIMARY KEY, val TEXT);
@@ -1520,7 +1520,7 @@ jobs:
               'shipping_upgrade_st',
               'SELECT id, val FROM shipping_upgrade_src',
               '1m', 'DIFFERENTIAL');
-            ALTER EXTENSION pg_trickle UPDATE TO '0.108.0';
+            ALTER EXTENSION pg_trickle UPDATE TO '0.108.1';
             INSERT INTO shipping_upgrade_src VALUES (2, 'after');
             SELECT pgtrickle.refresh_stream_table('shipping_upgrade_st');
             SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';

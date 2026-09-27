@@ -282,7 +282,7 @@ test-v108-conformance: build-e2e-image
 # Validate the v0.108 qualification contract and publication wiring.
 [group: "release"]
 v0-108-release-gate:
-    python3 scripts/v0_108_0_release_gate.py
+    python3 scripts/v0_108_1_release_gate.py
 
 # Run the v0.105 qualification gate.
 [group: "release"]
@@ -627,7 +627,7 @@ citus-chaos-up:
     docker compose -f docker/docker-compose.citus.yml up -d --wait
     @echo "Citus chaos cluster is up."
     @echo "Set these environment variables before running just test-citus-chaos:"
-    @echo "  export CITUS_COORDINATOR_URL=postgresql://postgres:postgres@localhost:15432/postgres"
+    @echo "  export CITUS_COORDINATOR_URL=postgresql://postgres@localhost:15432/postgres (add the local coordinator password if required)"
     @echo "  export CITUS_COORDINATOR_CONTAINER=citus-coordinator"
     @echo "  export CITUS_WORKER_0_CONTAINER=citus-worker-0"
     @echo "  export CITUS_WORKER_1_CONTAINER=citus-worker-1"

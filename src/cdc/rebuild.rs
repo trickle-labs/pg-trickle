@@ -718,15 +718,16 @@ pub fn has_user_triggers(st_relid: pg_sys::Oid) -> Result<bool, PgTrickleError> 
     Spi::get_one::<bool>(&format!(
         "SELECT EXISTS(\
            SELECT 1 FROM pg_catalog.pg_trigger tr \
+           JOIN pg_catalog.pg_class rel ON rel.oid = tr.tgrelid \
+           JOIN pg_catalog.pg_namespace rel_ns ON rel_ns.oid = rel.relnamespace \
+           JOIN pg_catalog.pg_proc fn ON fn.oid = tr.tgfoid \
+           JOIN pg_catalog.pg_namespace fn_ns ON fn_ns.oid = fn.pronamespace \
            WHERE tr.tgrelid = {}::oid \
              AND NOT tr.tgisinternal \
-             AND NOT EXISTS ( \
-               SELECT 1 FROM pg_catalog.pg_proc fn \
-               JOIN pg_catalog.pg_namespace ns ON ns.oid = fn.pronamespace \
-               WHERE fn.oid = tr.tgfoid \
-                 AND ns.nspname = 'pgtrickle' \
-                 AND fn.proname::text ~ '{}' \
-             ) \
+             AND NOT (fn_ns.nspname = 'pgtrickle' AND fn.proname::text ~ '{}') \
+             AND NOT (tr.tgname::text IN ('pgt_dml_guard', 'pgt_truncate_guard') \
+                      AND fn_ns.oid = rel_ns.oid \
+                      AND pg_catalog.starts_with(fn.proname::text, '_pgt_guard_')) \
          )",
         st_relid.to_u32(),
         crate::ivm::IVM_TRIGGER_FUNCTION_PATTERN,

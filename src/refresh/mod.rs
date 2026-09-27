@@ -273,6 +273,7 @@ pub(crate) fn disable_user_triggers(
 
         for trigger in triggers.iter().filter(|trigger| trigger.enabled != "D") {
             let trigger_name = crate::sql_builder::ident(&trigger.name);
+            // nosemgrep: rust.spi.run.dynamic-format — table and trigger_name are built with quote_ident from catalog identifiers.
             Spi::run(&format!(
                 "ALTER TABLE {table} DISABLE TRIGGER {trigger_name}"
             ))
@@ -311,6 +312,7 @@ pub(crate) fn restore_user_triggers(
                     )));
                 }
             };
+            // nosemgrep: rust.spi.run.dynamic-format — identifiers are quote_ident-escaped and mode is a fixed enum value.
             Spi::run(&format!(
                 "ALTER TABLE {table} ENABLE {mode}TRIGGER {trigger_name}"
             ))

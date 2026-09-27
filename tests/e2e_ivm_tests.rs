@@ -15,6 +15,7 @@ mod e2e;
 
 use e2e::E2eDb;
 use sqlx::PgPool;
+#[cfg(not(feature = "light-e2e"))]
 use std::time::Duration;
 
 // ── Helper ─────────────────────────────────────────────────────────────
@@ -875,6 +876,7 @@ async fn test_ivm_full_refresh_preserves_immediate_descendants() {
     .await;
 }
 
+#[cfg(not(feature = "light-e2e"))]
 #[tokio::test]
 async fn test_ivm_scheduled_full_refresh_preserves_immediate_descendants() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
