@@ -303,7 +303,8 @@ async fn test_caller_context_pg_error_restores_state_and_continues() {
         .execute(&mut *conn)
         .await
         .expect("set caller search path baseline");
-    sqlx::query("SET row_security = off")
+    // The failure probe sets this to off, so an on baseline makes restoration observable.
+    sqlx::query("SET row_security = on")
         .execute(&mut *conn)
         .await
         .expect("set caller row-security baseline");
