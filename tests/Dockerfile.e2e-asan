@@ -38,10 +38,12 @@ COPY benches/ benches/
 COPY src/ src/
 COPY sql/ sql/
 COPY pg_trickle.control ./
-RUN cargo +"${RUST_NIGHTLY}" pgrx package --pg-config /usr/local/pgsql/bin/pg_config \
+RUN cargo +"${RUST_NIGHTLY}" pgrx package --features pg18,e2e-unsafe-test-hooks \
+      --pg-config /usr/local/pgsql/bin/pg_config \
       --target x86_64-unknown-linux-gnu && \
     RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes' \
-      cargo +"${RUST_NIGHTLY}" build --lib --release --features pg18 --no-default-features \
+      cargo +"${RUST_NIGHTLY}" build --lib --release \
+        --features pg18,e2e-unsafe-test-hooks --no-default-features \
         --target x86_64-unknown-linux-gnu && \
     cp target/x86_64-unknown-linux-gnu/release/libpg_trickle.so \
       target/x86_64-unknown-linux-gnu/release/pg_trickle-pg18/usr/local/pgsql/lib/pg_trickle.so && \

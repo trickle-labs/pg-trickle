@@ -55,6 +55,8 @@ ALLOWED_MISSING: set[str] = {
     "clear_caches",
     "migrate",
     "parse_duration_seconds",
+    # Dedicated ASan E2E hook, compiled only with the non-default test feature.
+    "e2e_catch_security_context_error",
 }
 
 
@@ -127,4 +129,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

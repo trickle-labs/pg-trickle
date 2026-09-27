@@ -203,6 +203,90 @@ async fn assert_allowed_and_denied(conn: &mut PgConnection, prefix: &str) {
     assert!(denied.is_err(), "restored caller remains denied");
 }
 
+async fn assert_in_backend_context_restored(
+    db: &E2eDb,
+    conn: &mut PgConnection,
+    context: &str,
+    stream_table: &str,
+    expected_message: &str,
+) {
+    let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("read the backend that will run the direct API body probe");
+    let error = sqlx::query("SELECT pgtrickle.e2e_catch_security_context_error($1, $2)")
+        .bind(context)
+        .bind(stream_table)
+        .execute(&mut *conn)
+        .await
+        .expect_err("instrumented API body rethrows its expected ERROR after recording state");
+    assert!(
+        error.to_string().contains(expected_message),
+        "probe propagated the expected PostgreSQL ERROR: {error}"
+    );
+
+    let logs = docker_output(&["logs", db.container_id()]);
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&logs.stdout),
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    const MARKER: &str = "PGTRICKLE_E2E_SECURITY_CONTEXT_STATE:";
+    let witness = logs
+        .lines()
+        .filter_map(|line| line.split_once(MARKER).map(|(_, json)| json))
+        .filter_map(|json| serde_json::from_str::<serde_json::Value>(json.trim()).ok())
+        .find(|witness| {
+            witness["context"] == context
+                && witness["backend_pid"]
+                    .as_str()
+                    .and_then(|pid| pid.parse::<i32>().ok())
+                    == Some(backend_pid)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "backend log must contain the in-catch state witness for context {context}, PID {backend_pid}; logs:\n{logs}"
+            )
+        });
+    assert!(
+        witness["error"]
+            .as_str()
+            .is_some_and(|message| message.contains(expected_message)),
+        "witness records the expected ERROR: {witness}"
+    );
+    let before = witness["before"]
+        .as_array()
+        .expect("witness has pre-call state");
+    let after = witness["after"]
+        .as_array()
+        .expect("witness has post-catch state");
+    assert_eq!(
+        before.len(),
+        4,
+        "state includes PID, role, path, and row_security"
+    );
+    assert_eq!(
+        after.len(),
+        4,
+        "state includes PID, role, path, and row_security"
+    );
+    assert_eq!(
+        before[0].as_str().and_then(|pid| pid.parse::<i32>().ok()),
+        Some(backend_pid),
+        "witness uses the pinned backend"
+    );
+    assert_eq!(
+        after[0].as_str().and_then(|pid| pid.parse::<i32>().ok()),
+        Some(backend_pid),
+        "catch remains on the pinned backend"
+    );
+    assert_eq!(
+        &before[1..],
+        &after[1..],
+        "{context} context cleanup restores role, search_path, and row_security inside the running backend before SQL rollback"
+    );
+}
+
 #[tokio::test]
 async fn test_owner_context_pg_error_restores_state_and_continues() {
     let db = E2eDb::new().await.with_extension().await;
@@ -237,6 +321,7 @@ async fn test_owner_context_pg_error_restores_state_and_continues() {
         "ALTER TABLE unsafe_owner_st OWNER TO unsafe_owner",
         "GRANT SELECT ON unsafe_owner_src TO unsafe_owner",
         "GRANT EXECUTE ON FUNCTION pgtrickle.refresh_stream_table(text) TO unsafe_caller",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.e2e_catch_security_context_error(text, text) TO unsafe_caller",
     ])
     .await;
     db.execute("INSERT INTO unsafe_owner_src VALUES (2)").await;
@@ -260,6 +345,15 @@ async fn test_owner_context_pg_error_restores_state_and_continues() {
         .await
         .expect_err("refresh must raise the controlled division-by-zero ERROR");
     assert!(error.to_string().contains("division by zero"), "{error}");
+    assert_eq!(session_state(&mut conn).await, before);
+    assert_in_backend_context_restored(
+        &db,
+        &mut conn,
+        "owner",
+        "unsafe_owner_st",
+        "division by zero",
+    )
+    .await;
     assert_eq!(session_state(&mut conn).await, before);
     assert_allowed_and_denied(&mut conn, "unsafe_owner").await;
 }
@@ -290,6 +384,7 @@ async fn test_caller_context_pg_error_restores_state_and_continues() {
         "GRANT USAGE ON SCHEMA pgtrickle, tide TO unsafe_outbox_caller",
         "GRANT SELECT ON unsafe_caller_src, tide.tide_outbox_config, unsafe_caller_allowed TO unsafe_outbox_caller",
         "GRANT EXECUTE ON FUNCTION pgtrickle.attach_outbox(text, integer, integer) TO unsafe_outbox_caller",
+        "GRANT EXECUTE ON FUNCTION pgtrickle.e2e_catch_security_context_error(text, text) TO unsafe_outbox_caller",
         "CREATE OR REPLACE FUNCTION tide.outbox_create(p_name text, p_retention_hours integer DEFAULT 24, p_inline_threshold integer DEFAULT 10000) RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM set_config('search_path', 'pg_temp', false); PERFORM set_config('row_security', 'off', false); RAISE EXCEPTION 'unsafe caller context probe'; END $$",
     ])
     .await;
@@ -314,6 +409,15 @@ async fn test_caller_context_pg_error_restores_state_and_continues() {
         .await
         .expect_err("outbox adapter must propagate its deliberate PostgreSQL ERROR");
     assert!(error.to_string().contains("unsafe caller context probe"));
+    assert_eq!(session_state(&mut conn).await, before);
+    assert_in_backend_context_restored(
+        &db,
+        &mut conn,
+        "caller",
+        "unsafe_caller_st",
+        "unsafe caller context probe",
+    )
+    .await;
     assert_eq!(session_state(&mut conn).await, before);
     assert_allowed_and_denied(&mut conn, "unsafe_caller").await;
 }

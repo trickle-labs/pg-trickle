@@ -22,7 +22,7 @@
       "tests/Dockerfile.e2e-asan", "-t", "pg_trickle_e2e_asan:contract", "."
     ],
     "test_command_argv": [
-      "cargo", "test", "--test", "e2e_unsafe_boundary_tests", "--features", "pg18", "--", "--test-threads=1", "--nocapture"
+      "cargo", "test", "--test", "e2e_unsafe_boundary_tests", "--features", "pg18,e2e-unsafe-test-hooks", "--", "--test-threads=1", "--nocapture"
     ],
     "separate_from_exact_release_package": true,
     "required_cases": [

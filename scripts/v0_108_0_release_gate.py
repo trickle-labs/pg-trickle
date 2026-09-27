@@ -167,6 +167,8 @@ def check_support_contract() -> None:
         and instrumented.get("assertions") == "--enable-cassert"
         and instrumented.get("instrumentation")
         == "AddressSanitizer on PostgreSQL and pg_trickle"
+        and instrumented.get("test_command_argv", [])[4:6]
+        == ["--features", "pg18,e2e-unsafe-test-hooks"]
         and "--nocapture" in instrumented.get("test_command_argv", [])
         and set(instrumented.get("required_cases", [])) == expected_unsafe_cases,
         "unsafe boundary qualification is missing cases or is conflated with exact-release evidence",
@@ -311,9 +313,12 @@ def check_support_contract() -> None:
     )[0]
     unsafe_patterns = re.findall(r"^\s+- '([^']+)'$", unsafe_filter, re.MULTILINE)
     for path in (
+        "Cargo.toml",
         "src/error.rs",
         "src/refresh/pipeline.rs",
         "src/api/security_context.rs",
+        "src/api/refresh_ops.rs",
+        "src/api/outbox.rs",
         "src/scheduler/dispatch.rs",
         "tests/e2e/mod.rs",
         "tests/fixtures/asan_pg18_leak.supp",
@@ -358,6 +363,10 @@ def check_support_contract() -> None:
         "unsafe-boundary-asan:" in ci
         and "needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'" in ci
         and "tests/e2e_unsafe_boundary_tests" in ci
+        and "--features pg18,e2e-unsafe-test-hooks" in asan_dockerfile
+        and "--features pg18,e2e-unsafe-test-hooks" in ci
+        and "--features pg18,e2e-unsafe-test-hooks" in workflow
+        and 'default = ["pg18"]' in (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         and "--test-threads=1 --nocapture" in ci
         and "--test-threads=1 --nocapture" in workflow,
         "unsafe boundary changes do not run their instrumented E2E slice",
