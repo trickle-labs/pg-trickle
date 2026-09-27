@@ -275,6 +275,15 @@ def check_support_contract() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     shared.require("release-candidate.json" in workflow, "release archives do not carry candidate identity")
     shared.require(
+        "qualification_only:" in workflow
+        and 'EXPECTED_TAG="v${VERSION}"' in workflow
+        and workflow.count(
+            "if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}"
+        ) == 3
+        and "Publication stage ended as $stage during qualification-only run." in workflow,
+        "candidate qualification mode must bind the package version and skip every publisher",
+    )
+    shared.require(
         "Run separate unsafe-boundary ASan qualification" in workflow
         and "qualification-logs/unsafe-asan" in workflow
         and "steps.unsafe-asan.outcome" in workflow
