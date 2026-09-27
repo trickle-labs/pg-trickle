@@ -1607,9 +1607,12 @@ jobs:
               - 'scripts/run_failure_recovery_repetition.sh'
               - '.github/workflows/ci.yml'
             unsafe_boundary_changed:
+              - 'Cargo.toml'
               - 'src/error.rs'
               - 'src/refresh/pipeline.rs'
               - 'src/api/security_context.rs'
+              - 'src/api/refresh_ops.rs'
+              - 'src/api/outbox.rs'
               - 'src/scheduler/dispatch.rs'
               - 'tests/e2e_unsafe_boundary_tests.rs'
               - 'tests/e2e/mod.rs'
@@ -1639,7 +1642,8 @@ jobs:
             -f tests/Dockerfile.e2e-asan \
             -t pg_trickle_e2e_asan:contract .
           PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
-            cargo test --test e2e_unsafe_boundary_tests --features pg18 -- --test-threads=1 --nocapture
+            cargo test --test e2e_unsafe_boundary_tests \
+              --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture
 
   e2e-sensitive-gate:
     name: Sensitive E2E gate

@@ -485,7 +485,8 @@ jobs:
             -t pg_trickle_e2e_asan:contract . 2>&1 | \
             tee qualification-logs/unsafe-asan/image-build.log
           PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
-            cargo test --test e2e_unsafe_boundary_tests --features pg18 -- --test-threads=1 --nocapture 2>&1 | \
+            cargo test --test e2e_unsafe_boundary_tests \
+              --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture 2>&1 | \
             tee qualification-logs/unsafe-asan/workloads.log
 
       - name: Require every declared instrumented case to pass
