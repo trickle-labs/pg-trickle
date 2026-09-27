@@ -3818,7 +3818,8 @@ fn execute_scheduled_refresh(
     let test_failure = if config::pg_trickle_test_chaos_for_table() == st.pgt_name
         && config::pg_trickle_test_chaos_phase() == "before_apply"
     {
-        const SERIALIZATION_FAILURE_SQLSTATE: u32 = 527_283_932;
+        const SERIALIZATION_FAILURE_SQLSTATE: u32 =
+            pgrx::PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE as u32;
         let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
             .ok()
             .flatten()
