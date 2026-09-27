@@ -57,13 +57,17 @@ EXPECTED_SUITES = shared.EXPECTED_SUITES | {
 
 
 def missing_unsafe_asan_cases(output: str, required_cases: set[str]) -> list[str]:
-    passed = {
-        name.rsplit("::", 1)[-1]
-        for name, status in re.findall(
-            r"^test (\S+) \.\.\. (ok|FAILED|ignored)$", output, re.MULTILINE
+    starts = list(re.finditer(r"^test (\S+) \.\.\.", output, re.MULTILINE))
+    passed = set()
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(output)
+        statuses = re.findall(
+            r"^[ \t]*(ok|FAILED|ignored)[ \t]*$",
+            output[start.end() : end],
+            re.MULTILINE,
         )
-        if status == "ok"
-    }
+        if statuses and statuses[-1] == "ok":
+            passed.add(start.group(1).rsplit("::", 1)[-1])
     return sorted(case for case in required_cases if case.rsplit("::", 1)[-1] not in passed)
 
 
@@ -169,9 +173,11 @@ def check_support_contract() -> None:
     )
     cases = sorted(expected_unsafe_cases)
     first_case = cases[0]
-    first_name = first_case.rsplit("::", 1)[-1]
     complete_output = "\n".join(
-        f"test {case.rsplit('::', 1)[-1]} ... ok" for case in cases
+        f"test {case.rsplit('::', 1)[-1]} ... diagnostic output\nmore output\nok"
+        if case == first_case
+        else f"test {case.rsplit('::', 1)[-1]} ... ok"
+        for case in cases
     )
     missing_output = "\n".join(
         f"test {case.rsplit('::', 1)[-1]} ... ok" for case in cases[1:]
@@ -181,7 +187,9 @@ def check_support_contract() -> None:
         and missing_unsafe_asan_cases(missing_output, expected_unsafe_cases) == [first_case]
         and missing_unsafe_asan_cases(
             complete_output.replace(
-                f"test {first_name} ... ok", f"test {first_name} ... FAILED"
+                "diagnostic output\nmore output\nok",
+                "diagnostic output\nmore output\nFAILED",
+                1,
             ),
             expected_unsafe_cases,
         )
