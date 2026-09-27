@@ -29,11 +29,10 @@ paths = [
 ]
 
 [[allowlists]]
-description = "Removed local Citus sample URL in the justfile history"
+description = "Local Citus sample URL false positive in the initial PR justfile patch"
 condition = "AND"
-regexTarget = "line"
-regexes = [
-    '''postgresql:[/][/]postgres:[p][o][s][t][g][r][e][s]@localhost:15432[/]postgres''',
+commits = [
+    "266229f902c49e5ae4177101002ccffe37355305",
 ]
 paths = [
     '''^justfile$''',
