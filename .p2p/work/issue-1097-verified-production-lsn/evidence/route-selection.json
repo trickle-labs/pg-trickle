@@ -1,8 +1,0 @@
-{
-  "work_item": "work/issue-1097-verified-production-lsn.md",
-  "parent_issue": "https://github.com/trickle-labs/pg-trickle/issues/1090",
-  "route": "direct-to-main",
-  "authorization": "User selected the recommended direct-to-main route with the reply: \u201cdo it!\u201d",
-  "comparison_base": "2dfe8dae90452120cf6760b71dd0def8c241756b",
-  "candidate": "snapshot:sha256:361e2afe069e25ceb27988a01809dd9f840150e5e86307d48e422be6dce3bac9"
-}

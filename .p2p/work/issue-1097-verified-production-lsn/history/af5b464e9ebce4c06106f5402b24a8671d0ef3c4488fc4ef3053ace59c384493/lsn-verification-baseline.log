@@ -1,9 +1,0 @@
-error: Could not automatically infer triggers for this quantifer.  Use #[trigger] annotations to manually mark trigger terms instead.
-   --> verification/lsn.rs:344:13
-    |
-344 | /             forall|digit_index: int| 0 <= digit_index < index as int
-345 | |                 ==> uppercase_hex_byte(buffer@[high_digits as int + 1 + digit_index]),
-    | |_____________________________________________________________________________________^
-
-error: aborting due to 1 previous error
-
