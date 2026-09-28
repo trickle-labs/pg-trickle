@@ -35,6 +35,13 @@ DOCS_DIR = REPO_ROOT / "docs"
 GUC_CATALOG_PATH = DOCS_DIR / "GUC_CATALOG.md"
 SQL_CATALOG_PATH = DOCS_DIR / "SQL_API_CATALOG.md"
 
+# Test hooks enabled only by non-default E2E features are not public API docs.
+_TEST_ONLY_SQL_FUNCTIONS = frozenset({"e2e_catch_security_context_error"})
+
+
+def _exclude_test_only_sql_functions(functions: list[dict]) -> list[dict]:
+    return [f for f in functions if f["fn_name"] not in _TEST_ONLY_SQL_FUNCTIONS]
+
 # ---------------------------------------------------------------------------
 # GUC extraction
 # ---------------------------------------------------------------------------
@@ -342,7 +349,7 @@ def extract_sql_functions_from_pgrx_sql(sql_path: Path) -> list[dict]:
             "description": "",
         })
 
-    return functions
+    return _exclude_test_only_sql_functions(functions)
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +497,7 @@ def extract_sql_functions(src_dir: Path) -> list[dict]:
                 }
             )
 
-    return functions
+    return _exclude_test_only_sql_functions(functions)
 
 
 # ---------------------------------------------------------------------------
