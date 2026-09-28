@@ -1,0 +1,28 @@
+{
+  "work_item": "work/issue-1098-unsafe-boundaries-under-assertions-and-sanitizers.md",
+  "work_item_sha256": "54cb9d4f028518242e577a4b03f372371a91e9188a517f2d03d6e6d37dc4e450",
+  "comparison_base": "2dfe8dae90452120cf6760b71dd0def8c241756b",
+  "binding_inputs": [
+    {
+      "path": "work/sources/issue-1090-parent-snapshot-v1.md",
+      "sha256": "c5645654a11745aee1b64549f457348a145cc9dd10d009b351c2ea89c256d982"
+    },
+    {
+      "path": "work/sources/issue-1092.json",
+      "sha256": "e2625089607a2bf2b1731c66980d0da6c122a2d0f0e51214e2cd56d08e690329"
+    },
+    {
+      "path": "work/sources/issue-1093-contract-v1-proofed.md",
+      "sha256": "7d6b90f3d204dd55b07450eb9c63f569472e2d8d46175d03c59c9e2387499744"
+    },
+    {
+      "path": "work/sources/issue-1093-proof-source.json",
+      "sha256": "b270081bb2e8f4607bf7e839776713c80c9f75a97e557cea97ab102d8c1c654c"
+    },
+    {
+      "path": "work/sources/issue-1098.json",
+      "sha256": "b83db2a5823f15b13cb099821ef920c7b843641cc4c4e3b2a2988dddc4d4c56d"
+    }
+  ],
+  "commit": "f868e873475fdb3fbefa48154972704a8c8cc56d"
+}

@@ -1,0 +1,1953 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.14s
+     Running tests/e2e_unsafe_boundary_tests.rs (target/debug/deps/e2e_unsafe_boundary_tests-a9340f04c0c97203)
+
+running 10 tests
+test e2e::oracle::tests::admission_classification_requires_structured_unsupported_reason ... ok
+test e2e::oracle::tests::schema_oracle_checks_names_typmods_and_collations ... ok
+test e2e::oracle::tests::schema_oracle_rejects_type_differences_by_default ... ok
+test test_caller_context_pg_error_restores_state_and_continues ... ok
+test test_dispatch_worker_cancel_cleanup_and_restart_recovers ... ok
+test test_instrumented_invalid_memory_probe_is_detected ... ASAN_EXPECTED_PROBE_DIAGNOSTIC_BEGIN
+=================================================================
+==131==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000011 at pc 0x5555555551cb bp 0x7ffffffcaa00 sp 0x7ffffffca9f8
+WRITE of size 1 at 0x602000000011 thread T0
+    #0 0x5555555551ca in main /tmp/asan_probe.c:5
+    #1 0x7ffffef6a249  (/lib/x86_64-linux-gnu/libc.so.6+0x27249)
+    #2 0x7ffffef6a304 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x27304)
+    #3 0x5555555550b0 in _start (/usr/local/bin/asan_probe+0x10b0)
+
+0x602000000011 is located 0 bytes to the right of 1-byte region [0x602000000010,0x602000000011)
+allocated by thread T0 here:
+    #0 0x7fffff1dd9cf in __interceptor_malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:69
+    #1 0x55555555518a in main /tmp/asan_probe.c:4
+    #2 0x7ffffef6a249  (/lib/x86_64-linux-gnu/libc.so.6+0x27249)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /tmp/asan_probe.c:5 in main
+Shadow bytes around the buggy address:
+  0x0c047fff7fb0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c047fff7fc0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c047fff7fd0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c047fff7fe0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c047fff7ff0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x0c047fff8000: fa fa[01]fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c047fff8010: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c047fff8020: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c047fff8030: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c047fff8040: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c047fff8050: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==131==ABORTING
+
+ASAN_EXPECTED_PROBE_DIAGNOSTIC_END
+ok
+test test_instrumented_pg18_boot_and_assertions_enabled ... instrumented PostgreSQL version: PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+ASan symbols in postgres:                  U __asan_report_load1
+                 U __asan_report_load16
+                 U __asan_report_load2
+                 U __asan_report_load4
+                 U __asan_report_load8
+                 U __asan_report_load_n
+                 U __asan_report_store1
+                 U __asan_report_store16
+                 U __asan_report_store2
+                 U __asan_report_store4
+                 U __asan_report_store8
+                 U __asan_report_store_n
+
+ASan symbols in pg_trickle.so:                  U __asan_report_load1
+                 U __asan_report_load16
+                 U __asan_report_load2
+                 U __asan_report_load4
+                 U __asan_report_load8
+                 U __asan_report_load_n
+                 U __asan_report_store1
+                 U __asan_report_store16
+                 U __asan_report_store2
+                 U __asan_report_store4
+                 U __asan_report_store8
+                 U __asan_report_store_n
+
+ok
+test test_owner_context_pg_error_restores_state_and_continues ... ok
+test test_pipeline_copy_null_and_toasted_rows_survive_refresh ... ok
+test test_zz_instrumented_diagnostics_are_clean ... ASAN_CONTAINER_STOP_BEGIN
+64ff4d80352eb251d49a1bd21b56ea1ba79aedb37df54e312704ccb4f43b3ece
+
+ASAN_CONTAINER_STOP_END
+ASAN_RAW_POSTGRES_LOGS_BEGIN
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "en_US.utf8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... Etc/UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    /usr/local/pgsql/bin/pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-09-27 23:51:53.610 UTC [40] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-27 23:51:53.673 UTC [40] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-09-27 23:51:53.675 UTC [40] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+2026-09-27 23:51:53.693 UTC [46] LOG:  database system was shut down at 2026-09-27 23:51:53 UTC
+2026-09-27 23:51:53.720 UTC [40] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: running /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+CREATE EXTENSION
+
+
+2026-09-27 23:51:55.157 UTC [40] LOG:  received fast shutdown request
+waiting for server to shut down....2026-09-27 23:51:55.158 UTC [40] LOG:  aborting any active transactions
+2026-09-27 23:51:55.174 UTC [40] LOG:  background worker "logical replication launcher" (PID 50) exited with exit code 1
+2026-09-27 23:51:55.421 UTC [44] LOG:  shutting down
+2026-09-27 23:51:55.422 UTC [44] LOG:  checkpoint starting: shutdown immediate
+2026-09-27 23:51:55.531 UTC [44] LOG:  checkpoint complete: wrote 392 buffers (2.4%), wrote 4 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.018 s, sync=0.083 s, total=0.109 s; sync files=269, longest=0.005 s, average=0.001 s; distance=3784 kB, estimate=3784 kB; lsn=0/1BDAC38, redo lsn=0/1BDAC38
+2026-09-27 23:51:55.565 UTC [40] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+
+2026-09-27 23:51:51.265 UTC [30] LOG:  pg_trickle: initialized (shared_preload_libraries)
+initdb.asan-helper: warning: enabling "trust" authentication for local connections
+initdb.asan-helper: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        168 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:51:55.771 UTC [1] LOG:  pg_trickle: initialized (shared_preload_libraries)
+2026-09-27 23:51:55.839 UTC [1] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-09-27 23:51:55.843 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-27 23:51:55.843 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-27 23:51:55.845 UTC [1] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+2026-09-27 23:51:55.861 UTC [68] LOG:  database system was shut down at 2026-09-27 23:51:55 UTC
+2026-09-27 23:51:55.886 UTC [69] FATAL:  the database system is starting up
+2026-09-27 23:51:55.906 UTC [72] FATAL:  the database system is starting up
+2026-09-27 23:51:55.935 UTC [74] FATAL:  the database system is starting up
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:51:55.949 UTC [1] LOG:  database system is ready to accept connections
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:51:57.621 UTC [82] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:51:58.674 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:51:59.114 UTC [100] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:51:59.563 UTC [95] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.unsafe_caller_st
+2026-09-27 23:51:59.563 UTC [95] STATEMENT:  SELECT pgtrickle.create_stream_table('unsafe_caller_st', $$SELECT id, val FROM unsafe_caller_src$$, '1h', 'DIFFERENTIAL')
+2026-09-27 23:51:59.743 UTC [98] ERROR:  unsafe caller context probe
+2026-09-27 23:51:59.743 UTC [98] STATEMENT:  SELECT pgtrickle.attach_outbox('unsafe_caller_st')
+2026-09-27 23:51:59.763 UTC [98] WARNING:  PGTRICKLE_E2E_SECURITY_CONTEXT_STATE:{"after":["98","postgres","unsafe_outbox_caller","pgtrickle, pg_catalog, pg_temp","on"],"backend_pid":"98","before":["98","postgres","unsafe_outbox_caller","pgtrickle, pg_catalog, pg_temp","on"],"context":"caller","error":"unsafe caller context probe"}
+2026-09-27 23:51:59.764 UTC [98] ERROR:  unsafe caller context probe
+2026-09-27 23:51:59.764 UTC [98] STATEMENT:  SELECT pgtrickle.e2e_catch_security_context_error($1, $2)
+2026-09-27 23:51:59.826 UTC [98] ERROR:  permission denied for table unsafe_caller_denied
+2026-09-27 23:51:59.826 UTC [98] STATEMENT:  SELECT id FROM unsafe_caller_denied
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+      2         22 do_ereport
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:51:59.979 UTC [1] LOG:  received SIGHUP, reloading configuration files
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:05.324 UTC [104] ERROR:  source database "pgt_ext_template_69864" is being accessed by other users
+2026-09-27 23:52:05.324 UTC [104] DETAIL:  There is 1 other session using the database.
+2026-09-27 23:52:05.324 UTC [104] STATEMENT:  CREATE DATABASE "pgt_sched_e2e_69864_2" TEMPLATE "pgt_ext_template_69864"
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:06.147 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:06.161 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:06.163 UTC [1] LOG:  parameter "pg_trickle.scheduler_interval_ms" changed to "100"
+2026-09-27 23:52:06.383 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:06.599 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:06.601 UTC [1] LOG:  parameter "pg_trickle.auto_backoff" changed to "off"
+2026-09-27 23:52:07.232 UTC [111] WARNING:  [pg_trickle] ALWAYS_FULL: The stream table is configured for FULL refreshes. HINT: Use a supported rewrite for differential maintenance, or keep FULL explicitly if that is intentional.
+2026-09-27 23:52:07.649 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:17.883 UTC [114] WARNING:  pg_trickle refresh worker: job 1 panicked (PG ERROR): ErrorReportWithLevel { level: ERROR, inner: ErrorReport { sqlerrcode: ERRCODE_QUERY_CANCELED, message: "canceling statement due to user request", hint: None, detail: None, domain: Some("postgres-18"), location: ErrorReportLocation { file: "postgres.c", funcname: Some("ProcessInterrupts"), line: 3464, col: 0, backtrace: Some(<disabled>) } } }
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:18.204 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:18.806 UTC [117] LOG:  pg_trickle: refreshed public.unsafe_worker_st (REINITIALIZE, +2 -0 rows, 301ms)
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:24.237 UTC [119] ERROR:  source database "pgt_ext_template_69864" is being accessed by other users
+2026-09-27 23:52:24.237 UTC [119] DETAIL:  There is 1 other session using the database.
+2026-09-27 23:52:24.237 UTC [119] STATEMENT:  CREATE DATABASE "pgt_e2e_69864_3" TEMPLATE "pgt_ext_template_69864"
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:25.096 UTC [1] LOG:  received SIGHUP, reloading configuration files
+-----------------------------------------------------
+Suppressions used:
+-----------------------------------------------------
+  count      bytes template
+      1        128 save_ps_display_args
+Suppressions used:
+  count      bytes template
+-----------------------------------------------------
+
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:28.924 UTC [140] LOG:  pg_trickle: refreshed public.unsafe_worker_st (NO_DATA, +0 -0 rows, 156ms)
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:30.557 UTC [137] ERROR:  source database "pgt_ext_template_69864" is being accessed by other users
+2026-09-27 23:52:30.557 UTC [137] DETAIL:  There is 1 other session using the database.
+2026-09-27 23:52:30.557 UTC [137] STATEMENT:  CREATE DATABASE "pgt_e2e_69864_4" TEMPLATE "pgt_ext_template_69864"
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:31.374 UTC [1] LOG:  received SIGHUP, reloading configuration files
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:37.284 UTC [165] ERROR:  source database "pgt_ext_template_69864" is being accessed by other users
+2026-09-27 23:52:37.284 UTC [165] DETAIL:  There is 1 other session using the database.
+2026-09-27 23:52:37.284 UTC [165] STATEMENT:  CREATE DATABASE "pgt_e2e_69864_5" TEMPLATE "pgt_ext_template_69864"
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:38.142 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:38.622 UTC [174] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:38.765 UTC [174] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:38.890 UTC [174] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:39.011 UTC [174] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:39.132 UTC [174] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:39.168 UTC [176] LOG:  pg_trickle: refreshed public.unsafe_worker_st (NO_DATA, +0 -0 rows, 164ms)
+2026-09-27 23:52:39.170 UTC [173] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.unsafe_owner_st
+2026-09-27 23:52:39.170 UTC [173] STATEMENT:  SELECT pgtrickle.create_stream_table('unsafe_owner_st', $$SELECT id, CASE WHEN id = 2 THEN 1 / (id - 2) ELSE 1 END AS value FROM unsafe_owner_src$$, '1h', 'DIFFERENTIAL')
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:39.678 UTC [170] ERROR:  division by zero
+2026-09-27 23:52:39.678 UTC [170] STATEMENT:  SELECT pgtrickle.refresh_stream_table('unsafe_owner_st')
+2026-09-27 23:52:39.769 UTC [170] WARNING:  PGTRICKLE_E2E_SECURITY_CONTEXT_STATE:{"after":["170","postgres","unsafe_caller","pgtrickle, pg_catalog, pg_temp","off"],"backend_pid":"170","before":["170","postgres","unsafe_caller","pgtrickle, pg_catalog, pg_temp","off"],"context":"owner","error":"division by zero"}
+2026-09-27 23:52:39.770 UTC [170] ERROR:  division by zero
+2026-09-27 23:52:39.770 UTC [170] STATEMENT:  SELECT pgtrickle.e2e_catch_security_context_error($1, $2)
+2026-09-27 23:52:39.823 UTC [170] ERROR:  permission denied for table unsafe_owner_denied
+2026-09-27 23:52:39.823 UTC [170] STATEMENT:  SELECT id FROM unsafe_owner_denied
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+      2         24 do_ereport
+-----------------------------------------------------
+
+2026-09-27 23:52:45.087 UTC [178] ERROR:  source database "pgt_ext_template_69864" is being accessed by other users
+2026-09-27 23:52:45.087 UTC [178] DETAIL:  There is 1 other session using the database.
+2026-09-27 23:52:45.087 UTC [178] STATEMENT:  CREATE DATABASE "pgt_e2e_69864_6" TEMPLATE "pgt_ext_template_69864"
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:45.940 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:46.393 UTC [189] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:46.531 UTC [189] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:46.651 UTC [189] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:46.771 UTC [189] WARNING:  pg_trickle: holdback probe failed (safe frontier unavailable: frontier probe: active transaction has no proven prior fence); holding at previous watermark
+2026-09-27 23:52:46.785 UTC [183] LOG:  pg_trickle: pre-warmed delta+MERGE cache for public.unsafe_copy_st
+2026-09-27 23:52:46.785 UTC [183] STATEMENT:  SELECT pgtrickle.create_stream_table('unsafe_copy_st', $$SELECT id, val FROM unsafe_copy_src$$, '1h', 'DIFFERENTIAL')
+2026-09-27 23:52:46.910 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:46.910 UTC [183] CONTEXT:  SQL statement "CREATE TEMPORARY VIEW pg_temp."__pgt_validate_output_183_1" AS SELECT id, val FROM unsafe_copy_src"
+2026-09-27 23:52:46.913 UTC [183] DEBUG:  EventTriggerInvoke 18153
+2026-09-27 23:52:46.913 UTC [183] CONTEXT:  SQL statement "DROP VIEW IF EXISTS pg_temp."__pgt_validate_output_183_1""
+2026-09-27 23:52:46.913 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:46.913 UTC [183] CONTEXT:  SQL statement "DROP VIEW IF EXISTS pg_temp."__pgt_validate_output_183_1""
+2026-09-27 23:52:46.946 UTC [183] DEBUG:  rehashing catalog cache id 46 for pg_proc; 33 lists, 16 buckets at character 8
+2026-09-27 23:52:46.946 UTC [183] QUERY:  SELECT COUNT(*) = 1 AND BOOL_AND(__pgt_row_id = pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint))) FROM pgtrickle_changes.changes_bbe45b0f9715757f WHERE lsn = '0/0'::pg_lsn AND action = 'S'
+2026-09-27 23:52:46.960 UTC [183] DEBUG:  [pg_trickle] PREFLIGHT OK for ST public.unsafe_copy_st — source OIDs: [18665]
+2026-09-27 23:52:46.965 UTC [183] DEBUG:  rehashing catalog cache id 14 for pg_opclass; 17 tups, 8 buckets
+2026-09-27 23:52:46.965 UTC [183] CONTEXT:  SQL statement "SELECT EXISTS(SELECT 1 FROM "pgtrickle_changes".changes_bbe45b0f9715757f WHERE action IN ('I', 'D', 'T') AND lsn <= '0/453C5C0'::pg_lsn LIMIT 1)"
+2026-09-27 23:52:46.982 UTC [183] DEBUG:  rehashing catalog cache id 39 for pg_operator; 65 lists, 32 buckets
+2026-09-27 23:52:46.982 UTC [183] CONTEXT:  SQL statement "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms FROM ( SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0 / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, COUNT(*)::int AS cnt FROM ( SELECT end_time, start_time, delta_row_count FROM pgtrickle.pgt_refresh_history WHERE pgt_id = 1 AND action = 'DIFFERENTIAL' AND merge_strategy_used IS DISTINCT FROM 'FULL' AND merge_strategy_used IS DISTINCT FROM 'TOP_K' AND NOT was_full_fallback AND status = 'COMPLETED' AND delta_row_count > 0 AND end_time IS NOT NULL ORDER BY refresh_id DESC LIMIT 10 ) __pgt_incr ) incr, ( SELECT COALESCE( AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0), (SELECT last_full_ms FROM pgtrickle.pgt_stream_tables WHERE pgt_id = 1) ) AS avg_full_ms FROM ( SELECT end_time, start_time FROM pgtrickle.pgt_refresh_history WHERE pgt_id = 1 AND (action = 'FULL' OR merge_strategy_used = 'FULL') AND status = 'COMPLETED' AND rows_inserted > 0 AND end_time IS NOT NULL ORDER BY refresh_id DESC LIMIT 5 ) __pgt_full ) full_r WHERE incr.cnt >= 3 AND full_r.avg_full_ms IS NOT NULL AND full_r.avg_full_ms > 0 AND incr.avg_ms_per_delta IS NOT NULL AND incr.avg_ms_per_delta > 0"
+2026-09-27 23:52:46.988 UTC [183] DEBUG:  relation "pg_temp.__pgt_cdc_1_18665" does not exist
+2026-09-27 23:52:46.988 UTC [183] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:46.988 UTC [183] NOTICE:  table "__pgt_cdc_1_18665" does not exist, skipping
+2026-09-27 23:52:46.988 UTC [183] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:46.988 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:46.988 UTC [183] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:46.992 UTC [183] DEBUG:  building index "pg_toast_18764_index" on table "pg_toast_18764" serially
+2026-09-27 23:52:46.992 UTC [183] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:46.992 UTC [183] DEBUG:  index "pg_toast_18764_index" can safely use deduplication
+2026-09-27 23:52:46.992 UTC [183] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:46.997 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:46.997 UTC [183] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:47.001 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.001 UTC [183] CONTEXT:  SQL statement "GRANT SELECT ON TABLE pg_temp."__pgt_cdc_1_18665" TO "postgres""
+2026-09-27 23:52:47.010 UTC [183] DEBUG:  [pg_trickle] cache HIT for pgt_id=1
+2026-09-27 23:52:47.036 UTC [183] DEBUG:  [pg_trickle] MT-8 fallback=not_single_scan_aggregate for public.unsafe_copy_st
+2026-09-27 23:52:47.038 UTC [183] DEBUG:  relation "pg_temp.__pgt_pipeline_1_183" does not exist
+2026-09-27 23:52:47.038 UTC [183] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_183""
+2026-09-27 23:52:47.038 UTC [183] NOTICE:  table "__pgt_pipeline_1_183" does not exist, skipping
+2026-09-27 23:52:47.038 UTC [183] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_183""
+2026-09-27 23:52:47.038 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.038 UTC [183] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_183""
+2026-09-27 23:52:47.045 UTC [183] DEBUG:  building index "pg_toast_18773_index" on table "pg_toast_18773" serially
+2026-09-27 23:52:47.045 UTC [183] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_183" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:47.045 UTC [183] DEBUG:  index "pg_toast_18773_index" can safely use deduplication
+2026-09-27 23:52:47.045 UTC [183] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_183" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:47.046 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.046 UTC [183] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_183" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/453C5C0'::pg_lsn AND c.lsn <= '0/4569AD0'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:47.047 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.047 UTC [183] CONTEXT:  SQL statement "GRANT SELECT, INSERT, TRUNCATE ON TABLE pg_temp."__pgt_pipeline_1_183" TO "postgres""
+2026-09-27 23:52:47.080 UTC [183] DEBUG:  building index "pg_toast_18773_index" on table "pg_toast_18773" serially
+2026-09-27 23:52:47.080 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.080 UTC [183] DEBUG:  index "pg_toast_18773_index" can safely use deduplication
+2026-09-27 23:52:47.080 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.083 UTC [183] DEBUG:  building index "pg_toast_18773_index" on table "pg_toast_18773" serially
+2026-09-27 23:52:47.083 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.083 UTC [183] DEBUG:  index "pg_toast_18773_index" can safely use deduplication
+2026-09-27 23:52:47.083 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.086 UTC [183] DEBUG:  building index "pg_toast_18773_index" on table "pg_toast_18773" serially
+2026-09-27 23:52:47.086 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.086 UTC [183] DEBUG:  index "pg_toast_18773_index" can safely use deduplication
+2026-09-27 23:52:47.086 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.088 UTC [183] DEBUG:  building index "pg_toast_18773_index" on table "pg_toast_18773" serially
+2026-09-27 23:52:47.088 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.088 UTC [183] DEBUG:  index "pg_toast_18773_index" can safely use deduplication
+2026-09-27 23:52:47.088 UTC [183] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_183""
+2026-09-27 23:52:47.089 UTC [183] DEBUG:  [pg_trickle] v0.87 pipeline public.unsafe_copy_st reason=large_input batches=4 rows=4 bytes=32768
+2026-09-27 23:52:47.095 UTC [183] INFO:  [PGS_PROFILE] decision=18.67ms generate+build=5.31ms merge_exec=82.78ms cleanup_enqueue=0.26ms total=107.02ms affected=4 phantom_cleanup=0 delta_est=5 mode=INCR path=cache_hit hints=none strategy=pipeline
+2026-09-27 23:52:47.098 UTC [183] DEBUG:  rehashing catalog cache id 5 for pg_amproc; 33 tups, 16 buckets
+2026-09-27 23:52:47.098 UTC [183] CONTEXT:  SQL statement "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms, GREATEST(incr.avg_delta, 1)::double precision AS avg_delta FROM ( SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0 / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, AVG(delta_row_count)::double precision AS avg_delta, COUNT(*)::int AS cnt FROM ( SELECT end_time, start_time, delta_row_count FROM pgtrickle.pgt_refresh_history WHERE pgt_id = 1 AND action = 'DIFFERENTIAL' AND merge_strategy_used IS DISTINCT FROM 'FULL' AND merge_strategy_used IS DISTINCT FROM 'TOP_K' AND NOT was_full_fallback AND status = 'COMPLETED' AND delta_row_count > 0 AND end_time IS NOT NULL ORDER BY refresh_id DESC LIMIT 10 ) __pgt_incr ) incr, ( SELECT COALESCE( AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0), (SELECT last_full_ms FROM pgtrickle.pgt_stream_tables WHERE pgt_id = 1) ) AS avg_full_ms FROM ( SELECT end_time, start_time FROM pgtrickle.pgt_refresh_history WHERE pgt_id = 1 AND (action = 'FULL' OR merge_strategy_used = 'FULL') AND status = 'COMPLETED' AND rows_inserted > 0 AND end_time IS NOT NULL ORDER BY refresh_id DESC LIMIT 5 ) __pgt_full ) full_r WHERE incr.cnt >= 3 AND full_r.avg_full_ms IS NOT NULL AND full_r.avg_full_ms > 0 AND incr.avg_ms_per_delta IS NOT NULL AND incr.avg_ms_per_delta > 0"
+2026-09-27 23:52:47.098 UTC [183] DEBUG:  [pg_trickle] Adaptive threshold: INCR=107.0ms vs FULL=101.5ms (ratio=1.05), threshold 0.150 → 0.120
+2026-09-27 23:52:47.104 UTC [183] INFO:  Stream table public.unsafe_copy_st refreshed (DIFFERENTIAL: +4 -0)
+2026-09-27 23:52:47.663 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.663 UTC [187] CONTEXT:  SQL statement "CREATE TEMPORARY VIEW pg_temp."__pgt_validate_output_187_0" AS SELECT id, val FROM unsafe_copy_src"
+2026-09-27 23:52:47.667 UTC [187] DEBUG:  EventTriggerInvoke 18153
+2026-09-27 23:52:47.667 UTC [187] CONTEXT:  SQL statement "DROP VIEW IF EXISTS pg_temp."__pgt_validate_output_187_0""
+2026-09-27 23:52:47.668 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.668 UTC [187] CONTEXT:  SQL statement "DROP VIEW IF EXISTS pg_temp."__pgt_validate_output_187_0""
+2026-09-27 23:52:47.719 UTC [187] DEBUG:  rehashing catalog cache id 46 for pg_proc; 33 lists, 16 buckets at character 1220
+2026-09-27 23:52:47.719 UTC [187] QUERY:  WITH samples AS (
+	                     SELECT h.refresh_id, h.commit_to_visible_ms
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.commit_to_visible_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                      ORDER BY h.refresh_id DESC
+	                      LIMIT 128
+	                 ), stats AS (
+	                     SELECT count(*)::integer AS sample_count,
+	                            max(refresh_id) AS last_refresh_id,
+	                            (array_agg(commit_to_visible_ms ORDER BY refresh_id DESC))[1] AS last_sample,
+	                            percentile_cont(0.50) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p50,
+	                            percentile_cont(0.95) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p95,
+	                            percentile_cont(0.99) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p99
+	                       FROM samples
+	                 ), costs AS (
+	                     SELECT min(h.duration_ms) AS minimum_cost_ms,
+	                            count(h.duration_ms)::integer AS cost_samples
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.plan_identity = (SELECT defining_query_hash
+	                                                 FROM pgtrickle.pgt_stream_tables
+	                                                WHERE pgt_id = $1)
+	                        AND h.duration_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                 ), previous AS (
+	                     SELECT * FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1
+	                 ), decision AS (
+	                     SELECT st.pgt_id, st.defining_query_hash, st.freshness_deadline_ms,
+	                            stats.sample_count, stats.last_refresh_id, stats.last_sample,
+	                            stats.p50, stats.p95, stats.p99,
+	                            costs.minimum_cost_ms, costs.cost_samples,
+	                            COALESCE(previous.breach_streak, 0) AS old_breach_streak,
+	                            COALESCE(previous.recovery_streak, 0) AS old_recovery_streak,
+	                            COALESCE(previous.infeasibility_streak, 0) AS old_infeasibility_streak,
+	                            COALESCE(previous.last_settled_refresh_id, 0) AS old_last_refresh_id,
+	                            COALESCE(previous.sla_status, '') AS old_status,
+	                            previous.next_due_at
+	                       FROM pgtrickle.pgt_stream_tables st
+	                      CROSS JOIN stats CROSS JOIN costs
+	                      LEFT JOIN previous ON true
+	                      WHERE st.pgt_id = $1
+	                        AND st.target_freshness_mode = 'INTERVAL'
+	                 )
+	                 INSERT INTO pgtrickle.pgt_freshness_controller_state
+	                 (pgt_id, controller_version, plan_identity, target_ms,
+	                  sample_count, last_settled_refresh_id, last_sample_ms,
+	                  p50_freshness_ms, p95_freshness_ms, p99_freshness_ms,
+	                  sla_status, evidence_state, breach_streak, recovery_streak,
+	                  breach_started_at, infeasibility_streak, minimum_cost_ms,
+	                  infeasibility_reason, next_due_at, last_decision_at,
+	                  last_input_snapshot)
+	             SELECT pgt_id, 1, defining_query_hash, freshness_deadline_ms,
+	                    sample_count, last_refresh_id, last_sample,
+	                    p50, p95, p99,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) <> 'on'
+	                        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                    WHERE d.pgt_id = decision.pgt_id
+	                                      AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EVIDENCE_UNAVAILABLE'
+	                      WHEN sample_count < 20 THEN 'INSUFFICIENT_DATA'
+	                      WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                           AND old_infeasibility_streak >= 2 THEN 'INFEASIBLE'
+	                      WHEN old_status = 'BREACHING' AND p95 <= freshness_deadline_ms
+	                           AND old_recovery_streak < 2 THEN 'BREACHING'
+	                      WHEN old_breach_streak >= 2 AND p95 > freshness_deadline_ms THEN 'BREACHING'
+	                      WHEN p95 <= freshness_deadline_ms THEN 'MEETING'
+	                      ELSE 'AT_RISK'
+	                    END,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) = 'on'
+	                       AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                        WHERE d.pgt_id = decision.pgt_id
+	                                          AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EXACT' ELSE 'UNAVAILABLE'
+	                    END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                         THEN LEAST(old_breach_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 <= freshness_deadline_ms
+	                         THEN LEAST(old_recovery_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                              AND old_breach_streak = 0
+	                         THEN clock_timestamp() ELSE NULL END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id
+	                               AND cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN LEAST(old_infeasibility_streak + 1, 3) ELSE 0 END,
+	                    minimum_cost_ms,
+	                    CASE WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN 'FASTEST_COMPATIBLE_REFRESH_EXCEEDS_TARGET' ELSE NULL END,
+	                    COALESCE(next_due_at,
+	                             clock_timestamp() + freshness_deadline_ms * interval '1 millisecond'),
+	                    clock_timestamp(),
+	                    jsonb_build_object(
+	                        'controller_version', 1,
+	                        'sample_count', sample_count,
+	                        'last_settled_refresh_id', last_refresh_id,
+	                        'minimum_cost_ms', minimum_cost_ms,
+	                        'cost_samples', cost_samples)
+	               FROM decision
+	             ON CONFLICT (pgt_id) DO UPDATE SET
+	                 controller_version = EXCLUDED.controller_version,
+	                 plan_identity = EXCLUDED.plan_identity,
+	                 target_ms = EXCLUDED.target_ms,
+	                 last_settled_refresh_id = EXCLUDED.last_settled_refresh_id,
+	                 last_sample_ms = EXCLUDED.last_sample_ms,
+	                 sample_count = EXCLUDED.sample_count,
+	                 p50_freshness_ms = EXCLUDED.p50_freshness_ms,
+	                 p95_freshness_ms = EXCLUDED.p95_freshness_ms,
+	                 p99_freshness_ms = EXCLUDED.p99_freshness_ms,
+	                 sla_status = EXCLUDED.sla_status,
+	                 evidence_state = EXCLUDED.evidence_state,
+	                 breach_streak = EXCLUDED.breach_streak,
+	                 recovery_streak = EXCLUDED.recovery_streak,
+	                 breach_started_at = CASE
+	                     WHEN EXCLUDED.sla_status = 'MEETING' THEN NULL
+	                     WHEN pgtrickle.pgt_freshness_controller_state.breach_started_at IS NOT NULL
+	                         THEN pgtrickle.pgt_freshness_controller_state.breach_started_at
+	                     ELSE EXCLUDED.breach_started_at END,
+	                 infeasibility_streak = EXCLUDED.infeasibility_streak,
+	                 minimum_cost_ms = EXCLUDED.minimum_cost_ms,
+	                 infeasibility_reason = EXCLUDED.infeasibility_reason,
+	                 next_due_at = COALESCE(pgtrickle.pgt_freshness_controller_state.next_due_at,
+	                                        EXCLUDED.next_due_at),
+	                 last_input_snapshot = EXCLUDED.last_input_snapshot,
+	                 last_decision_at = EXCLUDED.last_decision_at,
+	                 updated_at = now()
+2026-09-27 23:52:47.722 UTC [187] DEBUG:  rehashing catalog cache id 39 for pg_operator; 33 lists, 16 buckets
+2026-09-27 23:52:47.722 UTC [187] CONTEXT:  SQL statement "WITH samples AS (
+	                     SELECT h.refresh_id, h.commit_to_visible_ms
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.commit_to_visible_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                      ORDER BY h.refresh_id DESC
+	                      LIMIT 128
+	                 ), stats AS (
+	                     SELECT count(*)::integer AS sample_count,
+	                            max(refresh_id) AS last_refresh_id,
+	                            (array_agg(commit_to_visible_ms ORDER BY refresh_id DESC))[1] AS last_sample,
+	                            percentile_cont(0.50) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p50,
+	                            percentile_cont(0.95) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p95,
+	                            percentile_cont(0.99) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p99
+	                       FROM samples
+	                 ), costs AS (
+	                     SELECT min(h.duration_ms) AS minimum_cost_ms,
+	                            count(h.duration_ms)::integer AS cost_samples
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.plan_identity = (SELECT defining_query_hash
+	                                                 FROM pgtrickle.pgt_stream_tables
+	                                                WHERE pgt_id = $1)
+	                        AND h.duration_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                 ), previous AS (
+	                     SELECT * FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1
+	                 ), decision AS (
+	                     SELECT st.pgt_id, st.defining_query_hash, st.freshness_deadline_ms,
+	                            stats.sample_count, stats.last_refresh_id, stats.last_sample,
+	                            stats.p50, stats.p95, stats.p99,
+	                            costs.minimum_cost_ms, costs.cost_samples,
+	                            COALESCE(previous.breach_streak, 0) AS old_breach_streak,
+	                            COALESCE(previous.recovery_streak, 0) AS old_recovery_streak,
+	                            COALESCE(previous.infeasibility_streak, 0) AS old_infeasibility_streak,
+	                            COALESCE(previous.last_settled_refresh_id, 0) AS old_last_refresh_id,
+	                            COALESCE(previous.sla_status, '') AS old_status,
+	                            previous.next_due_at
+	                       FROM pgtrickle.pgt_stream_tables st
+	                      CROSS JOIN stats CROSS JOIN costs
+	                      LEFT JOIN previous ON true
+	                      WHERE st.pgt_id = $1
+	                        AND st.target_freshness_mode = 'INTERVAL'
+	                 )
+	                 INSERT INTO pgtrickle.pgt_freshness_controller_state
+	                 (pgt_id, controller_version, plan_identity, target_ms,
+	                  sample_count, last_settled_refresh_id, last_sample_ms,
+	                  p50_freshness_ms, p95_freshness_ms, p99_freshness_ms,
+	                  sla_status, evidence_state, breach_streak, recovery_streak,
+	                  breach_started_at, infeasibility_streak, minimum_cost_ms,
+	                  infeasibility_reason, next_due_at, last_decision_at,
+	                  last_input_snapshot)
+	             SELECT pgt_id, 1, defining_query_hash, freshness_deadline_ms,
+	                    sample_count, last_refresh_id, last_sample,
+	                    p50, p95, p99,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) <> 'on'
+	                        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                    WHERE d.pgt_id = decision.pgt_id
+	                                      AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EVIDENCE_UNAVAILABLE'
+	                      WHEN sample_count < 20 THEN 'INSUFFICIENT_DATA'
+	                      WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                           AND old_infeasibility_streak >= 2 THEN 'INFEASIBLE'
+	                      WHEN old_status = 'BREACHING' AND p95 <= freshness_deadline_ms
+	                           AND old_recovery_streak < 2 THEN 'BREACHING'
+	                      WHEN old_breach_streak >= 2 AND p95 > freshness_deadline_ms THEN 'BREACHING'
+	                      WHEN p95 <= freshness_deadline_ms THEN 'MEETING'
+	                      ELSE 'AT_RISK'
+	                    END,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) = 'on'
+	                       AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                        WHERE d.pgt_id = decision.pgt_id
+	                                          AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EXACT' ELSE 'UNAVAILABLE'
+	                    END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                         THEN LEAST(old_breach_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 <= freshness_deadline_ms
+	                         THEN LEAST(old_recovery_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                              AND old_breach_streak = 0
+	                         THEN clock_timestamp() ELSE NULL END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id
+	                               AND cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN LEAST(old_infeasibility_streak + 1, 3) ELSE 0 END,
+	                    minimum_cost_ms,
+	                    CASE WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN 'FASTEST_COMPATIBLE_REFRESH_EXCEEDS_TARGET' ELSE NULL END,
+	                    COALESCE(next_due_at,
+	                             clock_timestamp() + freshness_deadline_ms * interval '1 millisecond'),
+	                    clock_timestamp(),
+	                    jsonb_build_object(
+	                        'controller_version', 1,
+	                        'sample_count', sample_count,
+	                        'last_settled_refresh_id', last_refresh_id,
+	                        'minimum_cost_ms', minimum_cost_ms,
+	                        'cost_samples', cost_samples)
+	               FROM decision
+	             ON CONFLICT (pgt_id) DO UPDATE SET
+	                 controller_version = EXCLUDED.controller_version,
+	                 plan_identity = EXCLUDED.plan_identity,
+	                 target_ms = EXCLUDED.target_ms,
+	                 last_settled_refresh_id = EXCLUDED.last_settled_refresh_id,
+	                 last_sample_ms = EXCLUDED.last_sample_ms,
+	                 sample_count = EXCLUDED.sample_count,
+	                 p50_freshness_ms = EXCLUDED.p50_freshness_ms,
+	                 p95_freshness_ms = EXCLUDED.p95_freshness_ms,
+	                 p99_freshness_ms = EXCLUDED.p99_freshness_ms,
+	                 sla_status = EXCLUDED.sla_status,
+	                 evidence_state = EXCLUDED.evidence_state,
+	                 breach_streak = EXCLUDED.breach_streak,
+	                 recovery_streak = EXCLUDED.recovery_streak,
+	                 breach_started_at = CASE
+	                     WHEN EXCLUDED.sla_status = 'MEETING' THEN NULL
+	                     WHEN pgtrickle.pgt_freshness_controller_state.breach_started_at IS NOT NULL
+	                         THEN pgtrickle.pgt_freshness_controller_state.breach_started_at
+	                     ELSE EXCLUDED.breach_started_at END,
+	                 infeasibility_streak = EXCLUDED.infeasibility_streak,
+	                 minimum_cost_ms = EXCLUDED.minimum_cost_ms,
+	                 infeasibility_reason = EXCLUDED.infeasibility_reason,
+	                 next_due_at = COALESCE(pgtrickle.pgt_freshness_controller_state.next_due_at,
+	                                        EXCLUDED.next_due_at),
+	                 last_input_snapshot = EXCLUDED.last_input_snapshot,
+	                 last_decision_at = EXCLUDED.last_decision_at,
+	                 updated_at = now()"
+2026-09-27 23:52:47.797 UTC [187] DEBUG:  [pg_trickle] PREFLIGHT OK for ST public.unsafe_copy_st — source OIDs: [18665]
+2026-09-27 23:52:47.824 UTC [187] DEBUG:  rehashing catalog cache id 65 for pg_statistic; 257 tups, 128 buckets
+2026-09-27 23:52:47.824 UTC [187] CONTEXT:  SQL statement "SELECT avg_full_ms, avg_diff_ms, sample_count FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1"
+2026-09-27 23:52:47.835 UTC [187] DEBUG:  relation "pg_temp.__pgt_cdc_1_18665" does not exist
+2026-09-27 23:52:47.835 UTC [187] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:47.835 UTC [187] NOTICE:  table "__pgt_cdc_1_18665" does not exist, skipping
+2026-09-27 23:52:47.835 UTC [187] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:47.835 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.835 UTC [187] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:47.843 UTC [187] DEBUG:  building index "pg_toast_18795_index" on table "pg_toast_18795" serially
+2026-09-27 23:52:47.843 UTC [187] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:47.845 UTC [187] DEBUG:  index "pg_toast_18795_index" can safely use deduplication
+2026-09-27 23:52:47.845 UTC [187] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:47.850 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.850 UTC [187] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:47.854 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.854 UTC [187] CONTEXT:  SQL statement "GRANT SELECT ON TABLE pg_temp."__pgt_cdc_1_18665" TO "postgres""
+2026-09-27 23:52:47.861 UTC [187] DEBUG:  [pg_trickle] cache MISS for pgt_id=1
+2026-09-27 23:52:47.904 UTC [187] DEBUG:  rehashing catalog cache id 14 for pg_opclass; 17 tups, 8 buckets
+2026-09-27 23:52:47.904 UTC [187] CONTEXT:  SQL statement "ANALYZE "pgtrickle_changes"."changes_bbe45b0f9715757f""
+2026-09-27 23:52:47.927 UTC [187] DEBUG:  [pg_trickle] MT-8 fallback=not_single_scan_aggregate for public.unsafe_copy_st
+2026-09-27 23:52:47.929 UTC [187] DEBUG:  relation "pg_temp.__pgt_pipeline_1_187" does not exist
+2026-09-27 23:52:47.929 UTC [187] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_187""
+2026-09-27 23:52:47.929 UTC [187] NOTICE:  table "__pgt_pipeline_1_187" does not exist, skipping
+2026-09-27 23:52:47.929 UTC [187] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_187""
+2026-09-27 23:52:47.929 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.929 UTC [187] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_187""
+2026-09-27 23:52:47.937 UTC [187] DEBUG:  building index "pg_toast_18801_index" on table "pg_toast_18801" serially
+2026-09-27 23:52:47.937 UTC [187] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_187" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:47.937 UTC [187] DEBUG:  index "pg_toast_18801_index" can safely use deduplication
+2026-09-27 23:52:47.937 UTC [187] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_187" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:47.938 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.938 UTC [187] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_187" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/4569AD0'::pg_lsn AND c.lsn <= '0/45882A8'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:47.940 UTC [187] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:47.940 UTC [187] CONTEXT:  SQL statement "GRANT SELECT, INSERT, TRUNCATE ON TABLE pg_temp."__pgt_pipeline_1_187" TO "postgres""
+2026-09-27 23:52:47.976 UTC [187] DEBUG:  building index "pg_toast_18801_index" on table "pg_toast_18801" serially
+2026-09-27 23:52:47.976 UTC [187] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_187""
+2026-09-27 23:52:47.976 UTC [187] DEBUG:  index "pg_toast_18801_index" can safely use deduplication
+2026-09-27 23:52:47.976 UTC [187] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_187""
+2026-09-27 23:52:47.978 UTC [187] DEBUG:  building index "pg_toast_18801_index" on table "pg_toast_18801" serially
+2026-09-27 23:52:47.978 UTC [187] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_187""
+2026-09-27 23:52:47.978 UTC [187] DEBUG:  index "pg_toast_18801_index" can safely use deduplication
+2026-09-27 23:52:47.978 UTC [187] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_187""
+2026-09-27 23:52:47.984 UTC [187] DEBUG:  building index "pg_toast_18801_index" on table "pg_toast_18801" serially
+2026-09-27 23:52:47.984 UTC [187] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_187""
+2026-09-27 23:52:47.984 UTC [187] DEBUG:  index "pg_toast_18801_index" can safely use deduplication
+2026-09-27 23:52:47.984 UTC [187] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_187""
+2026-09-27 23:52:47.985 UTC [187] DEBUG:  [pg_trickle] v0.87 pipeline public.unsafe_copy_st reason=large_input batches=3 rows=3 bytes=24576
+2026-09-27 23:52:47.990 UTC [187] INFO:  [PGS_PROFILE] decision=25.68ms generate+build=37.97ms merge_exec=92.38ms cleanup_enqueue=0.26ms total=156.29ms affected=3 phantom_cleanup=0 delta_est=3 mode=INCR path=cache_miss hints=none strategy=pipeline
+2026-09-27 23:52:47.994 UTC [187] DEBUG:  [pg_trickle] Adaptive threshold: INCR=156.3ms vs FULL=101.5ms (ratio=1.54), threshold 0.120 → 0.096
+2026-09-27 23:52:48.006 UTC [187] INFO:  Stream table public.unsafe_copy_st refreshed (DIFFERENTIAL: +3 -0)
+2026-09-27 23:52:48.257 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.257 UTC [191] CONTEXT:  SQL statement "CREATE TEMPORARY VIEW pg_temp."__pgt_validate_output_191_0" AS SELECT id, val FROM unsafe_copy_src"
+2026-09-27 23:52:48.261 UTC [191] DEBUG:  EventTriggerInvoke 18153
+2026-09-27 23:52:48.261 UTC [191] CONTEXT:  SQL statement "DROP VIEW IF EXISTS pg_temp."__pgt_validate_output_191_0""
+2026-09-27 23:52:48.262 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.262 UTC [191] CONTEXT:  SQL statement "DROP VIEW IF EXISTS pg_temp."__pgt_validate_output_191_0""
+2026-09-27 23:52:48.311 UTC [191] DEBUG:  rehashing catalog cache id 46 for pg_proc; 33 lists, 16 buckets at character 1220
+2026-09-27 23:52:48.311 UTC [191] QUERY:  WITH samples AS (
+	                     SELECT h.refresh_id, h.commit_to_visible_ms
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.commit_to_visible_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                      ORDER BY h.refresh_id DESC
+	                      LIMIT 128
+	                 ), stats AS (
+	                     SELECT count(*)::integer AS sample_count,
+	                            max(refresh_id) AS last_refresh_id,
+	                            (array_agg(commit_to_visible_ms ORDER BY refresh_id DESC))[1] AS last_sample,
+	                            percentile_cont(0.50) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p50,
+	                            percentile_cont(0.95) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p95,
+	                            percentile_cont(0.99) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p99
+	                       FROM samples
+	                 ), costs AS (
+	                     SELECT min(h.duration_ms) AS minimum_cost_ms,
+	                            count(h.duration_ms)::integer AS cost_samples
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.plan_identity = (SELECT defining_query_hash
+	                                                 FROM pgtrickle.pgt_stream_tables
+	                                                WHERE pgt_id = $1)
+	                        AND h.duration_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                 ), previous AS (
+	                     SELECT * FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1
+	                 ), decision AS (
+	                     SELECT st.pgt_id, st.defining_query_hash, st.freshness_deadline_ms,
+	                            stats.sample_count, stats.last_refresh_id, stats.last_sample,
+	                            stats.p50, stats.p95, stats.p99,
+	                            costs.minimum_cost_ms, costs.cost_samples,
+	                            COALESCE(previous.breach_streak, 0) AS old_breach_streak,
+	                            COALESCE(previous.recovery_streak, 0) AS old_recovery_streak,
+	                            COALESCE(previous.infeasibility_streak, 0) AS old_infeasibility_streak,
+	                            COALESCE(previous.last_settled_refresh_id, 0) AS old_last_refresh_id,
+	                            COALESCE(previous.sla_status, '') AS old_status,
+	                            previous.next_due_at
+	                       FROM pgtrickle.pgt_stream_tables st
+	                      CROSS JOIN stats CROSS JOIN costs
+	                      LEFT JOIN previous ON true
+	                      WHERE st.pgt_id = $1
+	                        AND st.target_freshness_mode = 'INTERVAL'
+	                 )
+	                 INSERT INTO pgtrickle.pgt_freshness_controller_state
+	                 (pgt_id, controller_version, plan_identity, target_ms,
+	                  sample_count, last_settled_refresh_id, last_sample_ms,
+	                  p50_freshness_ms, p95_freshness_ms, p99_freshness_ms,
+	                  sla_status, evidence_state, breach_streak, recovery_streak,
+	                  breach_started_at, infeasibility_streak, minimum_cost_ms,
+	                  infeasibility_reason, next_due_at, last_decision_at,
+	                  last_input_snapshot)
+	             SELECT pgt_id, 1, defining_query_hash, freshness_deadline_ms,
+	                    sample_count, last_refresh_id, last_sample,
+	                    p50, p95, p99,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) <> 'on'
+	                        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                    WHERE d.pgt_id = decision.pgt_id
+	                                      AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EVIDENCE_UNAVAILABLE'
+	                      WHEN sample_count < 20 THEN 'INSUFFICIENT_DATA'
+	                      WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                           AND old_infeasibility_streak >= 2 THEN 'INFEASIBLE'
+	                      WHEN old_status = 'BREACHING' AND p95 <= freshness_deadline_ms
+	                           AND old_recovery_streak < 2 THEN 'BREACHING'
+	                      WHEN old_breach_streak >= 2 AND p95 > freshness_deadline_ms THEN 'BREACHING'
+	                      WHEN p95 <= freshness_deadline_ms THEN 'MEETING'
+	                      ELSE 'AT_RISK'
+	                    END,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) = 'on'
+	                       AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                        WHERE d.pgt_id = decision.pgt_id
+	                                          AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EXACT' ELSE 'UNAVAILABLE'
+	                    END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                         THEN LEAST(old_breach_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 <= freshness_deadline_ms
+	                         THEN LEAST(old_recovery_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                              AND old_breach_streak = 0
+	                         THEN clock_timestamp() ELSE NULL END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id
+	                               AND cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN LEAST(old_infeasibility_streak + 1, 3) ELSE 0 END,
+	                    minimum_cost_ms,
+	                    CASE WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN 'FASTEST_COMPATIBLE_REFRESH_EXCEEDS_TARGET' ELSE NULL END,
+	                    COALESCE(next_due_at,
+	                             clock_timestamp() + freshness_deadline_ms * interval '1 millisecond'),
+	                    clock_timestamp(),
+	                    jsonb_build_object(
+	                        'controller_version', 1,
+	                        'sample_count', sample_count,
+	                        'last_settled_refresh_id', last_refresh_id,
+	                        'minimum_cost_ms', minimum_cost_ms,
+	                        'cost_samples', cost_samples)
+	               FROM decision
+	             ON CONFLICT (pgt_id) DO UPDATE SET
+	                 controller_version = EXCLUDED.controller_version,
+	                 plan_identity = EXCLUDED.plan_identity,
+	                 target_ms = EXCLUDED.target_ms,
+	                 last_settled_refresh_id = EXCLUDED.last_settled_refresh_id,
+	                 last_sample_ms = EXCLUDED.last_sample_ms,
+	                 sample_count = EXCLUDED.sample_count,
+	                 p50_freshness_ms = EXCLUDED.p50_freshness_ms,
+	                 p95_freshness_ms = EXCLUDED.p95_freshness_ms,
+	                 p99_freshness_ms = EXCLUDED.p99_freshness_ms,
+	                 sla_status = EXCLUDED.sla_status,
+	                 evidence_state = EXCLUDED.evidence_state,
+	                 breach_streak = EXCLUDED.breach_streak,
+	                 recovery_streak = EXCLUDED.recovery_streak,
+	                 breach_started_at = CASE
+	                     WHEN EXCLUDED.sla_status = 'MEETING' THEN NULL
+	                     WHEN pgtrickle.pgt_freshness_controller_state.breach_started_at IS NOT NULL
+	                         THEN pgtrickle.pgt_freshness_controller_state.breach_started_at
+	                     ELSE EXCLUDED.breach_started_at END,
+	                 infeasibility_streak = EXCLUDED.infeasibility_streak,
+	                 minimum_cost_ms = EXCLUDED.minimum_cost_ms,
+	                 infeasibility_reason = EXCLUDED.infeasibility_reason,
+	                 next_due_at = COALESCE(pgtrickle.pgt_freshness_controller_state.next_due_at,
+	                                        EXCLUDED.next_due_at),
+	                 last_input_snapshot = EXCLUDED.last_input_snapshot,
+	                 last_decision_at = EXCLUDED.last_decision_at,
+	                 updated_at = now()
+2026-09-27 23:52:48.314 UTC [191] DEBUG:  rehashing catalog cache id 39 for pg_operator; 33 lists, 16 buckets
+2026-09-27 23:52:48.314 UTC [191] CONTEXT:  SQL statement "WITH samples AS (
+	                     SELECT h.refresh_id, h.commit_to_visible_ms
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.commit_to_visible_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                      ORDER BY h.refresh_id DESC
+	                      LIMIT 128
+	                 ), stats AS (
+	                     SELECT count(*)::integer AS sample_count,
+	                            max(refresh_id) AS last_refresh_id,
+	                            (array_agg(commit_to_visible_ms ORDER BY refresh_id DESC))[1] AS last_sample,
+	                            percentile_cont(0.50) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p50,
+	                            percentile_cont(0.95) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p95,
+	                            percentile_cont(0.99) WITHIN GROUP (ORDER BY commit_to_visible_ms) AS p99
+	                       FROM samples
+	                 ), costs AS (
+	                     SELECT min(h.duration_ms) AS minimum_cost_ms,
+	                            count(h.duration_ms)::integer AS cost_samples
+	                       FROM pgtrickle.pgt_refresh_history h
+	                      WHERE h.pgt_id = $1
+	                        AND h.status = 'COMPLETED'
+	                        AND h.plan_identity = (SELECT defining_query_hash
+	                                                 FROM pgtrickle.pgt_stream_tables
+	                                                WHERE pgt_id = $1)
+	                        AND h.duration_ms IS NOT NULL
+	                        AND h.start_time >= clock_timestamp() - $2::double precision * interval '1 hour'
+	                 ), previous AS (
+	                     SELECT * FROM pgtrickle.pgt_freshness_controller_state WHERE pgt_id = $1
+	                 ), decision AS (
+	                     SELECT st.pgt_id, st.defining_query_hash, st.freshness_deadline_ms,
+	                            stats.sample_count, stats.last_refresh_id, stats.last_sample,
+	                            stats.p50, stats.p95, stats.p99,
+	                            costs.minimum_cost_ms, costs.cost_samples,
+	                            COALESCE(previous.breach_streak, 0) AS old_breach_streak,
+	                            COALESCE(previous.recovery_streak, 0) AS old_recovery_streak,
+	                            COALESCE(previous.infeasibility_streak, 0) AS old_infeasibility_streak,
+	                            COALESCE(previous.last_settled_refresh_id, 0) AS old_last_refresh_id,
+	                            COALESCE(previous.sla_status, '') AS old_status,
+	                            previous.next_due_at
+	                       FROM pgtrickle.pgt_stream_tables st
+	                      CROSS JOIN stats CROSS JOIN costs
+	                      LEFT JOIN previous ON true
+	                      WHERE st.pgt_id = $1
+	                        AND st.target_freshness_mode = 'INTERVAL'
+	                 )
+	                 INSERT INTO pgtrickle.pgt_freshness_controller_state
+	                 (pgt_id, controller_version, plan_identity, target_ms,
+	                  sample_count, last_settled_refresh_id, last_sample_ms,
+	                  p50_freshness_ms, p95_freshness_ms, p99_freshness_ms,
+	                  sla_status, evidence_state, breach_streak, recovery_streak,
+	                  breach_started_at, infeasibility_streak, minimum_cost_ms,
+	                  infeasibility_reason, next_due_at, last_decision_at,
+	                  last_input_snapshot)
+	             SELECT pgt_id, 1, defining_query_hash, freshness_deadline_ms,
+	                    sample_count, last_refresh_id, last_sample,
+	                    p50, p95, p99,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) <> 'on'
+	                        OR EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                    WHERE d.pgt_id = decision.pgt_id
+	                                      AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EVIDENCE_UNAVAILABLE'
+	                      WHEN sample_count < 20 THEN 'INSUFFICIENT_DATA'
+	                      WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                           AND old_infeasibility_streak >= 2 THEN 'INFEASIBLE'
+	                      WHEN old_status = 'BREACHING' AND p95 <= freshness_deadline_ms
+	                           AND old_recovery_streak < 2 THEN 'BREACHING'
+	                      WHEN old_breach_streak >= 2 AND p95 > freshness_deadline_ms THEN 'BREACHING'
+	                      WHEN p95 <= freshness_deadline_ms THEN 'MEETING'
+	                      ELSE 'AT_RISK'
+	                    END,
+	                    CASE
+	                      WHEN current_setting('track_commit_timestamp', true) = 'on'
+	                       AND NOT EXISTS (SELECT 1 FROM pgtrickle.pgt_dependencies d
+	                                        WHERE d.pgt_id = decision.pgt_id
+	                                          AND d.source_type NOT IN ('TABLE', 'STREAM_TABLE'))
+	                        THEN 'EXACT' ELSE 'UNAVAILABLE'
+	                    END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                         THEN LEAST(old_breach_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 <= freshness_deadline_ms
+	                         THEN LEAST(old_recovery_streak + 1, 3) ELSE 0 END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id AND p95 > freshness_deadline_ms
+	                              AND old_breach_streak = 0
+	                         THEN clock_timestamp() ELSE NULL END,
+	                    CASE WHEN last_refresh_id > old_last_refresh_id
+	                               AND cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN LEAST(old_infeasibility_streak + 1, 3) ELSE 0 END,
+	                    minimum_cost_ms,
+	                    CASE WHEN cost_samples >= 5 AND minimum_cost_ms > freshness_deadline_ms
+	                         THEN 'FASTEST_COMPATIBLE_REFRESH_EXCEEDS_TARGET' ELSE NULL END,
+	                    COALESCE(next_due_at,
+	                             clock_timestamp() + freshness_deadline_ms * interval '1 millisecond'),
+	                    clock_timestamp(),
+	                    jsonb_build_object(
+	                        'controller_version', 1,
+	                        'sample_count', sample_count,
+	                        'last_settled_refresh_id', last_refresh_id,
+	                        'minimum_cost_ms', minimum_cost_ms,
+	                        'cost_samples', cost_samples)
+	               FROM decision
+	             ON CONFLICT (pgt_id) DO UPDATE SET
+	                 controller_version = EXCLUDED.controller_version,
+	                 plan_identity = EXCLUDED.plan_identity,
+	                 target_ms = EXCLUDED.target_ms,
+	                 last_settled_refresh_id = EXCLUDED.last_settled_refresh_id,
+	                 last_sample_ms = EXCLUDED.last_sample_ms,
+	                 sample_count = EXCLUDED.sample_count,
+	                 p50_freshness_ms = EXCLUDED.p50_freshness_ms,
+	                 p95_freshness_ms = EXCLUDED.p95_freshness_ms,
+	                 p99_freshness_ms = EXCLUDED.p99_freshness_ms,
+	                 sla_status = EXCLUDED.sla_status,
+	                 evidence_state = EXCLUDED.evidence_state,
+	                 breach_streak = EXCLUDED.breach_streak,
+	                 recovery_streak = EXCLUDED.recovery_streak,
+	                 breach_started_at = CASE
+	                     WHEN EXCLUDED.sla_status = 'MEETING' THEN NULL
+	                     WHEN pgtrickle.pgt_freshness_controller_state.breach_started_at IS NOT NULL
+	                         THEN pgtrickle.pgt_freshness_controller_state.breach_started_at
+	                     ELSE EXCLUDED.breach_started_at END,
+	                 infeasibility_streak = EXCLUDED.infeasibility_streak,
+	                 minimum_cost_ms = EXCLUDED.minimum_cost_ms,
+	                 infeasibility_reason = EXCLUDED.infeasibility_reason,
+	                 next_due_at = COALESCE(pgtrickle.pgt_freshness_controller_state.next_due_at,
+	                                        EXCLUDED.next_due_at),
+	                 last_input_snapshot = EXCLUDED.last_input_snapshot,
+	                 last_decision_at = EXCLUDED.last_decision_at,
+	                 updated_at = now()"
+2026-09-27 23:52:48.381 UTC [191] DEBUG:  [pg_trickle] PREFLIGHT OK for ST public.unsafe_copy_st — source OIDs: [18665]
+2026-09-27 23:52:48.413 UTC [191] DEBUG:  rehashing catalog cache id 65 for pg_statistic; 257 tups, 128 buckets
+2026-09-27 23:52:48.413 UTC [191] CONTEXT:  SQL statement "SELECT avg_full_ms, avg_diff_ms, sample_count FROM pgtrickle.pgt_cost_model_summary WHERE pgt_id = $1"
+2026-09-27 23:52:48.426 UTC [191] DEBUG:  relation "pg_temp.__pgt_cdc_1_18665" does not exist
+2026-09-27 23:52:48.426 UTC [191] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:48.426 UTC [191] NOTICE:  table "__pgt_cdc_1_18665" does not exist, skipping
+2026-09-27 23:52:48.426 UTC [191] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:48.426 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.426 UTC [191] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_cdc_1_18665""
+2026-09-27 23:52:48.434 UTC [191] DEBUG:  building index "pg_toast_18821_index" on table "pg_toast_18821" serially
+2026-09-27 23:52:48.434 UTC [191] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:48.437 UTC [191] DEBUG:  index "pg_toast_18821_index" can safely use deduplication
+2026-09-27 23:52:48.437 UTC [191] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:48.448 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.448 UTC [191] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_cdc_1_18665" ON COMMIT DROP AS SELECT * FROM "pgtrickle_changes"."changes_bbe45b0f9715757f" WHERE lsn > $1::pg_lsn AND lsn <= $2::pg_lsn"
+2026-09-27 23:52:48.452 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.452 UTC [191] CONTEXT:  SQL statement "GRANT SELECT ON TABLE pg_temp."__pgt_cdc_1_18665" TO "postgres""
+2026-09-27 23:52:48.459 UTC [191] DEBUG:  [pg_trickle] cache MISS for pgt_id=1
+2026-09-27 23:52:48.499 UTC [191] DEBUG:  rehashing catalog cache id 14 for pg_opclass; 17 tups, 8 buckets
+2026-09-27 23:52:48.499 UTC [191] CONTEXT:  SQL statement "ANALYZE "pgtrickle_changes"."changes_bbe45b0f9715757f""
+2026-09-27 23:52:48.522 UTC [191] DEBUG:  [pg_trickle] MT-8 fallback=not_single_scan_aggregate for public.unsafe_copy_st
+2026-09-27 23:52:48.524 UTC [191] DEBUG:  relation "pg_temp.__pgt_pipeline_1_191" does not exist
+2026-09-27 23:52:48.524 UTC [191] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_191""
+2026-09-27 23:52:48.524 UTC [191] NOTICE:  table "__pgt_pipeline_1_191" does not exist, skipping
+2026-09-27 23:52:48.524 UTC [191] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_191""
+2026-09-27 23:52:48.524 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.524 UTC [191] CONTEXT:  SQL statement "DROP TABLE IF EXISTS pg_temp."__pgt_pipeline_1_191""
+2026-09-27 23:52:48.531 UTC [191] DEBUG:  building index "pg_toast_18828_index" on table "pg_toast_18828" serially
+2026-09-27 23:52:48.531 UTC [191] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_191" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:48.531 UTC [191] DEBUG:  index "pg_toast_18828_index" can safely use deduplication
+2026-09-27 23:52:48.531 UTC [191] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_191" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:48.532 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.532 UTC [191] CONTEXT:  SQL statement "CREATE TEMP TABLE pg_temp."__pgt_pipeline_1_191" ON COMMIT DROP AS SELECT * FROM ((WITH __pgt_cte_pk_stats_unsafe_copy_src_1 AS (
+	SELECT c.__pgt_row_id AS __pk_hash, count(*) AS cnt
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	GROUP BY c.__pgt_row_id
+	),
+	__pgt_cte_single_unsafe_copy_src_2 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       c.action AS __first_action,
+	       c.action AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt = 1
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	),
+	__pgt_cte_multi_raw_unsafe_copy_src_3 AS (
+	SELECT c.__pgt_row_id AS __pk_hash,
+	       c.__pgt_row_id AS __pk_hash_old,
+	       c.action,
+	       c.change_id,
+	       c."id",
+	       c."val",
+	       FIRST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	       ) AS __first_action,
+	       LAST_VALUE(c.action) OVER (
+	           PARTITION BY c.__pgt_row_id ORDER BY c.change_id
+	           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+	       ) AS __last_action
+	FROM pg_temp."__pgt_cdc_1_18665" c
+	JOIN __pgt_cte_pk_stats_unsafe_copy_src_1 p ON p.__pk_hash = c.__pgt_row_id AND p.cnt > 1
+	WHERE c.lsn > '0/45882A8'::pg_lsn AND c.lsn <= '0/45A20C8'::pg_lsn
+	),
+	__pgt_cte_scan_raw_unsafe_copy_src_4 AS (
+	SELECT * FROM __pgt_cte_single_unsafe_copy_src_2
+	UNION ALL
+	SELECT * FROM __pgt_cte_multi_raw_unsafe_copy_src_3
+	),
+	__pgt_cte_scan_unsafe_copy_src_5 AS (
+	-- DELETE events: row existed before AND was truly deleted, OR
+	-- the row hash changed (keyless table update — old row must be removed).
+	-- For PK-based tables __pk_hash_old == __pk_hash always, so the OR
+	-- clause never fires → no regression.
+	SELECT c.__pk_hash_old AS __pgt_row_id,
+	       'D'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash_old)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__first_action != 'I'
+	    AND (s.__last_action = 'D' OR s.__pk_hash_old != s.__pk_hash)
+	  ORDER BY s.__pk_hash_old, s.change_id
+	) c
+	
+	UNION ALL
+	
+	-- INSERT events: row exists after (handles inserts + updates)
+	SELECT c.__pk_hash AS __pgt_row_id,
+	       'I'::TEXT AS __pgt_action,
+	       c."id" AS "id",
+	       c."val" AS "val"
+	FROM (
+	  SELECT DISTINCT ON (s.__pk_hash)
+	         s.*
+	  FROM __pgt_cte_scan_raw_unsafe_copy_src_4 s
+	  WHERE s.__last_action != 'D'
+	  ORDER BY s.__pk_hash, s.change_id DESC
+	) c
+	),
+	__pgt_cte_project_6 AS (
+	SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id")) AS __pgt_row_id, __pgt_action, "id" AS "id", "val" AS "val"
+	FROM __pgt_cte_scan_unsafe_copy_src_5
+	)
+	SELECT * FROM __pgt_cte_project_6)) __pgt_pipeline_empty LIMIT 0 WITH NO DATA"
+2026-09-27 23:52:48.534 UTC [191] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.534 UTC [191] CONTEXT:  SQL statement "GRANT SELECT, INSERT, TRUNCATE ON TABLE pg_temp."__pgt_pipeline_1_191" TO "postgres""
+2026-09-27 23:52:48.567 UTC [191] DEBUG:  building index "pg_toast_18828_index" on table "pg_toast_18828" serially
+2026-09-27 23:52:48.567 UTC [191] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_191""
+2026-09-27 23:52:48.567 UTC [191] DEBUG:  index "pg_toast_18828_index" can safely use deduplication
+2026-09-27 23:52:48.567 UTC [191] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_191""
+2026-09-27 23:52:48.570 UTC [191] DEBUG:  building index "pg_toast_18828_index" on table "pg_toast_18828" serially
+2026-09-27 23:52:48.570 UTC [191] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_191""
+2026-09-27 23:52:48.570 UTC [191] DEBUG:  index "pg_toast_18828_index" can safely use deduplication
+2026-09-27 23:52:48.570 UTC [191] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_191""
+2026-09-27 23:52:48.572 UTC [191] DEBUG:  building index "pg_toast_18828_index" on table "pg_toast_18828" serially
+2026-09-27 23:52:48.572 UTC [191] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_191""
+2026-09-27 23:52:48.572 UTC [191] DEBUG:  index "pg_toast_18828_index" can safely use deduplication
+2026-09-27 23:52:48.572 UTC [191] CONTEXT:  SQL statement "TRUNCATE TABLE "__pgt_pipeline_1_191""
+2026-09-27 23:52:48.573 UTC [191] DEBUG:  [pg_trickle] v0.87 pipeline public.unsafe_copy_st reason=large_input batches=3 rows=3 bytes=24576
+2026-09-27 23:52:48.579 UTC [191] INFO:  [PGS_PROFILE] decision=29.62ms generate+build=36.48ms merge_exec=84.64ms cleanup_enqueue=0.27ms total=151.01ms affected=3 phantom_cleanup=0 delta_est=3 mode=INCR path=cache_miss hints=none strategy=pipeline
+2026-09-27 23:52:48.582 UTC [191] DEBUG:  [pg_trickle] Adaptive threshold: INCR=151.0ms vs FULL=101.5ms (ratio=1.49), threshold 0.096 → 0.077
+2026-09-27 23:52:48.595 UTC [191] INFO:  Stream table public.unsafe_copy_st refreshed (DIFFERENTIAL: +3 -0)
+2026-09-27 23:52:48.634 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.641 UTC [183] DEBUG:  EventTriggerInvoke 18153
+2026-09-27 23:52:48.642 UTC [183] DEBUG:  EventTriggerInvoke 18152
+2026-09-27 23:52:48.701 UTC [187] DEBUG:  unexpected EOF on client connection
+2026-09-27 23:52:48.701 UTC [191] DEBUG:  unexpected EOF on client connection
+2026-09-27 23:52:48.701 UTC [183] DEBUG:  unexpected EOF on client connection
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:49.382 UTC [196] LOG:  pg_trickle: refreshed public.unsafe_worker_st (NO_DATA, +0 -0 rows, 159ms)
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:53.981 UTC [192] ERROR:  source database "pgt_ext_template_69864" is being accessed by other users
+2026-09-27 23:52:53.981 UTC [192] DETAIL:  There is 1 other session using the database.
+2026-09-27 23:52:53.981 UTC [192] STATEMENT:  CREATE DATABASE "pgt_e2e_69864_7" TEMPLATE "pgt_ext_template_69864"
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:54.808 UTC [1] LOG:  received SIGHUP, reloading configuration files
+2026-09-27 23:52:54.859 UTC [1] LOG:  received fast shutdown request
+2026-09-27 23:52:54.861 UTC [1] LOG:  aborting any active transactions
+2026-09-27 23:52:54.862 UTC [205] FATAL:  terminating connection due to administrator command
+2026-09-27 23:52:54.867 UTC [202] FATAL:  terminating connection due to administrator command
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:55.010 UTC [1] LOG:  background worker "logical replication launcher" (PID 79) exited with exit code 1
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:55.219 UTC [66] LOG:  shutting down
+2026-09-27 23:52:55.220 UTC [66] LOG:  checkpoint starting: shutdown immediate
+2026-09-27 23:52:55.618 UTC [66] LOG:  checkpoint complete: wrote 9983 buffers (60.9%), wrote 25 SLRU buffers; 0 WAL file(s) added, 0 removed, 3 recycled; write=0.199 s, sync=0.187 s, total=0.397 s; sync files=3879, longest=0.014 s, average=0.001 s; distance=48656 kB, estimate=48656 kB; lsn=0/4B5EEF8, redo lsn=0/4B5EEF8
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+Suppressions used:
+-----------------------------------------------------
+
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+2026-09-27 23:52:55.788 UTC [1] LOG:  database system is shut down
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      1        128 save_ps_display_args
+-----------------------------------------------------
+
+
+ASAN_RAW_POSTGRES_LOGS_END
+ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 90.52s
+
