@@ -2,6 +2,38 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.108.0 to 0.108.1
+
+Install the v0.108.1 library and extension files, then apply the upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.108.1';
+```
+
+The migration updates `pgtrickle.quick_health` so missing or disabled
+IMMEDIATE maintenance triggers report a broken cascade and `CRITICAL` status.
+It does not repair stream-table rows or recreate triggers left broken by an
+older installation. Inspect the affected streams with `quick_health`,
+`health_check()`, and `explain_refresh_mode()`.
+
+Repair each affected IMMEDIATE cascade in dependency order, starting with the
+stream nearest the base table and continuing downstream:
+
+```sql
+SELECT pgtrickle.repair_stream_table('public.orders_immediate');
+SELECT pgtrickle.repair_stream_table('public.order_totals_immediate');
+SELECT pgtrickle.repair_stream_table('public.order_summary_immediate');
+```
+
+Use the names from your own cascade. Repairing only the last descendant can
+leave it rebuilt from a stale upstream table. After the repairs, compare each
+stream table with its defining query and confirm `broken_immediate_tables = 0`.
+
+If the extension already reports v0.108.1, do not rerun that version's
+migration. Install the corrected library if needed, recycle PostgreSQL
+backends so they load it, then run the same dependency-ordered repair procedure
+for any remaining stale streams.
+
 ## 0.107.0 to 0.108.0
 
 Install the v0.108.0 library and extension files, then apply the upgrade:

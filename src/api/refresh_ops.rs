@@ -491,8 +491,8 @@ pub fn reinit_rewrite_if_needed(st: &StreamTableMeta) -> Result<StreamTableMeta,
 }
 
 /// When user triggers are detected (and the GUC is not `"off"`), they are
-/// suppressed during the TRUNCATE + INSERT via `DISABLE TRIGGER USER` /
-/// `ENABLE TRIGGER USER`. A `NOTIFY pg_trickle_refresh` is emitted so
+/// suppressed during the TRUNCATE + INSERT while pg_trickle maintenance
+/// triggers remain active. A `NOTIFY pg_trickle_refresh` is emitted so
 /// listeners know a FULL refresh occurred.
 pub(crate) fn execute_manual_full_refresh(
     st: &StreamTableMeta,
@@ -614,14 +614,13 @@ fn execute_manual_full_refresh_target(
         crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
     };
 
-    // Suppress user triggers during TRUNCATE + INSERT to prevent
-    // spurious trigger invocations with wrong semantics.
-    if has_triggers {
-        refresh::with_stream_owner(st, || {
-            Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        })?;
-    }
+    // Suppress only application triggers. IVM maintenance triggers must run
+    // during the replacement so IMMEDIATE descendants stay in sync.
+    let suppressed_triggers = if has_triggers {
+        refresh::disable_user_triggers(st)?
+    } else {
+        Vec::new()
+    };
 
     // ── Snapshot ST change buffer LSNs BEFORE TRUNCATE+INSERT ──────────
     //
@@ -774,10 +773,7 @@ fn execute_manual_full_refresh_target(
     // Re-enable user triggers and emit NOTIFY so listeners know a FULL
     // refresh occurred.
     if has_triggers {
-        refresh::with_stream_owner(st, || {
-            Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))
-        })?;
+        refresh::restore_user_triggers(st, &suppressed_triggers)?;
 
         // PB2: Skip NOTIFY when pooler compatibility mode is enabled.
         if !st.pooler_compatibility_mode {
@@ -917,13 +913,13 @@ fn execute_manual_differential_refresh(
         return execute_manual_full_refresh(st, schema, table_name, source_oids);
     }
 
-    // IMMEDIATE upstreams maintain their output through IVM triggers, not the
-    // deferred stream-table change buffer consumed by this path. A FULL
-    // recompute is therefore the safe boundary for this mixed-mode edge.
+    // IMMEDIATE upstreams capture their IVM row deltas into the same durable
+    // stream-table buffer consumed by this path. If that buffer is missing,
+    // create it and establish a fresh baseline with one FULL refresh.
     if upstream_immediate_source_requires_full(st)? {
-        refresh::ensure_full_policy(st, "IMMEDIATE upstream source")?;
+        refresh::ensure_full_policy(st, "IMMEDIATE upstream change buffer is missing")?;
         pgrx::info!(
-            "Stream table {}.{}: IMMEDIATE upstream requires FULL refresh",
+            "Stream table {}.{}: IMMEDIATE upstream change buffer was missing; using FULL refresh to establish its baseline",
             schema,
             table_name,
         );
@@ -1086,12 +1082,20 @@ fn upstream_st_source_positions(
 }
 
 fn upstream_immediate_source_requires_full(st: &StreamTableMeta) -> Result<bool, PgTrickleError> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema();
     for dependency in StDependency::get_for_st(st.pgt_id)? {
-        if dependency.source_type == "STREAM_TABLE"
-            && StreamTableMeta::get_by_relid(dependency.source_relid)?
-                .refresh_mode
-                .is_immediate()
+        if dependency.source_type != "STREAM_TABLE" {
+            continue;
+        }
+        let upstream = StreamTableMeta::get_by_relid(dependency.source_relid)?;
+        if upstream.refresh_mode.is_immediate()
+            && !crate::cdc::has_st_change_buffer(upstream.pgt_id, &change_schema)
         {
+            crate::cdc::ensure_st_change_buffer(
+                upstream.pgt_id,
+                dependency.source_relid,
+                &change_schema,
+            )?;
             return Ok(true);
         }
     }

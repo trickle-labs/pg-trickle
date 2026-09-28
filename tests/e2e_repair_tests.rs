@@ -197,6 +197,132 @@ async fn test_immediate_repair_preserves_shared_deferred_cdc() {
     db.assert_st_matches_query("imm_shared_st", query).await;
 }
 
+#[tokio::test]
+async fn test_ivm_documented_cascade_recovery_restores_results() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE documented_repair_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO documented_repair_src VALUES (1, 10)")
+        .await;
+    db.create_st(
+        "documented_repair_upstream",
+        "SELECT id, val FROM documented_repair_src",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.create_st(
+        "documented_repair_child",
+        "SELECT id, val * 2 AS doubled FROM documented_repair_upstream",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    db.create_st(
+        "documented_repair_grandchild",
+        "SELECT id, doubled + 1 AS result FROM documented_repair_child",
+        "1m",
+        "IMMEDIATE",
+    )
+    .await;
+    let upstream_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'documented_repair_upstream'",
+        )
+        .await;
+    db.execute(&format!(
+        "DROP TRIGGER pgt_ivm_after_upd_{upstream_id} ON documented_repair_src"
+    ))
+    .await;
+    db.execute("UPDATE documented_repair_src SET val = 15 WHERE id = 1")
+        .await;
+    let stale_value: i32 = db
+        .query_scalar("SELECT val FROM documented_repair_upstream WHERE id = 1")
+        .await;
+    assert_eq!(
+        stale_value, 10,
+        "the fixture must start with a stale cascade"
+    );
+
+    // Follow docs/UPGRADING.md: repair each IMMEDIATE stream from the
+    // base-nearest upstream toward its downstream descendants.
+    for st_name in [
+        "documented_repair_upstream",
+        "documented_repair_child",
+        "documented_repair_grandchild",
+    ] {
+        db.execute(&format!(
+            "SELECT pgtrickle.repair_stream_table('{st_name}')"
+        ))
+        .await;
+    }
+    db.assert_st_matches_query(
+        "documented_repair_upstream",
+        "SELECT id, val FROM documented_repair_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "documented_repair_child",
+        "SELECT id, val * 2 AS doubled FROM documented_repair_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "documented_repair_grandchild",
+        "SELECT id, val * 2 + 1 AS result FROM documented_repair_src",
+    )
+    .await;
+    db.execute_seq(&[
+        "BEGIN",
+        "UPDATE documented_repair_src SET val = 21 WHERE id = 1",
+        r#"DO $assert$
+        DECLARE mismatch_count bigint;
+        BEGIN
+          WITH mismatches AS (
+            (SELECT id, val FROM documented_repair_src
+             EXCEPT ALL SELECT id, val FROM documented_repair_upstream)
+            UNION ALL
+            (SELECT id, val FROM documented_repair_upstream
+             EXCEPT ALL SELECT id, val FROM documented_repair_src)
+            UNION ALL
+            (SELECT id, val * 2 FROM documented_repair_src
+             EXCEPT ALL SELECT id, doubled FROM documented_repair_child)
+            UNION ALL
+            (SELECT id, doubled FROM documented_repair_child
+             EXCEPT ALL SELECT id, val * 2 FROM documented_repair_src)
+            UNION ALL
+            (SELECT id, val * 2 + 1 FROM documented_repair_src
+             EXCEPT ALL SELECT id, result FROM documented_repair_grandchild)
+            UNION ALL
+            (SELECT id, result FROM documented_repair_grandchild
+             EXCEPT ALL SELECT id, val * 2 + 1 FROM documented_repair_src)
+          )
+          SELECT count(*) INTO mismatch_count FROM mismatches;
+          IF mismatch_count > 0 THEN
+            RAISE EXCEPTION 'recovered cascade diverged before COMMIT';
+          END IF;
+        END
+        $assert$"#,
+        "COMMIT",
+    ])
+    .await;
+    db.assert_st_matches_query(
+        "documented_repair_upstream",
+        "SELECT id, val FROM documented_repair_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "documented_repair_child",
+        "SELECT id, val * 2 AS doubled FROM documented_repair_src",
+    )
+    .await;
+    db.assert_st_matches_query(
+        "documented_repair_grandchild",
+        "SELECT id, val * 2 + 1 AS result FROM documented_repair_src",
+    )
+    .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // R1: Basic repair_stream_table invocation
 // ═══════════════════════════════════════════════════════════════════════

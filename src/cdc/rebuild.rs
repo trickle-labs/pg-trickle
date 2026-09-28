@@ -705,24 +705,32 @@ pub fn get_replica_identity_mode(source_oid: pg_sys::Oid) -> Result<String, PgTr
     Ok(identity)
 }
 
-/// Returns true if the relation has any user-defined row-level triggers
-/// (excluding internal triggers and pg_trickle's own CDC triggers).
+/// Returns true if the relation has any application triggers, excluding
+/// PostgreSQL-internal triggers and pg_trickle's IVM maintenance triggers.
 ///
 /// Used by the refresh executor to decide whether to use the explicit DML
 /// path (which fires triggers with correct `TG_OP` / `OLD` / `NEW`) instead
 /// of the single-pass MERGE path.
 ///
-/// This is a lightweight query — single index scan on `pg_trigger(tgrelid)`.
+/// The trigger relation is index-scanned by `tgrelid`; function identity
+/// distinguishes IVM maintenance triggers from application trigger names.
 pub fn has_user_triggers(st_relid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
     Spi::get_one::<bool>(&format!(
         "SELECT EXISTS(\
-           SELECT 1 FROM pg_trigger \
-           WHERE tgrelid = {}::oid \
-             AND tgisinternal = false \
-             AND tgname NOT LIKE 'pgt_%' \
-             AND tgname NOT LIKE 'pg_trickle_%' \
+           SELECT 1 FROM pg_catalog.pg_trigger tr \
+           JOIN pg_catalog.pg_class rel ON rel.oid = tr.tgrelid \
+           JOIN pg_catalog.pg_namespace rel_ns ON rel_ns.oid = rel.relnamespace \
+           JOIN pg_catalog.pg_proc fn ON fn.oid = tr.tgfoid \
+           JOIN pg_catalog.pg_namespace fn_ns ON fn_ns.oid = fn.pronamespace \
+           WHERE tr.tgrelid = {}::oid \
+             AND NOT tr.tgisinternal \
+             AND NOT (fn_ns.nspname = 'pgtrickle' AND fn.proname::text ~ '{}') \
+             AND NOT (tr.tgname::text IN ('pgt_dml_guard', 'pgt_truncate_guard') \
+                      AND fn_ns.oid = rel_ns.oid \
+                      AND pg_catalog.starts_with(fn.proname::text, '_pgt_guard_')) \
          )",
         st_relid.to_u32(),
+        crate::ivm::IVM_TRIGGER_FUNCTION_PATTERN,
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
     .map(|v| v.unwrap_or(false))

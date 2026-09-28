@@ -393,8 +393,9 @@ fn diff_scan_change_buffer(
     // For keyless tables, identical rows share the same pk_hash (content
     // hash), causing the DISTINCT ON logic to collapse independent events.
     // Instead, we decompose all changes into atomic +1 (INSERT) / -1
-    // (DELETE) operations per content hash, sum to get a net count, and
-    // expand using generate_series.
+    // (DELETE) operations per source identity, sum to get a net count, and
+    // expand using generate_series. Stream-table sources also group by the
+    // visible payload so D+I updates sharing a stable identity stay separate.
     //
     // A44-10 (D+I schema): UPDATEs are already decomposed at write time
     // (D-row + I-row), so no UNION ALL for 'U' rows is needed here.
@@ -430,26 +431,41 @@ fn diff_scan_change_buffer(
             .iter()
             .map(|c| format!("sub.{}", quote_ident(&c.name)))
             .collect();
-        let payload_identity_expr = crate::hash::build_row_identity_expr(
-            "KEYLESS_ROW",
-            &columns
-                .iter()
-                .map(|c| format!("c.{}", quote_ident(&crate::cdc::cb_col_name(&c.name))))
-                .collect::<Vec<_>>(),
-        );
+        let is_st_source = ctx.st_source_pgt_ids().contains_key(&table_oid);
+        let payload_identity_select = if is_st_source {
+            let expression = crate::hash::build_row_identity_expr(
+                "KEYLESS_ROW",
+                &columns
+                    .iter()
+                    .map(|c| format!("c.{}", quote_ident(&crate::cdc::cb_col_name(&c.name))))
+                    .collect::<Vec<_>>(),
+            );
+            format!(", {expression} AS payload_identity")
+        } else {
+            String::new()
+        };
+        let payload_identity_group = if is_st_source {
+            ", payload_identity"
+        } else {
+            ""
+        };
+        let output_identity = if is_st_source && ctx.st_scan_payload_identity {
+            "sub.payload_identity"
+        } else {
+            "sub.content_hash"
+        };
 
-        // CTE: Decompose all events into atomic +1/-1 per content image.
-        // An upstream stream table can keep a stable group/key identity while
-        // its values change, so grouping only by content_hash would cancel a
-        // real DELETE+INSERT update.  The payload identity preserves that
-        // update while still cancelling identical INSERT+DELETE pairs.
+        // CTE: Decompose events into atomic +1/-1 rows. Group stream-table
+        // events by source identity and payload to preserve multiplicity.
+        // Row-wise target plans use payload identity; plans that combine rows
+        // retain the stable source identity.
         // A44-10 (D+I schema): No UPDATE UNION ALL branches needed —
         // UPDATEs arrive as D-row + I-row pairs from the trigger/WAL decoder.
         let decomp_cte = ctx.next_cte_name(&format!("kl_decomp_{alias}"));
         let decomp_sql = format!(
             "\
 -- INSERT events: +1 per content hash
-SELECT {pk_hash_expr} AS content_hash, {payload_identity_expr} AS payload_identity,
+SELECT {pk_hash_expr} AS content_hash{payload_identity_select},
        1 AS delta_sign,
        {col_refs}
 FROM {change_table} c
@@ -458,7 +474,7 @@ WHERE {lsn_filter} AND c.action = 'I'
 UNION ALL
 
 -- DELETE events: -1 per content hash
-SELECT {pk_hash_expr} AS content_hash, {payload_identity_expr} AS payload_identity,
+SELECT {pk_hash_expr} AS content_hash{payload_identity_select},
        -1 AS delta_sign,
        {col_refs}
 FROM {change_table} c
@@ -471,32 +487,32 @@ WHERE {lsn_filter} AND c.action = 'D'",
         let cte_name = ctx.next_cte_name(&format!("scan_{alias}"));
         let sql = format!(
             "\
--- Net inserts: content hashes with net_count > 0
-SELECT sub.content_hash AS __pgt_row_id,
+-- Net inserts: output identities with net_count > 0
+SELECT {output_identity} AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {sub_cols}
 FROM (
-    SELECT content_hash,
+    SELECT content_hash{payload_identity_group},
            {max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
-    GROUP BY content_hash, payload_identity
+    GROUP BY content_hash{payload_identity_group}
     HAVING SUM(delta_sign) > 0
 ) sub
 CROSS JOIN generate_series(1, sub.net_count) gs
 
 UNION ALL
 
--- Net deletes: content hashes with net_count < 0
-SELECT sub.content_hash AS __pgt_row_id,
+-- Net deletes: output identities with net_count < 0
+SELECT {output_identity} AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {sub_cols}
 FROM (
-    SELECT content_hash,
+    SELECT content_hash{payload_identity_group},
            {max_cols},
            SUM(delta_sign)::INT AS net_count
     FROM {decomp_cte}
-    GROUP BY content_hash, payload_identity
+    GROUP BY content_hash{payload_identity_group}
     HAVING SUM(delta_sign) < 0
 ) sub
 CROSS JOIN generate_series(1, -sub.net_count) gs",
@@ -1251,6 +1267,37 @@ mod tests {
         assert_sql_contains(&sql, "delta_sign");
         // Should compute net counts
         assert_sql_contains(&sql, "SUM(delta_sign)");
+        // Base-table row IDs already encode their payload, so the fast path
+        // needs no second payload hash.
+        assert_sql_contains(&sql, "sub.content_hash AS __pgt_row_id");
+        assert_sql_contains(&sql, "GROUP BY content_hash");
+        assert!(!sql.contains("payload_identity"));
+    }
+
+    #[test]
+    fn test_diff_scan_stream_table_keyless_uses_payload_identity() {
+        let mut ctx = test_ctx();
+        ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(100, 42)]));
+        ctx.st_scan_payload_identity = true;
+        let tree = scan(100, "orders", "public", "o", &["id", "amount"]);
+        let result = diff_scan(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "sub.payload_identity AS __pgt_row_id");
+        assert_sql_contains(&sql, "GROUP BY content_hash, payload_identity");
+        assert_sql_contains(&sql, "payload_identity");
+    }
+
+    #[test]
+    fn test_diff_scan_stream_table_keyless_preserves_identity_for_combining_plan() {
+        let mut ctx = test_ctx();
+        ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(100, 42)]));
+        let tree = scan(100, "orders", "public", "o", &["id", "amount"]);
+        let result = diff_scan(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        assert_sql_contains(&sql, "sub.content_hash AS __pgt_row_id");
+        assert_sql_contains(&sql, "GROUP BY content_hash, payload_identity");
     }
 
     #[test]

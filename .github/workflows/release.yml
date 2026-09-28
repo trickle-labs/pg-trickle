@@ -100,6 +100,10 @@ jobs:
         if: github.ref_name == 'v0.108.0'
         run: python3 scripts/v0_108_0_release_gate.py
 
+      - name: v0.108.1 IMMEDIATE cascade consistency release gate
+        if: github.ref_name == 'v0.108.1'
+        run: python3 scripts/v0_108_1_release_gate.py
+
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 
@@ -395,7 +399,7 @@ jobs:
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
   qualification:
-    name: Packaged v0.108.0 release qualification
+    name: Packaged v0.108.1 release qualification
     needs: [build-release, test-release]
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -430,12 +434,12 @@ jobs:
           set +e
           mkdir -p qualification-logs/logs qualification-logs/results qualification-logs/raw
           ARCHIVE="$(find dist/release-linux-amd64 -maxdepth 1 -name '*.tar.gz' -print -quit)"
-          mapfile -t SUITES < <(python3 -c 'import json; print("\n".join(s["id"] for s in json.load(open("tests/release/v0.108.0-qualification.json"))["required_suites"]))')
+          mapfile -t SUITES < <(python3 -c 'import json; print("\n".join(s["id"] for s in json.load(open("tests/release/v0.108.1-qualification.json"))["required_suites"]))')
           FAILED=0
           for suite in "${SUITES[@]}"; do
             echo "=== Qualification suite: ${suite} ==="
             python3 scripts/run_release_suite.py \
-              --qualification tests/release/v0.108.0-qualification.json \
+              --qualification tests/release/v0.108.1-qualification.json \
               --suite "$suite" \
               --artifact "$ARCHIVE" \
               --candidate-commit "$GITHUB_SHA" \
@@ -459,7 +463,7 @@ jobs:
             --output qualification-logs/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
             --candidate-commit "$GITHUB_SHA" \
-            --qualification tests/release/v0.108.0-qualification.json \
+            --qualification tests/release/v0.108.1-qualification.json \
             --capability-manifest docs/capability-manifest.json \
             --artifact dist/release-*/* \
             "${suite_args[@]}"
@@ -477,7 +481,7 @@ jobs:
         if: always()
         run: |
           if [[ "${{ steps.qualify.outputs.failed }}" != "0" ]]; then
-            echo "One or more v0.108.0 package qualification suites failed."
+            echo "One or more v0.108.1 package qualification suites failed."
             exit 1
           fi
 
@@ -520,7 +524,7 @@ jobs:
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
             --candidate-commit "$GITHUB_SHA" \
-            --qualification tests/release/v0.108.0-qualification.json \
+            --qualification tests/release/v0.108.1-qualification.json \
             --capability-manifest docs/capability-manifest.json \
             --artifact release-files/pg_trickle-*.tar.gz release-files/pg_trickle-*.zip \
             "${suite_args[@]}"

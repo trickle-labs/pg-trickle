@@ -11,8 +11,9 @@ useDefault = true
 
 # ── Global allowlist: paths that commonly contain example credentials ─────────
 
-[allowlist]
+[[allowlists]]
 description = "Example credentials in docs, tests, and CI config files"
+condition = "OR"
 paths = [
     '''docs/.*\.md''',
     '''blog/.*\.md''',
@@ -25,4 +26,27 @@ paths = [
     '''monitoring/.*''',
     '''cnpg/.*''',
     '''\.github/.*''',
+]
+
+[[allowlists]]
+description = "Local Citus sample URL false positive in the initial PR justfile patch"
+condition = "AND"
+commits = [
+    "266229f902c49e5ae4177101002ccffe37355305",
+    "2ef8a9fc89f733ed40a189d879651b0bf3acfc55",
+    "d0b7b7792ac68fd6506ca75ada270b7005b48340",
+]
+paths = [
+    '''(^|/)justfile$''',
+]
+
+[[allowlists]]
+description = "Local test credentials in two retained E2E evidence logs"
+condition = "AND"
+commits = [
+    "266229f902c49e5ae4177101002ccffe37355305",
+]
+paths = [
+    '''(^|/)\.p2p/work/issue-1119-immediate-downstream-consistency/evidence/issue-1119-repair-final2-upgrade\.log$''',
+    '''(^|/)\.p2p/work/issue-1119-immediate-downstream-consistency/evidence/issue-1119-repair6-e2e-image\.log$''',
 ]

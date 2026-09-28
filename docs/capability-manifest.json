@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "release_version": "0.108.0",
+  "release_version": "0.108.1",
   "capabilities": [
     {
       "id": "trigger-capture",
@@ -444,5 +444,5 @@
       "docs/integrations/extension-contracts.md"
     ]
   },
-  "manifest_digest": "sha256:db557dbe5226283d9f8446eabf1335f6c6e0793f711f976bf3dcc4a1cd27dbba"
+  "manifest_digest": "sha256:4d54972fcd2e8cb43c2c9d37adf072c4fefbae6efb38cbe5183adcf005f1224e"
 }

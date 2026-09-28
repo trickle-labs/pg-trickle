@@ -148,9 +148,10 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    [[ "$FROM_VERSION" == "0.106.1" && "$TO_VERSION" == "0.108.0" ]]
+    [[ "$FROM_VERSION" == "0.106.1" && "$TO_VERSION" == "0.108.1" ]]
     test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
+    test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
 docker cp "$CANDIDATE_DIR/usr/share/postgresql/18/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"

@@ -200,6 +200,10 @@ pub fn invalidate_ivm_delta_cache(pgt_id: i64) {
 
 // ── IVM trigger / function naming ────────────────────────────────────────
 
+/// Function-name pattern identifying pg_trickle's IVM maintenance triggers.
+pub(crate) const IVM_TRIGGER_FUNCTION_PATTERN: &str =
+    r"^(pgt_ivm_before|pgt_ivm_after_(ins|upd|del|trunc))_fn_[0-9]+_[0-9]+$";
+
 /// All trigger and function names used by IVM for a single
 /// (pgt_id, source_oid) pair.
 ///
@@ -685,6 +689,25 @@ fn apply_ivm_owner_delta(
         st.pgt_schema.replace('"', "\"\""),
         st.pgt_name.replace('"', "\"\""),
     );
+    let capture_columns = if crate::refresh::has_downstream_st_consumers(st.pgt_id) {
+        crate::refresh::get_st_user_columns(st)
+    } else {
+        Vec::new()
+    };
+    let capture_col_list = capture_columns
+        .iter()
+        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let pre_table = if capture_columns.is_empty() {
+        None
+    } else {
+        let basename = format!("__pgt_pre_{}", st.pgt_id);
+        let empty_pre_select =
+            format!("SELECT __pgt_row_id, {capture_col_list} FROM {st_qualified} WHERE false");
+        crate::refresh::prepare_owner_temp_table(st, &basename, &empty_pre_select)?;
+        Some(basename)
+    };
     // delta_sql is definition-derived: parse/analyze it under the owner's
     // identity and stored search_path, not this privileged caller's.
     let delta_table_quoted = crate::refresh::with_stream_owner(st, || {
@@ -703,6 +726,20 @@ fn apply_ivm_owner_delta(
                 .unwrap_or(0);
 
         if delta_count > 0 {
+            if let Some(basename) = &pre_table {
+                let pre_table = format!("pg_temp.{}", quote_identifier(basename));
+                let snapshot_sql = format!(
+                    "INSERT INTO {pre_table} \
+                     SELECT st.__pgt_row_id, {capture_col_list} FROM {st_qualified} st \
+                     WHERE EXISTS (SELECT 1 FROM {delta_table_quoted} delta \
+                       WHERE {})",
+                    crate::refresh::build_row_id_match("st.__pgt_row_id", "delta.__pgt_row_id")
+                );
+                Spi::run(&snapshot_sql).map_err(|e| {
+                    PgTrickleError::SpiError(format!("Failed to snapshot affected IVM rows: {e}"))
+                })?;
+            }
+
             Spi::run(&build_ivm_delete_sql(
                 &st_qualified,
                 delta_table,
@@ -736,12 +773,14 @@ fn apply_ivm_owner_delta(
         Ok(delta_count)
     });
     let result = result.and_then(|delta_count| {
-        if delta_count > 0 && crate::refresh::has_downstream_st_consumers(st.pgt_id) {
-            let public_columns = crate::refresh::get_st_user_columns(st);
-            crate::refresh::capture_delta_to_st_buffer(st, &public_columns)?;
+        if delta_count > 0 && !capture_columns.is_empty() {
+            crate::refresh::capture_incremental_diff_to_st_buffer(st, &capture_columns)?;
         }
         Ok(delta_count)
     });
+    if let Some(basename) = pre_table {
+        crate::refresh::drop_owner_temp_table(st, &basename);
+    }
     crate::refresh::drop_owner_temp_table(st, delta_table);
     result
 }
@@ -1309,6 +1348,66 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         st.pgt_name.replace('"', "\"\""),
     );
 
+    let needs_diff_capture = crate::refresh::has_downstream_st_consumers(st.pgt_id);
+    let user_cols = if needs_diff_capture {
+        crate::refresh::get_st_user_columns(&st)
+    } else {
+        Vec::new()
+    };
+    if !user_cols.is_empty() {
+        let col_list = user_cols
+            .iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pre_select = format!("SELECT __pgt_row_id, {col_list} FROM {st_qualified}");
+        crate::refresh::prepare_owner_temp_table(
+            &st,
+            &format!("__pgt_pre_{}", st.pgt_id),
+            &pre_select,
+        )?;
+        crate::refresh::with_stream_owner(&st, || {
+            Spi::run(&format!(
+                "INSERT INTO pg_temp.{} SELECT __pgt_row_id, {col_list} FROM {st_qualified}",
+                crate::sql_builder::ident(&format!("__pgt_pre_{}", st.pgt_id)),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        })?;
+    }
+
+    // Rebuild every persisted auxiliary column as well as the public result.
+    // Aggregate IVM state, for example, stores __pgt_count separately from its
+    // visible columns so later deltas can maintain the correct multiplicity.
+    let mut effective_query = if crate::dvm::query_needs_pgt_count(&st.defining_query) {
+        crate::api::inject_pgt_count(&st.defining_query)
+    } else {
+        st.defining_query.clone()
+    };
+    let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+    if !avg_aux.is_empty() {
+        effective_query = crate::api::inject_avg_aux(&effective_query, &avg_aux);
+    }
+    let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
+    if !sum2_aux.is_empty() {
+        let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
+        let typed = crate::api::typed_statistical_aux_columns(&sum2_aux, &types);
+        effective_query = crate::api::inject_sum2_aux_typed(&effective_query, &typed);
+    }
+    let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
+    if !covar_aux.is_empty() {
+        let types = crate::dvm::query_statistical_aux_types(&st.defining_query);
+        let typed = crate::api::typed_statistical_aux_columns(&covar_aux, &types);
+        effective_query = crate::api::inject_covar_aux_typed(&effective_query, &typed);
+    }
+    let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
+    if !nonnull_aux.is_empty() {
+        effective_query = crate::api::inject_nonnull_aux(&effective_query, &nonnull_aux);
+    }
+
+    let row_id_expr = crate::refresh::with_stream_owner(&st, || {
+        Ok(crate::dvm::row_id_expr_for_query(&st.defining_query))
+    })?;
+
     crate::refresh::with_stream_owner(&st, || {
         // Truncate the stream table.
         Spi::run(&format!("TRUNCATE {st_qualified}")) // nosemgrep: rust.spi.run.dynamic-format — relation is quote_ident()-escaped.
@@ -1317,7 +1416,6 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         // Re-populate from the defining query (which now reads from the
         // truncated base table — i.e., produces no/fewer rows).
         {
-            let defining_query = &st.defining_query;
             // Get the user columns from the stream table.
             let col_info = Spi::connect(|client| {
                 let query = format!(
@@ -1345,24 +1443,9 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                // Re-populate: INSERT with hash-based row_id.
-                let hash_cols: Vec<String> = col_info
-                    .iter()
-                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-                    .collect();
-
-                let row_id_expr = if hash_cols.len() == 1 {
-                    format!(
-                        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW({}))",
-                        hash_cols[0]
-                    )
-                } else {
-                    crate::hash::build_row_identity_expr("KEYLESS_ROW", &hash_cols)
-                };
-
                 let repopulate_sql = format!(
                     "INSERT INTO {st_qualified} (__pgt_row_id, {col_list})
-                 SELECT {row_id_expr}, {col_list} FROM ({defining_query}) __pgt_base"
+                 SELECT {row_id_expr}, {col_list} FROM ({effective_query}) sub"
                 );
                 Spi::run(&repopulate_sql).map_err(|e| {
                     PgTrickleError::SpiError(format!("IVM repopulate after TRUNCATE failed: {e}"))
@@ -1371,6 +1454,16 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
         }
         Ok(())
     })?;
+
+    if !user_cols.is_empty() {
+        crate::refresh::capture_full_refresh_diff_to_st_buffer(&st, &user_cols).map_err(|e| {
+            PgTrickleError::RefreshFinalizationFailed {
+                pgt_id: st.pgt_id,
+                stage: "IMMEDIATE TRUNCATE downstream CDC capture".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+    }
 
     pgrx::log!("[pg_trickle] IVM TRUNCATE handled for pgt_id={}", pgt_id,);
 
