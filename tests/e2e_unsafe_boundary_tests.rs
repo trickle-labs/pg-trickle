@@ -1,3 +1,5 @@
+#![cfg(feature = "e2e-unsafe-test-hooks")]
+
 //! Assertion and AddressSanitizer coverage for the selected unsafe boundaries.
 mod e2e;
 

@@ -1035,7 +1035,12 @@ fn execute_manual_differential_refresh(
     let _ = refresh::test_atomicity_barrier(st, "input_boundary", 0);
     // A bounded buffer position can trail the stored frontier. Never replay
     // deltas by letting a differential frontier move backward.
-    new_frontier.merge_from(&prev_frontier);
+    new_frontier.merge_from(&prev_frontier).map_err(|e| {
+        PgTrickleError::InvalidArgument(format!(
+            "stored frontier for {}.{} contains an invalid LSN: {e}",
+            schema, table_name
+        ))
+    })?;
 
     // Execute the differential refresh via the DVM engine.
     // DI-7: When QueryTooComplex is returned (e.g. join count exceeds

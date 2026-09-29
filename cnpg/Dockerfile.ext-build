@@ -58,6 +58,7 @@ RUN mkdir -p src/bin src/dvm/operators benches && \
 
 # ── Build the real extension ────────────────────────────────────────────────
 COPY src/ src/
+COPY verification/ verification/
 COPY pg_trickle.control ./
 
 RUN cargo pgrx package --pg-config /usr/bin/pg_config

@@ -20,6 +20,7 @@
 //!    upper bound. The DVM engine reads changes in `[old, new]` range.
 //! 3. **Reset** — on reinitialize. A new frontier is created from scratch.
 
+use crate::lsn::{Lsn, LsnParseError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -119,22 +120,39 @@ impl Frontier {
 
     /// Merge another frontier's sources into this one, keeping the
     /// higher LSN for each source (used for ST-on-ST dependencies).
-    pub fn merge_from(&mut self, other: &Frontier) {
+    pub fn merge_from(&mut self, other: &Frontier) -> Result<(), LsnParseError> {
+        for source in self.sources.values().chain(other.sources.values()) {
+            Lsn::parse(&source.lsn)?;
+        }
+        let updates = other
+            .sources
+            .iter()
+            .filter_map(|(key, sv)| {
+                let existing = self.sources.get(key)?;
+                Some((key, sv, existing))
+            })
+            .map(|(key, incoming, existing)| {
+                Ok((
+                    key.clone(),
+                    incoming.clone(),
+                    Lsn::parse(&incoming.lsn)? > Lsn::parse(&existing.lsn)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, LsnParseError>>()?;
+        for (key, incoming, is_higher) in updates {
+            if is_higher {
+                self.sources.insert(key, incoming);
+            }
+        }
         for (key, sv) in &other.sources {
             match self.sources.get(key) {
-                Some(existing) => {
-                    // Keep the higher LSN (lexicographic comparison works for hex LSNs
-                    // of the same length, but for proper comparison we'd parse).
-                    // We use the incoming value since it represents a newer state.
-                    if lsn_gt(&sv.lsn, &existing.lsn) {
-                        self.sources.insert(key.clone(), sv.clone());
-                    }
-                }
+                Some(_) => {}
                 None => {
                     self.sources.insert(key.clone(), sv.clone());
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -142,45 +160,34 @@ impl Frontier {
 ///
 /// LSN format is `X/Y` where X and Y are hex numbers.
 /// We parse both parts and compare numerically.
-pub fn lsn_gt(a: &str, b: &str) -> bool {
-    parse_lsn(a) > parse_lsn(b)
+pub fn lsn_gt(a: &str, b: &str) -> Result<bool, LsnParseError> {
+    Ok(crate::lsn::numeric_gt(Lsn::parse(a)?, Lsn::parse(b)?))
 }
 
 /// Parse a PostgreSQL LSN string (`"X/Y"`) into a `u64`.
 #[inline]
-pub fn lsn_to_u64(s: &str) -> u64 {
-    parse_lsn(s)
+pub fn lsn_to_u64(s: &str) -> Result<u64, LsnParseError> {
+    Ok(Lsn::parse(s)?.position())
 }
 
 /// Format a `u64` LSN value back into PostgreSQL `"X/Y"` notation.
 #[inline]
 pub fn u64_to_lsn(v: u64) -> String {
-    let hi = (v >> 32) as u32;
-    let lo = v as u32;
-    format!("{hi:X}/{lo:08X}")
-}
-
-/// Parse a PostgreSQL LSN string (`"X/Y"`) into a `u64`.
-#[inline]
-fn parse_lsn(s: &str) -> u64 {
-    match s.split_once('/') {
-        Some((hi_s, lo_s)) => {
-            let hi = u64::from_str_radix(hi_s, 16).unwrap_or(0);
-            let lo = u64::from_str_radix(lo_s, 16).unwrap_or(0);
-            (hi << 32) | lo
-        }
-        None => 0,
-    }
+    Lsn::from_position(v).format()
 }
 
 /// Compare two LSN strings. Returns true if `a >= b`.
-pub fn lsn_gte(a: &str, b: &str) -> bool {
-    a == b || lsn_gt(a, b)
+pub fn lsn_gte(a: &str, b: &str) -> Result<bool, LsnParseError> {
+    Ok(crate::lsn::numeric_gte(Lsn::parse(a)?, Lsn::parse(b)?))
 }
 
 /// Return the lower of two LSN strings.
-pub fn lsn_min<'a>(a: &'a str, b: &'a str) -> &'a str {
-    if lsn_gt(a, b) { b } else { a }
+pub fn lsn_min<'a>(a: &'a str, b: &'a str) -> Result<&'a str, LsnParseError> {
+    Ok(if crate::lsn::numeric_gt(Lsn::parse(a)?, Lsn::parse(b)?) {
+        b
+    } else {
+        a
+    })
 }
 
 // ── Data Timestamp Selection ───────────────────────────────────────────────
@@ -366,6 +373,16 @@ mod tests {
     }
 
     #[test]
+    fn test_frontier_persisted_unpadded_lsn_compatibility() {
+        let predecessor = r#"{"sources":{"16384":{"lsn":"0/A","snapshot_ts":"2026-02-17T10:00:00Z"}},"data_timestamp":"2026-02-17T10:00:00Z"}"#;
+        let frontier = Frontier::from_json(predecessor).expect("predecessor frontier JSON");
+
+        assert_eq!(frontier.get_lsn(16384), "0/A");
+        let serialized = frontier.to_json().expect("serialize frontier");
+        assert!(serialized.contains(r#""lsn":"0/A""#));
+    }
+
+    #[test]
     fn test_canonical_data_timestamp_alignment() {
         let period = 96u64;
         let ts = canonical_data_timestamp_secs(period);
@@ -406,13 +423,16 @@ mod tests {
 
     #[test]
     fn test_lsn_comparison() {
-        assert!(lsn_gt("0/2", "0/1"));
-        assert!(lsn_gt("1/0", "0/FFFFFFFF"));
-        assert!(!lsn_gt("0/1", "0/2"));
-        assert!(!lsn_gt("0/1", "0/1"));
-        assert!(lsn_gte("0/1", "0/1"));
-        assert!(lsn_gte("0/2", "0/1"));
-        assert!(!lsn_gte("0/1", "0/2"));
+        assert!(lsn_gt("0/2", "0/1").unwrap());
+        assert!(lsn_gt("1/0", "0/FFFFFFFF").unwrap());
+        assert!(!lsn_gt("0/1", "0/2").unwrap());
+        assert!(!lsn_gt("0/1", "0/1").unwrap());
+        assert!(lsn_gte("0/1", "0/1").unwrap());
+        assert!(lsn_gte("0/2", "0/1").unwrap());
+        assert!(!lsn_gte("0/1", "0/2").unwrap());
+        assert!(!lsn_gt("0/A", "0/0000000A").unwrap());
+        assert!(lsn_gt("10/0", "F/FFFFFFFF").unwrap());
+        assert!(lsn_gt("not-an-lsn", "0/0").is_err());
     }
 
     #[test]
@@ -426,11 +446,26 @@ mod tests {
         f2.set_source(200, "0/30".to_string(), "ts2".to_string()); // higher
         f2.set_source(300, "0/40".to_string(), "ts2".to_string()); // new
 
-        f1.merge_from(&f2);
+        f1.merge_from(&f2).unwrap();
 
         assert_eq!(f1.get_lsn(100), "0/10"); // lower frontier rejected
         assert_eq!(f1.get_lsn(200), "0/30"); // updated (higher)
         assert_eq!(f1.get_lsn(300), "0/40"); // added
+    }
+
+    #[test]
+    fn test_frontier_merge_invalid_lsn_leaves_frontier_unchanged() {
+        let mut current = Frontier::new();
+        current.set_source(100, "0/10".to_string(), "ts1".to_string());
+        let before = current.clone();
+
+        let mut incoming = Frontier::new();
+        incoming.set_source(100, "0/20".to_string(), "ts2".to_string());
+        incoming.set_source(200, "bad".to_string(), "ts2".to_string());
+
+        assert!(current.merge_from(&incoming).is_err());
+        assert_eq!(current.get_lsn(100), before.get_lsn(100));
+        assert_eq!(current.sources.len(), before.sources.len());
     }
 
     #[test]
@@ -519,18 +554,21 @@ mod tests {
     #[test]
     fn test_lsn_to_u64_round_trip() {
         // Round-trip: parse then format
-        assert_eq!(u64_to_lsn(lsn_to_u64("1/00000500")), "1/00000500");
-        assert_eq!(u64_to_lsn(lsn_to_u64("0/00000001")), "0/00000001");
-        assert_eq!(u64_to_lsn(lsn_to_u64("FF/FFFFFFFF")), "FF/FFFFFFFF");
-        assert_eq!(u64_to_lsn(lsn_to_u64("0/0")), "0/00000000");
+        assert_eq!(u64_to_lsn(lsn_to_u64("1/00000500").unwrap()), "1/00000500");
+        assert_eq!(u64_to_lsn(lsn_to_u64("0/00000001").unwrap()), "0/00000001");
+        assert_eq!(
+            u64_to_lsn(lsn_to_u64("FF/FFFFFFFF").unwrap()),
+            "FF/FFFFFFFF"
+        );
+        assert_eq!(u64_to_lsn(lsn_to_u64("0/0").unwrap()), "0/00000000");
     }
 
     #[test]
     fn test_lsn_to_u64_known_values() {
         // High segment 1, low 0x500 = u64 value 0x1_0000_0500
-        assert_eq!(lsn_to_u64("1/00000500"), 0x1_0000_0500);
-        assert_eq!(lsn_to_u64("0/00000001"), 1);
-        assert_eq!(lsn_to_u64("0/0"), 0);
+        assert_eq!(lsn_to_u64("1/00000500").unwrap(), 0x1_0000_0500);
+        assert_eq!(lsn_to_u64("0/00000001").unwrap(), 1);
+        assert_eq!(lsn_to_u64("0/0").unwrap(), 0);
     }
 
     #[test]

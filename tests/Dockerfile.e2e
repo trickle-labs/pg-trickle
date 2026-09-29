@@ -55,6 +55,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # ── Build the real extension ────────────────────────────────────────────────
 # Copy actual source — invalidates only the compile step below.
 COPY src/ src/
+COPY verification/ verification/
 COPY pg_trickle.control ./
 
 # Compile the extension.
