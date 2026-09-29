@@ -45,6 +45,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Test feature-gated SQL API documentation filters
+        run: python3 scripts/test_api_doc_filters.py
+
       - name: Check GUC and SQL API catalogs are up to date
         run: |
           python3 scripts/gen_catalogs.py --check

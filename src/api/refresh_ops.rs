@@ -61,6 +61,74 @@ fn refresh_stream_table(name: &str) {
     }
 }
 
+/// Catch the expected failure inside the instrumented backend, before this
+/// SECURITY DEFINER frame restores its own role and search_path.
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
+fn e2e_catch_security_context_error(context: &str, name: &str) -> Vec<String> {
+    use std::panic::AssertUnwindSafe;
+
+    let expected_message = match context {
+        "owner" => "division by zero",
+        "caller" => "unsafe caller context probe",
+        _ => pgrx::error!("unknown security-context test target: {context}"),
+    };
+    let before = e2e_security_context_state();
+    pgrx::PgTryBuilder::new(AssertUnwindSafe(|| match context {
+        "owner" => refresh_stream_table(name),
+        "caller" => super::outbox::attach_outbox(name, 24, 10000),
+        _ => pgrx::error!("unknown security-context test target: {context}"),
+    }))
+    .catch_others(|cause| {
+        let message = e2e_caught_error_message(&cause);
+        let after = e2e_security_context_state();
+        let evidence = serde_json::json!({
+            "backend_pid": before[0],
+            "context": context,
+            "before": before,
+            "after": after,
+            "error": message,
+        });
+        pgrx::warning!("PGTRICKLE_E2E_SECURITY_CONTEXT_STATE:{}", evidence);
+        cause.rethrow()
+    })
+    .execute();
+    pgrx::error!(
+        "security-context test target {context} returned without expected ERROR containing {expected_message}"
+    );
+}
+
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+fn e2e_security_context_state() -> Vec<String> {
+    [
+        "SELECT pg_backend_pid()::text",
+        "SELECT current_user::text",
+        "SELECT current_setting('role')",
+        "SELECT current_setting('search_path')",
+        "SELECT current_setting('row_security')",
+    ]
+    .into_iter()
+    .map(|query| match Spi::get_one::<String>(query) {
+        Ok(Some(value)) => value,
+        Ok(None) => pgrx::error!("security-context test state query returned NULL: {query}"),
+        Err(error) => pgrx::error!("security-context test state query failed: {error}"),
+    })
+    .collect()
+}
+
+#[cfg(feature = "e2e-unsafe-test-hooks")]
+fn e2e_caught_error_message(cause: &pgrx::pg_sys::panic::CaughtError) -> String {
+    use pgrx::pg_sys::panic::CaughtError;
+
+    match cause {
+        CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
+            report.message().to_owned()
+        }
+        CaughtError::RustPanic { ereport, .. } => ereport.message().to_owned(),
+    }
+}
+
 /// UX-5: Execute an arbitrary SQL statement (typically DML against a source
 /// table) and then immediately refresh the named stream table, all within the
 /// caller's transaction context.

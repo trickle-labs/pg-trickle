@@ -1,0 +1,7 @@
+# PostgreSQL 18.6 retains its copied argv/environment pointer array for the
+# process lifetime in save_ps_display_args. Suppress only that exact stack.
+leak:save_ps_display_args
+# pgrx-pg-sys 0.18.0 allocates an error-domain CString in do_ereport; a
+# PostgreSQL ERROR longjmps through Rust before the CString destructor runs.
+# Suppress only this pgrx runtime frame; other LSan reports remain fatal.
+leak:do_ereport

@@ -635,7 +635,8 @@ pub fn classify_spi_sqlstate_retryable(sqlstate_code: u32) -> bool {
 /// Test-only SQLSTATE classification using raw integer codes computed from
 /// PostgreSQL's MAKE_SQLSTATE macro, so tests don't need a live PG backend.
 ///
-/// MAKE_SQLSTATE(c1,c2,c3,c4,c5) = ((c1-'A')<<24)|((c2-'A')<<18)|...
+/// MAKE_SQLSTATE packs each `PGSIXBIT(c)` value at `6 * character_index`,
+/// starting with the least-significant group.
 /// For 5 chars c[0..5], each encoded in 6 bits.
 pub fn classify_spi_sqlstate_retryable_for_test(sqlstate_code: u32) -> bool {
     // Well-known integer codes for tests (from PostgreSQL errcodes.h):
@@ -713,26 +714,22 @@ fn sqlstate_class(code: u32) -> String {
 
 /// Convert a PostgreSQL integer SQLSTATE code to its 5-character string representation.
 ///
-/// PostgreSQL uses `MAKE_SQLSTATE(c1,c2,c3,c4,c5)` which encodes each character
-/// in 6 bits. Characters 'A'..'Z' map to 1..26; '0'..'9' map to values offset
-/// by the alphabet. Digit characters use an offset that differs from letter chars.
-/// This reverses that encoding.
+/// PostgreSQL uses `MAKE_SQLSTATE(c1,c2,c3,c4,c5)` to encode five PGSIXBIT
+/// characters into six-bit groups, with the first character in the least
+/// significant group. `PGSIXBIT(ch)` is `(ch - '0') & 0x3F`, so digits map to
+/// 0..9 and uppercase letters map to 17..42. This reverses that encoding.
 pub fn sqlstate_to_string(code: u32) -> String {
-    // PostgreSQL MAKE_SQLSTATE packs chars as:
-    //   result = 0
-    //   for each char c (left to right):
-    //       result = (result << 6) | encode(c)
-    // where encode('A'..='Z') = 1..26, encode('0'..='9') = 27..36.
-    // Unpack: extract 6-bit groups from MSB to LSB.
+    // MAKE_SQLSTATE packs PGSIXBIT(c1) at bits 0..5, c2 at 6..11, etc.
+    // PGSIXBIT(ch) is `((ch - '0') & 0x3F)` for every SQLSTATE character.
     let mut chars = Vec::with_capacity(5);
     let mut v = code;
     for _ in 0..5 {
-        let c6 = (v >> 24) & 0x3F;
-        v <<= 6;
-        let ch = if (1..=26).contains(&c6) {
-            (b'A' + (c6 as u8 - 1)) as char
-        } else if (27..=36).contains(&c6) {
-            (b'0' + (c6 as u8 - 27)) as char
+        let c6 = v & 0x3F;
+        v >>= 6;
+        let ch = if (0..=9).contains(&c6) {
+            (b'0' + c6 as u8) as char
+        } else if (17..=42).contains(&c6) {
+            (b'A' + (c6 as u8 - 17)) as char
         } else {
             '?'
         };
@@ -955,6 +952,17 @@ impl RetryState {
 mod tests {
     use super::*;
 
+    fn make_sqlstate(value: &str) -> u32 {
+        assert_eq!(value.len(), 5);
+        value.bytes().enumerate().fold(0, |code, (index, byte)| {
+            let sixbit = match byte {
+                b'0'..=b'9' | b'A'..=b'Z' => (byte - b'0') & 0x3F,
+                _ => panic!("invalid SQLSTATE character {byte:?}"),
+            };
+            code | (u32::from(sixbit) << (index * 6))
+        })
+    }
+
     #[test]
     fn test_error_classification() {
         assert_eq!(
@@ -1055,7 +1063,7 @@ mod tests {
                 .counts_toward_suspension()
         );
         assert!(
-            !PgTrickleError::SpiErrorCode(545_326_814, "lock_not_available".into())
+            !PgTrickleError::SpiErrorCode(make_sqlstate("55P03"), "lock_not_available".into())
                 .counts_toward_suspension()
         );
         assert!(!PgTrickleError::RefreshSkipped("x".into()).counts_toward_suspension());
@@ -1288,19 +1296,9 @@ mod tests {
     /// used in retry decisions.
     #[test]
     fn test_sqlstate_classifier_retryable_classes() {
-        // Retryable: 40xxx = transaction rollback (serialization, deadlock)
-        // Approximate MAKE_SQLSTATE('4','0','0','0','1') for 40001
-        // We test by constructing known codes symbolically.
-        // Instead of deriving MAKE_SQLSTATE (which needs PG headers),
-        // we verify round-trip: sqlstate_to_string → classify.
-
-        // Test that "40" class (transaction rollback) is retryable.
-        // We construct by setting the first two 6-bit chars to encode '4','0'.
-        // MAKE_SQLSTATE encodes: c1='4'→25+('4'-'A')... actually '4' is not A-Z.
-        // PostgreSQL uses A=1..Z=26, 0=27..9=36 for MAKE_SQLSTATE.
-        // '4' = 27 + 4 = 31; '0' = 27 + 0 = 27.
-        // MAKE_SQLSTATE('4','0','x','x','x') = (31<<24)|(27<<18)|...
-        // For the test we just verify the text-based fallback for known strings.
+        // Retryable: 40xxx = transaction rollback (serialization, deadlock).
+        // Exercise text-based fallback with known SQLSTATE descriptions; the
+        // integer encoder and decoder round-trip are tested separately.
 
         // Known non-retryable SQLSTATE classes via text-based classifier:
         assert!(!classify_spi_error_retryable("permission denied"));
@@ -1366,6 +1364,13 @@ mod tests {
                 "sqlstate_to_string({code}) must be non-empty"
             );
             assert_eq!(s1, s2, "sqlstate_to_string must be deterministic");
+        }
+    }
+
+    #[test]
+    fn test_sqlstate_to_string_round_trips_postgres_codes() {
+        for sqlstate in ["57014", "40P01"] {
+            assert_eq!(sqlstate_to_string(make_sqlstate(sqlstate)), sqlstate);
         }
     }
 }

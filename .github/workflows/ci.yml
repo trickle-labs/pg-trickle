@@ -51,6 +51,16 @@ on:
   schedule:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
+    inputs:
+      run_benchmark_regression:
+        description: Run the PR benchmark regression gate
+        required: false
+        type: boolean
+        default: false
+      benchmark_base:
+        description: Base ref or SHA for the benchmark comparison
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -876,13 +886,13 @@ jobs:
         run: |
           cargo nextest run --profile ci --test e2e_upgrade_tests --run-ignored all
 
-  # ── Benchmark regression gate (PRs targeting main only) ─────────────────
+  # ── Benchmark regression gate ───────────────────────────────────────────
   # Measures the candidate before the exact PR base to avoid penalizing the
   # candidate for hosted-runner drift, then fails on material regressions.
   bench-regression:
     name: Benchmark regression check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.run_benchmark_regression)
     timeout-minutes: 90
     continue-on-error: false
     steps:
@@ -908,8 +918,10 @@ jobs:
             v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
       - name: Fetch PR base for a same-run benchmark baseline
+        env:
+          BENCH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.benchmark_base || github.event.repository.default_branch }}
         run: |
-          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags --depth=1 origin "$BENCH_BASE_REF"
           git worktree add --detach "$RUNNER_TEMP/benchmark-base" FETCH_HEAD
 
       - name: Measure PR candidate
@@ -1576,6 +1588,7 @@ jobs:
       dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
       security_changed: ${{ steps.filter.outputs.security_changed }}
       failure_recovery_changed: ${{ steps.filter.outputs.failure_recovery_changed }}
+      unsafe_boundary_changed: ${{ steps.filter.outputs.unsafe_boundary_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1605,6 +1618,44 @@ jobs:
               - 'tests/e2e_cleanup_chaos_tests.rs'
               - 'scripts/run_failure_recovery_repetition.sh'
               - '.github/workflows/ci.yml'
+            unsafe_boundary_changed:
+              - 'Cargo.toml'
+              - 'src/error.rs'
+              - 'src/refresh/pipeline.rs'
+              - 'src/api/security_context.rs'
+              - 'src/api/refresh_ops.rs'
+              - 'src/api/outbox.rs'
+              - 'src/scheduler/dispatch.rs'
+              - 'tests/e2e_unsafe_boundary_tests.rs'
+              - 'tests/e2e/mod.rs'
+              - 'tests/Dockerfile.e2e-asan'
+              - 'tests/fixtures/asan_probe.c'
+              - 'tests/fixtures/asan_pg18_leak.supp'
+              - 'tests/fixtures/initdb-asan-wrapper.sh'
+              - '.github/workflows/ci.yml'
+
+  unsafe-boundary-asan:
+    name: Unsafe boundary ASan qualification
+    needs: detect-e2e-gates
+    if: >
+      github.event_name == 'pull_request' &&
+      needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Build and run the required instrumented slice
+        run: |
+          docker build --platform=linux/amd64 \
+            -f tests/Dockerfile.e2e-asan \
+            -t pg_trickle_e2e_asan:contract .
+          PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
+            cargo test --test e2e_unsafe_boundary_tests \
+              --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture
 
   e2e-sensitive-gate:
     name: Sensitive E2E gate

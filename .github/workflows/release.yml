@@ -2,7 +2,7 @@
 # Release Workflow — Build release artifacts, publish GitHub Release,
 # and push extension image for CNPG Image Volume Extensions to GHCR.
 #
-# Triggered when a version tag (v*) is pushed.
+# Triggered by a version tag (v*) or a manual candidate qualification run.
 # =============================================================================
 name: Release
 
@@ -10,6 +10,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      qualification_only:
+        description: Build and qualify this candidate, retain evidence, and skip all publication jobs.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,7 +45,19 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Check version references are in sync
-        run: ./scripts/check_version_sync.sh --expected-tag "$GITHUB_REF_NAME"
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
+        run: |
+          if [[ "$QUALIFICATION_ONLY" == "true" && "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "Qualification-only runs must use a branch ref, not a tag."
+            exit 1
+          fi
+          EXPECTED_TAG="$GITHUB_REF_NAME"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+            EXPECTED_TAG="v${VERSION}"
+          fi
+          ./scripts/check_version_sync.sh --expected-tag "$EXPECTED_TAG"
 
       - name: Setup pgrx environment (for the DVM release gate's build-dependent checks)
         uses: ./.github/actions/setup-pgrx
@@ -139,8 +157,13 @@ jobs:
       - name: Extract version from tag
         id: version
         shell: bash
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Release version: ${VERSION}"
 
@@ -292,7 +315,14 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build extension image
         run: |
@@ -452,16 +482,43 @@ jobs:
           echo "failed=${FAILED}" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: Run separate unsafe-boundary ASan qualification
+        id: unsafe-asan
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p qualification-logs/unsafe-asan
+          docker build --platform=linux/amd64 \
+            -f tests/Dockerfile.e2e-asan \
+            -t pg_trickle_e2e_asan:contract . 2>&1 | \
+            tee qualification-logs/unsafe-asan/image-build.log
+          PGS_E2E_IMAGE=pg_trickle_e2e_asan:contract \
+            cargo test --test e2e_unsafe_boundary_tests \
+              --features pg18,e2e-unsafe-test-hooks -- --test-threads=1 --nocapture 2>&1 | \
+            tee qualification-logs/unsafe-asan/workloads.log
+
+      - name: Require every declared instrumented case to pass
+        if: always()
+        run: >
+          python3 scripts/v0_108_0_release_gate.py
+          --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
+
       - name: Write candidate-bound release evidence
         if: always()
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
           suite_args=()
           for result in qualification-logs/results/*.json; do
-            [[ -f "$result" ]] && suite_args+=(--suite-result "$result")
+            [[ -f "$result" && "$result" != *.installation.json ]] && suite_args+=(--suite-result "$result")
           done
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
           python3 scripts/release_evidence.py \
             --output qualification-logs/RELEASE-EVIDENCE.json \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${VERSION}" \
             --candidate-commit "$GITHUB_SHA" \
             --qualification tests/release/v0.108.1-qualification.json \
             --capability-manifest docs/capability-manifest.json \
@@ -480,12 +537,13 @@ jobs:
       - name: Require all qualification suites to pass
         if: always()
         run: |
-          if [[ "${{ steps.qualify.outputs.failed }}" != "0" ]]; then
-            echo "One or more v0.108.1 package qualification suites failed."
+          if [[ "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
+            echo "One or more v0.108.1 package or separate instrumented qualification suites failed."
             exit 1
           fi
 
   publish-release:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Publish GitHub Release
     needs: [build-release, test-release, qualification]
     runs-on: ubuntu-latest
@@ -565,6 +623,7 @@ jobs:
   # .so artifact — no Rust recompilation. For CNPG Image Volume Extensions.
   # amd64 and arm64 run in parallel, then a manifest is merged.
   publish-docker-arch:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Docker image (${{ matrix.arch }})
     needs: [build-release, test-release, qualification]
     runs-on: ${{ matrix.runner }}
@@ -631,6 +690,7 @@ jobs:
 
   # ── Merge per-arch extension images into a single multi-arch manifest ──
   publish-docker:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.qualification_only != true }}
     name: Publish Docker manifest
     needs: publish-docker-arch
     runs-on: ubuntu-latest
@@ -696,7 +756,24 @@ jobs:
           GITHUB_RELEASE: ${{ needs.publish-release.result }}
           CNPG_IMAGES: ${{ needs.publish-docker-arch.result }}
           CNPG_MANIFEST: ${{ needs.publish-docker.result }}
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            for stage in "$BUILD" "$SMOKE" "$QUALIFICATION"; do
+              if [[ "$stage" != "success" ]]; then
+                echo "Qualification-only stage ended as $stage."
+                exit 1
+              fi
+            done
+            for stage in "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
+              if [[ "$stage" != "skipped" ]]; then
+                echo "Publication stage ended as $stage during qualification-only run."
+                exit 1
+              fi
+            done
+            echo "Candidate qualification passed; publication jobs were skipped."
+            exit 0
+          fi
           for stage in "$BUILD" "$SMOKE" "$QUALIFICATION" "$GITHUB_RELEASE" "$CNPG_IMAGES" "$CNPG_MANIFEST"; do
             if [[ "$stage" != "success" ]]; then
               echo "Release stage ended as $stage; release workflow must not be successful."

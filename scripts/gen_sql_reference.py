@@ -47,6 +47,8 @@ KNOWN_INTERNAL: frozenset[str] = frozenset(
         # DDL event hooks registered by CREATE EVENT TRIGGER, not callable by users.
         "_on_ddl_end",
         "_on_sql_drop",
+        # ASan probe, compiled only with the non-default E2E test feature.
+        "e2e_catch_security_context_error",
         # VP (Validity Period) lifecycle hook, called only from CDC triggers.
         "handle_vp_promoted",
         # IVM delta application — called from AFTER trigger SQL bodies, not by users.

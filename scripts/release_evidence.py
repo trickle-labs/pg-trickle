@@ -117,8 +117,10 @@ def validate_case_evidence(result: dict[str, object], spec: dict[str, object]) -
     for case in observed:
         if not isinstance(case, dict) or not isinstance(case.get("id"), str):
             raise ValueError(f"suite {result.get('suite_id')!r} has an invalid observed case")
+        if case.get("status") not in {"passed", "failed", "skipped", "missing"}:
+            raise ValueError(f"suite {result.get('suite_id')!r} has an invalid observed case status")
         observed_ids.append(case["id"])
-        if case.get("status") != "passed":
+        if case.get("status") != "passed" and result.get("status") == "passed":
             raise ValueError(f"required case {case['id']!r} did not pass")
     if len(observed_ids) != len(set(observed_ids)) or set(observed_ids) != set(required):
         raise ValueError(
@@ -148,17 +150,25 @@ def validate_attempts(result: dict[str, object], spec: dict[str, object]) -> Non
         if not isinstance(attempt, dict) or not isinstance(attempt.get("attempt"), int):
             raise ValueError(f"suite {result.get('suite_id')!r} has an invalid attempt record")
         indexes.append(attempt["attempt"])
-        if attempt.get("status") != "passed":
+        if attempt.get("status") not in {"passed", "failed"}:
+            raise ValueError(f"suite {result.get('suite_id')!r} has an invalid attempt status")
+        if attempt.get("status") != "passed" and result.get("status") == "passed":
             raise ValueError(
                 f"suite {result.get('suite_id')!r} retained a non-passing attempt; retries cannot erase it"
-        )
+            )
         cases = attempt.get("cases")
         required_cases = spec.get("required_cases", [])
         if not isinstance(cases, list):
             raise ValueError(f"suite {result.get('suite_id')!r} retained a failed or missing case attempt")
         if required_cases and {case.get("id") for case in cases if isinstance(case, dict)} != set(required_cases):
             raise ValueError(f"suite {result.get('suite_id')!r} retained a failed or missing case attempt")
-        if any(not isinstance(case, dict) or case.get("status") != "passed" for case in cases):
+        if any(
+            not isinstance(case, dict)
+            or case.get("status") not in {"passed", "failed", "skipped", "missing"}
+            for case in cases
+        ):
+            raise ValueError(f"suite {result.get('suite_id')!r} retained an invalid case attempt")
+        if result.get("status") == "passed" and any(case.get("status") != "passed" for case in cases):
             raise ValueError(f"suite {result.get('suite_id')!r} retained a failed or missing case attempt")
         log = attempt.get("log")
         if not isinstance(log, dict) or not all(
@@ -177,8 +187,6 @@ def validate_attempts(result: dict[str, object], spec: dict[str, object]) -> Non
         raise ValueError(f"suite {result.get('suite_id')!r} has non-contiguous attempt numbers")
     if result.get("retry_count") != len(attempts) - 1:
         raise ValueError(f"suite {result.get('suite_id')!r} retry_count does not match attempts")
-    if spec.get("required", True) and result.get("status") != "passed":
-        raise ValueError(f"required suite {result.get('suite_id')!r} did not pass all attempts")
 
 
 def validate_installation(
@@ -646,7 +654,7 @@ def structured_evidence(args: argparse.Namespace, parser: argparse.ArgumentParse
                 or not isinstance(subfloor_regressions, list)
             ):
                 raise ValueError("Criterion evidence must include compared benchmarks and maximum regression")
-            if measurement.get("baseline_version") != contract.get("source_versions", [None])[0]:
+            if measurement.get("baseline_version") != contract.get("source_versions", [None])[-1]:
                 raise ValueError("Criterion baseline does not match the previous published version")
             if minimum_delta_ns != spec.get("minimum_absolute_delta_ns"):
                 raise ValueError("Criterion materiality floor differs from the qualification contract")

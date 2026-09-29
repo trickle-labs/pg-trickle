@@ -71,6 +71,39 @@ class ReleaseEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-passing attempt"):
             validate_attempts(result, {"required": True})
 
+    def test_failed_suite_verdict_can_be_retained_for_blocked_evidence(self) -> None:
+        target = Path.cwd() / "target"
+        target.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pgt-release-evidence-", dir=target) as temporary:
+            log_path = Path(temporary) / "attempt.log"
+            log_path.write_bytes(b"measurement completed; release budget failed\n")
+            log = {
+                "path": log_path.relative_to(Path.cwd()).as_posix(),
+                "bytes": log_path.stat().st_size,
+                "sha256": hashlib.sha256(log_path.read_bytes()).hexdigest(),
+            }
+            result = {
+                "suite_id": "criterion-regression",
+                "status": "failed",
+                "retry_count": 0,
+                "attempts": [{"attempt": 1, "status": "passed", "cases": [], "log": log}],
+            }
+
+            self.assertIsNone(validate_attempts(result, {"required": True}))
+
+    def test_failed_required_case_can_be_retained_for_blocked_evidence(self) -> None:
+        result = {
+            "suite_id": "recovery",
+            "status": "failed",
+            "selected_cases": [CASE],
+            "observed_cases": [{"id": CASE, "status": "failed"}],
+        }
+
+        self.assertIsNone(validate_case_evidence(result, {"required_cases": [CASE]}))
+        result["status"] = "passed"
+        with self.assertRaisesRegex(ValueError, "did not pass"):
+            validate_case_evidence(result, {"required_cases": [CASE]})
+
     def test_failed_machine_event_cannot_be_dropped_from_result(self) -> None:
         name = "pg_trickle::e2e_example_tests$test_required_case"
         output = "\n".join(
