@@ -51,6 +51,16 @@ on:
   schedule:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
+    inputs:
+      run_benchmark_regression:
+        description: Run the PR benchmark regression gate
+        required: false
+        type: boolean
+        default: false
+      benchmark_base:
+        description: Base ref or SHA for the benchmark comparison
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -876,13 +886,13 @@ jobs:
         run: |
           cargo nextest run --profile ci --test e2e_upgrade_tests --run-ignored all
 
-  # ── Benchmark regression gate (PRs targeting main only) ─────────────────
+  # ── Benchmark regression gate ───────────────────────────────────────────
   # Measures the candidate before the exact PR base to avoid penalizing the
   # candidate for hosted-runner drift, then fails on material regressions.
   bench-regression:
     name: Benchmark regression check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.run_benchmark_regression)
     timeout-minutes: 90
     continue-on-error: false
     steps:
@@ -908,8 +918,10 @@ jobs:
             v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
       - name: Fetch PR base for a same-run benchmark baseline
+        env:
+          BENCH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.benchmark_base || github.event.repository.default_branch }}
         run: |
-          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags --depth=1 origin "$BENCH_BASE_REF"
           git worktree add --detach "$RUNNER_TEMP/benchmark-base" FETCH_HEAD
 
       - name: Measure PR candidate
