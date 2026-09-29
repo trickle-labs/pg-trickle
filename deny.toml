@@ -36,6 +36,9 @@ ignore = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The extension is not published as a Rust crate; its production LSN module
+# needs Verus's git-only vstd crate. Git sources stay restricted below.
+allow-wildcard-paths = true
 highlight = "all"
 # These duplicate versions come from pgrx pulling one version and
 # testcontainers/bollard pulling another. We have no direct control over these
@@ -63,4 +66,10 @@ skip = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+required-git-spec = "rev"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Verus pins synstructure from this second repository in Cargo.lock.
+allow-git = [
+  "https://github.com/verus-lang/verus",
+  "https://github.com/mystor/synstructure",
+]
