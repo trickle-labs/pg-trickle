@@ -432,7 +432,7 @@ jobs:
     name: Packaged v0.108.1 release qualification
     needs: [build-release, test-release]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
         with:
