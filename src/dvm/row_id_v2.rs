@@ -1805,8 +1805,25 @@ fn encode_record(
 /// Encode a PostgreSQL record into exact V2 identity bytes.
 #[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
 pub fn encode_row_id_v2(domain: &str, record: pgrx::AnyElement) -> Vec<u8> {
+    // SAFETY: AnyElement supplies the actual PostgreSQL argument type OID; resolving
+    // a domain's base type and inspecting catalog metadata does not dereference the datum.
+    let base_oid = unsafe { pg_sys::getBaseType(record.oid()) };
+    // SAFETY: base_oid is the registered type returned by PostgreSQL above.
+    if !unsafe { pg_sys::type_is_rowtype(base_oid) } {
+        pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
+            crate::error::PgTrickleError::TypeMismatch(format!(
+                "encode_row_id_v2 expected a record/composite argument, got type OID {}",
+                record.oid()
+            ))
+            .to_string()
+        );
+    }
+    // SAFETY: the non-null SQL argument has a validated record/composite base type,
+    // including domains with that same tuple representation.
     let record: Option<PgHeapTuple<'_, AllocatedByRust>> =
-        unsafe { PgHeapTuple::from_polymorphic_datum(record.datum(), false, record.oid()) };
+        unsafe { PgHeapTuple::from_polymorphic_datum(record.datum(), false, base_oid) };
     let result = record.ok_or_else(|| RowIdV2Error::InvalidFieldMetadata {
         field: "<record>".to_owned(),
         detail: "record argument is NULL".to_owned(),
