@@ -226,11 +226,21 @@ Future changes will be listed here.
 
 ## [0.108.1] — IMMEDIATE cascade consistency and recovery
 
-- Keep IMMEDIATE descendants current during manual and scheduled FULL refreshes
-  while preserving application-trigger suppression and trigger enable modes.
-- Capture IMMEDIATE TRUNCATE replacements for downstream DIFFERENTIAL refreshes.
-- Update the upgrade migration and `quick_health` view, and document repair of
-  existing cascades in dependency order.
+This release improves refresh correctness and recovery across stream-table
+pipelines, and includes PostgreSQL 18.6 support.
+
+- Keep downstream IMMEDIATE stream tables up to date when an upstream table is
+  refreshed or truncated, including manual and scheduled FULL refreshes.
+- Recover IMMEDIATE stream tables when their change buffers are missing, and
+  keep suspended tables maintained according to their configured behavior.
+- Avoid suspending stream tables unexpectedly when their owner changes a source
+  table's schema.
+- Fix differential refresh results for queries that use scalar subqueries,
+  including the TPC-H Q15 query.
+- Make change capture, foreign-table polling, scheduled refresh, and crash
+  recovery more reliable, while preserving changes through backup and restore.
+
+After installing the v0.108.1 files, run `ALTER EXTENSION pg_trickle UPDATE;`.
 
 ## [0.108.0] — Incremental graph and consumer recovery qualification
 
