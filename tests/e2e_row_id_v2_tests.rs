@@ -5,6 +5,127 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_row_id_v2_non_composite_inputs_error_and_backend_survives() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TYPE row_id_guard_pair AS (id int4, value text)",
+        "CREATE TYPE row_id_guard_enum AS ENUM ('x')",
+        "CREATE DOMAIN row_id_guard_int AS int4",
+        "CREATE DOMAIN row_id_guard_array AS int4[]",
+    ])
+    .await;
+    let mut connection = db.pool.acquire().await.expect("pin probe connection");
+    for argument in [
+        "1::int4",
+        "true::bool",
+        "'x'::text",
+        "ARRAY[1,2]::int4[]",
+        "ARRAY[]::int4[]",
+        "ARRAY[ROW(1, 'a')::row_id_guard_pair]",
+        "'x'::row_id_guard_enum",
+        "'{}'::jsonb",
+        "int4range(1,2)",
+        "1::row_id_guard_int",
+        "ARRAY[1,2]::row_id_guard_array",
+    ] {
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
+            .await
+            .expect("probe backend PID");
+        let error = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', {argument})"
+        )))
+        .execute(&mut *connection)
+        .await
+        .expect_err(argument);
+        let diagnostic = error
+            .as_database_error()
+            .expect("must receive a PostgreSQL error, not a transport failure")
+            .downcast_ref::<sqlx::postgres::PgDatabaseError>();
+        assert_eq!(diagnostic.severity(), sqlx::postgres::PgSeverity::Error);
+        assert!(
+            diagnostic.code() == "42804" || diagnostic.code().starts_with("22"),
+            "{argument}: {diagnostic}"
+        );
+        assert!(
+            diagnostic.message().contains("record") || diagnostic.message().contains("composite"),
+            "{argument}: {diagnostic}"
+        );
+        println!("{argument}: {} {diagnostic}", diagnostic.code());
+        let survived: (i32, i32) = sqlx::query_as("SELECT pg_backend_pid(), 1")
+            .fetch_one(&mut *connection)
+            .await
+            .expect("same pinned backend must survive the rejected argument");
+        assert_eq!(survived, (pid, 1), "{argument}: backend changed");
+    }
+}
+
+#[tokio::test]
+async fn test_row_id_v2_anonymous_records_keep_exact_bytes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    for (argument, expected) in [
+        ("ROW(1::int4)", "020100000001030180000001ff"),
+        (
+            "ROW(1::int4, 'a'::text)",
+            "0201000000020301800000010901610000ff",
+        ),
+        ("ROW(NULL::int4, NULL::text)", "02010000000203000900ff"),
+    ] {
+        let hex: String = db
+            .query_scalar(&format!(
+                "SELECT encode(pgtrickle.encode_row_id_v2('SCAN_KEY', {argument}), 'hex')"
+            ))
+            .await;
+        assert_eq!(hex, expected, "{argument}");
+    }
+}
+
+#[tokio::test]
+async fn test_row_id_v2_named_composites_keep_exact_bytes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TYPE row_id_guard_pair AS (id int4, value text)",
+        "CREATE TABLE row_id_guard_table (id int4, value text)",
+        "INSERT INTO row_id_guard_table VALUES (1, 'a')",
+    ])
+    .await;
+    for query in [
+        "SELECT encode(pgtrickle.encode_row_id_v2(\
+             'SCAN_KEY', ROW(1::int4, 'a'::text)::row_id_guard_pair), 'hex')",
+        "SELECT encode(pgtrickle.encode_row_id_v2(\
+             'SCAN_KEY', t), 'hex') FROM row_id_guard_table t",
+    ] {
+        let hex: String = db.query_scalar(query).await;
+        assert_eq!(hex, "0201000000020301800000010901610000ff");
+    }
+}
+
+#[tokio::test]
+async fn test_row_id_v2_composite_domain_uses_approved_policy() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TYPE row_id_guard_pair AS (id int4, value text)",
+        "CREATE DOMAIN row_id_guard_pair_domain AS row_id_guard_pair",
+    ])
+    .await;
+    let domain: String = db
+        .query_scalar(
+            "SELECT encode(pgtrickle.encode_row_id_v2('SCAN_KEY', \
+             (ROW(1::int4, 'a'::text)::row_id_guard_pair)::row_id_guard_pair_domain), 'hex')",
+        )
+        .await;
+    let base: String = db
+        .query_scalar(
+            "SELECT encode(pgtrickle.encode_row_id_v2(\
+             'SCAN_KEY', ROW(1::int4, 'a'::text)::row_id_guard_pair), 'hex')",
+        )
+        .await;
+    assert_eq!(domain, "0201000000020301800000010901610000ff");
+    assert_eq!(base, "0201000000020301800000010901610000ff");
+    assert_eq!(domain, base);
+}
+
+#[tokio::test]
 async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identity() {
     let db = E2eDb::new().await.with_extension().await;
     let encoder_is_owned_and_parallel_safe: bool = db

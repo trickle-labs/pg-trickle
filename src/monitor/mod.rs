@@ -2462,8 +2462,8 @@ mod tests {
         let event = AlertEvent::RefreshFailed;
         let copied = event; // Copy
         assert_eq!(event, copied);
-        // Verify Clone trait is implemented (Copy requires Clone)
-        let cloned: AlertEvent = Clone::clone(&event);
+        // Copy requires Clone, so this type-check also verifies the Clone bound.
+        let cloned: AlertEvent = event;
         assert_eq!(event, cloned);
     }
 
