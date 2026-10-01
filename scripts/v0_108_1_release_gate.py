@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import subprocess
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import generate_capability_manifest as capabilities
 import v0_106_1_release_gate as shared
+from v0_108_0_release_gate import missing_unsafe_asan_cases
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +52,15 @@ EXPECTED_SUITES = shared.EXPECTED_SUITES | {
     "resource-boundaries",
     "delta-qualification-default-off",
     "sensitivity-baseline",
+}
+EXPECTED_UNSAFE_CASES = {
+    "e2e_unsafe_boundary_tests::test_instrumented_pg18_boot_and_assertions_enabled",
+    "e2e_unsafe_boundary_tests::test_instrumented_invalid_memory_probe_is_detected",
+    "e2e_unsafe_boundary_tests::test_pipeline_copy_null_and_toasted_rows_survive_refresh",
+    "e2e_unsafe_boundary_tests::test_owner_context_pg_error_restores_state_and_continues",
+    "e2e_unsafe_boundary_tests::test_caller_context_pg_error_restores_state_and_continues",
+    "e2e_unsafe_boundary_tests::test_dispatch_worker_cancel_cleanup_and_restart_recovers",
+    "e2e_unsafe_boundary_tests::test_zz_instrumented_diagnostics_are_clean",
 }
 
 
@@ -132,6 +143,18 @@ def check_support_contract() -> None:
     shared.require(qualification.get("build_kind") == "exact-release", "qualification does not require exact release builds")
     shared.require(qualification.get("feature_scope") == "default-release", "qualification feature scope drifted")
     shared.require(qualification.get("candidate_identity", {}).get("required") is True, "candidate identity is optional")
+    instrumented = qualification.get("instrumented_qualification", {})
+    shared.require(
+        instrumented.get("separate_from_exact_release_package") is True
+        and instrumented.get("platform") == "linux/amd64"
+        and instrumented.get("postgresql") == "18.6"
+        and instrumented.get("assertions") == "--enable-cassert"
+        and instrumented.get("instrumentation") == "AddressSanitizer on PostgreSQL and pg_trickle"
+        and instrumented.get("test_command_argv", [])[4:6]
+        == ["--features", "pg18,e2e-unsafe-test-hooks"]
+        and set(instrumented.get("required_cases", [])) == EXPECTED_UNSAFE_CASES,
+        "unsafe boundary qualification is missing required cases or instrumentation metadata",
+    )
     suites = {suite["id"]: suite for suite in qualification["required_suites"]}
     for suite_id, test_binary in (
         ("delta-v1", "e2e_v108_conformance_tests"),
@@ -173,6 +196,12 @@ def check_support_contract() -> None:
         == ["bash", "scripts/run_v108_conformance.sh"],
         "graph-v1 does not run the combined packaged v0.108 conformance suite",
     )
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    shared.require(
+        "python3 scripts/v0_108_1_release_gate.py" in workflow
+        and "--unsafe-asan-log qualification-logs/unsafe-asan/workloads.log" in workflow,
+        "release qualification does not validate the v0.108.1 unsafe boundary cases",
+    )
     shared.require(
         suites["pending-data-upgrade"]["command_argv"][-2:]
         == ["0.106.1", "0.108.1"],
@@ -208,7 +237,6 @@ def check_support_contract() -> None:
         == set(shards["publication-topology"]["required_cases"]),
         "required case suites do not match their shards",
     )
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     shared.require("release-candidate.json" in workflow, "release archives do not carry candidate identity")
     stager = (ROOT / "scripts/stage_release_assets.py").read_text(encoding="utf-8")
     shared.require(
@@ -228,9 +256,27 @@ def check_support_contract() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--unsafe-asan-log",
+        type=Path,
+        help="verify every required instrumented test passed in this Cargo test log",
+    )
+    args = parser.parse_args()
+    if args.unsafe_asan_log is not None:
+        qualification = json.loads(
+            (ROOT / "tests/release/v0.108.1-qualification.json").read_text(encoding="utf-8")
+        )
+        required_cases = set(qualification["instrumented_qualification"]["required_cases"])
+        output = args.unsafe_asan_log.read_text(encoding="utf-8")
+        missing = missing_unsafe_asan_cases(output, required_cases)
+        shared.require(not missing, f"instrumented ASan cases missing or not passed: {missing}")
+        print("v0.108.1 instrumented ASan cases passed")
+        return
+
     shared.VERSION = VERSION
     shared.PREVIOUS_VERSION = "0.108.0"
-    shared.EXPECTED_SOURCE_VERSIONS = ["0.108.0", "0.106.1"]
+    shared.EXPECTED_SOURCE_VERSIONS = ["0.106.1", "0.108.0"]
     shared.QUALIFICATION = ROOT / "tests/release/v0.108.1-qualification.json"
     shared.GATE_SCRIPT = "v0_108_1_release_gate.py"
     shared.EXPECTED_SUITES = EXPECTED_SUITES

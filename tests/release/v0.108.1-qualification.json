@@ -2,8 +2,8 @@
   "contract_version": 3,
   "release_version": "0.108.1",
   "source_versions": [
-    "0.108.0",
-    "0.106.1"
+    "0.106.1",
+    "0.108.0"
   ],
   "postgresql_major": 18,
   "build_kind": "exact-release",
@@ -15,6 +15,26 @@
   },
   "candidate_identity": {
     "required": true
+  },
+  "instrumented_qualification": {
+    "separate_from_exact_release_package": true,
+    "platform": "linux/amd64",
+    "postgresql": "18.6",
+    "assertions": "--enable-cassert",
+    "instrumentation": "AddressSanitizer on PostgreSQL and pg_trickle",
+    "test_command_argv": [
+      "cargo", "test", "--test", "e2e_unsafe_boundary_tests",
+      "--features", "pg18,e2e-unsafe-test-hooks", "--", "--test-threads=1", "--nocapture"
+    ],
+    "required_cases": [
+      "e2e_unsafe_boundary_tests::test_instrumented_pg18_boot_and_assertions_enabled",
+      "e2e_unsafe_boundary_tests::test_instrumented_invalid_memory_probe_is_detected",
+      "e2e_unsafe_boundary_tests::test_pipeline_copy_null_and_toasted_rows_survive_refresh",
+      "e2e_unsafe_boundary_tests::test_owner_context_pg_error_restores_state_and_continues",
+      "e2e_unsafe_boundary_tests::test_caller_context_pg_error_restores_state_and_continues",
+      "e2e_unsafe_boundary_tests::test_dispatch_worker_cancel_cleanup_and_restart_recovers",
+      "e2e_unsafe_boundary_tests::test_zz_instrumented_diagnostics_are_clean"
+    ]
   },
   "required_cases": [
     "e2e_sensitivity_baseline_tests::test_oracle_detects_same_count_different_content",
