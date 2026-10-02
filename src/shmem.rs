@@ -1315,11 +1315,19 @@ pub fn decrement_parallel_queue_depth() {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let _ = PARALLEL_QUEUE_DEPTH.get().fetch_update(
-        std::sync::atomic::Ordering::Relaxed,
-        std::sync::atomic::Ordering::Relaxed,
-        |depth| Some(depth.saturating_sub(1)),
-    );
+    let counter = PARALLEL_QUEUE_DEPTH.get();
+    let mut depth = counter.load(std::sync::atomic::Ordering::Relaxed);
+    loop {
+        match counter.compare_exchange_weak(
+            depth,
+            depth.saturating_sub(1),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => depth = actual,
+        }
+    }
 }
 
 /// Decrement queue depth for one registered database scheduler.
