@@ -524,6 +524,121 @@ fn upgrade_image_available() -> bool {
     matches!(std::env::var("PGS_UPGRADE_FROM"), Ok(v) if !v.is_empty())
 }
 
+/// A tracked source for an IMMEDIATE stream table has no CDC buffer, while a
+/// DIFFERENTIAL source with a buffer must still have its CDC trigger rebuilt.
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_rebuild_cdc_triggers_immediate_without_buffer_succeeds() {
+    let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap_or_default();
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or_default();
+    if !matches!(from_version.as_str(), "0.97.0" | "0.107.0") || to_version != "0.108.2" {
+        eprintln!("SKIP: requires 0.97.0 -> 0.108.2 or 0.107.0 -> 0.108.2");
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute(&format!(
+        "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
+    ))
+    .await;
+
+    // Seed the old catalog directly: this image loads the current library with
+    // the old SQL catalog, so invoking an old API before ALTER EXTENSION UPDATE
+    // would run current code against an incompatible catalog.
+    db.execute("CREATE TABLE upgrade_imm_source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE upgrade_imm_st (__pgt_row_id BYTEA PRIMARY KEY, id INT, val TEXT)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, \
+          refresh_mode, requested_refresh_mode, status, is_populated, defining_search_path) \
+         VALUES ('public.upgrade_imm_st'::regclass, 'upgrade_imm_st', 'public', \
+                 'SELECT id, val FROM upgrade_imm_source', \
+                 'SELECT id, val FROM upgrade_imm_source', \
+                 'IMMEDIATE', 'IMMEDIATE', 'ACTIVE', true, 'public, pg_catalog')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_dependencies (pgt_id, source_relid, source_type, columns_used) \
+         SELECT pgt_id, 'public.upgrade_imm_source'::regclass, 'TABLE', ARRAY['id', 'val'] \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_imm_st'",
+    )
+    .await;
+    let immediate_source_oid = db.table_oid("upgrade_imm_source").await;
+    let immediate_buffer_exists: bool = db
+        .query_scalar(&format!(
+            "SELECT to_regclass('pgtrickle_changes.changes_{immediate_source_oid}') IS NOT NULL"
+        ))
+        .await;
+    assert!(
+        !immediate_buffer_exists,
+        "IMMEDIATE source must have no CDC buffer"
+    );
+
+    db.execute("CREATE TABLE upgrade_cdc_source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE upgrade_cdc_st (__pgt_row_id BYTEA PRIMARY KEY, id INT, val TEXT)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables \
+         (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, \
+          refresh_mode, requested_refresh_mode, status, is_populated, defining_search_path) \
+         VALUES ('public.upgrade_cdc_st'::regclass, 'upgrade_cdc_st', 'public', \
+                 'SELECT id, val FROM upgrade_cdc_source', \
+                 'SELECT id, val FROM upgrade_cdc_source', \
+                 'DIFFERENTIAL', 'DIFFERENTIAL', 'ACTIVE', true, 'public, pg_catalog')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_dependencies (pgt_id, source_relid, source_type, columns_used) \
+         SELECT pgt_id, 'public.upgrade_cdc_source'::regclass, 'TABLE', ARRAY['id', 'val'] \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'upgrade_cdc_st'",
+    )
+    .await;
+    let cdc_source_oid = db.table_oid("upgrade_cdc_source").await;
+    db.execute(&format!(
+        "CREATE TABLE pgtrickle_changes.changes_{cdc_source_oid} ( \
+             change_id BIGSERIAL, lsn PG_LSN NOT NULL, action CHAR(1) NOT NULL, \
+             source_xid XID DEFAULT pg_current_xact_id()::xid, source_commit_at TIMESTAMPTZ, \
+             __pgt_row_id BYTEA NOT NULL, changed_cols VARBIT, id INT, val TEXT, \
+             __pgt_trace_context TEXT)"
+    ))
+    .await;
+
+    let result: String = db
+        .query_scalar("SELECT pgtrickle.rebuild_cdc_triggers()")
+        .await;
+    assert_eq!(result, "done");
+    let trigger_exists: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger \
+             WHERE tgrelid = {cdc_source_oid}::oid AND NOT tgisinternal \
+               AND tgname LIKE 'pg_trickle_cdc_%')"
+        ))
+        .await;
+    assert!(trigger_exists, "CDC-backed source trigger must be rebuilt");
+
+    db.execute(&format!(
+        "ALTER EXTENSION pg_trickle UPDATE TO '{to_version}'"
+    ))
+    .await;
+    let upgraded_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+        .await;
+    assert_eq!(upgraded_version, to_version);
+
+    db.execute("INSERT INTO upgrade_cdc_source VALUES (42, 'captured')")
+        .await;
+    let captured_rows: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pgtrickle_changes.changes_{cdc_source_oid} \
+             WHERE action = 'I' AND id = 42 AND val = 'captured'"
+        ))
+        .await;
+    assert_eq!(captured_rows, 1, "rebuilt CDC trigger must capture DML");
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_upgrade_v0877_backfills_defining_search_path() {
