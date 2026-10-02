@@ -333,11 +333,23 @@ pub(super) fn rebuild_cdc_triggers() -> &'static str {
     let source_oids: Vec<pg_sys::Oid> = Spi::connect(|client| {
         let result = client
             .select(
-                "SELECT DISTINCT source_relid \
-                 FROM pgtrickle.pgt_dependencies \
-                 WHERE source_type = 'TABLE'",
+                "SELECT DISTINCT d.source_relid \
+                 FROM pgtrickle.pgt_dependencies d \
+                 WHERE d.source_type = 'TABLE' \
+                   AND EXISTS ( \
+                       SELECT 1 \
+                       FROM pg_catalog.pg_class cb \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = cb.relnamespace \
+                       LEFT JOIN pgtrickle.pgt_change_tracking ct \
+                         ON ct.source_relid = d.source_relid \
+                       WHERE n.nspname::text = $1 \
+                         AND ( \
+                             cb.relname::text = 'changes_' || d.source_relid::text \
+                             OR cb.relname::text = 'changes_' || ct.source_stable_name \
+                         ) \
+                   )",
                 None,
-                &[],
+                &[change_schema.clone().into()],
             )
             .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?;
         let mut oids = Vec::new();
