@@ -71,6 +71,42 @@ async fn test_alter_refresh_mode() {
 }
 
 #[tokio::test]
+async fn test_alter_refresh_mode_auto_from_full_and_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE al_auto_mode (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO al_auto_mode VALUES (1)").await;
+
+    let query = "SELECT id FROM al_auto_mode";
+    db.create_st("al_auto_mode_oracle", query, "1m", "AUTO")
+        .await;
+    let oracle: String = db
+        .query_scalar(
+            "SELECT refresh_mode || '/' || requested_refresh_mode \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'al_auto_mode_oracle'",
+        )
+        .await;
+    assert_eq!(oracle, "DIFFERENTIAL/AUTO");
+
+    for (name, starting_mode) in [
+        ("al_auto_from_full", "FULL"),
+        ("al_auto_from_diff", "DIFFERENTIAL"),
+    ] {
+        db.create_st(name, query, "1m", starting_mode).await;
+        db.alter_st(name, "refresh_mode => 'AUTO'").await;
+
+        let actual: String = db
+            .query_scalar(&format!(
+                "SELECT refresh_mode || '/' || requested_refresh_mode \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{name}'"
+            ))
+            .await;
+        assert_eq!(actual, oracle, "AUTO resolution for {starting_mode}");
+    }
+}
+
+#[tokio::test]
 async fn test_alter_to_immediate_ignores_global_wal_cdc_guc() {
     let db = E2eDb::new().await.with_extension().await;
 
