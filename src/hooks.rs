@@ -942,11 +942,11 @@ fn attached_partition_is_empty(
     let Some(qualified_name) = qualified_name else {
         return Ok(false);
     };
-    // nosemgrep: rust.spi.query.dynamic-format — qualified_name is built from
-    // PostgreSQL-quoted catalog identifiers, not caller-provided SQL.
+    // PostgreSQL's format('%I.%I') above quotes these catalog identifiers;
+    // this query interpolates no caller-provided SQL.
     let has_rows = Spi::get_one::<bool>(&format!(
         "SELECT EXISTS (SELECT 1 FROM {qualified_name} LIMIT 1)"
-    ))
+    )) // nosemgrep: rust.spi.query.dynamic-format
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     Ok(!has_rows.unwrap_or(true))
 }
