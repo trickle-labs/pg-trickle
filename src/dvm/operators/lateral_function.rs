@@ -64,14 +64,13 @@ pub fn diff_lateral_function(
     // `jsonb_array_elements(d.data)`) resolve naturally.
     let outer_alias = child.alias().to_string();
 
-    // SRF result column names
-    let srf_cols =
-        lateral_function_output_columns(func_sql, alias, column_aliases, declared_columns);
-
-    let mut srf_cols_with_ord = srf_cols.clone();
-    if *with_ordinality {
-        srf_cols_with_ord.push("ordinality".to_string());
-    }
+    let srf_cols_with_ord = lateral_function_output_columns(
+        func_sql,
+        alias,
+        column_aliases,
+        declared_columns,
+        *with_ordinality,
+    );
 
     // All output columns = child columns + SRF columns (+ optional ordinality)
     let mut all_output_cols: Vec<String> = child_cols.clone();
@@ -130,10 +129,7 @@ pub fn diff_lateral_function(
         .map(|c| quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    let srf_alias_clause = format!(
-        "{}{ordinality_clause} ({col_alias_list})",
-        quote_ident(alias),
-    );
+    let srf_alias_clause = format!("{} ({col_alias_list})", quote_ident(alias),);
 
     // ── CTE 2: Re-expand SRF for deleted/updated source rows (DELETE) ──
     // Instead of reading from the stream table (which may not have
@@ -146,7 +142,7 @@ pub fn diff_lateral_function(
                 {child_col_refs_str},\n\
                 {srf_col_refs_str}\n\
          FROM {changed_sources_cte} AS {outer_alias_q},\n\
-              LATERAL {func_sql} AS {srf_alias_clause}\n\
+              LATERAL {func_sql}{ordinality_clause} AS {srf_alias_clause}\n\
          WHERE {outer_alias_q}.\"__pgt_action\" = 'D'",
     );
     ctx.add_cte(old_rows_cte.clone(), old_rows_sql);
@@ -161,7 +157,7 @@ pub fn diff_lateral_function(
                 {child_col_refs_str},\n\
                 {srf_col_refs_str}\n\
          FROM {changed_sources_cte} AS {outer_alias_q},\n\
-              LATERAL {func_sql} AS {srf_alias_clause}\n\
+              LATERAL {func_sql}{ordinality_clause} AS {srf_alias_clause}\n\
          WHERE {outer_alias_q}.\"__pgt_action\" = 'I'",
     );
     ctx.add_cte(expand_cte.clone(), expand_sql);
@@ -507,7 +503,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            lateral_function_output_columns("normalize_text(t.raw)", "n", &[], &declared),
+            lateral_function_output_columns("normalize_text(t.raw)", "n", &[], &declared, false),
             vec!["normalized_value", "normalized_state"]
         );
 

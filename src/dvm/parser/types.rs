@@ -358,30 +358,52 @@ pub fn lateral_function_output_columns(
     alias: &str,
     column_aliases: &[String],
     declared_columns: &[Column],
+    with_ordinality: bool,
 ) -> Vec<String> {
-    if !column_aliases.is_empty() {
-        if declared_columns.is_empty() {
-            return column_aliases.to_vec();
-        }
-        let mut columns = declared_columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
-        for (index, alias) in column_aliases.iter().enumerate() {
-            if let Some(column) = columns.get_mut(index) {
-                *column = alias.clone();
-            }
-        }
-        return columns;
-    }
-    if !declared_columns.is_empty() {
-        return declared_columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect();
-    }
+    let default_columns = infer_default_lateral_function_columns(func_sql);
+    let function_column_count = if !declared_columns.is_empty() {
+        declared_columns.len()
+    } else {
+        default_columns.as_ref().map_or(1, Vec::len)
+    };
+    let (function_aliases, ordinality_alias) =
+        if with_ordinality && column_aliases.len() == function_column_count + 1 {
+            (
+                &column_aliases[..function_column_count],
+                Some(column_aliases[function_column_count].clone()),
+            )
+        } else {
+            (column_aliases, None)
+        };
 
-    infer_default_lateral_function_columns(func_sql).unwrap_or_else(|| vec![alias.to_string()])
+    let mut columns = if !function_aliases.is_empty() {
+        if declared_columns.is_empty() {
+            function_aliases.to_vec()
+        } else {
+            let mut columns = declared_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            for (index, alias) in function_aliases.iter().enumerate() {
+                if let Some(column) = columns.get_mut(index) {
+                    *column = alias.clone();
+                }
+            }
+            columns
+        }
+    } else if !declared_columns.is_empty() {
+        declared_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect()
+    } else {
+        default_columns.unwrap_or_else(|| vec![alias.to_string()])
+    };
+
+    if with_ordinality {
+        columns.push(ordinality_alias.unwrap_or_else(|| "ordinality".to_string()));
+    }
+    columns
 }
 
 fn infer_default_lateral_function_columns(func_sql: &str) -> Option<Vec<String>> {
@@ -2639,10 +2661,8 @@ impl OpTree {
                     alias,
                     column_aliases,
                     declared_columns,
+                    *with_ordinality,
                 ));
-                if *with_ordinality {
-                    columns.push("ordinality".to_string());
-                }
             }
             OpTree::LateralSubquery {
                 column_aliases,
