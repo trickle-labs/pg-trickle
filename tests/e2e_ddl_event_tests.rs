@@ -67,6 +67,86 @@ async fn test_ddl_changed_owner_suspends_stream_table() {
 }
 
 #[tokio::test]
+async fn test_replica_identity_full_keeps_trigger_stream_table_active() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE evt_replica_identity_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO evt_replica_identity_src VALUES (1, 'before')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'evt_replica_identity_st',\
+            query => $$SELECT id, val FROM evt_replica_identity_src$$,\
+            schedule => '1m',\
+            refresh_mode => 'DIFFERENTIAL',\
+            cdc_mode => 'trigger'\
+        )",
+    )
+    .await;
+
+    db.execute("ALTER TABLE evt_replica_identity_src REPLICA IDENTITY FULL")
+        .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'evt_replica_identity_st'",
+        )
+        .await;
+    assert_eq!(status, "ACTIVE");
+
+    db.execute("UPDATE evt_replica_identity_src SET val = 'after' WHERE id = 1")
+        .await;
+    db.refresh_st("evt_replica_identity_st").await;
+    db.assert_st_matches_query(
+        "public.evt_replica_identity_st",
+        "SELECT id, val FROM evt_replica_identity_src",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_disabling_source_capture_suspends_until_reinitialize() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE evt_disabled_capture_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO evt_disabled_capture_src VALUES (1, 'before')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'evt_disabled_capture_st',\
+            query => $$SELECT id, val FROM evt_disabled_capture_src$$,\
+            schedule => '1m',\
+            refresh_mode => 'DIFFERENTIAL',\
+            cdc_mode => 'trigger'\
+        )",
+    )
+    .await;
+
+    db.execute("ALTER TABLE evt_disabled_capture_src DISABLE TRIGGER USER")
+        .await;
+    db.execute("INSERT INTO evt_disabled_capture_src VALUES (2, 'missed')")
+        .await;
+    db.execute("ALTER TABLE evt_disabled_capture_src ENABLE TRIGGER USER")
+        .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'evt_disabled_capture_st'",
+        )
+        .await;
+    assert_eq!(status, "SUSPENDED");
+
+    db.execute("SELECT pgtrickle.reinitialize_stream_table('evt_disabled_capture_st')")
+        .await;
+    db.refresh_st("evt_disabled_capture_st").await;
+    db.assert_st_matches_query(
+        "public.evt_disabled_capture_st",
+        "SELECT id, val FROM evt_disabled_capture_src",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_ddl_hooks_dependency_lookup_timeout_fail_closed() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE evt_lock_unrelated (id INT)").await;
