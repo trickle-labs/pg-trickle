@@ -234,7 +234,7 @@ A **frontier** is a per-source map of `{source_oid → LSN}` that records exactl
 
 ### What is the `__pgt_row_id` column and why does it appear in my stream tables?
 
-Every stream table has a `__pgt_row_id BYTEA NOT NULL` column containing the complete typed V2 row identity. The refresh engine may use `row_probe_v1(__pgt_row_id)` to find candidates, but always rechecks the complete identity during `MERGE` and other DML.
+Every stream table has a `__pgt_row_id BYTEA NOT NULL` column containing the complete typed V3 row identity. The refresh engine may use `row_probe_v1(__pgt_row_id)` to find candidates, but always rechecks the complete identity during `MERGE` and other DML.
 
 **You should ignore this column in your queries.** It is an implementation detail. If it bothers you, exclude it explicitly:
 
@@ -1188,7 +1188,7 @@ its limitations with duplicate rows.
 
 **No, but it is strongly recommended.** When a source table has a primary key, pg_trickle uses it to generate a deterministic `__pgt_row_id` for each row — this is the most reliable way to track row identity across refreshes.
 
-Without a primary key, pg_trickle falls back to a **typed V2 content identity** over all column values. This works correctly for tables where every row is unique, while exact duplicate rows remain independently counted through the non-unique maintenance path. See [What are the risks of using tables without primary keys?](#what-are-the-risks-of-using-tables-without-primary-keys) for details.
+Without a primary key, pg_trickle falls back to a **typed V3 content identity** over all column values. This works correctly for tables where every row is unique, while exact duplicate rows remain independently counted through the non-unique maintenance path. See [What are the risks of using tables without primary keys?](#what-are-the-risks-of-using-tables-without-primary-keys) for details.
 
 ### What are the risks of using tables without primary keys?
 
@@ -1202,9 +1202,9 @@ Content-based row identity has known limitations with **exact duplicate rows** (
 
 ### How does content-based row identity work for duplicate rows?
 
-For tables without a primary key, `__pgt_row_id` is computed by the typed V2 encoder over all column values. Rows with identical content produce identical identities, and the non-unique counted path preserves their multiplicity.
+For tables without a primary key, `__pgt_row_id` is computed by the typed V3 encoder over all column values. Rows with identical content produce identical identities, and the non-unique counted path preserves their multiplicity.
 
-The typed V2 encoder preserves type tags, NULLs, lengths, and domain separation, minimizing ambiguity for rows with different content. Truly identical rows (same values in every column) will always share an identity — this is inherent to content-based identity.
+The typed V3 encoder preserves type tags, NULLs, lengths, and domain separation, minimizing ambiguity for rows with different content. Truly identical rows (same values in every column) will always share an identity — this is inherent to content-based identity.
 
 ---
 
@@ -1736,7 +1736,7 @@ SELECT * FROM pgtrickle.get_refresh_history('order_totals', 10);
 
 ### What is `__pgt_row_id`?
 
-Every stream table has a `__pgt_row_id BYTEA NOT NULL` column that stores the complete typed V2 row identity. A bounded direct index or a non-unique probe index accelerates lookup, but full identity equality is always required.
+Every stream table has a `__pgt_row_id BYTEA NOT NULL` column that stores the complete typed V3 row identity. A bounded direct index or a non-unique probe index accelerates lookup, but full identity equality is always required.
 
 For a detailed explanation of how this column is computed and why it exists, see [What is the `__pgt_row_id` column and why does it appear in my stream tables?](#what-is-the-__pgt_row_id-column-and-why-does-it-appear-in-my-stream-tables) in the General section.
 
@@ -3074,7 +3074,7 @@ unsupported on stream tables, and what to do instead.
 
 Stream table contents are the **output** of the refresh engine — they represent the materialized result of the defining query at a specific point in time. Direct DML would corrupt this contract in several ways:
 
-1. **Row ID integrity.** Every row has a complete typed-V2 `__pgt_row_id` (`BYTEA`). The refresh engine uses it for exact delta matching, with a probe only as an accelerator. A manually inserted row with an incorrect or duplicate identity would cause the next differential refresh to produce wrong results (double-counting, missed deletes, or merge conflicts).
+1. **Row ID integrity.** Every row has a complete typed-V3 `__pgt_row_id` (`BYTEA`). The refresh engine uses it for exact delta matching, with a probe only as an accelerator. A manually inserted row with an incorrect or duplicate identity would cause the next differential refresh to produce wrong results (double-counting, missed deletes, or merge conflicts).
 
 2. **Frontier inconsistency.** Each refresh records a *frontier* — a set of per-source LSN positions that represent "data up to this point has been materialized." A manual DML change is not tracked by any frontier. The next differential refresh would either overwrite the change (if the delta touches the same row) or leave the stream table in a state that doesn't match any consistent point-in-time snapshot of the source data.
 

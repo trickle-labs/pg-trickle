@@ -633,7 +633,7 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
 /// Build the pk_hash expression for a Scan node matching the CDC trigger's
 /// hash computation.
 ///
-/// For single- and multi-column keys, emits the typed V2 `SCAN_KEY` identity.
+/// For single- and multi-column keys, emits the typed V3 `SCAN_KEY` identity.
 /// For keyless tables: uses all columns as hash input.
 fn build_pk_hash_expr(
     alias: &str,
@@ -2895,8 +2895,8 @@ mod tests {
             "DI-2: single-PK Scan should use NOT EXISTS\n{sql}"
         );
         assert!(
-            sql.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"),
-            "DI-2: single-PK should use V2 identity\n{sql}"
+            sql.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"),
+            "DI-2: single-PK should use V3 identity\n{sql}"
         );
         assert!(
             sql.contains("__pgt_action = 'D'"),
@@ -2922,8 +2922,8 @@ mod tests {
             &HashMap::new(),
         );
         assert!(
-            sql.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"),
-            "DI-2: multi-PK should use V2 identity\n{sql}"
+            sql.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"),
+            "DI-2: multi-PK should use V3 identity\n{sql}"
         );
         assert!(
             sql.contains(r#""t"."a""#) && sql.contains(r#""t"."b""#),

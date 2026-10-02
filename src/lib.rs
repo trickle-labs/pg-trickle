@@ -1264,12 +1264,12 @@ BEGIN
       FROM (
           SELECT 1
             FROM pgtrickle.pgt_stream_tables
-           WHERE row_identity_version IS DISTINCT FROM 2
+           WHERE row_identity_version IS DISTINCT FROM 3
               OR row_probe_version IS DISTINCT FROM 1
           UNION ALL
           SELECT 1
             FROM pgtrickle.pgt_change_buffers
-           WHERE row_identity_version IS DISTINCT FROM 2
+           WHERE row_identity_version IS DISTINCT FROM 3
               OR row_probe_version IS DISTINCT FROM 1
       ) invalid_metadata;
 
@@ -2214,6 +2214,7 @@ GRANT EXECUTE ON FUNCTION pgtrickle.metrics_summary() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.parallel_job_status(integer) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.parse_duration_seconds(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.encode_row_id_v2(text, anyelement) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pgtrickle.encode_row_id_v3(text, anyelement) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.row_probe_v1(bytea) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pg_trickle_hash(text) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION pgtrickle.pg_trickle_hash_multi(text[]) TO PUBLIC;

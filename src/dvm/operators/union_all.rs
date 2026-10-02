@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(result.columns, vec!["id", "val"]);
         assert_sql_contains(&sql, "UNION ALL");
         // Each child gets a prefixed row_id
-        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SET_KEY'");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v3('SET_KEY'");
     }
 
     #[test]

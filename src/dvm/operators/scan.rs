@@ -6,11 +6,11 @@
 //! - change_id BIGSERIAL — insertion ordering (CACHE 1 invariant, see cdc.rs)
 //! - lsn PG_LSN
 //! - action CHAR(1) — 'I' or 'D'
-//! - __pgt_row_id BYTEA — complete typed-V2 row identity
+//! - __pgt_row_id BYTEA — complete typed-V3 row identity
 //! - {col} TYPE — flat typed row values for the action
 //!
 //! For UPDATEs, we split into DELETE (old values) + INSERT (new values).
-//! Row IDs are computed by the shared typed V2 encoder.
+//! Row IDs are computed by the shared typed V3 encoder.
 //!
 //! ## Single-pass design
 //!
@@ -913,10 +913,10 @@ pub fn build_hash_expr(exprs: &[String]) -> String {
     build_hash_expr_for_domain("SCAN_KEY", exprs)
 }
 
-/// Build a V2 identity expression for an operator-specific domain.
+/// Build a V3 identity expression for an operator-specific domain.
 pub fn build_hash_expr_for_domain(domain: &str, exprs: &[String]) -> String {
     if exprs.len() == 1 {
-        format!("pgtrickle.encode_row_id_v2('{domain}', ROW({}))", exprs[0])
+        format!("pgtrickle.encode_row_id_v3('{domain}', ROW({}))", exprs[0])
     } else {
         let array_items: Vec<String> = exprs.iter().map(|e| format!("({e})")).collect();
         crate::hash::build_row_identity_expr(domain, &array_items)
@@ -1105,13 +1105,13 @@ mod tests {
     #[test]
     fn test_build_hash_expr_single() {
         let result = build_hash_expr(&["x".to_string()]);
-        assert_eq!(result, "pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(x))");
+        assert_eq!(result, "pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(x))");
     }
 
     #[test]
     fn test_build_hash_expr_multiple() {
         let result = build_hash_expr(&["a".to_string(), "b".to_string()]);
-        assert!(result.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
+        assert!(result.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
         assert!(result.contains("ROW((a), (b))"));
     }
 
@@ -1226,7 +1226,7 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Should compute row_id from PK column
-        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SCAN_KEY'");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v3('SCAN_KEY'");
         assert_sql_contains(&sql, "\"id\"");
     }
 

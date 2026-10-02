@@ -871,12 +871,12 @@ fn build_intermediate_agg_delta(
             .map(|c| format!("n.{}", quote_ident(c)))
             .collect();
         let row_id_d = if group_hash_d.is_empty() {
-            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
             build_hash_expr_for_domain("GROUP_KEY", &group_hash_d)
         };
         let row_id_n = if group_hash_n.is_empty() {
-            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
             build_hash_expr_for_domain("GROUP_KEY", &group_hash_n)
         };
@@ -1058,12 +1058,12 @@ FROM {new_rescan_cte} n{new_presence}",
             .map(|c| format!("o.{}", quote_ident(c)))
             .collect();
         let row_id_new = if group_hash_n.is_empty() {
-            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
             build_hash_expr_for_domain("GROUP_KEY", &group_hash_n)
         };
         let row_id_old = if group_hash_o.is_empty() {
-            "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
+            "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
         } else {
             build_hash_expr_for_domain("GROUP_KEY", &group_hash_o)
         };
@@ -2080,7 +2080,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         .map(|c| format!("d.{}", quote_ident(c)))
         .collect();
     let row_id_expr = if group_hash_exprs.is_empty() {
-        "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
+        "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
     } else {
         build_hash_expr_for_domain("GROUP_KEY", &group_hash_exprs)
     };

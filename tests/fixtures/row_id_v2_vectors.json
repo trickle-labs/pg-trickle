@@ -1,6 +1,7 @@
 {
   "wire": {
     "identity_version": 2,
+    "corrected_identity_version": 3,
     "probe_version": 1,
     "domain_tags": {
       "SCAN_KEY": "01",
@@ -69,6 +70,9 @@
     { "name": "set_null_and_value", "domain": "SET_KEY", "fields": [{ "type": "int4", "value": null }, { "type": "int4", "value": 1 }], "bytes": "0205000000020300030180000001ff" },
     { "name": "window_int2_seven", "domain": "WINDOW_KEY", "fields": [{ "type": "int2", "value": 7 }], "bytes": "02060000000102018007ff" },
     { "name": "synthetic_discriminator", "domain": "SYNTHETIC", "fields": [{ "type": "text", "value": "scalar_aggregate_singleton" }], "bytes": "02070000000109017363616c61725f6167677265676174655f73696e676c65746f6e0000ff" }
+  ],
+  "v3_vectors": [
+    { "name": "scan_bpchar_trailing_tab", "domain": "SCAN_KEY", "fields": [{ "type": "bpchar", "value_hex": "7809" }], "bytes": "0301000000010b0178090000ff" }
   ],
   "probe_vectors": [
     { "name": "inline_probe_is_identity", "identity_hex": "020100000001030180000001ff", "probe_hex": "020100000001030180000001ff" },

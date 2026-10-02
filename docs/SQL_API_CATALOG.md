@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**169 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**170 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -57,6 +57,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.drop_watermark_group()` | `pgtrickle` | `void` | Drop a watermark group by name. |
 | `pgtrickle.embedding_stream_table()` | `pgtrickle` | `` | # Returns A single-column table with one row per action taken (or SQL line for dry_run). |
 | `pgtrickle.encode_row_id_v2()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into exact V2 identity bytes. |
+| `pgtrickle.encode_row_id_v3()` | `pgtrickle` | `Vec<u8>` | Encode a PostgreSQL record into corrected V3 identity bytes. |
 | `pgtrickle.error_catalog()` | `pgtrickle` | `SetOf row` | Stable operational error identifiers and their PostgreSQL SQLSTATEs. |
 | `pgtrickle.exec_stream_ddl()` | `pgtrickle` | `boolean` | # Example ```sql SELECT pgtrickle.exec_stream_ddl(   'CREATE STREAM TABLE revenue AS SELECT SUM(amount) FROM orders' ); ```. |
 | `pgtrickle.explain()` | `pgtrickle` | `text` | v0.86.0: Explain the bounded refresh/cost/freshness snapshot as text. |

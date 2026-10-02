@@ -1616,7 +1616,7 @@ fn build_pk_hash_parameterized(
     param_values: &mut Vec<Option<String>>,
 ) -> String {
     if identity_columns.is_empty() {
-        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string();
+        return "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string();
     }
 
     let type_for = |column: &str| {
@@ -1662,7 +1662,7 @@ fn build_identity_from_values(
     parsed: &std::collections::HashMap<String, String>,
 ) -> String {
     if identity_columns.is_empty() {
-        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string();
+        return "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string();
     }
 
     let items: Vec<String> = identity_columns
@@ -3305,7 +3305,7 @@ mod tests {
         let parsed = std::collections::HashMap::new();
         assert_eq!(
             build_pk_hash_from_values(&pk, &parsed),
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))"
         );
     }
 
@@ -3315,7 +3315,7 @@ mod tests {
         let mut parsed = std::collections::HashMap::new();
         parsed.insert("id".to_string(), "42".to_string());
         let result = build_pk_hash_from_values(&pk, &parsed);
-        assert!(result.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
+        assert!(result.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
         assert!(result.contains("42"));
     }
 
@@ -3326,7 +3326,7 @@ mod tests {
         parsed.insert("a".to_string(), "1".to_string());
         parsed.insert("b".to_string(), "2".to_string());
         let result = build_pk_hash_from_values(&pk, &parsed);
-        assert!(result.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
+        assert!(result.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
         assert!(result.contains("'1'"));
         assert!(result.contains("'2'"));
     }
@@ -3337,7 +3337,7 @@ mod tests {
         let parsed = std::collections::HashMap::new(); // no "id" key
         assert_eq!(
             build_pk_hash_from_values(&pk, &parsed),
-            "pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(NULL::text))"
+            "pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(NULL::text))"
         );
     }
 
@@ -3448,7 +3448,7 @@ mod tests {
         parsed.insert("num".to_string(), "42".to_string());
         assert_eq!(
             build_pk_hash_from_values(&pk_cols, &parsed),
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))",
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))",
             "Keyless table __pgt_row_id must use the synthetic identity"
         );
     }
@@ -3568,7 +3568,7 @@ mod tests {
             let result = build_pk_hash_from_values(&pk_cols, &values);
             prop_assert_eq!(
                 result,
-                "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string()
+                "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string()
             );
         }
 

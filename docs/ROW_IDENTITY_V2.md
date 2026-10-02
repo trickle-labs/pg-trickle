@@ -298,3 +298,21 @@ An independent implementation can verify the integer transform, NULL state,
 variable-value terminator, zero-byte escape, field count, domain, and tuple
 terminator from these vectors. Overflow probe vectors must compute XXH3-128
 with the fixed seed and write low64 before high64 in big-endian order.
+
+
+## Corrected identity V3
+
+Identity V3 uses the same type tags, field framing, domain tags, null handling,
+size limits, and probe contract as V2. Its first byte is `0x03`. The V2 encoder
+and its bytes remain immutable.
+
+For `bpchar`, V3 removes only trailing byte `0x20` before encoding. Tabs, line
+feeds, vertical tabs, form feeds, carriage returns, and all other trailing bytes
+remain significant; interior spaces remain significant. `text` and `varchar`
+encoding is unchanged. This makes full V3 identity equality match PostgreSQL's
+`bpchar` equality.
+
+Upgrading from V2 marks existing stream tables stale and requires their protected
+FULL reinitialization before differential maintenance resumes. CDC buffers use
+V3 for new writes after upgrade; queued state is not used for differential
+maintenance until the reinitialization completes.

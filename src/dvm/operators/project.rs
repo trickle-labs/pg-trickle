@@ -254,7 +254,7 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             .collect();
         let row_id_hash = if hash_cols.len() == 1 {
             format!(
-                "pgtrickle.encode_row_id_v2('JOIN_KEY', ROW({}))",
+                "pgtrickle.encode_row_id_v3('JOIN_KEY', ROW({}))",
                 hash_cols[0]
             )
         } else {
@@ -1095,7 +1095,7 @@ mod tests {
         let sql = ctx.cte_sql(&result.cte_name).unwrap();
         let row_id = sql.split(" AS __pgt_row_id").next().unwrap_or(sql);
 
-        assert!(row_id.contains("encode_row_id_v2('SCAN_KEY'"), "{row_id}");
+        assert!(row_id.contains("encode_row_id_v3('SCAN_KEY'"), "{row_id}");
         assert!(
             row_id.contains("encode_row_id_v2('MDM_SOURCE_KEY_V1'"),
             "{row_id}"
@@ -1175,7 +1175,7 @@ mod tests {
 
         let result = diff_project(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-        assert_sql_contains(&sql, "encode_row_id_v2('SCAN_KEY'");
+        assert_sql_contains(&sql, "encode_row_id_v3('SCAN_KEY'");
         for column in [
             "id",
             "source_record_id",

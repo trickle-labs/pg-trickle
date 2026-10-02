@@ -483,7 +483,7 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
 
     let recomputed_row_id = stable_identity.as_ref().map_or_else(
         || {
-            "pgtrickle.encode_row_id_v2('WINDOW_KEY', \
+            "pgtrickle.encode_row_id_v3('WINDOW_KEY', \
              ROW(row_to_json(w)::text, row_number() OVER ()))"
                 .to_string()
         },
@@ -650,7 +650,7 @@ mod tests {
 
         assert_sql_contains(
             &sql,
-            "pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW(w.\"id\"))",
+            "pgtrickle.encode_row_id_v3('WINDOW_KEY', ROW(w.\"id\"))",
         );
         assert_sql_contains(&sql, "FROM pgtrickle.__pgt_window_1_0_0_rows st");
         assert_sql_contains(&sql, "ON o.\"__pgt_row_id\" = r.\"__pgt_row_id\"");

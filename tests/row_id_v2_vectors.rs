@@ -1,6 +1,7 @@
 use pg_trickle::dvm::row_id_v2::{
-    EncodedField, IdentityDomain, TYPE_INT4, TYPE_INTERVAL, TYPE_NUMERIC, TYPE_TEXT, encode_bytes,
-    encode_interval_value, encode_numeric_text, encode_signed, encode_tuple,
+    EncodedField, IdentityDomain, TYPE_BPCHAR, TYPE_INT4, TYPE_INTERVAL, TYPE_NUMERIC, TYPE_TEXT,
+    encode_bpchar, encode_bpchar_v3, encode_bytes, encode_interval_value, encode_numeric_text,
+    encode_signed, encode_tuple, encode_tuple_v3,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -28,6 +29,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 fn row_id_v2_corpus_is_independent_and_exact() {
     let corpus: Value = serde_json::from_str(CORPUS).expect("row-id V2 corpus must be JSON");
     assert_eq!(corpus["wire"]["identity_version"], 2);
+    assert_eq!(corpus["wire"]["corrected_identity_version"], 3);
     assert_eq!(corpus["wire"]["probe_version"], 1);
     assert_eq!(corpus["wire"]["probe_prefix_bytes"], 128);
     assert_eq!(corpus["wire"]["tuple_end"], "ff");
@@ -130,6 +132,53 @@ fn row_id_v2_corpus_is_independent_and_exact() {
     assert_eq!(
         generated,
         decode_hex("020600000001130180000000000000000000025b7f3d4000ff")
+    );
+
+    let v3 = &corpus["v3_vectors"][0];
+    assert_eq!(v3["bytes"], "0301000000010b0178090000ff");
+    let tab = encode_bpchar_v3(b"x\t");
+    let identity = encode_tuple_v3(
+        IdentityDomain::ScanKey,
+        &[EncodedField::value(TYPE_BPCHAR, &tab)],
+    )
+    .expect("V3 bpchar identity");
+    assert_eq!(identity, decode_hex(hex(v3)));
+
+    let legacy_tab = encode_bpchar(b"x\t");
+    let legacy_plain = encode_bpchar(b"x");
+    assert_eq!(
+        encode_tuple(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_BPCHAR, &legacy_tab)]
+        )
+        .expect("V2 tab identity"),
+        encode_tuple(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_BPCHAR, &legacy_plain)]
+        )
+        .expect("V2 plain identity"),
+        "V2 bytes retain the former ASCII-whitespace trimming"
+    );
+    let corrected_plain = encode_bpchar_v3(b"x");
+    assert_eq!(
+        encode_tuple_v3(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_BPCHAR, &corrected_plain)]
+        )
+        .expect("V3 plain identity"),
+        encode_tuple_v3(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_BPCHAR, &encode_bpchar_v3(b"x "))]
+        )
+        .expect("V3 trailing-space identity")
+    );
+    assert_ne!(
+        identity[0],
+        encode_tuple(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_BPCHAR, &legacy_tab)]
+        )
+        .unwrap()[0]
     );
 
     for probe in corpus["probe_vectors"].as_array().unwrap() {

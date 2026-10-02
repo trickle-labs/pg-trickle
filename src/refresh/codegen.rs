@@ -994,17 +994,17 @@ pub fn build_content_hash_expr(prefix: &str, user_cols: &[String]) -> String {
     build_content_hash_expr_for_domain(prefix, user_cols, "KEYLESS_ROW")
 }
 
-/// Build a typed V2 identity for the supplied semantic domain.
+/// Build a typed V3 identity for the supplied semantic domain.
 pub fn build_content_hash_expr_for_domain(
     prefix: &str,
     user_cols: &[String],
     domain: &str,
 ) -> String {
     match user_cols.len() {
-        0 => "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
+        0 => "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string(),
         1 => {
             let c = user_cols[0].replace('"', "\"\"");
-            format!("pgtrickle.encode_row_id_v2('{domain}', ROW({prefix}\"{c}\"))")
+            format!("pgtrickle.encode_row_id_v3('{domain}', ROW({prefix}\"{c}\"))")
         }
         _ => {
             let args: Vec<String> = user_cols
@@ -2624,7 +2624,7 @@ mod tests {
         let result = build_content_hash_expr("t.", &[]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))"
         );
     }
 
@@ -2633,7 +2633,7 @@ mod tests {
         let result = build_content_hash_expr("t.", &["name".to_string()]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(t.\"name\"))"
+            "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(t.\"name\"))"
         );
     }
 
@@ -2642,7 +2642,7 @@ mod tests {
         let result = build_content_hash_expr("old.", &["val".to_string()]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(old.\"val\"))"
+            "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(old.\"val\"))"
         );
     }
 
@@ -2652,7 +2652,7 @@ mod tests {
         let result = build_content_hash_expr("t.", &cols);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(t.\"a\", t.\"b\", t.\"c\"))"
+            "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(t.\"a\", t.\"b\", t.\"c\"))"
         );
     }
 

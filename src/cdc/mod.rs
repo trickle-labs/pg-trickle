@@ -359,9 +359,9 @@ fn register_change_buffer(
 
     let sql = format!(
         "INSERT INTO {change_schema}.{buffer_name} (lsn, action, __pgt_row_id) \
-         SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)) \
+         SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v3('SYNTHETIC', ROW($1::bigint)) \
          WHERE NOT EXISTS (SELECT 1 FROM {change_schema}.{buffer_name} \
-                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND __pgt_row_id = pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)))",
+                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND __pgt_row_id = pgtrickle.encode_row_id_v3('SYNTHETIC', ROW($1::bigint)))",
     );
     Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
         pgt_id: if source_kind == "STREAM_TABLE" {
@@ -400,9 +400,9 @@ pub(crate) fn restore_registered_sentinel(
     })?;
     let sql = format!(
         "INSERT INTO {change_schema}.{buffer_name} (lsn, action, __pgt_row_id) \
-         SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)) \
+         SELECT '0/0'::pg_lsn, 'S', pgtrickle.encode_row_id_v3('SYNTHETIC', ROW($1::bigint)) \
          WHERE NOT EXISTS (SELECT 1 FROM {change_schema}.{buffer_name} \
-                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND __pgt_row_id = pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint)))"
+                           WHERE lsn = '0/0'::pg_lsn AND action = 'S' AND __pgt_row_id = pgtrickle.encode_row_id_v3('SYNTHETIC', ROW($1::bigint)))"
     );
     Spi::run_with_args(&sql, &[token.into()]).map_err(|e| PgTrickleError::CdcStateInvalid {
         pgt_id: source_id,
@@ -576,7 +576,7 @@ fn validate_one_change_buffer(
     let sentinel_ok = Spi::get_one_with_args::<bool>(
         &format!(
             "SELECT COUNT(*) = 1 AND BOOL_AND(__pgt_row_id = \
-                    pgtrickle.encode_row_id_v2('SYNTHETIC', ROW($1::bigint))) \
+                    pgtrickle.encode_row_id_v3('SYNTHETIC', ROW($1::bigint))) \
              FROM {change_schema}.{buffer_name} \
              WHERE lsn = '0/0'::pg_lsn AND action = 'S'"
         ),
@@ -935,7 +935,7 @@ pub fn create_change_trigger(
              INSERT INTO {change_schema}.changes_{name}
                  (lsn, action, __pgt_row_id, source_xid, source_commit_at)
              VALUES (pg_current_wal_insert_lsn(), 'T',
-                     pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)),
+                     pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)),
                      NULL::xid, NULL::timestamptz);
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -1067,7 +1067,7 @@ pub fn create_change_buffer_table(
     columns: &[(String, String)],
     stable_name: &str,
 ) -> Result<(), PgTrickleError> {
-    // __pgt_row_id is always present as the complete V2 identity.
+    // __pgt_row_id is always present as the complete V3 identity.
     // changed_cols is a VARBIT bitmask for UPDATE rows — bit i (leftmost=0)
     // is B'1' when column i changed. NULL for INSERT/DELETE rows.
     let pk_col = ",__pgt_row_id BYTEA NOT NULL,changed_cols VARBIT";
@@ -2256,16 +2256,16 @@ fn build_pk_hash_trigger_exprs(
     if hash_cols.is_empty() {
         // Degenerate case: table with zero columns (shouldn't happen).
         return (
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string(),
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string(),
         );
     }
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
         (
-            format!("pgtrickle.encode_row_id_v2('{domain}', ROW(NEW.{col}))"),
-            format!("pgtrickle.encode_row_id_v2('{domain}', ROW(OLD.{col}))"),
+            format!("pgtrickle.encode_row_id_v3('{domain}', ROW(NEW.{col}))"),
+            format!("pgtrickle.encode_row_id_v3('{domain}', ROW(OLD.{col}))"),
         )
     } else {
         let new_items: Vec<String> = hash_cols
@@ -2725,12 +2725,12 @@ fn build_pk_hash_stmt_expr(
     };
 
     if hash_cols.is_empty() {
-        return "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string();
+        return "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string();
     }
 
     if hash_cols.len() == 1 {
         let col = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.encode_row_id_v2('{domain}', ROW({prefix}.{col}))")
+        format!("pgtrickle.encode_row_id_v3('{domain}', ROW({prefix}.{col}))")
     } else {
         let items: Vec<String> = hash_cols
             .iter()
@@ -3700,11 +3700,11 @@ mod tests {
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
         assert_eq!(
             new_expr,
-            r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(NEW."id"))"#
+            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(NEW."id"))"#
         );
         assert_eq!(
             old_expr,
-            r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(OLD."id"))"#
+            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(OLD."id"))"#
         );
     }
 
@@ -3716,7 +3716,7 @@ mod tests {
             ("b".to_string(), "text".to_string()),
         ];
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
-        assert!(new_expr.contains("pgtrickle.encode_row_id_v2('SCAN_KEY'"));
+        assert!(new_expr.contains("pgtrickle.encode_row_id_v3('SCAN_KEY'"));
         assert!(new_expr.contains(r#"NEW."a""#));
         assert!(new_expr.contains(r#"NEW."b""#));
         assert!(old_expr.contains(r#"OLD."a""#));
@@ -3733,7 +3733,7 @@ mod tests {
         ];
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
         assert!(
-            new_expr.contains("pgtrickle.encode_row_id_v2('KEYLESS_ROW'"),
+            new_expr.contains("pgtrickle.encode_row_id_v3('KEYLESS_ROW'"),
             "Got: {new_expr}",
         );
         assert!(new_expr.contains(r#"NEW."name""#), "Got: {new_expr}");
@@ -3750,11 +3750,11 @@ mod tests {
         let (new_expr, old_expr) = build_pk_hash_trigger_exprs(&pk, &all);
         assert_eq!(
             new_expr,
-            r#"pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(NEW."val"))"#
+            r#"pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(NEW."val"))"#
         );
         assert_eq!(
             old_expr,
-            r#"pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(OLD."val"))"#
+            r#"pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(OLD."val"))"#
         );
     }
 

@@ -1,4 +1,4 @@
-//! Versioned, typed row-identity V2 foundation.
+//! Versioned, typed row-identity encoders.
 //!
 //! The complete identity is canonical bytes.  This module deliberately does
 //! not use output functions, text formatting, or a hash as an identity.
@@ -11,6 +11,8 @@ use std::str::FromStr;
 
 /// The immutable identity wire version.
 pub const IDENTITY_VERSION_V2: u8 = 2;
+/// Corrected identity wire version; V2 remains byte-for-byte immutable.
+pub const IDENTITY_VERSION_V3: u8 = 3;
 /// The immutable bounded-probe wire version.
 pub const PROBE_VERSION_V1: u8 = 1;
 /// XXH3-128 seed used by [`row_probe_v1`].
@@ -144,31 +146,29 @@ impl FromStr for IdentityDomain {
 /// Errors returned before the SQL boundary converts them to PostgreSQL errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RowIdV2Error {
-    #[error("row identity v2: invalid identity domain '{0}'")]
+    #[error("row identity: invalid identity domain '{0}'")]
     InvalidDomain(String),
-    #[error("row identity v2: PostgreSQL major {0} is unsupported; supported majors: 18")]
+    #[error("row identity: PostgreSQL major {0} is unsupported; supported majors: 18")]
     UnsupportedPostgresMajor(u16),
-    #[error(
-        "row identity v2: field '{field}' has unsupported structural type OID {oid} ({family})"
-    )]
+    #[error("row identity: field '{field}' has unsupported structural type OID {oid} ({family})")]
     UnsupportedStructuralType {
         field: String,
         oid: u32,
         family: &'static str,
     },
-    #[error("row identity v2: field '{field}' has unknown or unsupported type OID {oid}")]
+    #[error("row identity: field '{field}' has unknown or unsupported type OID {oid}")]
     UnknownType { field: String, oid: u32 },
-    #[error("row identity v2: field '{field}' uses a non-deterministic collation")]
+    #[error("row identity: field '{field}' uses a non-deterministic collation")]
     NonDeterministicCollation { field: String },
-    #[error("row identity v2: tuple has {found} fields; maximum is {maximum}")]
+    #[error("row identity: tuple has {found} fields; maximum is {maximum}")]
     TooManyFields { found: usize, maximum: usize },
-    #[error("row identity v2: encoded identity exceeds {maximum} bytes")]
+    #[error("row identity: encoded identity exceeds {maximum} bytes")]
     EncodedIdentityTooLarge { maximum: usize },
-    #[error("row identity v2: failed to read field '{field}': {detail}")]
+    #[error("row identity: failed to read field '{field}': {detail}")]
     Datum { field: String, detail: String },
-    #[error("row identity v2: field '{field}' has invalid metadata: {detail}")]
+    #[error("row identity: field '{field}' has invalid metadata: {detail}")]
     InvalidFieldMetadata { field: String, detail: String },
-    #[error("row identity v2: source key '{key}' is not eligible: {detail}")]
+    #[error("row identity: source key '{key}' is not eligible: {detail}")]
     InvalidSourceKey { key: String, detail: &'static str },
 }
 
@@ -571,7 +571,7 @@ const ENUM_DESCRIPTOR: TypeDescriptor = TypeDescriptor {
     supported_majors: SUPPORTED_POSTGRES_MAJORS,
 };
 
-/// Explicit registry for the supported V2 foundation types.
+/// Explicit registry for the supported row-identity types.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TypeRegistry;
 
@@ -684,6 +684,22 @@ pub fn encode_tuple(
     domain: IdentityDomain,
     fields: &[EncodedField<'_>],
 ) -> Result<Vec<u8>, RowIdV2Error> {
+    encode_tuple_with_version(IDENTITY_VERSION_V2, domain, fields)
+}
+
+/// Encode a tuple with corrected V3 bpchar canonicalization.
+pub fn encode_tuple_v3(
+    domain: IdentityDomain,
+    fields: &[EncodedField<'_>],
+) -> Result<Vec<u8>, RowIdV2Error> {
+    encode_tuple_with_version(IDENTITY_VERSION_V3, domain, fields)
+}
+
+fn encode_tuple_with_version(
+    identity_version: u8,
+    domain: IdentityDomain,
+    fields: &[EncodedField<'_>],
+) -> Result<Vec<u8>, RowIdV2Error> {
     if fields.len() > MAX_TUPLE_FIELDS {
         return Err(RowIdV2Error::TooManyFields {
             found: fields.len(),
@@ -704,7 +720,7 @@ pub fn encode_tuple(
         }
     };
     let mut output = Vec::with_capacity(output_bytes);
-    output.push(IDENTITY_VERSION_V2);
+    output.push(identity_version);
     output.push(domain.tag());
     output.extend_from_slice(&(fields.len() as u32).to_be_bytes());
     for field in fields {
@@ -1116,6 +1132,15 @@ pub fn encode_text(value: &[u8]) -> Vec<u8> {
 /// Encode `bpchar` after applying PostgreSQL's trailing-space equality rule.
 pub fn encode_bpchar(value: &[u8]) -> Vec<u8> {
     encode_bytes(value.trim_ascii_end())
+}
+
+/// Encode V3 bpchar, ignoring only trailing literal spaces as PostgreSQL does.
+pub fn encode_bpchar_v3(value: &[u8]) -> Vec<u8> {
+    let end = value
+        .iter()
+        .rposition(|byte| *byte != b' ')
+        .map_or(0, |index| index + 1);
+    encode_bytes(&value[..end])
 }
 
 fn encode_numeric_datum(value: &RawElement) -> Result<Vec<u8>, RowIdV2Error> {
@@ -1530,6 +1555,7 @@ fn encode_record_field(
     attno: std::num::NonZeroUsize,
     field: &str,
     descriptor: &TypeDescriptor,
+    identity_version: u8,
 ) -> Result<Option<Vec<u8>>, RowIdV2Error> {
     match descriptor.scalar {
         ScalarSupport::Bool => record
@@ -1581,7 +1607,11 @@ fn encode_record_field(
                 value.map(|value| {
                     let value = raw_varlena_payload(&value);
                     if descriptor.type_tag == TYPE_BPCHAR {
-                        encode_bpchar(&value)
+                        if identity_version == IDENTITY_VERSION_V3 {
+                            encode_bpchar_v3(&value)
+                        } else {
+                            encode_bpchar(&value)
+                        }
                     } else {
                         encode_text(&value)
                     }
@@ -1724,6 +1754,7 @@ fn encode_record_field(
 }
 
 fn encode_record(
+    identity_version: u8,
     domain: &str,
     record: PgHeapTuple<'_, AllocatedByRust>,
 ) -> Result<Vec<u8>, RowIdV2Error> {
@@ -1771,11 +1802,11 @@ fn encode_record(
                 unsafe { pgrx::pg_sys::get_collation_isdeterministic(attribute.attcollation) };
             validate_collation(field, deterministic)?;
         }
-        let payload = encode_record_field(&record, attno, field, descriptor)?;
+        let payload = encode_record_field(&record, attno, field, descriptor, identity_version)?;
         fields.push((descriptor.type_tag, payload));
     }
     let mut output = Vec::with_capacity(6 + fields.len() * 2 + 1);
-    output.push(IDENTITY_VERSION_V2);
+    output.push(identity_version);
     output.push(domain.tag());
     output.extend_from_slice(&(fields.len() as u32).to_be_bytes());
     for (type_tag, payload) in fields {
@@ -1805,6 +1836,16 @@ fn encode_record(
 /// Encode a PostgreSQL record into exact V2 identity bytes.
 #[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
 pub fn encode_row_id_v2(domain: &str, record: pgrx::AnyElement) -> Vec<u8> {
+    encode_row_id_version(IDENTITY_VERSION_V2, domain, record)
+}
+
+/// Encode a PostgreSQL record into corrected V3 identity bytes.
+#[pg_extern(schema = "pgtrickle", stable, parallel_safe)]
+pub fn encode_row_id_v3(domain: &str, record: pgrx::AnyElement) -> Vec<u8> {
+    encode_row_id_version(IDENTITY_VERSION_V3, domain, record)
+}
+
+fn encode_row_id_version(identity_version: u8, domain: &str, record: pgrx::AnyElement) -> Vec<u8> {
     // SAFETY: AnyElement supplies the actual PostgreSQL argument type OID. PostgreSQL
     // resolves its domain base type and classifies that registered type before the datum
     // is converted; only a validated record/composite reaches tuple conversion.
@@ -1815,7 +1856,8 @@ pub fn encode_row_id_v2(domain: &str, record: pgrx::AnyElement) -> Vec<u8> {
                 pgrx::PgLogLevel::ERROR,
                 pgrx::PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
                 crate::error::PgTrickleError::TypeMismatch(format!(
-                    "encode_row_id_v2 expected a record/composite argument, got type OID {}",
+                    "encode_row_id_v{} expected a record/composite argument, got type OID {}",
+                    identity_version,
                     record.oid()
                 ))
                 .to_string()
@@ -1827,7 +1869,7 @@ pub fn encode_row_id_v2(domain: &str, record: pgrx::AnyElement) -> Vec<u8> {
         field: "<record>".to_owned(),
         detail: "record argument is NULL".to_owned(),
     });
-    match result.and_then(|record| encode_record(domain, record)) {
+    match result.and_then(|record| encode_record(identity_version, domain, record)) {
         Ok(identity) => identity,
         Err(error) => pgrx::error!("{}", error),
     }

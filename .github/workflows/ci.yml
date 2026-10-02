@@ -77,7 +77,7 @@ jobs:
   # The current release contract runs on every PR so publication cannot
   # introduce untested suite claims or manually asserted passing results.
   release-qualification-contract:
-    name: v0.108.1 release evidence contract
+    name: v0.108.2 release evidence contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -85,7 +85,7 @@ jobs:
 
       - name: Validate release evidence and rejection controls
         run: |
-          python3 scripts/v0_108_1_release_gate.py
+          python3 scripts/v0_108_2_release_gate.py
           python3 scripts/check_lsn_verification.py --contract-only
           python3 -m unittest scripts/test_lsn_candidate_binding.py
 
@@ -1626,11 +1626,11 @@ jobs:
             CREATE EXTENSION pg_trickle VERSION '0.107.0';
             CREATE TABLE shipping_upgrade_src (id INT PRIMARY KEY, val TEXT);
             INSERT INTO shipping_upgrade_src VALUES (1, 'before');
+            ALTER EXTENSION pg_trickle UPDATE TO '0.108.2';
             SELECT pgtrickle.create_stream_table(
               'shipping_upgrade_st',
               'SELECT id, val FROM shipping_upgrade_src',
               '1m', 'DIFFERENTIAL');
-            ALTER EXTENSION pg_trickle UPDATE TO '0.108.1';
             INSERT INTO shipping_upgrade_src VALUES (2, 'after');
             SELECT pgtrickle.refresh_stream_table('shipping_upgrade_st');
             SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';

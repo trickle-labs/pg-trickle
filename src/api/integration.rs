@@ -150,7 +150,7 @@ pub fn integration_capabilities() -> TableIterator<
                 "max_graph_members": 1024,
                 "source_boundary": "local_trigger_or_wal",
                 "differential_features": [
-                    "stable_row_identity_encoder_v2",
+                    "stable_row_identity_encoder_v3",
                     "custom_table_srf_out_columns",
                     "lateral_immutable_composite_function"
                 ]

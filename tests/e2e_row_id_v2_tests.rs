@@ -126,7 +126,7 @@ async fn test_row_id_v2_composite_domain_uses_approved_policy() {
 }
 
 #[tokio::test]
-async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identity() {
+async fn test_row_identity_v2_and_v3_encoders_are_admitted_by_resolved_identity() {
     let db = E2eDb::new().await.with_extension().await;
     let encoder_is_owned_and_parallel_safe: bool = db
         .query_scalar(
@@ -156,6 +156,17 @@ async fn test_row_id_v2_is_the_only_stable_function_admitted_by_resolved_identit
     )
     .await;
     assert_eq!(db.pgt_status("row_id_admission").await.1, "DIFFERENTIAL");
+
+    db.create_st(
+        "row_id_admission_v3",
+        "SELECT id, value, pgtrickle.encode_row_id_v3(\
+             'MDM_SOURCE_KEY_V1', ROW(id, value)) AS encoded_id \
+         FROM public.row_id_admission_source",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    assert_eq!(db.pgt_status("row_id_admission_v3").await.1, "DIFFERENTIAL");
 
     for mutation in [
         "INSERT INTO row_id_admission_source VALUES (2, 'b')",
@@ -461,4 +472,55 @@ async fn test_row_id_v2_recreation_preflight_is_read_only_and_requires_ack() {
         .await;
     assert_eq!(stream_tables_before, stream_tables_after);
     assert_eq!(buffers_before, buffers_after);
+}
+
+#[tokio::test]
+async fn test_row_id_v2_bpchar_identity_matches_postgres_equality() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    let comparisons: Vec<(bool, bool, i32)> = sqlx::query_as(
+        "WITH cases(name, left_value, right_value) AS (VALUES \
+            ('trailing_spaces', 'x'::text, 'x  '::text), \
+            ('all_spaces', ' '::text, '   '::text), \
+            ('tab_equal_after_space', ('x' || chr(9))::text, ('x' || chr(9) || ' ')::text), \
+            ('tab_significant', 'x'::text, ('x' || chr(9))::text), \
+            ('lf_significant', 'x'::text, ('x' || chr(10))::text), \
+            ('vt_significant', 'x'::text, ('x' || chr(11))::text), \
+            ('ff_significant', 'x'::text, ('x' || chr(12))::text), \
+            ('cr_significant', 'x'::text, ('x' || chr(13))::text), \
+            ('interior_space', 'a b'::text, 'ab'::text), \
+            ('interior_and_trailing_space', 'a b '::text, 'a b'::text), \
+            ('different_prefix', 'abc'::text, 'abcd'::text) \
+        ) \
+        SELECT left_value::bpchar = right_value::bpchar, \
+               pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(left_value::bpchar)) = \
+                   pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(right_value::bpchar)), \
+               get_byte(pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(left_value::bpchar)), 0) \
+          FROM cases ORDER BY name",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("compare PostgreSQL bpchar equality with full V3 identity bytes");
+    assert_eq!(comparisons.len(), 11);
+    for (postgres_equal, identity_equal, version) in comparisons {
+        assert_eq!(version, 3);
+        assert_eq!(
+            identity_equal, postgres_equal,
+            "complete encoded identity equality must match PostgreSQL bpchar equality"
+        );
+    }
+
+    let v2_keeps_its_historical_bytes: bool = db
+        .query_scalar(
+            "SELECT pgtrickle.encode_row_id_v2('SCAN_KEY', ROW('x'::bpchar)) = \
+                    pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(('x' || chr(9))::bpchar))",
+        )
+        .await;
+    assert!(v2_keeps_its_historical_bytes);
+    let corrected_distinguishes_tab: bool = db
+        .query_scalar(
+            "SELECT pgtrickle.encode_row_id_v3('SCAN_KEY', ROW('x'::bpchar)) <> \
+                    pgtrickle.encode_row_id_v3('SCAN_KEY', ROW(('x' || chr(9))::bpchar))",
+        )
+        .await;
+    assert!(corrected_distinguishes_tab);
 }

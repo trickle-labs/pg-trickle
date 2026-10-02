@@ -1,6 +1,6 @@
 # What Happens When You INSERT a Row?
 
-> **v0.87.16 note:** The diagrams below use simplified legacy change-buffer labels to explain the lifecycle. Current buffers use flat typed columns and a complete `__pgt_row_id BYTEA` from the V2 encoder; `row_probe_v1` is only an index accelerator, never the identity.
+> **v0.87.16 note:** The diagrams below use simplified legacy change-buffer labels to explain the lifecycle. Current buffers use flat typed columns and a complete `__pgt_row_id BYTEA` from the current row-identity encoder; `row_probe_v1` is only an index accelerator, never the identity.
 
 This tutorial traces the complete lifecycle of a single `INSERT` statement on a base table that is referenced by a stream table — from the moment the row is written to the moment the stream table reflects the change.
 

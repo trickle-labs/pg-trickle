@@ -2,6 +2,21 @@
 
 This guide covers upgrading pg_trickle from one version to another.
 
+## 0.108.1 to 0.108.2
+
+Install the v0.108.2 library and extension files, then apply the upgrade:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.108.2';
+```
+
+The migration changes row identity to V3, which preserves PostgreSQL `bpchar`
+equality while leaving V2 bytes unchanged. Existing stream tables are marked
+for reinitialization. Run a protected FULL refresh for each stale stream table;
+differential maintenance stays blocked until that succeeds. A failed FULL
+rebuild leaves the stream marked stale. The migration retains queued CDC rows
+and replaces only each buffer's synthetic sentinel.
+
 ## 0.108.0 to 0.108.1
 
 Install the v0.108.1 library and extension files, then apply the upgrade:

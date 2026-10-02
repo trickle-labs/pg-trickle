@@ -1696,7 +1696,7 @@ fn row_id_expr_for_tree(defining_query: &str, tree: Option<&parser::OpTree>) -> 
         Some(cols) if !key_cols_have_unsupported_types(defining_query, &cols) => {
             if cols.len() == 1 {
                 format!(
-                    "pgtrickle.encode_row_id_v2('{domain}', ROW(sub.{}))",
+                    "pgtrickle.encode_row_id_v3('{domain}', ROW(sub.{}))",
                     diff::quote_ident(&cols[0]),
                 )
             } else {
@@ -1714,13 +1714,13 @@ fn row_id_expr_for_tree(defining_query: &str, tree: Option<&parser::OpTree>) -> 
             // while DIFF uses '__singleton_group', causing __pgt_row_id
             // mismatch and phantom row insertion.
             if tree.is_some_and(is_scalar_aggregate_root) {
-                "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))"
+                "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))"
                     .to_string()
             } else {
                 // Fallback for complex queries (joins, union all, etc.).
                 // Preserve the complete visible row as the identity; duplicate
                 // rows are handled by the non-unique/counting path.
-                "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(row_to_json(sub)::text))".to_string()
+                "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(row_to_json(sub)::text))".to_string()
             }
         }
     }
@@ -1997,7 +1997,7 @@ pub fn try_union_dedup_refresh_sql(
     let hash_items: Vec<String> = quoted_cols.iter().map(|c| format!("sub2.{c}")).collect();
     let hash_expr = if hash_items.len() == 1 {
         format!(
-            "pgtrickle.encode_row_id_v2('SET_KEY', ROW({}))",
+            "pgtrickle.encode_row_id_v3('SET_KEY', ROW({}))",
             hash_items[0]
         )
     } else {
@@ -2194,7 +2194,7 @@ pub fn try_set_op_refresh_sql(defining_query: &str, column_names: &[String]) -> 
     let hash_items: Vec<String> = canonical_cols.clone();
     let hash_expr_final = if hash_items.len() == 1 {
         format!(
-            "pgtrickle.encode_row_id_v2('SET_KEY', ROW({}))",
+            "pgtrickle.encode_row_id_v3('SET_KEY', ROW({}))",
             hash_items[0]
         )
     } else {
@@ -2267,11 +2267,11 @@ mod tests {
     fn test_window_row_identity_uses_stable_window_domain() {
         assert_eq!(
             window_row_identity_expr("sub", &["tenant_id".into(), "event_id".into()]),
-            "pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW(sub.\"tenant_id\", sub.\"event_id\"))"
+            "pgtrickle.encode_row_id_v3('WINDOW_KEY', ROW(sub.\"tenant_id\", sub.\"event_id\"))"
         );
         assert_eq!(
             window_row_identity_expr("sub", &[]),
-            "pgtrickle.encode_row_id_v2('WINDOW_KEY', ROW('__singleton_window'::text))"
+            "pgtrickle.encode_row_id_v3('WINDOW_KEY', ROW('__singleton_window'::text))"
         );
     }
 
@@ -2965,7 +2965,7 @@ mod tests {
     #[test]
     fn test_direct_full_refresh_insert_body_has_no_set_state_columns() {
         let sql = direct_full_refresh_insert_body_with_row_id(
-            "pgtrickle.encode_row_id_v2('SET_KEY', ROW(sub.value))",
+            "pgtrickle.encode_row_id_v3('SET_KEY', ROW(sub.value))",
             "SELECT value FROM left_t INTERSECT SELECT value FROM right_t",
         );
 

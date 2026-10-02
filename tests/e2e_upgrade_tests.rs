@@ -858,7 +858,7 @@ async fn test_upgrade_quick_health_reports_broken_immediate_cascades() {
     let to_version =
         std::env::var("PGS_UPGRADE_TO").unwrap_or_else(|_| CURRENT_PG_TRICKLE_VERSION.into());
     assert_eq!(from_version, "0.108.0");
-    assert_eq!(to_version, "0.108.1");
+    assert_eq!(to_version, CURRENT_PG_TRICKLE_VERSION);
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -1896,4 +1896,223 @@ async fn test_upgrade_major_version_active_stream_table_with_pending_deltas() {
     db.refresh_st("v092_major_st").await;
     db.assert_st_matches_query("v092_major_st", "SELECT id, value FROM v092_major_src")
         .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upgrade_v1082_rebuilds_bpchar_identity_before_differential() {
+    if !upgrade_image_available()
+        || std::env::var("PGS_UPGRADE_FROM").as_deref() != Ok("0.108.1")
+        || std::env::var("PGS_UPGRADE_TO").as_deref() != Ok(CURRENT_PG_TRICKLE_VERSION)
+    {
+        eprintln!("SKIP: requires the 0.108.1 -> current V3 identity upgrade image");
+        return;
+    }
+
+    let db = E2eDb::new_without_extension().await;
+    db.execute("CREATE EXTENSION pg_trickle VERSION '0.108.1' CASCADE")
+        .await;
+    let installed_version: String = db
+        .query_scalar("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+        .await;
+    assert_eq!(installed_version, "0.108.1");
+    // The upgrade image loads the current Rust library with the historical
+    // 0.108.1 SQL archive. Provide the future SQL symbol temporarily and
+    // delegate it to V2. This test seeds semantically old persisted state;
+    // it does not run the 0.108.1 library.
+    db.execute(
+        "CREATE FUNCTION pgtrickle.encode_row_id_v3(identity_domain text, record anyelement) \
+         RETURNS bytea STABLE PARALLEL SAFE LANGUAGE SQL \
+         AS $$ SELECT pgtrickle.encode_row_id_v2($1, $2) $$",
+    )
+    .await;
+    db.execute(
+        "ALTER EXTENSION pg_trickle ADD FUNCTION \
+         pgtrickle.encode_row_id_v3(text, anyelement)",
+    )
+    .await;
+    db.execute("CREATE TABLE bpchar_upgrade_source (key CHAR(8) PRIMARY KEY, value INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO bpchar_upgrade_source VALUES (('ab' || chr(9))::bpchar, 1)")
+        .await;
+    db.create_st(
+        "bpchar_upgrade_st",
+        "SELECT key, CASE WHEN value = 0 THEN 1 / value ELSE 100 / value END AS value \
+         FROM public.bpchar_upgrade_source",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let (current_st_version, source_oid, old_ids_are_v2, current_buffer_version): (
+        i16,
+        i64,
+        bool,
+        Option<i16>,
+    ) = sqlx::query_as(
+        "SELECT st.row_identity_version, 'public.bpchar_upgrade_source'::regclass::oid::bigint, \
+                (SELECT bool_and(get_byte(__pgt_row_id, 0) = 2) \
+                   FROM public.bpchar_upgrade_st), cb.row_identity_version \
+         FROM pgtrickle.pgt_stream_tables st \
+         LEFT JOIN pgtrickle.pgt_change_buffers cb \
+           ON cb.source_kind = 'BASE' \
+          AND cb.source_id = 'public.bpchar_upgrade_source'::regclass::oid::bigint \
+         WHERE st.pgt_name = 'bpchar_upgrade_st'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read old persisted identity version");
+    assert_eq!(current_st_version, 3);
+    assert!(
+        old_ids_are_v2,
+        "the persisted row identities must be V2 bytes"
+    );
+    assert_eq!(current_buffer_version, Some(3));
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET row_identity_version = 2 \
+         WHERE pgt_name = 'bpchar_upgrade_st'",
+    )
+    .await;
+    db.execute(
+        "UPDATE pgtrickle.pgt_change_buffers SET row_identity_version = 2, row_probe_version = 1 \
+         WHERE source_kind = 'BASE' \
+           AND source_id = 'public.bpchar_upgrade_source'::regclass::oid::bigint",
+    )
+    .await;
+    let (seeded_st_version, seeded_buffer_version): (Option<i16>, Option<i16>) = sqlx::query_as(
+        "SELECT st.row_identity_version, cb.row_identity_version \
+         FROM pgtrickle.pgt_stream_tables st \
+         JOIN pgtrickle.pgt_change_buffers cb \
+           ON cb.source_kind = 'BASE' \
+          AND cb.source_id = 'public.bpchar_upgrade_source'::regclass::oid::bigint \
+         WHERE st.pgt_name = 'bpchar_upgrade_st'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read seeded legacy identity metadata");
+    assert_eq!(
+        (seeded_st_version, seeded_buffer_version),
+        (Some(2), Some(2))
+    );
+    db.execute("UPDATE bpchar_upgrade_source SET value = 0")
+        .await;
+    let buffer = db.change_buffer_table(source_oid).await;
+    let (queued_before, queued_bytes_are_v2): (i64, bool) =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*), COALESCE(bool_and(get_byte(__pgt_row_id, 0) = 2), false) \
+         FROM {buffer} WHERE action <> 'S'"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect queued V2 CDC changes");
+    assert!(
+        queued_before > 0,
+        "the upgrade fixture must have pending CDC rows"
+    );
+    assert!(
+        queued_bytes_are_v2,
+        "queued CDC identities must be V2 bytes"
+    );
+    db.execute(
+        "ALTER EXTENSION pg_trickle DROP FUNCTION \
+         pgtrickle.encode_row_id_v3(text, anyelement)",
+    )
+    .await;
+    db.execute("DROP FUNCTION pgtrickle.encode_row_id_v3(text, anyelement)")
+        .await;
+
+    db.execute("ALTER EXTENSION pg_trickle UPDATE TO '0.108.2'")
+        .await;
+    let (st_version, needs_reinit, buffer_version): (Option<i16>, bool, Option<i16>) =
+        sqlx::query_as(
+            "SELECT st.row_identity_version, st.needs_reinit, cb.row_identity_version \
+             FROM pgtrickle.pgt_stream_tables st \
+             JOIN pgtrickle.pgt_change_buffers cb \
+               ON cb.source_kind = 'BASE' AND cb.source_id = $1 \
+             WHERE st.pgt_name = 'bpchar_upgrade_st'",
+        )
+        .bind(source_oid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read fail-closed V3 upgrade markers");
+    assert_eq!(st_version, None);
+    assert!(needs_reinit);
+    assert_eq!(buffer_version, Some(3));
+    let (queued_after, queued_bytes_are_v2): (i64, bool) =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*), COALESCE(bool_and(get_byte(__pgt_row_id, 0) = 2), false) \
+         FROM {buffer} WHERE action <> 'S'"
+        )))
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect queued changes after migration");
+    assert_eq!(queued_after, queued_before);
+    assert!(
+        queued_bytes_are_v2,
+        "migration must preserve queued V2 bytes"
+    );
+
+    let failed_rebuild = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('public.bpchar_upgrade_st')")
+        .await
+        .expect_err("a failing defining query must not complete the rebuild");
+    assert!(
+        failed_rebuild
+            .as_database_error()
+            .is_some_and(|error| error.code().as_deref() == Some("22012")),
+        "the first rebuild must fail for division by zero"
+    );
+    let (st_version, needs_reinit): (Option<i16>, bool) = sqlx::query_as(
+        "SELECT row_identity_version, needs_reinit FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_name = 'bpchar_upgrade_st'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("confirm failed rebuild remains stale");
+    assert_eq!(st_version, None);
+    assert!(needs_reinit);
+    let queued_after_failure: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+        ))
+        .await;
+    assert_eq!(queued_after_failure, queued_before);
+
+    db.execute("UPDATE bpchar_upgrade_source SET value = 2")
+        .await;
+    db.execute("INSERT INTO bpchar_upgrade_source VALUES ('ab', 4)")
+        .await;
+    db.refresh_st("public.bpchar_upgrade_st").await;
+    let (st_version, needs_reinit): (Option<i16>, bool) = sqlx::query_as(
+        "SELECT row_identity_version, needs_reinit FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_name = 'bpchar_upgrade_st'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read successful rebuild markers");
+    assert_eq!(st_version, Some(3));
+    assert!(!needs_reinit);
+    let distinct_ids: i64 = db
+        .query_scalar("SELECT count(DISTINCT __pgt_row_id) FROM public.bpchar_upgrade_st")
+        .await;
+    assert_eq!(
+        distinct_ids, 2,
+        "the V3 rebuild must retain both bpchar keys"
+    );
+    db.assert_st_matches_query(
+        "public.bpchar_upgrade_st",
+        "SELECT key, CASE WHEN value = 0 THEN 1 / value ELSE 100 / value END AS value \
+         FROM public.bpchar_upgrade_source",
+    )
+    .await;
+
+    db.execute("UPDATE bpchar_upgrade_source SET value = 5 WHERE key = 'ab'")
+        .await;
+    db.refresh_st("public.bpchar_upgrade_st").await;
+    db.assert_st_matches_query(
+        "public.bpchar_upgrade_st",
+        "SELECT key, CASE WHEN value = 0 THEN 1 / value ELSE 100 / value END AS value \
+         FROM public.bpchar_upgrade_source",
+    )
+    .await;
 }

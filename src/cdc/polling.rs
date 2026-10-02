@@ -311,7 +311,7 @@ pub(crate) fn build_pk_hash_expr(hash_cols: &[String], keyless: bool) -> String 
     let domain = if keyless { "KEYLESS_ROW" } else { "SCAN_KEY" };
     if hash_cols.len() == 1 {
         let c = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
-        format!("pgtrickle.encode_row_id_v2('{domain}', ROW({c}))")
+        format!("pgtrickle.encode_row_id_v3('{domain}', ROW({c}))")
     } else {
         let items: Vec<String> = hash_cols
             .iter()
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn test_pk_hash_single_column() {
         let expr = build_pk_hash_expr(&["id".to_string()], false);
-        assert_eq!(expr, r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("id"))"#);
+        assert_eq!(expr, r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW("id"))"#);
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
         let expr = build_pk_hash_expr(&["tenant_id".to_string(), "order_id".to_string()], false);
         assert_eq!(
             expr,
-            r#"pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("tenant_id", "order_id"))"#
+            r#"pgtrickle.encode_row_id_v3('SCAN_KEY', ROW("tenant_id", "order_id"))"#
         );
     }
 
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn test_pk_hash_three_columns() {
         let expr = build_pk_hash_expr(&["a".to_string(), "b".to_string(), "c".to_string()], false);
-        assert!(expr.starts_with("pgtrickle.encode_row_id_v2('SCAN_KEY', ROW("));
+        assert!(expr.starts_with("pgtrickle.encode_row_id_v3('SCAN_KEY', ROW("));
         assert!(expr.contains(r#""a""#));
         assert!(expr.contains(r#""b""#));
         assert!(expr.contains(r#""c""#));

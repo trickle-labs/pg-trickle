@@ -730,7 +730,7 @@ pub fn algebraic_finalize_sql(
         .map(|column| format!("d0.{}", quote_ident(&column.name)))
         .collect::<Vec<_>>();
     let group_row_id = if consolidated_group_refs.is_empty() {
-        "pgtrickle.encode_row_id_v2('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
+        "pgtrickle.encode_row_id_v3('GROUP_KEY', ROW('__singleton_group'::text))".to_string()
     } else {
         crate::dvm::operators::scan::build_hash_expr_for_domain(
             "GROUP_KEY",
