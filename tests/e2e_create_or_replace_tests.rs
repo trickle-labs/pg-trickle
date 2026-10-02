@@ -364,6 +364,72 @@ async fn test_cor_mode_switch_differential_to_full() {
     assert_eq!(count, 2);
 }
 
+#[tokio::test]
+async fn test_cor_refresh_mode_auto_over_full() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE cor_auto_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO cor_auto_src VALUES (1)").await;
+
+    let query = "SELECT id FROM cor_auto_src";
+    db.create_st("cor_auto_oracle", query, "1m", "AUTO").await;
+    db.create_st("cor_auto_explicit", query, "1m", "FULL").await;
+    create_or_replace(&db, "cor_auto_explicit", query, "1m", "AUTO").await;
+
+    let oracle: String = db
+        .query_scalar(
+            "SELECT refresh_mode || '/' || requested_refresh_mode \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'cor_auto_oracle'",
+        )
+        .await;
+    let actual: String = db
+        .query_scalar(
+            "SELECT refresh_mode || '/' || requested_refresh_mode \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'cor_auto_explicit'",
+        )
+        .await;
+
+    assert_eq!(oracle, "DIFFERENTIAL/AUTO");
+    assert_eq!(actual, oracle);
+}
+
+#[tokio::test]
+async fn test_cor_default_refresh_mode_auto_over_full() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE cor_default_auto_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO cor_default_auto_src VALUES (1)")
+        .await;
+
+    let query = "SELECT id FROM cor_default_auto_src";
+    db.create_st("cor_default_auto_oracle", query, "1m", "AUTO")
+        .await;
+    db.create_st("cor_default_auto", query, "1m", "FULL").await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_or_replace_stream_table(\
+         'cor_default_auto', $${query}$$, '1m')"
+    ))
+    .await;
+
+    let oracle: String = db
+        .query_scalar(
+            "SELECT refresh_mode || '/' || requested_refresh_mode \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'cor_default_auto_oracle'",
+        )
+        .await;
+    let actual: String = db
+        .query_scalar(
+            "SELECT refresh_mode || '/' || requested_refresh_mode \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'cor_default_auto'",
+        )
+        .await;
+
+    assert_eq!(oracle, "DIFFERENTIAL/AUTO");
+    assert_eq!(actual, oracle);
+}
+
 // ── 10. Incompatible schema change → full rebuild ──────────────────────
 
 #[tokio::test]

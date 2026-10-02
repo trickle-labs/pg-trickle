@@ -2488,8 +2488,8 @@ pub(crate) fn alter_stream_table_impl(
                 // ── Update catalog ──────────────────────────────────────
                 Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables \
-                 SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
-                &[mode_str.to_uppercase().into(), st.pgt_id.into()],
+                 SET refresh_mode = $1, requested_refresh_mode = $2, updated_at = now() WHERE pgt_id = $3",
+                &[new_mode.as_str().into(), mode_str.to_uppercase().into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
@@ -2522,8 +2522,8 @@ pub(crate) fn alter_stream_table_impl(
                 // Same mode — just update catalog (no-op but harmless).
                 Spi::run_with_args(
                 "UPDATE pgtrickle.pgt_stream_tables \
-                 SET refresh_mode = $1, requested_refresh_mode = $1, updated_at = now() WHERE pgt_id = $2",
-                &[mode_str.to_uppercase().into(), st.pgt_id.into()],
+                 SET refresh_mode = $1, requested_refresh_mode = $2, updated_at = now() WHERE pgt_id = $3",
+                &[new_mode.as_str().into(), mode_str.to_uppercase().into(), st.pgt_id.into()],
             )
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
