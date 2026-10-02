@@ -122,6 +122,10 @@ jobs:
         if: github.ref_name == 'v0.108.1'
         run: python3 scripts/v0_108_1_release_gate.py
 
+      - name: v0.108.2 row identity upgrade release gate
+        if: github.ref_name == 'v0.108.2'
+        run: python3 scripts/v0_108_2_release_gate.py
+
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 
@@ -429,7 +433,7 @@ jobs:
 
   # ── Publish GitHub Release ──────────────────────────────────────────────
   qualification:
-    name: Packaged v0.108.1 release qualification
+    name: Packaged release qualification
     needs: [build-release, test-release]
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -460,16 +464,23 @@ jobs:
 
       - name: Run contract suites against the exact Linux package
         id: qualify
+        env:
+          QUALIFICATION_ONLY: ${{ inputs.qualification_only }}
         run: |
           set +e
           mkdir -p qualification-logs/logs qualification-logs/results qualification-logs/raw
           ARCHIVE="$(find dist/release-linux-amd64 -maxdepth 1 -name '*.tar.gz' -print -quit)"
-          mapfile -t SUITES < <(python3 -c 'import json; print("\n".join(s["id"] for s in json.load(open("tests/release/v0.108.1-qualification.json"))["required_suites"]))')
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
+          QUALIFICATION="tests/release/v${VERSION}-qualification.json"
+          mapfile -t SUITES < <(python3 -c 'import json, sys; print("\n".join(s["id"] for s in json.load(open(sys.argv[1]))["required_suites"]))' "$QUALIFICATION")
           FAILED=0
           for suite in "${SUITES[@]}"; do
             echo "=== Qualification suite: ${suite} ==="
             python3 scripts/run_release_suite.py \
-              --qualification tests/release/v0.108.1-qualification.json \
+              --qualification "$QUALIFICATION" \
               --suite "$suite" \
               --artifact "$ARCHIVE" \
               --candidate-commit "$GITHUB_SHA" \
@@ -500,7 +511,7 @@ jobs:
       - name: Require every declared instrumented case to pass
         if: always()
         run: >
-          python3 scripts/v0_108_0_release_gate.py
+          python3 scripts/v0_108_2_release_gate.py
           --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
 
       - name: Write candidate-bound release evidence
@@ -516,11 +527,12 @@ jobs:
           if [[ "$QUALIFICATION_ONLY" == "true" ]]; then
             VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
           fi
+          QUALIFICATION="tests/release/v${VERSION}-qualification.json"
           python3 scripts/release_evidence.py \
             --output qualification-logs/RELEASE-EVIDENCE.json \
             --version "${VERSION}" \
             --candidate-commit "$GITHUB_SHA" \
-            --qualification tests/release/v0.108.1-qualification.json \
+            --qualification "$QUALIFICATION" \
             --capability-manifest docs/capability-manifest.json \
             --artifact dist/release-*/* \
             "${suite_args[@]}"
@@ -538,7 +550,7 @@ jobs:
         if: always()
         run: |
           if [[ "${{ steps.qualify.outputs.failed }}" != "0" || "${{ steps.unsafe-asan.outcome }}" != "success" ]]; then
-            echo "One or more v0.108.1 package or separate instrumented qualification suites failed."
+            echo "One or more package or separate instrumented qualification suites failed."
             exit 1
           fi
 
@@ -578,11 +590,12 @@ jobs:
           for result in qualification-logs/results/*.json; do
             [[ -f "$result" ]] && suite_args+=(--suite-result "$result")
           done
+          QUALIFICATION="tests/release/${GITHUB_REF_NAME#v}-qualification.json"
           python3 scripts/release_evidence.py \
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
             --candidate-commit "$GITHUB_SHA" \
-            --qualification tests/release/v0.108.1-qualification.json \
+            --qualification "$QUALIFICATION" \
             --capability-manifest docs/capability-manifest.json \
             --artifact release-files/pg_trickle-*.tar.gz release-files/pg_trickle-*.zip \
             "${suite_args[@]}"

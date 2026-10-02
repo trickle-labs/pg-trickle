@@ -1315,7 +1315,7 @@ pub fn decrement_parallel_queue_depth() {
     if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let _ = PARALLEL_QUEUE_DEPTH.get().try_update(
+    let _ = PARALLEL_QUEUE_DEPTH.get().fetch_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |depth| Some(depth.saturating_sub(1)),

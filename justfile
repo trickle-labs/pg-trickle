@@ -282,7 +282,7 @@ test-v108-conformance: build-e2e-image
 # Validate the v0.108 qualification contract and publication wiring.
 [group: "release"]
 v0-108-release-gate:
-    python3 scripts/v0_108_1_release_gate.py
+    python3 scripts/v0_108_2_release_gate.py
 
 # Run the v0.105 qualification gate.
 [group: "release"]
