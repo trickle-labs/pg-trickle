@@ -79,6 +79,7 @@
 
 use pgrx::prelude::*;
 use std::collections::HashSet;
+use std::ffi::CStr;
 
 use crate::catalog::{CdcMode, StDependency, StreamTableMeta};
 use crate::dag::StStatus;
@@ -118,7 +119,7 @@ use crate::{cdc, config, wal_decoder};
 pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
     fcinfo: pg_sys::FunctionCallInfo,
 ) -> pg_sys::Datum {
-    let owner_only = is_owner_only_alter_table(fcinfo);
+    let alter_table_hint = classify_alter_table(fcinfo);
     // Query the event trigger context for affected objects.
     // pg_event_trigger_ddl_commands() is only available inside an
     // event trigger context — calling it elsewhere will error.
@@ -133,7 +134,7 @@ pub extern "C-unwind" fn pg_trickle_on_ddl_end_wrapper(
     };
 
     for cmd in &commands {
-        handle_ddl_command(cmd, owner_only);
+        handle_ddl_command(cmd, &alter_table_hint);
     }
     pg_sys::Datum::null()
 }
@@ -144,33 +145,96 @@ pub extern "C" fn pg_finfo_pg_trickle_on_ddl_end_wrapper() -> &'static pg_sys::P
     &V1
 }
 
-/// The event trigger's parse tree identifies the subcommand without parsing SQL text.
-fn is_owner_only_alter_table(fcinfo: pg_sys::FunctionCallInfo) -> bool {
+/// The event trigger's parse tree identifies safe ALTER forms without parsing SQL text.
+fn classify_alter_table(fcinfo: pg_sys::FunctionCallInfo) -> AlterTableHint {
     // SAFETY: PostgreSQL calls this function as an event trigger. Its fcinfo,
     // EventTriggerData, parse tree, and command list live through this call.
     unsafe {
         let Some(call) = fcinfo.as_ref() else {
-            return false;
+            return AlterTableHint::Other;
         };
         let Some(event) = (call.context as *const pg_sys::EventTriggerData).as_ref() else {
-            return false;
+            return AlterTableHint::Other;
         };
         let Some(node) = event.parsetree.as_ref() else {
-            return false;
+            return AlterTableHint::Other;
         };
         if node.type_ != pg_sys::NodeTag::T_AlterTableStmt {
-            return false;
+            return AlterTableHint::Other;
         }
         let stmt = &*(event.parsetree as *const pg_sys::AlterTableStmt);
         if pg_sys::list_length(stmt.cmds) != 1 {
-            return false;
+            return AlterTableHint::Other;
         }
         let cmd = pg_sys::list_nth(stmt.cmds, 0) as *const pg_sys::AlterTableCmd;
-        cmd.as_ref().is_some_and(|cmd| {
-            cmd.type_ == pg_sys::NodeTag::T_AlterTableCmd
-                && cmd.subtype == pg_sys::AlterTableType::AT_ChangeOwner
-        })
+        let Some(cmd) = cmd.as_ref() else {
+            return AlterTableHint::Other;
+        };
+        if cmd.type_ != pg_sys::NodeTag::T_AlterTableCmd {
+            return AlterTableHint::Other;
+        }
+        match cmd.subtype {
+            pg_sys::AlterTableType::AT_ChangeOwner => AlterTableHint::OwnerOnly,
+            pg_sys::AlterTableType::AT_ReplicaIdentity => {
+                let Some(def) = cmd.def.as_ref() else {
+                    return AlterTableHint::Other;
+                };
+                if def.type_ != pg_sys::NodeTag::T_ReplicaIdentityStmt {
+                    return AlterTableHint::Other;
+                }
+                let replica_identity = &*(cmd.def as *const pg_sys::ReplicaIdentityStmt);
+                if replica_identity.identity_type == b'f' as std::ffi::c_char {
+                    AlterTableHint::ReplicaIdentityFull
+                } else {
+                    AlterTableHint::Other
+                }
+            }
+            pg_sys::AlterTableType::AT_AttachPartition => {
+                let Some(def) = cmd.def.as_ref() else {
+                    return AlterTableHint::Other;
+                };
+                if def.type_ != pg_sys::NodeTag::T_PartitionCmd {
+                    return AlterTableHint::Other;
+                }
+                let partition = &*(cmd.def as *const pg_sys::PartitionCmd);
+                let Some(name) = partition.name.as_ref() else {
+                    return AlterTableHint::Other;
+                };
+                let Some(relation) = pg_string(name.relname) else {
+                    return AlterTableHint::Other;
+                };
+                AlterTableHint::AttachPartition {
+                    schema: pg_string(name.schemaname),
+                    relation,
+                }
+            }
+            _ => AlterTableHint::Other,
+        }
     }
+}
+
+/// Copy a PostgreSQL-owned string while the event parse tree is alive.
+fn pg_string(value: *const std::ffi::c_char) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: callers pass NUL-terminated string fields from the live parse tree.
+    Some(
+        unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[derive(Debug, Clone)]
+enum AlterTableHint {
+    Other,
+    OwnerOnly,
+    ReplicaIdentityFull,
+    AttachPartition {
+        schema: Option<String>,
+        relation: String,
+    },
 }
 
 /// A single DDL command extracted from `pg_event_trigger_ddl_commands()`.
@@ -321,11 +385,11 @@ fn collect_ddl_commands() -> Result<Vec<DdlCommand>, PgTrickleError> {
 ///
 /// A17 (v0.36.0): dispatches on `cmd.kind` (pre-classified typed enum) rather
 /// than calling `classify_ddl_event()` at dispatch time.
-fn handle_ddl_command(cmd: &DdlCommand, owner_only: bool) {
+fn handle_ddl_command(cmd: &DdlCommand, alter_table_hint: &AlterTableHint) {
     match cmd.kind {
         DdlCommandKind::AlterTable => {
             let identity = cmd.object_identity.as_deref().unwrap_or("unknown");
-            handle_alter_table(cmd.objid, identity, owner_only);
+            handle_alter_table(cmd.objid, identity, alter_table_hint);
         }
         DdlCommandKind::CreateTable => {
             handle_created_table(cmd);
@@ -841,9 +905,53 @@ fn handle_policy_change(cmd: &DdlCommand) {
 
 // ── ALTER TABLE handling ───────────────────────────────────────────────────
 
+/// Return true only when the just-attached direct partition has no rows.
+fn attached_partition_is_empty(
+    parent_oid: pg_sys::Oid,
+    schema: Option<&str>,
+    relation: &str,
+) -> Result<bool, PgTrickleError> {
+    // SAFETY: This helper runs only from the live ddl_command_end event trigger.
+    let xid = unsafe { pg_sys::GetCurrentTransactionIdIfAny() };
+    if xid == pg_sys::InvalidTransactionId {
+        return Ok(false);
+    }
+    let schema_name = schema.unwrap_or_default();
+    // ATTACH creates a direct-parent pg_inherits row in this transaction. Its
+    // xid distinguishes the attached child from same-named siblings elsewhere;
+    // the count check below still fails closed if more than one candidate fits.
+    let qualified_name = Spi::get_one_with_args::<String>(
+        "SELECT CASE WHEN count(*) = 1 \
+                    THEN min(format('%I.%I', n.nspname, c.relname)) \
+               END \
+           FROM pg_inherits i \
+           JOIN pg_class c ON c.oid = i.inhrelid \
+           JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE i.inhparent = $1 \
+            AND i.xmin = $2::xid \
+            AND c.relname::text = $3 \
+            AND ($4::text = '' OR n.nspname::text = $4)",
+        &[
+            parent_oid.into(),
+            xid.into(),
+            relation.into(),
+            schema_name.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    let Some(qualified_name) = qualified_name else {
+        return Ok(false);
+    };
+    let has_rows = Spi::get_one::<bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {qualified_name} LIMIT 1)"
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Ok(!has_rows.unwrap_or(true))
+}
+
 /// Handle ALTER TABLE on an object that may be an upstream dependency or
 /// a ST storage table itself.
-fn handle_alter_table(objid: pg_sys::Oid, identity: &str, owner_only: bool) {
+fn handle_alter_table(objid: pg_sys::Oid, identity: &str, alter_table_hint: &AlterTableHint) {
     // Check if this OID is an upstream source of any ST.
     // Fail closed when relevance cannot be determined: allowing the DDL could
     // leave a tracked source's CDC and downstream stream tables inconsistent.
@@ -868,8 +976,8 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, owner_only: bool) {
 
     // IMMEDIATE consumers use transition-table IVM triggers, not CDC buffers.
     // A source shared with any deferred consumer still needs CDC maintenance.
-    let uses_deferred_cdc = match StDependency::effective_requested_mode_for_source(objid) {
-        Ok(mode) => mode.is_some(),
+    let requested_cdc_mode = match StDependency::effective_requested_mode_for_source(objid) {
+        Ok(mode) => mode,
         Err(e) => {
             pgrx::error!(
                 "pg_trickle: DDL hook could not inspect refresh modes — \
@@ -880,6 +988,29 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, owner_only: bool) {
             );
         }
     };
+    let uses_deferred_cdc = requested_cdc_mode.is_some();
+    let trigger_cdc = requested_cdc_mode.as_deref() == Some("trigger");
+    let empty_partition_attach = if trigger_cdc {
+        if let AlterTableHint::AttachPartition { schema, relation } = alter_table_hint {
+            match attached_partition_is_empty(objid, schema.as_deref(), relation) {
+                Ok(empty) => empty,
+                Err(e) => {
+                    pgrx::debug1!(
+                        "pg_trickle_ddl_tracker: could not verify attached partition {} is empty: {}",
+                        relation,
+                        e,
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let replica_identity_full =
+        trigger_cdc && matches!(alter_table_hint, AlterTableHint::ReplicaIdentityFull);
 
     // Classify the schema change and only reinitialize for column-affecting
     // changes.  Benign DDL (adding indexes, comments, statistics) and
@@ -889,7 +1020,7 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, owner_only: bool) {
     for pgt_id in &affected_pgt_ids {
         // Only this exact subcommand can be proved harmless from the saved owner.
         // Older snapshots lack the owner and retain the conservative behavior.
-        if owner_only
+        if matches!(alter_table_hint, AlterTableHint::OwnerOnly)
             && crate::catalog::get_column_snapshot(*pgt_id, objid)
                 .ok()
                 .flatten()
@@ -901,6 +1032,11 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str, owner_only: bool) {
                 )
                 .is_some_and(|(old, current)| old == current)
         {
+            continue;
+        }
+        // REPLICA IDENTITY only changes WAL's old-row representation. It does
+        // not affect trigger CDC; other CDC modes retain conservative handling.
+        if replica_identity_full || empty_partition_attach {
             continue;
         }
         // ALTER TABLE also covers owner and row-security changes. Those values

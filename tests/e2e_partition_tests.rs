@@ -315,11 +315,146 @@ async fn test_partition_attach_triggers_reinit() {
     // Refresh after repair should pick up all data including the newly attached partition.
     db.refresh_st("attach_st").await;
 
+    db.assert_st_matches_query(
+        "public.attach_st",
+        "SELECT id, created_at, total FROM attach_orders",
+    )
+    .await;
+
     let count: i64 = db.count("attach_st").await;
     assert_eq!(
         count, 3,
         "After reinit, all rows including attached partition data should be visible"
     );
+}
+
+#[tokio::test]
+async fn test_empty_partition_attach_keeps_trigger_stream_table_active() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE empty_attach_orders (
+            id BIGSERIAL,
+            created_at DATE NOT NULL,
+            total NUMERIC,
+            PRIMARY KEY (id, created_at)
+        ) PARTITION BY RANGE (created_at)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE empty_attach_orders_2025 PARTITION OF empty_attach_orders
+            FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute("INSERT INTO empty_attach_orders (created_at, total) VALUES ('2025-06-01', 100.00)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'empty_attach_st',\
+            query => $$SELECT id, created_at, total FROM empty_attach_orders$$,\
+            schedule => '1m',\
+            refresh_mode => 'DIFFERENTIAL',\
+            cdc_mode => 'trigger'\
+        )",
+    )
+    .await;
+    db.refresh_st("empty_attach_st").await;
+
+    db.execute(
+        "CREATE TABLE empty_attach_orders_2026 (
+            id BIGSERIAL,
+            created_at DATE NOT NULL,
+            total NUMERIC,
+            PRIMARY KEY (id, created_at)
+        )",
+    )
+    .await;
+    db.execute(
+        "ALTER TABLE empty_attach_orders ATTACH PARTITION empty_attach_orders_2026
+            FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    )
+    .await;
+
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'empty_attach_st'",
+        )
+        .await;
+    assert_eq!(status, "ACTIVE");
+
+    db.execute("INSERT INTO empty_attach_orders (created_at, total) VALUES ('2026-03-01', 200.00)")
+        .await;
+    db.refresh_st("empty_attach_st").await;
+    db.assert_st_matches_query(
+        "public.empty_attach_st",
+        "SELECT id, created_at, total FROM empty_attach_orders",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_empty_partition_attach_resolves_duplicate_names_by_search_path() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE SCHEMA attach_first").await;
+    db.execute("CREATE SCHEMA attach_second").await;
+    db.execute(
+        "CREATE TABLE public.duplicate_attach_orders (
+            id INT NOT NULL,
+            created_at DATE NOT NULL,
+            PRIMARY KEY (id, created_at)
+        ) PARTITION BY RANGE (created_at)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE attach_first.duplicate_attach_part PARTITION OF public.duplicate_attach_orders
+            FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE attach_second.duplicate_attach_part (
+            id INT NOT NULL,
+            created_at DATE NOT NULL,
+            PRIMARY KEY (id, created_at)
+        )",
+    )
+    .await;
+    db.execute("INSERT INTO public.duplicate_attach_orders VALUES (1, '2025-06-01')")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+            name => 'duplicate_attach_st',\
+            query => $$SELECT id, created_at FROM public.duplicate_attach_orders$$,\
+            schedule => '1m',\
+            refresh_mode => 'DIFFERENTIAL',\
+            cdc_mode => 'trigger'\
+        )",
+    )
+    .await;
+
+    db.execute_seq(&[
+        "SET search_path = attach_second, attach_first, public",
+        "ALTER TABLE public.duplicate_attach_orders ATTACH PARTITION duplicate_attach_part \
+            FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+    ])
+    .await;
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'duplicate_attach_st'",
+        )
+        .await;
+    assert_eq!(status, "ACTIVE");
+
+    db.execute("INSERT INTO public.duplicate_attach_orders VALUES (2, '2026-06-01')")
+        .await;
+    db.refresh_st("duplicate_attach_st").await;
+    db.assert_st_matches_query(
+        "public.duplicate_attach_st",
+        "SELECT id, created_at FROM public.duplicate_attach_orders",
+    )
+    .await;
 }
 
 #[tokio::test]
