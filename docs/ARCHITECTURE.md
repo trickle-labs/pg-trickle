@@ -174,7 +174,7 @@ pg_trickle uses a **hybrid CDC** architecture that starts with triggers and opti
 #### Trigger Mode (initial path in `cdc_mode = 'auto'`)
 
 1. **Trigger Management** — Creates statement-level `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` triggers with transition tables on each tracked source table by default (`pg_trickle.cdc_trigger_mode = 'statement'`). Legacy row-level triggers are available with `pg_trickle.cdc_trigger_mode = 'row'`. Each trigger fires a PL/pgSQL function (`pg_trickle_cdc_fn_<stable_name>()`) that writes typed changes to the buffer table.
-2. **Change Buffering** — Decoded changes are written to per-source change buffer tables in the `pgtrickle_changes` schema. Each row captures the LSN (`pg_current_wal_lsn()`), transaction ID, action type (I/D), the complete typed-V2 `__pgt_row_id BYTEA`, and flat typed user columns — native PostgreSQL types, not JSONB. UPDATEs are represented as D+I pairs.
+2. **Change Buffering** — Decoded changes are written to per-source change buffer tables in the `pgtrickle_changes` schema. Each row captures the LSN (`pg_current_wal_lsn()`), transaction ID, action type (I/D), the complete typed-V3 `__pgt_row_id BYTEA`, and flat typed user columns — native PostgreSQL types, not JSONB. UPDATEs are represented as D+I pairs.
 3. **Cleanup** — Consumed changes are deleted after refresh using the persisted minimum frontier across all consumers, so no downstream stream table loses rows it still needs.
 4. **Lifecycle** — Triggers and trigger functions are automatically created when a source table is first tracked and dropped when the last stream table referencing a source is removed.
 

@@ -1690,7 +1690,7 @@ SELECT * FROM pgtrickle.integration_capabilities();
 ```
 
 Graph V1.2 reports the differential feature identifiers
-`stable_row_identity_encoder_v2`, `custom_table_srf_out_columns`, and
+`stable_row_identity_encoder_v3`, `custom_table_srf_out_columns`, and
 `lateral_immutable_composite_function`. Delta V1.1 reports recovery contract
 version 1, public resnapshot requests, public validation, qualification API
 name `qualify_output_delta_recovery`, and typed delta encoding version 1.
@@ -3083,9 +3083,24 @@ collations, malformed metadata, and values above the published resource limits
 raise an error; the function never falls back to text formatting or hashing.
 See [ROW_IDENTITY_V2.md](ROW_IDENTITY_V2.md) for the complete wire contract.
 
+### pgtrickle.encode_row_id_v3
+
+Encode a PostgreSQL record using corrected Version 3 row-identity bytes.
+V3 preserves the V2 type and tuple framing while making `bpchar` canonicalization
+match PostgreSQL equality: only trailing literal space bytes are removed.
+Existing V2 bytes and the V2 SQL function remain unchanged.
+
+```sql
+pgtrickle.encode_row_id_v3(domain text, record anyelement) → bytea
+```
+
+New production identities use V3. Existing V2 stream-table state is marked for
+protected FULL reinitialization during upgrade before differential maintenance
+can use it.
+
 ### pgtrickle.row_probe_v1
 
-Produce the bounded, non-unique index probe for a complete V2 row identity.
+Produce the bounded, non-unique index probe for a complete row identity.
 Inputs up to 128 bytes are returned unchanged. Longer inputs retain the first
 128 bytes and append the fixed-seed XXH3-128 digest. The full identity remains
 the authoritative equality value.
@@ -3798,7 +3813,7 @@ Stream tables may contain additional hidden columns whose names begin with `__pg
 
 #### `__pgt_row_id` — Row identity (always present)
 
-Every stream table has a `BYTEA NOT NULL` column named `__pgt_row_id`. It stores the complete canonical V2 identity, updated by the refresh engine on every refresh. A bounded identity uses a direct B-tree; an unbounded identity uses a `row_probe_v1(__pgt_row_id)` accelerator plus exact full-identity equality for inserts, updates, and deletes.
+Every stream table has a `BYTEA NOT NULL` column named `__pgt_row_id`. It stores the complete canonical V3 identity, updated by the refresh engine on every refresh. A bounded identity uses a direct B-tree; an unbounded identity uses a `row_probe_v1(__pgt_row_id)` accelerator plus exact full-identity equality for inserts, updates, and deletes.
 
 #### `__pgt_count` — Group multiplicity (aggregates & DISTINCT)
 
@@ -5974,7 +5989,7 @@ and produce incorrect query results.**
 | Prefix | Purpose | Example |
 |--------|---------|---------|
 | `__pgt_count` | Weight column for aggregate deduplication (DIFF mode) | `__pgt_count` |
-| `__pgt_row_id` | Complete typed-V2 row identity (`BYTEA NOT NULL`) | `__pgt_row_id` |
+| `__pgt_row_id` | Complete typed-V3 row identity (`BYTEA NOT NULL`) | `__pgt_row_id` |
 | `__pgt_wf_N` | Synthetic window-function lifting columns (rewrite pass #7) | `__pgt_wf_1`, `__pgt_wf_2` |
 | `__pgt_in_sub_*` | Derived-table alias for multi-column IN → SemiJoin rewrite (M-5) | `__pgt_in_sub_t` |
 | `__pgt_src_N` | Source partition aliases in generated delta CTEs | `__pgt_src_0` |

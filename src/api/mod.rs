@@ -1352,9 +1352,9 @@ fn validate_and_parse_query(
         }
     }
 
-    // V2 identity encoding is deliberately conservative for structural
+    // V3 identity encoding is deliberately conservative for structural
     // datums (for example JSONB). AUTO must choose the existing FULL path
-    // before any differential SQL can call encode_row_id_v2 on such a field.
+    // before any differential SQL can call encode_row_id_v3 on such a field.
     if let Some(pr) = parsed_tree.as_ref() {
         let identity_columns = crate::api::helpers::row_identity_columns(&columns, Some(pr));
         let registry = crate::dvm::row_id_v2::TypeRegistry::new();
@@ -1369,13 +1369,13 @@ fn validate_and_parse_query(
         }) {
             if is_auto && *refresh_mode == RefreshMode::Differential {
                 pgrx::warning!(
-                    "[pg_trickle] Falling back to FULL refresh: row identity V2 cannot encode one or more identity fields ({error})."
+                    "[pg_trickle] Falling back to FULL refresh: row identity V3 cannot encode one or more identity fields ({error})."
                 );
                 *refresh_mode = RefreshMode::Full;
                 parsed_tree = None;
             } else {
                 return Err(PgTrickleError::InvalidArgument(format!(
-                    "row identity V2 cannot encode the selected identity fields: {error}"
+                    "row identity V3 cannot encode the selected identity fields: {error}"
                 )));
             }
         }

@@ -12,26 +12,27 @@
 use pgrx::prelude::*;
 use xxhash_rust::xxh64;
 
-/// Version of the composite row-identity byte framing.
-pub(crate) const COMPOSITE_ENCODING_VERSION: u16 = 2;
-/// Catalog value for the active composite row-identity encoding.
-pub(crate) const CURRENT_ROW_IDENTITY_VERSION: i16 = COMPOSITE_ENCODING_VERSION as i16;
+/// Version of the legacy text-array hash framing; keep independent from row IDs.
+const HASH_MULTI_ENCODING_VERSION: u16 = 2;
+/// Catalog value for the active typed row-identity encoding.
+pub(crate) const CURRENT_ROW_IDENTITY_VERSION: i16 =
+    crate::dvm::row_id_v2::IDENTITY_VERSION_V3 as i16;
 const NULL_TAG: u8 = 0;
 const VALUE_TAG: u8 = 1;
 
 /// Build the canonical SQL call used for every composite row identity.
 ///
 /// The legacy function name is retained because it is used throughout the
-/// SQL generator, but it now returns the complete V2 identity rather than a
+/// SQL generator, but it now returns the complete V3 identity rather than a
 /// lossy 64-bit digest.
 pub(crate) fn build_composite_hash_expr(expressions: &[String]) -> String {
     build_row_identity_expr("SCAN_KEY", expressions)
 }
 
-/// Build a typed V2 identity expression for a named semantic domain.
+/// Build a typed V3 identity expression for a named semantic domain.
 pub(crate) fn build_row_identity_expr(domain: &str, expressions: &[String]) -> String {
     format!(
-        "pgtrickle.encode_row_id_v2('{domain}', ROW({}))",
+        "pgtrickle.encode_row_id_v3('{domain}', ROW({}))",
         expressions.join(", ")
     )
 }
@@ -81,7 +82,7 @@ fn write_framed_components<'a>(
     inputs: impl IntoIterator<Item = Option<&'a str>>,
     mut write: impl FnMut(&[u8]),
 ) {
-    write(&COMPOSITE_ENCODING_VERSION.to_be_bytes());
+    write(&HASH_MULTI_ENCODING_VERSION.to_be_bytes());
     write(&(component_count as u64).to_be_bytes());
     for input in inputs {
         match input {
@@ -198,9 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn test_framing_has_fixed_header_and_tags() {
+    fn test_framing_keeps_v2_header_and_tags() {
         let bytes = encode_framed_components(&[None, Some("")]);
-        assert_eq!(&bytes[..2], &COMPOSITE_ENCODING_VERSION.to_be_bytes());
+        assert_eq!(&bytes[..2], &2_u16.to_be_bytes());
         assert_eq!(&bytes[2..10], &2_u64.to_be_bytes());
         assert_eq!(bytes[10], NULL_TAG);
         assert_eq!(bytes[11], VALUE_TAG);

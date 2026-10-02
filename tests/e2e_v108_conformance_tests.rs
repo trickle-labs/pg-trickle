@@ -90,7 +90,7 @@ async fn test_v108_capability_details_publish_graph_1_2_and_delta_1_1() {
                 assert_eq!(
                     details["differential_features"],
                     serde_json::json!([
-                        "stable_row_identity_encoder_v2",
+                        "stable_row_identity_encoder_v3",
                         "custom_table_srf_out_columns",
                         "lateral_immutable_composite_function"
                     ])

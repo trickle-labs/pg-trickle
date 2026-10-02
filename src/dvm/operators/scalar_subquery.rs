@@ -284,8 +284,8 @@ mod tests {
             !sql.contains("LIMIT 1"),
             "scalar snapshots must preserve PostgreSQL cardinality errors"
         );
-        assert!(sql.contains("encode_row_id_v2('SCAN_KEY'"));
-        assert!(!sql.contains("encode_row_id_v2('JOIN_KEY'"));
+        assert!(sql.contains("encode_row_id_v3('SCAN_KEY'"));
+        assert!(!sql.contains("encode_row_id_v3('JOIN_KEY'"));
     }
 
     #[test]

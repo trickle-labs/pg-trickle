@@ -412,7 +412,7 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Row ID hash should include both child and SRF columns
-        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v3");
     }
 
     #[test]

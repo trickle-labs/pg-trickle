@@ -53,6 +53,10 @@ CREATE OR REPLACE FUNCTION pgtrickle.encode_row_id_v2(domain TEXT, value ANYELEM
 RETURNS BYTEA
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
 AS $$ SELECT decode(md5(domain || ':' || value::text), 'hex') $$;
+CREATE OR REPLACE FUNCTION pgtrickle.encode_row_id_v3(domain TEXT, value ANYELEMENT)
+RETURNS BYTEA
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
+AS $$ SELECT decode(md5(domain || ':' || value::text), 'hex') $$;
 CREATE OR REPLACE FUNCTION pgtrickle.row_probe_v1(value BYTEA)
 RETURNS BYTEA
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE

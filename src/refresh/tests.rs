@@ -1011,7 +1011,7 @@ fn test_build_content_hash_expr_single_col() {
     let expr = build_content_hash_expr("d.", &["id".to_string()]);
     assert_eq!(
         expr,
-        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(d.\"id\"))"
+        "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(d.\"id\"))"
     );
 }
 
@@ -1020,7 +1020,7 @@ fn test_build_content_hash_expr_multi_col() {
     let expr = build_content_hash_expr("d.", &["id".to_string(), "val".to_string()]);
     assert_eq!(
         expr,
-        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(d.\"id\", d.\"val\"))"
+        "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(d.\"id\", d.\"val\"))"
     );
 }
 
@@ -1029,7 +1029,7 @@ fn test_build_content_hash_expr_quoted_col() {
     let expr = build_content_hash_expr("pre.", &["col\"name".to_string()]);
     assert_eq!(
         expr,
-        "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(pre.\"col\"\"name\"))"
+        "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(pre.\"col\"\"name\"))"
     );
 }
 
@@ -1038,7 +1038,7 @@ fn test_build_content_hash_expr_empty_cols_fallback() {
     let expr = build_content_hash_expr("d.", &[]);
     assert_eq!(
         expr,
-        "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+        "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))"
     );
 }
 

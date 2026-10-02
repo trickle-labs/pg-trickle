@@ -63,16 +63,16 @@ pub(crate) fn build_merge_join_condition(key_cols: &[&str]) -> String {
 
 /// Build the MD5 content-hash column expression for deduplication.
 ///
-/// Produces a canonical V2 identity expression using the given `prefix`
+/// Produces a canonical V3 identity expression using the given `prefix`
 /// (e.g. `"source."` or `"d."`).
 ///
 /// When `data_cols` is empty, falls back to `__pgt_row_id` for keyless tables.
 pub(crate) fn build_content_hash_column(prefix: &str, data_cols: &[&str]) -> String {
     match data_cols.len() {
-        0 => "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))".to_string(),
+        0 => "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))".to_string(),
         1 => {
             let escaped = data_cols[0].replace('"', "\"\"");
-            format!("pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW({prefix}\"{escaped}\"))")
+            format!("pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW({prefix}\"{escaped}\"))")
         }
         _ => {
             let args: Vec<String> = data_cols
@@ -190,7 +190,7 @@ mod tests {
         let result = build_content_hash_column("d.", &[]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8))"
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8))"
         );
     }
 
@@ -199,7 +199,7 @@ mod tests {
         let result = build_content_hash_column("d.", &["amount"]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(d.\"amount\"))"
+            "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(d.\"amount\"))"
         );
     }
 
@@ -208,7 +208,7 @@ mod tests {
         let result = build_content_hash_column("source.", &["name", "value"]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(source.\"name\", source.\"value\"))"
+            "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(source.\"name\", source.\"value\"))"
         );
     }
 
@@ -217,7 +217,7 @@ mod tests {
         let result = build_content_hash_column("ins.", &["price"]);
         assert_eq!(
             result,
-            "pgtrickle.encode_row_id_v2('KEYLESS_ROW', ROW(ins.\"price\"))"
+            "pgtrickle.encode_row_id_v3('KEYLESS_ROW', ROW(ins.\"price\"))"
         );
     }
 

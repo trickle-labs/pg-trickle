@@ -3540,7 +3540,8 @@ pub(crate) fn is_mdm_source_key_expr(expr: &Expr) -> bool {
     let Expr::FuncCall { func_name, args } = expr else {
         return false;
     };
-    func_name.eq_ignore_ascii_case("pgtrickle.encode_row_id_v2")
+    (func_name.eq_ignore_ascii_case("pgtrickle.encode_row_id_v2")
+        || func_name.eq_ignore_ascii_case("pgtrickle.encode_row_id_v3"))
         && args.first().is_some_and(|domain| {
             matches!(
                 domain,

@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "release_version": "0.108.1",
+  "release_version": "0.108.2",
   "capabilities": [
     {
       "id": "trigger-capture",
@@ -36,7 +36,7 @@
       "target": null,
       "details": {
         "differential_features": [
-          "stable_row_identity_encoder_v2",
+          "stable_row_identity_encoder_v3",
           "custom_table_srf_out_columns",
           "lateral_immutable_composite_function"
         ]
@@ -444,5 +444,5 @@
       "docs/integrations/extension-contracts.md"
     ]
   },
-  "manifest_digest": "sha256:4d54972fcd2e8cb43c2c9d37adf072c4fefbae6efb38cbe5183adcf005f1224e"
+  "manifest_digest": "sha256:ce629931b7db4681de1c6521f930b4d0584723f3bdefecd5884390815ab00ca6"
 }

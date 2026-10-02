@@ -222,6 +222,8 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
+
 Future changes will be listed here.
 
 ## [0.108.1] — IMMEDIATE cascade consistency and recovery

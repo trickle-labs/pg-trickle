@@ -1030,7 +1030,7 @@ pub struct ColumnDef {
     pub typmod: i32,
 }
 
-/// Return whether a complete V2 identity is safe as a direct B-tree key.
+/// Return whether a complete typed identity is safe as a direct B-tree key.
 /// Unknown, typmod-dependent, and unbounded fields deliberately choose the
 /// probe index; false is the safe answer because PostgreSQL's index tuple
 /// limit is fixed by BLCKSZ.
@@ -1111,8 +1111,9 @@ fn max_analyzed_volatility(a: char, b: char) -> char {
 #[cfg(not(test))]
 fn is_safe_row_identity_encoder(oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
     Spi::get_one_with_args::<bool>(
-        "SELECT p.oid = pg_catalog.to_regprocedure(\
-                    'pgtrickle.encode_row_id_v2(text,anyelement)') \
+        "SELECT p.oid IN (pg_catalog.to_regprocedure(\
+                    'pgtrickle.encode_row_id_v2(text,anyelement)'),\
+                    pg_catalog.to_regprocedure('pgtrickle.encode_row_id_v3(text,anyelement)')) \
                 AND p.proargtypes = '25 2283'::pg_catalog.oidvector \
                 AND p.prorettype = 'bytea'::pg_catalog.regtype \
                 AND p.provolatile = 's' \

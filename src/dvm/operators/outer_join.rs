@@ -427,7 +427,7 @@ UNION ALL
 -- before. Without this check, left rows that ALREADY had matches would get
 -- spurious D(NULL-padded) rows that corrupt intermediate aggregate old-state
 -- reconstruction via EXCEPT ALL/UNION ALL.
-SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_part2} l
@@ -447,7 +447,7 @@ UNION ALL
 -- reverts to NULL-padded. Check current right (post-changes) to verify no
 -- remaining matches exist, AND check R_old to confirm the left row previously
 -- HAD matches (otherwise it was already NULL-padded — no change needed).
-SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l
@@ -503,7 +503,7 @@ UNION ALL
 
 -- Part 4: Delete stale NULL-padded rows when a left row gains its FIRST right match.
 -- Use L₀ so simultaneous left changes delete the row that actually existed.
-SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_part2} l
@@ -519,7 +519,7 @@ WHERE (SELECT has_ins FROM {flags_cte})
 UNION ALL
 
 -- Part 5: Insert NULL-padded rows when a left row loses ALL right matches.
-SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
+SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(0::int8)) AS __pgt_row_id,
        'I'::TEXT AS __pgt_action,
        {l_null_padded_cols}
 FROM {left_table} l

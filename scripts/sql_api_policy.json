@@ -1289,6 +1289,13 @@
       "identity_arguments": "",
       "class": "owner_lifecycle",
       "execution_policy": "definer_owner_checked"
+    },
+    "pgtrickle.encode_row_id_v3(text, anyelement)": {
+      "schema": "pgtrickle",
+      "name": "encode_row_id_v3",
+      "identity_arguments": "text, anyelement",
+      "class": "public_read",
+      "execution_policy": "capability_specific"
     }
   }
 }

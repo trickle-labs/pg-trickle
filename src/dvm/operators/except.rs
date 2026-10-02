@@ -314,7 +314,7 @@ mod tests {
         let result = diff_except(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2('SET_KEY'");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v3('SET_KEY'");
     }
 
     #[test]

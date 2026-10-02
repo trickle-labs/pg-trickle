@@ -676,7 +676,7 @@ fn build_inner_change_branch(
 
     Ok(Some(format!(
         "-- Outer rows affected by inner subquery source changes\n\
-         SELECT pgtrickle.encode_row_id_v2('SYNTHETIC', ROW({LATERAL_INNER_DUMMY_ROW_ID}::int8)) AS \"__pgt_row_id\",\n\
+         SELECT pgtrickle.encode_row_id_v3('SYNTHETIC', ROW({LATERAL_INNER_DUMMY_ROW_ID}::int8)) AS \"__pgt_row_id\",\n\
                 'I'::TEXT AS \"__pgt_action\",\n\
                 {col_refs_str}\n\
          FROM {outer_snap} {outer_alias_q}\n\
@@ -870,7 +870,7 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
 
         // Row ID hash should include both child and subquery columns
-        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v3");
     }
 
     #[test]
@@ -952,7 +952,7 @@ mod tests {
 
         // LEFT JOIN preserves NULLs through the typed row identity encoder.
         assert_sql_contains(&sql, "LEFT JOIN LATERAL");
-        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v2");
+        assert_sql_contains(&sql, "pgtrickle.encode_row_id_v3");
         assert_sql_contains(&sql, "\"sub\".\"val\"");
         assert!(!sql.contains("\"t\".\"id\"::text"));
         assert!(!sql.contains("\"sub\".\"val\"::text"));
@@ -1228,7 +1228,7 @@ mod tests {
         // literal without overflow, so i64::MIN+1 (-9223372036854775807) is used.
         assert_sql_contains(
             &sql,
-            "pgtrickle.encode_row_id_v2('SYNTHETIC', ROW(-9223372036854775807::int8))",
+            "pgtrickle.encode_row_id_v3('SYNTHETIC', ROW(-9223372036854775807::int8))",
         );
         assert!(
             !sql.contains("SELECT 0::BYTEA AS \"__pgt_row_id\""),

@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "release_version": "0.108.1",
+  "release_version": "0.108.2",
   "capabilities": [
     {
       "id": "trigger-capture",
@@ -36,7 +36,7 @@
       "target": null,
       "details": {
         "differential_features": [
-          "stable_row_identity_encoder_v2",
+          "stable_row_identity_encoder_v3",
           "custom_table_srf_out_columns",
           "lateral_immutable_composite_function"
         ]
