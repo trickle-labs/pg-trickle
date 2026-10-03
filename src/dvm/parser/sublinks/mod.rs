@@ -3202,19 +3202,7 @@ unsafe fn parse_select_stmt_inner(
             })
             .collect();
 
-        // Resolve ordinal GROUP BY references (e.g., GROUP BY 1 → first
-        // target expression). PostgreSQL allows GROUP BY <n> to refer to
-        // the Nth output column. Resolve these to the actual target
-        // expressions now so that rename detection below can match them.
-        for gb_expr in &mut group_by {
-            if let Expr::Raw(s) = &gb_expr
-                && let Ok(pos) = s.parse::<usize>()
-                && pos >= 1
-                && pos <= target_exprs.len()
-            {
-                *gb_expr = target_exprs[pos - 1].clone();
-            }
-        }
+        resolve_ordinal_group_by(&mut group_by, &target_exprs);
 
         let target_projection = aggregate_target_projection(
             &target_exprs,
@@ -3330,6 +3318,25 @@ unsafe fn parse_select_stmt_inner(
     }
 
     Ok(tree)
+}
+
+/// Resolve integer ordinals in GROUP BY to their SELECT target expressions.
+///
+/// Numeric constants are parsed as `Expr::Literal`; `Expr::Raw` is retained
+/// for compatibility with expressions parsed before that distinction.
+fn resolve_ordinal_group_by(group_by: &mut [Expr], target_exprs: &[Expr]) {
+    for group_expr in group_by {
+        let position = match group_expr {
+            Expr::Literal(sql) | Expr::Raw(sql) => sql.parse::<usize>().ok(),
+            _ => None,
+        };
+        if let Some(position) = position
+            && position >= 1
+            && position <= target_exprs.len()
+        {
+            *group_expr = target_exprs[position - 1].clone();
+        }
+    }
 }
 
 fn aggregate_target_projection(
@@ -8357,6 +8364,26 @@ unsafe fn target_alias_for_res_target(rt: &pg_sys::ResTarget, ordinal: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_ordinal_group_by_literals_and_raw_values() {
+        let targets = [
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "first_col".into(),
+            },
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "second_col".into(),
+            },
+        ];
+        let mut group_by = [Expr::Literal("1".into()), Expr::Raw("2".into())];
+
+        resolve_ordinal_group_by(&mut group_by, &targets);
+
+        assert_eq!(group_by[0].to_sql(), "first_col");
+        assert_eq!(group_by[1].to_sql(), "second_col");
+    }
 
     #[test]
     fn test_aggregate_target_projection_restores_constant_position() {
