@@ -58,6 +58,83 @@ async fn test_create_simple_select() {
 }
 
 #[tokio::test]
+async fn test_create_preserves_columns_matching_reserved_prefix_wildcards() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE reserved_prefix_src (\
+            id INT PRIMARY KEY, \
+            __pgt_row_id TEXT, \
+            abpgtc TEXT, \
+            xxpgt_value INT, \
+            \"AbpgtC\" TEXT\
+        )",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO reserved_prefix_src VALUES \
+         (1, 'internal', 'before', 10, 'MixedCase')",
+    )
+    .await;
+
+    db.create_st(
+        "reserved_prefix_st",
+        "SELECT * FROM (SELECT id, abpgtc, xxpgt_value, \"AbpgtC\" \
+         FROM reserved_prefix_src) projected",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let output_columns: Vec<String> = db
+        .query_scalar(
+            "SELECT array_agg(attname::text ORDER BY attnum) \
+             FILTER (WHERE attname::text <> '__pgt_row_id') \
+             FROM pg_attribute \
+             WHERE attrelid = 'public.reserved_prefix_st'::regclass \
+               AND attnum > 0 AND NOT attisdropped",
+        )
+        .await;
+    assert_eq!(
+        output_columns,
+        ["id", "abpgtc", "xxpgt_value", "AbpgtC"],
+        "the public output schema should keep ordinary matching names and quoted case",
+    );
+
+    let source_has_internal_column: bool = db
+        .query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute \
+             WHERE attrelid = 'public.reserved_prefix_src'::regclass \
+               AND attname::text = '__pgt_row_id' AND attnum > 0 \
+               AND NOT attisdropped)",
+        )
+        .await;
+    assert!(source_has_internal_column);
+
+    let values: (i32, String, i32, String) =
+        sqlx::query_as("SELECT id, abpgtc, xxpgt_value, \"AbpgtC\" FROM public.reserved_prefix_st")
+            .fetch_one(&db.pool)
+            .await
+            .expect("stream table should contain the selected source values");
+    assert_eq!(values, (1, "before".into(), 10, "MixedCase".into()));
+
+    db.execute(
+        "UPDATE reserved_prefix_src \
+         SET abpgtc = 'after', xxpgt_value = 20, \"AbpgtC\" = 'ChangedCase' \
+         WHERE id = 1",
+    )
+    .await;
+    db.refresh_st("reserved_prefix_st").await;
+
+    let values: (i32, String, i32, String) =
+        sqlx::query_as("SELECT id, abpgtc, xxpgt_value, \"AbpgtC\" FROM public.reserved_prefix_st")
+            .fetch_one(&db.pool)
+            .await
+            .expect("refreshed stream table should contain the selected source values");
+    assert_eq!(values, (1, "after".into(), 20, "ChangedCase".into()));
+}
+
+#[tokio::test]
 async fn test_create_with_aggregation() {
     let db = E2eDb::new().await.with_extension().await;
 
