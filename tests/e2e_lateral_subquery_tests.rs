@@ -626,3 +626,138 @@ async fn test_lateral_subquery_self_ref_multi_cycle() {
         db.assert_st_matches_query("lat_mc_st", q).await;
     }
 }
+
+async fn assert_lateral_subquery_differential_action(db: &E2eDb, name: &str) {
+    let action: String = db
+        .query_scalar(&format!(
+            "SELECT action::text FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_schema = 'public' AND pgt_name = '{name}') \
+             ORDER BY refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    assert_eq!(action, "DIFFERENTIAL", "{name} refreshed with {action}");
+}
+
+#[tokio::test]
+async fn test_lateral_subquery_explicit_join_on_left_null_extension_and_dml_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lsq_on_orders (id INT PRIMARY KEY, ceiling INT NOT NULL)")
+        .await;
+    db.execute("CREATE TABLE lsq_on_items (id INT PRIMARY KEY, order_id INT NOT NULL, amount INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO lsq_on_orders VALUES (1, 15), (2, 1), (3, 20)")
+        .await;
+    db.execute("INSERT INTO lsq_on_items VALUES (11, 1, 10), (12, 1, 20), (21, 2, 5)")
+        .await;
+
+    let inner = "SELECT o.id, x.amount FROM public.lsq_on_orders o \
+                 JOIN LATERAL (SELECT i.amount FROM public.lsq_on_items i \
+                               WHERE i.order_id = o.id) x ON x.amount <= o.ceiling";
+    let left = "SELECT o.id, x.amount FROM public.lsq_on_orders o \
+                LEFT JOIN LATERAL (SELECT i.amount FROM public.lsq_on_items i \
+                                   WHERE i.order_id = o.id) x ON x.amount <= o.ceiling";
+    let false_inner = "SELECT o.id, x.amount FROM public.lsq_on_orders o \
+                       JOIN LATERAL (SELECT i.amount FROM public.lsq_on_items i \
+                                     WHERE i.order_id = o.id) x ON false";
+    let false_left = "SELECT o.id, x.amount FROM public.lsq_on_orders o \
+                      LEFT JOIN LATERAL (SELECT i.amount FROM public.lsq_on_items i \
+                                        WHERE i.order_id = o.id) x ON false";
+    for (name, query) in [
+        ("lsq_on_inner", inner),
+        ("lsq_on_left", left),
+        ("lsq_on_false_inner", false_inner),
+        ("lsq_on_false_left", false_left),
+    ] {
+        db.create_st(name, query, "1m", "DIFFERENTIAL").await;
+    }
+    for (name, query) in [
+        ("lsq_on_inner", inner),
+        ("lsq_on_left", left),
+        ("lsq_on_false_inner", false_inner),
+        ("lsq_on_false_left", false_left),
+    ] {
+        db.refresh_st(name).await;
+        db.assert_st_matches_query(name, query).await;
+        assert_lateral_subquery_differential_action(&db, name).await;
+    }
+    assert_eq!(db.count("lsq_on_inner").await, 1);
+    assert_eq!(db.count("lsq_on_left").await, 3);
+    assert_eq!(db.count("lsq_on_false_inner").await, 0);
+    assert_eq!(db.count("lsq_on_false_left").await, 3);
+    let null_rows: i64 = db
+        .query_scalar("SELECT count(*) FROM lsq_on_left WHERE amount IS NULL")
+        .await;
+    assert_eq!(
+        null_rows, 2,
+        "predicate-rejected and empty subqueries are null-extended"
+    );
+    let false_null_rows: i64 = db
+        .query_scalar("SELECT count(*) FROM lsq_on_false_left WHERE amount IS NULL")
+        .await;
+    assert_eq!(false_null_rows, 3, "ON false null-extends every left row");
+
+    for mutation in [
+        "INSERT INTO lsq_on_orders VALUES (4, 100)",
+        "UPDATE lsq_on_orders SET ceiling = 6 WHERE id = 2",
+        "DELETE FROM lsq_on_orders WHERE id = 1",
+    ] {
+        db.execute(mutation).await;
+        for (name, query) in [
+            ("lsq_on_inner", inner),
+            ("lsq_on_left", left),
+            ("lsq_on_false_inner", false_inner),
+            ("lsq_on_false_left", false_left),
+        ] {
+            db.refresh_st(name).await;
+            db.assert_st_matches_query(name, query).await;
+            assert_lateral_subquery_differential_action(&db, name).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_lateral_subquery_differential_tracks_nongequality_outer_dependency() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute(
+        "CREATE TABLE lat_sq_body_outer (id INT PRIMARY KEY, region TEXT NOT NULL, \
+         limit_value INT NOT NULL, ceiling INT NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE lat_sq_body_inner (id INT PRIMARY KEY, region TEXT NOT NULL, amount INT NOT NULL)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO lat_sq_body_outer VALUES \
+         (1, 'north', 15, 30), (2, 'north', 30, 40), (3, 'south', 12, 20)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO lat_sq_body_inner VALUES (11, 'north', 10), (12, 'north', 20), (21, 'south', 8)",
+    )
+    .await;
+
+    let query = "SELECT o.id, x.total FROM public.lat_sq_body_outer o \
+                 JOIN LATERAL (SELECT SUM(i.amount) AS total FROM public.lat_sq_body_inner i \
+                               WHERE i.region = o.region AND i.amount < o.limit_value) x \
+                   ON x.total <= o.ceiling";
+    db.create_st("lat_sq_body_dependency_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.refresh_st("lat_sq_body_dependency_st").await;
+    db.assert_st_matches_query("lat_sq_body_dependency_st", query)
+        .await;
+    assert_lateral_subquery_differential_action(&db, "lat_sq_body_dependency_st").await;
+
+    for mutation in [
+        "INSERT INTO lat_sq_body_inner VALUES (13, 'north', 12)",
+        "UPDATE lat_sq_body_inner SET amount = 18 WHERE id = 11",
+        "DELETE FROM lat_sq_body_inner WHERE id = 12",
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("lat_sq_body_dependency_st").await;
+        db.assert_st_matches_query("lat_sq_body_dependency_st", query)
+            .await;
+        assert_lateral_subquery_differential_action(&db, "lat_sq_body_dependency_st").await;
+    }
+}

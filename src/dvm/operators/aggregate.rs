@@ -489,6 +489,8 @@ fn child_to_from_sql_in_context(
             column_aliases,
             declared_columns,
             with_ordinality,
+            is_left_join,
+            join_condition,
             child: lateral_child,
         } => {
             // The LATERAL builder adds the source alias itself. Its fallback
@@ -503,6 +505,8 @@ fn child_to_from_sql_in_context(
                     column_aliases,
                     declared_columns,
                     *with_ordinality,
+                    *is_left_join,
+                    join_condition.as_ref(),
                     lateral_child,
                     &child_snapshot,
                 ),
@@ -5845,6 +5849,8 @@ mod tests {
                 column_aliases: vec!["token".into()],
                 declared_columns: vec![],
                 with_ordinality: false,
+                is_left_join: false,
+                join_condition: None,
                 child: Box::new(scan_with_pk(
                     1,
                     "normalized_name",
@@ -5892,6 +5898,8 @@ mod tests {
                 column_aliases: vec!["token".into()],
                 declared_columns: vec![],
                 with_ordinality: false,
+                is_left_join: false,
+                join_condition: None,
                 child: Box::new(scan),
             },
         );
@@ -5935,6 +5943,8 @@ mod tests {
             column_aliases: vec!["token".into()],
             declared_columns: vec![],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan(
                 10,
                 "normalized_name",
@@ -5972,6 +5982,8 @@ mod tests {
             column_aliases: vec!["token".into()],
             declared_columns: vec![],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan(
                 10,
                 "mdm_v9_st_normalized_name",

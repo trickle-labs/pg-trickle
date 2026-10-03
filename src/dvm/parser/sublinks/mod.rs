@@ -3001,6 +3001,8 @@ unsafe fn parse_select_stmt_inner(
                     column_aliases,
                     declared_columns,
                     with_ordinality,
+                    is_left_join: false,
+                    join_condition: None,
                     child: Box::new(tree),
                 };
             } else if let OpTree::LateralSubquery {
@@ -3011,6 +3013,7 @@ unsafe fn parse_select_stmt_inner(
                 is_left_join,
                 subquery_source_oids,
                 correlation_predicates,
+                lateral_body_refs,
                 ..
             } = right
             {
@@ -3023,6 +3026,8 @@ unsafe fn parse_select_stmt_inner(
                     is_left_join,
                     subquery_source_oids,
                     correlation_predicates,
+                    lateral_body_refs,
+                    join_condition: None,
                     child: Box::new(tree),
                 };
             } else {
@@ -3752,9 +3757,15 @@ unsafe fn parse_from_item_inner(
             output_cols,
             subquery_source_oids,
             correlation_predicates,
+            lateral_body_refs,
             ..
         } = right
         {
+            let join_condition = if join.quals.is_null() {
+                None
+            } else {
+                Some(safe_node_to_expr(join.quals)?)
+            };
             match join.jointype {
                 pg_sys::JoinType::JOIN_INNER => {
                     return Ok(OpTree::LateralSubquery {
@@ -3763,8 +3774,10 @@ unsafe fn parse_from_item_inner(
                         column_aliases,
                         output_cols,
                         is_left_join: false,
+                        join_condition,
                         subquery_source_oids,
                         correlation_predicates,
+                        lateral_body_refs,
                         child: Box::new(left),
                     });
                 }
@@ -3775,8 +3788,10 @@ unsafe fn parse_from_item_inner(
                         column_aliases,
                         output_cols,
                         is_left_join: true,
+                        join_condition,
                         subquery_source_oids,
                         correlation_predicates,
+                        lateral_body_refs,
                         child: Box::new(left),
                     });
                 }
@@ -3803,6 +3818,11 @@ unsafe fn parse_from_item_inner(
             ..
         } = right
         {
+            let join_condition = if join.quals.is_null() {
+                None
+            } else {
+                Some(safe_node_to_expr(join.quals)?)
+            };
             match join.jointype {
                 pg_sys::JoinType::JOIN_INNER | pg_sys::JoinType::JOIN_LEFT => {
                     return Ok(OpTree::LateralFunction {
@@ -3811,6 +3831,8 @@ unsafe fn parse_from_item_inner(
                         column_aliases,
                         declared_columns,
                         with_ordinality,
+                        is_left_join: join.jointype == pg_sys::JoinType::JOIN_LEFT,
+                        join_condition,
                         child: Box::new(left),
                     });
                 }
@@ -4009,6 +4031,8 @@ unsafe fn parse_from_item_inner(
             let correlation_predicates =
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
                 unsafe { extract_correlation_predicates(sub_stmt.whereClause, &inner_alias_oids) };
+            // SAFETY: sub_stmt and every clause pointer belong to the active raw parse tree.
+            let lateral_body_refs = unsafe { extract_lateral_body_refs(sub_stmt) };
 
             // Return a LateralSubquery with a placeholder child.
             // The real child is attached in the FROM-list loop or JoinExpr handler.
@@ -4020,6 +4044,8 @@ unsafe fn parse_from_item_inner(
                 is_left_join: false,
                 subquery_source_oids,
                 correlation_predicates,
+                lateral_body_refs,
+                join_condition: None,
                 child: Box::new(OpTree::Scan {
                     table_oid: 0,
                     table_name: String::new(),
@@ -4125,6 +4151,8 @@ unsafe fn parse_from_item_inner(
                 func_node as *const pg_sys::FuncCall,
             )?,
             with_ordinality,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(OpTree::Scan {
                 table_oid: 0,
                 table_name: String::new(),
@@ -4165,6 +4193,8 @@ unsafe fn parse_from_item_inner(
             column_aliases,
             declared_columns: vec![],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(OpTree::Scan {
                 table_oid: 0,
                 table_name: String::new(),
@@ -4585,7 +4615,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
     } else if is_node_type!(node, T_A_Const) {
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
-        Ok(Expr::Raw(unsafe { deparse_node(node) }))
+        Ok(Expr::Literal(unsafe { deparse_node(node) }))
     } else if let Some(aexpr) = cast_node!(node, T_A_Expr, pg_sys::A_Expr) {
         match aexpr.kind {
             pg_sys::A_Expr_Kind::AEXPR_OP => {
@@ -6433,6 +6463,226 @@ unsafe fn collect_from_item_alias_oids(
         unsafe { collect_from_item_alias_oids(join.rarg, pairs)? };
     }
     Ok(())
+}
+
+/// Collect syntactically complete column references from a supported LATERAL
+/// SELECT body. Inner qualified references are discarded; qualified references
+/// not bound by the body and unqualified names are retained for outer resolution
+/// once the child tree and its output columns are known.
+///
+/// Any body shape or expression the collector cannot fully inspect returns
+/// None so the differential operator uses its row-scoped LATERAL path.
+///
+/// # Safety
+/// Caller must ensure stmt and all nodes reachable from it belong to a live
+/// PostgreSQL raw parse tree.
+unsafe fn extract_lateral_body_refs(stmt: &pg_sys::SelectStmt) -> Option<Vec<Expr>> {
+    if stmt.op != pg_sys::SetOperation::SETOP_NONE
+        || !stmt.withClause.is_null()
+        || !stmt.windowClause.is_null()
+        || !stmt.valuesLists.is_null()
+        || !stmt.lockingClause.is_null()
+        || !stmt.intoClause.is_null()
+    {
+        return None;
+    }
+
+    let mut inner_aliases = HashSet::new();
+    for node in pg_list::<pg_sys::Node>(stmt.fromClause).iter_ptr() {
+        if node.is_null()
+            // SAFETY: node is an item in the live raw SelectStmt FROM list.
+            || !unsafe { collect_lateral_from_aliases(node, &mut inner_aliases) }
+        {
+            return None;
+        }
+    }
+
+    let mut references = Vec::new();
+    for node in pg_list::<pg_sys::Node>(stmt.fromClause).iter_ptr() {
+        if node.is_null()
+            // SAFETY: node is an item in the live raw SelectStmt FROM list.
+            || !unsafe { collect_lateral_join_refs(node, &inner_aliases, &mut references) }
+        {
+            return None;
+        }
+    }
+
+    let mut collect_expr = |node: *mut pg_sys::Node| {
+        if node.is_null() {
+            return true;
+        }
+        // SAFETY: node is a SELECT expression owned by the live raw parse tree.
+        let Ok(expr) = safe_node_to_expr(node) else {
+            return false;
+        };
+        collect_lateral_expr_refs(&expr, &inner_aliases, &mut references)
+    };
+
+    for target in pg_list::<pg_sys::Node>(stmt.targetList).iter_ptr() {
+        let target = cast_node!(target, T_ResTarget, pg_sys::ResTarget)?;
+        if !collect_expr(target.val) {
+            return None;
+        }
+    }
+    for node in [
+        stmt.whereClause,
+        stmt.havingClause,
+        stmt.limitOffset,
+        stmt.limitCount,
+    ] {
+        if !collect_expr(node) {
+            return None;
+        }
+    }
+    for node in pg_list::<pg_sys::Node>(stmt.groupClause).iter_ptr() {
+        if !collect_expr(node) {
+            return None;
+        }
+    }
+    for sort in pg_list::<pg_sys::SortBy>(stmt.sortClause).iter_ptr() {
+        if sort.is_null()
+            // SAFETY: sort is a member of the live raw SelectStmt ORDER BY list.
+            || !collect_expr(unsafe { (*sort).node })
+        {
+            return None;
+        }
+    }
+    // Plain DISTINCT is represented by null list elements. DISTINCT ON has
+    // expressions, which must be included in the dependency set.
+    for node in pg_list::<pg_sys::Node>(stmt.distinctClause).iter_ptr() {
+        if !node.is_null() && !collect_expr(node) {
+            return None;
+        }
+    }
+
+    references.sort_by_key(Expr::to_sql);
+    references.dedup_by(|left, right| left.to_sql() == right.to_sql());
+    Some(references)
+}
+
+/// Collect visible base-table aliases for simple body FROM items.
+///
+/// Range subqueries and table functions are conservatively unsupported here;
+/// their scopes require a separate dependency walk.
+unsafe fn collect_lateral_from_aliases(
+    node: *mut pg_sys::Node,
+    aliases: &mut HashSet<String>,
+) -> bool {
+    if let Some(range) = cast_node!(node, T_RangeVar, pg_sys::RangeVar) {
+        if range.relname.is_null() {
+            return false;
+        }
+        // SAFETY: relname is a string in the live raw parse tree.
+        let Ok(table_name) = pg_cstr_to_str(range.relname) else {
+            return false;
+        };
+        let alias = if range.alias.is_null() {
+            table_name.to_string()
+        } else {
+            // SAFETY: alias is non-null and belongs to the live RangeVar.
+            let alias = unsafe { &*range.alias };
+            // SAFETY: aliasname is a string in the live raw parse tree.
+            let Ok(alias_name) = pg_cstr_to_str(alias.aliasname) else {
+                return false;
+            };
+            alias_name.to_string()
+        };
+        aliases.insert(alias);
+        true
+    } else if let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) {
+        // Aliased or USING joins introduce extra name-resolution rules. Fail
+        // closed instead of classifying their references as outer by mistake.
+        if !join.alias.is_null() || !join.usingClause.is_null() {
+            return false;
+        }
+        // SAFETY: both children are nodes in the live raw join tree.
+        (unsafe { collect_lateral_from_aliases(join.larg, aliases) })
+            && (unsafe { collect_lateral_from_aliases(join.rarg, aliases) })
+    } else {
+        false
+    }
+}
+
+/// Collect JOIN quals throughout a simple FROM tree using its full body alias set.
+///
+/// # Safety
+/// Caller must ensure node and its children belong to a live raw parse tree.
+unsafe fn collect_lateral_join_refs(
+    node: *mut pg_sys::Node,
+    inner_aliases: &HashSet<String>,
+    references: &mut Vec<Expr>,
+) -> bool {
+    if cast_node!(node, T_RangeVar, pg_sys::RangeVar).is_some() {
+        return true;
+    }
+    let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) else {
+        return false;
+    };
+    // SAFETY: quals belongs to the live raw JoinExpr parse tree.
+    if !join.quals.is_null()
+        && !unsafe { collect_lateral_body_expr_node(join.quals, inner_aliases, references) }
+    {
+        return false;
+    }
+    // SAFETY: both children are nodes in the live raw join tree.
+    (unsafe { collect_lateral_join_refs(join.larg, inner_aliases, references) })
+        && (unsafe { collect_lateral_join_refs(join.rarg, inner_aliases, references) })
+}
+
+unsafe fn collect_lateral_body_expr_node(
+    node: *mut pg_sys::Node,
+    inner_aliases: &HashSet<String>,
+    references: &mut Vec<Expr>,
+) -> bool {
+    if node.is_null() {
+        return true;
+    }
+    // SAFETY: node is an expression from the live raw parse tree.
+    let Ok(expr) = safe_node_to_expr(node) else {
+        return false;
+    };
+    collect_lateral_expr_refs(&expr, inner_aliases, references)
+}
+
+fn collect_lateral_expr_refs(
+    expr: &Expr,
+    inner_aliases: &HashSet<String>,
+    references: &mut Vec<Expr>,
+) -> bool {
+    match expr {
+        Expr::ColumnRef {
+            table_alias: Some(alias),
+            ..
+        } if inner_aliases.contains(alias) => true,
+        Expr::ColumnRef {
+            table_alias: Some(_),
+            ..
+        }
+        | Expr::ColumnRef {
+            table_alias: None, ..
+        } => {
+            references.push(expr.clone());
+            true
+        }
+        Expr::Literal(_) | Expr::Star { table_alias: None } => true,
+        Expr::Star {
+            table_alias: Some(alias),
+        } if inner_aliases.contains(alias) => true,
+        Expr::Star {
+            table_alias: Some(_),
+        } => {
+            references.push(expr.clone());
+            true
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_lateral_expr_refs(left, inner_aliases, references)
+                && collect_lateral_expr_refs(right, inner_aliases, references)
+        }
+        Expr::FuncCall { args, .. } => args
+            .iter()
+            .all(|arg| collect_lateral_expr_refs(arg, inner_aliases, references)),
+        Expr::Raw(_) => false,
+    }
 }
 
 /// Extract correlation predicates from a LATERAL subquery's WHERE clause.

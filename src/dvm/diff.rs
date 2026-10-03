@@ -368,12 +368,18 @@ fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> (String, String) {
             OpTree::LateralFunction {
                 func_sql,
                 alias,
+                is_left_join,
+                join_condition,
                 child,
                 ..
             } => {
                 push(out, "LF");
                 push(out, func_sql);
                 push(out, alias);
+                push(out, if *is_left_join { "LEFT" } else { "INNER" });
+                if let Some(condition) = join_condition {
+                    push(out, &condition.to_sql());
+                }
                 push(out, "(");
                 build_fingerprint(child, out);
                 push(out, ")");
@@ -381,12 +387,18 @@ fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> (String, String) {
             OpTree::LateralSubquery {
                 subquery_sql,
                 alias,
+                is_left_join,
+                join_condition,
                 child,
                 ..
             } => {
                 push(out, "LSQ");
                 push(out, subquery_sql);
                 push(out, alias);
+                push(out, if *is_left_join { "LEFT" } else { "INNER" });
+                if let Some(condition) = join_condition {
+                    push(out, &condition.to_sql());
+                }
                 push(out, "(");
                 build_fingerprint(child, out);
                 push(out, ")");

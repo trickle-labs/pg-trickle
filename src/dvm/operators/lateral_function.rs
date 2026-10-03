@@ -32,6 +32,8 @@ pub fn diff_lateral_function(
         column_aliases,
         declared_columns,
         with_ordinality,
+        is_left_join,
+        join_condition,
         child,
     } = op
     else {
@@ -140,13 +142,18 @@ pub fn diff_lateral_function(
     // intermediate columns like source-table-only columns), re-expand
     // the SRF using the old values from the child delta (action = 'D').
     // This produces the old expanded rows that should be removed.
+    let lateral_join = if *is_left_join { "LEFT JOIN" } else { "JOIN" };
+    let join_condition_sql = join_condition
+        .as_ref()
+        .map(|condition| condition.to_sql())
+        .unwrap_or_else(|| "true".into());
     let old_rows_cte = ctx.next_cte_name("lat_old");
     let old_rows_sql = format!(
         "SELECT {row_id_expr} AS \"__pgt_row_id\",\n\
                 {child_col_refs_str},\n\
                 {srf_col_refs_str}\n\
-         FROM {changed_sources_cte} AS {outer_alias_q},\n\
-              LATERAL {func_sql} AS {srf_alias_clause}\n\
+         FROM {changed_sources_cte} AS {outer_alias_q}\n\
+         {lateral_join} LATERAL {func_sql} AS {srf_alias_clause} ON {join_condition_sql}\n\
          WHERE {outer_alias_q}.\"__pgt_action\" = 'D'",
     );
     ctx.add_cte(old_rows_cte.clone(), old_rows_sql);
@@ -160,8 +167,8 @@ pub fn diff_lateral_function(
         "SELECT {row_id_expr} AS \"__pgt_row_id\",\n\
                 {child_col_refs_str},\n\
                 {srf_col_refs_str}\n\
-         FROM {changed_sources_cte} AS {outer_alias_q},\n\
-              LATERAL {func_sql} AS {srf_alias_clause}\n\
+         FROM {changed_sources_cte} AS {outer_alias_q}\n\
+         {lateral_join} LATERAL {func_sql} AS {srf_alias_clause} ON {join_condition_sql}\n\
          WHERE {outer_alias_q}.\"__pgt_action\" = 'I'",
     );
     ctx.add_cte(expand_cte.clone(), expand_sql);
@@ -214,6 +221,8 @@ mod tests {
             column_aliases: col_aliases.into_iter().map(|c| c.to_string()).collect(),
             declared_columns: vec![],
             with_ordinality,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(child),
         }
     }
@@ -518,6 +527,8 @@ mod tests {
             column_aliases: vec![],
             declared_columns: declared,
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan_with_pk(1, "t", "public", "t", &["id", "raw"], &["id"])),
         };
         let result = diff_lateral_function(&mut ctx, &tree).unwrap();

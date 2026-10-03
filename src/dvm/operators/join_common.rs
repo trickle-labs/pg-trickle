@@ -144,6 +144,8 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
             column_aliases,
             declared_columns,
             with_ordinality,
+            is_left_join,
+            join_condition,
             child,
         } => {
             let child_snap = build_snapshot_sql(child);
@@ -153,6 +155,8 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                 column_aliases,
                 declared_columns,
                 *with_ordinality,
+                *is_left_join,
+                join_condition.as_ref(),
                 child,
                 &child_snap,
             )
@@ -410,6 +414,8 @@ pub(crate) fn build_lateral_function_from_clause(
     column_aliases: &[String],
     declared_columns: &[Column],
     with_ordinality: bool,
+    is_left_join: bool,
+    join_condition: Option<&Expr>,
     child: &OpTree,
     child_snapshot: &str,
 ) -> String {
@@ -430,8 +436,12 @@ pub(crate) fn build_lateral_function_from_clause(
         .map(|column| quote_ident(column))
         .collect::<Vec<_>>()
         .join(", ");
+    let join_type = if is_left_join { "LEFT JOIN" } else { "JOIN" };
+    let condition = join_condition
+        .map(Expr::to_sql)
+        .unwrap_or_else(|| "true".into());
     format!(
-        "{child_snapshot} AS {child_alias} CROSS JOIN LATERAL {func_sql}{ordinality} AS {alias_q} ({column_list})",
+        "{child_snapshot} AS {child_alias} {join_type} LATERAL {func_sql}{ordinality} AS {alias_q} ({column_list}) ON {condition}",
         child_alias = quote_ident(child.alias()),
         alias_q = quote_ident(alias),
     )
@@ -444,6 +454,8 @@ fn build_lateral_function_snapshot(
     column_aliases: &[String],
     declared_columns: &[Column],
     with_ordinality: bool,
+    is_left_join: bool,
+    join_condition: Option<&Expr>,
     child: &OpTree,
     child_snapshot: &str,
 ) -> String {
@@ -483,6 +495,8 @@ fn build_lateral_function_snapshot(
         column_aliases,
         declared_columns,
         with_ordinality,
+        is_left_join,
+        join_condition,
         child,
         child_snapshot,
     );
@@ -559,6 +573,8 @@ pub(crate) fn build_snapshot_inline_from(op: &OpTree) -> Option<String> {
             column_aliases,
             declared_columns,
             with_ordinality,
+            is_left_join,
+            join_condition,
             child,
         } => Some(build_lateral_function_from_clause(
             func_sql,
@@ -566,6 +582,8 @@ pub(crate) fn build_snapshot_inline_from(op: &OpTree) -> Option<String> {
             column_aliases,
             declared_columns,
             *with_ordinality,
+            *is_left_join,
+            join_condition.as_ref(),
             child,
             &build_snapshot_sql(child),
         )),
@@ -908,6 +926,8 @@ pub fn build_pre_change_snapshot_sql(
             column_aliases,
             declared_columns,
             with_ordinality,
+            is_left_join,
+            join_condition,
             child,
         } => {
             let child_snap = build_pre_change_snapshot_sql(
@@ -922,6 +942,8 @@ pub fn build_pre_change_snapshot_sql(
                 column_aliases,
                 declared_columns,
                 *with_ordinality,
+                *is_left_join,
+                join_condition.as_ref(),
                 child,
                 &child_snap,
             )
@@ -1181,6 +1203,8 @@ fn build_pre_change_inline_from(
             column_aliases,
             declared_columns,
             with_ordinality,
+            is_left_join,
+            join_condition,
             child,
         } => {
             let child_snapshot = build_pre_change_snapshot_sql(
@@ -1195,6 +1219,8 @@ fn build_pre_change_inline_from(
                 column_aliases,
                 declared_columns,
                 *with_ordinality,
+                *is_left_join,
+                join_condition.as_ref(),
                 child,
                 &child_snapshot,
             ))
@@ -1757,6 +1783,7 @@ fn find_column_source(op: &OpTree, column_name: &str) -> Option<String> {
             declared_columns,
             with_ordinality,
             child,
+            ..
         } => {
             if lateral_snapshot_columns(
                 func_sql,
@@ -2122,6 +2149,8 @@ mod tests {
                 },
             ],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(child),
         }
     }

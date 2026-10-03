@@ -213,6 +213,8 @@ pub fn lateral_subquery(
         is_left_join,
         subquery_source_oids,
         correlation_predicates: Vec::new(),
+        lateral_body_refs: Some(Vec::new()),
+        join_condition: None,
         child: Box::new(child),
     }
 }

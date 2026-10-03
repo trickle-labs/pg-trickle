@@ -694,3 +694,72 @@ async fn test_lateral_multiple_refreshes_converge() {
     )
     .await;
 }
+
+async fn assert_lateral_differential_action(db: &E2eDb, name: &str) {
+    let action: String = db
+        .query_scalar(&format!(
+            "SELECT action::text FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_schema = 'public' AND pgt_name = '{name}') \
+             ORDER BY refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    assert_eq!(action, "DIFFERENTIAL", "{name} refreshed with {action}");
+}
+
+#[tokio::test]
+async fn test_lateral_explicit_join_on_left_null_extension_and_dml_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lat_join_source (id INT PRIMARY KEY, limit_value INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO lat_join_source VALUES (1, 0), (2, 1), (3, 4)")
+        .await;
+
+    let inner = "SELECT p.id, g.value FROM public.lat_join_source p \
+                 JOIN LATERAL generate_series(1, p.limit_value) AS g(value) \
+                   ON g.value % 2 = 0";
+    let false_inner = "SELECT p.id, g.value FROM public.lat_join_source p \
+                       JOIN LATERAL generate_series(1, p.limit_value) AS g(value) ON false";
+    let left = "SELECT p.id, g.value FROM public.lat_join_source p \
+                LEFT JOIN LATERAL generate_series(1, p.limit_value) AS g(value) \
+                  ON g.value = p.limit_value - 1";
+    db.create_st("lat_join_inner", inner, "1m", "DIFFERENTIAL")
+        .await;
+    db.create_st("lat_join_false", false_inner, "1m", "DIFFERENTIAL")
+        .await;
+    db.create_st("lat_join_left", left, "1m", "DIFFERENTIAL")
+        .await;
+
+    for (name, query) in [
+        ("lat_join_inner", inner),
+        ("lat_join_false", false_inner),
+        ("lat_join_left", left),
+    ] {
+        db.refresh_st(name).await;
+        db.assert_st_matches_query(name, query).await;
+        assert_lateral_differential_action(&db, name).await;
+    }
+    let null_rows: i64 = db
+        .query_scalar("SELECT count(*) FROM lat_join_left WHERE value IS NULL")
+        .await;
+    assert_eq!(null_rows, 2, "empty and ON-rejected SRFs are null-extended");
+    assert_eq!(db.count("lat_join_inner").await, 2);
+    assert_eq!(db.count("lat_join_false").await, 0);
+
+    for mutation in [
+        "INSERT INTO lat_join_source VALUES (4, 3)",
+        "UPDATE lat_join_source SET limit_value = 2 WHERE id = 1",
+        "DELETE FROM lat_join_source WHERE id = 3",
+    ] {
+        db.execute(mutation).await;
+        for (name, query) in [
+            ("lat_join_inner", inner),
+            ("lat_join_false", false_inner),
+            ("lat_join_left", left),
+        ] {
+            db.refresh_st(name).await;
+            db.assert_st_matches_query(name, query).await;
+            assert_lateral_differential_action(&db, name).await;
+        }
+    }
+}
