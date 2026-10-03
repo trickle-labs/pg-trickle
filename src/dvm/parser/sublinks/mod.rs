@@ -4470,7 +4470,7 @@ fn resolve_columns(table_oid: u32) -> Result<Vec<Column>, PgTrickleError> {
         "SELECT attname::text, atttypid, attnotnull \
          FROM pg_attribute \
          WHERE attrelid = {} AND attnum > 0 AND NOT attisdropped \
-           AND attname::text NOT LIKE '__pgt_%%' \
+           AND NOT starts_with(attname::text, '__pgt_') \
            AND attgenerated = '' \
          ORDER BY attnum",
         table_oid,
@@ -4502,6 +4502,37 @@ fn resolve_columns(table_oid: u32) -> Result<Vec<Column>, PgTrickleError> {
         }
         Ok(columns)
     })
+}
+
+#[cfg(feature = "pg_test")]
+#[pg_schema]
+mod tests {
+    use super::*;
+
+    #[pg_test]
+    fn test_resolve_columns_excludes_literal_reserved_prefix_names() {
+        Spi::run(
+            "CREATE TEMPORARY TABLE resolve_columns_reserved_prefix_src (
+                id INT,
+                __pgt_row_id TEXT,
+                __pgt_source_tag TEXT,
+                abpgtc TEXT,
+                xxpgt_value INT,
+                \"AbpgtC\" TEXT
+            )",
+        )
+        .expect("failed to create resolve_columns_reserved_prefix_src");
+        let table_oid = Spi::get_one::<i32>(
+            "SELECT 'pg_temp.resolve_columns_reserved_prefix_src'::regclass::oid::int4",
+        )
+        .expect("failed to look up resolve_columns_reserved_prefix_src")
+        .expect("resolve_columns_reserved_prefix_src OID query returned NULL")
+            as u32;
+
+        let columns = resolve_columns(table_oid).expect("failed to resolve source columns");
+        let names: Vec<String> = columns.into_iter().map(|column| column.name).collect();
+        assert_eq!(names, ["id", "abpgtc", "xxpgt_value", "AbpgtC"]);
+    }
 }
 
 /// Resolve primary key column names for a table via `pg_constraint`.
@@ -8362,7 +8393,7 @@ unsafe fn target_alias_for_res_target(rt: &pg_sys::ResTarget, ordinal: usize) ->
 // ── Unit tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     #[test]
