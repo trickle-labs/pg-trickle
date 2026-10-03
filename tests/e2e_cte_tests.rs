@@ -2762,6 +2762,70 @@ async fn test_subquery_with_filter_differential() {
     assert_eq!(db.count("public.subq_filter_st").await, 4);
 }
 
+#[tokio::test]
+async fn test_nested_partial_alias_wrappers_match_query_after_mutations() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE partial_alias_src (id INT PRIMARY KEY, name TEXT, qty INT)")
+        .await;
+    db.execute("INSERT INTO partial_alias_src VALUES (1, 'one', 10), (2, 'two', 20)")
+        .await;
+
+    let query = "WITH base(base_id) AS (\
+                     SELECT id, name, qty FROM partial_alias_src\
+                 ) \
+                 SELECT wrapped.out_id, wrapped.name, wrapped.qty \
+                 FROM (\
+                     SELECT ref.ref_id AS sid, ref.name, ref.qty \
+                     FROM base AS ref(ref_id)\
+                 ) AS wrapped(out_id)";
+
+    db.create_st("partial_alias_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("partial_alias_st", query).await;
+
+    db.execute("INSERT INTO partial_alias_src VALUES (3, 'three', 30)")
+        .await;
+    db.refresh_st("partial_alias_st").await;
+    db.assert_st_matches_query("partial_alias_st", query).await;
+
+    db.execute("UPDATE partial_alias_src SET name = 'two updated', qty = 22 WHERE id = 2")
+        .await;
+    db.refresh_st("partial_alias_st").await;
+    db.assert_st_matches_query("partial_alias_st", query).await;
+
+    db.execute("DELETE FROM partial_alias_src WHERE id = 1")
+        .await;
+    db.refresh_st("partial_alias_st").await;
+    db.assert_st_matches_query("partial_alias_st", query).await;
+}
+
+#[tokio::test]
+async fn test_overlong_partial_alias_lists_rejected_at_sql_boundary() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE alias_boundary_src (id INT PRIMARY KEY)")
+        .await;
+
+    let subquery = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(                'overlong_subquery_alias_st',                 $$SELECT rel.first_name FROM (SELECT id FROM alias_boundary_src)                   AS rel(first_name, extra_name)$$,                 '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        subquery.is_err(),
+        "PostgreSQL must reject an overlong subquery alias list"
+    );
+
+    let cte = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(                'overlong_cte_alias_st',                 $$WITH rel(first_name, extra_name) AS (SELECT id FROM alias_boundary_src)                   SELECT first_name FROM rel$$,                 '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        cte.is_err(),
+        "PostgreSQL must reject an overlong CTE alias list"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  CTE + Join Combinations
 // ═══════════════════════════════════════════════════════════════════════════

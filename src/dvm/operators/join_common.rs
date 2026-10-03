@@ -63,14 +63,7 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                 table_name.replace('"', "\"\""),
             )
         }
-        OpTree::CteScan {
-            alias,
-            body,
-            columns,
-            cte_def_aliases,
-            column_aliases,
-            ..
-        } => {
+        OpTree::CteScan { alias, body, .. } => {
             // Delegate to the body's snapshot when available (always in
             // production; `None` only in unit-test stubs that never call
             // this function).  This prevents the old bug where the CTE alias
@@ -86,13 +79,7 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
             let body_cols = body.output_columns();
 
             // Determine the CTE's effective output column names.
-            let effective_cols: Vec<&str> = if !column_aliases.is_empty() {
-                column_aliases.iter().map(|s| s.as_str()).collect()
-            } else if !cte_def_aliases.is_empty() {
-                cte_def_aliases.iter().map(|s| s.as_str()).collect()
-            } else {
-                columns.iter().map(|s| s.as_str()).collect()
-            };
+            let effective_cols = op.output_columns();
 
             // When body columns differ from effective CTE columns (due to
             // CTE-level column aliases), wrap in a renaming SELECT.
@@ -245,14 +232,11 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
                 let inner = build_snapshot_sql(child);
                 let child_alias = child.alias();
                 // Use positional references (ordinal) to rename
-                let selects: Vec<String> = column_aliases
+                let output_columns = op.output_columns();
+                let selects: Vec<String> = output_columns
                     .iter()
                     .enumerate()
-                    .map(|(i, alias)| {
-                        // Reference by position: column number i+1
-                        // We use a subquery wrapper so we can rename by ordinal
-                        format!("__sub.col{} AS {}", i + 1, quote_ident(alias))
-                    })
+                    .map(|(i, alias)| format!("__sub.col{} AS {}", i + 1, quote_ident(alias)))
                     .collect();
                 // Wrap inner snapshot with ordinal column names
                 let child_cols = child.output_columns();
@@ -956,7 +940,8 @@ pub fn build_pre_change_snapshot_sql(
                     .enumerate()
                     .map(|(i, c)| format!("{} AS col{}", quote_ident(c), i + 1))
                     .collect();
-                let selects: Vec<String> = column_aliases
+                let output_columns = op.output_columns();
+                let selects: Vec<String> = output_columns
                     .iter()
                     .enumerate()
                     .map(|(i, alias)| format!("__sub.col{} AS {}", i + 1, quote_ident(alias)))
@@ -1032,14 +1017,7 @@ pub fn build_pre_change_snapshot_sql(
                 .collect::<Vec<_>>();
             format!("({})", branches.join(" UNION ALL "))
         }
-        OpTree::CteScan {
-            alias,
-            columns,
-            cte_def_aliases,
-            column_aliases,
-            body,
-            ..
-        } => {
+        OpTree::CteScan { alias, body, .. } => {
             let Some(body) = body else {
                 return build_snapshot_sql(op);
             };
@@ -1056,13 +1034,7 @@ pub fn build_pre_change_snapshot_sql(
                 st_source_pgt_ids,
             );
             let body_cols = body.output_columns();
-            let effective_cols: Vec<&str> = if !column_aliases.is_empty() {
-                column_aliases.iter().map(String::as_str).collect()
-            } else if !cte_def_aliases.is_empty() {
-                cte_def_aliases.iter().map(String::as_str).collect()
-            } else {
-                columns.iter().map(String::as_str).collect()
-            };
+            let effective_cols = op.output_columns();
 
             if body_cols
                 .iter()
@@ -2134,6 +2106,30 @@ mod tests {
         let node = scan(1, "orders", "public", "o", &["id", "cust_id"]);
         let snap = build_snapshot_sql(&node);
         assert_eq!(snap, "\"public\".\"orders\"");
+    }
+
+    #[test]
+    fn test_snapshot_partial_alias_wrappers_preserve_remainder() {
+        let child = scan(1, "t", "public", "t", &["id", "name", "qty"]);
+        let subquery = subquery("sq", vec!["renamed_id"], child.clone());
+        let sql = build_snapshot_sql(&subquery);
+        assert_sql_contains(&sql, "__sub.col1 AS \"renamed_id\"");
+        assert_sql_contains(&sql, "__sub.col2 AS \"name\"");
+        assert_sql_contains(&sql, "__sub.col3 AS \"qty\"");
+
+        let cte = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "x".into(),
+            alias: "y".into(),
+            columns: vec!["id".into(), "name".into(), "qty".into()],
+            cte_def_aliases: vec!["base_id".into()],
+            column_aliases: vec!["ref_id".into()],
+            body: Some(Box::new(child)),
+        };
+        let sql = build_snapshot_sql(&cte);
+        assert_sql_contains(&sql, "\"id\" AS \"ref_id\"");
+        assert_sql_contains(&sql, "\"name\"");
+        assert_sql_contains(&sql, "\"qty\"");
     }
 
     #[test]

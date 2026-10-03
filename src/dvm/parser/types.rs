@@ -1868,6 +1868,15 @@ pub fn unwrap_transparent(op: &OpTree) -> &OpTree {
     }
 }
 
+/// Apply aliases to a relation's positional prefix while retaining its remaining names.
+pub(crate) fn apply_column_aliases(columns: &[String], aliases: &[String]) -> Vec<String> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| aliases.get(index).unwrap_or(column).clone())
+        .collect()
+}
+
 impl OpTree {
     /// Get the alias for this node (used in CTE naming).
     pub fn alias(&self) -> &str {
@@ -2493,12 +2502,42 @@ impl OpTree {
                     Some(cols)
                 }
             }
-            OpTree::Subquery { child, .. } => child.row_id_key_columns(),
-            OpTree::CteScan { columns, .. } => {
-                // CTE scan: use all CTE output columns as content hash.
-                // This matches the intermediate aggregate's row_id formula
-                // when the CTE body contains an aggregate.
-                Some(columns.clone())
+            OpTree::Subquery {
+                child,
+                column_aliases,
+                ..
+            } => {
+                let keys = child.row_id_key_columns()?;
+                if column_aliases.is_empty() {
+                    return Some(keys);
+                }
+                let child_columns = child.output_columns();
+                let output_columns = apply_column_aliases(&child_columns, column_aliases);
+                keys.into_iter()
+                    .map(|key| {
+                        let mut matches = child_columns
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, column)| *column == &key);
+                        let (index, _) = matches.next()?;
+                        if matches.next().is_some() {
+                            return None;
+                        }
+                        output_columns.get(index).cloned()
+                    })
+                    .collect()
+            }
+            OpTree::CteScan {
+                columns,
+                cte_def_aliases,
+                column_aliases,
+                ..
+            } => {
+                // CTE scan: use every visible CTE column as the content key.
+                // Keep the key names aligned with the definition/reference
+                // aliases used by both snapshot and differential projections.
+                let definition_columns = apply_column_aliases(columns, cte_def_aliases);
+                Some(apply_column_aliases(&definition_columns, column_aliases))
             }
             OpTree::Window {
                 child,
@@ -2609,11 +2648,10 @@ impl OpTree {
                 child,
                 ..
             } => {
-                if column_aliases.is_empty() {
-                    child.append_output_columns(columns);
-                } else {
-                    columns.extend(column_aliases.iter().cloned());
-                }
+                columns.extend(apply_column_aliases(
+                    &child.output_columns(),
+                    column_aliases,
+                ));
             }
             OpTree::CteScan {
                 columns: cte_columns,
@@ -2621,13 +2659,8 @@ impl OpTree {
                 column_aliases,
                 ..
             } => {
-                if !column_aliases.is_empty() {
-                    columns.extend(column_aliases.iter().cloned());
-                } else if !cte_def_aliases.is_empty() {
-                    columns.extend(cte_def_aliases.iter().cloned());
-                } else {
-                    columns.extend(cte_columns.iter().cloned());
-                }
+                let definition_columns = apply_column_aliases(cte_columns, cte_def_aliases);
+                columns.extend(apply_column_aliases(&definition_columns, column_aliases));
             }
             OpTree::RecursiveCte {
                 columns: cte_columns,
@@ -3728,13 +3761,14 @@ pub(crate) fn scan_pk_columns(op: &OpTree) -> Vec<String> {
             ..
         } if !column_aliases.is_empty() => {
             let child_columns = child.output_columns();
+            let output_columns = apply_column_aliases(&child_columns, column_aliases);
             scan_pk_columns(child)
                 .iter()
                 .filter_map(|key| {
                     child_columns
                         .iter()
                         .position(|column| column == key)
-                        .and_then(|index| column_aliases.get(index))
+                        .and_then(|index| output_columns.get(index))
                         .cloned()
                 })
                 .collect()
@@ -3749,13 +3783,8 @@ pub(crate) fn scan_pk_columns(op: &OpTree) -> Vec<String> {
         } => {
             let body_keys = body.row_id_key_columns().unwrap_or_default();
             let body_columns = body.output_columns();
-            let visible_columns = if !column_aliases.is_empty() {
-                column_aliases
-            } else if !cte_def_aliases.is_empty() {
-                cte_def_aliases
-            } else {
-                columns
-            };
+            let definition_columns = apply_column_aliases(columns, cte_def_aliases);
+            let visible_columns = apply_column_aliases(&definition_columns, column_aliases);
             body_keys
                 .iter()
                 .filter_map(|key| {
@@ -3825,7 +3854,8 @@ fn key_column_is_non_nullable(op: &OpTree, key: &str) -> bool {
                 return key_column_is_non_nullable(child, key);
             }
             let child_columns = child.output_columns();
-            column_aliases
+            let output_columns = apply_column_aliases(&child_columns, column_aliases);
+            output_columns
                 .iter()
                 .position(|alias| alias == key)
                 .is_some_and(|index| {
@@ -3853,13 +3883,8 @@ fn key_column_is_non_nullable(op: &OpTree, key: &str) -> bool {
             column_aliases,
             ..
         } => {
-            let visible_columns = if !column_aliases.is_empty() {
-                column_aliases
-            } else if !cte_def_aliases.is_empty() {
-                cte_def_aliases
-            } else {
-                columns
-            };
+            let definition_columns = apply_column_aliases(columns, cte_def_aliases);
+            let visible_columns = apply_column_aliases(&definition_columns, column_aliases);
             let body_columns = body.output_columns();
             visible_columns
                 .iter()
