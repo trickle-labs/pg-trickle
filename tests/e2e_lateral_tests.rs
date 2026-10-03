@@ -11,6 +11,61 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_lateral_with_ordinality_differential_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lat_ordinality (id INT PRIMARY KEY, upper_bound INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO lat_ordinality VALUES (1, 2)").await;
+
+    let defining_query = "SELECT d.id, g.n, g.ordinality \
+         FROM public.lat_ordinality d \
+         CROSS JOIN LATERAL generate_series(1, d.upper_bound) \
+         WITH ORDINALITY AS g(n, ordinality)";
+    db.create_st("lat_ordinality_st", defining_query, "1m", "DIFFERENTIAL")
+        .await;
+    assert_eq!(db.pgt_status("lat_ordinality_st").await.1, "DIFFERENTIAL");
+
+    db.execute("UPDATE lat_ordinality SET upper_bound = 3 WHERE id = 1")
+        .await;
+    db.refresh_st("lat_ordinality_st").await;
+    assert_eq!(db.count("public.lat_ordinality_st").await, 3);
+    db.assert_st_matches_query("public.lat_ordinality_st", defining_query)
+        .await;
+}
+
+#[tokio::test]
+async fn test_lateral_with_custom_ordinality_alias_differential_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lat_custom_ordinality (id INT PRIMARY KEY, upper_bound INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO lat_custom_ordinality VALUES (1, 2)")
+        .await;
+
+    let defining_query = "SELECT d.id, g.n, g.seq \
+         FROM public.lat_custom_ordinality d \
+         CROSS JOIN LATERAL generate_series(1, d.upper_bound) \
+         WITH ORDINALITY AS g(n, seq)";
+    db.create_st(
+        "lat_custom_ordinality_st",
+        defining_query,
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    assert_eq!(
+        db.pgt_status("lat_custom_ordinality_st").await.1,
+        "DIFFERENTIAL"
+    );
+
+    db.execute("UPDATE lat_custom_ordinality SET upper_bound = 3 WHERE id = 1")
+        .await;
+    db.refresh_st("lat_custom_ordinality_st").await;
+    assert_eq!(db.count("public.lat_custom_ordinality_st").await, 3);
+    db.assert_st_matches_query("public.lat_custom_ordinality_st", defining_query)
+        .await;
+}
+
+#[tokio::test]
 async fn test_lateral_immutable_table_function_uses_declared_out_columns_differential() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE SCHEMA mdm_graph").await;

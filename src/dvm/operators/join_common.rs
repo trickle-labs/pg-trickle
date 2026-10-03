@@ -399,12 +399,13 @@ fn lateral_snapshot_columns(
     declared_columns: &[Column],
     with_ordinality: bool,
 ) -> Vec<String> {
-    let mut columns =
-        lateral_function_output_columns(func_sql, alias, column_aliases, declared_columns);
-    if with_ordinality {
-        columns.push("ordinality".to_string());
-    }
-    columns
+    lateral_function_output_columns(
+        func_sql,
+        alias,
+        column_aliases,
+        declared_columns,
+        with_ordinality,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
