@@ -437,15 +437,25 @@ pub(crate) fn build_lateral_function_from_clause(
         .map(|column| quote_ident(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let join_type = if is_left_join { "LEFT JOIN" } else { "JOIN" };
-    let condition = join_condition
-        .map(Expr::to_sql)
-        .unwrap_or_else(|| "true".into());
-    format!(
-        "{child_snapshot} AS {child_alias} {join_type} LATERAL {func_sql}{ordinality} AS {alias_q} ({column_list}) ON {condition}",
+    let join_type = if is_left_join {
+        "LEFT JOIN"
+    } else if join_condition.is_some() {
+        "JOIN"
+    } else {
+        "CROSS JOIN"
+    };
+    let join_clause = format!(
+        "{child_snapshot} AS {child_alias} {join_type} LATERAL {func_sql}{ordinality} AS {alias_q} ({column_list})",
         child_alias = quote_ident(child.alias()),
         alias_q = quote_ident(alias),
-    )
+    );
+    match (is_left_join, join_condition) {
+        (false, None) => join_clause,
+        (_, condition) => format!(
+            "{join_clause} ON {condition}",
+            condition = condition.map(Expr::to_sql).unwrap_or_else(|| "true".into()),
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
