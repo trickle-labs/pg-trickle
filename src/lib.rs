@@ -1897,11 +1897,17 @@ RETURNS TABLE(
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_schema  text;
-    v_table   text;
-    v_canary  text;
-    v_dot     int;
-    v_sql     text;
+    v_schema        text;
+    v_table         text;
+    v_canary        text;
+    v_dot           int;
+    v_live_oid      oid;
+    v_canary_oid    oid;
+    v_live_names    text[];
+    v_canary_names  text[];
+    v_live_columns  text;
+    v_canary_columns text;
+    v_sql           text;
 BEGIN
     v_dot    := strpos(p_name, '.');
     IF v_dot > 0 THEN
@@ -1914,19 +1920,63 @@ BEGIN
 
     v_canary := '__pgt_canary_' || v_table;
 
-    -- Return rows in live-only vs canary-only using EXCEPT (symmetric difference).
+    v_live_oid := to_regclass(format('%I.%I', v_schema, v_table));
+    IF v_live_oid IS NULL THEN
+        RAISE EXCEPTION 'Live stream table %.% does not exist', v_schema, v_table
+            USING ERRCODE = '42P01';
+    END IF;
+
+    v_canary_oid := to_regclass(format('%I.%I', v_schema, v_canary));
+    IF v_canary_oid IS NULL THEN
+        RAISE EXCEPTION 'Canary stream table %.% does not exist', v_schema, v_canary
+            USING ERRCODE = '42P01';
+    END IF;
+
+    SELECT
+        array_agg(a.attname::text ORDER BY a.attnum),
+        string_agg(format('%I', a.attname), ', ' ORDER BY a.attnum)
+      INTO v_live_names, v_live_columns
+      FROM pg_attribute a
+     WHERE a.attrelid = v_live_oid
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+       AND left(a.attname::text, 6) <> '__pgt_';
+
+    SELECT
+        array_agg(a.attname::text ORDER BY a.attnum),
+        string_agg(format('%I', a.attname), ', ' ORDER BY a.attnum)
+      INTO v_canary_names, v_canary_columns
+      FROM pg_attribute a
+     WHERE a.attrelid = v_canary_oid
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+       AND left(a.attname::text, 6) <> '__pgt_';
+
+    IF v_live_names IS NULL OR v_live_names IS DISTINCT FROM v_canary_names THEN
+        RAISE EXCEPTION 'Live and canary stream tables have incompatible visible column names or order'
+            USING ERRCODE = '42804';
+    END IF;
+
+    -- Compare typed visible values as multisets. Apply the side label only after
+    -- EXCEPT ALL so it cannot prevent equal rows from cancelling.
     v_sql := format(
-        '(SELECT %L AS row_source, t::text AS diff_row FROM %I.%I t EXCEPT
-          SELECT %L, c::text FROM %I.%I c)
+        'SELECT %L::text AS row_source, ROW(d.*)::text AS diff_row
+           FROM (SELECT %s FROM %I.%I EXCEPT ALL SELECT %s FROM %I.%I) AS d
          UNION ALL
-         (SELECT %L, c::text FROM %I.%I c EXCEPT
-          SELECT %L, t::text FROM %I.%I t)',
-        'live_only',   v_schema, v_table,
-        'canary_only', v_schema, v_canary,
-        'canary_only', v_schema, v_canary,
-        'live_only',   v_schema, v_table
+         SELECT %L::text, ROW(d.*)::text
+           FROM (SELECT %s FROM %I.%I EXCEPT ALL SELECT %s FROM %I.%I) AS d',
+        'live_only', v_live_columns, v_schema, v_table,
+        v_canary_columns, v_schema, v_canary,
+        'canary_only', v_canary_columns, v_schema, v_canary,
+        v_live_columns, v_schema, v_table
     );
-    RETURN QUERY EXECUTE v_sql;
+
+    BEGIN
+        RETURN QUERY EXECUTE v_sql;
+    EXCEPTION WHEN datatype_mismatch THEN
+        RAISE EXCEPTION 'Live and canary stream tables have incompatible visible column types'
+            USING ERRCODE = '42804';
+    END;
 END;
 $$;
 
