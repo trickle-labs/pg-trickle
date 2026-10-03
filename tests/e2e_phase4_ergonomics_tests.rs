@@ -575,3 +575,324 @@ async fn test_erg_t4_no_wal_warning_when_wal_level_logical() {
         "No WAL-level warning expected when wal_level is logical; got: {notices:?}"
     );
 }
+
+async fn create_canary_pair(db: &E2eDb, name: &str, live_query: &str, canary_query: &str) {
+    db.create_st(name, live_query, "1m", "FULL").await;
+    db.refresh_st(name).await;
+    db.execute(&format!(
+        "SELECT pgtrickle.canary_begin('{name}', $canary${canary_query}$canary$)"
+    ))
+    .await;
+    db.refresh_st(&format!("__pgt_canary_{name}")).await;
+}
+
+async fn canary_diff_rows(db: &E2eDb, name: &str) -> String {
+    db.query_scalar(&format!(
+        "SELECT coalesce(string_agg(row_source || '|' || diff_row, E'\\n' \
+                    ORDER BY row_source COLLATE \"C\", diff_row COLLATE \"C\"), '') \
+         FROM pgtrickle.canary_diff('{name}')"
+    ))
+    .await
+}
+
+#[tokio::test]
+async fn test_canary_diff_identical_nonempty_and_empty_outputs_return_empty() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_same_src (id INT, val TEXT)")
+        .await;
+    db.execute("INSERT INTO cd_same_src VALUES (1, 'a'), (2, NULL)")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_same",
+        "SELECT id, val FROM cd_same_src",
+        "SELECT id, val FROM cd_same_src",
+    )
+    .await;
+
+    let fixture_rows: i64 = db.query_scalar("SELECT count(*) FROM cd_same_src").await;
+    assert_eq!(fixture_rows, 2);
+    assert!(canary_diff_rows(&db, "cd_same").await.is_empty());
+    assert!(canary_diff_rows(&db, "public.cd_same").await.is_empty());
+
+    db.execute("TRUNCATE cd_same_src").await;
+    db.refresh_st("cd_same").await;
+    db.refresh_st("__pgt_canary_cd_same").await;
+    assert!(canary_diff_rows(&db, "cd_same").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_canary_diff_equal_numeric_values_with_different_text_return_empty() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_numeric_live (value NUMERIC)")
+        .await;
+    db.execute("CREATE TABLE cd_numeric_canary (value NUMERIC)")
+        .await;
+    db.execute("INSERT INTO cd_numeric_live VALUES (1.0)").await;
+    db.execute("INSERT INTO cd_numeric_canary VALUES (1.00)")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_numeric",
+        "SELECT value FROM cd_numeric_live",
+        "SELECT value FROM cd_numeric_canary",
+    )
+    .await;
+
+    let distinct_texts: bool = db
+        .query_scalar(
+            "SELECT (SELECT value::text FROM cd_numeric_live) <> \
+                    (SELECT value::text FROM cd_numeric_canary)",
+        )
+        .await;
+    let equal_values: bool = db.query_scalar("SELECT 1.0::numeric = 1.00::numeric").await;
+    assert!(distinct_texts);
+    assert!(equal_values);
+    assert!(canary_diff_rows(&db, "cd_numeric").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_canary_diff_compatible_integer_and_numeric_columns_return_empty() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_int_live (value INT)").await;
+    db.execute("CREATE TABLE cd_int_canary (value NUMERIC)")
+        .await;
+    db.execute("INSERT INTO cd_int_live VALUES (1)").await;
+    db.execute("INSERT INTO cd_int_canary VALUES (1.00)").await;
+    create_canary_pair(
+        &db,
+        "cd_int",
+        "SELECT value FROM cd_int_live",
+        "SELECT value FROM cd_int_canary",
+    )
+    .await;
+
+    assert!(canary_diff_rows(&db, "cd_int").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_canary_diff_insert_and_delete_report_only_the_containing_side() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_insert_live (id INT, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE cd_insert_canary (id INT, val TEXT)")
+        .await;
+    db.execute("INSERT INTO cd_insert_live VALUES (1, 'a')")
+        .await;
+    db.execute("INSERT INTO cd_insert_canary VALUES (1, 'a'), (2, 'b')")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_insert",
+        "SELECT id, val FROM cd_insert_live",
+        "SELECT id, val FROM cd_insert_canary",
+    )
+    .await;
+    assert_eq!(
+        canary_diff_rows(&db, "cd_insert").await,
+        "canary_only|(2,b)"
+    );
+
+    db.execute("INSERT INTO cd_insert_live VALUES (3, 'c')")
+        .await;
+    db.execute("DELETE FROM cd_insert_canary WHERE id = 2")
+        .await;
+    db.refresh_st("cd_insert").await;
+    db.refresh_st("__pgt_canary_cd_insert").await;
+    assert_eq!(canary_diff_rows(&db, "cd_insert").await, "live_only|(3,c)");
+
+    db.execute("DELETE FROM cd_insert_live").await;
+    db.refresh_st("cd_insert").await;
+    db.refresh_st("__pgt_canary_cd_insert").await;
+    assert_eq!(
+        canary_diff_rows(&db, "cd_insert").await,
+        "canary_only|(1,a)"
+    );
+}
+
+#[tokio::test]
+async fn test_canary_diff_duplicate_multiplicity_preserves_excess_and_null_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_dup_live (value INT, label TEXT)")
+        .await;
+    db.execute("CREATE TABLE cd_dup_canary (value INT, label TEXT)")
+        .await;
+    db.execute("INSERT INTO cd_dup_live VALUES (1, 'x'), (1, 'x'), (1, 'x'), (NULL, 'n'), (NULL, 'n'), (NULL, 'n')")
+        .await;
+    db.execute("INSERT INTO cd_dup_canary VALUES (1, 'x'), (NULL, 'n')")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_dup",
+        "SELECT value, label FROM cd_dup_live",
+        "SELECT value, label FROM cd_dup_canary",
+    )
+    .await;
+    assert_eq!(
+        canary_diff_rows(&db, "cd_dup").await,
+        "live_only|(,n)\nlive_only|(,n)\nlive_only|(1,x)\nlive_only|(1,x)"
+    );
+
+    db.execute("DELETE FROM cd_dup_live WHERE ctid IN (SELECT ctid FROM cd_dup_live WHERE value = 1 LIMIT 2)")
+        .await;
+    db.execute("DELETE FROM cd_dup_live WHERE ctid IN (SELECT ctid FROM cd_dup_live WHERE value IS NULL LIMIT 2)")
+        .await;
+    db.execute("INSERT INTO cd_dup_canary VALUES (1, 'x'), (1, 'x'), (NULL, 'n'), (NULL, 'n')")
+        .await;
+    db.refresh_st("cd_dup").await;
+    db.refresh_st("__pgt_canary_cd_dup").await;
+    assert_eq!(
+        canary_diff_rows(&db, "cd_dup").await,
+        "canary_only|(,n)\ncanary_only|(,n)\ncanary_only|(1,x)\ncanary_only|(1,x)"
+    );
+
+    db.execute("INSERT INTO cd_dup_live VALUES (1, 'x'), (1, 'x'), (NULL, 'n'), (NULL, 'n')")
+        .await;
+    db.refresh_st("cd_dup").await;
+    db.refresh_st("__pgt_canary_cd_dup").await;
+    assert!(canary_diff_rows(&db, "cd_dup").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_canary_diff_internal_columns_do_not_affect_visible_output() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_internal_src (id INT, val TEXT)")
+        .await;
+    db.execute("INSERT INTO cd_internal_src VALUES (1, 'a'), (2, 'b')")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_internal",
+        "SELECT id, val FROM cd_internal_src",
+        "SELECT DISTINCT id, val FROM cd_internal_src",
+    )
+    .await;
+
+    let internal_columns: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_attribute \
+             WHERE attrelid = 'cd_internal'::regclass AND attnum > 0 \
+               AND NOT attisdropped AND left(attname::text, 6) = '__pgt_'",
+        )
+        .await;
+    assert!(internal_columns > 0);
+    assert!(canary_diff_rows(&db, "cd_internal").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_canary_diff_column_named_d_returns_complete_row_payloads() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cd_d_live (d INT, companion TEXT)")
+        .await;
+    db.execute("CREATE TABLE cd_d_canary (d INT, companion TEXT)")
+        .await;
+    db.execute(
+        "INSERT INTO cd_d_live VALUES (3, 'common'), (NULL, 'null-common'), (8, 'live-only')",
+    )
+    .await;
+    db.execute("INSERT INTO cd_d_canary VALUES (3, 'common'), (NULL, 'null-common'), (9, 'canary-only'), (NULL, 'canary-null')")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_d",
+        "SELECT d, companion FROM cd_d_live",
+        "SELECT d, companion FROM cd_d_canary",
+    )
+    .await;
+
+    assert_eq!(
+        canary_diff_rows(&db, "cd_d").await,
+        "canary_only|(,canary-null)\ncanary_only|(9,canary-only)\nlive_only|(8,live-only)"
+    );
+}
+
+#[tokio::test]
+async fn test_canary_diff_interface_schema_errors_and_native_json_error() {
+    let db = E2eDb::new().await.with_extension().await;
+    let result_shape: String = db
+        .query_scalar("SELECT pg_get_function_result('pgtrickle.canary_diff(text)'::regprocedure)")
+        .await;
+    assert_eq!(result_shape, "TABLE(row_source text, diff_row text)");
+
+    db.execute("CREATE TABLE cd_schema_live (id INT, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE cd_schema_canary (val TEXT, id INT)")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_schema",
+        "SELECT id, val FROM cd_schema_live",
+        "SELECT val, id FROM cd_schema_canary",
+    )
+    .await;
+    let error = db
+        .try_execute("SELECT * FROM pgtrickle.canary_diff('cd_schema')")
+        .await
+        .expect_err("different visible names/order must fail");
+    assert!(error.to_string().contains("incompatible visible column"));
+
+    db.execute("CREATE TABLE cd_count_live (id INT, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE cd_count_canary (id INT)").await;
+    create_canary_pair(
+        &db,
+        "cd_count",
+        "SELECT id, val FROM cd_count_live",
+        "SELECT id FROM cd_count_canary",
+    )
+    .await;
+    let error = db
+        .try_execute("SELECT * FROM pgtrickle.canary_diff('cd_count')")
+        .await
+        .expect_err("different visible column counts must fail for empty outputs");
+    assert!(error.to_string().contains("incompatible visible column"));
+
+    db.execute("CREATE TABLE cd_type_live (value INT)").await;
+    db.execute("CREATE TABLE cd_type_canary (value TEXT)").await;
+    create_canary_pair(
+        &db,
+        "cd_type",
+        "SELECT value FROM cd_type_live",
+        "SELECT value FROM cd_type_canary",
+    )
+    .await;
+    let error = db
+        .try_execute("SELECT * FROM pgtrickle.canary_diff('cd_type')")
+        .await
+        .expect_err("incompatible visible types must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("incompatible visible column types")
+    );
+
+    db.execute("CREATE TABLE cd_json_live (payload JSON)").await;
+    db.execute("CREATE TABLE cd_json_canary (payload JSON)")
+        .await;
+    db.execute("INSERT INTO cd_json_live VALUES ('{\"a\":1}')")
+        .await;
+    db.execute("INSERT INTO cd_json_canary VALUES ('{\"a\":1}')")
+        .await;
+    create_canary_pair(
+        &db,
+        "cd_json",
+        "SELECT payload FROM cd_json_live",
+        "SELECT payload FROM cd_json_canary",
+    )
+    .await;
+    let error = db
+        .try_execute("SELECT * FROM pgtrickle.canary_diff('public.cd_json')")
+        .await
+        .expect_err("json has no set-operation equality operator");
+    assert!(
+        error
+            .to_string()
+            .contains("equality operator for type json")
+    );
+
+    let missing = db
+        .try_execute("SELECT * FROM pgtrickle.canary_diff('missing_canary')")
+        .await
+        .expect_err("missing live relation must not look equal");
+    assert!(missing.to_string().contains("does not exist"));
+}
