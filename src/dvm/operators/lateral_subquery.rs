@@ -16,7 +16,7 @@
 //! CTE so that outer rows without matching inner rows produce NULL-padded rows.
 
 use crate::dvm::diff::{DiffContext, DiffResult, col_list, quote_ident};
-use crate::dvm::parser::OpTree;
+use crate::dvm::parser::{Expr, OpTree};
 use crate::error::PgTrickleError;
 
 /// Sentinel row_id for inner-change-branch dummy rows.
@@ -31,6 +31,142 @@ use crate::error::PgTrickleError;
 /// `-(9223372036854775808::BIGINT)` and `9223372036854775808 > i64::MAX`,
 /// producing "bigint out of range". `i64::MIN + 1` avoids this.
 const LATERAL_INNER_DUMMY_ROW_ID: i64 = i64::MIN + 1; // -9223372036854775807
+
+/// Collect ON references that can be resolved to one side of the lateral join.
+/// `false` means the precompute key cannot safely represent the predicate.
+fn collect_lateral_on_outer_columns(
+    expr: &Expr,
+    outer_alias: &str,
+    lateral_alias: &str,
+    child_cols: &[String],
+    sub_cols: &[String],
+    outer_columns: &mut Vec<String>,
+) -> bool {
+    match expr {
+        Expr::ColumnRef {
+            table_alias: Some(alias),
+            column_name,
+        } if alias == outer_alias && alias != lateral_alias => {
+            if child_cols
+                .iter()
+                .filter(|column| column.as_str() == column_name)
+                .count()
+                != 1
+            {
+                return false;
+            }
+            outer_columns.push(column_name.clone());
+            true
+        }
+        Expr::ColumnRef {
+            table_alias: Some(alias),
+            column_name,
+        } if alias == lateral_alias && alias != outer_alias => {
+            sub_cols
+                .iter()
+                .filter(|column| column.as_str() == column_name)
+                .count()
+                == 1
+        }
+        Expr::ColumnRef {
+            table_alias: Some(_),
+            ..
+        } => false,
+        Expr::ColumnRef {
+            table_alias: None,
+            column_name,
+        } => {
+            let outer_matches = child_cols
+                .iter()
+                .filter(|column| column.as_str() == column_name)
+                .take(2)
+                .count();
+            let lateral_matches = sub_cols
+                .iter()
+                .filter(|column| column.as_str() == column_name)
+                .take(2)
+                .count();
+            match (outer_matches, lateral_matches) {
+                (1, 0) => {
+                    outer_columns.push(column_name.clone());
+                    true
+                }
+                (0, 1) => true,
+                _ => false,
+            }
+        }
+        Expr::Literal(_) => true,
+        Expr::BinaryOp { left, right, .. } => {
+            collect_lateral_on_outer_columns(
+                left,
+                outer_alias,
+                lateral_alias,
+                child_cols,
+                sub_cols,
+                outer_columns,
+            ) && collect_lateral_on_outer_columns(
+                right,
+                outer_alias,
+                lateral_alias,
+                child_cols,
+                sub_cols,
+                outer_columns,
+            )
+        }
+        Expr::FuncCall { args, .. } => args.iter().all(|arg| {
+            collect_lateral_on_outer_columns(
+                arg,
+                outer_alias,
+                lateral_alias,
+                child_cols,
+                sub_cols,
+                outer_columns,
+            )
+        }),
+        Expr::Star { .. } | Expr::Raw(_) => false,
+    }
+}
+
+/// Resolve collected LATERAL body references against the child row available
+/// to the precompute query. Unqualified names are safe only when they cannot
+/// name a child column; unknown qualified aliases and outer stars force fallback.
+fn resolve_lateral_body_outer_columns(
+    references: &[Expr],
+    outer_alias: &str,
+    child_cols: &[String],
+) -> Option<Vec<String>> {
+    let mut columns = Vec::new();
+    for reference in references {
+        match reference {
+            Expr::ColumnRef {
+                table_alias: Some(alias),
+                column_name,
+            } if alias == outer_alias => {
+                if child_cols
+                    .iter()
+                    .filter(|column| column.as_str() == column_name)
+                    .count()
+                    != 1
+                {
+                    return None;
+                }
+                columns.push(column_name.clone());
+            }
+            Expr::ColumnRef {
+                table_alias: Some(_),
+                ..
+            } => return None,
+            Expr::ColumnRef {
+                table_alias: None, ..
+            } => return None,
+            Expr::Star { .. } => return None,
+            _ => return None,
+        }
+    }
+    columns.sort();
+    columns.dedup();
+    Some(columns)
+}
 
 /// Differentiate a LateralSubquery node via row-scoped recomputation.
 ///
@@ -47,8 +183,10 @@ pub fn diff_lateral_subquery(
         column_aliases,
         output_cols,
         is_left_join,
+        join_condition,
         subquery_source_oids,
         correlation_predicates,
+        lateral_body_refs,
         child,
     } = op
     else {
@@ -144,6 +282,11 @@ pub fn diff_lateral_subquery(
             )));
         }
     }
+
+    let join_condition_sql = join_condition
+        .as_ref()
+        .map(|condition| condition.to_sql())
+        .unwrap_or_else(|| "true".into());
 
     // ── CTE 1: Find source rows that changed ───────────────────────────
     //
@@ -251,22 +394,49 @@ pub fn diff_lateral_subquery(
     //
     // The pre-computation uses the outer alias so that column references
     // in the subquery_sql (e.g. `s.region`) resolve correctly.
-    let use_precomp = inner_change_branch_present && !correlation_predicates.is_empty();
+    let on_outer_cols = match join_condition.as_ref() {
+        Some(condition) => {
+            let mut columns = Vec::new();
+            collect_lateral_on_outer_columns(
+                condition,
+                &outer_alias,
+                alias,
+                child_cols,
+                &sub_cols,
+                &mut columns,
+            )
+            .then(|| {
+                columns.sort();
+                columns.dedup();
+                columns
+            })
+        }
+        None => Some(Vec::new()),
+    };
+    let precomp_outer_cols = if inner_change_branch_present && !correlation_predicates.is_empty() {
+        match (lateral_body_refs.as_deref(), on_outer_cols) {
+            (Some(body_refs), Some(on_columns)) => {
+                resolve_lateral_body_outer_columns(body_refs, &outer_alias, child_cols).map(
+                    |body_columns| {
+                        let mut columns: Vec<String> = correlation_predicates
+                            .iter()
+                            .map(|predicate| predicate.outer_col.clone())
+                            .chain(body_columns)
+                            .chain(on_columns)
+                            .collect();
+                        columns.sort();
+                        columns.dedup();
+                        columns
+                    },
+                )
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
-    if use_precomp {
-        // Determine the outer column names used in correlation predicates.
-        // These columns fully determine the LATERAL subquery result for
-        // the common aggregate pattern.
-        let corr_outer_cols: Vec<String> = {
-            let mut cols: Vec<String> = correlation_predicates
-                .iter()
-                .map(|p| p.outer_col.clone())
-                .collect();
-            cols.sort();
-            cols.dedup();
-            cols
-        };
-
+    if let Some(corr_outer_cols) = precomp_outer_cols {
         let outer_alias_q = quote_ident(&outer_alias);
         let corr_col_refs: Vec<String> = corr_outer_cols
             .iter()
@@ -290,12 +460,12 @@ pub fn diff_lateral_subquery(
         let precomp_lateral = if *is_left_join {
             format!(
                 "FROM {groups_cte} AS {outer_alias_q}\n\
-                 LEFT JOIN LATERAL ({subquery_sql}) AS {sub_alias_clause} ON true",
+                 LEFT JOIN LATERAL ({subquery_sql}) AS {sub_alias_clause} ON {join_condition_sql}",
             )
         } else {
             format!(
-                "FROM {groups_cte} AS {outer_alias_q},\n\
-                      LATERAL ({subquery_sql}) AS {sub_alias_clause}",
+                "FROM {groups_cte} AS {outer_alias_q}\n\
+                 JOIN LATERAL ({subquery_sql}) AS {sub_alias_clause} ON {join_condition_sql}",
             )
         };
         let precomp_sub_refs: Vec<String> = sub_cols
@@ -361,7 +531,7 @@ pub fn diff_lateral_subquery(
             (
                 format!(
                     "FROM {changed_sources_cte} AS {outer_alias_q}\n\
-                     LEFT JOIN LATERAL ({subquery_sql}) AS {sub_alias_clause} ON true",
+                     LEFT JOIN LATERAL ({subquery_sql}) AS {sub_alias_clause} ON {join_condition_sql}",
                     outer_alias_q = quote_ident(&outer_alias),
                 ),
                 format!(
@@ -372,8 +542,8 @@ pub fn diff_lateral_subquery(
         } else {
             (
                 format!(
-                    "FROM {changed_sources_cte} AS {outer_alias_q},\n\
-                          LATERAL ({subquery_sql}) AS {sub_alias_clause}",
+                    "FROM {changed_sources_cte} AS {outer_alias_q}\n\
+                     JOIN LATERAL ({subquery_sql}) AS {sub_alias_clause} ON {join_condition_sql}",
                     outer_alias_q = quote_ident(&outer_alias),
                 ),
                 format!(
@@ -708,6 +878,8 @@ mod tests {
             is_left_join,
             subquery_source_oids,
             correlation_predicates: Vec::new(),
+            lateral_body_refs: Some(Vec::new()),
+            join_condition: None,
             child: Box::new(child),
         }
     }
@@ -732,6 +904,8 @@ mod tests {
             is_left_join,
             subquery_source_oids,
             correlation_predicates,
+            lateral_body_refs: Some(Vec::new()),
+            join_condition: None,
             child: Box::new(child),
         }
     }
@@ -1133,6 +1307,99 @@ mod tests {
         // Should still have the full CTE chain
         assert_sql_contains(&sql, "lat_sq_changed");
         assert_sql_contains(&sql, "lat_sq_final");
+    }
+
+    #[test]
+    fn test_lateral_subquery_on_groups_only_resolved_outer_refs_or_falls_back() {
+        use crate::dvm::parser::CorrelationPredicate;
+
+        let child = scan_with_pk(
+            1,
+            "orders",
+            "public",
+            "o",
+            &["id", "region", "threshold", "limit_value"],
+            &["id"],
+        );
+        let mut tree = lateral_subquery_with_corr(
+            "SELECT SUM(amount) AS total FROM line_items li WHERE li.region = o.region",
+            "x",
+            vec!["total"],
+            vec!["total"],
+            false,
+            vec![2],
+            vec![CorrelationPredicate {
+                outer_col: "region".to_string(),
+                inner_alias: "li".to_string(),
+                inner_col: "region".to_string(),
+                inner_oid: 2,
+            }],
+            child.clone(),
+        );
+        if let OpTree::LateralSubquery {
+            join_condition,
+            lateral_body_refs,
+            ..
+        } = &mut tree
+        {
+            *lateral_body_refs = Some(vec![Expr::ColumnRef {
+                table_alias: Some("o".to_string()),
+                column_name: "limit_value".to_string(),
+            }]);
+            *join_condition = Some(Expr::BinaryOp {
+                op: "<=".to_string(),
+                left: Box::new(Expr::ColumnRef {
+                    table_alias: Some("x".to_string()),
+                    column_name: "total".to_string(),
+                }),
+                right: Box::new(Expr::ColumnRef {
+                    table_alias: Some("o".to_string()),
+                    column_name: "threshold".to_string(),
+                }),
+            });
+        }
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        let result = diff_lateral_subquery(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        let group_cte = sql
+            .split("lat_sq_groups")
+            .nth(1)
+            .and_then(|tail| tail.split("lat_sq_precomp").next())
+            .expect("precompute group CTE should be generated");
+        assert!(group_cte.contains("\"o\".\"region\""));
+        assert!(group_cte.contains("\"o\".\"threshold\""));
+        assert!(group_cte.contains("\"o\".\"limit_value\""));
+        assert!(
+            !group_cte.contains("\"o\".\"id\""),
+            "the retained outer primary key must not split correlation groups"
+        );
+
+        let mut fallback_tree = lateral_subquery_with_corr(
+            "SELECT SUM(amount) AS total FROM line_items li WHERE li.region = o.region",
+            "x",
+            vec!["total"],
+            vec!["total"],
+            false,
+            vec![2],
+            vec![CorrelationPredicate {
+                outer_col: "region".to_string(),
+                inner_alias: "li".to_string(),
+                inner_col: "region".to_string(),
+                inner_oid: 2,
+            }],
+            child,
+        );
+        if let OpTree::LateralSubquery { join_condition, .. } = &mut fallback_tree {
+            *join_condition = Some(Expr::Raw("\"o\".\"threshold\" > 0".to_string()));
+        }
+        let mut fallback_ctx = test_ctx_with_st("public", "my_st");
+        let fallback_result = diff_lateral_subquery(&mut fallback_ctx, &fallback_tree).unwrap();
+        let fallback_sql = fallback_ctx.build_with_query(&fallback_result.cte_name);
+        assert!(
+            !fallback_sql.contains("lat_sq_groups"),
+            "an opaque ON expression must use the row-scoped path"
+        );
+        assert_sql_contains(&fallback_sql, "JOIN LATERAL (SELECT SUM(amount)");
     }
 
     #[test]

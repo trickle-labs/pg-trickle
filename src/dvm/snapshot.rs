@@ -262,6 +262,8 @@ mod tests {
             column_aliases: vec!["value".into()],
             declared_columns: vec![],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan(1, "items", "public", "t", &["id", "tags"])),
         };
 

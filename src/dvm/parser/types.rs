@@ -1506,6 +1506,10 @@ pub enum OpTree {
         declared_columns: Vec<Column>,
         /// Whether `WITH ORDINALITY` was specified (adds a `bigint` ordinal column).
         with_ordinality: bool,
+        /// Whether this is a LEFT JOIN LATERAL.
+        is_left_join: bool,
+        /// ON predicate for an explicit LATERAL join; `None` means TRUE.
+        join_condition: Option<Expr>,
         /// The left-hand FROM item that this function may reference (LATERAL dependency).
         child: Box<OpTree>,
     },
@@ -1531,6 +1535,8 @@ pub enum OpTree {
         /// Whether this is a LEFT JOIN LATERAL (true) or CROSS JOIN LATERAL (false).
         /// LEFT JOIN preserves outer rows even when the subquery returns no rows.
         is_left_join: bool,
+        /// ON predicate for an explicit LATERAL join; `None` means TRUE.
+        join_condition: Option<Expr>,
         /// Source table OIDs referenced by the subquery body.
         /// Needed for CDC trigger setup.
         subquery_source_oids: Vec<u32>,
@@ -1538,6 +1544,9 @@ pub enum OpTree {
         /// When available, inner-change re-execution is scoped to only outer rows
         /// that correlate with changed inner rows, reducing O(|outer|) to O(delta).
         correlation_predicates: Vec<CorrelationPredicate>,
+        /// Complete references found in supported raw body expressions;
+        /// None means the body could not be resolved safely for group precompute.
+        lateral_body_refs: Option<Vec<Expr>>,
         /// The left-hand FROM item that this subquery may reference
         /// (LATERAL dependency).
         child: Box<OpTree>,

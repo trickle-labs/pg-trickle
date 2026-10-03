@@ -449,7 +449,7 @@ async fn test_empty_partition_attach_resolves_duplicate_names_by_search_path() {
 
     db.execute("INSERT INTO public.duplicate_attach_orders VALUES (2, '2026-06-01')")
         .await;
-    db.refresh_st("duplicate_attach_st").await;
+    db.refresh_st("public.duplicate_attach_st").await;
     db.assert_st_matches_query(
         "public.duplicate_attach_st",
         "SELECT id, created_at FROM public.duplicate_attach_orders",

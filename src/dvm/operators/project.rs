@@ -1137,6 +1137,8 @@ mod tests {
                 },
             ],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan_with_pk(
                 1,
                 "records",
@@ -1194,6 +1196,8 @@ mod tests {
             column_aliases: vec!["state".into(), "normalized".into()],
             declared_columns: vec![],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan(
                 1,
                 "records",
@@ -1730,6 +1734,8 @@ mod tests {
                 is_nullable: true,
             }],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan_node),
         };
         let filt = filter(

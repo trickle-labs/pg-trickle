@@ -2056,6 +2056,8 @@ mod monotonicity_tests {
             column_aliases: vec![],
             declared_columns: vec![],
             with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
             child: Box::new(scan()),
         };
         assert!(check_monotonicity(&lateral).is_err());
@@ -2103,12 +2105,14 @@ mod monotonicity_tests {
         let lateral_result = ParseResult {
             tree: OpTree::LateralSubquery {
                 subquery_sql: "SELECT id FROM inner_t".into(),
+                lateral_body_refs: None,
                 alias: "inner".into(),
                 column_aliases: vec![],
                 output_cols: vec!["id".into()],
                 is_left_join: false,
                 subquery_source_oids: vec![42],
                 correlation_predicates: vec![],
+                join_condition: None,
                 child: Box::new(scan()),
             },
             cte_registry: CteRegistry::default(),
@@ -2127,6 +2131,7 @@ mod monotonicity_tests {
         let lateral_result = ParseResult {
             tree: OpTree::LateralSubquery {
                 subquery_sql: "SELECT x FROM inner_t i WHERE i.fk = missing.id".into(),
+                lateral_body_refs: None,
                 alias: "inner".into(),
                 column_aliases: vec![],
                 output_cols: vec!["x".into()],
@@ -2138,6 +2143,7 @@ mod monotonicity_tests {
                     inner_col: "fk".into(),
                     inner_oid: 99,
                 }],
+                join_condition: None,
                 child: Box::new(OpTree::Scan {
                     table_oid: 1,
                     table_name: "outer_t".into(),
@@ -2172,12 +2178,14 @@ mod monotonicity_tests {
         let lateral_result = ParseResult {
             tree: OpTree::LateralSubquery {
                 subquery_sql: "SELECT x FROM inner_t i".into(),
+                lateral_body_refs: None,
                 alias: "inner".into(),
                 column_aliases: vec![],
                 output_cols: vec!["x".into()],
                 is_left_join: false,
                 subquery_source_oids: vec![42],
                 correlation_predicates: vec![],
+                join_condition: None,
                 child: Box::new(OpTree::InnerJoin {
                     condition: Expr::Literal("TRUE".into()),
                     left: Box::new(scan()),
