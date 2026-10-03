@@ -10,7 +10,7 @@
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::scan::build_hash_expr;
-use crate::dvm::parser::OpTree;
+use crate::dvm::parser::{OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
 
 /// Differentiate a CteScan node.
@@ -60,13 +60,8 @@ pub fn diff_cte_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
 
     // Step 3: determine effective output columns.
     // Priority: column_aliases (FROM reference) > cte_def_aliases (CTE definition) > body columns
-    let effective_cols = if !column_aliases.is_empty() {
-        column_aliases.clone()
-    } else if !cte_def_aliases.is_empty() {
-        cte_def_aliases.clone()
-    } else {
-        base_result.columns.clone()
-    };
+    let definition_cols = apply_column_aliases(&base_result.columns, cte_def_aliases);
+    let effective_cols = apply_column_aliases(&definition_cols, column_aliases);
 
     // Hash the source expressions before their positional aliases are applied.
     // The values are identical to the CTE's visible columns, while referring
@@ -97,12 +92,18 @@ pub fn diff_cte_scan(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
         .collect();
 
     let cte_name_str = ctx.next_cte_name(&format!("ctescan_{alias}"));
-
+    let mut projections = vec![
+        format!("{row_id_expr} AS __pgt_row_id"),
+        "__pgt_action".to_string(),
+    ];
+    if base_result.has_key_changed {
+        projections.push("__pgt_key_changed".to_string());
+    }
+    projections.extend(select_exprs);
     let sql = format!(
-        "SELECT {row_id_expr} AS __pgt_row_id, __pgt_action, {cols}\n\
-         FROM {child_cte}",
-        cols = select_exprs.join(", "),
-        child_cte = base_result.cte_name,
+        "SELECT {}\nFROM {}",
+        projections.join(", "),
+        base_result.cte_name,
     );
 
     ctx.add_cte(cte_name_str.clone(), sql);
@@ -184,6 +185,32 @@ mod tests {
 
         // Should use cte_def_aliases when column_aliases is empty
         assert_eq!(result.columns, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn test_diff_cte_scan_partial_aliases_preserve_columns_and_key_changed() {
+        let body = scan_with_pk(1, "t", "public", "t", &["id", "name", "qty"], &["id"]);
+        let mut ctx = ctx_with_cte_registry(vec![("my_cte", body)]);
+        ctx.source_cdc_columns_mut()
+            .insert(1, vec!["id".into(), "name".into(), "qty".into()]);
+        ctx.source_key_columns_mut().insert(1, vec!["id".into()]);
+        let tree = cte_scan(
+            0,
+            "my_cte",
+            "mc",
+            vec!["id", "name", "qty"],
+            vec!["base_id"],
+            vec!["ref_id"],
+        );
+        let result = diff_cte_scan(&mut ctx, &tree).unwrap();
+
+        assert_eq!(result.columns, vec!["ref_id", "name", "qty"]);
+        assert!(result.has_key_changed);
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(
+            &sql,
+            "__pgt_key_changed, \"id\" AS \"ref_id\", \"name\", \"qty\"",
+        );
     }
 
     #[test]

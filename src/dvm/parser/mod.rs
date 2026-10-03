@@ -1314,6 +1314,16 @@ mod tests {
     }
 
     #[test]
+    fn test_subquery_output_columns_partial_aliases_retain_remainder() {
+        let tree = OpTree::Subquery {
+            alias: "sub".to_string(),
+            column_aliases: vec!["renamed_id".to_string()],
+            child: Box::new(scan_node("t", 1, &["id", "name", "val"])),
+        };
+        assert_eq!(tree.output_columns(), vec!["renamed_id", "name", "val"]);
+    }
+
+    #[test]
     fn test_subquery_source_oids_delegates() {
         let tree = OpTree::Subquery {
             alias: "sub".to_string(),
@@ -1741,6 +1751,20 @@ mod tests {
             body: None,
         };
         assert_eq!(node.output_columns(), vec!["c", "d"]);
+    }
+
+    #[test]
+    fn test_cte_scan_partial_definition_and_reference_aliases_retain_remainder() {
+        let node = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "x".to_string(),
+            alias: "y".to_string(),
+            columns: vec!["id".to_string(), "name".to_string(), "val".to_string()],
+            cte_def_aliases: vec!["base_id".to_string()],
+            column_aliases: vec!["ref_id".to_string()],
+            body: None,
+        };
+        assert_eq!(node.output_columns(), vec!["ref_id", "name", "val"]);
     }
 
     #[test]
@@ -2591,6 +2615,51 @@ mod tests {
             alias: "t".to_string(),
         };
         assert_eq!(tree.row_id_key_columns(), Some(vec!["id".to_string()]),);
+    }
+
+    #[test]
+    fn test_row_id_key_columns_follow_partial_cte_and_subquery_aliases() {
+        let cte = OpTree::CteScan {
+            cte_id: 0,
+            cte_name: "base".to_string(),
+            alias: "ref".to_string(),
+            columns: vec!["id".to_string(), "name".to_string(), "qty".to_string()],
+            cte_def_aliases: vec!["base_id".to_string()],
+            column_aliases: vec!["ref_id".to_string()],
+            body: None,
+        };
+        let projected = OpTree::Project {
+            expressions: vec![
+                qualified_col("ref", "ref_id"),
+                qualified_col("ref", "name"),
+                qualified_col("ref", "qty"),
+            ],
+            aliases: vec!["sid".to_string(), "name".to_string(), "qty".to_string()],
+            child: Box::new(cte),
+        };
+        let wrapped = OpTree::Subquery {
+            alias: "wrapped".to_string(),
+            column_aliases: vec!["out_id".to_string()],
+            child: Box::new(projected),
+        };
+        let tree = OpTree::Project {
+            expressions: vec![
+                qualified_col("wrapped", "out_id"),
+                qualified_col("wrapped", "name"),
+                qualified_col("wrapped", "qty"),
+            ],
+            aliases: vec!["out_id".to_string(), "name".to_string(), "qty".to_string()],
+            child: Box::new(wrapped),
+        };
+
+        assert_eq!(
+            tree.row_id_key_columns(),
+            Some(vec![
+                "out_id".to_string(),
+                "name".to_string(),
+                "qty".to_string()
+            ]),
+        );
     }
 
     #[test]

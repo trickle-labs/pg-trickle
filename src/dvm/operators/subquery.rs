@@ -11,7 +11,7 @@
 //! - Explicit subqueries: `SELECT ... FROM (SELECT ...) AS x(c1, c2)`
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
-use crate::dvm::parser::OpTree;
+use crate::dvm::parser::{OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
 
 /// Differentiate a Subquery node.
@@ -41,10 +41,11 @@ pub fn diff_subquery(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
 
     // Column aliases present — generate a renaming CTE.
     // Map child output columns → alias names.
-    let child_cols = &child_result.columns;
-    let rename_exprs: Vec<String> = child_cols
+    let output_columns = apply_column_aliases(&child_result.columns, column_aliases);
+    let rename_exprs: Vec<String> = child_result
+        .columns
         .iter()
-        .zip(column_aliases.iter())
+        .zip(&output_columns)
         .map(|(src, dst)| {
             let src_ident = quote_ident(src);
             let dst_ident = quote_ident(dst);
@@ -57,20 +58,23 @@ pub fn diff_subquery(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, P
         .collect();
 
     let cte_name = ctx.next_cte_name(&format!("subq_{alias}"));
-
+    let mut projections = vec!["__pgt_row_id".to_string(), "__pgt_action".to_string()];
+    if child_result.has_key_changed {
+        projections.push("__pgt_key_changed".to_string());
+    }
+    projections.extend(rename_exprs);
     let sql = format!(
-        "SELECT __pgt_row_id, __pgt_action, {cols}\n\
-         FROM {child_cte}",
-        cols = rename_exprs.join(", "),
-        child_cte = child_result.cte_name,
+        "SELECT {}\nFROM {}",
+        projections.join(", "),
+        child_result.cte_name,
     );
 
     ctx.add_cte(cte_name.clone(), sql);
 
     Ok(DiffResult {
         cte_name,
-        columns: column_aliases.clone(),
-        schema: child_result.schema.renamed(column_aliases),
+        columns: output_columns.clone(),
+        schema: child_result.schema.renamed(&output_columns),
         is_deduplicated: child_result.is_deduplicated,
         has_key_changed: child_result.has_key_changed,
     })
@@ -103,6 +107,25 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         assert_sql_contains(&sql, "\"id\" AS \"a\"");
         assert_sql_contains(&sql, "\"name\" AS \"b\"");
+    }
+
+    #[test]
+    fn test_diff_subquery_partial_alias_preserves_columns_and_key_changed() {
+        let mut ctx = test_ctx();
+        ctx.source_cdc_columns_mut()
+            .insert(1, vec!["id".into(), "name".into(), "qty".into()]);
+        ctx.source_key_columns_mut().insert(1, vec!["id".into()]);
+        let child = scan_with_pk(1, "t", "public", "t", &["id", "name", "qty"], &["id"]);
+        let tree = subquery("sq", vec!["renamed_id"], child);
+        let result = diff_subquery(&mut ctx, &tree).unwrap();
+
+        assert_eq!(result.columns, vec!["renamed_id", "name", "qty"]);
+        assert!(result.has_key_changed);
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(
+            &sql,
+            "__pgt_action, __pgt_key_changed, \"id\" AS \"renamed_id\", \"name\", \"qty\"",
+        );
     }
 
     #[test]

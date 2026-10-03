@@ -14,7 +14,7 @@ use crate::dvm::operators::join_common::{
     build_snapshot_inline_from, build_snapshot_sql, snapshot_join_column_name,
 };
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
-use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree};
+use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
 
 /// Resolve a column reference expression against child CTE column names.
@@ -335,19 +335,14 @@ fn child_to_from_sql(
             let (_, body) = registry.get(*cte_id)?;
             let inner = child_to_from_sql(body, registry, project_scan_columns)?;
             let source_cols = body.output_columns();
-            let output_cols = if !column_aliases.is_empty() {
-                column_aliases
-            } else if !cte_def_aliases.is_empty() {
-                cte_def_aliases
-            } else {
-                &source_cols
-            };
+            let definition_cols = apply_column_aliases(&source_cols, cte_def_aliases);
+            let output_cols = apply_column_aliases(&definition_cols, column_aliases);
             if source_cols.len() != output_cols.len() {
                 return None;
             }
             let selects = source_cols
                 .iter()
-                .zip(output_cols)
+                .zip(&output_cols)
                 .map(|(source, output)| {
                     if source == output {
                         quote_ident(source)
