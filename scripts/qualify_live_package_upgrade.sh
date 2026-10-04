@@ -148,10 +148,31 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    [[ "$FROM_VERSION" == "0.106.1" && "$TO_VERSION" == "0.108.1" ]]
-    test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
-    test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
-    test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
+    [[ "$FROM_VERSION" == "0.106.1" ]] || {
+        echo "no qualified upgrade path from v${FROM_VERSION} to v${TO_VERSION}" >&2
+        exit 1
+    }
+    case "$TO_VERSION" in
+        0.108.0)
+            upgrade_steps=(0.106.1--0.107.0 0.107.0--0.108.0)
+            ;;
+        0.108.1)
+            upgrade_steps=(0.106.1--0.107.0 0.107.0--0.108.0 0.108.0--0.108.1)
+            ;;
+        0.108.2)
+            upgrade_steps=(0.106.1--0.107.0 0.107.0--0.108.0 0.108.0--0.108.1 0.108.1--0.108.2)
+            ;;
+        *)
+            echo "no qualified upgrade path from v${FROM_VERSION} to v${TO_VERSION}" >&2
+            exit 1
+            ;;
+    esac
+    for step in "${upgrade_steps[@]}"; do
+        [[ -f "$UPGRADE_DIR/pg_trickle--${step}.sql" ]] || {
+            echo "candidate package is missing upgrade step ${step}" >&2
+            exit 1
+        }
+    done
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
 docker cp "$CANDIDATE_DIR/usr/share/postgresql/18/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"
