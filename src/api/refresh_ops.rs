@@ -129,6 +129,10 @@ fn e2e_caught_error_message(cause: &pgrx::pg_sys::panic::CaughtError) -> String 
     }
 }
 
+fn execute_caller_sql(sql: &str) -> Result<(), PgTrickleError> {
+    Spi::run(sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
 /// UX-5: Execute an arbitrary SQL statement (typically DML against a source
 /// table) and then immediately refresh the named stream table, all within the
 /// caller's transaction context.
@@ -143,10 +147,6 @@ fn e2e_caught_error_message(cause: &pgrx::pg_sys::panic::CaughtError) -> String 
 /// refresh completes after seeing the writes from `sql`. A concurrent refresh
 /// causes the call to fail, so the caller's write is not committed as a false
 /// success.
-fn execute_caller_sql(sql: &str) -> Result<(), PgTrickleError> {
-    Spi::run(sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
-}
-
 #[pg_extern(schema = "pgtrickle", security_definer)]
 #[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn write_and_refresh(sql: &str, stream_table_name: &str) {
