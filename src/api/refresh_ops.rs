@@ -129,6 +129,10 @@ fn e2e_caught_error_message(cause: &pgrx::pg_sys::panic::CaughtError) -> String 
     }
 }
 
+fn execute_caller_sql(sql: &str) -> Result<(), PgTrickleError> {
+    Spi::run(sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
 /// UX-5: Execute an arbitrary SQL statement (typically DML against a source
 /// table) and then immediately refresh the named stream table, all within the
 /// caller's transaction context.
@@ -143,19 +147,28 @@ fn e2e_caught_error_message(cause: &pgrx::pg_sys::panic::CaughtError) -> String 
 /// refresh completes after seeing the writes from `sql`. A concurrent refresh
 /// causes the call to fail, so the caller's write is not committed as a false
 /// success.
-#[pg_extern(schema = "pgtrickle")]
+#[pg_extern(schema = "pgtrickle", security_definer)]
+#[search_path(pgtrickle, pg_catalog, pg_temp)]
 fn write_and_refresh(sql: &str, stream_table_name: &str) {
-    // Execute the user-supplied SQL.
-    if let Err(e) = Spi::run(sql) {
-        pgrx::error!("write_and_refresh: user SQL failed: {}", e,);
+    let caller = match security_context::capture_caller_context(
+        security_context::EntryContext::SecurityDefiner,
+    ) {
+        Ok(caller) => caller,
+        Err(error) => raise_error_with_context(error),
+    };
+    // Run caller-controlled SQL with the captured role, search_path, and RLS
+    // state; the definer context is used only for private refresh catalogs.
+    let write = security_context::with_caller_context(&caller, || execute_caller_sql(sql));
+    if let Err(error) = write {
+        pgrx::error!("write_and_refresh: user SQL failed: {}", error);
     }
-    // Refresh the stream table.
-    let result = refresh_stream_table_impl(
+    // Preserve write_and_refresh's hard failure on skipped refreshes so its
+    // transaction rolls back caller SQL when a concurrent refresh owns the lock.
+    if let Err(error) = refresh_stream_table_impl(
         stream_table_name,
-        security_context::EntryContext::SecurityInvoker,
-    );
-    if let Err(e) = result {
-        raise_error_with_context(e);
+        security_context::EntryContext::SecurityDefiner,
+    ) {
+        raise_error_with_context(error);
     }
 }
 
@@ -184,7 +197,7 @@ fn refresh_stream_table_impl(
         ));
     }
 
-    let (schema, table_name, st) = resolve_owned_stream_table(name, entry_context)?;
+    let (schema, table_name, st) = resolve_refreshable_stream_table(name, entry_context)?;
 
     if st.orchestration_mode.eq_ignore_ascii_case("EXTERNAL") {
         return Err(PgTrickleError::IntegrationError {

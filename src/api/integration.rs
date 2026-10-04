@@ -244,16 +244,11 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 }
 
 fn authorize_graph_member(info: &RelationInfo) -> Result<(), PgTrickleError> {
-    if crate::api::helpers::role_owns_relation_or_is_superuser(
+    crate::api::helpers::authorize_stream_table_refresh(
         crate::api::helpers::outer_user_id(),
         info.oid,
-    )? {
-        Ok(())
-    } else {
-        Err(PgTrickleError::PermissionDenied(
-            "owner-equivalent authority is required for every graph member".to_string(),
-        ))
-    }
+        &relation_label(info),
+    )
 }
 
 fn authorize_graph_source(info: &RelationInfo) -> Result<(), PgTrickleError> {
@@ -949,7 +944,11 @@ pub fn refresh_graph_strict(
                 integration_error("PGT_EXT_GRAPH_INVALID", "graph member identity is invalid")
             })? as u32;
             let meta = StreamTableMeta::get_by_relid(pg_sys::Oid::from(relid))?;
-            super::check_stream_table_ownership(meta.pgt_relid, &meta.pgt_schema, &meta.pgt_name)?;
+            crate::api::helpers::authorize_stream_table_refresh(
+                crate::api::helpers::outer_user_id(),
+                pg_sys::Oid::from(relid),
+                &format!("{}.{}", meta.pgt_schema, meta.pgt_name),
+            )?;
             member_ids.push((relid, meta));
         }
         let mut lock_ids = member_ids
