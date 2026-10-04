@@ -1585,6 +1585,20 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 - If another refresh owns the lock, returns without refreshing and emits a NOTICE.
 - For `DIFFERENTIAL` mode, generates and applies a delta query. For `FULL` mode, truncates and reloads.
 - Records the refresh in `pgtrickle.pgt_refresh_history` with `initiated_by = 'MANUAL'`.
+- The caller must own the stream table, have owner-equivalent authority, or
+  have PostgreSQL `MAINTAIN` on that exact stream-table relation. This
+  refresh-specific grant also admits Graph V1 member inspection and strict
+  refresh for each exact member; Graph V1's base-table source privileges are
+  still checked separately. It does not grant pg_trickle lifecycle authority.
+- PostgreSQL `MAINTAIN` is broader than pg_trickle refresh admission: it also
+  permits native `VACUUM`, `ANALYZE`, `CLUSTER`, `REINDEX`, and `LOCK TABLE`
+  operations on the relation, and satisfies PostgreSQL's `MAINTAIN`
+  prerequisite for `REFRESH MATERIALIZED VIEW` on materialized views.
+  PostgreSQL defines that privilege breadth, and pg_trickle cannot narrow it.
+  Grant it only to a trusted, dedicated maintenance worker. See PostgreSQL 18's
+  [REFRESH MATERIALIZED VIEW](https://www.postgresql.org/docs/18/sql-refreshmaterializedview.html)
+  and [predefined roles](https://www.postgresql.org/docs/18/predefined-roles.html#PREDEFINED-ROLES)
+  documentation.
 
 ---
 
@@ -1607,8 +1621,18 @@ SELECT pgtrickle.write_and_refresh(
 The refresh sees the caller's writes when it runs. If another refresh owns the
 lock, the function raises an error and the caller's write is rolled back; a
 successful return therefore means the refresh completed. Other SQL or refresh
-errors also abort the transaction. The caller must have the required source
-privileges and permission to refresh the stream table.
+errors also abort the transaction. The caller must have the required
+privileges for the supplied SQL. To admit the stored-query refresh, the caller
+must own the exact stream table, have owner-equivalent authority, or have
+PostgreSQL `MAINTAIN` on that relation. The stored defining query continues to
+execute as the stream-table owner under its captured `search_path` and RLS
+behavior; the worker does not need `SELECT` on that source solely for this
+refresh. PostgreSQL `MAINTAIN` also permits native `VACUUM`, `ANALYZE`,
+`CLUSTER`, `REINDEX`, and `LOCK TABLE` operations on the relation, and satisfies
+the privilege prerequisite for `REFRESH MATERIALIZED VIEW` on materialized
+views. See PostgreSQL 18's [REFRESH MATERIALIZED VIEW](https://www.postgresql.org/docs/18/sql-refreshmaterializedview.html)
+and [predefined roles](https://www.postgresql.org/docs/18/predefined-roles.html#PREDEFINED-ROLES)
+documentation.
 
 ---
 
@@ -1725,7 +1749,8 @@ Return the stream table's contract generation, SHA-256 digest, and JSON
 projection. The digest includes query rewrite identity, output schema,
 dependencies, source identity, ownership, RLS flags, search path, row identity
 versions, DVM format, and database instance identity. The caller must have
-owner-equivalent authority over the stream table. For each base-table source,
+owner-equivalent authority or PostgreSQL `MAINTAIN` on the exact stream-table
+relation. For each base-table source,
 the caller must either have owner-equivalent authority or have schema `USAGE`
 and the table privileges `SELECT` and `MAINTAIN`.
 
@@ -1748,7 +1773,10 @@ GRANT USAGE ON SCHEMA app TO graph_coordinator;
 GRANT SELECT, MAINTAIN ON TABLE app.orders TO graph_coordinator;
 ```
 
-Graph members still require owner-equivalent authority.
+For each graph member, callers need owner-equivalent authority or `MAINTAIN` on
+that exact member. Graph V1's separate base-table source authorization is
+unchanged. Revoking a member's `MAINTAIN` grant causes subsequent contract and
+strict refresh calls to fail closed.
 
 ```sql
 SELECT *
@@ -1770,7 +1798,8 @@ SELECT * FROM pgtrickle.refresh_graph_strict(
 ```
 
 The expected digest is mandatory. The function rejects stale contracts,
-unsupported members, authorization failures, and busy or changed catalog state
+unsupported members, authorization failures (including missing exact-member
+`MAINTAIN`), and busy or changed catalog state
 before executing any member. It does not commit. Revoking a required source
 grant causes subsequent contract and refresh calls to fail closed.
 

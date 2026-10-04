@@ -682,6 +682,32 @@ pub(crate) fn role_owns_relation_or_is_superuser(
     .map(|value| value.unwrap_or(false))
 }
 
+/// Authorize a refresh-specific owner-equivalent caller or a caller with
+/// MAINTAIN on this exact stream-table relation.
+pub(crate) fn authorize_stream_table_refresh(
+    caller_oid: pgrx::pg_sys::Oid,
+    relid: pgrx::pg_sys::Oid,
+    identity: &str,
+) -> Result<(), PgTrickleError> {
+    if role_owns_relation_or_is_superuser(caller_oid, relid)? {
+        return Ok(());
+    }
+
+    let has_maintain = Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.has_table_privilege($1, $2, 'MAINTAIN')",
+        &[caller_oid.into(), relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+    if has_maintain {
+        Ok(())
+    } else {
+        Err(PgTrickleError::PermissionDenied(format!(
+            "must own stream table {identity} or have MAINTAIN on that exact relation"
+        )))
+    }
+}
+
 /// SEC-1: Check that the outer invoker owns the stream table's storage table.
 ///
 /// Uses the current `pg_class` row for the stored schema/name rather than the
@@ -744,6 +770,27 @@ pub(super) fn resolve_owned_stream_table_with_caller(
     let (schema, table_name) = resolve_qualified_name_as_caller(name, &caller.search_path)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     check_stream_table_ownership_for(caller.role_oid, st.pgt_relid, &schema, &table_name)?;
+    Ok((schema, table_name, st))
+}
+
+/// Resolve a manual-refresh target with the caller's path and the narrow
+/// owner-equivalent-or-MAINTAIN authorization used by refresh entry points.
+pub(super) fn resolve_refreshable_stream_table(
+    name: &str,
+    entry_context: security_context::EntryContext,
+) -> Result<(String, String, StreamTableMeta), PgTrickleError> {
+    let caller = security_context::capture_caller_context(entry_context)?;
+    let (schema, table_name) = resolve_qualified_name_as_caller(name, &caller.search_path)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    let relid = Spi::get_one_with_args::<pg_sys::Oid>(
+        "SELECT c.oid FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2",
+        &[schema.as_str().into(), table_name.as_str().into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .ok_or_else(|| PgTrickleError::NotFound(format!("stream table {schema}.{table_name}")))?;
+    authorize_stream_table_refresh(caller.role_oid, relid, &format!("{schema}.{table_name}"))?;
     Ok((schema, table_name, st))
 }
 
