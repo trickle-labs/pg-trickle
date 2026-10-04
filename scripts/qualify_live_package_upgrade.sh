@@ -135,7 +135,7 @@ STREAM_STATE_BEFORE="$(psql "SELECT pgt_id || ':' || status || ':' || orchestrat
 DEPENDENCIES_BEFORE="$(psql "SELECT count(*) FROM pgtrickle.pgt_dependencies \
     WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
                     WHERE pgt_name = 'v106_upgrade_st')")"
-CURSOR_BEFORE="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
+CURSOR_BEFORE="$(psql "SELECT acknowledged_batch_token::text FROM \
     pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '${CONSUMER_ID}'::uuid")"
 BATCHES_BEFORE="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' \
     ORDER BY batch_token), '')) FROM pgtrickle.pgt_output_delta_batches b \
@@ -209,6 +209,13 @@ UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg
 psql 'SELECT pgtrickle.resume_all()' >/dev/null
 CAPTURE_STATE="$(psql 'SELECT state FROM pgtrickle.pgt_capture_instance WHERE singleton')"
 [[ "$CAPTURE_STATE" == "ACTIVE" ]] || { echo "capture did not resume after update" >&2; exit 1; }
+CONSUMER_STATES_AFTER="$(psql "SELECT string_agg(state, ',' ORDER BY state) \
+    FROM pgtrickle.pgt_output_delta_consumers \
+    WHERE consumer_id IN ('${CONSUMER_ID}'::uuid, '${FENCED_CONSUMER_ID}'::uuid)")"
+[[ "$CONSUMER_STATES_AFTER" == "RESNAPSHOT_REQUIRED,RESNAPSHOT_REQUIRED" ]] || {
+    echo "row identity upgrade did not require fresh output-delta baselines" >&2
+    exit 1
+}
 
 PENDING_AFTER="$(psql "SELECT count(*) FROM ${BUFFER}")"
 GRAPH_AFTER="$(psql "SELECT encode(graph_digest, 'hex') FROM \
@@ -218,7 +225,7 @@ STREAM_STATE_AFTER="$(psql "SELECT pgt_id || ':' || status || ':' || orchestrati
 DEPENDENCIES_AFTER="$(psql "SELECT count(*) FROM pgtrickle.pgt_dependencies \
     WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
                     WHERE pgt_name = 'v106_upgrade_st')")"
-CURSOR_AFTER="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
+CURSOR_AFTER="$(psql "SELECT acknowledged_batch_token::text FROM \
     pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '${CONSUMER_ID}'::uuid")"
 BATCHES_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' \
     ORDER BY batch_token), '')) FROM pgtrickle.pgt_output_delta_batches b \
@@ -227,19 +234,38 @@ BATCHES_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' 
 PAYLOAD_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(p)::text, '|' \
     ORDER BY batch_token, ordinal), '')) FROM ${DELTA_RELATION} p")"
 [[ "$PENDING_AFTER" == "$PENDING_BEFORE" ]] || { echo "pending CDC rows changed across upgrade" >&2; exit 1; }
-[[ "$GRAPH_AFTER" == "$GRAPH_BEFORE" ]] || { echo "graph binding changed across upgrade" >&2; exit 1; }
+[[ "$GRAPH_AFTER" != "$GRAPH_BEFORE" ]] || { echo "row identity upgrade did not invalidate the graph contract" >&2; exit 1; }
 [[ "$STREAM_STATE_AFTER" == "$STREAM_STATE_BEFORE" ]] || { echo "stream publication state changed across upgrade" >&2; exit 1; }
 [[ "$DEPENDENCIES_AFTER" == "$DEPENDENCIES_BEFORE" ]] || { echo "graph dependencies changed across upgrade" >&2; exit 1; }
 [[ "$CURSOR_AFTER" == "$CURSOR_BEFORE" ]] || { echo "consumer cursor changed across upgrade" >&2; exit 1; }
 [[ "$BATCHES_AFTER" == "$BATCHES_BEFORE" ]] || { echo "output batches changed across upgrade" >&2; exit 1; }
 [[ "$PAYLOAD_AFTER" == "$PAYLOAD_BEFORE" ]] || { echo "typed output payload changed across upgrade" >&2; exit 1; }
-psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
-    '${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid);" | grep -qx ACTIVE
 
+# An upgrade invalidates pre-upgrade snapshot fences. Rebuild the stream table
+# with V3 identities before issuing new snapshots to either preserved consumer.
+STALE_ACK="$(psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
+    '${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid)" 2>&1 || true)"
+[[ "$STALE_ACK" == *"PGT_EXT_TOKEN_INVALID"* ]] || {
+    echo "pre-upgrade output-delta resnapshot token remained valid" >&2
+    exit 1
+}
 refresh_graph
 psql "SELECT NOT EXISTS ( \
     (SELECT id, value FROM public.v106_upgrade_st EXCEPT ALL \
      SELECT id, value FROM public.v106_upgrade_source) UNION ALL \
     (SELECT id, value FROM public.v106_upgrade_source EXCEPT ALL \
      SELECT id, value FROM public.v106_upgrade_st))" | grep -qx t
-echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION} with pending changes, graph bindings, publication state, and consumer cursor preserved."
+for consumer_id in "$CONSUMER_ID" "$FENCED_CONSUMER_ID"; do
+    RESNAPSHOT_TOKEN="$(psql "SELECT resnapshot_token FROM \
+        pgtrickle.begin_output_delta_resnapshot('${consumer_id}'::uuid)")"
+    [[ -n "$RESNAPSHOT_TOKEN" ]] || { echo "resnapshot token was not created" >&2; exit 1; }
+    psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
+        '${consumer_id}'::uuid, '${RESNAPSHOT_TOKEN}'::uuid);" | grep -qx ACTIVE
+done
+refresh_graph
+psql "SELECT NOT EXISTS ( \
+    (SELECT id, value FROM public.v106_upgrade_st EXCEPT ALL \
+     SELECT id, value FROM public.v106_upgrade_source) UNION ALL \
+    (SELECT id, value FROM public.v106_upgrade_source EXCEPT ALL \
+     SELECT id, value FROM public.v106_upgrade_st))" | grep -qx t
+echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION}; pending changes and consumer data were preserved, then both consumers completed fresh V3 snapshots."

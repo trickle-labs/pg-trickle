@@ -15,7 +15,12 @@ equality while leaving V2 bytes unchanged. Existing stream tables are marked
 for reinitialization. Run a protected FULL refresh for each stale stream table;
 differential maintenance stays blocked until that succeeds. A failed FULL
 rebuild leaves the stream marked stale. The migration retains queued CDC rows
-and replaces only each buffer's synthetic sentinel.
+and replaces only each buffer's synthetic sentinel. Existing output-delta
+consumers and their durable batches are retained, marked `RESNAPSHOT_REQUIRED`,
+and their old snapshot tokens are invalidated. After the protected FULL refresh,
+each consumer must take and acknowledge a fresh baseline before resuming deltas.
+The graph-contract digest also changes; external refresh clients should fetch
+the new digest before requesting refreshes.
 
 ## 0.108.0 to 0.108.1
 

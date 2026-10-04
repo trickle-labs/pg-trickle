@@ -304,7 +304,7 @@
         "0.106.1",
         "0.108.2"
       ],
-      "workload": "pg-mdm-pinned v0.106.1 package upgraded through v0.108.1 and v0.108.2 with consumers, cursors, batches, payload, and pending changes preserved"
+      "workload": "pg-mdm-pinned v0.106.1 package upgraded through v0.108.1 and v0.108.2 with pending changes and consumer data preserved, old snapshot tokens invalidated, and fresh V3 baselines acknowledged"
     },
     {
       "id": "recreation",
