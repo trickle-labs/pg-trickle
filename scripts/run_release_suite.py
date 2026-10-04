@@ -235,6 +235,8 @@ def main() -> int:
                     "PGT_RELEASE_NEXTEST_RETRIES": str(suite.get("nextest_retries", 2)),
                 }
             )
+            if suite["id"] == "criterion-regression":
+                environment["PGS_RELEASE_QUALIFICATION"] = str(args.qualification.resolve())
             if suite.get("e2e_image"):
                 environment["PGS_E2E_IMAGE"] = suite["e2e_image"]
             measurement_path = None

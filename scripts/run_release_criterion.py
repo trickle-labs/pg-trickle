@@ -14,10 +14,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_TAG = "v0.108.0"
-BASELINE_VERSION = BASELINE_TAG.removeprefix("v")
-QUALIFICATION = ROOT / "tests/release/v0.108.1-qualification.json"
 MAX_COMPARISON_ATTEMPTS = 2
+
+
+def criterion_baseline(contract: dict[str, object]) -> str:
+    budget = next(
+        item for item in contract["performance_budgets"] if item["id"] == "criterion-regression"
+    )
+    baseline = budget.get("baseline_version")
+    if not isinstance(baseline, str) or baseline not in contract.get("source_versions", []):
+        raise ValueError("criterion baseline must be a declared source version")
+    return baseline
 
 
 def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -27,12 +34,15 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> 
 
 def main() -> int:
     measurement = Path(os.environ["PGS_RELEASE_MEASUREMENT_JSON"])
+    qualification = Path(os.environ["PGS_RELEASE_QUALIFICATION"])
     raw_dir = measurement.parent / "criterion-raw"
     baseline_snapshot = raw_dir / "baseline"
     target_criterion = ROOT / "target/criterion"
     env = os.environ.copy()
     env["BENCH_QUICK"] = "1"
-    contract = json.loads(QUALIFICATION.read_text(encoding="utf-8"))
+    contract = json.loads(qualification.read_text(encoding="utf-8"))
+    baseline_version = criterion_baseline(contract)
+    baseline_tag = f"v{baseline_version}"
     criterion_budget = next(
         item for item in contract["performance_budgets"] if item["id"] == "criterion-regression"
     )
@@ -63,7 +73,7 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory(prefix="pgtrickle-v01060-baseline-") as temp_name:
             worktree = Path(temp_name) / "baseline"
-            run(["git", "worktree", "add", "--detach", str(worktree), BASELINE_TAG], cwd=ROOT)
+            run(["git", "worktree", "add", "--detach", str(worktree), baseline_tag], cwd=ROOT)
             try:
                 run(
                     [
@@ -71,7 +81,7 @@ def main() -> int:
                         "scripts/run_benchmarks.sh",
                         "--",
                         "--save-baseline",
-                        BASELINE_VERSION,
+                        baseline_version,
                     ],
                     cwd=worktree,
                     env=env,
@@ -80,7 +90,7 @@ def main() -> int:
                 if not source.is_dir():
                     raise RuntimeError("baseline Criterion run produced no raw estimates")
                 shutil.copytree(source, baseline_snapshot, dirs_exist_ok=True)
-                for baseline in source.rglob(BASELINE_VERSION):
+                for baseline in source.rglob(baseline_version):
                     if baseline.is_dir():
                         destination = target_criterion / baseline.relative_to(source)
                         shutil.copytree(baseline, destination, dirs_exist_ok=True)
@@ -100,7 +110,7 @@ def main() -> int:
                         "scripts/run_benchmarks.sh",
                         "--",
                         "--baseline",
-                        BASELINE_VERSION,
+                        baseline_version,
                     ],
                     cwd=ROOT,
                     env=env,
@@ -120,7 +130,7 @@ def main() -> int:
                         "--minimum-delta-ns",
                         str(criterion_budget["minimum_absolute_delta_ns"]),
                         "--baseline",
-                        BASELINE_VERSION,
+                        baseline_version,
                         "--require-pairs",
                         "--dir",
                         str(target_criterion),

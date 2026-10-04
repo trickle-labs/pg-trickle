@@ -133,6 +133,22 @@ def check_support_contract() -> None:
         (ROOT / "tests/release/v0.108.2-qualification.json").read_text(encoding="utf-8")
     )
     shared.require(qualification.get("contract_version") == 3, "release qualification contract is not evidence-complete")
+    criterion_budget = next(
+        item for item in qualification["performance_budgets"] if item["id"] == "criterion-regression"
+    )
+    shared.require(
+        criterion_budget.get("baseline_version") == shared.PREVIOUS_VERSION,
+        "Criterion regression must compare against the previous published release",
+    )
+    criterion_runner = (ROOT / "scripts/run_release_criterion.py").read_text(encoding="utf-8")
+    suite_runner = (ROOT / "scripts/run_release_suite.py").read_text(encoding="utf-8")
+    evidence_writer = (ROOT / "scripts/release_evidence.py").read_text(encoding="utf-8")
+    shared.require(
+        "PGS_RELEASE_QUALIFICATION" in criterion_runner
+        and "PGS_RELEASE_QUALIFICATION" in suite_runner
+        and 'spec.get("baseline_version")' in evidence_writer,
+        "Criterion measurement and evidence validation must use the qualification baseline",
+    )
     shared.require(qualification.get("build_kind") == "exact-release", "qualification does not require exact release builds")
     shared.require(qualification.get("feature_scope") == "default-release", "qualification feature scope drifted")
     shared.require(qualification.get("candidate_identity", {}).get("required") is True, "candidate identity is optional")
@@ -275,7 +291,13 @@ def main() -> None:
             f"instrumented ASan cases missing or not passed: {missing}",
         )
     subprocess.run(
-        [sys.executable, "-m", "unittest", "scripts.test_release_evidence"],
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "scripts.test_release_evidence",
+            "scripts.test_run_release_criterion",
+        ],
         cwd=ROOT,
         check=True,
     )

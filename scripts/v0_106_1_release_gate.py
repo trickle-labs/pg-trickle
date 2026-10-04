@@ -105,7 +105,7 @@ def synthetic_contract() -> dict[str, object]:
             },
         }],
         "performance_budgets": [
-            {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "minimum_absolute_delta_ns": 250, "unit": "percent"},
+            {"id": "criterion-regression", "metric": "maximum_mean_regression_pct", "threshold": 10, "minimum_absolute_delta_ns": 250, "baseline_version": PREVIOUS_VERSION, "unit": "percent"},
             {"id": "foreground-write-overhead", "metric": "source_write_p50_overhead_pct", "threshold": 15, "unit": "percent"},
         ],
     }

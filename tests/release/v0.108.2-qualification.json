@@ -454,7 +454,7 @@
         "scripts/run_release_criterion.py"
       ],
       "measurement_file": "qualification-logs/raw/criterion.json",
-      "workload": "same-runner v0.108.0 and candidate Criterion microbenchmarks"
+      "workload": "same-runner v0.108.1 and candidate Criterion microbenchmarks"
     },
     {
       "id": "database-workloads",
@@ -837,6 +837,7 @@
       "metric": "maximum_mean_regression_pct",
       "threshold": 10.0,
       "minimum_absolute_delta_ns": 250.0,
+      "baseline_version": "0.108.1",
       "unit": "percent",
       "comparison": "max"
     },
