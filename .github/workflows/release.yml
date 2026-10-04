@@ -590,7 +590,7 @@ jobs:
           for result in qualification-logs/results/*.json; do
             [[ -f "$result" ]] && suite_args+=(--suite-result "$result")
           done
-          QUALIFICATION="tests/release/${GITHUB_REF_NAME#v}-qualification.json"
+          QUALIFICATION="tests/release/v${GITHUB_REF_NAME#v}-qualification.json"
           python3 scripts/release_evidence.py \
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
