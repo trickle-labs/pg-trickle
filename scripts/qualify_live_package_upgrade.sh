@@ -148,10 +148,13 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    [[ "$FROM_VERSION" == "0.106.1" && "$TO_VERSION" == "0.108.1" ]]
+    [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$TO_VERSION" == "0.108.3" ) ]]
     test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
+    if [[ "$TO_VERSION" == "0.108.3" ]]; then
+        test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
+    fi
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
 docker cp "$CANDIDATE_DIR/usr/share/postgresql/18/extension/." "$CONTAINER_ID:/usr/share/postgresql/18/extension/"
@@ -178,6 +181,23 @@ if [[ -n "${PGT_RELEASE_ATTESTATION_PATH:-}" ]]; then
         --container "$CONTAINER_ID" \
         --candidate-root "$CANDIDATE_DIR" \
         --output "$PGT_RELEASE_ATTESTATION_PATH"
+fi
+if [[ "$TO_VERSION" == "0.108.3" ]]; then
+    psql "ALTER EXTENSION pg_trickle UPDATE TO '0.108.1'" >/dev/null
+    if psql "ALTER EXTENSION pg_trickle UPDATE TO '${TO_VERSION}'" >"$WORK_DIR/blocked-upgrade.log" 2>&1; then
+        echo "identity migration accepted an active consumer" >&2
+        exit 1
+    fi
+    if ! grep -q 'PGT_EXT_CONSUMER_BLOCKED' "$WORK_DIR/blocked-upgrade.log"; then
+        cat "$WORK_DIR/blocked-upgrade.log" >&2
+        echo "identity migration failed without the expected active-consumer block" >&2
+        exit 1
+    fi
+    [[ "$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")" == "0.108.1" ]]
+    psql "SELECT state FROM pgtrickle.request_output_delta_resnapshot('${CONSUMER_ID}'::uuid)" | grep -qx RESNAPSHOT_REQUIRED
+    psql "SELECT state FROM pgtrickle.request_output_delta_resnapshot('${FENCED_CONSUMER_ID}'::uuid)" | grep -qx INVALIDATED
+    CURSOR_BEFORE="$(psql "SELECT state || ':' || acknowledged_batch_token FROM \
+        pgtrickle.pgt_output_delta_consumers WHERE consumer_id = '${CONSUMER_ID}'::uuid")"
 fi
 psql "ALTER EXTENSION pg_trickle UPDATE TO '${TO_VERSION}'" >/dev/null
 UPDATED_VERSION="$(psql "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")"
@@ -206,19 +226,40 @@ BATCHES_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' 
 PAYLOAD_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(p)::text, '|' \
     ORDER BY batch_token, ordinal), '')) FROM ${DELTA_RELATION} p")"
 [[ "$PENDING_AFTER" == "$PENDING_BEFORE" ]] || { echo "pending CDC rows changed across upgrade" >&2; exit 1; }
-[[ "$GRAPH_AFTER" == "$GRAPH_BEFORE" ]] || { echo "graph binding changed across upgrade" >&2; exit 1; }
+if [[ "$TO_VERSION" == "0.108.3" ]]; then
+    [[ "$GRAPH_AFTER" != "$GRAPH_BEFORE" ]] || { echo "identity migration did not invalidate graph binding" >&2; exit 1; }
+    psql "SELECT row_identity_version IS NULL AND needs_reinit FROM pgtrickle.pgt_stream_tables \
+        WHERE pgt_name = 'v106_upgrade_st'" | grep -qx t
+else
+    [[ "$GRAPH_AFTER" == "$GRAPH_BEFORE" ]] || { echo "graph binding changed across upgrade" >&2; exit 1; }
+fi
 [[ "$STREAM_STATE_AFTER" == "$STREAM_STATE_BEFORE" ]] || { echo "stream publication state changed across upgrade" >&2; exit 1; }
 [[ "$DEPENDENCIES_AFTER" == "$DEPENDENCIES_BEFORE" ]] || { echo "graph dependencies changed across upgrade" >&2; exit 1; }
 [[ "$CURSOR_AFTER" == "$CURSOR_BEFORE" ]] || { echo "consumer cursor changed across upgrade" >&2; exit 1; }
 [[ "$BATCHES_AFTER" == "$BATCHES_BEFORE" ]] || { echo "output batches changed across upgrade" >&2; exit 1; }
 [[ "$PAYLOAD_AFTER" == "$PAYLOAD_BEFORE" ]] || { echo "typed output payload changed across upgrade" >&2; exit 1; }
-psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
-    '${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid);" | grep -qx ACTIVE
+if [[ "$TO_VERSION" != "0.108.3" ]]; then
+    psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
+        '${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid);" | grep -qx ACTIVE
+fi
 
 refresh_graph
+if [[ "$TO_VERSION" == "0.108.3" ]]; then
+    psql "SELECT row_identity_version = 3 AND NOT needs_reinit FROM pgtrickle.pgt_stream_tables \
+        WHERE pgt_name = 'v106_upgrade_st'" | grep -qx t
+    if psql "SELECT pgtrickle.ack_output_delta_resnapshot('${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid)" >"$WORK_DIR/stale-token.log" 2>&1; then
+        echo "identity migration accepted a pre-upgrade resnapshot token" >&2
+        exit 1
+    fi
+    grep -q 'PGT_EXT_TOKEN_INVALID' "$WORK_DIR/stale-token.log"
+    for consumer in "$CONSUMER_ID" "$FENCED_CONSUMER_ID"; do
+        token="$(psql "SELECT resnapshot_token FROM pgtrickle.begin_output_delta_resnapshot('${consumer}'::uuid)")"
+        psql "SELECT pgtrickle.ack_output_delta_resnapshot('${consumer}'::uuid, '${token}'::uuid)" | grep -qx ACTIVE
+    done
+fi
 psql "SELECT NOT EXISTS ( \
     (SELECT id, value FROM public.v106_upgrade_st EXCEPT ALL \
      SELECT id, value FROM public.v106_upgrade_source) UNION ALL \
     (SELECT id, value FROM public.v106_upgrade_source EXCEPT ALL \
      SELECT id, value FROM public.v106_upgrade_st))" | grep -qx t
-echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION} with pending changes, graph bindings, publication state, and consumer cursor preserved."
+echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION} with pending changes and durable consumer data preserved; identity migration requires a fresh resnapshot."
