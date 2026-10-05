@@ -540,9 +540,6 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
             if expressions.iter().any(parser::is_mdm_source_key_expr) {
                 return false;
             }
-            let is_pure_projection = expressions
-                .iter()
-                .all(|expr| matches!(expr, parser::Expr::ColumnRef { .. }));
             let preserves_scan_pk = match unwrap_subqueries(child) {
                 parser::OpTree::Scan {
                     pk_columns,
@@ -568,7 +565,9 @@ fn is_scan_chain_tree(tree: &parser::OpTree) -> bool {
                 }
                 _ => false,
             };
-            (is_pure_projection || preserves_scan_pk) && is_scan_chain_tree(child)
+            // Dropping the PK makes projected values the row identity. An
+            // UPDATE must delete the old values before inserting the new ones.
+            preserves_scan_pk && is_scan_chain_tree(child)
         }
         parser::OpTree::Subquery { child, .. } => is_scan_chain_tree(child),
         _ => false,
@@ -2571,9 +2570,30 @@ mod tests {
 
     #[test]
     fn test_is_scan_chain_project_over_scan() {
-        let s = scan(1, "t", "public", "t", &["id", "name"]);
+        let s = crate::dvm::operators::test_helpers::scan_with_pk(
+            1,
+            "t",
+            "public",
+            "t",
+            &["id", "name"],
+            &["id"],
+        );
         let p = project(vec![colref("id")], vec!["id"], s);
         assert!(is_scan_chain_tree(&p));
+    }
+
+    #[test]
+    fn test_is_scan_chain_project_dropping_pk_keeps_delete() {
+        let s = crate::dvm::operators::test_helpers::scan_with_pk(
+            1,
+            "t",
+            "public",
+            "t",
+            &["id", "name"],
+            &["id"],
+        );
+        let p = project(vec![colref("name")], vec!["name"], s);
+        assert!(!is_scan_chain_tree(&p));
     }
 
     #[test]
