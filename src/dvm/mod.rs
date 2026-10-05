@@ -1766,6 +1766,13 @@ fn is_scalar_aggregate_root(tree: &parser::OpTree) -> bool {
 /// The returned SQL is a SELECT producing `__pgt_row_id` plus user columns,
 /// ready to be prefixed with `INSERT INTO schema.table`.
 pub fn try_union_all_refresh_sql(defining_query: &str) -> Option<String> {
+    // A UNION ALL inside an EXCEPT/INTERSECT is not the complete query.
+    if !matches!(
+        parse_defining_query(defining_query).ok()?,
+        parser::OpTree::UnionAll { .. }
+    ) {
+        return None;
+    }
     let branches = split_top_level_union_all(defining_query)?;
 
     let mut parts = Vec::new();
