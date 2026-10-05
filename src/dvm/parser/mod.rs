@@ -2709,10 +2709,9 @@ mod tests {
     }
 
     #[test]
-    fn test_row_id_key_columns_project_filter_scan_pk_not_projected_returns_none() {
-        // When the PK column is NOT in the SELECT list, the row_id key
-        // cannot be determined — return None so the fallback row_to_json
-        // hash is used consistently for both full and differential refresh.
+    fn test_row_id_key_columns_project_filter_scan_pk_not_projected_uses_output() {
+        // FULL and DIFFERENTIAL use the same visible columns when the PK
+        // cannot be recovered from the projection.
         let scan = OpTree::Scan {
             table_oid: 1,
             table_name: "t".to_string(),
@@ -2735,7 +2734,7 @@ mod tests {
             aliases: vec!["name".to_string()],
             child: Box::new(filter),
         };
-        assert_eq!(tree.row_id_key_columns(), None);
+        assert_eq!(tree.row_id_key_columns(), Some(vec!["name".to_string()]));
     }
 
     #[test]
