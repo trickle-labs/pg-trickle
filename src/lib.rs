@@ -969,6 +969,12 @@ BEGIN
        AND EXISTS (
            SELECT 1 FROM pgtrickle.pgt_output_delta_consumers
            WHERE pgt_id = OLD.pgt_id AND state <> 'DROPPED'
+             AND NOT (
+                 state IN ('RESNAPSHOT_REQUIRED', 'INVALIDATED')
+                 AND (OLD.pgt_relid, OLD.defining_query, OLD.refresh_mode, OLD.orchestration_mode)
+                     IS NOT DISTINCT FROM
+                     (NEW.pgt_relid, NEW.defining_query, NEW.refresh_mode, NEW.orchestration_mode)
+             )
        ) THEN
         RAISE EXCEPTION 'PGT_EXT_CONSUMER_BLOCKED: active output-delta consumers require an explicit resnapshot'
             USING ERRCODE = '55006';

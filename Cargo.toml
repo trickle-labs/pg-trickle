@@ -1,6 +1,6 @@
 [package]
 name = "pg_trickle"
-version = "0.108.2"
+version = "0.108.3"
 publish = false
 edition = "2024"
 description = "Streaming Stream Tables for PostgreSQL 18 with differential view maintenance"

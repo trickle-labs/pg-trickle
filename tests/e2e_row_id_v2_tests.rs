@@ -333,6 +333,59 @@ async fn test_row_id_v2_sql_entry_points_are_exact_and_bounded() {
 }
 
 #[tokio::test]
+async fn test_projected_source_key_differential_update_removes_full_row() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TABLE projected_key_source (id bigint PRIMARY KEY, name text NOT NULL)",
+        "INSERT INTO projected_key_source VALUES (1, 'old')",
+    ])
+    .await;
+    let query = "SELECT 'crm'::text AS source_name, \
+        pgtrickle.encode_row_id_v2('SCAN_KEY', ROW(id)) AS source_record_key, name \
+        FROM public.projected_key_source";
+    db.create_st("projected_key_stream", query, "1m", "DIFFERENTIAL")
+        .await;
+    for (mutation, expected) in [
+        (
+            "UPDATE projected_key_source SET name = 'new' WHERE id = 1",
+            "[\"new\"]",
+        ),
+        ("DELETE FROM projected_key_source WHERE id = 1", "[]"),
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("projected_key_stream").await;
+        let actual: String = db
+            .query_scalar("SELECT COALESCE(jsonb_agg(name ORDER BY name), '[]'::jsonb)::text FROM public.projected_key_stream")
+            .await;
+        assert_eq!(actual, expected);
+        db.assert_st_matches_query("public.projected_key_stream", query)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn test_projected_source_without_pk_preserves_duplicate_values() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "CREATE TABLE projected_duplicates (id bigint PRIMARY KEY, name text NOT NULL)",
+        "INSERT INTO projected_duplicates VALUES (1, 'same'), (2, 'same')",
+    ])
+    .await;
+    let query = "SELECT name FROM public.projected_duplicates";
+    db.create_st("projected_duplicate_stream", query, "1m", "DIFFERENTIAL")
+        .await;
+    for mutation in [
+        "UPDATE projected_duplicates SET name = 'new' WHERE id = 1",
+        "DELETE FROM projected_duplicates WHERE id = 2",
+    ] {
+        db.execute(mutation).await;
+        db.refresh_st("projected_duplicate_stream").await;
+        db.assert_st_matches_query("public.projected_duplicate_stream", query)
+            .await;
+    }
+}
+
+#[tokio::test]
 async fn test_computed_mdm_source_key_keeps_project_rows_distinct() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute_seq(&[

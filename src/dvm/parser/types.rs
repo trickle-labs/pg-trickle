@@ -2454,7 +2454,9 @@ impl OpTree {
                             return Some(mapped);
                         }
                     }
-                    return None;
+                    // A projected table row without its PK uses its visible
+                    // columns in DIFFERENTIAL refresh; FULL must match.
+                    return matches!(unwrapped, OpTree::Scan { .. }).then(|| aliases.clone());
                 }
                 match child.row_id_key_columns() {
                     Some(keys) => {

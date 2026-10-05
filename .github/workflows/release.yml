@@ -126,6 +126,14 @@ jobs:
         if: github.ref_name == 'v0.108.2'
         run: python3 scripts/v0_108_2_release_gate.py
 
+      - name: v0.108.3 projected identity repair release gate
+        if: github.ref_name == 'v0.108.3'
+        run: python3 scripts/v0_108_3_release_gate.py
+
+      - name: v0.108.3 projected identity repair release gate
+        if: github.ref_name == 'v0.108.3'
+        run: python3 scripts/v0_108_3_release_gate.py
+
       - name: Validate monitoring contract
         run: python3 scripts/check_monitoring_contract.py
 
