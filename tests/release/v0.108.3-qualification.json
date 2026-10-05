@@ -144,10 +144,12 @@
       "upgrade": false,
       "requires_postgresql": true,
       "suite_version": "0.108.3",
-      "command": "bash scripts/run_v108_conformance.sh --test e2e_v108_conformance_tests",
+      "command": "bash scripts/run_v108_conformance.sh --test-threads 1 --test e2e_v108_conformance_tests",
       "command_argv": [
         "bash",
         "scripts/run_v108_conformance.sh",
+        "--test-threads",
+        "1",
         "--test",
         "e2e_v108_conformance_tests"
       ],
