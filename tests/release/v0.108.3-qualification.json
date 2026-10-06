@@ -686,11 +686,11 @@
       "upgrade": true,
       "requires_postgresql": true,
       "suite_version": "0.108.3",
-      "command": "bash -c PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.2 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.2 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
+      "command": "bash -c PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.3 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.3 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
       "command_argv": [
         "bash",
         "-c",
-        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.2 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.2 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture"
+        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.3 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.3 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture"
       ],
       "required_cases": [
         "e2e_upgrade_tests::test_upgrade_v1082_rebuilds_bpchar_identity_before_differential"

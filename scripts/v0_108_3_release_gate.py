@@ -190,13 +190,13 @@ def check_support_contract() -> None:
     identity_upgrade_command = [
         "bash",
         "-c",
-        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.2 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.2 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
+        "PGS_E2E_BASE_IMAGE=pg_trickle_release_candidate:local tests/build_e2e_upgrade_image.sh 0.108.1 0.108.3 && PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest PGS_UPGRADE_FROM=0.108.1 PGS_UPGRADE_TO=0.108.3 scripts/run_e2e_tests.sh --test e2e_upgrade_tests test_upgrade_v1082_rebuilds_bpchar_identity_before_differential --run-ignored all --no-capture",
     ]
     identity_upgrade_case = "e2e_upgrade_tests::test_upgrade_v1082_rebuilds_bpchar_identity_before_differential"
     shared.require(
         identity_upgrade.get("command_argv") == identity_upgrade_command
         and identity_upgrade.get("required_cases") == [identity_upgrade_case],
-        "0.108.1 to 0.108.2 qualification must run the V3 identity rebuild regression",
+        "0.108.1 to 0.108.3 qualification must run the V3 identity rebuild regression",
     )
     shards = {shard["id"]: shard for shard in qualification.get("required_shards", [])}
     for shard in qualification.get("required_shards", []):
