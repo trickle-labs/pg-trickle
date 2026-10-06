@@ -596,7 +596,7 @@ jobs:
         run: |
           suite_args=()
           for result in qualification-logs/results/*.json; do
-            [[ -f "$result" ]] && suite_args+=(--suite-result "$result")
+            [[ -f "$result" && "$result" != *.installation.json ]] && suite_args+=(--suite-result "$result")
           done
           QUALIFICATION="tests/release/v${GITHUB_REF_NAME#v}-qualification.json"
           python3 scripts/release_evidence.py \
