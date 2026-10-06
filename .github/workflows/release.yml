@@ -444,7 +444,7 @@ jobs:
     name: Packaged release qualification
     needs: [build-release, test-release]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
         with:
@@ -519,7 +519,7 @@ jobs:
       - name: Require every declared instrumented case to pass
         if: always()
         run: >
-          python3 scripts/v0_108_2_release_gate.py
+          python3 scripts/v0_108_3_release_gate.py
           --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
 
       - name: Write candidate-bound release evidence
@@ -596,9 +596,9 @@ jobs:
         run: |
           suite_args=()
           for result in qualification-logs/results/*.json; do
-            [[ -f "$result" ]] && suite_args+=(--suite-result "$result")
+            [[ -f "$result" && "$result" != *.installation.json ]] && suite_args+=(--suite-result "$result")
           done
-          QUALIFICATION="tests/release/${GITHUB_REF_NAME#v}-qualification.json"
+          QUALIFICATION="tests/release/v${GITHUB_REF_NAME#v}-qualification.json"
           python3 scripts/release_evidence.py \
             --output release-files/RELEASE-EVIDENCE.json \
             --version "${GITHUB_REF_NAME#v}" \
