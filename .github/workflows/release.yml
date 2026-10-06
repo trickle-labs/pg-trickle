@@ -519,7 +519,7 @@ jobs:
       - name: Require every declared instrumented case to pass
         if: always()
         run: >
-          python3 scripts/v0_108_2_release_gate.py
+          python3 scripts/v0_108_3_release_gate.py
           --unsafe-asan-log qualification-logs/unsafe-asan/workloads.log
 
       - name: Write candidate-bound release evidence
