@@ -10,13 +10,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_TAG = "v0.108.0"
-BASELINE_VERSION = BASELINE_TAG.removeprefix("v")
-QUALIFICATION = ROOT / "tests/release/v0.108.1-qualification.json"
+PACKAGE_VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+QUALIFICATION = ROOT / f"tests/release/v{PACKAGE_VERSION}-qualification.json"
+SOURCE_VERSIONS = json.loads(QUALIFICATION.read_text(encoding="utf-8"))["source_versions"]
+BASELINE_VERSION = max(SOURCE_VERSIONS, key=lambda version: tuple(map(int, version.split("."))))
+BASELINE_TAG = f"v{BASELINE_VERSION}"
 MAX_COMPARISON_ATTEMPTS = 2
 
 

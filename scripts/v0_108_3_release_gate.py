@@ -13,6 +13,7 @@ from pathlib import Path
 import generate_capability_manifest as capabilities
 import v0_106_1_release_gate as shared
 import v0_108_0_release_gate as unsafe_asan
+import run_release_criterion as criterion
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +76,11 @@ def check_support_contract() -> None:
             "lateral_immutable_composite_function",
         ],
         "Graph V1.2 differential feature identifiers drifted",
+    )
+    shared.require(
+        criterion.BASELINE_TAG == "v0.108.2"
+        and criterion.QUALIFICATION.name == "v0.108.3-qualification.json",
+        "Criterion qualification must compare against the v0.108.2 release",
     )
     shared.require(
         (delta["major_version"], delta["minor_version"]) == (1, 1),
