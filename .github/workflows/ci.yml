@@ -1571,7 +1571,7 @@ jobs:
             psql -U postgres -d app -v ON_ERROR_STOP=1 -c "
               CREATE EXTENSION pg_trickle VERSION '0.107.0';
               SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_trickle';
-              ALTER EXTENSION pg_trickle UPDATE TO '0.108.1';
+              ALTER EXTENSION pg_trickle UPDATE;
               SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_trickle';
               SHOW pg_trickle.enabled;
               CREATE TABLE cnpg_test_src (id INT PRIMARY KEY, val TEXT);

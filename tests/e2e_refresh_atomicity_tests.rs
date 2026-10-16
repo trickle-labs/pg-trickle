@@ -232,7 +232,16 @@ async fn wait_for_barrier(
             };
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("refresh did not reach {phase} barrier for pgt_id={id}");
+            let logs = tokio::process::Command::new("docker")
+                .args(["logs", "--tail", "100", db.container_id()])
+                .output()
+                .await
+                .expect("read container logs");
+            panic!(
+                "refresh did not reach {phase} barrier for pgt_id={id}\n{}{}",
+                String::from_utf8_lossy(&logs.stdout),
+                String::from_utf8_lossy(&logs.stderr)
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -469,12 +478,15 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
         .begin()
         .await
         .expect("begin scheduler setup transaction");
-    sqlx::query(AssertSqlSafe(format!(
-        "SELECT pgtrickle.alter_stream_table('{scheduler}', schedule => '1s')"
-    )))
+    // Keep the 1h cadence's deadlines; a 1s cadence allows only 100ms at the barrier.
+    sqlx::query(
+        "UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours'
+         WHERE pgt_id = $1",
+    )
+    .bind(scheduler_id)
     .execute(&mut *schedule_change)
     .await
-    .expect("make scheduler refresh due");
+    .expect("make scheduler fixture immediately due");
     sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO public.{source} VALUES (3, 'scheduler-pending')"
     )))
@@ -493,6 +505,8 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
         Duration::from_secs(90),
     )
     .await;
+    // Keep the barrier held beyond the former 100ms lock deadline.
+    tokio::time::sleep(Duration::from_millis(250)).await;
     // Compare rollback to the last committed boundary; a no-data scheduler tick may finish first.
     let scheduler_progress = progress(&db, scheduler_id).await;
     assert!(scheduler_witness.pid > 0);
