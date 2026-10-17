@@ -35,9 +35,31 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
     let root = "public.recon_graph_st";
     let digest = reference_clients::graph_digest(&db.pool, root).await;
     reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_scratch_creations (object_identity text);
+         CREATE FUNCTION audit_recon_scratch() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO public.recon_scratch_creations
+             SELECT object_identity FROM pg_event_trigger_ddl_commands()
+             WHERE command_tag = 'CREATE TABLE AS'
+               AND position('__pgt_recon_' in object_identity) > 0;
+         END $$;
+         CREATE EVENT TRIGGER audit_recon_scratch ON ddl_command_end
+             EXECUTE FUNCTION audit_recon_scratch()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("audit reconciliation scratch tables");
     // No change must exercise the signed-multiset fast path without touching
     // the result rows, and must not trigger a forbidden FULL refresh.
     reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let scratch_creations: i64 = db
+        .query_scalar("SELECT count(*) FROM recon_scratch_creations")
+        .await;
+    assert_eq!(
+        scratch_creations, 0,
+        "matching results need no scratch table"
+    );
     let initial: Vec<(i32, String)> =
         sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
             .fetch_all(&db.pool)
@@ -85,6 +107,13 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
         repaired, initial,
         "reconciliation must correct every kind of residue"
     );
+    let scratch_creations: i64 = db
+        .query_scalar("SELECT count(*) FROM recon_scratch_creations")
+        .await;
+    assert_eq!(
+        scratch_creations, 1,
+        "drift must materialize the repair input"
+    );
 
     // Follow-up no-data passes must remain idempotent.
     reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
@@ -94,6 +123,70 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
             .await
             .expect("read stable graph rows");
     assert_eq!(stable, initial);
+    let scratch_creations: i64 = db
+        .query_scalar("SELECT count(*) FROM recon_scratch_creations")
+        .await;
+    assert_eq!(
+        scratch_creations, 1,
+        "a repaired result needs no new scratch table"
+    );
+}
+
+#[tokio::test]
+async fn test_graph_reconciliation_preserves_duplicate_null_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_duplicates (id int, value text);
+         CREATE TABLE recon_duplicate_partner (id int PRIMARY KEY);
+         INSERT INTO recon_duplicates VALUES (1, NULL), (1, NULL), (1, 'visible');
+         INSERT INTO recon_duplicate_partner VALUES (1);
+         SELECT pgtrickle.create_stream_table(
+             name => 'recon_duplicates_st',
+             query => 'SELECT s.id, s.value FROM recon_duplicates s
+                       JOIN recon_duplicate_partner p ON s.id = p.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install duplicate reconciliation fixture");
+    let root = "public.recon_duplicates_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let expected: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT id, value FROM recon_duplicates ORDER BY id, value NULLS FIRST")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read duplicate source rows");
+    let initial: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT id, value FROM recon_duplicates_st ORDER BY id, value NULLS FIRST")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read duplicate result rows");
+    assert_eq!(initial, expected);
+
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin missing duplicate injection");
+    sqlx::raw_sql(
+        "SET LOCAL pg_trickle.internal_refresh = 'true';
+         DELETE FROM recon_duplicates_st WHERE ctid = (
+             SELECT ctid FROM recon_duplicates_st WHERE value IS NULL LIMIT 1)",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("remove one duplicate NULL row");
+    tx.commit().await.expect("commit missing duplicate");
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let repaired: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT id, value FROM recon_duplicates_st ORDER BY id, value NULLS FIRST")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read repaired duplicate rows");
+    assert_eq!(repaired, expected, "the probe must compare multiplicities");
 }
 
 #[tokio::test]

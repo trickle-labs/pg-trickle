@@ -1261,10 +1261,9 @@ pub fn execute_differential_refresh_with_tuning(
                 schema.replace('"', "\"\""),
                 name.replace('"', "\"\""),
             );
-            super::phd1::prepare_cross_cycle_phantom_table(st, &effective_defining_query)?;
             let reconciled = with_stream_owner(st, || {
                 super::phd1::cleanup_cross_cycle_phantoms(
-                    st.pgt_id,
+                    st,
                     &quoted_table,
                     &effective_defining_query,
                     10_000,
@@ -3476,10 +3475,9 @@ pub fn execute_differential_refresh_with_tuning(
             schema.replace('"', "\"\""),
             name.replace('"', "\"\""),
         );
-        super::phd1::prepare_cross_cycle_phantom_table(st, &effective_defining_query)?;
         let cleanup_result = with_stream_owner(st, || {
             super::phd1::cleanup_cross_cycle_phantoms(
-                st.pgt_id,
+                st,
                 &quoted_table,
                 &effective_defining_query,
                 10_000,
