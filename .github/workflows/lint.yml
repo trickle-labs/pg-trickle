@@ -1,5 +1,5 @@
 # =============================================================================
-# Lint Workflow — Fast fmt + clippy gate on every push/PR
+# Lint Workflow — fmt + clippy for Rust and build-input changes
 #
 # Formatting runs before provisioning PostgreSQL or restoring build artifacts.
 # =============================================================================
@@ -8,32 +8,40 @@ name: Lint
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - 'PLAN*.md'
-      - 'REPORT*.md'
-      - 'adrs/**'
-      - 'plans/**'
-      - 'coverage/**'
-      - 'cnpg/**'
+    paths:
+      - 'src/**'
+      - 'verification/**'
+      - 'benches/**'
+      - 'tests/**'
+      - 'sql/archive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - '.cargo/**'
+      - 'scripts/gen_test_schema.py'
+      - '.github/actions/**'
+      - '.github/workflows/lint.yml'
+      - '!tests/release/**'
+      - '!**/*.md'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - 'PLAN*.md'
-      - 'REPORT*.md'
-      - 'adrs/**'
-      - 'plans/**'
-      - 'coverage/**'
-      - 'cnpg/**'
-      - 'scripts/**'
-      - '.github/workflows/**'
+    paths:
+      - 'src/**'
+      - 'verification/**'
+      - 'benches/**'
+      - 'tests/**'
+      - 'sql/archive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - '.cargo/**'
+      - 'scripts/gen_test_schema.py'
+      - '.github/actions/**'
+      - '.github/workflows/lint.yml'
+      - '!tests/release/**'
+      - '!**/*.md'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

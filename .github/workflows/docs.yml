@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'blog/**'
+      - 'ESSENCE.md'
       - 'book.toml'
       - 'INSTALL.md'
       - 'CHANGELOG.md'

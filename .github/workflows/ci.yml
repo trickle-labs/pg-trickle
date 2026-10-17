@@ -1,8 +1,8 @@
 # =============================================================================
 # CI Workflow — Run the full test matrix
 #
-# Automatic triggers (with path filters on Rust/test files):
-#   Draft PR      : quick validation, Linux unit/integration, LSN proof
+# Automatic triggers (expensive jobs selected by .github/ci-paths.yml):
+#   Draft PR      : quick validation, LSN proof; unit/integration for runtime
 #   Ready PR      : + packaged E2E and path-selected sensitive gates
 #   push → main   : unit/integration, packaged E2E, smoke, benchmark tracking
 #   Nightly       : full matrix, E2E, dbt, CNPG, performance gates
@@ -16,42 +16,9 @@ name: CI
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'verification/**'
-      - 'sql/**'
-      - 'scripts/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'tests/**'
-      - '.github/workflows/ci.yml'
-      - '.github/workflows/release.yml'
-      - '.github/actions/**'
-      - 'benchmarks/**'
-      - 'Dockerfile.ghcr'
-      - 'cnpg/**'
-      - 'docker/**'
-      - 'docs/**'
-      - 'tests/release/**'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
-    paths:
-      - 'src/**'
-      - 'verification/**'
-      - 'sql/**'
-      - 'scripts/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'tests/**'
-      - '.github/workflows/ci.yml'
-      - '.github/workflows/release.yml'
-      - '.github/actions/**'
-      - 'benchmarks/**'
-      - 'Dockerfile.ghcr'
-      - 'cnpg/**'
-      - 'docker/**'
-      - 'docs/**'
   schedule:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
@@ -77,36 +44,63 @@ env:
   PG_VERSION: "18"
 
 jobs:
-  # The current release contract runs on every PR so publication cannot
-  # introduce untested suite claims or manually asserted passing results.
+  # Keep contracts on every PR, including .github/workflows/release.yml and
+  # tests/release/** changes; job selection only defers expensive runtime work.
   release-qualification-contract:
     name: v0.108.3 release evidence contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      runtime: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.runtime == 'true' || steps.paths.outputs.harness == 'true' }}
+      benchmarks: ${{ steps.paths.outputs.benchmarks }}
+      shipping: ${{ steps.paths.outputs.shipping }}
+      monitoring: ${{ steps.paths.outputs.monitoring }}
+      getting_started: ${{ steps.paths.outputs.getting_started }}
     steps:
       - uses: actions/checkout@v7
 
+      - name: Select checks for changed files
+        id: paths
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event.before || github.event.repository.default_branch }}
+          predicate-quantifier: some-with-excludes
+          filters: .github/ci-paths.yml
+
       - name: Install rustfmt
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.runtime == 'true' || steps.paths.outputs.harness == 'true' || steps.paths.outputs.benchmarks == 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           components: rustfmt
 
-      - name: Check formatting and static contracts before expensive jobs
+      - name: Check formatting before expensive jobs
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.runtime == 'true' || steps.paths.outputs.harness == 'true' || steps.paths.outputs.benchmarks == 'true'
+        run: cargo fmt -- --check
+
+      - name: Check static contracts
         run: |
-          cargo fmt -- --check
+          bash scripts/check_security_definer.sh
+          python3 scripts/check_privilege_boundaries.py
           bash scripts/check_sql_builder.sh
           python3 scripts/check_fuzz_targets.py
+          python3 scripts/check_monitoring_contract.py
 
       - name: Validate release evidence and rejection controls
         run: |
           python3 scripts/v0_108_3_release_gate.py
           python3 scripts/check_lsn_verification.py --contract-only
-          python3 -m unittest scripts/test_lsn_candidate_binding.py
+          python3 -m unittest discover -s scripts -p 'test_*.py'
 
   lsn-verification:
     name: Checked LSN proof and semantic mutation control
     needs: release-qualification-contract
+    outputs:
+      runtime: ${{ needs.release-qualification-contract.outputs.runtime }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -130,6 +124,7 @@ jobs:
   unit-tests:
     name: Unit tests (PR gate, linux-amd64)
     needs: release-qualification-contract
+    if: needs.release-qualification-contract.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -160,6 +155,7 @@ jobs:
   otel-collector-contract:
     name: OpenTelemetry Collector contract
     needs: release-qualification-contract
+    if: needs.release-qualification-contract.outputs.runtime == 'true' || needs.release-qualification-contract.outputs.monitoring == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -242,7 +238,7 @@ jobs:
   windows-compile-gate:
     name: Windows compile check (PR gate)
     needs: release-qualification-contract
-    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.release-qualification-contract.outputs.runtime == 'true'
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -258,6 +254,7 @@ jobs:
   integration-tests:
     name: Integration tests
     needs: release-qualification-contract
+    if: needs.release-qualification-contract.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -352,7 +349,7 @@ jobs:
   light-e2e-package:
     name: Package light E2E extension
     needs: [lsn-verification]
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: needs.lsn-verification.outputs.runtime == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1079,7 +1076,7 @@ jobs:
     name: Benchmarks
     needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.release-qualification-contract.outputs.runtime == 'true' || needs.release-qualification-contract.outputs.benchmarks == 'true'))
     timeout-minutes: 45
     continue-on-error: true
     steps:
@@ -1356,7 +1353,7 @@ jobs:
     name: dbt getting-started example
     needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (needs.release-qualification-contract.outputs.runtime == 'true' || needs.release-qualification-contract.outputs.getting_started == 'true'))
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -1618,7 +1615,11 @@ jobs:
     name: Shipping image upgrade
     needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
+    if: >
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+       (needs.release-qualification-contract.outputs.runtime == 'true' || needs.release-qualification-contract.outputs.shipping == 'true')) ||
+      (github.event_name == 'push' && needs.release-qualification-contract.outputs.shipping == 'true')
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -1703,7 +1704,7 @@ jobs:
     name: Detect sensitive E2E paths
     needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: (github.event_name == 'pull_request' && !github.event.pull_request.draft) || github.event_name == 'push'
+    if: needs.release-qualification-contract.outputs.runtime == 'true' && ((github.event_name == 'pull_request' && !github.event.pull_request.draft) || github.event_name == 'push')
     outputs:
       dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
       security_changed: ${{ steps.filter.outputs.security_changed }}

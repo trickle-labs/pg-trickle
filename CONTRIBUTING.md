@@ -111,16 +111,34 @@ The PR template will walk you through the checklist.
 
 ### CI Coverage on PRs
 
-For changes selected by its path filters, PR CI runs quick formatting/static
-validation, the release evidence contract, Linux unit/integration tests, and
-the checked LSN proof. Expensive CI jobs wait
-for quick validation to pass. Draft PRs defer packaging, light/full E2E,
-shipping-image qualification, Windows compilation, and fuzz corpus replay.
+Every PR runs static/release contracts, script unit tests, upgrade completeness,
+and the checked LSN proof. The contracts also classify changed files using
+[.github/ci-paths.yml](.github/ci-paths.yml). Expensive CI jobs wait for the
+contracts to pass and run only when the relevant inputs changed:
+
+| Changed inputs | Selected work beyond the contracts and proof |
+|----------------|---------------------------------------------|
+| Rust, extension SQL, build inputs, test fixtures/harness | Unit/integration tests and the existing packaged/sensitive E2E gates |
+| Documentation, release-contract data, ordinary maintenance scripts | Documentation checks and script tests; no extension rebuild |
+| Benchmark sources or inputs | Benchmark tracking on main; measurements also remain nightly/manual |
+| Shipping Dockerfile or PostgreSQL defaults | Shipping-image qualification |
+| Monitoring configuration | Collector contract |
+| dbt getting-started project or adapter | Getting-started example on main; full dbt integration remains scheduled/manual |
+| Demo/CNPG examples | Static checks; CNPG deployment verification remains scheduled/manual |
+
+Build inputs include `build.rs`, `.cargo/**`, `pg_trickle.control`, Cargo
+manifests, and the scripts used by compiled tests. Unclassified paths retain
+runtime coverage. A mixed PR selects the union of the relevant checks. The
+standalone lint, benchmark-tracking, and coverage workflows also filter their
+inputs, so a documentation-only merge does not rebuild Rust targets.
+
+Draft PRs defer packaging, light/full E2E, shipping-image qualification,
+Windows compilation, and fuzz corpus replay.
 Marking a draft **ready for review** starts those jobs; converting it back to
 a draft cancels the previous run and returns to the smaller set of checks.
 
-Ready PRs additionally run packaged-extension coverage, including light E2E
-split across three shards against stock `postgres:18.6`. Sensitive paths select
+Ready PRs with runtime changes additionally run packaged-extension coverage,
+including light E2E split across three shards against stock `postgres:18.6`. Sensitive paths select
 the existing full E2E, security, failure-recovery, or unsafe-boundary gates.
 
 Criterion regression comparisons and the pgbench overhead gate run nightly
@@ -131,6 +149,9 @@ compared commit IDs are recorded in the job summary. TPC-H, dbt, CNPG, and the
 extra macOS/Windows unit jobs also retain their scheduled/manual coverage.
 
 #### Workflow trigger matrix
+
+PR and push entries below are subject to the input selection described above.
+Nightly and manual CI runs retain the full matrix regardless of changed paths.
 
 | Workflow / Job | PR | Push to main | Daily schedule | Manual dispatch |
 |----------------|----|--------------|----------------|-----------------|
@@ -145,7 +166,7 @@ extra macOS/Windows unit jobs also retain their scheduled/manual coverage.
 | Benchmarks | ❌ | ✅ | ✅ | ✅ |
 | Benchmark regression gate | ❌ | ❌ | ✅ | Opt-in |
 | pgbench overhead gate | ❌ | ❌ | ✅ | ✅ |
-| Shipping image upgrade | Ready only | ❌ | ✅ | ✅ |
+| Shipping image upgrade | Ready only | Shipping inputs | ✅ | ✅ |
 | DAG bench (calc / throughput) | ❌ | ❌ | ✅ | ✅ |
 | DAG bench (parallel workers) | ❌ | ❌ | ✅ | ✅ |
 | E2E bench — refresh matrix | ❌ | ❌ | Weekly (Sun) | ✅ |
