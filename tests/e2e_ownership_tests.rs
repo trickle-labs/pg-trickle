@@ -279,61 +279,7 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
 /// with extension privileges while defining-query SQL still runs as the owner.
 #[tokio::test]
 async fn test_refresh_resolves_private_dependencies_for_stream_owner() {
-    let db = E2eDb::new_dedicated_with_postgres_args(&[
-        "-c",
-        "shared_preload_libraries=pg_trickle,pg_react",
-        "-c",
-        "pg_trickle.enabled=off",
-        "-c",
-        "pg_trickle.cdc_mode=trigger",
-        "-c",
-        "pg_trickle.differential_max_change_ratio=1.0",
-        "-c",
-        "max_locks_per_transaction=256",
-        "-c",
-        "shared_buffers=8MB",
-        "-c",
-        "max_connections=20",
-        "-c",
-        "deadlock_timeout=1s",
-        "-c",
-        "log_lock_waits=on",
-    ])
-    .await
-    .with_extension()
-    .await;
-    let settings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name::text, setting::text FROM pg_settings \
-         WHERE name::text = ANY (ARRAY[ \
-             'deadlock_timeout', 'log_lock_waits', 'max_connections', \
-             'max_locks_per_transaction', 'pg_trickle.cdc_mode', \
-             'pg_trickle.differential_max_change_ratio', 'pg_trickle.enabled', \
-             'shared_buffers', 'shared_preload_libraries' \
-         ]::text[]) ORDER BY name",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .expect("read explicit PostgreSQL test settings");
-    assert_eq!(
-        settings,
-        vec![
-            ("deadlock_timeout".into(), "1000".into()),
-            ("log_lock_waits".into(), "on".into()),
-            ("max_connections".into(), "20".into()),
-            ("max_locks_per_transaction".into(), "256".into()),
-            ("pg_trickle.cdc_mode".into(), "trigger".into()),
-            (
-                "pg_trickle.differential_max_change_ratio".into(),
-                "1".into()
-            ),
-            ("pg_trickle.enabled".into(), "off".into()),
-            ("shared_buffers".into(), "1024".into()),
-            (
-                "shared_preload_libraries".into(),
-                "pg_trickle,pg_react".into()
-            ),
-        ]
-    );
+    let db = E2eDb::new().await.with_extension().await;
     let runner = "mdm_s1_runner";
     let runtime = "mdm_s1_runtime";
     let schema = format!("r53perm_{}", std::process::id());
@@ -415,11 +361,21 @@ async fn test_refresh_resolves_private_dependencies_for_stream_owner() {
         "refresh must exercise the DVM cache-miss path"
     );
 
-    db.try_execute(&format!(
-        "SELECT pgtrickle.refresh_stream_table('{stream}')"
-    ))
+    db.try_execute_with_config(
+        &["SET pg_trickle.differential_max_change_ratio = 1.0"],
+        &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+    )
     .await
     .expect("public cache-miss refresh keeps private catalog reads privileged");
+    let action: String = db
+        .query_scalar(&format!(
+            "SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+             WHERE t.pgt_name = 'st' AND t.pgt_schema = '{schema}' \
+             ORDER BY h.refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    assert_eq!(action, "DIFFERENTIAL");
 
     let rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, value FROM {stream} ORDER BY id"

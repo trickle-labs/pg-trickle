@@ -595,16 +595,12 @@ impl E2eDb {
 
     /// Start an isolated container for tests that restart PostgreSQL itself.
     pub async fn new_dedicated() -> Self {
-        Self::new_with_db("pg_trickle_test", false, &[]).await
-    }
-
-    pub async fn new_dedicated_with_postgres_args(args: &[&str]) -> Self {
-        Self::new_with_db("pg_trickle_test", false, args).await
+        Self::new_with_db("pg_trickle_test", false).await
     }
 
     /// Start an isolated container with output-delta qualification disabled.
     pub async fn new_with_output_delta_qualification_disabled() -> Self {
-        Self::new_with_db("pg_trickle_qualification_disabled", true, &[]).await
+        Self::new_with_db("pg_trickle_qualification_disabled", true).await
     }
 
     /// Start a fresh database WITHOUT the extension pre-installed.
@@ -708,11 +704,7 @@ impl E2eDb {
     }
 
     /// Internal: start a container using the given database name.
-    async fn new_with_db(
-        db_name: &str,
-        disable_output_delta_qualification: bool,
-        postgres_args: &[&str],
-    ) -> Self {
+    async fn new_with_db(db_name: &str, disable_output_delta_qualification: bool) -> Self {
         let (img_name, img_tag) = e2e_image();
         assert_docker_image_exists(&img_name, &img_tag).await;
         let run_id = std::env::var("PGT_E2E_RUN_ID").ok();
@@ -737,13 +729,12 @@ impl E2eDb {
             image = image.with_mount(mount);
         }
 
-        let mut command = vec!["postgres"];
-        command.extend_from_slice(postgres_args);
         if disable_output_delta_qualification {
-            command.extend_from_slice(&["-c", "pg_trickle.enable_output_delta_qualification=off"]);
-        }
-        if command.len() > 1 {
-            image = image.with_cmd(command);
+            image = image.with_cmd([
+                "postgres",
+                "-c",
+                "pg_trickle.enable_output_delta_qualification=off",
+            ]);
         }
 
         let container = start_e2e_image(image).await.expect(
