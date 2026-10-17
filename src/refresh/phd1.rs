@@ -21,12 +21,18 @@ pub fn prepare_cross_cycle_phantom_table(
     let recon_table = format!("__pgt_recon_{}", st.pgt_id);
     // defining_query is definition-derived: parse/analyze it under the
     // owner's identity and stored search_path, not this privileged caller's.
+    let prepare_start = std::time::Instant::now();
     crate::refresh::with_stream_owner(st, || {
         let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
         let recon_select =
             format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
         crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
     })?;
+    pgrx::debug1!(
+        "[pg_trickle] EC01-2 timing pgt_id={} phase=prepare_ms elapsed_ms={:.3}",
+        st.pgt_id,
+        prepare_start.elapsed().as_secs_f64() * 1000.0,
+    );
     Ok(())
 }
 
@@ -168,9 +174,11 @@ pub fn cleanup_cross_cycle_phantoms(
         "INSERT INTO {recon_table} \
          SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub"
     );
+    let materialize_start = std::time::Instant::now();
     Spi::run(&insert_recon_sql).map_err(|e| {
         PgTrickleError::SpiError(format!("EC01-2 reconcile materialise failed: {e}"))
     })?;
+    let materialize_ms = materialize_start.elapsed().as_secs_f64() * 1000.0;
 
     // Common case: the differential MERGE already converged. A single signed
     // multiset aggregation detects whether any repair is necessary; avoid the
@@ -179,10 +187,15 @@ pub fn cleanup_cross_cycle_phantoms(
     // full-query materialisation or suppress repair when there is drift.
     let drift_probe =
         reconciliation_has_drift_sql(stream_table_name, &recon_table, &st_sig, &r_sig);
+    let probe_start = std::time::Instant::now();
     let has_drift = Spi::get_one::<bool>(&drift_probe)
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 drift probe failed: {e}")))?
         .unwrap_or(true);
+    let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
     if !has_drift {
+        pgrx::debug1!(
+            "[pg_trickle] EC01-2 timing pgt_id={pgt_id} drift=false materialize_ms={materialize_ms:.3} probe_ms={probe_ms:.3} delete_ms=0 insert_ms=0",
+        );
         return Ok(0);
     }
 
@@ -232,9 +245,11 @@ pub fn cleanup_cross_cycle_phantoms(
         SELECT count(*)::bigint FROM deleted",
     );
 
+    let delete_start = std::time::Instant::now();
     let deleted = Spi::get_one_with_args::<i64>(&delete_sql, &[batch_size.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile DELETE failed: {e}")))?
         .unwrap_or(0);
+    let delete_ms = delete_start.elapsed().as_secs_f64() * 1000.0;
 
     // Step 3: insert missing rows (multiset-aware on user-content sig).
     //
@@ -284,10 +299,15 @@ pub fn cleanup_cross_cycle_phantoms(
         all_cols_csv = all_cols_csv,
     );
 
+    let insert_start = std::time::Instant::now();
     let inserted = Spi::get_one_with_args::<i64>(&insert_sql, &[batch_size.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile INSERT failed: {e}")))?
         .unwrap_or(0);
+    let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
 
+    pgrx::debug1!(
+        "[pg_trickle] EC01-2 timing pgt_id={pgt_id} drift=true materialize_ms={materialize_ms:.3} probe_ms={probe_ms:.3} delete_ms={delete_ms:.3} insert_ms={insert_ms:.3} deleted={deleted} inserted={inserted}",
+    );
     let total = deleted + inserted;
     if total > 0 {
         pgrx::log!(
@@ -354,7 +374,7 @@ mod tests {
 mod pg_tests {
     use super::*;
 
-    #[pg_test]
+    #[pgrx::pg_test]
     fn test_reconciliation_drift_probe_handles_nulls_and_duplicate_rows() {
         Spi::run("CREATE TEMP TABLE __pgt_probe_st (value text)").unwrap();
         Spi::run("CREATE TEMP TABLE __pgt_probe_recon (value text)").unwrap();
