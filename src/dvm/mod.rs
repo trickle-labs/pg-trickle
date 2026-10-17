@@ -793,6 +793,7 @@ fn generate_delta_query_impl(
                     );
                     // Empty staged windows are immutable for this refresh. Expose
                     // that fact to the planner so unused join snapshots are pruned.
+                    // nosemgrep: rust.spi.query.dynamic-format -- fixed pg_temp schema and numeric-ID-derived relation.
                     let has_rows = pgrx::Spi::get_one::<bool>(&format!(
                         "SELECT EXISTS (SELECT 1 FROM {table})"
                     ))
