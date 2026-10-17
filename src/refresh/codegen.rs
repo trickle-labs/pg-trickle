@@ -766,17 +766,15 @@ fn planner_work_mem(
 /// - delta 100–9 999: `SET LOCAL enable_nestloop = off`
 /// - delta >= 10 000: also `SET LOCAL work_mem = '<N>MB'`
 /// - scan_count >= 5 (deep join): disable nest loops, raise work_mem,
-///   raise join_collapse_limit, and remove temp_file_limit. The delta
+///   raise join_collapse_limit, and remove temp_file_limit only when the hint is not clamped. The delta
 ///   SQL for 5+ table joins produces O(n) snapshot CTEs whose hash
 ///   joins can exceed default temp_file_limit under poor plans.
 ///
 /// `SET LOCAL` is automatically reset at the end of the current transaction,
 /// so these hints cannot leak to other queries.
 ///
-/// Returns `true` if the SCAL-3 work_mem cap requires an allowed FULL
-/// fallback. Under `FullPolicy::Error`, the capped setting is applied and the
-/// differential plan continues because the cap affects performance, not
-/// correctness.
+/// Returns `true` if a large-delta work_mem hint requires an allowed FULL
+/// fallback. Deep joins continue at the cap under either full policy.
 pub(crate) fn apply_planner_hints(
     estimated_delta: i64,
     st_relid: pg_sys::Oid,
@@ -799,21 +797,17 @@ pub(crate) fn apply_planner_hints(
     // CTEs. Without planner guidance, PostgreSQL may choose nested-loop
     // plans that create pathological temp file spills (>8 GB at SF=0.01).
     // Fix: disable nest loops, raise work_mem, bump join_collapse_limit
-    // so the planner considers all join orderings, and remove the
-    // temp_file_limit cap so the query can run to completion.
+    // so the planner considers all join orderings. Capped plans retain
+    // the caller's temporary-file budget.
     if scan_count >= DEEP_JOIN_SCAN_THRESHOLD {
         let requested_mb = tuning.merge_work_mem_mb.max(512);
 
         let cap = tuning.delta_work_mem_cap_mb;
-        let (mb, fallback_to_full) =
-            planner_work_mem(requested_mb, cap, crate::refresh::current_full_policy());
-        if fallback_to_full {
-            pgrx::notice!(
-                "[pg_trickle] SCAL-3: deep-join work_mem ({requested_mb}MB) exceeds \
-                 delta_work_mem_cap_mb ({cap}MB). Falling back to FULL refresh.",
-            );
-            return true;
-        }
+        let mb = if cap > 0 {
+            requested_mb.min(cap)
+        } else {
+            requested_mb
+        };
         if mb != requested_mb {
             pgrx::notice!(
                 "[pg_trickle] SCAL-3: deep-join work_mem ({requested_mb}MB) exceeds \
@@ -850,9 +844,10 @@ pub(crate) fn apply_planner_hints(
                 e
             );
         }
-        // Remove temp_file_limit for this transaction so the delta query
-        // can complete even if intermediate hash batches spill to disk.
-        if let Err(e) = Spi::run("SET LOCAL temp_file_limit = -1") {
+        // A clamped memory hint must not remove the caller's disk-spill limit.
+        if mb == requested_mb
+            && let Err(e) = Spi::run("SET LOCAL temp_file_limit = -1")
+        {
             pgrx::debug1!(
                 "[pg_trickle] DI-11: failed to SET LOCAL temp_file_limit: {}",
                 e
@@ -860,8 +855,7 @@ pub(crate) fn apply_planner_hints(
         }
         pgrx::debug1!(
             "[pg_trickle] DI-11: deep join (scan_count={scan_count}) — \
-             disabled nestloop, work_mem={mb}MB, join_collapse_limit={jcl}, \
-             temp_file_limit=-1",
+             disabled nestloop, work_mem={mb}MB, join_collapse_limit={jcl}",
         );
         // Skip the normal delta-size hints below — deep-join hints
         // already cover nest-loop and work_mem.

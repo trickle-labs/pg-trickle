@@ -12,6 +12,81 @@ const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, t
      text, integer, double precision, text, boolean, text, integer, text, text";
 
 #[tokio::test]
+async fn test_graph_refresh_scopes_nested_join_snapshots_and_empty_stages() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE stage_left (id int NOT NULL, value int NOT NULL);
+         CREATE TABLE stage_right (id int PRIMARY KEY, value int NOT NULL);
+         CREATE TABLE stage_meta (id int PRIMARY KEY);
+         INSERT INTO stage_left SELECT i, i FROM generate_series(1, 4000) i;
+         INSERT INTO stage_right SELECT i, 0 FROM generate_series(1, 4000) i;
+         INSERT INTO stage_meta VALUES (1);
+         CREATE FUNCTION stage_value(value int) RETURNS TABLE (normalized int)
+         LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+         BEGIN RETURN QUERY SELECT value; END $$",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install staged-join fixture");
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+             name => 'stage_join',
+             query => 'SELECT l.id AS left_id, r.id AS right_id, l.value, r.value AS right_value
+                       FROM (SELECT s.id, n.normalized AS value FROM stage_left s
+                             CROSS JOIN LATERAL public.stage_value(s.value) AS n(normalized)) l
+                       JOIN stage_right r ON l.id = r.id
+                       JOIN stage_meta m ON m.id = 1',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    let root = "public.stage_join";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+
+    let mut tx = db.pool.begin().await.expect("begin staged refresh");
+    sqlx::raw_sql(
+        "SET LOCAL track_functions = 'all';
+         UPDATE stage_left SET value = 200 WHERE id = 1;
+         UPDATE stage_right SET value = 201 WHERE id = 1",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("change both inputs while leaving metadata unchanged");
+    reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT calls FROM pg_stat_xact_user_functions WHERE funcid = 'stage_value(int)'::regprocedure",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read function execution count");
+    eprintln!("normalization calls: {calls}");
+    // Reconciliation still evaluates 4000 rows; delta joins must expand
+    // only affected keys, even with an empty metadata delta.
+    assert!((4000..4500).contains(&calls), "unexpected calls: {calls}");
+    let values: (i32, i32) =
+        sqlx::query_as("SELECT value, right_value FROM stage_join WHERE left_id = 1")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read refreshed value");
+    assert_eq!(values, (200, 201));
+    tx.rollback().await.expect("rollback staged refresh");
+    let value: i32 = db
+        .query_scalar("SELECT value FROM stage_join WHERE left_id = 1")
+        .await;
+    assert_eq!(value, 1, "rollback must restore the graph output");
+
+    db.execute("UPDATE stage_right SET id = 4001 WHERE id = 1")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    assert_eq!(
+        db.count(root).await,
+        3999,
+        "right-only changes must survive"
+    );
+}
+
+#[tokio::test]
 async fn test_v104_capabilities_are_stable_by_default() {
     let db = E2eDb::new().await.with_extension().await;
 
@@ -190,7 +265,11 @@ async fn test_v104_delta_reference_consumer_reads_and_acknowledges() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
              name => 'v104_delta_st',\
-             query => 'SELECT id, value FROM v104_delta_source',\
+             query => 'SELECT a.id, a.value FROM v104_delta_source a \
+                       JOIN v104_delta_source b USING (id) \
+                       JOIN v104_delta_source c USING (id) \
+                       JOIN v104_delta_source d USING (id) \
+                       JOIN v104_delta_source e USING (id)',\
              schedule => '1h',\n             refresh_mode => 'DIFFERENTIAL',\
              initialize => false,\
              orchestration_mode => 'EXTERNAL'\
@@ -225,15 +304,43 @@ async fn test_v104_delta_reference_consumer_reads_and_acknowledges() {
         .await;
     let graph_digest = reference_clients::graph_digest(&db.pool, root).await;
     let mut tx = db.pool.begin().await.expect("begin delta transaction");
+    sqlx::raw_sql(
+        "SET LOCAL pg_trickle.refresh_strategy = 'differential';
+         SET LOCAL pg_trickle.delta_work_mem_cap_mb = 256;
+         SET LOCAL temp_file_limit = '64MB'",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("configure capped deep-join delta");
     let refresh_id = reference_clients::refresh_graph(&mut *tx, root, &graph_digest).await;
     let batch = reference_clients::pending_batch(&mut *tx, &registration.consumer_id).await;
     assert_eq!(batch.mode, "EXACT");
     assert_eq!(batch.graph_refresh_id, Some(refresh_id));
     assert_eq!(batch.row_count, 1);
-    assert_eq!(
-        reference_clients::read_payload(&mut *tx, &registration.delta_relation).await,
-        1
-    );
+    let payload: Vec<(String, i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT action, id, value FROM {} WHERE batch_token = $1 ORDER BY ordinal",
+        registration.delta_relation
+    )))
+    .bind(batch.batch_token)
+    .fetch_all(&mut *tx)
+    .await
+    .expect("read complete typed delta payload");
+    assert_eq!(payload, vec![("INSERT".into(), 2, "after".into())]);
+    let rows: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM v104_delta_st ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("read complete deep-join result");
+    assert_eq!(rows, vec![(1, "before".into()), (2, "after".into())]);
+    let action: String = sqlx::query_scalar(
+        "SELECT h.action FROM pgtrickle.pgt_refresh_history h
+         JOIN pgtrickle.pgt_stream_tables t USING (pgt_id)
+         WHERE t.pgt_name = 'v104_delta_st' ORDER BY h.refresh_id DESC LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read effective deep-join action");
+    assert_eq!(action, "DIFFERENTIAL");
     assert_eq!(
         reference_clients::ack(&mut *tx, &registration.consumer_id, batch.batch_token).await,
         "APPLIED"

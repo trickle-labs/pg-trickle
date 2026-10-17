@@ -881,20 +881,20 @@ SET pg_trickle.merge_work_mem_mb = 128;
 
 ### pg_trickle.delta_work_mem_cap_mb
 
-Maximum `work_mem` (in MB) that planner hints are allowed to set during delta MERGE execution. When the deep-join or large-delta path would set `work_mem` above this cap, the refresh falls back to FULL instead of risking OOM.
+Maximum `work_mem` (in MB) that planner hints are allowed to set during delta MERGE execution. Deep joins continue DIFFERENTIAL at the cap and preserve the caller's `temp_file_limit` when the preferred hint exceeds it. Large-delta hints above the cap fall back to FULL when the full policy permits it. This limits a per-operation setting, not total executor memory or disk use.
 
 | Property | Value |
 |---|---|
 | Type | `int` |
-| Default | `0` (disabled — no cap) |
+| Default | `256` |
 | Range | `0` – `8192` (0 to 8 GB) |
 | Context | `SUSET` |
 | Restart Required | No |
 
-Set to `0` to disable the cap entirely (default). When enabled, the cap is checked before any `SET LOCAL work_mem` in `apply_planner_hints()`. If the configured or computed `work_mem` exceeds the cap, the refresh emits a `NOTICE` and falls back to FULL refresh.
+Set to `0` to disable the cap. When a preferred planner hint exceeds the cap, the refresh emits a `NOTICE` describing whether it continues DIFFERENTIAL at the cap or falls back to FULL.
 
 **Tuning Guidance:**
-- **Production servers with tight memory budgets**: Set to `256`–`512` to prevent runaway hash joins.
+- **Production servers with tight memory budgets**: Set to `256`–`512` and configure a finite `temp_file_limit`; monitor total memory and storage separately.
 - **Servers with ample RAM** (64+ GB): Leave at `0` (disabled) or set high (`2048`+).
 - **If you see SCAL-3 fallback notices**: Either raise the cap or investigate why delta sizes are unexpectedly large.
 

@@ -632,6 +632,7 @@ pub fn generate_delta_query(
     generate_delta_query_impl(
         None,
         None,
+        None,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -647,10 +648,12 @@ pub(crate) fn generate_delta_query_staged(
     new_frontier: &Frontier,
     pgt_schema: &str,
     pgt_name: &str,
+    stream_owner: Option<&crate::catalog::StreamTableMeta>,
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     generate_delta_query_impl(
         Some(pgt_id),
         None,
+        stream_owner,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -661,6 +664,7 @@ pub(crate) fn generate_delta_query_staged(
 
 /// Generate the benchmark candidate against a validated ROW_NUMBER row mirror.
 /// Production v0.89 plans keep this rejected path disabled.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_delta_query_staged_with_window_state(
     pgt_id: i64,
     row_relation: &str,
@@ -669,10 +673,12 @@ pub(crate) fn generate_delta_query_staged_with_window_state(
     new_frontier: &Frontier,
     pgt_schema: &str,
     pgt_name: &str,
+    stream_owner: Option<&crate::catalog::StreamTableMeta>,
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     generate_delta_query_impl(
         Some(pgt_id),
         Some(row_relation),
+        stream_owner,
         defining_query,
         prev_frontier,
         new_frontier,
@@ -681,9 +687,11 @@ pub(crate) fn generate_delta_query_staged_with_window_state(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_delta_query_impl(
     stage_pgt_id: Option<i64>,
     window_state_row_relation: Option<&str>,
+    stream_owner: Option<&crate::catalog::StreamTableMeta>,
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
@@ -693,7 +701,11 @@ fn generate_delta_query_impl(
     // Step 1: Parse the defining query into an operator tree + CTE registry.
     // This now handles recursive CTEs via OpTree::RecursiveCte, so no
     // early bypass is needed.
-    let mut result = parse_defining_query_full(defining_query)?;
+    let parse_query = || parse_defining_query_full(defining_query);
+    let mut result = match stream_owner {
+        Some(st) => crate::refresh::with_stream_owner(st, parse_query)?,
+        None => parse_query()?,
+    };
 
     // Extract source OIDs before moving cte_registry.
     let mut source_oids: Vec<u32> = result.tree.source_oids();
@@ -775,15 +787,25 @@ fn generate_delta_query_impl(
             source_oids
                 .iter()
                 .map(|oid| {
-                    (
-                        *oid,
-                        format!(
-                            "pg_temp.\"{}\"",
-                            crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
-                        ),
-                    )
+                    let table = format!(
+                        "pg_temp.\"{}\"",
+                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                    );
+                    // Empty staged windows are immutable for this refresh. Expose
+                    // that fact to the planner so unused join snapshots are pruned.
+                    let has_rows = pgrx::Spi::get_one::<bool>(&format!(
+                        "SELECT EXISTS (SELECT 1 FROM {table})"
+                    ))
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false);
+                    let scan = if has_rows {
+                        table
+                    } else {
+                        format!("(SELECT * FROM {table} WHERE false)")
+                    };
+                    Ok((*oid, scan))
                 })
-                .collect(),
+                .collect::<Result<_, PgTrickleError>>()?,
         );
     }
 
@@ -852,6 +874,7 @@ pub fn generate_delta_query_cached(
             new_frontier,
             pgt_schema,
             pgt_name,
+            stream_owner,
         );
     }
 
@@ -866,6 +889,7 @@ pub fn generate_delta_query_cached(
             new_frontier,
             pgt_schema,
             pgt_name,
+            stream_owner,
         );
     }
 
@@ -881,6 +905,7 @@ pub fn generate_delta_query_cached(
             new_frontier,
             pgt_schema,
             pgt_name,
+            stream_owner,
         );
     }
 
@@ -1002,13 +1027,20 @@ pub fn generate_delta_query_cached(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    let build_entry = || -> Result<CachedDeltaTemplate, PgTrickleError> {
-        // M-6 (v0.55.0): Time the DVM parse pass.
+    // Definition SQL needs the stream owner's rights; catalog lookups below
+    // must retain the extension caller's rights.
+    let parse_query = || {
         let parse_start = std::time::Instant::now();
-        let mut result = parse_defining_query_full(defining_query)?;
-        let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
-        crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
+        let result = parse_defining_query_full(defining_query)?;
+        Ok((result, parse_start.elapsed().as_millis() as u64))
+    };
+    let (mut result, parse_elapsed_ms) = match stream_owner {
+        Some(st) => crate::refresh::with_stream_owner(st, parse_query)?,
+        None => parse_query()?,
+    };
+    crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
 
+    let build_entry = || -> Result<CachedDeltaTemplate, PgTrickleError> {
         let mut source_oids: Vec<u32> = result.tree.source_oids();
         source_oids.extend(result.cte_registry.source_oids());
         source_oids.sort_unstable();
@@ -1086,10 +1118,7 @@ pub fn generate_delta_query_cached(
             last_used: 0,
         })
     };
-    let entry = match stream_owner {
-        Some(st) => crate::refresh::with_stream_owner(st, build_entry)?,
-        None => build_entry()?,
-    };
+    let entry = build_entry()?;
     let template_sql = entry.delta_sql_template.clone();
     let output_columns = entry.output_columns.clone();
     let source_oids = entry.source_oids.clone();
@@ -1687,6 +1716,34 @@ pub fn row_id_expr_for_query(defining_query: &str) -> String {
     row_id_expr_for_tree(defining_query, tree.as_ref())
 }
 
+pub fn row_id_expr_for_query_and_complete_output(
+    defining_query: &str,
+    output_columns: &[String],
+) -> (String, bool) {
+    let tree = parse_defining_query(defining_query).ok();
+    let covers_output = tree.as_ref().is_some_and(|tree| {
+        row_identity_domain(tree) != "WINDOW_KEY"
+            && tree
+                .row_id_key_columns()
+                .is_some_and(|keys| row_id_keys_match_output(&keys, output_columns))
+    });
+    (
+        row_id_expr_for_tree(defining_query, tree.as_ref()),
+        covers_output,
+    )
+}
+
+fn row_id_keys_match_output(key_columns: &[String], output_columns: &[String]) -> bool {
+    if key_columns.len() != output_columns.len() {
+        return false;
+    }
+    let mut key_columns = key_columns.to_vec();
+    let mut output_columns = output_columns.to_vec();
+    key_columns.sort_unstable();
+    output_columns.sort_unstable();
+    key_columns == output_columns
+}
+
 fn row_id_expr_for_tree(defining_query: &str, tree: Option<&parser::OpTree>) -> String {
     let key_cols = tree.and_then(parser::OpTree::row_id_key_columns);
     let domain = tree.map(row_identity_domain).unwrap_or("SCAN_KEY");
@@ -2268,6 +2325,23 @@ mod tests {
     use super::*;
     use crate::dvm::operators::test_helpers::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn test_row_id_keys_match_complete_output_only() {
+        let output = vec!["source_id".to_string(), "value".to_string()];
+        assert!(row_id_keys_match_output(
+            &["value".to_string(), "source_id".to_string()],
+            &output
+        ));
+        assert!(!row_id_keys_match_output(
+            &["source_id".to_string()],
+            &output
+        ));
+        assert!(!row_id_keys_match_output(
+            &["Source_id".to_string(), "value".to_string()],
+            &output
+        ));
+    }
 
     #[test]
     fn test_window_row_identity_uses_stable_window_domain() {

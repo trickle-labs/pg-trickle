@@ -1069,6 +1069,90 @@ async fn test_recovery_capture_instance_catalog_and_safe_report() {
 }
 
 #[tokio::test]
+async fn test_recovery_capture_instance_heartbeat_skips_locked_row_then_advances() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE heartbeat_lock_src (id INT PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "heartbeat_lock_st",
+        "SELECT id FROM heartbeat_lock_src",
+        "1h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st("heartbeat_lock_st").await;
+
+    db.execute(
+        "UPDATE pgtrickle.pgt_capture_instance
+            SET last_seen_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'
+          WHERE singleton",
+    )
+    .await;
+    let initial_heartbeat: String = db
+        .query_scalar(
+            "SELECT last_seen_at::text FROM pgtrickle.pgt_capture_instance WHERE singleton",
+        )
+        .await;
+
+    let mut blocker = db.pool.acquire().await.expect("acquire blocker session");
+    sqlx::query("BEGIN")
+        .execute(&mut *blocker)
+        .await
+        .expect("begin blocker transaction");
+    sqlx::query("SELECT singleton FROM pgtrickle.pgt_capture_instance WHERE singleton FOR UPDATE")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("lock capture-instance row");
+
+    let mut refresh = {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            sqlx::query("SELECT pgtrickle.refresh_stream_table('heartbeat_lock_st')")
+                .execute(&pool)
+                .await
+        })
+    };
+    let refresh_result = tokio::time::timeout(Duration::from_secs(5), &mut refresh).await;
+    if refresh_result.is_err() {
+        sqlx::query("ROLLBACK")
+            .execute(&mut *blocker)
+            .await
+            .expect("release blocker after refresh timeout");
+        let _ = refresh.await;
+        panic!("public refresh waited on the locked telemetry row");
+    }
+    refresh_result
+        .expect("refresh completed within the nonblocking lock bound")
+        .expect("refresh task completed")
+        .expect("public refresh succeeded while heartbeat row was locked");
+
+    let (locked_heartbeat, state): (String, String) = sqlx::query_as(
+        "SELECT last_seen_at::text, state::text
+           FROM pgtrickle.pgt_capture_instance
+          WHERE singleton",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read capture-instance state while row lock is held");
+    assert_eq!(locked_heartbeat, initial_heartbeat);
+    assert_eq!(state, "ACTIVE");
+
+    sqlx::query("COMMIT")
+        .execute(&mut *blocker)
+        .await
+        .expect("release capture-instance row lock");
+    db.execute("SELECT pgtrickle.refresh_stream_table('heartbeat_lock_st')")
+        .await;
+    let advanced_heartbeat: String = db
+        .query_scalar(
+            "SELECT last_seen_at::text FROM pgtrickle.pgt_capture_instance WHERE singleton",
+        )
+        .await;
+    assert_ne!(advanced_heartbeat, initial_heartbeat);
+    assert!(advanced_heartbeat > initial_heartbeat);
+}
+
+#[tokio::test]
 #[ignore = "v0.92 recovery matrix runs in the full E2E recovery job"]
 async fn test_recovery_quiesce_and_resume_boundary() {
     let db = E2eDb::new().await.with_extension().await;
