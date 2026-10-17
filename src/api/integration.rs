@@ -909,6 +909,7 @@ pub fn refresh_graph_strict(
     ),
 > {
     let result = (|| -> Result<_, PgTrickleError> {
+        let graph_started = std::time::Instant::now();
         super::require_v098_capability(super::GRAPH_V1_CAPABILITY)?;
         let policy = full_policy.trim().to_ascii_uppercase();
         if !matches!(policy.as_str(), "ALLOW" | "ERROR") {
@@ -956,6 +957,7 @@ pub fn refresh_graph_strict(
             .map(|(relid, _)| *relid)
             .collect::<Vec<_>>();
         lock_ids.sort_unstable();
+        let locks_started = std::time::Instant::now();
         for relid in lock_ids {
             let meta = member_ids
                 .iter()
@@ -975,6 +977,7 @@ pub fn refresh_graph_strict(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .ok_or_else(|| integration_error("PGT_EXT_GRAPH_BUSY", "graph member disappeared"))?;
         }
+        let locks_elapsed = locks_started.elapsed();
         let (_, graph_digest, JsonB(graph)) = graph_contract_data(&roots)?;
         if expected_graph_digest != graph_digest {
             return Err(integration_error(
@@ -1034,7 +1037,9 @@ pub fn refresh_graph_strict(
         let (boundary, boundary_digest) =
             build_source_boundary(&graph, &members, &safe_bound, graph_refresh_id)?;
         let mut node_results = serde_json::Map::new();
+        let nodes_started = std::time::Instant::now();
         for (relid, meta) in member_ids {
+            let node_started = std::time::Instant::now();
             if policy == "ERROR" && super::refresh_ops::manual_requires_whole_query_full(&meta) {
                 return Err(integration_error(
                     "PGT_EXT_FULL_POLICY",
@@ -1073,7 +1078,14 @@ pub fn refresh_graph_strict(
                     "contract_generation": meta.contract_generation,
                 }),
             );
+            pgrx::debug1!(
+                "[pg_trickle] S1 graph node timing graph_refresh_id={} pgt_id={} duration_ms={:.3}",
+                graph_refresh_id,
+                meta.pgt_id,
+                node_started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
+        let nodes_finished = std::time::Instant::now();
         let change_schema = crate::config::pg_trickle_change_buffer_schema();
         let upstream_ids = members
             .iter()
@@ -1084,6 +1096,18 @@ pub fn refresh_graph_strict(
             .into_iter()
             .collect::<Vec<_>>();
         crate::refresh::cleanup_st_change_buffers_by_frontier(&change_schema, &upstream_ids);
+        let graph_finished = std::time::Instant::now();
+        // pre_nodes_ms includes graph_lock_ms; they are nested, not additive.
+        pgrx::debug1!(
+            "[pg_trickle] S1 graph timing graph_refresh_id={} node_count={} pre_nodes_ms={:.3} graph_lock_ms={:.3} nodes_ms={:.3} finalize_ms={:.3} total_ms={:.3}",
+            graph_refresh_id,
+            node_results.len(),
+            nodes_started.duration_since(graph_started).as_secs_f64() * 1000.0,
+            locks_elapsed.as_secs_f64() * 1000.0,
+            nodes_finished.duration_since(nodes_started).as_secs_f64() * 1000.0,
+            graph_finished.duration_since(nodes_finished).as_secs_f64() * 1000.0,
+            graph_finished.duration_since(graph_started).as_secs_f64() * 1000.0,
+        );
         Ok(TableIterator::once((
             CONTRACT_VERSION,
             graph_refresh_id,
