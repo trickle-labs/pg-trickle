@@ -1529,6 +1529,11 @@ fn analyze_query_tree(query: &str) -> Result<*mut pg_sys::Query, PgTrickleError>
     }
 }
 
+/// Inspect resolved expression volatility without executing the defining query.
+pub(crate) fn defining_query_volatility(query: &str) -> Result<char, PgTrickleError> {
+    analyzed_query_volatility(analyze_query_tree(query)?)
+}
+
 /// Validate a defining query and extract its output columns and volatility via
 /// parse analysis.
 ///

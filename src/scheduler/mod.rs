@@ -278,7 +278,7 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
     // #536: Use holdback-aware watermark for dynamic workers.
     let tick_watermark = job.tick_watermark_lsn.clone();
     let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
-    let action = refresh::determine_refresh_action(&st, has_changes);
+    let action = determine_scheduled_refresh_action(&st, has_changes);
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None)
 }
@@ -405,7 +405,7 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
         }
 
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
-        let action = refresh::determine_refresh_action(&st, has_changes);
+        let action = determine_scheduled_refresh_action(&st, has_changes);
 
         let result = execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
         match result {
@@ -500,7 +500,7 @@ fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
     // #536: Use holdback-aware watermark for dynamic workers.
     let tick_watermark = job.tick_watermark_lsn.clone();
     let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
-    let action = refresh::determine_refresh_action(&st, has_changes);
+    let action = determine_scheduled_refresh_action(&st, has_changes);
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None)
 }
@@ -852,7 +852,7 @@ fn try_fused_chain_refresh(
 
         // Determine refresh action.
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
-        let action = refresh::determine_refresh_action(&st, has_changes);
+        let action = determine_scheduled_refresh_action(&st, has_changes);
         if action != RefreshAction::Differential {
             continue;
         }
@@ -1260,7 +1260,7 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
 
         let is_last = idx == member_count - 1;
         let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
-        let action = refresh::determine_refresh_action(&st, has_changes);
+        let action = determine_scheduled_refresh_action(&st, has_changes);
 
         // DAG-4: For intermediate members, set a flag so the refresh path
         // uses bypass capture instead of the persistent buffer.
@@ -2271,6 +2271,34 @@ fn is_external_orchestration(st: &StreamTableMeta) -> bool {
     st.orchestration_mode.eq_ignore_ascii_case("EXTERNAL")
 }
 
+/// FULL queries with non-immutable expressions can change without source writes.
+fn requires_query_reevaluation(st: &StreamTableMeta) -> bool {
+    if st.refresh_mode != RefreshMode::Full || st.needs_reinit {
+        return false;
+    }
+    match refresh::with_stream_owner(st, || {
+        crate::api::helpers::defining_query_volatility(&st.defining_query)
+    }) {
+        Ok(volatility) => volatility != 'i',
+        Err(error) => {
+            warning!(
+                "pg_trickle: cannot inspect volatility for {}.{}; requiring refresh: {}",
+                st.pgt_schema,
+                st.pgt_name,
+                error,
+            );
+            true
+        }
+    }
+}
+
+fn determine_scheduled_refresh_action(
+    st: &StreamTableMeta,
+    has_upstream_changes: bool,
+) -> RefreshAction {
+    refresh::determine_refresh_action(st, has_upstream_changes || requires_query_reevaluation(st))
+}
+
 /// Check if a ST is stale (staleness exceeds effective schedule or cron is due).
 ///
 /// G-7: When tiered scheduling is enabled, the tier multiplier is applied
@@ -2315,10 +2343,9 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
     .unwrap_or(None)
     .unwrap_or(false);
     if interval_target {
-        if !check_upstream_changes(st) {
-            return false;
-        }
-        return check_controller_due(st.pgt_id);
+        return check_controller_due(st.pgt_id)
+            && (check_upstream_changes(st)
+                || (check_interval_elapsed(st.pgt_id) && requires_query_reevaluation(st)));
     }
 
     // G-7: When tiered scheduling is enabled, check tier first.
@@ -2414,6 +2441,11 @@ fn check_controller_due(pgt_id: i64) -> bool {
     {
         return due;
     }
+    check_interval_elapsed(pgt_id)
+}
+
+/// Quiet clock-driven queries still wait one target interval between refreshes.
+fn check_interval_elapsed(pgt_id: i64) -> bool {
     Spi::get_one_with_args::<bool>(
         "SELECT COALESCE(last_refresh_at, created_at)
                     + freshness_deadline_ms * interval '1 millisecond'
@@ -3315,7 +3347,7 @@ fn refresh_single_st(
         upstream_change_state(&st, table_change_snapshot);
 
     let action = {
-        let mut base_action = refresh::determine_refresh_action(&st, has_changes);
+        let mut base_action = determine_scheduled_refresh_action(&st, has_changes);
 
         // A08 (v0.35.0): Force-full-refresh GUC override.
         // When `pg_trickle.force_full_refresh = true`, override any DIFFERENTIAL
