@@ -84,8 +84,8 @@
 use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
-    is_simple_child, join_scan_count, rewrite_expr_for_join, rewrite_join_condition,
+    build_base_table_key_exprs, build_filtered_leaf_snapshot_sql, build_snapshot_sql,
+    is_join_child, is_simple_child, join_scan_count, rewrite_expr_for_join, rewrite_join_condition,
     snapshot_join_column_name,
 };
 use crate::dvm::parser::{Expr, OpTree};
@@ -366,31 +366,24 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         } else {
             // Scan, Subquery/Aggregate child: use L₀ via single-table
             // snapshot (DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback)
-            let left_pre_change = build_leaf_snapshot_sql(
+            let filters = equi_keys
+                .iter()
+                .map(|(left_key, right_key)| {
+                    format!(
+                        "{left_key} IN (SELECT DISTINCT {right_key} FROM {})",
+                        right_result.cte_name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            build_filtered_leaf_snapshot_sql(
                 left,
                 &left_result.cte_name,
                 left_cols,
                 ctx.fallback_leaf_oids(),
                 ctx.st_source_pgt_ids(),
-            );
-            // Apply semi-join filter to L₀ if equi-keys are available
-            if equi_keys.is_empty() {
-                left_pre_change
-            } else {
-                let filters: Vec<String> = equi_keys
-                    .iter()
-                    .map(|(left_key, right_key)| {
-                        format!(
-                            "{left_key} IN (SELECT DISTINCT {right_key} FROM {})",
-                            right_result.cte_name
-                        )
-                    })
-                    .collect();
-                format!(
-                    "(SELECT * FROM {left_pre_change} __l0 WHERE {filters})",
-                    filters = filters.join(" AND "),
-                )
-            }
+                (!filters.is_empty()).then_some(filters.as_str()),
+            )
         }
     } else {
         // SemiJoin-containing nested join child: use post-change L₁ with
@@ -480,31 +473,24 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         } else {
             // Scan, Subquery/Aggregate child: use R₀ via single-table
             // snapshot (DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback)
-            let right_pre_change = build_leaf_snapshot_sql(
+            let filters = equi_keys
+                .iter()
+                .map(|(left_key, right_key)| {
+                    format!(
+                        "{right_key} IN (SELECT DISTINCT {left_key} FROM {})",
+                        left_result.cte_name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            build_filtered_leaf_snapshot_sql(
                 right,
                 &right_result.cte_name,
                 right_cols,
                 ctx.fallback_leaf_oids(),
                 ctx.st_source_pgt_ids(),
-            );
-            // Apply semi-join filter to R₀
-            if equi_keys.is_empty() {
-                right_pre_change
-            } else {
-                let filters: Vec<String> = equi_keys
-                    .iter()
-                    .map(|(left_key, right_key)| {
-                        format!(
-                            "{right_key} IN (SELECT DISTINCT {left_key} FROM {})",
-                            left_result.cte_name
-                        )
-                    })
-                    .collect();
-                format!(
-                    "(SELECT * FROM {right_pre_change} __r0 WHERE {filters})",
-                    filters = filters.join(" AND "),
-                )
-            }
+                (!filters.is_empty()).then_some(filters.as_str()),
+            )
         }
     } else {
         // Nested/complex right child: fall back to R₁ (current right).
