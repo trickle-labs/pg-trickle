@@ -53,6 +53,32 @@ fn content_signature_expr(
     format!("md5(to_jsonb(ROW({values}))::text)")
 }
 
+/// Return whether the current stream and reconstructed result have different
+/// multisets of content signatures. The same signatures drive the correction
+/// queries below, so a zero signed count for every signature proves that both
+/// the DELETE and INSERT correction sets are empty, including duplicates and
+/// NULL-valued signatures.
+fn reconciliation_has_drift_sql(
+    stream_table_name: &str,
+    recon_table: &str,
+    st_sig: &str,
+    r_sig: &str,
+) -> String {
+    format!(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM ( \
+                 SELECT {st_sig} AS __pgt_sig, 1 AS __pgt_weight \
+                 FROM {stream_table_name} st \
+                 UNION ALL \
+                 SELECT {r_sig} AS __pgt_sig, -1 AS __pgt_weight \
+                 FROM {recon_table} r \
+             ) __pgt_multiset \
+             GROUP BY __pgt_sig \
+             HAVING SUM(__pgt_weight) <> 0 \
+         )"
+    )
+}
+
 /// EC01-2: Reconcile the stream table against the full-query result set.
 ///
 /// After a refresh (DIFFERENTIAL or IMMEDIATE) applies a delta, residue from
@@ -145,6 +171,20 @@ pub fn cleanup_cross_cycle_phantoms(
     Spi::run(&insert_recon_sql).map_err(|e| {
         PgTrickleError::SpiError(format!("EC01-2 reconcile materialise failed: {e}"))
     })?;
+
+    // Common case: the differential MERGE already converged. A single signed
+    // multiset aggregation detects whether any repair is necessary; avoid the
+    // separate DELETE/INSERT count aggregations and row-number windows when
+    // every content signature has equal multiplicity. This does NOT skip the
+    // full-query materialisation or suppress repair when there is drift.
+    let drift_probe =
+        reconciliation_has_drift_sql(stream_table_name, &recon_table, &st_sig, &r_sig);
+    let has_drift = Spi::get_one::<bool>(&drift_probe)
+        .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 drift probe failed: {e}")))?
+        .unwrap_or(true);
+    if !has_drift {
+        return Ok(0);
+    }
 
     // Step 2: delete surplus ST rows (multiset-aware on user-content sig).
     //
@@ -284,9 +324,64 @@ mod tests {
     }
 
     #[test]
+    fn test_reconciliation_drift_probe_preserves_signed_multiplicities() {
+        let sql = super::reconciliation_has_drift_sql(
+            "\"public\".\"source_stream\"",
+            "pg_temp.__pgt_recon_42",
+            "st.\"__pgt_row_id\"",
+            "r.\"__pgt_row_id\"",
+        );
+        assert!(sql.contains("SELECT EXISTS"));
+        assert!(sql.contains("UNION ALL"));
+        assert!(sql.contains("GROUP BY __pgt_sig"));
+        assert!(sql.contains("HAVING SUM(__pgt_weight) <> 0"));
+        assert_eq!(sql.matches("FROM \"public\".\"source_stream\" st").count(), 1);
+        assert_eq!(sql.matches("FROM pg_temp.__pgt_recon_42 r").count(), 1);
+        assert!(sql.contains("SELECT st.\"__pgt_row_id\" AS __pgt_sig, 1 AS __pgt_weight"));
+        assert!(sql.contains("SELECT r.\"__pgt_row_id\" AS __pgt_sig, -1 AS __pgt_weight"));
+    }
+
+    #[test]
     fn test_cleanup_returns_zero_for_empty_case() {
         // Verify batch_size defaults are positive integers
         let batch_size: i64 = 1000;
         assert!(batch_size > 0);
+    }
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod pg_tests {
+    use super::*;
+
+    #[pg_test]
+    fn test_reconciliation_drift_probe_handles_nulls_and_duplicate_rows() {
+        Spi::run("CREATE TEMP TABLE __pgt_probe_st (value text)").unwrap();
+        Spi::run("CREATE TEMP TABLE __pgt_probe_recon (value text)").unwrap();
+        let sql = reconciliation_has_drift_sql(
+            "pg_temp.__pgt_probe_st",
+            "pg_temp.__pgt_probe_recon",
+            "st.value",
+            "r.value",
+        );
+        let has_drift = || Spi::get_one::<bool>(&sql).unwrap().unwrap();
+        assert!(!has_drift(), "two empty multisets match");
+
+        Spi::run("INSERT INTO __pgt_probe_st VALUES ('a'), (NULL), (NULL)").unwrap();
+        Spi::run("INSERT INTO __pgt_probe_recon VALUES (NULL), ('a'), (NULL)").unwrap();
+        assert!(!has_drift(), "multiplicity and NULLs match regardless of order");
+
+        Spi::run("INSERT INTO __pgt_probe_st VALUES (NULL)").unwrap();
+        assert!(has_drift(), "a surplus NULL signature must trigger repair");
+        Spi::run("INSERT INTO __pgt_probe_recon VALUES (NULL)").unwrap();
+        assert!(!has_drift(), "equal duplicate counts cancel");
+
+        Spi::run("UPDATE __pgt_probe_recon SET value = 'changed' WHERE value = 'a'").unwrap();
+        assert!(has_drift(), "stale content must trigger repair");
+        Spi::run("UPDATE __pgt_probe_st SET value = 'changed' WHERE value = 'a'").unwrap();
+        assert!(!has_drift(), "matching content clears the drift probe");
+
+        Spi::run("DELETE FROM __pgt_probe_recon WHERE value = 'changed'").unwrap();
+        assert!(has_drift(), "a missing result row must trigger repair");
     }
 }
