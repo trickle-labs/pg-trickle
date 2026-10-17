@@ -10,6 +10,10 @@ on:
       - 'docs/GUC_CATALOG.md'
       - 'docs/SQL_API_CATALOG.md'
       - 'scripts/gen_catalogs.py'
+      - 'scripts/gen_sql_reference.py'
+      - 'scripts/gen_plans_index.py'
+      - 'scripts/test_api_doc_filters.py'
+      - 'plans/**'
       - '.github/workflows/docs-drift.yml'
   pull_request:
     branches: [main]
@@ -20,6 +24,10 @@ on:
       - 'docs/GUC_CATALOG.md'
       - 'docs/SQL_API_CATALOG.md'
       - 'scripts/gen_catalogs.py'
+      - 'scripts/gen_sql_reference.py'
+      - 'scripts/gen_plans_index.py'
+      - 'scripts/test_api_doc_filters.py'
+      - 'plans/**'
       - '.github/workflows/docs-drift.yml'
   schedule:
     - cron: '30 6 * * 1'
