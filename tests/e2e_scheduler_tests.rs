@@ -31,6 +31,198 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+// Keep schedules long and explicitly make each pass due so observations cannot
+// race another refresh. Backdating the leaf also forces a real DIFFERENTIAL
+// pass via the upstream-refresh timestamp, even when no deltas remain.
+async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstream: bool) {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+
+    db.execute("CREATE TABLE replay_src (id INT PRIMARY KEY, grp INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO replay_src VALUES (1, 1), (2, 1)")
+        .await;
+    db.create_st("replay_up", "SELECT id, grp FROM replay_src", "1h", "FULL")
+        .await;
+    let query = "SELECT grp, COUNT(*) AS n FROM replay_up GROUP BY grp";
+    for leaf in ["replay_leaf", "replay_sibling"] {
+        db.create_st(leaf, query, "1h", "DIFFERENTIAL").await;
+    }
+    db.execute(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['replay_up', 'replay_leaf', 'replay_sibling'])",
+    )
+    .await;
+    db.execute("DELETE FROM pgtrickle.pgt_refresh_history")
+        .await;
+    if baseline == "FALLBACK" {
+        // Put one eligible delta below the next tick bound so differential
+        // execution reaches the configured FULL fallback instead of no-oping.
+        db.execute("INSERT INTO replay_src VALUES (4, 1)").await;
+        db.refresh_st("replay_up").await;
+    }
+    if change_upstream {
+        db.execute("INSERT INTO replay_src VALUES (3, 1)").await;
+    }
+    match baseline {
+        "FULL" => {
+            db.alter_system_set_and_wait("pg_trickle.force_full_refresh", "on", "on")
+                .await;
+        }
+        "FALLBACK" => {
+            db.alter_system_set_and_wait("pg_trickle.refresh_strategy", "full", "full")
+                .await;
+        }
+        "REINITIALIZE" => {
+            db.execute("UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = true WHERE pgt_name = 'replay_leaf'")
+                .await;
+        }
+        "FRONTIER_MISSING" => {
+            db.execute("UPDATE pgtrickle.pgt_stream_tables SET frontier = NULL WHERE pgt_name = 'replay_leaf'")
+                .await;
+        }
+        _ => panic!("unknown baseline {baseline}"),
+    }
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name IN ('replay_up', 'replay_leaf')")
+        .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_up', 'replay_leaf'])")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "scheduled baseline",
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED')",
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+        .await
+    );
+    db.assert_st_matches_query("replay_leaf", query).await;
+    let upstream_id: i64 = db
+        .query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'replay_up'")
+        .await;
+    let buffer = format!("pgtrickle_changes.changes_pgt_{upstream_id}");
+    let diagnostics: String = db
+        .query_scalar(&format!(
+            "SELECT jsonb_build_object(
+                    'baseline', '{baseline}', 'action', h.action,
+                    'strategy', h.merge_strategy_used, 'fallback', h.was_full_fallback,
+                    'tick_bound', h.tick_watermark_lsn, 'frontier', st.frontier,
+                    'buffer_max', (SELECT MAX(lsn)::text FROM {buffer}),
+                    'same_transaction', h.visibility_xid = (
+                        SELECT visibility_xid FROM pgtrickle.pgt_refresh_history
+                        WHERE pgt_id = {upstream_id} AND status = 'COMPLETED'
+                        ORDER BY refresh_id DESC LIMIT 1))::text
+           FROM pgtrickle.pgt_refresh_history h
+           JOIN pgtrickle.pgt_stream_tables st USING (pgt_id)
+          WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED'
+          ORDER BY h.refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    eprintln!("scheduler baseline witness: {diagnostics}");
+    let witness: serde_json::Value = serde_json::from_str(&diagnostics).expect("baseline witness");
+    assert_eq!(
+        witness["action"],
+        if baseline == "REINITIALIZE" {
+            "REINITIALIZE"
+        } else {
+            "FULL"
+        }
+    );
+    assert_eq!(witness["strategy"], "FULL", "{diagnostics}");
+    assert_eq!(witness["same_transaction"], true, "{diagnostics}");
+    if baseline == "FALLBACK" {
+        assert_eq!(witness["fallback"], true, "{diagnostics}");
+    }
+    if change_upstream {
+        assert!(db.query_scalar::<bool>(&format!(
+            "SELECT MAX(lsn) > (SELECT tick_watermark_lsn FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1) FROM {buffer}"
+        )).await, "upstream capture must exceed the tick bound: {diagnostics}");
+        assert_eq!(
+            db.query_scalar::<i64>(&format!("SELECT COUNT(*) FROM {buffer} WHERE action = 'I'"))
+                .await,
+            if baseline == "FALLBACK" { 2 } else { 1 },
+            "FULL must retain the delta for the paused sibling"
+        );
+    }
+
+    db.alter_system_set_and_wait("pg_trickle.force_full_refresh", "off", "off")
+        .await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "differential",
+        "differential",
+    )
+    .await;
+    // No further source writes: consume only the window following the baseline.
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'replay_leaf'")
+        .await;
+    assert!(db.wait_for_condition(
+        "differential after baseline",
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_leaf' AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND h.merge_strategy_used <> 'FULL' AND NOT h.was_full_fallback)",
+        Duration::from_secs(60),
+        Duration::from_millis(50),
+    ).await, "a real differential pass must follow the baseline: {diagnostics}");
+    db.assert_st_matches_query("replay_leaf", query).await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT __pgt_count FROM replay_leaf")
+            .await,
+        if baseline == "FALLBACK" {
+            4
+        } else if change_upstream {
+            3
+        } else {
+            2
+        }
+    );
+    assert!(db.query_scalar::<bool>(&format!(
+        "SELECT (frontier #>> '{{sources,pgt_{upstream_id},lsn}}')::pg_lsn >= (SELECT COALESCE(MAX(lsn), '0/0'::pg_lsn) FROM {buffer}) FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'replay_leaf'"
+    )).await, "the baseline frontier must cover all materialized upstream changes");
+
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'replay_sibling'")
+        .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['replay_sibling'])")
+        .await;
+    assert!(db.wait_for_condition(
+        "sibling catch-up",
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_sibling' AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)",
+        Duration::from_secs(60),
+        Duration::from_millis(50),
+    ).await);
+    db.assert_st_matches_query("replay_sibling", query).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_full_baseline_does_not_replay_upstream_changes() {
+    assert_scheduler_baseline_does_not_replay("FULL", true).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_fallback_baseline_does_not_replay_upstream_changes() {
+    assert_scheduler_baseline_does_not_replay("FALLBACK", true).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_reinitialize_baseline_does_not_replay_upstream_changes() {
+    assert_scheduler_baseline_does_not_replay("REINITIALIZE", true).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_missing_frontier_baseline_does_not_replay_upstream_changes() {
+    assert_scheduler_baseline_does_not_replay("FRONTIER_MISSING", true).await;
+}
+
+#[tokio::test]
+async fn test_scheduler_unchanged_upstream_baseline_preserves_counts() {
+    assert_scheduler_baseline_does_not_replay("REINITIALIZE", false).await;
+}
+
 /// A lossless CDC pause keeps trigger capture active while refresh consumption
 /// is stopped, then lets differential refresh catch up after resume.
 #[tokio::test]

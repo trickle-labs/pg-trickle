@@ -105,9 +105,14 @@ async fn commit_row(db: &E2eDb, source: &str, journal: &str, id: i32, value: &st
     .execute(&mut *tx)
     .await
     .expect("independent journal operation should commit");
+    let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("record committed input transaction identity");
     tx.commit()
         .await
         .expect("journal transaction should commit");
+    eprintln!("[WAL journal] source={source} journal={journal} xid={xid} id={id} value={value}");
 }
 
 async fn identity(db: &E2eDb, sentinel_table: &str, container_id: &str) -> Identity {
@@ -662,6 +667,213 @@ async fn test_trigger_to_wal_handoff_preserves_pending_commits() {
         "the post-handoff commit must have an acknowledged WAL receipt"
     );
     eprintln!("[Q1095] trigger_to_wal source_oid={oid} slot={slot} capture=WAL");
+}
+
+async fn run_trigger_fallback_case(phase: &str) {
+    let mut fixture = setup_wal_fixture(&format!("fallback_{phase}")).await;
+    let db = &fixture.db;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
+    let shared = format!("{}_shared", fixture.stream);
+    db.alter_system_set_and_wait("pg_trickle.cdc_capture_mode", "'hold'", "hold")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_paused", "on", "on")
+        .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(\
+            name => '{shared}', query => $$SELECT id, value FROM public.{}$$,\
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', cdc_mode => 'wal')",
+        fixture.source
+    ))
+    .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_paused", "off", "off")
+        .await;
+    wait_for_cdc_mode(db, &fixture.source, "WAL").await;
+    for stream in [&fixture.stream, &shared] {
+        db.refresh_st(stream).await;
+        db.execute(&format!(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+        ))
+        .await;
+        assert!(
+            db.query_scalar::<bool>(&format!(
+                "SELECT NOT needs_reinit AND frontier IS NOT NULL \
+             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
+            ))
+            .await,
+            "consumer must start with an established baseline"
+        );
+    }
+    let history: i64 = db
+        .query_scalar("SELECT coalesce(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    let buffer = db.change_buffer_table(fixture.oid).await;
+    let value = format!("fallback-{phase}-pending");
+    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
+    set_wal_phase(db, fixture.oid, phase, &value).await;
+    commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
+    wait_for_wal_barrier(db, fixture.oid, phase, blocker_pid).await;
+    assert_eq!(
+        db.query_scalar::<i64>(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+        ))
+        .await,
+        0,
+        "pending commit must have no trigger or replay copy"
+    );
+    assert!(exact_diff(&db.pool, &fixture.stream, &fixture.journal).await > 0);
+    if phase == "before_replay" {
+        wait_for_receipt(&db.pool, fixture.oid, "RECEIVED", &value).await;
+        let receipt: (String, String, String) = sqlx::query_as(
+            "SELECT lsn::text, source_xid::text, data FROM pgtrickle.pgt_wal_receipts \
+             WHERE source_relid = $1 AND status = 'RECEIVED' AND source_change AND data LIKE $2",
+        )
+        .bind(fixture.oid)
+        .bind(format!("%{value}%"))
+        .fetch_one(&db.pool)
+        .await
+        .expect("retain the real pending receipt witness");
+        eprintln!(
+            "[Q1159] phase={phase} source_oid={} receipt={receipt:?}",
+            fixture.oid
+        );
+    } else {
+        assert_eq!(
+            matching_receipts(&db.pool, fixture.oid, "RECEIVED", &value).await,
+            0
+        );
+    }
+
+    // Change the effective GUC request without alter_stream_table's separate forced cutover.
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_stream_tables SET requested_cdc_mode = NULL \
+         WHERE pgt_name IN ('{}', '{shared}')",
+        fixture.stream
+    ))
+    .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_paused", "on", "on")
+        .await;
+    clear_wal_phase(db).await;
+    // SIGTERM lets a scheduler finish its tick; kill it while the witness lock is still held.
+    let output = tokio::process::Command::new("docker")
+        .args(["restart", "--time", "0", db.container_id()])
+        .output()
+        .await
+        .expect("restart the retained PostgreSQL container at the witnessed boundary");
+    assert!(output.status.success(), "Docker restart failed");
+    drop(barrier);
+    fixture.db.pool = fixture.db.reconnect_after_restart().await;
+    let db = &fixture.db;
+    for stream in [&fixture.stream, &shared] {
+        db.execute(&format!(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+        ))
+        .await;
+    }
+    assert_eq!(
+        matching_receipts(&db.pool, fixture.oid, "RECEIVED", &value).await > 0,
+        phase == "before_replay",
+        "restart must preserve the witnessed pending-work state"
+    );
+    db.alter_system_set_and_wait("pg_trickle.cdc_paused", "off", "off")
+        .await;
+    wait_for_cdc_mode(db, &fixture.source, "TRIGGER").await;
+    assert!(
+        db.query_scalar::<bool>(&format!(
+            "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')",
+            fixture.slot
+        ))
+        .await
+    );
+    for stream in [&fixture.stream, &shared] {
+        let invalidated: bool = db
+            .query_scalar(&format!(
+                "SELECT needs_reinit AND frontier IS NULL FROM pgtrickle.pgt_stream_tables \
+                 WHERE pgt_name = '{stream}'"
+            ))
+            .await;
+        eprintln!("[Q1159] phase={phase} stream={stream} invalidated={invalidated}");
+        db.refresh_st(stream).await;
+        assert_eq!(exact_diff(&db.pool, stream, &fixture.journal).await, 0);
+        assert!(
+            invalidated,
+            "fallback must invalidate every consumer before successful refresh: {stream}"
+        );
+        let action: String = db
+            .query_scalar(&format!(
+                "SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = '{stream}' AND h.refresh_id > {history} \
+             AND h.status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1"
+            ))
+            .await;
+        assert_eq!(
+            action, "REINITIALIZE",
+            "recovery must be explicit in history"
+        );
+        assert!(
+            !db.query_scalar::<bool>(&format!(
+                "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
+            ))
+            .await
+        );
+    }
+    commit_row(
+        db,
+        &fixture.source,
+        &fixture.journal,
+        3,
+        "after-trigger-fallback",
+    )
+    .await;
+    assert!(
+        db.query_scalar::<i64>(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+        ))
+        .await
+            > 0,
+        "future writes must be trigger-captured"
+    );
+    for stream in [&fixture.stream, &shared] {
+        db.refresh_st(stream).await;
+        assert_eq!(exact_diff(&db.pool, stream, &fixture.journal).await, 0);
+        assert!(
+            db.query_scalar::<bool>(&format!(
+                "SELECT h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = '{stream}' AND h.status = 'COMPLETED' \
+             ORDER BY h.refresh_id DESC LIMIT 1"
+            ))
+            .await,
+            "future trigger writes must refresh without a hidden FULL repair"
+        );
+    }
+    let sentinel = format!("wal_fallback_{phase}_identity");
+    assert!(identity_matches(
+        &fixture.identity,
+        &identity(db, &sentinel, db.container_id()).await
+    ));
+    eprintln!(
+        "[Q1159] phase={phase} source_oid={} fallback=TRIGGER recovery=REINITIALIZE parity=exact",
+        fixture.oid
+    );
+}
+
+#[tokio::test]
+async fn test_wal_trigger_fallback_received_receipt_requires_rebaseline() {
+    run_trigger_fallback_case("before_replay").await;
+}
+
+#[tokio::test]
+async fn test_wal_trigger_fallback_undecoded_commit_requires_rebaseline() {
+    run_trigger_fallback_case("before_receipt").await;
 }
 
 async fn cleanup_fixture() -> (E2eDb, String, String, String, i64, String) {

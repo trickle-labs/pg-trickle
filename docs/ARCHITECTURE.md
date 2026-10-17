@@ -219,6 +219,14 @@ When a stream table's defining query references another stream table (rather tha
 
 **Delta capture — FULL path.** When an upstream stream table refreshes in FULL mode (e.g., due to a mode downgrade or `full => true`), the engine takes a **pre-refresh snapshot**, executes the full refresh, then computes an `EXCEPT ALL` diff between the old and new contents. The resulting INSERT/DELETE pairs are written to the ST change buffer. This prevents FULL refreshes from cascading through the entire dependency chain — downstream STs always receive a minimal delta regardless of how the upstream was refreshed.
 
+Scheduled FULL and reinitialization baselines lock upstream storage and catalog
+rows before reading their current contents. Their upstream stream-table
+frontiers record the actual change-buffer high-water marks, including changes
+published earlier in the same tick above its safe bound. Differential windows
+remain capped by that immutable bound. A differential fallback to FULL uses the
+same baseline rule after acquiring the source locks; sibling consumers retain
+their own frontiers and the buffered deltas they still need.
+
 **Frontier tracking.** ST source positions are tracked in the same frontier JSONB structure as base-table sources, using `pgt_<upstream_pgt_id>` as the key (e.g., `{"pgt_42": 157}`) rather than the OID-based keys used for base tables. The scheduler's `has_stream_table_source_changes()` function compares the downstream's last-consumed frontier position against the upstream buffer's current maximum LSN to decide whether a refresh is needed.
 
 **Lifecycle.** ST change buffers are created automatically when a stream table gains its first downstream consumer (`create_st_change_buffer_table()`), and dropped when the last downstream consumer is removed (`drop_st_change_buffer_table()`). Existing ST-to-ST dependencies have their buffers auto-created on the first scheduler tick. Consumed rows are cleaned up by `cleanup_st_change_buffers_by_frontier()` after each successful downstream refresh.

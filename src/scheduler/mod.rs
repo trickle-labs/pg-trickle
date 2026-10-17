@@ -3946,55 +3946,58 @@ fn execute_scheduled_refresh(
     // Using MAX(lsn) from the buffer records EXACTLY the latest data point,
     // ensuring the next tick's delta correctly starts AFTER consumed data.
     let change_schema_for_st = crate::config::pg_trickle_change_buffer_schema();
-    let st_source_positions = dependencies
-        .iter()
-        .filter(|dep| dep.source_type == "STREAM_TABLE")
-        .map(|dep| {
-            let upstream_pgt_id = crate::catalog::StreamTableMeta::pgt_id_for_relid(
-                dep.source_relid,
-            )
-            .ok_or_else(|| crate::error::PgTrickleError::CdcStateInvalid {
-                pgt_id: st.pgt_id,
-                source_name: format!("OID {}", dep.source_relid.to_u32()),
-                buffer: "stream-table dependency".to_string(),
-                reason: "upstream stream table metadata is missing".to_string(),
-            })?;
-            if !crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema_for_st) {
-                return Err(crate::error::PgTrickleError::CdcStateInvalid {
+    let read_st_source_positions = |full_baseline: bool| {
+        dependencies
+            .iter()
+            .filter(|dep| dep.source_type == "STREAM_TABLE")
+            .map(|dep| {
+                let upstream_pgt_id =
+                    crate::catalog::StreamTableMeta::pgt_id_for_relid(dep.source_relid)
+                        .ok_or_else(|| crate::error::PgTrickleError::CdcStateInvalid {
+                            pgt_id: st.pgt_id,
+                            source_name: format!("OID {}", dep.source_relid.to_u32()),
+                            buffer: "stream-table dependency".to_string(),
+                            reason: "upstream stream table metadata is missing".to_string(),
+                        })?;
+                if !crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema_for_st) {
+                    return Err(crate::error::PgTrickleError::CdcStateInvalid {
+                        pgt_id: st.pgt_id,
+                        source_name: format!("pgt_id {upstream_pgt_id}"),
+                        buffer: format!("{change_schema_for_st}.changes_pgt_{upstream_pgt_id}"),
+                        reason: "required stream-table change buffer is missing".to_string(),
+                    });
+                }
+                // A protected FULL baseline reads the locked upstream's current
+                // contents, including same-tick changes above safe_bound (#1160).
+                // Only differential windows must retain the immutable tick cap.
+                let lsn = Spi::get_one_with_args::<String>(
+                    &format!(
+                        "SELECT (CASE WHEN $2 THEN COALESCE(MAX(lsn), '0/0'::pg_lsn) \
+                             ELSE LEAST(COALESCE(MAX(lsn), '0/0'::pg_lsn), $1::pg_lsn) \
+                             END)::text \
+                     FROM \"{schema}\".changes_pgt_{id}",
+                        schema = change_schema_for_st,
+                        id = upstream_pgt_id,
+                    ),
+                    &[safe_bound.into(), full_baseline.into()],
+                )
+                .map_err(|e| crate::error::PgTrickleError::CdcStateInvalid {
                     pgt_id: st.pgt_id,
                     source_name: format!("pgt_id {upstream_pgt_id}"),
                     buffer: format!("{change_schema_for_st}.changes_pgt_{upstream_pgt_id}"),
-                    reason: "required stream-table change buffer is missing".to_string(),
-                });
-            }
-            // ST-ST-7: Read the actual max LSN from the change buffer and
-            // cap it to this tick's immutable bound. An empty managed buffer
-            // has only its sentinel position.
-            let lsn = Spi::get_one_with_args::<String>(
-                &format!(
-                    "SELECT LEAST(COALESCE(MAX(lsn), '0/0'::pg_lsn), $1::pg_lsn)::text \
-                     FROM \"{schema}\".changes_pgt_{id}",
-                    schema = change_schema_for_st,
-                    id = upstream_pgt_id,
-                ),
-                &[safe_bound.into()],
-            )
-            .map_err(|e| crate::error::PgTrickleError::CdcStateInvalid {
-                pgt_id: st.pgt_id,
-                source_name: format!("pgt_id {upstream_pgt_id}"),
-                buffer: format!("{change_schema_for_st}.changes_pgt_{upstream_pgt_id}"),
-                reason: format!("could not read bounded upstream position: {e}"),
-            })?
-            .ok_or_else(|| crate::error::PgTrickleError::CdcStateInvalid {
-                pgt_id: st.pgt_id,
-                source_name: format!("pgt_id {upstream_pgt_id}"),
-                buffer: format!("{change_schema_for_st}.changes_pgt_{upstream_pgt_id}"),
-                reason: "bounded upstream position was NULL".to_string(),
-            })?;
-            Ok::<_, crate::error::PgTrickleError>((upstream_pgt_id, lsn))
-        })
-        .collect::<Result<Vec<_>, _>>();
-    let st_source_positions = match st_source_positions {
+                    reason: format!("could not read upstream position: {e}"),
+                })?
+                .ok_or_else(|| crate::error::PgTrickleError::CdcStateInvalid {
+                    pgt_id: st.pgt_id,
+                    source_name: format!("pgt_id {upstream_pgt_id}"),
+                    buffer: format!("{change_schema_for_st}.changes_pgt_{upstream_pgt_id}"),
+                    reason: "upstream position was NULL".to_string(),
+                })?;
+                Ok::<_, crate::error::PgTrickleError>((upstream_pgt_id, lsn))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let st_source_positions = match read_st_source_positions(full_baseline) {
         Ok(positions) => positions,
         Err(e) => {
             log!(
@@ -4266,7 +4269,7 @@ fn execute_scheduled_refresh(
             {
                 return RefreshOutcome::AtomicityTestFailure(message);
             }
-            let frontier = match StreamTableMeta::get_frontier(st.pgt_id) {
+            let mut frontier = match StreamTableMeta::get_frontier(st.pgt_id) {
                 Ok(Some(frontier)) => frontier,
                 Ok(None) => {
                     log!(
@@ -4286,6 +4289,22 @@ fn execute_scheduled_refresh(
             };
             let effective_mode = refresh::take_effective_mode();
             let effective_action = refresh::effective_action_for_mode(action, effective_mode);
+            if !full_baseline
+                && matches!(
+                    effective_action,
+                    RefreshAction::Full | RefreshAction::Reinitialize
+                )
+            {
+                // A differential fallback took the FULL source locks during
+                // execution; its frontier must now match that locked baseline.
+                let positions = match read_st_source_positions(true) {
+                    Ok(positions) => positions,
+                    Err(e) => pgrx::error!("pg_trickle: FULL baseline frontier failed: {}", e),
+                };
+                for (upstream_pgt_id, lsn) in positions {
+                    frontier.set_st_source(upstream_pgt_id, lsn, data_ts_frontier.clone());
+                }
+            }
             let execution = refresh::RefreshExecution {
                 requested_action: action,
                 effective_mode,

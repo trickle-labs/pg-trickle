@@ -21,10 +21,6 @@ fn refresh_safe_bound() -> Result<String, PgTrickleError> {
         .unwrap_or_else(crate::cdc::get_current_wal_lsn)
 }
 
-fn graph_bound_is_set() -> bool {
-    refresh::current_safe_bound().is_some()
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ManualRefreshResult {
     pub(crate) action: String,
@@ -1022,23 +1018,53 @@ fn execute_manual_differential_refresh(
     // Get current WAL positions for non-ST sources (reuses source_oids — G-N3).
     // The immutable bound limits the delta read; source writes after it remain
     // available to the next refresh.
-    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
-    let mut safe_bound = refresh_safe_bound()?;
-    if !graph_bound_is_set() {
-        for source_oid in source_oids {
-            let buffer_name = cdc::buffer_base_name_for_oid(*source_oid);
-            // nosemgrep: rust.spi.get_one_with_args.dynamic-format — change_schema is a quoted config identifier and buffer_name is OID-derived.
-            safe_bound = Spi::get_one_with_args::<String>(
-                &format!(
-                    "SELECT GREATEST($1::pg_lsn, COALESCE(MAX(lsn), '0/0'::pg_lsn))::text \
-                     FROM \"{change_schema}\".{buffer_name}"
-                ),
-                &[safe_bound.as_str().into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-            .unwrap_or(safe_bound);
+    let safe_bound = if let Some(bound) = refresh::current_safe_bound() {
+        bound
+    } else {
+        // Capture before inspecting locks: any older invisible CDC still has a writer lock.
+        let candidate = cdc::get_current_wal_lsn()?;
+        let has_writer = Spi::get_one_with_args::<bool>(
+            "WITH RECURSIVE sources(oid) AS (
+                 SELECT source_relid FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1
+                 UNION
+                 SELECT i.inhrelid FROM pg_inherits i JOIN sources s ON i.inhparent = s.oid
+             )
+             SELECT CASE WHEN current_setting('transaction_isolation')
+                              IN ('repeatable read', 'serializable') THEN NULL
+             ELSE EXISTS (
+                 SELECT 1 FROM pg_locks l
+                 JOIN pg_class c ON c.oid = l.relation
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE l.locktype = 'relation' AND l.granted
+                   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND l.pid IS DISTINCT FROM pg_backend_pid()
+                   AND l.mode IN ('RowExclusiveLock', 'ShareRowExclusiveLock',
+                                  'ExclusiveLock', 'AccessExclusiveLock')
+                   AND (l.relation IN (SELECT oid FROM sources) OR n.nspname = $2)
+             ) END",
+            &[
+                st.pgt_id.into(),
+                crate::config::pg_trickle_change_buffer_schema()
+                    .as_str()
+                    .into(),
+            ],
+        )
+        .map_err(|e| PgTrickleError::SafeFrontierUnavailable {
+            context: format!("manual refresh of {schema}.{table_name}"),
+            reason: format!("source writer lock probe failed: {e}"),
+        })?
+        .ok_or_else(|| PgTrickleError::SafeFrontierUnavailable {
+            context: format!("manual refresh of {schema}.{table_name}"),
+            reason: "manual differential writer-lock proof requires READ COMMITTED isolation"
+                .to_string(),
+        })?;
+        // shortcut: hold all manual sources until writers drain; add per-source fences if busy sources starve.
+        if has_writer {
+            "0/0".to_string()
+        } else {
+            candidate
         }
-    }
+    };
     let slot_positions = cdc::get_slot_positions_at_bound(source_oids, &safe_bound)?;
     let data_ts = get_data_timestamp_str();
     let mut new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
