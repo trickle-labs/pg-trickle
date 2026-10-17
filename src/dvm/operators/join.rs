@@ -850,8 +850,14 @@ fn get_current_table_ref(op: &OpTree) -> String {
 /// Marking them NOT MATERIALIZED forces PostgreSQL to inline the CTE.
 pub fn mark_leaf_delta_ctes_not_materialized(op: &OpTree, ctx: &mut DiffContext) {
     match op {
-        OpTree::Scan { alias, .. } => {
-            if let Some(cte_name) = ctx.scan_delta_ctes().get(alias.as_str()).cloned() {
+        OpTree::Scan {
+            alias, table_oid, ..
+        } => {
+            if let Some(cte_name) = ctx
+                .scan_delta_ctes()
+                .get(&(*table_oid, alias.clone()))
+                .cloned()
+            {
                 ctx.mark_cte_not_materialized(&cte_name);
             }
         }

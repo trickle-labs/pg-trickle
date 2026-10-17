@@ -54,7 +54,7 @@ pub fn diff_lateral_function(
     } = child.as_ref()
     {
         ctx.scan_delta_ctes_mut()
-            .insert(alias.clone(), child_result.cte_name.clone());
+            .insert((*table_oid, alias.clone()), child_result.cte_name.clone());
         ctx.set_scan_delta_cte_for_source(*table_oid, child_result.cte_name.clone());
     }
 

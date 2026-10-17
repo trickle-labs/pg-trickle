@@ -3728,13 +3728,11 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
-    // Explicit DML reports actual writes; input changes can leave the output unchanged.
-    // Keep the pgrx 0.17 / PostgreSQL 18 MERGE processed-count workaround scoped to MERGE.
-    let effective_count = if materializes_delta {
-        merge_count as i64
-    } else {
-        (merge_count as i64).max(1)
-    };
+    if materializes_delta && merge_count == 0 && phantom_cleanup_count == 0 {
+        crate::api::output_delta::record_empty_apply(st.pgt_id);
+    }
+    // Preserve the legacy work counter independently of proven empty output capture.
+    let effective_count = (merge_count as i64).max(1);
 
     let mut cost_evidence =
         crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);

@@ -182,7 +182,7 @@ FROM {new_table}",
     // EC01B-1: Record this scan's delta CTE name for per-leaf
     // pre-change snapshots in deep join trees.
     ctx.scan_delta_ctes_mut()
-        .insert(alias.to_string(), cte_name.clone());
+        .insert((table_oid, alias.to_string()), cte_name.clone());
     ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
     Ok(DiffResult {
@@ -522,7 +522,7 @@ CROSS JOIN generate_series(1, -sub.net_count) gs",
         ctx.add_cte(cte_name.clone(), sql);
 
         ctx.scan_delta_ctes_mut()
-            .insert(alias.to_string(), cte_name.clone());
+            .insert((table_oid, alias.to_string()), cte_name.clone());
         ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
         return Ok(DiffResult {
@@ -739,7 +739,7 @@ FROM (
     // build_pre_change_snapshot_sql can construct per-leaf pre-change
     // snapshots for deep join trees without full-snapshot EXCEPT ALL.
     ctx.scan_delta_ctes_mut()
-        .insert(alias.to_string(), cte_name.clone());
+        .insert((table_oid, alias.to_string()), cte_name.clone());
     ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
     Ok(DiffResult {
@@ -1271,7 +1271,7 @@ mod tests {
         );
         assert_eq!(
             snapshot,
-            "(SELECT \"id\", \"amount\" FROM \"public\".\"orders\" \"o\" WHERE NOT EXISTS (SELECT 1 FROM __pgt_cte_scan_o_2 __pgt_d WHERE pgtrickle.row_probe_v1(__pgt_d.__pgt_row_id) = pgtrickle.row_probe_v1(\"o\".\"__pgt_row_id\") AND __pgt_d.__pgt_row_id = \"o\".\"__pgt_row_id\") UNION ALL SELECT \"id\", \"amount\" FROM __pgt_cte_scan_o_2 WHERE __pgt_action = 'D')"
+            "(SELECT \"id\", \"amount\" FROM \"public\".\"orders\" \"o\" EXCEPT ALL SELECT \"id\", \"amount\" FROM __pgt_cte_scan_o_2 WHERE __pgt_action = 'I' UNION ALL SELECT \"id\", \"amount\" FROM __pgt_cte_scan_o_2 WHERE __pgt_action = 'D')"
         );
     }
 

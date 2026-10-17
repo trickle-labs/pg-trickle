@@ -18,7 +18,7 @@ const INITIAL_BASELINE_REQUIRED: &str = "INITIAL_BASELINE_REQUIRED";
 const DELTA_RELATION_PREFIX: &str = "output_delta_";
 
 thread_local! {
-    static CAPTURE_STARTS: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
+    static CAPTURE_STARTS: RefCell<HashMap<i64, (i64, bool)>> = RefCell::new(HashMap::new());
 }
 
 fn delta_error(code: &'static str, detail: impl Into<String>) -> PgTrickleError {
@@ -504,8 +504,16 @@ pub(crate) fn begin_capture(pgt_id: i64) -> Result<(), PgTrickleError> {
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
     .unwrap_or(0);
-    CAPTURE_STARTS.with(|starts| starts.borrow_mut().insert(pgt_id, max_id));
+    CAPTURE_STARTS.with(|starts| starts.borrow_mut().insert(pgt_id, (max_id, false)));
     Ok(())
+}
+
+pub(crate) fn record_empty_apply(pgt_id: i64) {
+    CAPTURE_STARTS.with(|starts| {
+        if let Some((_, empty)) = starts.borrow_mut().get_mut(&pgt_id) {
+            *empty = true;
+        }
+    });
 }
 
 pub(crate) fn has_consumer(pgt_id: i64) -> bool {
@@ -528,7 +536,14 @@ pub(crate) fn finalize(
         return Ok(());
     }
     super::require_v098_capability(super::DELTA_V1_CAPABILITY)?;
-    let captured_start = CAPTURE_STARTS.with(|starts| starts.borrow_mut().remove(&meta.pgt_id));
+    let capture = CAPTURE_STARTS.with(|starts| starts.borrow_mut().remove(&meta.pgt_id));
+    // Legacy refresh counters can signal input work even when explicit DML wrote no output.
+    let rows_changed = if capture.is_some_and(|(_, empty)| empty) {
+        0
+    } else {
+        rows_changed
+    };
+    let captured_start = capture.map(|(start, _)| start);
     let start = captured_start.unwrap_or_else(|| {
         let schema = crate::config::pg_trickle_change_buffer_schema();
         Spi::get_one::<i64>(&format!(
@@ -567,7 +582,7 @@ pub(crate) fn finalize(
         "pgtrickle_changes.{}",
         quoted_ident(&payload_name(meta.pgt_id))
     );
-    let (changed_rows, unsupported_rows) = if rows_changed > 0 {
+    let (changed_rows, unsupported_rows) = if rows_changed > 0 || captured_start.is_some() {
         // nosemgrep: rust.spi.get_one_with_args.dynamic-format — source is assembled from a quoted schema and OID-derived relation name.
         let changed_rows = spi(Spi::get_one_with_args::<i64>(
             &format!("SELECT count(*)::bigint FROM {source} b WHERE b.change_id > $1"),
@@ -1424,6 +1439,31 @@ pub fn output_delta_consumer_status() -> TableIterator<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_empty_apply_is_scoped_to_an_active_capture() {
+        super::CAPTURE_STARTS.with(|starts| starts.borrow_mut().clear());
+        super::record_empty_apply(7);
+        super::CAPTURE_STARTS
+            .with(|starts| assert_eq!(*starts.borrow(), std::collections::HashMap::new()));
+        super::CAPTURE_STARTS.with(|starts| {
+            starts
+                .borrow_mut()
+                .extend([(7, (41, false)), (8, (52, false))])
+        });
+        super::record_empty_apply(7);
+        super::CAPTURE_STARTS.with(|starts| {
+            assert_eq!(
+                *starts.borrow(),
+                std::collections::HashMap::from([(7, (41, true)), (8, (52, false))])
+            );
+            starts.borrow_mut().insert(7, (61, false));
+        });
+        super::CAPTURE_STARTS.with(|starts| {
+            assert_eq!(starts.borrow_mut().remove(&7), Some((61, false)));
+            starts.borrow_mut().clear();
+        });
+    }
+
     use super::*;
 
     #[test]

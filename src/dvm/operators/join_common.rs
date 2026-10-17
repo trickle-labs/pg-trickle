@@ -708,10 +708,8 @@ pub fn build_leaf_snapshot_sql(
             pk_columns,
             table_oid,
         } => {
-            // DI-2 per-leaf fallback: when this source's delta fraction
-            // exceeds max_delta_fraction, emit EXCEPT ALL instead of the
-            // index-based NOT EXISTS anti-join.
-            if fallback_oids.contains(table_oid) {
+            // Keyless rows require bag subtraction to preserve unchanged duplicate copies.
+            if pk_columns.is_empty() || fallback_oids.contains(table_oid) {
                 let table = build_snapshot_sql(op);
                 format!(
                     "(SELECT {col_list} FROM {table} {alias_q} \
@@ -779,24 +777,27 @@ pub fn build_leaf_snapshot_sql(
 /// the join. This avoids materializing the full join result (which can
 /// spill GBs of temp files for deep join trees at any scale factor).
 ///
-/// `scan_delta_ctes` maps each Scan alias to its delta CTE name, as
+/// `scan_delta_ctes` maps each source OID and Scan alias to its delta CTE name, as
 /// populated by `diff_scan` during the diff traversal.
 ///
 /// DI-2: For Scan leaves, uses NOT EXISTS anti-join against the delta
 /// CTE's `__pgt_row_id` (pk_hash) instead of the expensive EXCEPT ALL.
-/// When a Scan's `table_oid` is in `fallback_oids`, EXCEPT ALL is used
-/// instead (per-leaf conditional fallback).
+/// Keyless scans and sources in `fallback_oids` use EXCEPT ALL instead.
 pub fn build_pre_change_snapshot_sql(
     op: &OpTree,
-    scan_delta_ctes: &HashMap<String, String>,
+    scan_delta_ctes: &HashMap<(u32, String), String>,
     fallback_oids: &HashSet<u32>,
     st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
     match op {
-        OpTree::Scan { alias, columns, .. } => {
-            if let Some(delta_cte) = scan_delta_ctes.get(alias.as_str()) {
-                // DI-2: Delegate to build_leaf_snapshot_sql which uses
-                // NOT EXISTS for Scan nodes.
+        OpTree::Scan {
+            alias,
+            columns,
+            table_oid,
+            ..
+        } => {
+            if let Some(delta_cte) = scan_delta_ctes.get(&(*table_oid, alias.clone())) {
+                // Reconstruct this source's old rows without alias collisions across UNION branches.
                 let data_cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
                 build_leaf_snapshot_sql(op, delta_cte, &data_cols, fallback_oids, st_source_pgt_ids)
             } else {
@@ -1111,7 +1112,7 @@ fn build_pre_change_inline_join_from(
     condition: &Expr,
     left: &OpTree,
     right: &OpTree,
-    scan_delta_ctes: &HashMap<String, String>,
+    scan_delta_ctes: &HashMap<(u32, String), String>,
     fallback_oids: &HashSet<u32>,
     st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
@@ -1136,7 +1137,7 @@ fn build_pre_change_inline_join_from(
 /// Pre-change variant of [`build_snapshot_inline_from`].
 fn build_pre_change_inline_from(
     op: &OpTree,
-    scan_delta_ctes: &HashMap<String, String>,
+    scan_delta_ctes: &HashMap<(u32, String), String>,
     fallback_oids: &HashSet<u32>,
     st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> Option<String> {
@@ -1221,7 +1222,7 @@ fn build_pre_change_join_snapshot(
     condition: &Expr,
     left: &OpTree,
     right: &OpTree,
-    scan_delta_ctes: &HashMap<String, String>,
+    scan_delta_ctes: &HashMap<(u32, String), String>,
     fallback_oids: &HashSet<u32>,
     st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
@@ -2407,11 +2408,11 @@ mod tests {
         );
 
         let scan_deltas = HashMap::from([
-            ("p".to_string(), "delta_p".to_string()),
-            ("l0".to_string(), "delta_l0".to_string()),
-            ("r0".to_string(), "delta_r0".to_string()),
-            ("l1".to_string(), "delta_l1".to_string()),
-            ("r1".to_string(), "delta_r1".to_string()),
+            ((1, "p".to_string()), "delta_p".to_string()),
+            ((101, "l0".to_string()), "delta_l0".to_string()),
+            ((201, "r0".to_string()), "delta_r0".to_string()),
+            ((301, "l1".to_string()), "delta_l1".to_string()),
+            ((401, "r1".to_string()), "delta_r1".to_string()),
         ]);
         let pre_change =
             build_pre_change_snapshot_sql(&tree, &scan_deltas, &HashSet::new(), &HashMap::new());
@@ -2516,7 +2517,7 @@ mod tests {
             "r",
             &["source_record_key", "raw_value"],
         ));
-        let scan_deltas = HashMap::from([("r".to_string(), "scan_r_delta".to_string())]);
+        let scan_deltas = HashMap::from([((1, "r".to_string()), "scan_r_delta".to_string())]);
 
         let snap =
             build_pre_change_snapshot_sql(&tree, &scan_deltas, &HashSet::new(), &HashMap::new());
@@ -2968,8 +2969,33 @@ mod tests {
     }
 
     #[test]
+    fn test_pre_change_snapshot_scopes_reused_alias_by_source() {
+        let deltas = HashMap::from([
+            ((1, "l".to_owned()), "delta_first".to_owned()),
+            ((2, "l".to_owned()), "delta_second".to_owned()),
+        ]);
+        let snapshots: Vec<String> = [(1, "first"), (2, "second")]
+            .into_iter()
+            .map(|(oid, table)| {
+                build_pre_change_snapshot_sql(
+                    &scan(oid, table, "public", "l", &["value"]),
+                    &deltas,
+                    &HashSet::new(),
+                    &HashMap::new(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            snapshots,
+            [
+                "(SELECT \"value\" FROM \"public\".\"first\" \"l\" EXCEPT ALL SELECT \"value\" FROM delta_first WHERE __pgt_action = 'I' UNION ALL SELECT \"value\" FROM delta_first WHERE __pgt_action = 'D')",
+                "(SELECT \"value\" FROM \"public\".\"second\" \"l\" EXCEPT ALL SELECT \"value\" FROM delta_second WHERE __pgt_action = 'I' UNION ALL SELECT \"value\" FROM delta_second WHERE __pgt_action = 'D')",
+            ]
+        );
+    }
+
+    #[test]
     fn test_di2_leaf_snapshot_scan_keyless() {
-        // DI-2: Keyless Scan uses all columns for hash.
         let op = scan(1, "t", "public", "t", &["x", "y"]);
         let no_fallback = HashSet::new();
         let sql = build_leaf_snapshot_sql(
@@ -2979,13 +3005,9 @@ mod tests {
             &no_fallback,
             &HashMap::new(),
         );
-        assert!(
-            sql.contains("NOT EXISTS"),
-            "DI-2: keyless Scan should still use NOT EXISTS\n{sql}"
-        );
-        assert!(
-            sql.contains(r#""t"."x""#) && sql.contains(r#""t"."y""#),
-            "DI-2: keyless identity should include all columns\n{sql}"
+        assert_eq!(
+            sql,
+            "(SELECT \"x\", \"y\" FROM \"public\".\"t\" \"t\" EXCEPT ALL SELECT \"x\", \"y\" FROM scan_t WHERE __pgt_action = 'I' UNION ALL SELECT \"x\", \"y\" FROM scan_t WHERE __pgt_action = 'D')"
         );
     }
 
