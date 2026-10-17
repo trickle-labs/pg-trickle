@@ -51,17 +51,23 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
     let mut tx = db.pool.begin().await.expect("begin residue injection");
     sqlx::raw_sql(
         "SET LOCAL pg_trickle.internal_refresh = 'true';
-         UPDATE recon_graph_st SET value = 'stale' WHERE id = 1;
-         WITH missing AS (
-             DELETE FROM recon_graph_st WHERE id = 2
-             RETURNING __pgt_row_id
-         )
-         INSERT INTO recon_graph_st (__pgt_row_id, id, value)
-         SELECT __pgt_row_id, 999, 'orphan' FROM missing",
+         UPDATE recon_graph_st SET value = 'stale' WHERE id = 1",
     )
     .execute(&mut *tx)
     .await
-    .expect("inject stream-table residue");
+    .expect("inject stale stream-table content");
+    let missing_identity: Vec<u8> =
+        sqlx::query_scalar("DELETE FROM recon_graph_st WHERE id = 2 RETURNING __pgt_row_id")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("retain deleted identity for surplus-row fixture");
+    sqlx::query(
+        "INSERT INTO recon_graph_st (__pgt_row_id, id, value) VALUES ($1, 999, 'orphan')",
+    )
+    .bind(missing_identity)
+    .execute(&mut *tx)
+    .await
+    .expect("inject orphan using a now-vacant complete identity");
     tx.commit().await.expect("commit test-only residue");
 
     let corrupted: Vec<(i32, String)> =
