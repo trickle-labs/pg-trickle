@@ -3728,12 +3728,13 @@ pub fn execute_differential_refresh_with_tuning(
         }
     }
 
-    // Guarantee a non-zero count when the change buffer actually had entries.
-    // PostgreSQL MERGE may report 0 processed rows via SPI even when it
-    // modifies data (observed with pgrx 0.17 / PostgreSQL 18).
-    // Since we already verified `any_changes=true` above, the MERGE must
-    // have processed at least one change buffer entry.
-    let effective_count = (merge_count as i64).max(1);
+    // Explicit DML reports actual writes; input changes can leave the output unchanged.
+    // Keep the pgrx 0.17 / PostgreSQL 18 MERGE processed-count workaround scoped to MERGE.
+    let effective_count = if materializes_delta {
+        merge_count as i64
+    } else {
+        (merge_count as i64).max(1)
+    };
 
     let mut cost_evidence =
         crate::refresh::build_differential_cost_evidence(total_change_count, effective_count);

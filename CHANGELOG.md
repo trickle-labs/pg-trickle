@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Reconstruct nested joins from keyless stream-table changes using the pre-change snapshot, preserving exact downstream deletions during graph refresh.
+- Preserve empty exact output batches when explicit differential DML writes no rows.
+
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
 
 Future changes will be listed here.
