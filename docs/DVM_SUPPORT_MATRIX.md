@@ -215,6 +215,13 @@ STABLE and VOLATILE expressions use FULL under AUTO and are rejected for
 explicit DIFFERENTIAL or IMMEDIATE mode. PostgreSQL analysis resolves the exact
 function, operator, and cast overload before pg_trickle checks its volatility.
 
+FULL queries with non-immutable expressions are re-evaluated when their duration,
+cron, or interval freshness target is due, even without source writes. This
+allows predicates such as `expires_at > CURRENT_TIMESTAMP` to expire rows on
+schedule. Source-only immutable queries retain the `NO_DATA` optimization.
+CALCULATED scheduling remains driven by upstream changes; use an explicit
+schedule or interval target when freshness depends on time passing.
+
 ---
 
 ## Fallback behaviour and reason codes
