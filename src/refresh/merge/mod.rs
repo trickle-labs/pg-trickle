@@ -2043,28 +2043,26 @@ pub fn execute_differential_refresh_with_tuning(
         // ── Cache miss: full pipeline + PREPARE + cache ──────────────
         pgrx::debug1!("[pg_trickle] cache MISS for pgt_id={}", st.pgt_id);
         let delta_result = if let Some(state) = incremental_window_state.as_ref() {
-            with_stream_owner(st, || {
-                dvm::generate_delta_query_staged_with_window_state(
-                    st.pgt_id,
-                    &state.row_relation,
-                    &effective_defining_query,
-                    prev_frontier,
-                    new_frontier,
-                    schema,
-                    name,
-                )
-            })?
+            dvm::generate_delta_query_staged_with_window_state(
+                st.pgt_id,
+                &state.row_relation,
+                &effective_defining_query,
+                prev_frontier,
+                new_frontier,
+                schema,
+                name,
+                Some(st),
+            )?
         } else if has_recursive_cte || graph_same_pass {
-            with_stream_owner(st, || {
-                dvm::generate_delta_query_staged(
-                    st.pgt_id,
-                    &effective_defining_query,
-                    prev_frontier,
-                    new_frontier,
-                    schema,
-                    name,
-                )
-            })?
+            dvm::generate_delta_query_staged(
+                st.pgt_id,
+                &effective_defining_query,
+                prev_frontier,
+                new_frontier,
+                schema,
+                name,
+                Some(st),
+            )?
         } else {
             dvm::generate_delta_query_cached(
                 st.pgt_id,

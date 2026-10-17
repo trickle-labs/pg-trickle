@@ -8,6 +8,7 @@ mod reference_clients;
 use e2e::E2eDb;
 use serde::Deserialize;
 use serde_json::Value;
+use sqlx::Acquire;
 use std::collections::{BTreeMap, BTreeSet};
 
 const ARTIFACT: &str = include_str!("fixtures/pg_mdm_compiler_v9_person.json");
@@ -475,9 +476,18 @@ async fn setup_fixture() -> Fixture {
 }
 
 async fn mutate_refresh_and_compare(fixture: &Fixture, mutation: &str) {
-    let mut tx = fixture
+    let mut connection = fixture
         .db
         .pool
+        .acquire()
+        .await
+        .expect("acquire compiler-v9 connection");
+    let settings_sql = "SELECT current_setting('work_mem'), current_setting('temp_file_limit')";
+    let settings_before: (String, String) = sqlx::query_as(settings_sql)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read caller resource settings");
+    let mut tx = connection
         .begin()
         .await
         .expect("begin compiler-v9 mutation");
@@ -486,13 +496,28 @@ async fn mutate_refresh_and_compare(fixture: &Fixture, mutation: &str) {
         .await
         .expect("apply compiler-v9 source mutation");
     sync_source_records(&mut *tx).await;
-    sqlx::query("SET LOCAL pg_trickle.refresh_strategy = 'differential'")
-        .execute(&mut *tx)
-        .await
-        .expect("force differential conformance strategy");
-    let refresh = strict_refresh_result(&mut *tx, &fixture.root, &fixture.digest, "ERROR").await;
+    sqlx::raw_sql(
+        "SET LOCAL pg_trickle.refresh_strategy = 'differential';
+         SET LOCAL pg_trickle.delta_work_mem_cap_mb = 256;
+         SET LOCAL work_mem = '16MB';
+         SET LOCAL temp_file_limit = '64MB'",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("force differential conformance strategy");
+    let refresh = strict_refresh_result(&mut *tx, &fixture.root, &fixture.digest, "ALLOW").await;
     assert_refresh_is_differential(&refresh);
+    let settings: (String, String) = sqlx::query_as(settings_sql)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read capped deep-join settings");
+    assert_eq!(settings, ("256MB".into(), "64MB".into()));
     tx.commit().await.expect("commit compiler-v9 mutation");
+    let settings_after: (String, String) = sqlx::query_as(settings_sql)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read restored caller settings");
+    assert_eq!(settings_after, settings_before);
     rebuild_and_compare(fixture, mutation).await;
 }
 
@@ -672,4 +697,41 @@ async fn test_pg_mdm_compiler_v9_bootstrap_and_mutations_match_full_without_fall
     retry_tx.rollback().await.expect("roll back graph refresh");
     assert_eq!(graph_fingerprint(&fixture).await, before_retry);
     mutate_refresh_and_compare(&fixture, retry_sql).await;
+
+    for (cap, expected_work_mem, expected_temp_limit) in [
+        (0, "512MB", "-1"),
+        (1024, "512MB", "-1"),
+        (256, "256MB", "64MB"),
+    ] {
+        let before = graph_fingerprint(&fixture).await;
+        let mut tx = fixture.db.pool.begin().await.expect("begin resource probe");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "SET LOCAL pg_trickle.refresh_strategy = 'differential';
+             SET LOCAL pg_trickle.delta_work_mem_cap_mb = {cap};
+             SET LOCAL work_mem = '16MB';
+             SET LOCAL temp_file_limit = '64MB';
+             UPDATE mdm_erp SET legal_name = 'Resource Probe',
+                 email = 'resource-probe@example.test', changed_at = clock_timestamp()
+              WHERE tenant_id = 7 AND external_id = 'A'"
+        )))
+        .execute(&mut *tx)
+        .await
+        .expect("configure resource probe");
+        sync_source_records(&mut *tx).await;
+        let refresh =
+            strict_refresh_result(&mut *tx, &fixture.root, &fixture.digest, "ALLOW").await;
+        assert_refresh_is_differential(&refresh);
+        let settings: (String, String) = sqlx::query_as(
+            "SELECT current_setting('work_mem'), current_setting('temp_file_limit')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read deep-join resource settings");
+        assert_eq!(
+            settings,
+            (expected_work_mem.into(), expected_temp_limit.into())
+        );
+        tx.rollback().await.expect("roll back resource probe");
+        assert_eq!(graph_fingerprint(&fixture).await, before);
+    }
 }
