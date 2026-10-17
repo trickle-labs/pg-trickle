@@ -1937,14 +1937,13 @@ fn complete_wal_transition(
 /// Abort the WAL transition and fall back to trigger-based CDC.
 ///
 /// Called when the transition times out or encounters an unrecoverable error.
-/// Cleans up WAL decoder resources and reverts to trigger mode.
+/// Restores trigger capture and requires a rebaseline before consumers resume.
 pub fn abort_wal_transition(
     source_oid: pg_sys::Oid,
     _pgt_id: i64,
     change_schema: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
-    let slot_name = slot_name_for_source(source_oid);
 
     let lock_key = -(oid_u32 as i64);
     Spi::run_with_args("SELECT pg_advisory_xact_lock($1)", &[lock_key.into()]).map_err(|e| {
@@ -1956,116 +1955,12 @@ pub fn abort_wal_transition(
         }
     })?;
 
-    let source_table = cdc::get_qualified_table_name(source_oid)?;
-    Spi::run(&format!("LOCK TABLE {source_table} IN SHARE MODE")) // nosemgrep: rust.spi.run.dynamic-format — source_table is PostgreSQL format('%I.%I') output from a catalog OID.
-        .map_err(|e| PgTrickleError::CdcCutoverUnproven {
-            source_oid: oid_u32,
-            target: "TRIGGER".to_string(),
-            required_lsn: "source lock".to_string(),
-            confirmed_lsn: Some(e.to_string()),
-        })?;
-
-    // Future writes must be captured before WAL resources are released.
-    ensure_trigger_for_source(source_oid, change_schema)?;
-
-    // Step 1: Drop the replication slot (stops WAL retention)
-    if let Err(e) = drop_replication_slot(&slot_name) {
-        warning!(
-            "pg_trickle: failed to drop replication slot {} during abort: {}",
-            slot_name,
-            e
-        );
-    }
-
-    // Step 2: Drop the publication
-    if let Err(e) = drop_publication(source_oid) {
-        warning!(
-            "pg_trickle: failed to drop publication during abort for OID {}: {}",
-            oid_u32,
-            e
-        );
-    }
-
-    // Step 3: Revert catalog to trigger mode
-    // Step 3: Revert catalog to trigger mode for all dependents of this source.
-    StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Trigger, None, None)?;
-    StDependency::set_cutover_for_source(source_oid, None, None)?;
-
-    // Step 4: Verify the trigger still exists — recreate if lost.
-    // This step is best-effort: if the source table lost its primary key (the
-    // common case when falling back due to A41-3 eligibility failure), trigger
-    // recreation will fail.  Log a warning and continue — the catalog is already
-    // in TRIGGER mode and the slot/publication have been cleaned up.
-    if !cdc::trigger_exists(source_oid)? {
-        match cdc::resolve_pk_columns(source_oid) {
-            Ok(pk_columns) if !pk_columns.is_empty() => {
-                match cdc::resolve_source_column_defs(source_oid) {
-                    Ok(columns) => {
-                        let src_id = crate::citus::SourceIdentifier::from_oid(source_oid)
-                            .unwrap_or_else(|_| {
-                                crate::citus::SourceIdentifier::from_oid_and_stable_name(
-                                    source_oid,
-                                    source_oid.to_u32().to_string(),
-                                )
-                            });
-                        if let Err(e) = cdc::create_change_trigger(
-                            source_oid,
-                            change_schema,
-                            &pk_columns,
-                            &columns,
-                            &src_id.stable_name,
-                        ) {
-                            warning!(
-                                "pg_trickle: could not recreate CDC trigger for source OID {} \
-                                 during abort (non-fatal): {}",
-                                oid_u32,
-                                e
-                            );
-                        } else {
-                            warning!(
-                                "pg_trickle: recreated CDC trigger for source OID {} during abort",
-                                oid_u32
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warning!(
-                            "pg_trickle: could not resolve column defs for source OID {} \
-                             during abort (non-fatal): {}",
-                            oid_u32,
-                            e
-                        );
-                    }
-                }
-            }
-            Ok(_) => {
-                // No primary key — cannot recreate trigger.  Log and continue.
-                // The source must have a PK restored before CDC can resume.
-                warning!(
-                    "pg_trickle: source OID {} has no primary key — \
-                     CDC trigger not recreated during WAL abort. \
-                     Restore a primary key to re-enable trigger-based CDC.",
-                    oid_u32
-                );
-            }
-            Err(e) => {
-                warning!(
-                    "pg_trickle: could not resolve PK columns for source OID {} \
-                     during abort (non-fatal): {}",
-                    oid_u32,
-                    e
-                );
-            }
-        }
-    }
+    force_source_to_trigger(source_oid, change_schema)?;
 
     warning!(
         "pg_trickle: aborted WAL transition for source OID {}; reverted to triggers",
         oid_u32
     );
-
-    // Emit NOTIFY for transition abort (fallback to triggers)
-    monitor::emit_cdc_transition_notify(source_oid, CdcMode::Wal, CdcMode::Trigger, None);
 
     Ok(())
 }
@@ -2162,8 +2057,8 @@ pub fn force_source_to_trigger(
     StDependency::update_cdc_mode_for_source(source_oid, CdcMode::Trigger, None, None)?;
     StDependency::set_cutover_for_source(source_oid, None, None)?;
 
-    // A WAL handoff boundary cannot be proven for a source whose receipts were
-    // not retained. Force a rebuild before any converted legacy table resumes refresh.
+    // Restoring triggers cannot recover undecoded WAL or unreplayed receipts;
+    // every consumer needs a fresh baseline before advancing its frontier.
     if previous_mode.is_some() {
         for dep in &source_deps {
             Spi::run_with_args(
