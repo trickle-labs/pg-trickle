@@ -355,7 +355,10 @@ mod tests {
         assert!(sql.contains("UNION ALL"));
         assert!(sql.contains("GROUP BY __pgt_sig"));
         assert!(sql.contains("HAVING SUM(__pgt_weight) <> 0"));
-        assert_eq!(sql.matches("FROM \"public\".\"source_stream\" st").count(), 1);
+        assert_eq!(
+            sql.matches("FROM \"public\".\"source_stream\" st").count(),
+            1
+        );
         assert_eq!(sql.matches("FROM pg_temp.__pgt_recon_42 r").count(), 1);
         assert!(sql.contains("SELECT st.\"__pgt_row_id\" AS __pgt_sig, 1 AS __pgt_weight"));
         assert!(sql.contains("SELECT r.\"__pgt_row_id\" AS __pgt_sig, -1 AS __pgt_weight"));
@@ -389,7 +392,10 @@ mod pg_tests {
 
         Spi::run("INSERT INTO __pgt_probe_st VALUES ('a'), (NULL), (NULL)").unwrap();
         Spi::run("INSERT INTO __pgt_probe_recon VALUES (NULL), ('a'), (NULL)").unwrap();
-        assert!(!has_drift(), "multiplicity and NULLs match regardless of order");
+        assert!(
+            !has_drift(),
+            "multiplicity and NULLs match regardless of order"
+        );
 
         Spi::run("INSERT INTO __pgt_probe_st VALUES (NULL)").unwrap();
         assert!(has_drift(), "a surplus NULL signature must trigger repair");

@@ -61,13 +61,11 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
             .fetch_one(&mut *tx)
             .await
             .expect("retain deleted identity for surplus-row fixture");
-    sqlx::query(
-        "INSERT INTO recon_graph_st (__pgt_row_id, id, value) VALUES ($1, 999, 'orphan')",
-    )
-    .bind(missing_identity)
-    .execute(&mut *tx)
-    .await
-    .expect("inject orphan using a now-vacant complete identity");
+    sqlx::query("INSERT INTO recon_graph_st (__pgt_row_id, id, value) VALUES ($1, 999, 'orphan')")
+        .bind(missing_identity)
+        .execute(&mut *tx)
+        .await
+        .expect("inject orphan using a now-vacant complete identity");
     tx.commit().await.expect("commit test-only residue");
 
     let corrupted: Vec<(i32, String)> =
@@ -83,7 +81,10 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
             .fetch_all(&db.pool)
             .await
             .expect("read repaired graph rows");
-    assert_eq!(repaired, initial, "reconciliation must correct every kind of residue");
+    assert_eq!(
+        repaired, initial,
+        "reconciliation must correct every kind of residue"
+    );
 
     // Follow-up no-data passes must remain idempotent.
     reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
