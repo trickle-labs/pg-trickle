@@ -52,10 +52,12 @@ async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_row
     sqlx::raw_sql(
         "SET LOCAL pg_trickle.internal_refresh = 'true';
          UPDATE recon_graph_st SET value = 'stale' WHERE id = 1;
-         DELETE FROM recon_graph_st WHERE id = 2;
+         WITH missing AS (
+             DELETE FROM recon_graph_st WHERE id = 2
+             RETURNING __pgt_row_id
+         )
          INSERT INTO recon_graph_st (__pgt_row_id, id, value)
-         SELECT __pgt_row_id, 999, 'orphan'
-           FROM recon_graph_st WHERE id = 1",
+         SELECT __pgt_row_id, 999, 'orphan' FROM missing",
     )
     .execute(&mut *tx)
     .await
