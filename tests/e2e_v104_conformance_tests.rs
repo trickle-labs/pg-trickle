@@ -11,6 +11,82 @@ use sqlx::Row;
 const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
      text, integer, double precision, text, boolean, text, integer, text, text";
 
+/// A graph pass must preserve the no-drift fast path AND still repair past
+/// phantom residue when there are no new source-table CDC records.
+#[tokio::test]
+async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_source (id int PRIMARY KEY, value text NOT NULL);
+         CREATE TABLE recon_partner (id int PRIMARY KEY);
+         INSERT INTO recon_source VALUES (1, 'expected'), (2, 'second');
+         INSERT INTO recon_partner VALUES (1), (2);
+         SELECT pgtrickle.create_stream_table(
+             name => 'recon_graph_st',
+             query => 'SELECT s.id, s.value FROM recon_source s
+                       JOIN recon_partner p ON s.id = p.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install reconciliation fixture");
+
+    let root = "public.recon_graph_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    // No change must exercise the signed-multiset fast path without touching
+    // the result rows, and must not trigger a forbidden FULL refresh.
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let initial: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read initial graph rows");
+    assert_eq!(initial, vec![(1, "expected".into()), (2, "second".into())]);
+
+    // Simulate stale content, a missing row, and a surplus row left by an
+    // earlier broken delta. Mutations to storage are test-only and isolated
+    // to this fixture; source tables are deliberately unchanged.
+    let mut tx = db.pool.begin().await.expect("begin residue injection");
+    sqlx::raw_sql(
+        "SET LOCAL pg_trickle.internal_refresh = 'true';
+         UPDATE recon_graph_st SET value = 'stale' WHERE id = 1;
+         DELETE FROM recon_graph_st WHERE id = 2;
+         INSERT INTO recon_graph_st (__pgt_row_id, id, value)
+         SELECT __pgt_row_id, 999, 'orphan'
+           FROM recon_graph_st WHERE id = 1",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("inject stream-table residue");
+    tx.commit().await.expect("commit test-only residue");
+
+    let corrupted: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read injected residue");
+    assert_eq!(corrupted, vec![(1, "stale".into()), (999, "orphan".into())]);
+
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let repaired: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read repaired graph rows");
+    assert_eq!(repaired, initial, "reconciliation must correct every kind of residue");
+
+    // Follow-up no-data passes must remain idempotent.
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let stable: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read stable graph rows");
+    assert_eq!(stable, initial);
+}
+
 #[tokio::test]
 async fn test_manual_refresh_nested_key_filter_prunes_unused_identity() {
     let db = E2eDb::new().await.with_extension().await;
