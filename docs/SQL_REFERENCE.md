@@ -3453,6 +3453,13 @@ schema and argument types.
 
 FULL mode accepts all volatility classes since it re-evaluates the entire query each time.
 
+When a FULL query contains non-immutable expressions, duration schedules, cron
+schedules, and interval freshness targets trigger re-evaluation even without
+source writes. For example, `WHERE expires_at > CURRENT_TIMESTAMP` removes
+expired rows at the next due refresh. Immutable source-only queries can still
+complete as `NO_DATA`. CALCULATED scheduling is driven by upstream changes;
+choose an explicit schedule or interval target for clock-dependent freshness.
+
 #### Volatile Function Policy (VOL-1)
 
 The `pg_trickle.volatile_function_policy` GUC controls how volatile functions are handled:

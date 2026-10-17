@@ -31,6 +31,124 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
+async fn assert_clock_dependent_refresh(mode: &str, schedule_kind: &str) {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.parallel_refresh_mode", "off", "off")
+        .await;
+    db.execute("CREATE TABLE clock_src (id INT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)")
+        .await;
+    db.execute("INSERT INTO clock_src VALUES (1, clock_timestamp() + interval '5 seconds')")
+        .await;
+    let query = "SELECT id FROM clock_src WHERE expires_at > CURRENT_TIMESTAMP";
+    let schedule = if schedule_kind == "cron" {
+        "0 * * * *"
+    } else {
+        "1h"
+    };
+    db.create_st("clock_st", query, schedule, mode).await;
+    db.create_st("clock_control", "SELECT id FROM clock_src", "1h", "FULL")
+        .await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['clock_st', 'clock_control'])")
+        .await;
+    if schedule_kind == "interval" {
+        db.alter_st("clock_st", "target_freshness => '1 hour'")
+            .await;
+    }
+    assert_eq!(db.count("clock_st").await, 1);
+    assert_eq!(db.pgt_status("clock_st").await.1, "FULL");
+    db.execute("DELETE FROM pgtrickle.pgt_refresh_history")
+        .await;
+    assert!(
+        db.wait_for_condition(
+            "source row expired without writes",
+            "SELECT clock_timestamp() >= expires_at FROM clock_src",
+            Duration::from_secs(15),
+            Duration::from_millis(50),
+        )
+        .await
+    );
+    // Make every schedule observably due after expiry, without source writes.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours'",
+    )
+    .await;
+    if schedule_kind == "interval" {
+        db.execute("UPDATE pgtrickle.pgt_freshness_controller_state SET next_due_at = now() - interval '1 second'")
+            .await;
+    }
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['clock_st', 'clock_control'])")
+        .await;
+    assert!(db.wait_for_condition(
+        "scheduler due-time witness",
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_control' AND h.status = 'COMPLETED')",
+        Duration::from_secs(30),
+        Duration::from_millis(50),
+    ).await);
+    let refreshed = db
+        .wait_for_condition(
+            "clock-dependent scheduled expiry",
+            "SELECT NOT EXISTS(SELECT 1 FROM clock_st)",
+            Duration::from_secs(10),
+            Duration::from_millis(50),
+        )
+        .await;
+    if refreshed && schedule_kind == "interval" {
+        // Witness another tick while the controller's original due time is past.
+        db.execute("UPDATE pgtrickle.pgt_stream_tables SET last_refresh_at = now() - interval '2 hours' WHERE pgt_name = 'clock_control'")
+            .await;
+        assert!(db.wait_for_condition(
+            "second scheduler tick before next clock interval",
+            "SELECT count(*) >= 2 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_control' AND h.status = 'COMPLETED'",
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        ).await);
+        let refreshes: i64 = db.query_scalar("SELECT count(*) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_st' AND h.status = 'COMPLETED'").await;
+        assert_eq!(
+            refreshes, 1,
+            "clock reevaluation must wait for its next interval"
+        );
+    }
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['clock_st', 'clock_control'])")
+        .await;
+    let witness: String = db.query_scalar(
+        "SELECT jsonb_build_object('now', clock_timestamp(), 'source', (SELECT jsonb_agg(s) FROM clock_src s), 'materialized', (SELECT count(*) FROM clock_st), 'expected', (SELECT count(*) FROM clock_src WHERE expires_at > CURRENT_TIMESTAMP), 'metadata', (SELECT jsonb_agg(jsonb_build_object('name', pgt_name, 'mode', refresh_mode, 'schedule', schedule, 'target', target_freshness_mode, 'last_refresh_at', last_refresh_at)) FROM pgtrickle.pgt_stream_tables), 'history', (SELECT jsonb_agg(jsonb_build_object('action', action, 'status', status)) FROM pgtrickle.pgt_refresh_history))::text"
+    ).await;
+    eprintln!("clock refresh witness ({mode}, {schedule_kind}): {witness}");
+    assert_eq!(db.count("clock_src").await, 1);
+    let control_action: String = db.query_scalar("SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_control' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert_eq!(
+        control_action, "NO_DATA",
+        "source-only FULL must stay cheap"
+    );
+    // Manual FULL is a control, evaluated only after recording scheduled output.
+    db.refresh_st("clock_st").await;
+    db.assert_st_matches_query("clock_st", query).await;
+    assert!(refreshed, "scheduled output stayed stale: {witness}");
+    let action: String = db.query_scalar("SELECT h.action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'clock_st' AND h.status = 'COMPLETED' ORDER BY h.refresh_id LIMIT 1").await;
+    assert_eq!(action, "FULL", "{witness}");
+}
+
+#[tokio::test]
+async fn test_scheduler_clock_auto_duration_expires_without_writes() {
+    assert_clock_dependent_refresh("AUTO", "duration").await;
+}
+
+#[tokio::test]
+async fn test_scheduler_clock_full_duration_expires_without_writes() {
+    assert_clock_dependent_refresh("FULL", "duration").await;
+}
+
+#[tokio::test]
+async fn test_scheduler_clock_auto_cron_expires_without_writes() {
+    assert_clock_dependent_refresh("AUTO", "cron").await;
+}
+
+#[tokio::test]
+async fn test_scheduler_clock_auto_interval_expires_without_writes() {
+    assert_clock_dependent_refresh("AUTO", "interval").await;
+}
+
 // Keep schedules long and explicitly make each pass due so observations cannot
 // race another refresh. Backdating the leaf also forces a real DIFFERENTIAL
 // pass via the upstream-refresh timestamp, even when no deltas remain.
