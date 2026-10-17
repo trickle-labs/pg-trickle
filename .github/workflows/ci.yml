@@ -2,10 +2,11 @@
 # CI Workflow — Run the full test matrix
 #
 # Automatic triggers (with path filters on Rust/test files):
-#   push/PR → main : unit (Linux) + integration tests (~15 min gate)
-#   push → main    : + light E2E tests, + coverage upload
-#   Weekly (Mon)   : full unit matrix (Linux + macOS), E2E, dbt, CNPG smoke
-#   Manual         : all jobs, all platforms (including Windows + benchmarks)
+#   Draft PR      : quick validation, Linux unit/integration, LSN proof
+#   Ready PR      : + packaged E2E and path-selected sensitive gates
+#   push → main   : unit/integration, packaged E2E, smoke, benchmark tracking
+#   Nightly       : full matrix, E2E, dbt, CNPG, performance gates
+#   Manual        : full matrix; opt in to benchmark comparison
 #
 # TPC-H nightly (TEST-10) is in tpch-nightly.yml — it can take up to 3–5 h
 # and must not block PRs or push-to-main gating.
@@ -34,6 +35,7 @@ on:
       - 'tests/release/**'
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - 'src/**'
       - 'verification/**'
@@ -55,7 +57,7 @@ on:
   workflow_dispatch:
     inputs:
       run_benchmark_regression:
-        description: Run the PR benchmark regression gate
+        description: Compare benchmarks against benchmark_base (defaults to main)
         required: false
         type: boolean
         default: false
@@ -65,7 +67,8 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Pushes to main must not cancel the longer nightly qualification run.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -83,6 +86,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install rustfmt
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check formatting and static contracts before expensive jobs
+        run: |
+          cargo fmt -- --check
+          bash scripts/check_sql_builder.sh
+          python3 scripts/check_fuzz_targets.py
+
       - name: Validate release evidence and rejection controls
         run: |
           python3 scripts/v0_108_3_release_gate.py
@@ -91,6 +106,7 @@ jobs:
 
   lsn-verification:
     name: Checked LSN proof and semantic mutation control
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -113,6 +129,7 @@ jobs:
   # ── Unit tests (Linux PR gate) ──────────────────────────────────────────
   unit-tests:
     name: Unit tests (PR gate, linux-amd64)
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -142,6 +159,7 @@ jobs:
   # PP-5 (v0.97.0): exercise the OTLP/HTTP contract against a real collector.
   otel-collector-contract:
     name: OpenTelemetry Collector contract
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -182,6 +200,7 @@ jobs:
   # while the wider platform matrix runs on schedule or manual dispatch.
   unit-tests-macos:
     name: Unit tests (scheduled/manual, macos-arm64)
+    needs: release-qualification-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     timeout-minutes: 15
@@ -202,6 +221,7 @@ jobs:
 
   unit-tests-windows:
     name: Unit tests (scheduled/manual, windows-amd64)
+    needs: release-qualification-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 15
@@ -221,7 +241,8 @@ jobs:
   # Does not require PostgreSQL — just verifies the Rust code compiles on Windows.
   windows-compile-gate:
     name: Windows compile check (PR gate)
-    if: github.event_name == 'pull_request'
+    needs: release-qualification-contract
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -236,6 +257,7 @@ jobs:
   # ── Integration tests (testcontainers, Linux only) ──────────────────────
   integration-tests:
     name: Integration tests
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -280,43 +302,13 @@ jobs:
           report_paths: 'target/nextest/ci/junit.xml'
           commit: ${{github.event.pull_request.head.sha}}
 
-  # Run the blocking pgbench gate when runtime or benchmark inputs change.
-  # Test-only and documentation-only changes use the functional gates below.
-  detect-pgbench-changes:
-    name: Detect pgbench path changes
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    outputs:
-      benchmark_changed: ${{ steps.filter.outputs.benchmark_changed }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Filter benchmark inputs
-        id: filter
-        uses: dorny/paths-filter@v4
-        with:
-          filters: |
-            benchmark_changed:
-              - 'src/**'
-              - 'sql/self_monitoring_setup.sql'
-              - 'benchmarks/**'
-              - 'tests/Dockerfile.builder'
-              - 'tests/Dockerfile.e2e'
-              - '.github/actions/setup-pgrx/**'
-
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
   # This is intentionally separate from the long weekly E2E benchmark history.
   # The three configurations and budgets are versioned under benchmarks/.
   pgbench-v087:
     name: v0.87 pgbench overhead gate
-    needs: detect-pgbench-changes
-    if: >
-      always() &&
-      (github.event_name == 'workflow_dispatch' ||
-       (needs.detect-pgbench-changes.result == 'success' &&
-        needs.detect-pgbench-changes.outputs.benchmark_changed == 'true'))
+    needs: release-qualification-contract
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -360,6 +352,7 @@ jobs:
   light-e2e-package:
     name: Package light E2E extension
     needs: [lsn-verification]
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -552,7 +545,6 @@ jobs:
     needs: detect-e2e-gates
     runs-on: ubuntu-latest
     if: >
-      always() &&
       (github.event_name == 'push' ||
        (github.event_name == 'pull_request' &&
         needs.detect-e2e-gates.result == 'success' &&
@@ -624,6 +616,7 @@ jobs:
   # schedule and manual dispatch only (not push-to-main — too slow).
   e2e-tests:
     name: E2E tests
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 180
@@ -799,6 +792,7 @@ jobs:
   # Full upgrade E2E tests run on schedule/manual dispatch only.
   upgrade-e2e-pr-slice:
     name: Upgrade E2E slice (nightly/manual)
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 45
@@ -901,6 +895,7 @@ jobs:
           echo "::notice::Upgrade E2E slice skipped — no SQL/CDC/API/config changes detected."
 
   upgrade-e2e-prepare:
+    needs: release-qualification-contract
     name: Discover upgrade pairs
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -985,16 +980,22 @@ jobs:
           cargo nextest run --profile ci --test e2e_upgrade_tests --run-ignored all
 
   # ── Benchmark regression gate ───────────────────────────────────────────
-  # Measures the candidate before the exact PR base to avoid penalizing the
-  # candidate for hosted-runner drift, then fails on material regressions.
+  # Measure both revisions on the same runner. Nightly compares against the
+  # last successful scheduled CI revision; manual runs accept an exact base.
   bench-regression:
     name: Benchmark regression check
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.run_benchmark_regression)
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_benchmark_regression)
     timeout-minutes: 90
     continue-on-error: false
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
@@ -1015,31 +1016,43 @@ jobs:
           restore-keys: |
             v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
-      - name: Fetch PR base for a same-run benchmark baseline
+      - name: Fetch baseline for a same-run benchmark comparison
         env:
-          BENCH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.benchmark_base || github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          BENCH_BASE_REF: ${{ inputs.benchmark_base || (github.event_name == 'workflow_dispatch' && github.event.repository.default_branch) || '' }}
         run: |
+          if [ -z "$BENCH_BASE_REF" ]; then
+            BENCH_BASE_REF=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml --event schedule --status success --limit 1 \
+              --json headSha --jq '.[0].headSha // empty')
+          fi
+          if [ -z "$BENCH_BASE_REF" ]; then
+            BENCH_BASE_REF=$(git rev-parse HEAD^)
+            echo "::warning::No successful nightly CI baseline; comparing against the previous commit"
+          fi
           git fetch --no-tags --depth=1 origin "$BENCH_BASE_REF"
           git worktree add --detach "$RUNNER_TEMP/benchmark-base" FETCH_HEAD
+          printf 'Benchmark candidate: `%s`\n\nBaseline: `%s`\n' \
+            "$GITHUB_SHA" "$(git rev-parse FETCH_HEAD)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Measure PR candidate
+      - name: Measure candidate
         run: |
           ./scripts/run_benchmarks.sh -- --save-baseline candidate
         env:
           BENCH_QUICK: "1"
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
-      - name: Clear PR candidate's current estimates
+      - name: Clear candidate's current estimates
         run: find target/criterion -type d -name new -prune -exec rm -rf {} +
 
-      - name: Measure PR base
+      - name: Measure baseline
         run: |
           BENCH_PROJECT_DIR="$RUNNER_TEMP/benchmark-base" ./scripts/run_benchmarks.sh -- --save-baseline base
         env:
           BENCH_QUICK: "1"
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
-      - name: Restore PR candidate estimates
+      - name: Restore candidate estimates
         run: |
           find target/criterion -type d -name new -prune -exec rm -rf {} +
           find target/criterion -type d -name candidate -print0 | while IFS= read -r -d '' source; do
@@ -1050,7 +1063,7 @@ jobs:
         run: |
           if ! python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs; then
             # Shared runners can produce noisy microbenchmark samples. Re-run
-            # the candidate once on the same runner before blocking the PR.
+            # the candidate once on the same runner before failing the gate.
             find target/criterion -type d -name new -prune -exec rm -rf {} +
             ./scripts/run_benchmarks.sh -- --baseline base
             python3 scripts/criterion_regression_check.py --baseline base --minimum-delta-ns 250 --require-pairs
@@ -1064,6 +1077,7 @@ jobs:
   # On push to main: saves a Criterion baseline so PRs can compare against it.
   benchmarks:
     name: Benchmarks
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     timeout-minutes: 45
@@ -1111,6 +1125,7 @@ jobs:
   # 15 tests × ~15 s each ≈ well under 30 min. Non-blocking (continue-on-error).
   dag-bench-calc:
     name: DAG bench (calc/throughput)
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
@@ -1159,6 +1174,7 @@ jobs:
   # 6 tests × ~12 min each ≈ 72 min serially. Non-blocking (continue-on-error).
   dag-bench-parallel:
     name: DAG bench (parallel workers)
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 120
@@ -1210,6 +1226,7 @@ jobs:
   # Runs on weekly schedule and manual dispatch only (slow Docker build).
   dbt-integration:
     name: dbt integration
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
@@ -1337,6 +1354,7 @@ jobs:
   # Runs on push-to-main, weekly schedule, and manual dispatch only.
   dbt-getting-started:
     name: dbt getting-started example
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
@@ -1412,6 +1430,7 @@ jobs:
   # official CNPG operand image.
   cnpg-smoke-test:
     name: CNPG smoke test
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 20
@@ -1597,8 +1616,9 @@ jobs:
   # previous-version database and the current ALTER EXTENSION path.
   shipping-image-upgrade:
     name: Shipping image upgrade
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -1651,6 +1671,7 @@ jobs:
   # deliberately disrupt PostgreSQL.
   production-recovery-qualification:
     name: CDC crash and WAL qualification
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 90
@@ -1680,8 +1701,9 @@ jobs:
   # from building the same E2E image twice when path sets overlap.
   detect-e2e-gates:
     name: Detect sensitive E2E paths
+    needs: release-qualification-contract
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: (github.event_name == 'pull_request' && !github.event.pull_request.draft) || github.event_name == 'push'
     outputs:
       dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
       security_changed: ${{ steps.filter.outputs.security_changed }}

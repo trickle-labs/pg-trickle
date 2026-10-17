@@ -1,8 +1,7 @@
 # =============================================================================
 # Lint Workflow — Fast fmt + clippy gate on every push/PR
 #
-# This is the only automatic workflow that runs on code changes.
-# Full builds are available via the manual Build or CI workflows.
+# Formatting runs before provisioning PostgreSQL or restoring build artifacts.
 # =============================================================================
 name: Lint
 
@@ -52,11 +51,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup pgrx environment
-        uses: ./.github/actions/setup-pgrx
+      - name: Install rustfmt
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
 
       - name: Run clippy
         run: cargo clippy --all-targets --features pg18 -- -D warnings

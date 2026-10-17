@@ -111,17 +111,24 @@ The PR template will walk you through the checklist.
 
 ### CI Coverage on PRs
 
-PR CI runs a three-tier gate:
+For changes selected by its path filters, PR CI runs quick formatting/static
+validation, the release evidence contract, Linux unit/integration tests, and
+the checked LSN proof. Expensive CI jobs wait
+for quick validation to pass. Draft PRs defer packaging, light/full E2E,
+shipping-image qualification, Windows compilation, and fuzz corpus replay.
+Marking a draft **ready for review** starts those jobs; converting it back to
+a draft cancels the previous run and returns to the smaller set of checks.
 
-- **Unit tests (Linux only)**
-- **Integration tests**
-- **Light E2E** — curated PR-friendly end-to-end coverage split across three
-  shards and executed against stock `postgres:18.6`
+Ready PRs additionally run packaged-extension coverage, including light E2E
+split across three shards against stock `postgres:18.6`. Sensitive paths select
+the existing full E2E, security, failure-recovery, or unsafe-boundary gates.
 
-Full E2E, TPC-H tests, benchmarks, dbt, CNPG smoke, and the extra macOS /
-Windows unit jobs stay off the PR critical path and run on push-to-main,
-schedule, or manual dispatch. This keeps typical PR feedback closer to the
-single-digit-minute range while preserving broader scheduled coverage.
+Criterion regression comparisons and the pgbench overhead gate run nightly
+and remain available manually. Nightly Criterion runs measure both the
+candidate and the last successful scheduled CI revision on the same runner;
+the first nightly run falls back to the previous commit with a warning. The
+compared commit IDs are recorded in the job summary. TPC-H, dbt, CNPG, and the
+extra macOS/Windows unit jobs also retain their scheduled/manual coverage.
 
 #### Workflow trigger matrix
 
@@ -130,12 +137,15 @@ single-digit-minute range while preserving broader scheduled coverage.
 | Unit tests (Linux) | ✅ | ✅ | ✅ | ✅ |
 | Unit tests (macOS + Windows) | ❌ | ❌ | ✅ | ✅ |
 | Integration tests | ✅ | ✅ | ✅ | ✅ |
-| Light E2E (3 shards) | ✅ | ✅ | ✅ | ✅ |
-| Full E2E + TPC-H | ❌ | ✅ | ✅ | ✅ |
+| Light E2E (3 shards) | Ready only | ✅ | ✅ | ✅ |
+| Full E2E | Sensitive paths, ready only | ❌ | ✅ | ✅ |
+| TPC-H | ❌ | ❌ | ✅ | ✅ |
 | Upgrade completeness check | ✅ | ✅ | ✅ | ✅ |
-| Upgrade E2E | ❌ | ✅ | ✅ | ✅ |
+| Upgrade E2E | ❌ | ❌ | ✅ | ✅ |
 | Benchmarks | ❌ | ✅ | ✅ | ✅ |
-| Benchmark regression gate | ✅ | ❌ | ❌ | ✅ |
+| Benchmark regression gate | ❌ | ❌ | ✅ | Opt-in |
+| pgbench overhead gate | ❌ | ❌ | ✅ | ✅ |
+| Shipping image upgrade | Ready only | ❌ | ✅ | ✅ |
 | DAG bench (calc / throughput) | ❌ | ❌ | ✅ | ✅ |
 | DAG bench (parallel workers) | ❌ | ❌ | ✅ | ✅ |
 | E2E bench — refresh matrix | ❌ | ❌ | Weekly (Sun) | ✅ |
@@ -153,8 +163,8 @@ single-digit-minute range while preserving broader scheduled coverage.
 | cargo audit (security) | ✅ | ✅ | ✅ | ✅ |
 | Semgrep static analysis | ✅ | ✅ | ✅ | ✅ |
 | Secret scanning (gitleaks) | ✅ | ✅ | ✅ | ✅ |
-| Fuzz corpus replay | ✅ | ✅ | ✅ | ✅ |
-| Windows compile check | ✅ | ✅ | ✅ | ✅ |
+| Fuzz corpus replay | Ready only | ❌ | ✅ | ✅ |
+| Windows compile check | Ready only | ❌ | ❌ | ❌ |
 
 ¹ `cargo-deny` runs on PRs only when `Cargo.toml`, `Cargo.lock`, or `deny.toml`
 change (path filter).  If your PR does not touch these files, the check is skipped
@@ -166,6 +176,16 @@ engine, refresh, or CDC changes):
 ```bash
 gh workflow run ci.yml --ref <your-branch>
 ```
+
+Manual dispatch also runs the heavy tests on a draft branch. To opt in to the
+Criterion comparison against an exact base ref or commit:
+
+```bash
+gh workflow run ci.yml --ref <your-branch> \
+  -f run_benchmark_regression=true -f benchmark_base=<base-ref-or-sha>
+```
+
+Omitting `benchmark_base` on manual runs compares against `main`.
 
 To run all tests locally before pushing:
 
