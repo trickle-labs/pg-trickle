@@ -1584,6 +1584,13 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 - Uses an advisory lock to prevent concurrent refreshes of the same ST.
 - If another refresh owns the lock, returns without refreshing and emits a NOTICE.
 - For `DIFFERENTIAL` mode, generates and applies a delta query. For `FULL` mode, truncates and reloads.
+- Manual `DIFFERENTIAL` refreshes hold back their source frontier while an
+  earlier transaction remains open. Committed changes beyond that safe bound
+  are deferred until a later refresh, so late commits cannot be skipped.
+  Continuous overlapping source or CDC-buffer writers can defer manual
+  progress until writers drain; scheduled refreshes retain writer-fence progress.
+  Ordinary manual DIFFERENTIAL refreshes reject `REPEATABLE READ` and
+  `SERIALIZABLE`: their fixed snapshots cannot prove visibility of late commits.
 - Records the refresh in `pgtrickle.pgt_refresh_history` with `initiated_by = 'MANUAL'`.
 - The caller must own the stream table, have owner-equivalent authority, or
   have PostgreSQL `MAINTAIN` on that exact stream-table relation. This

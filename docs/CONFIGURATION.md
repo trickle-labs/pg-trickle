@@ -303,6 +303,12 @@ For shared source tables, pg_trickle resolves the effective source-level CDC
 mechanism conservatively: any dependent stream table that requests `'trigger'`
 keeps the source on trigger CDC; otherwise `'wal'` wins over `'auto'`.
 
+Falling back from `WAL` or `TRANSITIONING` to trigger capture clears every
+dependent stream table's frontier and sets `needs_reinit`. The next successful
+refresh performs an explicit `REINITIALIZE` rebuild, recorded in refresh history,
+to include committed changes still pending in WAL or unapplied receipts. Future
+source writes use triggers once fallback commits.
+
 ```sql
 -- Start with triggers and transition eligible sources to WAL
 SET pg_trickle.cdc_mode = 'auto';
