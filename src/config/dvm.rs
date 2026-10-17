@@ -34,10 +34,10 @@ pub static PGS_MERGE_WORK_MEM_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
 
 /// SCAL-3: Maximum `work_mem` (in MB) allowed during delta MERGE execution.
 ///
-/// When the planner hints would set `work_mem` above this cap (for deep
-/// joins or large deltas), the refresh falls back to FULL instead. This
-/// prevents OOM on unexpectedly large deltas where hash joins would
-/// allocate unbounded memory.
+/// Deep joins continue DIFFERENTIAL at the cap and retain the caller's
+/// temporary-file limit when the preferred hint exceeds it. Large-delta
+/// hints above the cap fall back to FULL when the full policy permits it.
+/// This caps a per-operation setting, not total executor memory or disk use.
 ///
 /// PERF-004 (v0.70.0): Default changed from 0 (disabled) to 256 MB.
 /// Deployments that rely on the old unlimited behaviour must set

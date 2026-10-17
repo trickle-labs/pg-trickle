@@ -275,6 +275,147 @@ async fn test_ownership_nonsuperuser_create_uses_private_infrastructure() {
     );
 }
 
+/// A cache miss during public refresh must resolve private CDC dependencies
+/// with extension privileges while defining-query SQL still runs as the owner.
+#[tokio::test]
+async fn test_refresh_resolves_private_dependencies_for_stream_owner() {
+    let db = E2eDb::new().await.with_extension().await;
+    let runner = "mdm_s1_runner";
+    let runtime = "mdm_s1_runtime";
+    let schema = format!("r53perm_{}", std::process::id());
+    let source = format!("{schema}.source");
+    let stream = format!("{schema}.st");
+
+    db.execute(&format!("CREATE ROLE {runner} NOLOGIN")).await;
+    db.execute(&format!("CREATE ROLE {runtime} NOLOGIN")).await;
+    db.execute(&format!("CREATE SCHEMA {schema} AUTHORIZATION {runner}"))
+        .await;
+    db.execute(&format!(
+        "CREATE TABLE {source} (id INT PRIMARY KEY, value TEXT)"
+    ))
+    .await;
+    db.execute(&format!("ALTER TABLE {source} OWNER TO {runner}"))
+        .await;
+    db.execute(&format!("INSERT INTO {source} VALUES (1, 'before')"))
+        .await;
+    db.execute(&format!("GRANT SELECT ON {source} TO {runner}"))
+        .await;
+    db.execute(&format!("GRANT USAGE ON SCHEMA pgtrickle TO {runner}"))
+        .await;
+    db.execute(&format!(
+        "GRANT EXECUTE ON FUNCTION pgtrickle.refresh_stream_table(text) TO {runner}"
+    ))
+    .await;
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(\
+            name => '{stream}', query => 'SELECT id, value FROM {source}', \
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', \
+            cdc_mode => 'trigger', initialize => true)"
+    ))
+    .await;
+    db.execute(&format!("ALTER TABLE {stream} OWNER TO {runner}"))
+        .await;
+
+    let (owner_oid, owner_name): (i64, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT c.relowner::bigint, r.rolname::text \
+         FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner \
+         WHERE c.oid = '{stream}'::regclass"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the stream relation owner");
+    assert!(owner_oid > 0);
+    assert_eq!(owner_name, runner);
+
+    let mut privilege_results = Vec::new();
+    for role in [runner, runtime] {
+        let can_read_dependencies: bool = db
+            .query_scalar(&format!(
+                "SELECT has_table_privilege('{role}', \
+                 'pgtrickle.pgt_dependencies', 'SELECT')"
+            ))
+            .await;
+        privilege_results.push((role, can_read_dependencies));
+    }
+    assert_eq!(
+        privilege_results,
+        vec![(runner, false), (runtime, false)],
+        "the named S1 roles must not read private dependencies"
+    );
+    println!(
+        "R53_PERMISSION_ORACLE owner_oid={owner_oid} owner_role={owner_name} direct_select_before={privilege_results:?}"
+    );
+
+    db.execute(&format!("INSERT INTO {source} VALUES (2, 'after')"))
+        .await;
+    db.execute("SELECT pgtrickle.clear_caches()").await;
+    let l2_entries: i64 = db
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM pgtrickle.pgt_template_cache \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_name = 'st' AND pgt_schema = '{schema}')"
+        ))
+        .await;
+    assert_eq!(
+        l2_entries, 0,
+        "refresh must exercise the DVM cache-miss path"
+    );
+
+    db.try_execute_with_config(
+        &["SET pg_trickle.differential_max_change_ratio = 1.0"],
+        &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+    )
+    .await
+    .expect("public cache-miss refresh keeps private catalog reads privileged");
+    let action: String = db
+        .query_scalar(&format!(
+            "SELECT h.action FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables t USING (pgt_id) \
+             WHERE t.pgt_name = 'st' AND t.pgt_schema = '{schema}' \
+             ORDER BY h.refresh_id DESC LIMIT 1"
+        ))
+        .await;
+    assert_eq!(action, "DIFFERENTIAL");
+
+    let rows: Vec<(i32, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, value FROM {stream} ORDER BY id"
+    )))
+    .fetch_all(&db.pool)
+    .await
+    .expect("read refreshed stream rows");
+    assert_eq!(
+        rows,
+        vec![(1, "before".to_string()), (2, "after".to_string())],
+        "public refresh must preserve all rows visible to the stream owner"
+    );
+
+    let mut privilege_results_after = Vec::new();
+    for role in [runner, runtime] {
+        let can_read_dependencies: bool = db
+            .query_scalar(&format!(
+                "SELECT has_table_privilege('{role}', \
+                 'pgtrickle.pgt_dependencies', 'SELECT')"
+            ))
+            .await;
+        privilege_results_after.push((role, can_read_dependencies));
+    }
+    assert_eq!(
+        privilege_results_after,
+        vec![(runner, false), (runtime, false)],
+        "the named S1 roles must not read private dependencies after refresh"
+    );
+    println!(
+        "R53_PERMISSION_ORACLE owner_oid={owner_oid} owner_role={owner_name} direct_select_after={privilege_results_after:?}"
+    );
+
+    db.execute(&format!("SELECT pgtrickle.drop_stream_table('{stream}')"))
+        .await;
+    db.execute(&format!("DROP SCHEMA {schema} CASCADE")).await;
+    db.execute(&format!("DROP OWNED BY {runtime}, {runner}"))
+        .await;
+    db.execute(&format!("DROP ROLE {runtime}, {runner}")).await;
+}
+
 /// #903: The elevated creation API must not grant its owner privileges to the
 /// defining query; PostgreSQL should return a normal permission error instead.
 #[tokio::test]

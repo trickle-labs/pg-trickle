@@ -30,7 +30,14 @@ pub fn prepare_cross_cycle_phantom_table(
     Ok(())
 }
 
-fn content_signature_expr(alias: &str, quoted_user_cols: &[String]) -> String {
+fn content_signature_expr(
+    alias: &str,
+    quoted_user_cols: &[String],
+    row_id_is_complete: bool,
+) -> String {
+    if row_id_is_complete {
+        return format!("{alias}.\"__pgt_row_id\"");
+    }
     if quoted_user_cols.is_empty() {
         // Degenerate case (no user columns); use a constant fingerprint so
         // reconciliation collapses to a row-count diff.
@@ -88,8 +95,9 @@ pub fn cleanup_cross_cycle_phantoms(
     defining_query: &str,
     batch_size: i64,
 ) -> Result<i64, PgTrickleError> {
-    let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
     let user_cols = crate::dvm::get_defining_query_columns(defining_query)?;
+    let (row_id_expr, row_id_is_complete) =
+        crate::dvm::row_id_expr_for_query_and_complete_output(defining_query, &user_cols);
 
     // Quote user column names.
     let quoted_user_cols: Vec<String> = user_cols
@@ -111,8 +119,8 @@ pub fn cleanup_cross_cycle_phantoms(
     // makes the reconciliation correct for those query shapes too — two
     // rows with identical user content are considered equivalent regardless
     // of any internal hash drift.
-    let st_sig = content_signature_expr("st", &quoted_user_cols);
-    let r_sig = content_signature_expr("r", &quoted_user_cols);
+    let st_sig = content_signature_expr("st", &quoted_user_cols, row_id_is_complete);
+    let r_sig = content_signature_expr("r", &quoted_user_cols, row_id_is_complete);
     let recon_row_number_alias = {
         let mut suffix = 0_u32;
         loop {
@@ -260,11 +268,19 @@ mod tests {
         let columns = (0..51)
             .map(|index| format!("\"column_{index}\""))
             .collect::<Vec<_>>();
-        let expression = super::content_signature_expr("st", &columns);
+        let expression = super::content_signature_expr("st", &columns, false);
 
         assert!(expression.contains("to_jsonb(ROW("));
         assert!(!expression.contains("jsonb_build_object"));
         assert_eq!(expression.matches("st.\"column_").count(), 51);
+    }
+
+    #[test]
+    fn test_content_signature_reuses_complete_row_identity() {
+        assert_eq!(
+            super::content_signature_expr("r", &[], true),
+            "r.\"__pgt_row_id\""
+        );
     }
 
     #[test]

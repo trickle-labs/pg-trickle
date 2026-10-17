@@ -236,8 +236,19 @@ fn ensure_capture_instance() -> Result<CaptureGate, PgTrickleError> {
         return Ok(CaptureGate::Quiesced);
     }
 
-    Spi::run("UPDATE pgtrickle.pgt_capture_instance SET last_seen_at = now() WHERE singleton")
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    Spi::run(
+        "WITH available AS (
+             SELECT singleton
+               FROM pgtrickle.pgt_capture_instance
+              WHERE singleton
+              FOR UPDATE SKIP LOCKED
+         )
+         UPDATE pgtrickle.pgt_capture_instance AS instance
+            SET last_seen_at = now()
+           FROM available
+          WHERE instance.singleton = available.singleton",
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     Ok(CaptureGate::Ready)
 }
 
