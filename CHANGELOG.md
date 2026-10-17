@@ -226,6 +226,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
   when source transactions commit out of LSN order (#1158).
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
 - Require an explicit rebuild of dependent stream tables when WAL capture falls back to triggers, preserving committed changes still pending in WAL or unapplied receipts (#1159).
+- Reduce differential-refresh work by pruning empty graph CDC stages and filtering nested join snapshots to affected keys.
 
 Future changes will be listed here.
 

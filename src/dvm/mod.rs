@@ -787,15 +787,25 @@ fn generate_delta_query_impl(
             source_oids
                 .iter()
                 .map(|oid| {
-                    (
-                        *oid,
-                        format!(
-                            "pg_temp.\"{}\"",
-                            crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
-                        ),
-                    )
+                    let table = format!(
+                        "pg_temp.\"{}\"",
+                        crate::refresh::delta_stage::DeltaStage::table_name(pgt_id, *oid)
+                    );
+                    // Empty staged windows are immutable for this refresh. Expose
+                    // that fact to the planner so unused join snapshots are pruned.
+                    let has_rows = pgrx::Spi::get_one::<bool>(&format!(
+                        "SELECT EXISTS (SELECT 1 FROM {table})"
+                    ))
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false);
+                    let scan = if has_rows {
+                        table
+                    } else {
+                        format!("(SELECT * FROM {table} WHERE false)")
+                    };
+                    Ok((*oid, scan))
                 })
-                .collect(),
+                .collect::<Result<_, PgTrickleError>>()?,
         );
     }
 

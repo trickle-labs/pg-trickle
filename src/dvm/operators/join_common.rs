@@ -1334,7 +1334,7 @@ pub fn rewrite_join_condition(
 }
 
 /// Recursively rewrite an expression for join delta/snapshot usage.
-fn rewrite_expr_for_join(
+pub(super) fn rewrite_expr_for_join(
     expr: &Expr,
     left: &OpTree,
     new_left: &str,
