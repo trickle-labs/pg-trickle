@@ -12,6 +12,37 @@ const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, t
      text, integer, double precision, text, boolean, text, integer, text, text";
 
 #[tokio::test]
+async fn test_manual_refresh_nested_key_filter_prunes_unused_identity() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE metadata (id int PRIMARY KEY, owner name NOT NULL);
+         CREATE TABLE metadata_state (id int PRIMARY KEY);
+         CREATE TABLE changed_rows (id int PRIMARY KEY, owner name NOT NULL, value int NOT NULL);
+         INSERT INTO metadata VALUES (1, 'postgres');
+         INSERT INTO metadata_state VALUES (1);
+         INSERT INTO changed_rows VALUES (1, 'postgres', 1);
+         SELECT pgtrickle.create_stream_table(
+             name => 'metadata_join',
+             query => 'SELECT c.id, c.value FROM changed_rows c
+                       JOIN metadata m ON c.id = m.id AND c.owner = m.owner
+                       JOIN metadata_state s ON m.id = s.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'MANAGED')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install metadata join fixture");
+    db.execute("SELECT pgtrickle.refresh_stream_table('metadata_join')")
+        .await;
+    db.execute("UPDATE changed_rows SET value = 2 WHERE id = 1")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('metadata_join')")
+        .await;
+    let value: i32 = db.query_scalar("SELECT value FROM metadata_join").await;
+    assert_eq!(value, 2);
+}
+
+#[tokio::test]
 async fn test_graph_refresh_scopes_nested_join_snapshots_and_empty_stages() {
     let db = E2eDb::new().await.with_extension().await;
     sqlx::raw_sql(

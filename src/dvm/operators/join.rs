@@ -291,6 +291,11 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         "__pgt_left",
         "__pgt_right",
     );
+    if !equi_keys.is_empty() {
+        // Key probes add references; keep unused child identity expressions prunable.
+        ctx.mark_cte_not_materialized(&left_result.cte_name);
+        ctx.mark_cte_not_materialized(&right_result.cte_name);
+    }
 
     // Build semi-join-filtered table references.
     // Part 1: right base table filtered by delta-left join keys
@@ -1173,6 +1178,9 @@ mod tests {
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
         assert_sql_contains(outer_sql, "WHERE id IN (SELECT DISTINCT a__id FROM");
         assert_sql_contains(outer_sql, "WHERE a__id IN (SELECT DISTINCT id FROM");
+        assert!(sql.lines().any(|line| {
+            line.starts_with("__pgt_cte_join_") && line.ends_with(" AS NOT MATERIALIZED (")
+        }));
     }
 
     #[test]
