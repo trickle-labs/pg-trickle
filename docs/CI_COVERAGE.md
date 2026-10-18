@@ -226,3 +226,9 @@ successfully after releasing its blocker. Timed failure tests retain their
 SQLSTATE and cleanup assertions, with ten-second faults occurring after the
 five-second witness deadline. All 14 locally eligible recovery checks passed
 without retries after these changes.
+
+The LSN transition check also compared a live pending-receipt count before and
+after rejected input while decoding continued. It now pins the initial receipt
+ID boundary, waits for that cohort to be acknowledged, and compares the same
+cohort after rejection. New bookkeeping receipts remain outside the protected
+cohort. All 11 LSN contract checks passed without retries after this repair.
