@@ -1,0 +1,69 @@
+# Unclassified files retain runtime coverage; exclusions select cheaper checks.
+# Used with paths-filter's some-with-excludes predicate.
+runtime:
+  - '**'
+  - '!**/*.md'
+  - '!docs/**'
+  - '!scripts/**'
+  - '!benchmarks/**'
+  - '!benches/**'
+  - '!cnpg/**'
+  - '!docker/**'
+  - '!monitoring/**'
+  - '!demo/**'
+  - '!demos/**'
+  - '!examples/**'
+  - '!playground/**'
+  - '!blog/**'
+  - '!plans/**'
+  - '!adrs/**'
+  - '!dbt-pgtrickle/**'
+  - '!tests/release/**'
+  - '!.github/**'
+  - '!LICENSE'
+  - '!.gitignore'
+  - '!book.toml'
+  - '!codecov.yml'
+  - '!deny.toml'
+  - '!META.json'
+  - '!justfile'
+  - '!Dockerfile.demo'
+  - '!Dockerfile.ghcr'
+
+# These scripts and CI definitions affect compiled tests or candidate identity.
+harness:
+  - 'scripts/pg_stub.c'
+  - 'scripts/gen_test_schema.py'
+  - 'scripts/run_*'
+  - '!scripts/run_benchmarks.sh'
+  - 'scripts/release_install_attestation.py'
+  - 'scripts/check_lsn_verification.py'
+  - 'scripts/check_lsn_candidate_binding.py'
+  - '.github/actions/**'
+  - '.github/workflows/ci.yml'
+  - '.github/ci-paths.yml'
+  - '!**/*.md'
+
+benchmarks:
+  - 'benches/**'
+  - 'benchmarks/**'
+  - '!**/*.md'
+  - 'scripts/run_benchmarks.sh'
+  - 'scripts/criterion_regression_check.py'
+  - '.github/workflows/benchmarks.yml'
+
+shipping:
+  - 'Dockerfile.ghcr'
+  - '.dockerignore'
+  - 'docker/pg_trickle-defaults.conf'
+
+monitoring:
+  - 'monitoring/**'
+  - '!**/*.md'
+  - 'src/otel.rs'
+  - 'scripts/check_monitoring_contract.py'
+
+getting_started:
+  - 'examples/dbt_getting_started/**'
+  - 'dbt-pgtrickle/**'
+  - '!**/*.md'

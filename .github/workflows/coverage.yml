@@ -13,9 +13,21 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'verification/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'tests/**'
+      - 'sql/archive/**'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - '.cargo/**'
+      - 'proptest-regressions/**'
+      - 'scripts/gen_test_schema.py'
+      - 'scripts/pg_stub.c'
+      - '.github/actions/**'
+      - '.github/workflows/coverage.yml'
+      - '!tests/release/**'
+      - '!**/*.md'
   # A46-15: Weekly scheduled coverage to track module-level coverage trends.
   schedule:
     - cron: '0 2 * * 1'  # Every Monday at 02:00 UTC (unit coverage)

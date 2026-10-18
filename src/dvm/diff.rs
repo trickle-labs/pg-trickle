@@ -92,7 +92,7 @@ pub struct CacheContext {
     cte_delta_cache: HashMap<usize, DiffResult>,
     scan_pushed_predicate: Option<Expr>,
     st_bypass_tables: HashMap<i64, String>,
-    scan_delta_ctes: HashMap<String, String>,
+    scan_delta_ctes: HashMap<(u32, String), String>,
     scan_delta_ctes_by_oid: HashMap<u32, String>,
     snapshot_cte_cache: HashMap<String, (String, String)>,
     snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
@@ -776,11 +776,11 @@ impl DiffContext {
         &self.cache.st_bypass_tables
     }
 
-    pub(crate) fn scan_delta_ctes(&self) -> &HashMap<String, String> {
+    pub(crate) fn scan_delta_ctes(&self) -> &HashMap<(u32, String), String> {
         &self.cache.scan_delta_ctes
     }
 
-    pub(crate) fn scan_delta_ctes_mut(&mut self) -> &mut HashMap<String, String> {
+    pub(crate) fn scan_delta_ctes_mut(&mut self) -> &mut HashMap<(u32, String), String> {
         &mut self.cache.scan_delta_ctes
     }
 
@@ -797,7 +797,7 @@ impl DiffContext {
     ) -> Option<&String> {
         self.cache
             .scan_delta_ctes
-            .get(alias)
+            .get(&(source_oid, alias.to_string()))
             .or_else(|| self.cache.scan_delta_ctes_by_oid.get(&source_oid))
     }
 

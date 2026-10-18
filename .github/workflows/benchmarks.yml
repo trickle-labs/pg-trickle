@@ -2,8 +2,8 @@
 # Benchmark Tracking Workflow
 #
 # Runs Criterion benchmarks and tracks results using Bencher for continuous
-# benchmarking. On pushes to main, stores baseline results. On PRs, compares
-# against the baseline and comments with any regressions.
+# benchmarking. Relevant pushes to main store baseline results; documentation
+# and deployment examples do not rebuild the benchmark binaries.
 #
 # Setup:
 #   1. Create a Bencher project: https://bencher.dev
@@ -16,6 +16,23 @@ name: Benchmarks
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'verification/**'
+      - 'benches/**'
+      - 'benchmarks/**'
+      - 'sql/archive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - '.cargo/**'
+      - 'scripts/gen_test_schema.py'
+      - 'scripts/pg_stub.c'
+      - 'scripts/run_benchmarks.sh'
+      - '.github/actions/**'
+      - '.github/workflows/benchmarks.yml'
+      - '!**/*.md'
   workflow_dispatch:
 
 concurrency:
@@ -84,12 +101,14 @@ jobs:
         env:
           BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BENCH_BRANCH: ${{ github.head_ref }}
+          BENCH_BASE: ${{ github.base_ref }}
         run: |
           bencher run \
             --project pg-trickle \
             --token "$BENCHER_API_TOKEN" \
-            --branch "${{ github.head_ref }}" \
-            --branch-start-point "${{ github.base_ref }}" \
+            --branch "$BENCH_BRANCH" \
+            --branch-start-point "$BENCH_BASE" \
             --testbed github-actions \
             --adapter rust_bench \
             --file bench-output.txt \

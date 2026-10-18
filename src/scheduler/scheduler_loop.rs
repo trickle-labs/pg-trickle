@@ -20,7 +20,6 @@ use crate::dag::{
 };
 use crate::error::{RetryPolicy, RetryState};
 use crate::monitor;
-use crate::refresh::{self};
 use crate::shmem;
 use crate::wal_decoder;
 
@@ -34,13 +33,13 @@ use super::watermark::compute_coordinator_tick_watermark;
 use super::{
     RefreshOutcome, SubTransaction, batched_has_source_changes, check_cdc_transition_health,
     check_extension_version_match, check_schedule, check_skip_needed, check_upstream_changes,
-    current_epoch_ms, emit_stale_alert_if_needed, evaluate_fuse, execute_scheduled_refresh,
-    group_schedule_policy, has_table_source_changes, is_any_source_gated, is_group_due,
-    is_load_shed_exempt, is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint,
-    load_gated_source_oids, load_shed_buffer_guard_ids, load_shed_buffer_guard_sample_due,
-    load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash, refresh_single_st,
-    self_monitoring_auto_apply_tick, sla_tier_adjustment_tick, update_backoff_factor,
-    upstream_change_state,
+    current_epoch_ms, determine_scheduled_refresh_action, emit_stale_alert_if_needed,
+    evaluate_fuse, execute_scheduled_refresh, group_schedule_policy, has_table_source_changes,
+    is_any_source_gated, is_group_due, is_load_shed_exempt, is_watermark_misaligned,
+    is_watermark_stuck, iterate_to_fixpoint, load_gated_source_oids, load_shed_buffer_guard_ids,
+    load_shed_buffer_guard_sample_due, load_st_by_id, log_gated_skip, log_watermark_skip,
+    recover_from_crash, refresh_single_st, self_monitoring_auto_apply_tick,
+    sla_tier_adjustment_tick, update_backoff_factor, upstream_change_state,
 };
 use crate::refresh::orchestrator::batch_update_cost_model_summary;
 
@@ -1859,7 +1858,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
                     let (has_changes, _has_stream_table_changes) =
                         upstream_change_state(&st, initial_table_changes.get(&pgt_id).copied());
-                    let action = refresh::determine_refresh_action(&st, has_changes);
+                    let action = determine_scheduled_refresh_action(&st, has_changes);
                     let result =
                         execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
 

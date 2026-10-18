@@ -182,7 +182,7 @@ FROM {new_table}",
     // EC01B-1: Record this scan's delta CTE name for per-leaf
     // pre-change snapshots in deep join trees.
     ctx.scan_delta_ctes_mut()
-        .insert(alias.to_string(), cte_name.clone());
+        .insert((table_oid, alias.to_string()), cte_name.clone());
     ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
     Ok(DiffResult {
@@ -521,6 +521,10 @@ CROSS JOIN generate_series(1, -sub.net_count) gs",
         );
         ctx.add_cte(cte_name.clone(), sql);
 
+        ctx.scan_delta_ctes_mut()
+            .insert((table_oid, alias.to_string()), cte_name.clone());
+        ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
+
         return Ok(DiffResult {
             cte_name,
             columns: col_names,
@@ -735,7 +739,7 @@ FROM (
     // build_pre_change_snapshot_sql can construct per-leaf pre-change
     // snapshots for deep join trees without full-snapshot EXCEPT ALL.
     ctx.scan_delta_ctes_mut()
-        .insert(alias.to_string(), cte_name.clone());
+        .insert((table_oid, alias.to_string()), cte_name.clone());
     ctx.set_scan_delta_cte_for_source(table_oid, cte_name.clone());
 
     Ok(DiffResult {
@@ -1252,6 +1256,24 @@ mod tests {
     }
 
     // ── EC-06: Keyless net-counting delta tests ────────────────────────
+
+    #[test]
+    fn test_diff_scan_keyless_snapshot_uses_pending_changes() {
+        let mut ctx = test_ctx();
+        ctx.set_st_source_pgt_ids(std::collections::HashMap::from([(100, 42)]));
+        let tree = scan(100, "orders", "public", "o", &["id", "amount"]);
+        diff_scan(&mut ctx, &tree).unwrap();
+        let snapshot = crate::dvm::operators::join_common::build_pre_change_snapshot_sql(
+            &tree,
+            ctx.scan_delta_ctes(),
+            ctx.fallback_leaf_oids(),
+            ctx.st_source_pgt_ids(),
+        );
+        assert_eq!(
+            snapshot,
+            "(SELECT \"id\", \"amount\" FROM \"public\".\"orders\" \"o\" EXCEPT ALL SELECT \"id\", \"amount\" FROM __pgt_cte_scan_o_2 WHERE __pgt_action = 'I' UNION ALL SELECT \"id\", \"amount\" FROM __pgt_cte_scan_o_2 WHERE __pgt_action = 'D')"
+        );
+    }
 
     #[test]
     fn test_diff_scan_keyless_uses_net_counting() {
