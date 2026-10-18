@@ -5908,8 +5908,10 @@ mod tests {
             42,
             "pg_temp.__pgt_cdc_99_10".into(),
         )]));
-        ctx.scan_delta_ctes_mut()
-            .insert("normalized_name".into(), "__pgt_cte_scan_normalized".into());
+        ctx.scan_delta_ctes_mut().insert(
+            (10, "normalized_name".into()),
+            "__pgt_cte_scan_normalized".into(),
+        );
 
         let sql = crate::refresh::with_refresh_context(
             crate::refresh::RefreshContext::graph_result(
@@ -5953,8 +5955,10 @@ mod tests {
             10,
             "pg_temp.__pgt_cdc_99_10".into(),
         )]));
-        ctx.scan_delta_ctes_mut()
-            .insert("normalized_name".into(), "__pgt_cte_scan_normalized".into());
+        ctx.scan_delta_ctes_mut().insert(
+            (10, "normalized_name".into()),
+            "__pgt_cte_scan_normalized".into(),
+        );
 
         let sql = child_to_from_sql_in_context(&child, &ctx, true)
             .expect("base-table LATERAL snapshot should be reconstructible");
