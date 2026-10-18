@@ -5,8 +5,8 @@
 //!       LEFT JOIN managers m ON d.mgr_id = m.id
 //!
 //! Delta output columns:
-//!   join__e__id, join__e__dept_id, join__e__name  (always non-NULL — e is the anchor),
-//!   join__d__dept_id, join__d__mgr_id, join__d__label  (nullable — inner LEFT JOIN),
+//!   left_join__e__id, left_join__e__dept_id, left_join__e__name  (always non-NULL — e is the anchor),
+//!   left_join__d__dept_id, left_join__d__mgr_id, left_join__d__label  (nullable — inner LEFT JOIN),
 //!   m__id, m__mgr_name  (nullable — outer LEFT JOIN).
 
 mod common;
@@ -213,17 +213,17 @@ async fn reset_nested_lj_fixture(db: &TestDb) {
 
 /// Query delta rows for the nested left join output.
 ///
-/// e columns (join__e__*) are non-nullable (employees always present as anchor).
-/// d columns (join__d__*) are nullable (inner LEFT JOIN may not match).
+/// e columns (left_join__e__*) are non-nullable (employees always present as anchor).
+/// d columns (left_join__d__*) are nullable (inner LEFT JOIN may not match).
 /// m columns (m__*) are nullable (outer LEFT JOIN may not match).
 type NestedLjRow = (
     String,         // __pgt_action
-    i32,            // join__e__id
-    i32,            // join__e__dept_id
-    String,         // join__e__name
-    Option<i32>,    // join__d__dept_id
-    Option<i32>,    // join__d__mgr_id
-    Option<String>, // join__d__label
+    i32,            // left_join__e__id
+    i32,            // left_join__e__dept_id
+    String,         // left_join__e__name
+    Option<i32>,    // left_join__d__dept_id
+    Option<i32>,    // left_join__d__mgr_id
+    Option<String>, // left_join__d__label
     Option<i32>,    // m__id
     Option<String>, // m__mgr_name
 );
@@ -231,16 +231,16 @@ type NestedLjRow = (
 async fn query_nested_lj_rows(db: &TestDb, sql: &str) -> Vec<NestedLjRow> {
     sqlx::query_as::<_, NestedLjRow>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
-                  "join__e__id",
-                  "join__e__dept_id",
-                  "join__e__name",
-                  "join__d__dept_id",
-                  "join__d__mgr_id",
-                  "join__d__label",
+                  "left_join__e__id",
+                  "left_join__e__dept_id",
+                  "left_join__e__name",
+                  "left_join__d__dept_id",
+                  "left_join__d__mgr_id",
+                  "left_join__d__label",
                   "m__id",
                   "m__mgr_name"
            FROM ({sql}) delta
-           ORDER BY __pgt_action, "join__e__id""#
+           ORDER BY __pgt_action, "left_join__e__id""#
     )))
     .fetch_all(&db.pool)
     .await
@@ -261,6 +261,8 @@ async fn test_diff_nested_left_join_innermost_insert_fully_matched() {
         .expect("nested left-join differentiation should succeed");
 
     reset_nested_lj_fixture(&db).await;
+    db.execute("INSERT INTO public.employees VALUES (1, 10, 'Bob')")
+        .await;
     db.execute("INSERT INTO public.departments VALUES (10, 99, 'Engineering')")
         .await;
     db.execute("INSERT INTO public.managers VALUES (99, 'Alice')")
@@ -302,6 +304,8 @@ async fn test_diff_nested_left_join_insert_with_no_dept() {
         .expect("nested left-join differentiation should succeed");
 
     reset_nested_lj_fixture(&db).await;
+    db.execute("INSERT INTO public.employees VALUES (1, 20, 'Bob')")
+        .await;
     // dept_id=20 has no matching department row; insert only the employee.
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
@@ -354,7 +358,7 @@ async fn test_diff_nested_left_join_outermost_delete() {
 
     let rows = query_nested_lj_rows(&db, &sql).await;
 
-    // Ordered by action then join__e__id: 'D' < 'I'
+    // Ordered by action then left_join__e__id: 'D' < 'I'
     assert_eq!(
         rows.len(),
         2,

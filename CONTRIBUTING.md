@@ -41,7 +41,8 @@ just lint
 # Run tests
 just test-unit          # fast, no DB
 just test-integration   # Testcontainers
-just test-light-e2e     # PR-equivalent Light E2E tier (stock postgres)
+just test-dvm           # generated DVM SQL against Testcontainers PostgreSQL
+just test-light-e2e     # installed extension in stock postgres
 just test-e2e           # full E2E (builds Docker image)
 just test-pgbouncer     # PgBouncer transaction-pool compatibility tests
 ```
@@ -118,7 +119,7 @@ contracts to pass and run only when the relevant inputs changed:
 
 | Changed inputs | Selected work beyond the contracts and proof |
 |----------------|---------------------------------------------|
-| Rust, extension SQL, build inputs, test fixtures/harness | Unit/integration tests and the existing packaged/sensitive E2E gates |
+| Rust, extension SQL, build inputs, test fixtures/harness | Unit/catalog/DVM component tests; ready PRs add packaged and bounded full E2E |
 | Documentation, release-contract data, ordinary maintenance scripts | Documentation checks and script tests; no extension rebuild |
 | Benchmark sources or inputs | Benchmark tracking on main; measurements also remain nightly/manual |
 | Shipping Dockerfile or PostgreSQL defaults | Shipping-image qualification |
@@ -137,9 +138,20 @@ Windows compilation, and fuzz corpus replay.
 Marking a draft **ready for review** starts those jobs; converting it back to
 a draft cancels the previous run and returns to the smaller set of checks.
 
-Ready PRs with runtime changes additionally run packaged-extension coverage,
-including light E2E split across three shards against stock `postgres:18.6`. Sensitive paths select
-the existing full E2E, security, failure-recovery, or unsafe-boundary gates.
+Ready runtime PRs additionally run all 91 light targets in three shards against
+stock `postgres:18.6` and 84 full-harness targets from
+[the checked allocation](.github/ci-suites.json). Permanent regressions,
+transaction visibility, multiplicity, recovery, permissions, workers and
+full-only cases remain pre-merge checks. DVM component tests run in the
+integration job using the existing pg_stub/Testcontainers runner. Refresh,
+CDC and scheduler paths select additional failure-recovery repetitions;
+unsafe-boundary paths keep instrumented qualification.
+
+[The coverage map](docs/CI_COVERAGE.md) explains the unique behavior at each
+layer, every deferred suite's workflow and failure ownership, verification,
+timing comparisons and the proposed required check. `PR correctness` rejects
+selected failed, cancelled or unexpectedly skipped jobs. No branch/ruleset
+settings are changed by this allocation.
 
 Criterion regression comparisons and the pgbench overhead gate run nightly
 and remain available manually. Nightly Criterion runs measure both the
@@ -157,9 +169,10 @@ Nightly and manual CI runs retain the full matrix regardless of changed paths.
 |----------------|----|--------------|----------------|-----------------|
 | Unit tests (Linux) | ✅ | ✅ | ✅ | ✅ |
 | Unit tests (macOS + Windows) | ❌ | ❌ | ✅ | ✅ |
-| Integration tests | ✅ | ✅ | ✅ | ✅ |
+| Catalog + DVM component tests | ✅ | ✅ | ✅ | ✅ |
 | Light E2E (3 shards) | Ready only | ✅ | ✅ | ✅ |
-| Full E2E | Sensitive paths, ready only | ❌ | ✅ | ✅ |
+| Bounded full E2E | Ready runtime PRs | ❌ | Full inventory | Full inventory |
+| PR correctness aggregate | ✅ | ❌ | ❌ | ❌ |
 | TPC-H | ❌ | ❌ | ✅ | ✅ |
 | Upgrade completeness check | ✅ | ✅ | ✅ | ✅ |
 | Upgrade E2E | ❌ | ❌ | ✅ | ✅ |
@@ -216,7 +229,14 @@ just test-all          # unit + integration + e2e
 # PR-equivalent fast path:
 just test-unit
 just test-integration
+just test-dvm
 just test-light-e2e
+just build-e2e-image
+python3 scripts/ci_pr_suite.py
+
+# Validate the inventory and gate logic without Docker:
+python3 scripts/ci_pr_suite.py --list
+python3 -m unittest discover -s scripts -p 'test_ci*.py'
 
 # TPC-H correctness tests (requires e2e Docker image):
 cargo test --test e2e_tpch_tests -- --ignored --test-threads=1 --nocapture
