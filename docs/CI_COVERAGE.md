@@ -217,3 +217,12 @@ The test now waits up to 90 seconds for exactly the expected `b` row while the
 scheduler remains active, then keeps its original count, membership and exact
 query assertions. The controlled holdback probe and all 19 cascade checks
 passed without retries after this correction.
+
+The broader follow-up sweep also exposed a recovery negative control whose
+one-second statement timeout could expire while it prepared the wrong-PID
+cancellation. The control now uses witnessed lock barriers, verifies that the
+wrong backend really was cancelled, and requires the untouched target to finish
+successfully after releasing its blocker. Timed failure tests retain their
+SQLSTATE and cleanup assertions, with ten-second faults occurring after the
+five-second witness deadline. All 14 locally eligible recovery checks passed
+without retries after these changes.
