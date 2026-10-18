@@ -51,11 +51,22 @@ No installed-extension assertion is replaced solely by a component test.
 Components add earlier, more focused operator feedback in the existing
 integration job, without another setup/cache job.
 
+All package consumers clear the cached package directory and download into
+`target/release/pg_trickle-pg18`. Inspection of the existing Actions artifact
+confirmed that its root is `usr/...`; downloading one directory higher could
+trigger repackaging or leave consumers selecting a cached package instead.
+The producer also clears that directory before packaging. Release controls
+and candidate binding therefore consume the downloaded artifact at the same
+path as the light shards.
+
 The full suite keeps the metamorphic batching/multi-source history regression
 and the strategy transaction-barrier/resource-boundary test. Only the named
 exhaustive live rewrite and corpus-mode cross-product cases move to scheduled
 tiers. The fixed seeded diamond topology combinations also move; deterministic
 diamond regressions and DAG/snapshot/Z-set property traces remain on PRs.
+Refresh-atomicity witnesses run serially without retries after the parallel
+full suite, preserving their isolation from its container load. Selected
+failure-recovery paths additionally retain the ten witnessed repetitions.
 
 Runtime selection uses [.github/ci-paths.yml](../.github/ci-paths.yml), with
 unclassified inputs retaining runtime coverage. Ordinary docs changes avoid

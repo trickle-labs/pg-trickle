@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import check_ci_results
@@ -58,6 +59,19 @@ class AllocationTests(unittest.TestCase):
                 command = run.call_args.args[0]
                 self.assertEqual(command[:3], ["./scripts/run_e2e_tests.sh", "--profile", "ci"])
                 self.assertNotIn("e2e_*", command)
+
+    def test_atomicity_runs_isolated_without_retries_and_propagates_failure(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
+                "ci_pr_suite.subprocess.run"
+            ) as run:
+                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, status)]
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
+                self.assertEqual(run.call_args_list[1].args[0], [
+                    "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
+                    "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+                ])
 
 
 class VerdictTests(unittest.TestCase):

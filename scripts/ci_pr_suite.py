@@ -50,7 +50,8 @@ def main() -> int:
         return 0
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci"]
     for name in selected:
-        command.extend(["--test", name])
+        if name != "e2e_refresh_atomicity_tests":
+            command.extend(["--test", name])
     cases = json.loads((ROOT / ".github/ci-suites.json").read_text())["scheduled_cases"]
     excluded = []
     for case in cases:
@@ -58,7 +59,14 @@ def main() -> int:
         excluded.append(f"not (binary(={binary}) & test(={test}))")
     if excluded:
         command.extend(["-E", " & ".join(excluded)])
-    return subprocess.run(command, cwd=ROOT).returncode
+    status = subprocess.run(command, cwd=ROOT).returncode
+    if status:
+        return status
+    # Keep witnessed barriers isolated from the parallel suite's container load.
+    return subprocess.run([
+        "./scripts/run_e2e_tests.sh", "--profile", "ci",
+        "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+    ], cwd=ROOT).returncode
 
 
 if __name__ == "__main__":
