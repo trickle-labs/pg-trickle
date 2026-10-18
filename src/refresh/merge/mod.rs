@@ -3787,9 +3787,7 @@ pub fn execute_differential_refresh_with_tuning(
         t1.duration_since(t0).as_secs_f64() * 1000.0,
         t2.duration_since(t1).as_secs_f64() * 1000.0,
         t3.duration_since(t2).as_secs_f64() * 1000.0,
-        (t_decision.as_secs_f64()
-            + t_staging.as_secs_f64()
-            + t3.duration_since(t0).as_secs_f64())
+        (t_decision.as_secs_f64() + t_staging.as_secs_f64() + t3.duration_since(t0).as_secs_f64())
             * 1000.0,
     );
 
