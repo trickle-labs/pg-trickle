@@ -161,3 +161,36 @@ python3 scripts/ci_run_metrics.py /tmp/ci-run.json /tmp/ci-jobs.json
 The summarizer rejects incomplete runs and reports each job's result, wait
 and execution minutes. Record cancelled/failed runs as such, never as passing
 performance comparisons.
+
+## Verification record (2026-10-18)
+
+The local probes used a freshly rebuilt x86-64 PostgreSQL 18.6 image and the
+same extension library in the light harness. Production Rust and SQL were
+unchanged. The probes informed the final allocation; they are not hosted
+runner performance measurements.
+
+| Check | Observed result |
+|---|---|
+| Format, lint, actionlint, release/candidate static contract | Passed; lint had zero warnings |
+| DVM components | 67 passed across ten targets |
+| Script tests | 31 passed |
+| Light inventory | 1493 passed; no failed attempts |
+| Original 84-target full probe | 944 passed, one WAL recovery case failed |
+| 67 candidate full-harness duplicates | 1205 passed with two retries; the replay led to retaining 16 worker-sensitive targets in the final 100-target full allocation |
+| Isolated refresh-atomicity phase | All 12 passed serially with retries disabled |
+| Path and artifact placement | 26 matching-library path cases and all three real-artifact consumer layouts passed; downloaded library digests matched and cached leftovers were removed |
+| Hosted ready-PR execution and controlled before/after timings | Not completed; Actions remained queued |
+
+The full-harness DAG schedule-change probe reported an extra stale `d` group
+in `ops_l1`, then passed on retry and in an isolated no-retry run. The target
+remains pre-merge. The other retry was Docker port discovery and also passed
+an isolated no-retry run. Retried success is not treated as proof that these
+first-attempt failures are harmless.
+
+`test_wal_trigger_fallback_undecoded_commit_requires_rebaseline` failed in the
+full probe and again in a separate no-retry run: the observed pending receipt
+state after restart was `true`, while the witnessed phase required `false`.
+That check remains pre-merge. Its root cause is unresolved, and this CI-only
+change does not alter production recovery behavior or weaken its assertions.
+Full verification is therefore **not green**; the PR remains a draft pending
+triage and completed hosted evidence.

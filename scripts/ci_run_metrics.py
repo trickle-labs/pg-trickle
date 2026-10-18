@@ -23,6 +23,7 @@ def summarize(run, jobs):
     } for job in active]
     return {
         "url": run["html_url"], "sha": run["head_sha"], "event": run["event"],
+        "conclusion": run.get("conclusion"),
         "active_jobs": len(rows),
         "creation_to_start_minutes": round(sum(minutes(job["created_at"], job["started_at"]) for job in active), 3),
         "execution_minutes": round(sum(minutes(job["started_at"], job["completed_at"]) for job in active), 3),
