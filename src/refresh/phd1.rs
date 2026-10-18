@@ -14,22 +14,6 @@
 use crate::error::PgTrickleError;
 use pgrx::Spi;
 
-pub fn prepare_cross_cycle_phantom_table(
-    st: &crate::catalog::StreamTableMeta,
-    defining_query: &str,
-) -> Result<(), PgTrickleError> {
-    let recon_table = format!("__pgt_recon_{}", st.pgt_id);
-    // defining_query is definition-derived: parse/analyze it under the
-    // owner's identity and stored search_path, not this privileged caller's.
-    crate::refresh::with_stream_owner(st, || {
-        let row_id_expr = crate::dvm::row_id_expr_for_query(defining_query);
-        let recon_select =
-            format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
-        crate::refresh::prepare_owner_temp_table(st, &recon_table, &recon_select)
-    })?;
-    Ok(())
-}
-
 fn content_signature_expr(
     alias: &str,
     quoted_user_cols: &[String],
@@ -53,6 +37,32 @@ fn content_signature_expr(
     format!("md5(to_jsonb(ROW({values}))::text)")
 }
 
+/// Return whether the current stream and reconstructed result have different
+/// multisets of content signatures. The same signatures drive the correction
+/// queries below, so a zero signed count for every signature proves that both
+/// the DELETE and INSERT correction sets are empty, including duplicates and
+/// NULL-valued signatures.
+fn reconciliation_has_drift_sql(
+    stream_table_name: &str,
+    recon_table: &str,
+    st_sig: &str,
+    r_sig: &str,
+) -> String {
+    format!(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM ( \
+                 SELECT {st_sig} AS __pgt_sig, 1 AS __pgt_weight \
+                 FROM {stream_table_name} st \
+                 UNION ALL \
+                 SELECT {r_sig} AS __pgt_sig, -1 AS __pgt_weight \
+                 FROM {recon_table} r \
+             ) __pgt_multiset \
+             GROUP BY __pgt_sig \
+             HAVING SUM(__pgt_weight) <> 0 \
+         )"
+    )
+}
+
 /// EC01-2: Reconcile the stream table against the full-query result set.
 ///
 /// After a refresh (DIFFERENTIAL or IMMEDIATE) applies a delta, residue from
@@ -74,7 +84,8 @@ fn content_signature_expr(
 /// DIFFERENTIAL path against the same shape) the cleanup now performs full
 /// multiset reconciliation against the live query result:
 ///
-///   * Materialise the full-query output (including `__pgt_row_id`).
+///   * Compare the stored and full-query content signature multisets.
+///   * On drift, materialise the full-query output (including `__pgt_row_id`).
 ///   * Hash each ST and recon row by `row_to_json` to obtain a NULL-safe,
 ///     order-independent content fingerprint.
 ///   * For every fingerprint where ST count > recon count, delete the
@@ -89,12 +100,14 @@ fn content_signature_expr(
 /// Called after each non-deduplicated, non-partitioned, join-bearing apply
 /// so stale rows converge even when the current delta did not contain the
 /// matching change.
+/// The caller must run this under the stream owner's identity and search path.
 pub fn cleanup_cross_cycle_phantoms(
-    pgt_id: i64,
+    st: &crate::catalog::StreamTableMeta,
     stream_table_name: &str,
     defining_query: &str,
     batch_size: i64,
 ) -> Result<i64, PgTrickleError> {
+    let pgt_id = st.pgt_id;
     let user_cols = crate::dvm::get_defining_query_columns(defining_query)?;
     let (row_id_expr, row_id_is_complete) =
         crate::dvm::row_id_expr_for_query_and_complete_output(defining_query, &user_cols);
@@ -136,15 +149,44 @@ pub fn cleanup_cross_cycle_phantoms(
         }
     };
 
-    // Step 1: materialise the live full-query result into the prepared temp table.
-    let recon_table = format!("__pgt_recon_{pgt_id}");
-    let insert_recon_sql = format!(
-        "INSERT INTO {recon_table} \
-         SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub"
+    // Compare the live result before allocating or writing a scratch table;
+    // most differential applies have already converged.
+    let recon_select =
+        format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({defining_query}) sub");
+    let drift_probe = reconciliation_has_drift_sql(
+        stream_table_name,
+        &format!("({recon_select})"),
+        &st_sig,
+        &r_sig,
     );
-    Spi::run(&insert_recon_sql).map_err(|e| {
+    let probe_start = std::time::Instant::now();
+    let has_drift = Spi::get_one::<bool>(&drift_probe)
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "EC01-2 drift probe failed for stream table {pgt_id}: {e}"
+            ))
+        })?
+        .unwrap_or(true);
+    let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
+    if !has_drift {
+        pgrx::debug1!(
+            "[pg_trickle] EC01-2 timing pgt_id={pgt_id} drift=false materialize_ms=0 probe_ms={probe_ms:.3} delete_ms=0 insert_ms=0",
+        );
+        return Ok(0);
+    }
+
+    // Materialise drift under the same owner context before the bounded repair.
+    let materialize_start = std::time::Instant::now();
+    let recon_table = crate::refresh::prepare_owner_temp_table(
+        st,
+        &format!("__pgt_recon_{pgt_id}"),
+        &recon_select,
+    )?;
+    // nosemgrep: rust.spi.run.dynamic-format — recon_table is pg_temp-qualified and quoted; defining SQL executes as its owner.
+    Spi::run(&format!("INSERT INTO {recon_table} {recon_select}")).map_err(|e| {
         PgTrickleError::SpiError(format!("EC01-2 reconcile materialise failed: {e}"))
     })?;
+    let materialize_ms = materialize_start.elapsed().as_secs_f64() * 1000.0;
 
     // Step 2: delete surplus ST rows (multiset-aware on user-content sig).
     //
@@ -192,9 +234,11 @@ pub fn cleanup_cross_cycle_phantoms(
         SELECT count(*)::bigint FROM deleted",
     );
 
+    let delete_start = std::time::Instant::now();
     let deleted = Spi::get_one_with_args::<i64>(&delete_sql, &[batch_size.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile DELETE failed: {e}")))?
         .unwrap_or(0);
+    let delete_ms = delete_start.elapsed().as_secs_f64() * 1000.0;
 
     // Step 3: insert missing rows (multiset-aware on user-content sig).
     //
@@ -244,10 +288,15 @@ pub fn cleanup_cross_cycle_phantoms(
         all_cols_csv = all_cols_csv,
     );
 
+    let insert_start = std::time::Instant::now();
     let inserted = Spi::get_one_with_args::<i64>(&insert_sql, &[batch_size.into()])
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile INSERT failed: {e}")))?
         .unwrap_or(0);
+    let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
 
+    pgrx::debug1!(
+        "[pg_trickle] EC01-2 timing pgt_id={pgt_id} drift=true materialize_ms={materialize_ms:.3} probe_ms={probe_ms:.3} delete_ms={delete_ms:.3} insert_ms={insert_ms:.3} deleted={deleted} inserted={inserted}",
+    );
     let total = deleted + inserted;
     if total > 0 {
         pgrx::log!(
@@ -284,9 +333,70 @@ mod tests {
     }
 
     #[test]
+    fn test_reconciliation_drift_probe_preserves_signed_multiplicities() {
+        let sql = super::reconciliation_has_drift_sql(
+            "\"public\".\"source_stream\"",
+            "pg_temp.__pgt_recon_42",
+            "st.\"__pgt_row_id\"",
+            "r.\"__pgt_row_id\"",
+        );
+        assert!(sql.contains("SELECT EXISTS"));
+        assert!(sql.contains("UNION ALL"));
+        assert!(sql.contains("GROUP BY __pgt_sig"));
+        assert!(sql.contains("HAVING SUM(__pgt_weight) <> 0"));
+        assert_eq!(
+            sql.matches("FROM \"public\".\"source_stream\" st").count(),
+            1
+        );
+        assert_eq!(sql.matches("FROM pg_temp.__pgt_recon_42 r").count(), 1);
+        assert!(sql.contains("SELECT st.\"__pgt_row_id\" AS __pgt_sig, 1 AS __pgt_weight"));
+        assert!(sql.contains("SELECT r.\"__pgt_row_id\" AS __pgt_sig, -1 AS __pgt_weight"));
+    }
+
+    #[test]
     fn test_cleanup_returns_zero_for_empty_case() {
         // Verify batch_size defaults are positive integers
         let batch_size: i64 = 1000;
         assert!(batch_size > 0);
+    }
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod pg_tests {
+    use super::*;
+
+    #[pgrx::pg_test]
+    fn test_reconciliation_drift_probe_handles_nulls_and_duplicate_rows() {
+        Spi::run("CREATE TEMP TABLE __pgt_probe_st (value text)").unwrap();
+        Spi::run("CREATE TEMP TABLE __pgt_probe_recon (value text)").unwrap();
+        let sql = reconciliation_has_drift_sql(
+            "pg_temp.__pgt_probe_st",
+            "pg_temp.__pgt_probe_recon",
+            "st.value",
+            "r.value",
+        );
+        let has_drift = || Spi::get_one::<bool>(&sql).unwrap().unwrap();
+        assert!(!has_drift(), "two empty multisets match");
+
+        Spi::run("INSERT INTO __pgt_probe_st VALUES ('a'), (NULL), (NULL)").unwrap();
+        Spi::run("INSERT INTO __pgt_probe_recon VALUES (NULL), ('a'), (NULL)").unwrap();
+        assert!(
+            !has_drift(),
+            "multiplicity and NULLs match regardless of order"
+        );
+
+        Spi::run("INSERT INTO __pgt_probe_st VALUES (NULL)").unwrap();
+        assert!(has_drift(), "a surplus NULL signature must trigger repair");
+        Spi::run("INSERT INTO __pgt_probe_recon VALUES (NULL)").unwrap();
+        assert!(!has_drift(), "equal duplicate counts cancel");
+
+        Spi::run("UPDATE __pgt_probe_recon SET value = 'changed' WHERE value = 'a'").unwrap();
+        assert!(has_drift(), "stale content must trigger repair");
+        Spi::run("UPDATE __pgt_probe_st SET value = 'changed' WHERE value = 'a'").unwrap();
+        assert!(!has_drift(), "matching content clears the drift probe");
+
+        Spi::run("DELETE FROM __pgt_probe_recon WHERE value = 'changed'").unwrap();
+        assert!(has_drift(), "a missing result row must trigger repair");
     }
 }

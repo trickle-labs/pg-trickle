@@ -645,10 +645,9 @@ fn run_immediate_phantom_cleanup(
         return Ok(());
     }
 
-    crate::refresh::phd1::prepare_cross_cycle_phantom_table(st, &st.defining_query)?;
     let cleanup_result = crate::refresh::with_stream_owner(st, || {
         crate::refresh::phd1::cleanup_cross_cycle_phantoms(
-            st.pgt_id,
+            st,
             st_qualified,
             &st.defining_query,
             10_000,

@@ -1261,10 +1261,9 @@ pub fn execute_differential_refresh_with_tuning(
                 schema.replace('"', "\"\""),
                 name.replace('"', "\"\""),
             );
-            super::phd1::prepare_cross_cycle_phantom_table(st, &effective_defining_query)?;
             let reconciled = with_stream_owner(st, || {
                 super::phd1::cleanup_cross_cycle_phantoms(
-                    st.pgt_id,
+                    st,
                     &quoted_table,
                     &effective_defining_query,
                     10_000,
@@ -1890,12 +1889,16 @@ pub fn execute_differential_refresh_with_tuning(
     let incremental_window_state = ready_window_state;
 
     let t_decision = t_decision_start.elapsed();
+    // CDC staging precedes t0, so it was absent from the existing per-node
+    // timing report even though it can issue several SQL statements per source.
+    let staging_start = Instant::now();
     let delta_stage = crate::refresh::delta_stage::DeltaStage::prepare(
         st,
         &dependencies,
         prev_frontier,
         new_frontier,
     )?;
+    let t_staging = staging_start.elapsed();
     let t0 = Instant::now();
 
     // ── G8.1: Cross-session cache invalidation ──────────────────────
@@ -3476,10 +3479,9 @@ pub fn execute_differential_refresh_with_tuning(
             schema.replace('"', "\"\""),
             name.replace('"', "\"\""),
         );
-        super::phd1::prepare_cross_cycle_phantom_table(st, &effective_defining_query)?;
         let cleanup_result = with_stream_owner(st, || {
             super::phd1::cleanup_cross_cycle_phantoms(
-                st.pgt_id,
+                st,
                 &quoted_table,
                 &effective_defining_query,
                 10_000,
@@ -3759,16 +3761,34 @@ pub fn execute_differential_refresh_with_tuning(
             "timings_ms".into(),
             serde_json::json!({
                 "decision": t_decision.as_secs_f64() * 1000.0,
+                "cdc_stage": t_staging.as_secs_f64() * 1000.0,
                 "generate_and_build": t1.duration_since(t0).as_secs_f64() * 1000.0,
                 "apply": t2.duration_since(t1).as_secs_f64() * 1000.0,
                 "cleanup_enqueue": t3.duration_since(t2).as_secs_f64() * 1000.0,
+                // Retain the historical total meaning for existing consumers.
+                // The new total covers every measured phase, including CDC
+                // staging; earlier setup and outer graph time are separate.
                 "total": (t_decision.as_secs_f64() + t3.duration_since(t0).as_secs_f64()) * 1000.0,
+                "measured_total_with_staging": (t_decision.as_secs_f64()
+                    + t_staging.as_secs_f64()
+                    + t3.duration_since(t0).as_secs_f64()) * 1000.0,
             }),
         );
     }
     let cost_evidence = serde_json::to_string(&cost_evidence)
         .map_err(|e| PgTrickleError::InternalError(format!("serialize cost evidence: {e}")))?;
     crate::refresh::set_last_cost_evidence(cost_evidence);
+    pgrx::debug1!(
+        "[pg_trickle] S1 merge timing pgt_id={} decision_ms={:.3} cdc_stage_ms={:.3} generate_ms={:.3} apply_ms={:.3} cleanup_enqueue_ms={:.3} measured_total_ms={:.3}",
+        st.pgt_id,
+        t_decision.as_secs_f64() * 1000.0,
+        t_staging.as_secs_f64() * 1000.0,
+        t1.duration_since(t0).as_secs_f64() * 1000.0,
+        t2.duration_since(t1).as_secs_f64() * 1000.0,
+        t3.duration_since(t2).as_secs_f64() * 1000.0,
+        (t_decision.as_secs_f64() + t_staging.as_secs_f64() + t3.duration_since(t0).as_secs_f64())
+            * 1000.0,
+    );
 
     // ── DAG-3: Delta amplification detection ────────────────────────
     // After the MERGE completes, check whether the output delta is

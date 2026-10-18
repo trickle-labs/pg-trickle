@@ -11,6 +11,290 @@ use sqlx::Row;
 const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
      text, integer, double precision, text, boolean, text, integer, text, text";
 
+/// A graph pass must preserve the no-drift fast path AND still repair past
+/// phantom residue when there are no new source-table CDC records.
+#[tokio::test]
+async fn test_graph_no_data_reconciliation_repairs_stale_missing_and_surplus_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_source (id int PRIMARY KEY, value text NOT NULL);
+         CREATE TABLE recon_partner (id int PRIMARY KEY);
+         INSERT INTO recon_source VALUES (1, 'expected'), (2, 'second');
+         INSERT INTO recon_partner VALUES (1), (2);
+         SELECT pgtrickle.create_stream_table(
+             name => 'recon_graph_st',
+             query => 'SELECT s.id, s.value FROM recon_source s
+                       JOIN recon_partner p ON s.id = p.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install reconciliation fixture");
+
+    let root = "public.recon_graph_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_scratch_creations (object_identity text);
+         CREATE FUNCTION audit_recon_scratch() RETURNS event_trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO public.recon_scratch_creations
+             SELECT object_identity FROM pg_event_trigger_ddl_commands()
+             WHERE command_tag = 'CREATE TABLE AS'
+               AND position('__pgt_recon_' in object_identity) > 0;
+         END $$;
+         CREATE EVENT TRIGGER audit_recon_scratch ON ddl_command_end
+             EXECUTE FUNCTION audit_recon_scratch()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("audit reconciliation scratch tables");
+    // No change must exercise the signed-multiset fast path without touching
+    // the result rows, and must not trigger a forbidden FULL refresh.
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let scratch_creations: i64 = db
+        .query_scalar("SELECT count(*) FROM recon_scratch_creations")
+        .await;
+    assert_eq!(
+        scratch_creations, 0,
+        "matching results need no scratch table"
+    );
+    let initial: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read initial graph rows");
+    assert_eq!(initial, vec![(1, "expected".into()), (2, "second".into())]);
+
+    // Simulate stale content, a missing row, and a surplus row left by an
+    // earlier broken delta. Mutations to storage are test-only and isolated
+    // to this fixture; source tables are deliberately unchanged.
+    let mut tx = db.pool.begin().await.expect("begin residue injection");
+    sqlx::raw_sql(
+        "SET LOCAL pg_trickle.internal_refresh = 'true';
+         UPDATE recon_graph_st SET value = 'stale' WHERE id = 1",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("inject stale stream-table content");
+    let missing_identity: Vec<u8> =
+        sqlx::query_scalar("DELETE FROM recon_graph_st WHERE id = 2 RETURNING __pgt_row_id")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("retain deleted identity for surplus-row fixture");
+    sqlx::query("INSERT INTO recon_graph_st (__pgt_row_id, id, value) VALUES ($1, 999, 'orphan')")
+        .bind(missing_identity)
+        .execute(&mut *tx)
+        .await
+        .expect("inject orphan using a now-vacant complete identity");
+    tx.commit().await.expect("commit test-only residue");
+
+    let corrupted: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read injected residue");
+    assert_eq!(corrupted, vec![(1, "stale".into()), (999, "orphan".into())]);
+
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let repaired: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read repaired graph rows");
+    assert_eq!(
+        repaired, initial,
+        "reconciliation must correct every kind of residue"
+    );
+    let scratch_creations: i64 = db
+        .query_scalar("SELECT count(*) FROM recon_scratch_creations")
+        .await;
+    assert_eq!(
+        scratch_creations, 1,
+        "drift must materialize the repair input"
+    );
+
+    // Follow-up no-data passes must remain idempotent.
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let stable: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, value FROM recon_graph_st ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read stable graph rows");
+    assert_eq!(stable, initial);
+    let scratch_creations: i64 = db
+        .query_scalar("SELECT count(*) FROM recon_scratch_creations")
+        .await;
+    assert_eq!(
+        scratch_creations, 1,
+        "a repaired result needs no new scratch table"
+    );
+}
+
+#[tokio::test]
+async fn test_graph_reconciliation_preserves_duplicate_null_rows() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_duplicates (id int, value text);
+         CREATE TABLE recon_duplicate_partner (id int PRIMARY KEY);
+         INSERT INTO recon_duplicates VALUES (1, NULL), (1, NULL), (1, 'visible');
+         INSERT INTO recon_duplicate_partner VALUES (1);
+         SELECT pgtrickle.create_stream_table(
+             name => 'recon_duplicates_st',
+             query => 'SELECT s.id, s.value FROM recon_duplicates s
+                       JOIN recon_duplicate_partner p ON s.id = p.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install duplicate reconciliation fixture");
+    let root = "public.recon_duplicates_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let expected: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT id, value FROM recon_duplicates ORDER BY id, value NULLS FIRST")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read duplicate source rows");
+    let initial: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT id, value FROM recon_duplicates_st ORDER BY id, value NULLS FIRST")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read duplicate result rows");
+    assert_eq!(initial, expected);
+
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin missing duplicate injection");
+    sqlx::raw_sql(
+        "SET LOCAL pg_trickle.internal_refresh = 'true';
+         DELETE FROM recon_duplicates_st WHERE ctid = (
+             SELECT ctid FROM recon_duplicates_st WHERE value IS NULL LIMIT 1)",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("remove one duplicate NULL row");
+    tx.commit().await.expect("commit missing duplicate");
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let repaired: Vec<(i32, Option<String>)> =
+        sqlx::query_as("SELECT id, value FROM recon_duplicates_st ORDER BY id, value NULLS FIRST")
+            .fetch_all(&db.pool)
+            .await
+            .expect("read repaired duplicate rows");
+    assert_eq!(repaired, expected, "the probe must compare multiplicities");
+}
+
+#[tokio::test]
+async fn test_manual_refresh_nested_key_filter_prunes_unused_identity() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE metadata (id int PRIMARY KEY, owner name NOT NULL);
+         CREATE TABLE metadata_state (id int PRIMARY KEY);
+         CREATE TABLE changed_rows (id int PRIMARY KEY, owner name NOT NULL, value int NOT NULL);
+         INSERT INTO metadata VALUES (1, 'postgres');
+         INSERT INTO metadata_state VALUES (1);
+         INSERT INTO changed_rows VALUES (1, 'postgres', 1);
+         SELECT pgtrickle.create_stream_table(
+             name => 'metadata_join',
+             query => 'SELECT c.id, c.value FROM changed_rows c
+                       JOIN metadata m ON c.id = m.id AND c.owner = m.owner
+                       JOIN metadata_state s ON m.id = s.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'MANAGED')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install metadata join fixture");
+    db.execute("SELECT pgtrickle.refresh_stream_table('metadata_join')")
+        .await;
+    db.execute("UPDATE changed_rows SET value = 2 WHERE id = 1")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('metadata_join')")
+        .await;
+    let value: i32 = db.query_scalar("SELECT value FROM metadata_join").await;
+    assert_eq!(value, 2);
+}
+
+#[tokio::test]
+async fn test_graph_refresh_scopes_nested_join_snapshots_and_empty_stages() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE stage_left (id int NOT NULL, value int NOT NULL);
+         CREATE TABLE stage_right (id int PRIMARY KEY, value int NOT NULL);
+         CREATE TABLE stage_meta (id int PRIMARY KEY);
+         INSERT INTO stage_left SELECT i, i FROM generate_series(1, 4000) i;
+         INSERT INTO stage_right SELECT i, 0 FROM generate_series(1, 4000) i;
+         INSERT INTO stage_meta VALUES (1);
+         CREATE FUNCTION stage_value(value int) RETURNS TABLE (normalized int)
+         LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+         BEGIN RETURN QUERY SELECT value; END $$",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install staged-join fixture");
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+             name => 'stage_join',
+             query => 'SELECT l.id AS left_id, r.id AS right_id, l.value, r.value AS right_value
+                       FROM (SELECT s.id, n.normalized AS value FROM stage_left s
+                             CROSS JOIN LATERAL public.stage_value(s.value) AS n(normalized)) l
+                       JOIN stage_right r ON l.id = r.id
+                       JOIN stage_meta m ON m.id = 1',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    let root = "public.stage_join";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+
+    let mut tx = db.pool.begin().await.expect("begin staged refresh");
+    sqlx::raw_sql(
+        "SET LOCAL track_functions = 'all';
+         UPDATE stage_left SET value = 200 WHERE id = 1;
+         UPDATE stage_right SET value = 201 WHERE id = 1",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("change both inputs while leaving metadata unchanged");
+    reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT calls FROM pg_stat_xact_user_functions WHERE funcid = 'stage_value(int)'::regprocedure",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read function execution count");
+    eprintln!("normalization calls: {calls}");
+    // Reconciliation still evaluates 4000 rows; delta joins must expand
+    // only affected keys, even with an empty metadata delta.
+    assert!((4000..4500).contains(&calls), "unexpected calls: {calls}");
+    let values: (i32, i32) =
+        sqlx::query_as("SELECT value, right_value FROM stage_join WHERE left_id = 1")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read refreshed value");
+    assert_eq!(values, (200, 201));
+    tx.rollback().await.expect("rollback staged refresh");
+    let value: i32 = db
+        .query_scalar("SELECT value FROM stage_join WHERE left_id = 1")
+        .await;
+    assert_eq!(value, 1, "rollback must restore the graph output");
+
+    db.execute("UPDATE stage_right SET id = 4001 WHERE id = 1")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    assert_eq!(
+        db.count(root).await,
+        3999,
+        "right-only changes must survive"
+    );
+}
+
 #[tokio::test]
 async fn test_v104_capabilities_are_stable_by_default() {
     let db = E2eDb::new().await.with_extension().await;

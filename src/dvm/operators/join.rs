@@ -84,8 +84,9 @@
 use crate::config;
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
-    is_simple_child, join_scan_count, rewrite_join_condition, snapshot_join_column_name,
+    build_base_table_key_exprs, build_filtered_leaf_snapshot_sql, build_snapshot_sql,
+    is_join_child, is_simple_child, join_scan_count, rewrite_expr_for_join, rewrite_join_condition,
+    snapshot_join_column_name,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::dvm::snapshot::SnapshotPlan;
@@ -283,14 +284,18 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // If we can identify (left_key, right_key) pairs from the condition,
     // we filter the base table scan to only matching keys from the delta.
     //
-    // Skip the optimization when either child is a nested join — the
-    // column names in the condition don't directly match the snapshot
-    // or delta CTE columns for complex children.
-    let equi_keys = if is_simple_child(left) && is_simple_child(right) {
-        extract_equijoin_keys(condition, left_prefix, right_prefix)
-    } else {
-        vec![]
-    };
+    // Resolve nested output names before extracting keys, using the same
+    // mapping as the join condition and snapshots.
+    let equi_keys = extract_equijoin_keys(
+        &rewrite_expr_for_join(condition, left, "__pgt_left", right, "__pgt_right"),
+        "__pgt_left",
+        "__pgt_right",
+    );
+    if !equi_keys.is_empty() {
+        // Key probes add references; keep unused child identity expressions prunable.
+        ctx.mark_cte_not_materialized(&left_result.cte_name);
+        ctx.mark_cte_not_materialized(&right_result.cte_name);
+    }
 
     // Build semi-join-filtered table references.
     // Part 1: right base table filtered by delta-left join keys
@@ -366,31 +371,24 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         } else {
             // Scan, Subquery/Aggregate child: use L₀ via single-table
             // snapshot (DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback)
-            let left_pre_change = build_leaf_snapshot_sql(
+            let filters = equi_keys
+                .iter()
+                .map(|(left_key, right_key)| {
+                    format!(
+                        "{left_key} IN (SELECT DISTINCT {right_key} FROM {})",
+                        right_result.cte_name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            build_filtered_leaf_snapshot_sql(
                 left,
                 &left_result.cte_name,
                 left_cols,
                 ctx.fallback_leaf_oids(),
                 ctx.st_source_pgt_ids(),
-            );
-            // Apply semi-join filter to L₀ if equi-keys are available
-            if equi_keys.is_empty() {
-                left_pre_change
-            } else {
-                let filters: Vec<String> = equi_keys
-                    .iter()
-                    .map(|(left_key, right_key)| {
-                        format!(
-                            "{left_key} IN (SELECT DISTINCT {right_key} FROM {})",
-                            right_result.cte_name
-                        )
-                    })
-                    .collect();
-                format!(
-                    "(SELECT * FROM {left_pre_change} __l0 WHERE {filters})",
-                    filters = filters.join(" AND "),
-                )
-            }
+                (!filters.is_empty()).then_some(filters.as_str()),
+            )
         }
     } else {
         // SemiJoin-containing nested join child: use post-change L₁ with
@@ -480,31 +478,24 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
         } else {
             // Scan, Subquery/Aggregate child: use R₀ via single-table
             // snapshot (DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback)
-            let right_pre_change = build_leaf_snapshot_sql(
+            let filters = equi_keys
+                .iter()
+                .map(|(left_key, right_key)| {
+                    format!(
+                        "{right_key} IN (SELECT DISTINCT {left_key} FROM {})",
+                        left_result.cte_name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            build_filtered_leaf_snapshot_sql(
                 right,
                 &right_result.cte_name,
                 right_cols,
                 ctx.fallback_leaf_oids(),
                 ctx.st_source_pgt_ids(),
-            );
-            // Apply semi-join filter to R₀
-            if equi_keys.is_empty() {
-                right_pre_change
-            } else {
-                let filters: Vec<String> = equi_keys
-                    .iter()
-                    .map(|(left_key, right_key)| {
-                        format!(
-                            "{right_key} IN (SELECT DISTINCT {left_key} FROM {})",
-                            left_result.cte_name
-                        )
-                    })
-                    .collect();
-                format!(
-                    "(SELECT * FROM {right_pre_change} __r0 WHERE {filters})",
-                    filters = filters.join(" AND "),
-                )
-            }
+                (!filters.is_empty()).then_some(filters.as_str()),
+            )
         }
     } else {
         // Nested/complex right child: fall back to R₁ (current right).
@@ -1179,9 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_inner_join_nested_skips_semijoin_optimization() {
-        // When a child is a nested join, semi-join optimization is skipped
-        // at the OUTER join level (the inner join's own optimization is fine).
+    fn test_diff_inner_join_nested_filters_disambiguated_keys() {
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
         let inner = inner_join(eq_cond("a", "id", "b", "id"), a, b);
@@ -1191,11 +1180,13 @@ mod tests {
         let mut ctx = test_ctx();
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-        // The outer join CTE should NOT have equi-join semi-join filter.
-        // Extract only the outer join CTE body (after its name).
         let outer_cte_marker = format!("{} AS", result.cte_name);
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
-        assert_sql_not_contains(outer_sql, "IN (SELECT DISTINCT");
+        assert_sql_contains(outer_sql, "WHERE id IN (SELECT DISTINCT a__id FROM");
+        assert_sql_contains(outer_sql, "WHERE a__id IN (SELECT DISTINCT id FROM");
+        assert!(sql.lines().any(|line| {
+            line.starts_with("__pgt_cte_join_") && line.ends_with(" AS NOT MATERIALIZED (")
+        }));
     }
 
     #[test]

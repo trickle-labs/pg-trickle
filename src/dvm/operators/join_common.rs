@@ -693,6 +693,30 @@ pub fn build_leaf_snapshot_sql(
     fallback_oids: &HashSet<u32>,
     st_source_pgt_ids: &HashMap<u32, i64>,
 ) -> String {
+    build_filtered_leaf_snapshot_sql(
+        op,
+        delta_cte,
+        data_cols,
+        fallback_oids,
+        st_source_pgt_ids,
+        None,
+    )
+}
+
+/// Apply the same key restriction to every multiset arm before reconstruction;
+/// PostgreSQL cannot push an IN subquery through the outer EXCEPT ALL itself.
+pub fn build_filtered_leaf_snapshot_sql(
+    op: &OpTree,
+    delta_cte: &str,
+    data_cols: &[String],
+    fallback_oids: &HashSet<u32>,
+    st_source_pgt_ids: &HashMap<u32, i64>,
+    predicate: Option<&str>,
+) -> String {
+    let where_filter = predicate
+        .map(|p| format!(" WHERE ({p})"))
+        .unwrap_or_default();
+    let and_filter = predicate.map(|p| format!(" AND ({p})")).unwrap_or_default();
     let col_list: String = data_cols
         .iter()
         .map(|c| quote_ident(c))
@@ -712,11 +736,11 @@ pub fn build_leaf_snapshot_sql(
             if pk_columns.is_empty() || fallback_oids.contains(table_oid) {
                 let table = build_snapshot_sql(op);
                 format!(
-                    "(SELECT {col_list} FROM {table} {alias_q} \
+                    "(SELECT {col_list} FROM {table} {alias_q}{where_filter} \
                      EXCEPT ALL \
-                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'I' \
+                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'I'{and_filter} \
                      UNION ALL \
-                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
+                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D'{and_filter})",
                     alias_q = quote_ident(alias),
                 )
             } else {
@@ -731,9 +755,9 @@ pub fn build_leaf_snapshot_sql(
                        SELECT 1 FROM {delta_cte} __pgt_d \
                        WHERE pgtrickle.row_probe_v1(__pgt_d.__pgt_row_id) = pgtrickle.row_probe_v1({pk_hash_expr}) \
                          AND __pgt_d.__pgt_row_id = {pk_hash_expr}\
-                     ) \
+                     ){and_filter} \
                      UNION ALL \
-                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
+                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D'{and_filter})",
                     schema = schema.replace('"', "\"\""),
                     table_name = table_name.replace('"', "\"\""),
                     alias_q = quote_ident(alias),
@@ -745,11 +769,11 @@ pub fn build_leaf_snapshot_sql(
             let table = build_snapshot_sql(op);
             let alias = op.alias();
             format!(
-                "(SELECT {col_list} FROM {table} {alias_q} \
+                "(SELECT {col_list} FROM {table} {alias_q}{where_filter} \
                  EXCEPT ALL \
-                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'I' \
+                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'I'{and_filter} \
                  UNION ALL \
-                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
+                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D'{and_filter})",
                 alias_q = quote_ident(alias),
             )
         }
@@ -1335,7 +1359,7 @@ pub fn rewrite_join_condition(
 }
 
 /// Recursively rewrite an expression for join delta/snapshot usage.
-fn rewrite_expr_for_join(
+pub(super) fn rewrite_expr_for_join(
     expr: &Expr,
     left: &OpTree,
     new_left: &str,
@@ -3009,6 +3033,66 @@ mod tests {
             sql,
             "(SELECT \"x\", \"y\" FROM \"public\".\"t\" \"t\" EXCEPT ALL SELECT \"x\", \"y\" FROM scan_t WHERE __pgt_action = 'I' UNION ALL SELECT \"x\", \"y\" FROM scan_t WHERE __pgt_action = 'D')"
         );
+    }
+
+    #[test]
+    fn test_filtered_leaf_snapshot_restricts_every_multiset_arm() {
+        let source = scan_with_pk(42, "orders", "public", "o", &["id", "region"], &["id"]);
+        let aggregate = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            source.clone(),
+        );
+        let predicate = "region IN (SELECT region FROM other_delta)";
+        for (op, fallback, columns, arms) in [
+            (
+                &source,
+                HashSet::new(),
+                vec!["id".into(), "region".into()],
+                2,
+            ),
+            (
+                &source,
+                HashSet::from([42]),
+                vec!["id".into(), "region".into()],
+                3,
+            ),
+            (
+                &aggregate,
+                HashSet::new(),
+                vec!["region".into(), "cnt".into()],
+                3,
+            ),
+        ] {
+            let sql = build_filtered_leaf_snapshot_sql(
+                op,
+                "source_delta",
+                &columns,
+                &fallback,
+                &HashMap::new(),
+                Some(predicate),
+            );
+            assert_eq!(sql.matches(predicate).count(), arms, "{sql}");
+            assert!(
+                sql.contains(&format!("__pgt_action = 'D' AND ({predicate})")),
+                "{sql}"
+            );
+            if arms == 3 {
+                assert!(
+                    sql.contains(&format!("WHERE ({predicate}) EXCEPT ALL")),
+                    "{sql}"
+                );
+                assert!(
+                    sql.contains(&format!("__pgt_action = 'I' AND ({predicate})")),
+                    "{sql}"
+                );
+            } else {
+                assert!(
+                    sql.contains(&format!(") AND ({predicate}) UNION ALL")),
+                    "{sql}"
+                );
+            }
+        }
     }
 
     #[test]
