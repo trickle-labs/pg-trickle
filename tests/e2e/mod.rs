@@ -1535,31 +1535,35 @@ impl E2eDb {
 
     /// Refresh a stream table, retrying when a concurrent background refresh holds the lock.
     ///
-    /// The background scheduler may race with a manual refresh of a downstream ST
-    /// (e.g. after the test manually refreshes an upstream ST, the scheduler detects
-    /// staleness within its polling interval and acquires the session-level advisory
-    /// lock on the same `pgt_id`). When `refresh_stream_table` returns
-    /// "another refresh is already in progress", this helper sleeps 100 ms and retries
-    /// until the lock clears or 10 seconds elapse.
+    /// Busy refreshes return a NOTICE, not an error. Require a completed manual
+    /// history row from this attempt's transaction before returning success.
     pub async fn refresh_st_with_retry(&self, name: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            match self
-                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
+            let mut tx = self.pool.begin().await.expect("begin refresh attempt");
+            sqlx::query("SELECT pgtrickle.refresh_stream_table($1)")
+                .bind(name)
+                .execute(&mut *tx)
                 .await
-            {
-                Ok(_) => return,
-                Err(e) if e.to_string().contains("already in progress") => {
-                    if std::time::Instant::now() >= deadline {
-                        panic!(
-                            "refresh_st_with_retry: timed out waiting for \
-                             concurrent refresh of '{name}' to complete"
-                        );
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                Err(e) => panic!("refresh_stream_table('{name}') failed: {e:?}"),
+                .unwrap_or_else(|e| panic!("refresh_stream_table('{name}') failed: {e:?}"));
+            let completed: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history \
+                 WHERE xmin = pg_current_xact_id()::xid \
+                   AND initiated_by = 'MANUAL' AND status = 'COMPLETED')",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .expect("check refresh attempt history");
+            tx.commit().await.expect("commit refresh attempt");
+            if completed {
+                return;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "refresh_st_with_retry: timed out waiting for \
+                 concurrent refresh of '{name}' to complete"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
