@@ -20,6 +20,8 @@ class AllocationTests(unittest.TestCase):
             "e2e_keyless_duplicate_tests", "e2e_safety_tests", "e2e_rls_wal_tests",
             "e2e_dvm_corpus_tests", "e2e_dvm_negative_control_tests",
             "e2e_sensitivity_baseline_tests", "e2e_window_state_recovery_tests",
+            "e2e_dag_operations_tests", "e2e_dag_concurrent_tests",
+            "e2e_monitoring_tests", "e2e_stmt_cdc_tests",
         ):
             self.assertIn(name, full)
 
@@ -59,6 +61,7 @@ class AllocationTests(unittest.TestCase):
                 command = run.call_args.args[0]
                 self.assertEqual(command[:3], ["./scripts/run_e2e_tests.sh", "--profile", "ci"])
                 self.assertNotIn("e2e_*", command)
+                self.assertEqual(command[command.index("--retries") + 1], "0")
 
     def test_atomicity_runs_isolated_without_retries_and_propagates_failure(self):
         for status in (0, 1, 130):

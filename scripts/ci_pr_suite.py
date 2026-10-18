@@ -48,7 +48,7 @@ def main() -> int:
     if args.list:
         print("\n".join(selected))
         return 0
-    command = ["./scripts/run_e2e_tests.sh", "--profile", "ci"]
+    command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     for name in selected:
         if name != "e2e_refresh_atomicity_tests":
             command.extend(["--test", name])

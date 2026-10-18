@@ -36,7 +36,7 @@ the packaged extension. Neither substitutes for the installed tests above.
 
 For runtime or harness changes, Linux unit/catalog/component checks run even
 on drafts. Ready PRs add the existing 91-target, three-shard light suite and
-an explicit 84-target full suite. The old sensitive DVM gate selected all 161
+an explicit 100-target full suite. The old sensitive DVM gate selected all 161
 E2E targets in addition to light E2E. The new full suite retains permanent
 corpus, identity, versioned security and conformance regressions in both
 harnesses. All targets with `cfg(not(feature = "light-e2e"))` stay in the full
@@ -44,7 +44,18 @@ suite, including watermark gating, IMMEDIATE mode, mixed DAGs, multi-cycle
 refresh, failure recovery and checked LSN cases. The inventory validator
 rejects an allocation that drops these full-only cases.
 
-The remaining 67 light targets use the installed extension for parser,
+Full coverage also retains worker interactions without compile-time guards:
+CDC/TRUNCATE and statement capture, concurrent and reconfigured DAGs,
+scheduler suppression, shared-memory monitoring, GUC reload and lifecycle
+operations. A full-harness replay observed an exact-row mismatch in the DAG
+schedule-change case that passed on retry. That target stays pre-merge;
+light execution alone does not establish equivalent worker protection.
+The bounded full suite disables test retries so a correctness failure cannot
+be hidden by a later successful attempt. Investigate a failed run before
+rerunning it; ordinary infrastructure retries remain an explicit operator
+decision rather than an automatic correctness verdict.
+
+The remaining 51 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation
 is removed; their assertions remain in light E2E and nightly full E2E.
 No installed-extension assertion is replaced solely by a component test.
@@ -136,7 +147,7 @@ comparison must use ready runtime PRs with the same production/test source,
 runner class, selected subsystems, retry settings and similar cache state.
 Record the SHA, active job count, execution and wait separately. This change
 adds no component setup job; `PR correctness` adds one small aggregation job.
-The 161 → 84 full-target reduction is an allocation count, not a measured
+The 161 → 100 full-target reduction is an allocation count, not a measured
 runtime speedup.
 
 Capture a **completed** run, including all paginated matrix jobs:

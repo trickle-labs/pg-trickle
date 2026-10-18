@@ -139,13 +139,15 @@ Marking a draft **ready for review** starts those jobs; converting it back to
 a draft cancels the previous run and returns to the smaller set of checks.
 
 Ready runtime PRs additionally run all 91 light targets in three shards against
-stock `postgres:18.6` and 84 full-harness targets from
+stock `postgres:18.6` and 100 full-harness targets from
 [the checked allocation](.github/ci-suites.json). Permanent regressions,
 transaction visibility, multiplicity, recovery, permissions, workers and
 full-only cases remain pre-merge checks. DVM component tests run in the
 integration job using the existing pg_stub/Testcontainers runner. Refresh,
 CDC and scheduler paths select additional failure-recovery repetitions;
 unsafe-boundary paths keep instrumented qualification.
+The bounded full suite disables automatic retries; investigate a failure
+before explicitly rerunning it.
 
 [The coverage map](docs/CI_COVERAGE.md) explains the unique behavior at each
 layer, every deferred suite's workflow and failure ownership, verification,
