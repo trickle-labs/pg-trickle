@@ -208,3 +208,12 @@ getting-started checks passed in both full and light harnesses after repair.
 Production recovery behavior and data assertions are unchanged. The full sweep
 with failed attempts is **not green**; hosted verification of the repairs is
 still required.
+
+The next hosted run exposed a four-layer cascade delete assertion that assumed
+every completed manual refresh had consumed the latest changes. A controlled
+CDC writer lock reproduced the same stale two-row result despite four completed
+manual attempts: the documented writer holdback can defer their source windows.
+The test now waits up to 90 seconds for exactly the expected `b` row while the
+scheduler remains active, then keeps its original count, membership and exact
+query assertions. The controlled holdback probe and all 19 cascade checks
+passed without retries after this correction.

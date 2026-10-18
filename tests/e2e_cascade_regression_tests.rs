@@ -1234,6 +1234,18 @@ async fn test_four_layer_cascade_delete_propagates() {
     db.refresh_st_with_retry("stst3_4ld_l3").await;
     db.refresh_st_with_retry("stst3_4ld_l4").await;
 
+    // Manual windows can be held back by CDC writers; allow the scheduler to propagate them.
+    assert!(
+        db.wait_for_condition(
+            "four-layer cascade delete",
+            "SELECT count(*) = 1 AND count(*) FILTER (WHERE grp = 'b') = 1 FROM stst3_4ld_l4",
+            std::time::Duration::from_secs(90),
+            std::time::Duration::from_millis(50),
+        )
+        .await,
+        "four-layer cascade must converge after deleting c"
+    );
+
     assert_eq!(
         db.count("public.stst3_4ld_l4").await,
         1,

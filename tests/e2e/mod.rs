@@ -1537,6 +1537,8 @@ impl E2eDb {
     ///
     /// Busy refreshes return a NOTICE, not an error. Require a completed manual
     /// history row from this attempt's transaction before returning success.
+    /// Writer holdback can still defer changes in a completed attempt; use
+    /// `wait_for_condition` when asserting eventual scheduler propagation.
     pub async fn refresh_st_with_retry(&self, name: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
