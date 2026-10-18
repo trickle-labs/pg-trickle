@@ -36,8 +36,8 @@ class AllocationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root)
-            (root / "tests/e2e_new_tests.rs").write_text("")
-            with self.assertRaisesRegex(ValueError, "unmapped targets.*e2e_new_tests"):
+            (root / "tests/e2e_new.rs").write_text("")
+            with self.assertRaisesRegex(ValueError, "unmapped targets.*e2e_new"):
                 ci_pr_suite.targets(root)
 
     def test_light_conditional_requires_full_harness(self):

@@ -2,7 +2,7 @@
 
 The PR suite protects committed results through real PostgreSQL execution.
 The inventory is checked by `python3 scripts/ci_pr_suite.py --list`: every
-`tests/e2e_*tests.rs` target must be in the light allowlist, the explicit full
+`tests/e2e_*.rs` target must be in the light allowlist, the explicit full
 list, or a documented scheduled tier. New targets fail the static contract
 until allocated. The source of truth is
 [ci-suites.json](../.github/ci-suites.json) plus
