@@ -190,7 +190,21 @@ first-attempt failures are harmless.
 `test_wal_trigger_fallback_undecoded_commit_requires_rebaseline` failed in the
 full probe and again in a separate no-retry run: the observed pending receipt
 state after restart was `true`, while the witnessed phase required `false`.
-That check remains pre-merge. Its root cause is unresolved, and this CI-only
-change does not alter production recovery behavior or weaken its assertions.
-Full verification is therefore **not green**; the PR remains a draft pending
-triage and completed hosted evidence.
+That check remains pre-merge. The recovery fixture now uses an immediate
+SIGKILL followed by a start of the same container: `docker restart --time 0`
+first signals shutdown, which can release the barrier backend before the
+decoder stops. Recovery checks also wait for the separately committed receipt
+acknowledgement after data convergence. All 14 WAL recovery checks passed with
+retries disabled after these fixture fixes.
+
+The later 1,210-check full sweep passed 1,207 checks and exposed three failures:
+the WAL crash boundary above, an RLS/WAL mode assertion, and Docker port
+discovery before a refresh test could start. The RLS fixture now drains cutover
+work and establishes its baseline before testing differential mutations; it
+passed three independent runs without retries. The Docker setup case passed
+separately. The hosted getting-started failure was traced to a refresh helper
+that treated a NOTICE-only skip as completion; its lock regression and all 15
+getting-started checks passed in both full and light harnesses after repair.
+Production recovery behavior and data assertions are unchanged. The full sweep
+with failed attempts is **not green**; hosted verification of the repairs is
+still required.

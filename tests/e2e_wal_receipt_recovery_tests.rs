@@ -527,6 +527,7 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
 
     let pool = restart_and_check_named(&fixture, &sentinel_table).await;
     wait_for_exact(&pool, &fixture.stream, &fixture.journal).await;
+    wait_for_receipt(&pool, fixture.oid, "ACKNOWLEDGED", &value).await;
     let acknowledged: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts
           WHERE source_relid = $1 AND status = 'ACKNOWLEDGED' AND data LIKE $2",
@@ -760,13 +761,19 @@ async fn run_trigger_fallback_case(phase: &str) {
     db.alter_system_set_and_wait("pg_trickle.cdc_paused", "on", "on")
         .await;
     clear_wal_phase(db).await;
-    // SIGTERM lets a scheduler finish its tick; kill it while the witness lock is still held.
+    // Skip graceful shutdown: releasing the barrier backend first lets the decoder commit.
     let output = tokio::process::Command::new("docker")
-        .args(["restart", "--time", "0", db.container_id()])
+        .args(["kill", "--signal", "KILL", db.container_id()])
         .output()
         .await
-        .expect("restart the retained PostgreSQL container at the witnessed boundary");
-    assert!(output.status.success(), "Docker restart failed");
+        .expect("kill the retained PostgreSQL container at the witnessed boundary");
+    assert!(output.status.success(), "Docker kill failed");
+    let output = tokio::process::Command::new("docker")
+        .args(["start", db.container_id()])
+        .output()
+        .await
+        .expect("restart the retained PostgreSQL container");
+    assert!(output.status.success(), "Docker start failed");
     drop(barrier);
     fixture.db.pool = fixture.db.reconnect_after_restart().await;
     let db = &fixture.db;
