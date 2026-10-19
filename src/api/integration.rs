@@ -345,11 +345,11 @@ fn source_payload(
             authorize_graph_source(&info)?;
         }
         "STREAM_TABLE" => {
-            // Graph closure traversal already loaded and validated these catalog rows.
+            // Each graph member is loaded by traversal and authorized by its own contract.
             if !known_streams.contains(&info.oid.to_u32()) {
                 StreamTableMeta::get_by_relid(info.oid)?;
+                authorize_graph_member(&info)?;
             }
-            authorize_graph_member(&info)?;
         }
         other => {
             return Err(integration_error(
@@ -385,6 +385,7 @@ fn dependency_value(value: &Value) -> Result<CanonicalValue, PgTrickleError> {
 fn build_stream_contract(
     meta: &StreamTableMeta,
     known_streams: &BTreeSet<u32>,
+    known_dependencies: Option<&[StDependency]>,
 ) -> Result<BuiltContract, PgTrickleError> {
     let info = relation_info(meta.pgt_relid).map_err(|error| {
         integration_error(
@@ -401,13 +402,20 @@ fn build_stream_contract(
             ),
         )
     })?;
-    let sources = StDependency::get_for_st(meta.pgt_id)
-        .map_err(|error| {
-            integration_error(
-                "PGT_EXT_GRAPH_INVALID",
-                format!("could not inspect stream-table dependencies: {error}"),
-            )
-        })?
+    let loaded_dependencies;
+    let dependencies = match known_dependencies {
+        Some(dependencies) => dependencies,
+        None => {
+            loaded_dependencies = StDependency::get_for_st(meta.pgt_id).map_err(|error| {
+                integration_error(
+                    "PGT_EXT_GRAPH_INVALID",
+                    format!("could not inspect stream-table dependencies: {error}"),
+                )
+            })?;
+            &loaded_dependencies
+        }
+    };
+    let sources = dependencies
         .iter()
         .map(|dependency| {
             source_payload(dependency, known_streams).map_err(|error| {
@@ -562,7 +570,7 @@ fn build_stream_contract(
 pub(crate) fn stream_contract_digest(
     meta: &StreamTableMeta,
 ) -> Result<(Vec<u8>, i16), PgTrickleError> {
-    let contract = build_stream_contract(meta, &BTreeSet::new())?;
+    let contract = build_stream_contract(meta, &BTreeSet::new(), None)?;
     Ok((
         contract.digest.to_vec(),
         meta.row_identity_version.unwrap_or(0),
@@ -600,7 +608,7 @@ pub fn stream_table_contract(
             format!("could not load stream-table metadata: {error}"),
         )),
     };
-    let contract = match build_stream_contract(&meta, &BTreeSet::new()) {
+    let contract = match build_stream_contract(&meta, &BTreeSet::new(), None) {
         Ok(contract) => contract,
         Err(error) => raise(error),
     };
@@ -637,6 +645,7 @@ fn graph_contract_data(roots: &[pg_sys::Oid]) -> Result<BuiltGraphContract, PgTr
     }
     let mut pending = root_ids.iter().copied().collect::<Vec<_>>();
     let mut members = BTreeMap::<u32, StreamTableMeta>::new();
+    let mut dependencies = BTreeMap::new();
     let mut edges = BTreeSet::<(u32, u32)>::new();
     while let Some(relid) = pending.pop() {
         if members.contains_key(&relid) {
@@ -654,12 +663,14 @@ fn graph_contract_data(roots: &[pg_sys::Oid]) -> Result<BuiltGraphContract, PgTr
             ));
         }
         validate_mode_for_refresh(EXTERNAL, meta.refresh_mode)?;
-        for dep in StDependency::get_for_st(meta.pgt_id)? {
+        let member_dependencies = StDependency::get_for_st(meta.pgt_id)?;
+        for dep in &member_dependencies {
             if dep.source_type == "STREAM_TABLE" {
                 edges.insert((dep.source_relid.to_u32(), relid));
                 pending.push(dep.source_relid.to_u32());
             }
         }
+        dependencies.insert(relid, member_dependencies);
         members.insert(relid, meta);
     }
     root_ids.retain(|id| members.contains_key(id));
@@ -673,7 +684,11 @@ fn graph_contract_data(roots: &[pg_sys::Oid]) -> Result<BuiltGraphContract, PgTr
     let mut built = BTreeMap::new();
     let mut source_map = BTreeMap::new();
     for (relid, meta) in &members {
-        let contract = build_stream_contract(meta, &member_ids)?;
+        let contract = build_stream_contract(
+            meta,
+            &member_ids,
+            dependencies.get(relid).map(Vec::as_slice),
+        )?;
         for source in &contract.sources {
             source_map.insert(source["source_relid"].as_u64().unwrap_or(0), source.clone());
         }

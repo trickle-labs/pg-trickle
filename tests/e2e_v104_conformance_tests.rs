@@ -610,6 +610,59 @@ async fn test_v104_graph_source_owner_can_delegate_coordinator() {
     .expect("the delegated coordinator should refresh its graph");
     assert_eq!(db.count("public.v104_delegated_st").await, 1);
 
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v104_delegated_upstream',\
+             query => 'SELECT id FROM v104_delegated_source',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL',\
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .await;
+    db.execute("GRANT SELECT ON v104_delegated_upstream TO v104_graph_coordinator")
+        .await;
+    db.try_execute_with_role(
+        "SET ROLE v104_graph_coordinator",
+        "SELECT pgtrickle.create_stream_table(\
+             name => 'v104_delegated_root',\
+             query => 'SELECT id FROM v104_delegated_upstream',\
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,\
+             orchestration_mode => 'EXTERNAL')",
+        "RESET ROLE",
+    )
+    .await
+    .expect("create delegated root with a separately owned upstream member");
+    for granted in [false, true, false] {
+        db.execute(if granted {
+            "GRANT MAINTAIN ON v104_delegated_upstream TO v104_graph_coordinator"
+        } else {
+            "REVOKE MAINTAIN ON v104_delegated_upstream FROM v104_graph_coordinator"
+        })
+        .await;
+        let digest: String = db
+            .query_scalar(
+                "SELECT encode(graph_digest, 'hex') FROM pgtrickle.graph_contract(\
+                     ARRAY['public.v104_delegated_root'::regclass])",
+            )
+            .await;
+        let refreshed = db
+            .try_execute_with_role(
+                "SET ROLE v104_graph_coordinator",
+                &format!(
+                    "SELECT * FROM pgtrickle.refresh_graph_strict(\
+                         ARRAY['public.v104_delegated_root'::regclass], decode('{digest}', 'hex'))"
+                ),
+                "RESET ROLE",
+            )
+            .await;
+        if granted {
+            refreshed.expect("MAINTAIN delegates the upstream member in the graph closure");
+            assert_eq!(db.count("public.v104_delegated_root").await, 1);
+        } else {
+            let error = refreshed.expect_err("every snapshot must authorize the upstream member");
+            assert!(error.to_string().contains("MAINTAIN"), "{error}");
+        }
+    }
+
     db.execute("REVOKE MAINTAIN ON v104_delegated_source FROM v104_graph_coordinator")
         .await;
     assert!(
