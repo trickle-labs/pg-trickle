@@ -42,6 +42,8 @@ harness:
   - '.github/actions/**'
   - '.github/workflows/ci.yml'
   - '.github/ci-paths.yml'
+  - '.github/ci-suites.json'
+  - 'scripts/ci_pr_suite.py'
   - '!**/*.md'
 
 benchmarks:

@@ -79,9 +79,9 @@ async fn setup_ops_pipeline(db: &E2eDb) {
 
 /// Refresh the ops pipeline in topological order.
 async fn refresh_ops_pipeline(db: &E2eDb) {
-    db.refresh_st("ops_l1").await;
-    db.refresh_st("ops_l2").await;
-    db.refresh_st("ops_l3").await;
+    db.refresh_st_until_converged("ops_l1").await;
+    db.refresh_st_until_converged("ops_l2").await;
+    db.refresh_st_until_converged("ops_l3").await;
 }
 
 /// Ground-truth queries for the ops pipeline.
@@ -126,7 +126,7 @@ async fn test_suspend_middle_layer_blocks_downstream() {
     // Mutate base and refresh only L1
     db.execute("INSERT INTO ops_src (grp, val) VALUES ('a', 100)")
         .await;
-    db.refresh_st("ops_l1").await;
+    db.refresh_st_until_converged("ops_l1").await;
     db.assert_st_matches_query("ops_l1", OPS_L1_Q).await;
 
     // Refreshing L2 should fail (SUSPENDED)
@@ -152,8 +152,8 @@ async fn test_suspend_middle_layer_blocks_downstream() {
 
     // Resume L2 and refresh the rest of the pipeline
     db.alter_st("ops_l2", "status => 'ACTIVE'").await;
-    db.refresh_st("ops_l2").await;
-    db.refresh_st("ops_l3").await;
+    db.refresh_st_until_converged("ops_l2").await;
+    db.refresh_st_until_converged("ops_l3").await;
     assert_ops_pipeline_correct(&db).await;
 }
 
@@ -178,6 +178,11 @@ async fn test_alter_schedule_mid_pipeline() {
         .await;
     assert_eq!(schedule, "5s");
 
+    // Keep both mutation cycles under manual control after changing the schedule.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['ops_l1', 'ops_l2', 'ops_l3'])")
+        .await;
+
     // Mutate and refresh — pipeline should still converge
     db.execute("INSERT INTO ops_src (grp, val) VALUES ('d', 99)")
         .await;
@@ -186,7 +191,42 @@ async fn test_alter_schedule_mid_pipeline() {
 
     // Another cycle to confirm stability
     db.execute("DELETE FROM ops_src WHERE grp = 'd'").await;
-    refresh_ops_pipeline(&db).await;
+    let mut writer = db.pool.begin().await.expect("begin controlled DAG writer");
+    sqlx::query("LOCK TABLE ops_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold controlled DAG writer");
+    let last_refresh: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    tokio::join!(refresh_ops_pipeline(&db), async {
+        assert!(
+            db.wait_for_condition(
+                "DAG delete held back by a source writer",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                     JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                     WHERE st.pgt_name = 'ops_l1' AND h.refresh_id > {last_refresh} \
+                       AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED')"
+                ),
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_millis(50),
+            )
+            .await,
+            "DAG refresh must complete a held-back attempt before releasing the writer"
+        );
+        let stale_group: bool = db
+            .query_scalar("SELECT EXISTS(SELECT 1 FROM ops_l1 WHERE grp = 'd')")
+            .await;
+        assert!(
+            stale_group,
+            "writer holdback must preserve the previous group"
+        );
+        writer
+            .rollback()
+            .await
+            .expect("release controlled DAG writer");
+    });
     assert_ops_pipeline_correct(&db).await;
 }
 
@@ -285,9 +325,9 @@ async fn test_alter_query_mid_pipeline() {
     // Mutate and verify cascade still works
     db.execute("INSERT INTO ops_src (grp, val) VALUES ('a', 50)")
         .await;
-    db.refresh_st("ops_l1").await;
-    db.refresh_st("ops_l2").await;
-    db.refresh_st("ops_l3").await;
+    db.refresh_st_until_converged("ops_l1").await;
+    db.refresh_st_until_converged("ops_l2").await;
+    db.refresh_st_until_converged("ops_l3").await;
 
     db.assert_st_matches_query("ops_l1", l1_filtered_q).await;
     db.assert_st_matches_query("ops_l2", l2_filtered_q).await;
@@ -318,8 +358,8 @@ async fn test_drop_leaf_keeps_pipeline_intact() {
     // Mutate and refresh L1, L2 — should still work
     db.execute("INSERT INTO ops_src (grp, val) VALUES ('z', 999)")
         .await;
-    db.refresh_st("ops_l1").await;
-    db.refresh_st("ops_l2").await;
+    db.refresh_st_until_converged("ops_l1").await;
+    db.refresh_st_until_converged("ops_l2").await;
 
     db.assert_st_matches_query("ops_l1", OPS_L1_Q).await;
     db.assert_st_matches_query("ops_l2", OPS_L2_Q).await;
@@ -359,7 +399,7 @@ async fn test_drop_middle_layer_cascades() {
     // L1 should still be intact and refreshable
     db.execute("INSERT INTO ops_src (grp, val) VALUES ('z', 42)")
         .await;
-    db.refresh_st("ops_l1").await;
+    db.refresh_st_until_converged("ops_l1").await;
     db.assert_st_matches_query("ops_l1", OPS_L1_Q).await;
 }
 
@@ -422,8 +462,8 @@ async fn test_suspend_resume_cycle_data_consistency() {
 
     // Resume L1 and do a single refresh
     db.alter_st("sr_l1", "status => 'ACTIVE'").await;
-    db.refresh_st("sr_l1").await;
-    db.refresh_st("sr_l2").await;
+    db.refresh_st_until_converged("sr_l1").await;
+    db.refresh_st_until_converged("sr_l2").await;
 
     // All cumulative changes should be reflected
     db.assert_st_matches_query("sr_l1", l1_q).await;

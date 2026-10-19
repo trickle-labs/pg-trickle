@@ -614,12 +614,22 @@ async fn test_lsn_wal_transition_rejects_malformed_and_preserves_results() {
         )
         .await;
     assert!(reached_wal, "source must reach WAL mode");
+    // Decoder bookkeeping can keep producing receipts; pin the cohort this probe protects.
+    let receipt_boundary: i64 = db
+        .query_scalar(
+            "SELECT COALESCE(MAX(receipt_id), 0) FROM pgtrickle.pgt_wal_receipts \
+             WHERE source_relid = 'lsn_transition_source'::regclass",
+        )
+        .await;
+    let pending_receipts_sql = format!(
+        "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts \
+         WHERE source_relid = 'lsn_transition_source'::regclass \
+           AND receipt_id <= {receipt_boundary} AND status <> 'ACKNOWLEDGED'"
+    );
     let receipts_settled = db
         .wait_for_condition(
             "initial WAL receipts acknowledged",
-            "SELECT NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_receipts \
-             WHERE source_relid = 'lsn_transition_source'::regclass \
-               AND status <> 'ACKNOWLEDGED')",
+            &format!("SELECT ({pending_receipts_sql}) = 0"),
             Duration::from_secs(90),
             Duration::from_millis(50),
         )
@@ -655,13 +665,7 @@ async fn test_lsn_wal_transition_rejects_malformed_and_preserves_results() {
         )
         .await;
     assert!(slot_exists, "completed WAL transition retains its slot");
-    let pending_receipts: i64 = db
-        .query_scalar(
-            "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts \
-             WHERE source_relid = 'lsn_transition_source'::regclass \
-               AND status <> 'ACKNOWLEDGED'",
-        )
-        .await;
+    let pending_receipts: i64 = db.query_scalar(&pending_receipts_sql).await;
     assert_eq!(pending_receipts, 0, "transition buffers must be settled");
 
     assert!(
@@ -686,13 +690,7 @@ async fn test_lsn_wal_transition_rejects_malformed_and_preserves_results() {
         after_invalid, before,
         "rejected input must preserve transition state"
     );
-    let pending_after_invalid: i64 = db
-        .query_scalar(
-            "SELECT count(*)::bigint FROM pgtrickle.pgt_wal_receipts \
-             WHERE source_relid = 'lsn_transition_source'::regclass \
-               AND status <> 'ACKNOWLEDGED'",
-        )
-        .await;
+    let pending_after_invalid: i64 = db.query_scalar(&pending_receipts_sql).await;
     assert_eq!(pending_after_invalid, pending_receipts);
     db.assert_st_matches_query(
         "lsn_transition_stream",
