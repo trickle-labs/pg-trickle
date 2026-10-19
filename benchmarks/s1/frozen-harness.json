@@ -33,7 +33,8 @@
     "tests/integrations/pg-mdm/time/population.sql": "614e80b2781f4ecb1e127a049cef704ce9d5c21afd1800dd99a8d25cd7df83a6",
     "tests/integrations/pg-mdm/time/idle.sql": "0789246af7071271336dc8cecb8e865022c86068701bb7eafd375c489ec93779",
     "tests/integrations/pg-mdm/time/workload.sql": "151973dea94e703765ec77942b47fbfb8c9e4c2bee40b8aebc205861d9f627b2",
-    "tests/integrations/pg-mdm/time/maintenance.sql": "0f0c320ad931aa449191e7877ce3fc26c9d7b960ec1e4df4ef4c1acbef91a4b9"
+    "tests/integrations/pg-mdm/time/maintenance.sql": "0f0c320ad931aa449191e7877ce3fc26c9d7b960ec1e4df4ef4c1acbef91a4b9",
+    "tests/integrations/pg-mdm/v0.48-adjacent-upgrade.sql": "ca84ce45865c9d2a1cf037d9d67d421bda3f8cbbcaf24d4480dc215021cd1b8f"
   },
   "adaptations": {
     "run_bounded.py": "Invoke Docker directly instead of rtk proxy; no supervision threshold changes",
@@ -67,6 +68,7 @@
     "tests/integrations/pg-mdm/v0.48-admission.sh": "ed6a742772bed6faaa524d50926d3dc13b0d7573322dd741a77cd476f7baa9c8",
     "tests/integrations/pg-mdm/v0.48-codec.sql": "ef250594a0d9441007253023dfe25d37911d093c713b0d9dc60193e7d2e8653c",
     "tests/integrations/pg-mdm/v0.48-live.sql": "72b7b7f623039882abdb11e1f59d92c915f3da70b9bded89de6d22de04a54725",
-    "tests/integrations/pg-mdm/v0.48-security.sql": "054da4e498cc376f9dcfe96ab0a1d25afaa9233ad70c6bf43bc1938eab5e96d0"
+    "tests/integrations/pg-mdm/v0.48-security.sql": "054da4e498cc376f9dcfe96ab0a1d25afaa9233ad70c6bf43bc1938eab5e96d0",
+    "tests/integrations/pg-mdm/v0.48-adjacent-upgrade.sql": "ca84ce45865c9d2a1cf037d9d67d421bda3f8cbbcaf24d4480dc215021cd1b8f"
   }
 }
