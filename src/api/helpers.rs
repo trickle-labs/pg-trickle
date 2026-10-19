@@ -3481,8 +3481,8 @@ pub(super) fn split_top_level_commas(s: &str) -> Vec<String> {
 }
 
 /// Find the byte offset of the first top-level occurrence of a SQL keyword
-/// (not inside parentheses or string literals).
-pub(super) fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
+/// (outside parentheses, quoted identifiers, single-quoted strings, and comments).
+pub(crate) fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
     let kw_len = keyword.len();
     let bytes = sql.as_bytes();
     let kw_upper = keyword.to_ascii_uppercase();
@@ -3506,6 +3506,21 @@ pub(super) fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> 
             continue;
         }
         match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == b'"' {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
             b'\'' => {
                 in_string = true;
                 i += 1;
@@ -3553,10 +3568,10 @@ pub(super) fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> 
                     .all(|(a, b)| a.to_ascii_uppercase() == *b)
                 {
                     // Verify word boundaries
-                    let before_ok =
-                        i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
-                    let after_ok = i + kw_len >= bytes.len()
-                        || !bytes[i + kw_len].is_ascii_alphanumeric() && bytes[i + kw_len] != b'_';
+                    let identifier_byte =
+                        |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+                    let before_ok = i == 0 || !identifier_byte(bytes[i - 1]);
+                    let after_ok = i + kw_len >= bytes.len() || !identifier_byte(bytes[i + kw_len]);
                     if before_ok && after_ok {
                         return Some(i);
                     }

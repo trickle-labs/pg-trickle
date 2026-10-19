@@ -134,6 +134,29 @@ pub(crate) struct ReconciliationDelta {
     pub columns: String,
 }
 
+fn reconciliation_query<'a>(query: &'a str, tree: &crate::dvm::parser::OpTree) -> &'a str {
+    use crate::dvm::parser::OpTree;
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return query;
+    };
+    let pruned =
+        crate::dvm::operators::project::prune_unreferenced_false_left_joins(child, expressions);
+    if std::ptr::eq(pruned, child.as_ref())
+        || !matches!(pruned, OpTree::Scan { .. } | OpTree::Subquery { .. })
+        // shortcut: retain escape/dollar syntax and outer clauses until their slicing is covered.
+        || query.contains(['\\', '$'])
+        || ["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "WINDOW", "UNION", "EXCEPT", "INTERSECT", "RIGHT", "FULL", "CROSS", "NATURAL"]
+            .iter().any(|keyword| crate::api::find_top_level_keyword(query, keyword).is_some())
+    {
+        return query;
+    }
+    crate::api::find_top_level_keyword(query, "LEFT JOIN")
+        .map_or(query, |position| query[..position].trim_end())
+}
+
 pub(crate) fn reconciliation_delta_sql(
     st: &crate::catalog::StreamTableMeta,
     defining_query: &str,
@@ -166,11 +189,13 @@ pub(crate) fn reconciliation_delta_sql(
         }
     }
     let row_id = crate::dvm::row_id_expr_for_tree(defining_query, Some(tree));
+    // The original query was already probed as owner, including every dependency's privileges.
+    let query = reconciliation_query(defining_query, tree);
     let materialization_query = if has_pgt_count {
         columns.push("__pgt_count".to_string());
-        crate::api::inject_pgt_count(defining_query)
+        crate::api::inject_pgt_count(query)
     } else {
-        defining_query.to_string()
+        query.to_string()
     };
     let table = format!(
         "{}.{}",
@@ -577,6 +602,41 @@ pub fn cleanup_cross_cycle_phantoms(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_reconciliation_query_removes_only_unused_false_join_suffix() {
+        use crate::dvm::operators::test_helpers::*;
+        let child = left_join(
+            lit("false"),
+            subquery("p", vec![], scan(1, "source", "public", "s", &["id"])),
+            scan(2, "other", "public", "d", &["id"]),
+        );
+        let tree = project(vec![qcolref("p", "id")], vec!["id"], child.clone());
+        let query = "SELECT p.id FROM (SELECT id FROM source) p LEFT JOIN other d ON false";
+        assert_eq!(
+            super::reconciliation_query(query, &tree),
+            "SELECT p.id FROM (SELECT id FROM source) p"
+        );
+        let referenced = project(vec![qcolref("d", "id")], vec!["id"], child);
+        let referenced_query = query.replacen("SELECT p.id", "SELECT d.id", 1);
+        assert_eq!(
+            super::reconciliation_query(&referenced_query, &referenced),
+            referenced_query
+        );
+        for suffix in [
+            " WHERE p.id > 0",
+            " ORDER BY p.id",
+            " LIMIT 1",
+            " RIGHT JOIN extra r ON false",
+        ] {
+            let query = format!("{query}{suffix}");
+            assert_eq!(super::reconciliation_query(&query, &tree), query);
+        }
+        let escaped = query.replace("p.id", "E'\\n' AS id");
+        assert_eq!(super::reconciliation_query(&escaped, &tree), escaped);
+        let dollar = query.replace("p.id", "$$LEFT JOIN$$ AS id");
+        assert_eq!(super::reconciliation_query(&dollar, &tree), dollar);
+    }
+
     #[test]
     fn test_scalar_reconciliation_requires_singleton_shape() {
         use crate::dvm::operators::test_helpers::*;

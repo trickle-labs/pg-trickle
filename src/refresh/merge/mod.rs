@@ -3044,12 +3044,27 @@ pub fn execute_differential_refresh_with_tuning(
         use_delete_insert || use_agg_fast_path || use_explicit_dml || use_vector_agg;
     let delta_table_basename = format!("__pgt_delta_{}", st.pgt_id);
     let delta_select = format!("SELECT * FROM {} AS d", resolved.trigger_using_sql);
+    let delta_schema_select = reconciliation_delta.as_ref().map(|delta| {
+        format!(
+            "SELECT __pgt_row_id, ''::pg_catalog.text AS __pgt_action, {columns}, \
+                    NULL::pg_catalog.tid AS {delete_column} FROM {schema}.{name}",
+            columns = delta.columns,
+            delete_column = crate::sql_builder::ident(&delta.delete_column),
+            schema = crate::sql_builder::ident(schema),
+            name = crate::sql_builder::ident(name),
+        )
+    });
     let delta_table = if materializes_delta {
         // resolved.trigger_using_sql is definition-derived: parse/analyze it
         // under the owner's identity and stored search_path, not this
         // privileged caller's.
         crate::refresh::with_stream_owner(st, || {
-            crate::refresh::prepare_owner_temp_table(st, &delta_table_basename, &delta_select)
+            // The comparison has the storage columns plus fixed action/ctid metadata.
+            crate::refresh::prepare_owner_temp_table(
+                st,
+                &delta_table_basename,
+                delta_schema_select.as_ref().unwrap_or(&delta_select),
+            )
         })?
     } else {
         format!(

@@ -259,6 +259,13 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
     let query = format!(
         "SELECT r.value AS value{columns}, r.active, r.level, r.payload, r.typed_value, r.key_uuid FROM row_leaf r{joins}"
     );
+    let projected_labels = (1..=8)
+        .map(|i| format!("p.label{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "SELECT p.value, {projected_labels}, p.active, p.level, p.payload, p.typed_value, p.key_uuid FROM ({query}) p LEFT JOIN unused_leaf unused_dependency ON false"
+    );
     let count_query =
         format!("SELECT count(r.value IS NULL)::bigint AS total_rows FROM row_leaf r{joins}");
     let group_query =
@@ -276,6 +283,7 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
             "SELECT value, active, level, payload, typed_value, key_uuid FROM recon_rows",
         ),
         ("dim_leaf", "SELECT id, label FROM recon_dim"),
+        ("unused_leaf", "SELECT id FROM recon_dim"),
         ("recon_join", query.as_str()),
         ("recon_count", count_query.as_str()),
         ("recon_groups", group_query.as_str()),
@@ -284,6 +292,14 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
         sqlx::query("SELECT pgtrickle.create_stream_table(name => $1, query => $2, schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, orchestration_mode => 'EXTERNAL')")
             .bind(name).bind(query).execute(&db.pool).await.expect("create join graph");
     }
+    db.execute("CREATE ROLE graph_reconciliation_owner NOLOGIN")
+        .await;
+    db.execute("GRANT USAGE ON SCHEMA public, pgtrickle TO graph_reconciliation_owner")
+        .await;
+    db.execute("GRANT SELECT ON row_leaf, dim_leaf, unused_leaf TO graph_reconciliation_owner")
+        .await;
+    db.execute("ALTER TABLE recon_join OWNER TO graph_reconciliation_owner")
+        .await;
     let root = "public.recon_terminal";
     let digest = reference_clients::graph_digest(&db.pool, root).await;
     reference_clients::refresh_graph(&db.pool, root, &digest).await;
@@ -374,6 +390,32 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
             );
             reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
         }
+        sqlx::query("UPDATE recon_rows SET active = true WHERE value IS NULL")
+            .execute(&mut *tx)
+            .await
+            .expect("change rows again in the same transaction");
+        reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+        for consumer in &consumers {
+            let batch = reference_clients::pending_batch(&mut *tx, &consumer.consumer_id).await;
+            let rows: Vec<(String, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT action, active FROM {} WHERE batch_token = $1 ORDER BY action, active",
+                consumer.delta_relation
+            )))
+            .bind(batch.batch_token)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("read repeated-refresh delta");
+            assert_eq!(batch.mode, "EXACT");
+            assert_eq!(batch.row_count, 6);
+            assert_eq!(
+                rows,
+                vec![("DELETE".into(), false); 3]
+                    .into_iter()
+                    .chain(vec![("INSERT".into(), true); 3])
+                    .collect::<Vec<_>>()
+            );
+            reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
+        }
         if commit {
             tx.commit().await.expect("commit exact delivery");
         } else {
@@ -406,6 +448,30 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
     assert_eq!(groups, vec![(None, 3, 3), (Some("kept".into()), 1, 1)]);
     let strategy: String = db.query_scalar("SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'recon_join' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
     assert_eq!(strategy, "reconciliation_delta");
+    let before: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_join'",
+        )
+        .await;
+    db.execute("REVOKE SELECT ON unused_leaf FROM graph_reconciliation_owner")
+        .await;
+    db.execute("INSERT INTO recon_rows(value) VALUES ('denied')")
+        .await;
+    let error = sqlx::query("SELECT graph_refresh_id FROM pgtrickle.refresh_graph_strict(ARRAY[$1::regclass], $2::bytea, 'ERROR')")
+        .bind(root).bind(&digest).execute(&db.pool).await.expect_err("unused dependency still requires owner SELECT");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    let after: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_join'",
+        )
+        .await;
+    assert_eq!(
+        after, before,
+        "rejected owner access must not advance the frontier"
+    );
 }
 
 #[tokio::test]

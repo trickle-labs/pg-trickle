@@ -3663,6 +3663,25 @@ mod tests {
     }
 
     #[test]
+    fn test_find_top_level_keyword_ignores_quoted_and_unicode_identifiers() {
+        let sql = r#"SELECT "FROM", "escaped""WHERE", caféFROM FROM source"#;
+        assert_eq!(
+            find_top_level_keyword(sql, "FROM"),
+            sql.find(" FROM source").map(|pos| pos + 1)
+        );
+        assert_eq!(find_top_level_keyword(sql, "WHERE"), None);
+        let sql = r#"SELECT "LEFT JOIN" FROM source LEFT JOIN other ON false"#;
+        assert_eq!(
+            find_top_level_keyword(sql, "LEFT JOIN"),
+            sql.rfind("LEFT JOIN")
+        );
+        assert_eq!(
+            inject_pgt_count(r#"SELECT count(*) AS "FROM" FROM source"#),
+            r#"SELECT count(*) AS "FROM", COUNT(*) AS __pgt_count FROM source"#
+        );
+    }
+
+    #[test]
     fn test_find_top_level_keyword_case_insensitive() {
         let sql = "select a from t1";
         assert!(find_top_level_keyword(sql, "FROM").is_some());
