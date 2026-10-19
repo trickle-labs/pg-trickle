@@ -229,6 +229,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Reduce differential-refresh work by pruning empty graph CDC stages, filtering nested join snapshots to affected keys, and avoiding reconciliation scratch tables when stored results already match the defining query.
 - Avoid JIT compilation during small graph-delta applies when planner hints are enabled; restore the caller's JIT setting before returning.
 - Reuse the owner-resolved defining-query tree for DISTINCT bounds, apply strategy and join reconciliation within each differential refresh.
+- Validate CDC control columns using the already resolved buffer relation OID, avoiding repeated catalog joins while preserving schema and durability checks.
 - Reconstruct nested joins from keyless stream-table changes using the pre-change snapshot, preserving exact downstream deletions during graph refresh.
 - Preserve empty exact output batches when explicit differential DML writes no rows.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.

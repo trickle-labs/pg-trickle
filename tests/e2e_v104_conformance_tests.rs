@@ -11,6 +11,76 @@ use sqlx::Row;
 const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, text, boolean, boolean, \
      text, integer, double precision, text, boolean, text, integer, text, text";
 
+#[tokio::test]
+async fn test_graph_buffer_schema_checks_reject_wrong_type_and_nullable_identity() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE buffer_schema_source (id int PRIMARY KEY);
+         INSERT INTO buffer_schema_source VALUES (1);
+         SELECT pgtrickle.create_stream_table(
+             name => 'buffer_schema_st', query => 'SELECT id FROM buffer_schema_source',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install malformed-buffer regression fixture");
+    let root = "public.buffer_schema_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    let oid: i64 = db
+        .query_scalar("SELECT 'buffer_schema_source'::regclass::oid::bigint")
+        .await;
+    let buffer = db.change_buffer_table(oid).await;
+    for (id, damage, repair) in [
+        (
+            2,
+            "ALTER COLUMN action TYPE text",
+            "ALTER COLUMN action TYPE character(1)",
+        ),
+        (
+            3,
+            "ALTER COLUMN __pgt_row_id DROP NOT NULL",
+            "ALTER COLUMN __pgt_row_id SET NOT NULL",
+        ),
+    ] {
+        db.execute(&format!("INSERT INTO buffer_schema_source VALUES ({id})"))
+            .await;
+        let frontier: String = db
+            .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name='buffer_schema_st'")
+            .await;
+        db.execute(&format!("ALTER TABLE {buffer} {damage}")).await;
+        let digest = reference_clients::graph_digest(&db.pool, root).await;
+        let error = sqlx::query(
+            "SELECT * FROM pgtrickle.refresh_graph_strict(ARRAY[$1::regclass], $2, 'ERROR')",
+        )
+        .bind(root)
+        .bind(&digest)
+        .execute(&db.pool)
+        .await
+        .expect_err("malformed buffer must fail before differential apply");
+        assert!(
+            error
+                .to_string()
+                .contains("required control columns are missing"),
+            "{error}"
+        );
+        let after: String = db
+            .query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name='buffer_schema_st'")
+            .await;
+        assert_eq!(
+            after, frontier,
+            "invalid buffer must not advance the frontier"
+        );
+        assert_eq!(db.count("buffer_schema_st").await, id - 1);
+        db.execute(&format!("ALTER TABLE {buffer} {repair}")).await;
+        let digest = reference_clients::graph_digest(&db.pool, root).await;
+        reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+        db.assert_st_matches_query("buffer_schema_st", "SELECT id FROM buffer_schema_source")
+            .await;
+    }
+}
+
 /// A graph pass must preserve the no-drift fast path AND still repair past
 /// phantom residue when there are no new source-table CDC records.
 #[tokio::test]

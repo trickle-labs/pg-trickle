@@ -534,14 +534,18 @@ fn validate_one_change_buffer(
             registry.1
         )));
     }
-    let relpersistence = Spi::get_one_with_args::<String>(
-        "SELECT c.relpersistence::text FROM pg_class c \
+    let relation = Spi::get_two_with_args::<pg_sys::Oid, String>(
+        "SELECT c.oid, c.relpersistence::text FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
         &[change_schema.into(), buffer_name.into()],
     )
-    .map_err(|e| invalid(format!("relation lookup failed: {e}")))?
-    .ok_or_else(|| invalid("buffer relation missing or has invalid relkind".into()))?;
+    .map_err(|e| invalid(format!("relation lookup failed: {e}")))?;
+    let (Some(relation_oid), Some(relpersistence)) = relation else {
+        return Err(invalid(
+            "buffer relation missing or has invalid relkind".into(),
+        ));
+    };
     let expected_persistence = if durability == config::ChangeBufferDurability::Unlogged {
         "u"
     } else {
@@ -561,11 +565,9 @@ fn validate_one_change_buffer(
                     ('__pgt_row_id', 'bytea'::regtype))) = 4 \
            AND COALESCE(BOOL_AND(a.attname <> '__pgt_row_id' OR a.attnotnull), false) \
            FROM pg_attribute a \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 \
+         WHERE a.attrelid = $1 AND a.attnum > 0 \
            AND NOT a.attisdropped AND a.attname::text IN ('change_id', 'lsn', 'action', '__pgt_row_id')",
-        &[change_schema.into(), buffer_name.into()],
+        &[relation_oid.into()],
     )
     .map_err(|e| invalid(format!("buffer schema lookup failed: {e}")))?
     .unwrap_or(false);
