@@ -357,36 +357,42 @@ async fn test_agg_avg_distinct_numeric_differential() {
 
 #[tokio::test]
 async fn test_agg_distinct_bound_exceeded_falls_back_to_full() {
-    let db = E2eDb::new().await.with_extension().await;
-    db.execute("CREATE TABLE agg_dbound (id INT PRIMARY KEY, grp INT, val INT)")
-        .await;
-    db.execute("INSERT INTO agg_dbound VALUES (1, 1, 1), (2, 1, 2)")
-        .await;
+    for in_cte in [false, true] {
+        let db = E2eDb::new().await.with_extension().await;
+        db.execute("CREATE TABLE agg_dbound (id INT PRIMARY KEY, grp INT, val INT)")
+            .await;
+        db.execute("INSERT INTO agg_dbound VALUES (1, 1, 1), (2, 1, 2)")
+            .await;
 
-    let q = "SELECT grp, COUNT(DISTINCT val) AS uniq FROM agg_dbound GROUP BY grp";
-    db.create_st("agg_dbound_st", q, "1m", "DIFFERENTIAL").await;
-    db.assert_st_matches_query("agg_dbound_st", q).await;
+        let q = if in_cte {
+            "WITH counts AS (SELECT grp, COUNT(DISTINCT val) AS uniq FROM agg_dbound GROUP BY grp) SELECT * FROM counts"
+        } else {
+            "SELECT grp, COUNT(DISTINCT val) AS uniq FROM agg_dbound GROUP BY grp"
+        };
+        db.create_st("agg_dbound_st", q, "1m", "DIFFERENTIAL").await;
+        db.assert_st_matches_query("agg_dbound_st", q).await;
 
-    db.execute("INSERT INTO agg_dbound VALUES (3, 1, 3)").await;
-    db.try_execute_with_config(
-        &["SET pg_trickle.distinct_agg_max_values_per_group = 2"],
-        "SELECT pgtrickle.refresh_stream_table('agg_dbound_st')",
-    )
-    .await
-    .expect("DISTINCT bound overflow should fall back to FULL");
-    db.assert_st_matches_query("agg_dbound_st", q).await;
+        db.execute("INSERT INTO agg_dbound VALUES (3, 1, 3)").await;
+        db.try_execute_with_config(
+            &["SET pg_trickle.distinct_agg_max_values_per_group = 2"],
+            "SELECT pgtrickle.refresh_stream_table('agg_dbound_st')",
+        )
+        .await
+        .expect("DISTINCT bound overflow should fall back to FULL");
+        db.assert_st_matches_query("agg_dbound_st", q).await;
 
-    let (action, full_fallback): (String, bool) = sqlx::query_as(
-        "SELECT action, was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+        let (action, full_fallback): (String, bool) = sqlx::query_as(
+            "SELECT action, was_full_fallback FROM pgtrickle.pgt_refresh_history h \
          JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
          WHERE st.pgt_name = 'agg_dbound_st' \
          ORDER BY refresh_id DESC LIMIT 1",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("refresh history");
-    assert_eq!(action, "FULL");
-    assert!(full_fallback);
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("refresh history");
+        assert_eq!(action, "FULL");
+        assert!(full_fallback);
+    }
 }
 
 #[tokio::test]

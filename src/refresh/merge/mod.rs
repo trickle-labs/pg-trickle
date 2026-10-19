@@ -582,22 +582,22 @@ fn distinct_agg_bound_error(reason: &str) -> PgTrickleError {
     ))
 }
 
-fn enforce_distinct_aggregate_bounds(
+fn parse_and_enforce_distinct_aggregate_bounds(
     st: &StreamTableMeta,
     defining_query: &str,
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
     change_schema: &str,
-) -> Result<(), PgTrickleError> {
+) -> Result<dvm::ParseResult, PgTrickleError> {
     let max_values = crate::config::pg_trickle_distinct_agg_max_values_per_group() as i64;
-    let mut result = crate::dvm::parse_defining_query_full(defining_query)?;
+    let result = crate::dvm::parse_defining_query_full(defining_query)?;
     let mut checks = Vec::new();
     collect_distinct_agg_bound_checks(&result.tree, &mut checks)?;
-    for (_, body) in result.cte_registry.entries.drain(..) {
-        collect_distinct_agg_bound_checks(&body, &mut checks)?;
+    for (_, body) in &result.cte_registry.entries {
+        collect_distinct_agg_bound_checks(body, &mut checks)?;
     }
     if checks.is_empty() {
-        return Ok(());
+        return Ok(result);
     }
 
     for check in checks {
@@ -611,7 +611,7 @@ fn enforce_distinct_aggregate_bounds(
         }
     }
 
-    Ok(())
+    Ok(result)
 }
 
 fn distinct_aggregate_max_values(
@@ -1297,8 +1297,8 @@ pub fn execute_differential_refresh_with_tuning(
         return Ok((0, 0));
     }
 
-    with_stream_owner(st, || {
-        enforce_distinct_aggregate_bounds(
+    let parsed_query = with_stream_owner(st, || {
+        parse_and_enforce_distinct_aggregate_bounds(
             st,
             &effective_defining_query,
             prev_frontier,
@@ -1306,6 +1306,8 @@ pub fn execute_differential_refresh_with_tuning(
             &change_schema,
         )
     })?;
+    // Reuse the owner-resolved shape within this refresh; never cache it across DDL.
+    let query_has_join = crate::dvm::operators::join_common::tree_contains_join(&parsed_query.tree);
 
     // ── A-3a: Append-only heuristic fallback ─────────────────────────
     // When the stream table is marked append-only, check whether any
@@ -2704,9 +2706,7 @@ pub fn execute_differential_refresh_with_tuning(
     // handles these collisions.
     let use_delete_insert = if !resolved.is_deduplicated
         && !resolved.is_all_algebraic
-        && with_stream_owner(st, || {
-            Ok(dvm::query_has_join(&effective_defining_query).unwrap_or(true))
-        })?
+        && query_has_join
         && !st.has_keyless_source
         && !use_explicit_dml
         && st.st_partition_key.is_none()
@@ -2781,90 +2781,84 @@ pub fn execute_differential_refresh_with_tuning(
 
     // MT-8: only the proven single-scan COUNT/SUM/AVG shape replaces the
     // SQL delta producer. Existing target/apply constraints fail closed.
-    let vector_tree =
-        with_stream_owner(st, || dvm::parse_defining_query(&effective_defining_query));
-    let vector_plan = match vector_tree {
-        Ok(tree) => {
-            let admission = crate::dvm::operators::vectorized_agg::VectorAggregateAdmission {
-                immediate_mode: false,
-                constrained_apply: use_explicit_dml
-                    || use_delete_insert
-                    || is_distributed_st
-                    || st.st_partition_key.is_some()
-                    || st.has_keyless_source
-                    || schema.contains('.')
-                    || schema.contains('"')
-                    || name.contains('.')
-                    || name.contains('"')
-                    || !crate::config::pg_trickle_aggregate_fast_path(),
-            };
-            match crate::dvm::operators::vectorized_agg::VectorizedAggregateOperator::plan(
-                &tree,
-                Some("pending"),
-                Some(("pending", "pending")),
-                admission,
-            ) {
-                Ok(mut plan) if plan.output_projection.is_none() => {
-                    plan.change_buffer = format!(
-                        "pg_temp.{}",
-                        crate::refresh::delta_stage::DeltaStage::table_name(
-                            st.pgt_id,
-                            plan.source_oid,
-                        )
-                    );
-                    plan.frontier_placeholders = (
-                        prev_frontier.get_lsn(plan.source_oid),
-                        new_frontier.get_lsn(plan.source_oid),
-                    );
-                    if let Some(staged_source) = delta_stage.source_tables().get(&plan.source_oid) {
-                        let has_minmax = plan.aggregates.iter().any(|aggregate| {
+    let vector_plan = {
+        let tree = &parsed_query.tree;
+        let admission = crate::dvm::operators::vectorized_agg::VectorAggregateAdmission {
+            immediate_mode: false,
+            constrained_apply: use_explicit_dml
+                || use_delete_insert
+                || is_distributed_st
+                || st.st_partition_key.is_some()
+                || st.has_keyless_source
+                || schema.contains('.')
+                || schema.contains('"')
+                || name.contains('.')
+                || name.contains('"')
+                || !crate::config::pg_trickle_aggregate_fast_path(),
+        };
+        match crate::dvm::operators::vectorized_agg::VectorizedAggregateOperator::plan(
+            tree,
+            Some("pending"),
+            Some(("pending", "pending")),
+            admission,
+        ) {
+            Ok(mut plan) if plan.output_projection.is_none() => {
+                plan.change_buffer = format!(
+                    "pg_temp.{}",
+                    crate::refresh::delta_stage::DeltaStage::table_name(st.pgt_id, plan.source_oid)
+                );
+                plan.frontier_placeholders = (
+                    prev_frontier.get_lsn(plan.source_oid),
+                    new_frontier.get_lsn(plan.source_oid),
+                );
+                if let Some(staged_source) = delta_stage.source_tables().get(&plan.source_oid) {
+                    let has_minmax = plan.aggregates.iter().any(|aggregate| {
                             matches!(
                                 aggregate.function,
                                 crate::dvm::operators::vectorized_agg::VectorAggregateFunction::Min
                                     | crate::dvm::operators::vectorized_agg::VectorAggregateFunction::Max
                             )
                         });
-                        let has_deletes = has_minmax
+                    let has_deletes = has_minmax
                             // nosemgrep: rust.spi.query.dynamic-format -- staged_source is an internally generated, quote-escaped temporary relation.
                             && Spi::get_one::<bool>(&format!(
                                 "SELECT EXISTS (SELECT 1 FROM {staged_source} WHERE action = 'D')"
                             ))
                             .map_err(|error| PgTrickleError::SpiError(error.to_string()))?
                             .unwrap_or(false);
-                        Some((plan, !has_deletes))
-                    } else {
-                        pgrx::debug1!(
+                    Some((plan, !has_deletes))
+                } else {
+                    pgrx::debug1!(
                             "[pg_trickle] MT-8 fallback={} for {}.{}",
                             crate::dvm::operators::vectorized_agg::VectorAggregateFallback::StatisticsOrTypeMetadataUnavailable.as_str(),
                             schema,
                             name,
                         );
-                        None
-                    }
+                    None
                 }
-                Ok(_) => {
-                    pgrx::debug1!(
+            }
+            Ok(_) => {
+                pgrx::debug1!(
                         "[pg_trickle] MT-8 fallback={} for {}.{}",
                         crate::dvm::operators::vectorized_agg::VectorAggregateFallback::UnsupportedProjection.as_str(),
                         schema,
                         name,
                     );
-                    None
-                }
-                Err(reason) => {
-                    pgrx::debug1!(
-                        "[pg_trickle] MT-8 fallback={} for {}.{}",
-                        reason.as_str(),
-                        schema,
-                        name,
-                    );
-                    None
-                }
+                None
+            }
+            Err(reason) => {
+                pgrx::debug1!(
+                    "[pg_trickle] MT-8 fallback={} for {}.{}",
+                    reason.as_str(),
+                    schema,
+                    name,
+                );
+                None
             }
         }
-        Err(_) => None,
     };
     let use_vector_agg = vector_plan.is_some();
+    drop(parsed_query);
 
     // ── A1-2/A1-3: Partition-key range predicate injection ───────────
     // For partitioned stream tables, compute the MIN/MAX of the partition
@@ -3467,20 +3461,13 @@ pub fn execute_differential_refresh_with_tuning(
     // Reconcile only those proven affected shapes; ordinary projections and
     // keyed scans keep their differential cost.
     //
-    // EC-01b: use the parsed OpTree for join detection. If parsing fails,
-    // fail safe and run the repair path.
-    let query_has_join =
-        with_stream_owner(st, || dvm::query_has_join(&effective_defining_query)).unwrap_or(true);
+    // EC-01b: reuse the owner-parsed OpTree validated before applying the delta.
     // A BEFORE trigger may deliberately change the materialized row after
     // the defining query has produced it. Reconciliation against that query
     // would erase the trigger's result, so only reconcile when triggers are
     // disabled or absent.
-    let query_has_recursive_cte = with_stream_owner(st, || {
-        dvm::query_has_recursive_cte(&effective_defining_query)
-    })
-    .unwrap_or(false);
     let phantom_cleanup_count = if query_has_join
-        && !query_has_recursive_cte
+        && !has_recursive_cte
         && !resolved.is_deduplicated
         && st.st_partition_key.is_none()
         && !user_triggers_active
