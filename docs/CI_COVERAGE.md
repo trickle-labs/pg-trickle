@@ -176,8 +176,8 @@ Dispatch `ci.yml` with `compare_pr_allocations=true` on the comparison branch
 to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
-Both allocations use the production/test trees at merged commit
-`0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14`, the `ubuntu-24.04` runner class,
+Both allocations use the production/test trees at
+`1d9ecde4592740cc8f303426e0e635bf71555deb`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -189,6 +189,8 @@ The before allocation replays the broad full inventory from `b2ebaa8d`
 (after #1189); the after allocation uses the checked bounded list and adds
 the existing DVM components to integration. Fixed recovery witnesses and
 isolated atomicity execution are held constant on both sides.
+Production sources match merged PR #1190 (`0cbd84dc`); both sides also include
+the witnessed mixed-view diamond fixture repair described below.
 
 This measures the affected tier workloads, including cold test compilation.
 Unchanged unit, release, shipping, LSN and security jobs are excluded from

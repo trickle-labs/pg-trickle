@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Verify frozen production and test sources
-        run: git diff --exit-code 0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14 -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+        run: git diff --exit-code 1d9ecde4592740cc8f303426e0e635bf71555deb -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - name: Read the builder image from GHCR
@@ -87,7 +87,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Verify frozen production and test sources
-        run: git diff --exit-code 0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14 -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+        run: git diff --exit-code 1d9ecde4592740cc8f303426e0e635bf71555deb -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - uses: actions/download-artifact@v8
