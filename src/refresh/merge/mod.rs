@@ -2889,6 +2889,7 @@ pub fn execute_differential_refresh_with_tuning(
                 && count <= crate::config::pg_trickle_deep_join_l0_scan_threshold()
                 && count <= crate::config::pg_trickle_part3_max_scan_count()
         })
+        && super::phd1::supports_reconciliation_replace(st)?
         && with_stream_owner(st, || {
             let (_, complete) = dvm::row_id_expr_for_query_and_complete_output(
                 &effective_defining_query,

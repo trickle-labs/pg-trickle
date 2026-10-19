@@ -8,6 +8,87 @@ mod reference_clients;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_graph_join_keeps_row_security_admission_barrier_after_reconciled_baseline() {
+    const QUERY: &str =
+        "SELECT l.id, r.label FROM public.rls_left l JOIN public.rls_right r USING (id)";
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE ROLE graph_rls_reader").await;
+    sqlx::raw_sql(
+        "CREATE TABLE rls_left(id int NOT NULL);
+         CREATE TABLE rls_right(id int NOT NULL, label text NOT NULL);
+         CREATE TABLE rls_hidden(id int NOT NULL);
+         INSERT INTO rls_left VALUES (1), (2);
+         INSERT INTO rls_right VALUES (1,'old'), (2,'old');
+         ALTER TABLE rls_left ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY visible_rows ON rls_left FOR SELECT USING
+             (NOT EXISTS (SELECT 1 FROM public.rls_hidden h WHERE h.id = rls_left.id));
+         GRANT USAGE ON SCHEMA public, pgtrickle TO graph_rls_reader;
+         GRANT SELECT ON rls_left, rls_right, rls_hidden TO graph_rls_reader",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("create policy-controlled inputs");
+    sqlx::query("SELECT pgtrickle.create_stream_table(name => 'rls_join', query => $1, schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, orchestration_mode => 'EXTERNAL')")
+        .bind(QUERY).execute(&db.pool).await.expect("create row-security graph");
+    let root = "public.rls_join";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    db.execute("UPDATE rls_right SET label = 'warm'").await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let before: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_join'",
+        )
+        .await;
+    db.execute("ALTER TABLE rls_join OWNER TO graph_rls_reader")
+        .await;
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    // This policy dependency is absent from the defining SQL's captured delta.
+    db.execute("INSERT INTO rls_hidden VALUES (1)").await;
+    db.execute("UPDATE rls_right SET label = 'new' WHERE id = 2")
+        .await;
+    let error = sqlx::query("SELECT graph_refresh_id FROM pgtrickle.refresh_graph_strict(ARRAY[$1::regclass], $2::bytea, 'ERROR')")
+        .bind(root).bind(&digest).execute(&db.pool).await.expect_err("effective RLS must retain its admission barrier");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("0A000")
+    );
+    assert!(error.to_string().contains("row-level security"));
+    let actual: Vec<(i32, String)> = sqlx::query_as("SELECT id, label FROM rls_join ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .expect("read materialized policy result");
+    let mut tx = db.pool.begin().await.expect("begin owner reference query");
+    sqlx::query("SET LOCAL ROLE graph_rls_reader")
+        .execute(&mut *tx)
+        .await
+        .expect("assume defining owner");
+    let mut expected: Vec<(i32, String)> = sqlx::query_as(QUERY)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("evaluate complete policy-controlled query");
+    expected.sort();
+    tx.rollback().await.expect("restore reference role");
+    assert_eq!(expected, vec![(2, "new".to_string())]);
+    assert_eq!(
+        actual,
+        vec![(1, "warm".to_string()), (2, "warm".to_string())]
+    );
+    let after: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_join'",
+        )
+        .await;
+    assert_eq!(
+        after, before,
+        "rejected policy change must not advance the frontier"
+    );
+}
+
+#[tokio::test]
 async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles() {
     use std::collections::BTreeMap;
     type Row = (i32, i32, Option<String>);
@@ -123,7 +204,7 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
         ))).bind(batch.batch_token).fetch_all(&mut *tx).await.expect("read every rowwise delta occurrence");
         actual.sort();
         assert_eq!(batch.mode, "EXACT");
-        assert_eq!(actual, expected, "mutation cycle {cycle}");
+        assert_eq!(actual, expected, "cycle={cycle}, extra={extra}, reduced_limits={reduced_join_limits}, nested={nested}");
         assert_eq!(batch.row_count, actual.len() as i64);
         reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
         tx.commit().await.expect("commit rowwise refresh and exact acknowledgement");
