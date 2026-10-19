@@ -22,6 +22,8 @@ RUN --mount=type=cache,id=s1-registry,target=/usr/local/cargo/registry \
 FROM compiler AS mdm
 WORKDIR /build
 COPY _s1/mdm/ ./
+COPY benchmarks/s1/mdm-grants.patch /tmp/mdm-grants.patch
+RUN git apply /tmp/mdm-grants.patch
 RUN --mount=type=cache,id=s1-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=s1-mdm,target=/build/target \
     sha256sum Cargo.lock > /tmp/lock.sha256 && \
@@ -54,4 +56,5 @@ RUN sed -i 's/0\.108\.0/0.108.3/g' \
 ENV PG_REACT_INIT_VERSION=0.46.1
 LABEL pg_mdm.source_revision="eef7937180d504e62ce1076074bbeed8cef5d5a7"
 LABEL qualification.react_pg_trickle_pin="0.108.3"
+LABEL qualification.mdm_grant_patch="sha256:a3dd34646b51a89cb52b3e424dfe17c48dab0f632ef585cb06cfbfa4934de388"
 USER postgres

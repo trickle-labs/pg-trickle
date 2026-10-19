@@ -15,11 +15,24 @@ p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
 below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
 container memory, 45 minutes, or less than 10 GiB host free space. These are
 sampled limits, not a per-operation memory guarantee.
+The supervisor retries recognized PostgreSQL restart connection gaps at most
+four times, one second apart, because the frozen worker-health checks restart
+the server. Persistent failures, timeouts and other errors stop the run.
 
 The workflow runs both images sequentially on the same native Linux amd64
 runner. This environment differs from the earlier amd64 runs emulated on an
 ARM64 Docker host; historical rates cannot establish a speedup on this host.
 The workload and acceptance thresholds are unchanged.
+
+The user also approved `mdm-grants.patch` for **both** images after native run
+39255297739 deadlocked on admission 236. MDM had reissued GRANT on every graph
+table before each refresh; its catalog writes can deadlock with ANALYZE while
+graph refresh waits for a SHARE storage lock. The patch checks existing SELECT
+access and locks storage before granting missing access. `test_grant_analyze.py`
+reproduces the old lock cycle in PostgreSQL 18.4 and checks both corrected paths.
+The original MDM source remains pinned; the exact patch is retained with the
+qualification source and applied explicitly by the Dockerfile. The failed run
+remains a failure, with no complete throughput or paired speedup score.
 
 ## Fixed inputs
 

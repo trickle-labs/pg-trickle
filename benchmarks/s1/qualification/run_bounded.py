@@ -23,6 +23,18 @@ def container_has_exited(code, stdout, stderr):
                               for message in ("no such object:", "no such container:")))
 
 
+def postgres_metrics(args):
+    # The frozen worker-health checks deliberately restart PostgreSQL.
+    for attempt in range(5):
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        restarting = any(message in result.stderr for message in (
+            'No such file or directory', 'the database system is starting up',
+            'the database system is shutting down', 'server closed the connection unexpectedly'))
+        if result.returncode == 0 or not restarting or attempt == 4:
+            return result
+        time.sleep(1)
+
+
 def main(image, run_name, profile_cases=None):
     root = Path(__file__).resolve().parent
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", image)
@@ -83,12 +95,11 @@ def main(image, run_name, profile_cases=None):
                     assert identity == image, (name, identity)
                     if running != "true":
                         continue
-                    measured = subprocess.run(
+                    measured = postgres_metrics(
                         ["docker", "exec", name, "psql", "-XAtq", "-U", "postgres",
                          "-d", "postgres", "-c", "SELECT json_build_object('database_bytes',"
                          "(SELECT sum(pg_database_size(oid)) FROM pg_database),"
-                         "'wal_bytes',(SELECT wal_bytes FROM pg_stat_wal))"],
-                        capture_output=True, text=True, timeout=15)
+                         "'wal_bytes',(SELECT wal_bytes FROM pg_stat_wal))"])
                     disk = subprocess.run(
                         ["docker", "exec", name, "sh", "-c", 'du -sk "$PGDATA"'],
                         capture_output=True, text=True, timeout=15)

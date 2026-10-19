@@ -37,8 +37,8 @@
     "tests/integrations/pg-mdm/v0.48-adjacent-upgrade.sql": "ca84ce45865c9d2a1cf037d9d67d421bda3f8cbbcaf24d4480dc215021cd1b8f"
   },
   "adaptations": {
-    "run_bounded.py": "Invoke Docker directly instead of rtk proxy; no supervision threshold changes",
-    "test_supervisor.py": "Match direct Docker command positions",
+    "run_bounded.py": "Invoke Docker directly instead of rtk proxy; retry transient PostgreSQL restart connection failures at most four times one second apart; preserve resource and workload thresholds and fail on persistent or other errors",
+    "test_supervisor.py": "Match direct Docker command positions; cover transient and persistent restart gaps plus non-restart errors",
     "tests/integrations/pg-mdm/time/audit-r53-repair.py": "Retain original bootstrap bytes and hashes; adapt only two helper-audit resolver strategy assertions for #1171 exact deltas; verify reconstructed React exact-version admission and rejection with scheduler enabled",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "Fail-closed, narrowly matched bootstrap adapter; original helper audit checks remain"
   },
@@ -50,10 +50,10 @@
     "integrations/pg-mdm/sql/request-store.sql": "94a4b474bbb4a1d610857f0f3ba41077e8fc94632ce1e9198008035ba7d8cf2a",
     "integrations/pg-mdm/sql/routing.sql": "f1a83c261e8f0231e816f264419ff985481b180652f82083e1f0bc4b5d6e18be",
     "integrations/pg-mdm/sql/typed-flow.sql": "b53646d0b62e31c2b834c0325acb8be9418ada4808017a2c8579ad45866c3bf8",
-    "run_bounded.py": "7c94a88833ef13c5e987d7881dc2e2a21d305c3ae68b4706dd406518cff9310a",
+    "run_bounded.py": "e8dae76cd3b88887373334cbfbcc490579f2c4f21c2fb2f28043c767c945c639",
     "showcase/mdm-stewardship/01-fixture.sql": "cab7cbe1d02f3d435c12f8ea0bf8c078069626da9b33677a0f3ff3ad2f4cac4a",
     "showcase/mdm-stewardship/02-read-only-package.sql": "f1b41ed7a641f79a7e89dbfad9e560cac5846f989c7c3d00446f5e538b9a837d",
-    "test_supervisor.py": "41b09453ce4a83cc63baed9852346f4d7e287bd82bc16dc3d3be7f9538d1eb5c",
+    "test_supervisor.py": "74bd138c83d16d5f54ff1e32e5615443f874f3b8ed440029ecfe5b3a3ab184b2",
     "tests/integrations/pg-mdm/time/audit-r53-repair.py": "e66e75220afe3789a6ca37459873c197cf3da0d99364e941bedb5f7f9bc89ba8",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "7b1a5a6051a206ffc56816bbc79ad9e957cd0404a36c6d68d36faf17b1ae9bb5",
     "tests/integrations/pg-mdm/time/boundaries.sql": "8ea5931a9fd0e62753b391b46d27040e23dc36d23b19fb193ec499d9adb097cc",

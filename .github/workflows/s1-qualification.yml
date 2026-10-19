@@ -59,6 +59,7 @@ jobs:
           python3 benchmarks/s1/test_check_result.py
           python3 benchmarks/s1/qualification/run_bounded.py --self-check
           python3 benchmarks/s1/qualification/test_supervisor.py
+          python3 benchmarks/s1/test_grant_analyze.py _s1/evidence/grant-analyze-results.json
       - name: Build exact control and candidate images
         id: build
         run: |
