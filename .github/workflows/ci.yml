@@ -40,7 +40,8 @@ on:
 
 concurrency:
   # Pushes to main must not cancel the longer nightly qualification run.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # Paired experiments retain their evidence when another comparison is dispatched.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.compare_pr_allocations && github.run_id || github.ref }}
   cancel-in-progress: true
 
 env:
