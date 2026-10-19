@@ -1,0 +1,96 @@
+name: S1 exact-image qualification
+
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/s1/**'
+      - '.github/workflows/s1-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v7
+        with:
+          ref: 1c0345791979907e2c1418b0008ea15d58311cb9
+          path: _s1/control
+      - uses: actions/checkout@v7
+        with:
+          repository: trickle-labs/pg-mdm
+          ref: eef7937180d504e62ce1076074bbeed8cef5d5a7
+          path: _s1/mdm
+      - uses: actions/checkout@v7
+        with:
+          repository: trickle-labs/pg-react
+          ref: f19d9b2c5f3d947705ea26aa1619a989f08ae1dc
+          path: _s1/react
+      - name: Retain source, environment, and supervision checks
+        run: |
+          test "$(uname -m)" = x86_64
+          mkdir -p _s1/evidence
+          uname -a > _s1/evidence/host.txt
+          lscpu >> _s1/evidence/host.txt
+          docker info > _s1/evidence/docker.txt
+          git rev-parse HEAD > _s1/evidence/candidate-commit.txt
+          for component in control mdm react; do
+            git -C "_s1/$component" rev-parse HEAD > "_s1/evidence/$component-commit.txt"
+            (cd "_s1/$component"; git ls-files -z | tar --null -T - -czf "../evidence/$component-source.tar.gz")
+          done
+          git ls-files -z -- Cargo.toml Cargo.lock build.rs pg_trickle.control src verification benches sql scripts/gen_test_schema.py .cargo/config.toml |
+            tar --null -T - -czf _s1/evidence/candidate-source.tar.gz
+          python3 benchmarks/s1/check_frozen_harness.py
+          python3 benchmarks/s1/test_bootstrap_compat.py
+          python3 benchmarks/s1/qualification/run_bounded.py --self-check
+          python3 benchmarks/s1/qualification/test_supervisor.py
+      - name: Build exact control and candidate images
+        id: build
+        run: |
+          docker build --platform linux/amd64 --provenance=false -f benchmarks/s1/Dockerfile \
+            --build-arg TRICKLE_SOURCE=_s1/control -t s1-control:qualification . \
+            > _s1/evidence/build-control.log 2>&1 || { tail -100 _s1/evidence/build-control.log; exit 1; }
+          docker build --platform linux/amd64 --provenance=false -f benchmarks/s1/Dockerfile \
+            -t s1-candidate:qualification . \
+            > _s1/evidence/build-candidate.log 2>&1 || { tail -100 _s1/evidence/build-candidate.log; exit 1; }
+          for image in control candidate; do
+            docker image inspect "s1-$image:qualification" > "_s1/evidence/$image-image.json"
+            docker run --rm --entrypoint sha256sum "s1-$image:qualification" \
+              /usr/lib/postgresql/18/lib/pg_trickle.so /usr/lib/postgresql/18/lib/pg_mdm.so \
+              /usr/lib/postgresql/18/lib/pg_react.so > "_s1/evidence/$image-libraries.sha256"
+          done
+      - name: Qualify corrected control, unchanged 300 admissions
+        if: steps.build.outcome == 'success'
+        env:
+          PGREACT_S1_BATCH_SIZE: '32'
+        run: |
+          image=$(docker image inspect s1-control:qualification --format '{{.Id}}')
+          python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300
+      - name: Qualify candidate, unchanged 300 admissions
+        if: always() && steps.build.outcome == 'success'
+        env:
+          PGREACT_S1_BATCH_SIZE: '32'
+        run: |
+          image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
+          python3 benchmarks/s1/qualification/run_bounded.py "$image" candidate-300
+      - name: Hash complete evidence
+        if: always()
+        run: |
+          find _s1/evidence benchmarks/s1/qualification/control-300 benchmarks/s1/qualification/candidate-300 \
+            -type f ! -name SHA256SUMS -print0 2>/dev/null |
+            sort -z | xargs -0 sha256sum > _s1/evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: s1-exact-image-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 90
+          path: |
+            _s1/evidence/
+            benchmarks/s1/qualification/control-300/
+            benchmarks/s1/qualification/candidate-300/
