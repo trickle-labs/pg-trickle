@@ -1,4 +1,7 @@
 **
+!benchmarks/
+!benchmarks/s1/
+!benchmarks/s1/mdm-grants.patch
 !Cargo.toml
 !Cargo.lock
 !build.rs
