@@ -20,7 +20,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.aggregate_fast_path` | `bool` | `true` | B-1: Aggregate fast-path — use explicit DML instead of MERGE for GROUP BY queries where all aggregates are algebraically invertible (COUNT, SUM, AVG, etc.). |
 | `pg_trickle.algebraic_drift_reset_cycles` | `int4` | `0` | Set to 0 to disable periodic drift reset (default). |
 | `pg_trickle.allow_circular` | `bool` | `false` | When `false` (default), cycle detection rejects any stream table creation that would introduce a cycle in the dependency graph. |
-| `pg_trickle.analyze_before_delta` | `bool` | `true` | When enabled, `ANALYZE pgtrickle_changes.changes_<oid>` is run before the delta SQL is executed. |
+| `pg_trickle.analyze_before_delta` | `bool` | `true` | Graph refreshes analyze their bounded CDC stages and materialized deltas; other refreshes analyze persistent source change buffers. |
 | `pg_trickle.auto_backoff` | `bool` | `true` | This prevents CPU runaway when a stream table's refresh cost exceeds its schedule budget and an operator is not available to respond manually. |
 | `pg_trickle.auto_index` | `bool` | `true` | When enabled, `create_stream_table()` automatically creates indexes on GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the `__pgt_row_id` index for stream tables with ≤ 8 output columns. |
 | `pg_trickle.backpressure_consecutive_limit` | `int4` | `3` | Default: 3 cycles. |

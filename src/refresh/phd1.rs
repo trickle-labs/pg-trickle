@@ -14,6 +14,69 @@
 use crate::error::PgTrickleError;
 use pgrx::Spi;
 
+/// These pointwise operators preserve the signed multiplicity of every input.
+pub(crate) fn exact_rowwise_join_scan_count(tree: &crate::dvm::parser::OpTree) -> Option<usize> {
+    use crate::dvm::parser::OpTree;
+    match tree {
+        OpTree::Scan { .. } => Some(1),
+        OpTree::Project { child, .. } | OpTree::Filter { child, .. } => {
+            exact_rowwise_join_scan_count(child)
+        }
+        OpTree::InnerJoin { left, right, .. } => {
+            Some(exact_rowwise_join_scan_count(left)? + exact_rowwise_join_scan_count(right)?)
+        }
+        OpTree::LateralFunction {
+            is_left_join: false,
+            child,
+            ..
+        } => exact_rowwise_join_scan_count(child),
+        _ => None,
+    }
+}
+
+pub(crate) fn has_reconciled_baseline(pgt_id: i64) -> Result<bool, PgTrickleError> {
+    let strategy = Spi::get_one_with_args::<String>(
+        "SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history \
+         WHERE pgt_id = $1 AND status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1",
+        &[pgt_id.into()],
+    )
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!("reconciliation baseline lookup for {pgt_id}: {e}"))
+    })?;
+    Ok(matches!(
+        strategy.as_deref(),
+        Some("explicit_dml_reconciled" | "explicit_dml_exact_join" | "reconciliation_delta")
+    ))
+}
+
+pub(crate) fn is_scalar_count(tree: &crate::dvm::parser::OpTree) -> bool {
+    use crate::dvm::parser::{AggFunc, OpTree};
+    matches!(tree, OpTree::Aggregate { group_by, aggregates, .. }
+        if group_by.is_empty() && !aggregates.is_empty()
+            && aggregates.iter().all(|agg| matches!(agg.function, AggFunc::Count | AggFunc::CountStar)))
+}
+
+pub(crate) fn supports_reconciliation_replace(
+    st: &crate::catalog::StreamTableMeta,
+) -> Result<bool, PgTrickleError> {
+    // Constraint triggers and rules can observe DELETE+INSERT versus UPDATE.
+    Spi::get_one_with_args::<bool>(
+        "SELECT c.relkind = 'r' AND NOT c.relhasrules \
+                AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
+                                WHERE tr.tgrelid = c.oid AND tr.tgconstraint <> 0) \
+         FROM pg_catalog.pg_class c WHERE c.oid = $1",
+        &[st.pgt_relid.into()],
+    )
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "reconciliation apply eligibility for {}.{}: {e}",
+            st.pgt_schema, st.pgt_name,
+        ))
+    })
+    .map(|allowed| allowed.unwrap_or(false))
+}
+
 fn content_signature_expr(
     alias: &str,
     quoted_user_cols: &[String],
@@ -61,6 +124,150 @@ fn reconciliation_has_drift_sql(
              HAVING SUM(__pgt_weight) <> 0 \
          )"
     )
+}
+
+/// Produce the exact multiset delta from the comparison already required for
+/// graph joins. Retain physical deletion targets when an identity covers only
+/// part of the output, so equal identities cannot delete the wrong occurrence.
+pub(crate) struct ReconciliationDelta {
+    pub sql: String,
+    pub delete_column: String,
+    pub columns: String,
+}
+
+pub(crate) fn reconciliation_delta_sql(
+    st: &crate::catalog::StreamTableMeta,
+    defining_query: &str,
+    has_pgt_count: bool,
+    scalar_count: bool,
+) -> Result<Option<ReconciliationDelta>, PgTrickleError> {
+    let mut columns = crate::dvm::get_defining_query_columns(defining_query)?;
+    let (row_id, complete) =
+        crate::dvm::row_id_expr_for_query_and_complete_output(defining_query, &columns);
+    if columns.is_empty() || !(complete || scalar_count) {
+        return Ok(None);
+    }
+    let materialization_query = if has_pgt_count {
+        columns.push("__pgt_count".to_string());
+        crate::api::inject_pgt_count(defining_query)
+    } else {
+        defining_query.to_string()
+    };
+    let table = format!(
+        "{}.{}",
+        crate::sql_builder::ident(&st.pgt_schema),
+        crate::sql_builder::ident(&st.pgt_name)
+    );
+    let cols = columns
+        .iter()
+        .map(|column| crate::sql_builder::ident(column))
+        .collect::<Vec<_>>();
+    let csv = cols.join(", ");
+    let mut occurrence = "__pgt_occurrence".to_string();
+    while columns.contains(&occurrence) {
+        occurrence.push('_');
+    }
+    let mut delete_ctid = "__pgt_delete_ctid".to_string();
+    while columns.contains(&delete_ctid) {
+        delete_ctid.push('_');
+    }
+    let pre_cols = cols
+        .iter()
+        .map(|c| format!("pre.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let post_cols = cols
+        .iter()
+        .map(|c| format!("post.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let different = cols
+        .iter()
+        .map(|c| format!("pre.{c} IS DISTINCT FROM post.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let row_match = "pre.__pgt_row_id = post.__pgt_row_id";
+    if complete {
+        let mut weight = "__pgt_recon_weight".to_string();
+        while columns.contains(&weight) {
+            weight.push('_');
+        }
+        let state = if has_pgt_count { ", __pgt_count" } else { "" };
+        let pre_state = if has_pgt_count {
+            ", pre.__pgt_count"
+        } else {
+            ""
+        };
+        let post_state = if has_pgt_count {
+            ", post.__pgt_count"
+        } else {
+            ""
+        };
+        let pre_match = if has_pgt_count {
+            " AND pre.__pgt_count IS NOT DISTINCT FROM w.__pgt_count"
+        } else {
+            ""
+        };
+        let post_match = if has_pgt_count {
+            " AND post.__pgt_count IS NOT DISTINCT FROM w.__pgt_count"
+        } else {
+            ""
+        };
+        // Complete identities prove equal content; number only changed groups.
+        let sql = format!(
+            "WITH __pgt_recon_expected AS MATERIALIZED (\
+                 SELECT {row_id} AS __pgt_row_id, sub.* FROM ({materialization_query}) sub), \
+             __pgt_recon_weights AS MATERIALIZED (\
+                 SELECT __pgt_row_id{state}, SUM(__pgt_signed_weight) AS {weight} FROM (\
+                     SELECT __pgt_row_id{state}, -1 AS __pgt_signed_weight FROM {table} \
+                     UNION ALL SELECT __pgt_row_id{state}, 1 AS __pgt_signed_weight FROM __pgt_recon_expected\
+                 ) signs GROUP BY __pgt_row_id{state} HAVING SUM(__pgt_signed_weight) <> 0) \
+             SELECT __pgt_row_id, 'D'::text AS __pgt_action, {csv}, {delete_ctid} FROM (\
+                 SELECT pre.__pgt_row_id, {pre_cols}, pre.ctid AS {delete_ctid}, w.{weight}, \
+                        row_number() OVER (PARTITION BY pre.__pgt_row_id{pre_state} ORDER BY pre.ctid) AS {occurrence} \
+                 FROM {table} pre JOIN __pgt_recon_weights w ON pre.__pgt_row_id = w.__pgt_row_id{pre_match} \
+                 WHERE w.{weight} < 0\
+             ) deletes WHERE {occurrence} <= -{weight} \
+             UNION ALL \
+             SELECT __pgt_row_id, 'I'::text AS __pgt_action, {csv}, NULL::tid AS {delete_ctid} FROM (\
+                 SELECT post.__pgt_row_id, {post_cols}, w.{weight}, \
+                        row_number() OVER (PARTITION BY post.__pgt_row_id{post_state}) AS {occurrence} \
+                 FROM __pgt_recon_expected post JOIN __pgt_recon_weights w ON post.__pgt_row_id = w.__pgt_row_id{post_match} \
+                 WHERE w.{weight} > 0\
+             ) inserts WHERE {occurrence} <= {weight}"
+        );
+        return Ok(Some(ReconciliationDelta {
+            sql,
+            delete_column: delete_ctid,
+            columns: csv,
+        }));
+    }
+    // Occurrences retain duplicate multiplicity, including NULL-valued rows.
+    Ok(Some(ReconciliationDelta {
+        sql: format!(
+            "WITH __pgt_recon_expected AS MATERIALIZED (\
+             SELECT {row_id} AS __pgt_row_id, sub.* FROM ({materialization_query}) sub), \
+         __pgt_recon_before AS MATERIALIZED (\
+             SELECT ctid AS {delete_ctid}, __pgt_row_id, {csv}, \
+                    row_number() OVER (PARTITION BY __pgt_row_id ORDER BY tableoid, ctid) AS {occurrence} \
+             FROM {table}), \
+         __pgt_recon_after AS MATERIALIZED (\
+             SELECT __pgt_row_id, {csv}, \
+                    row_number() OVER (PARTITION BY __pgt_row_id) AS {occurrence} \
+             FROM __pgt_recon_expected) \
+         SELECT pre.__pgt_row_id, 'D'::text AS __pgt_action, {pre_cols}, pre.{delete_ctid} \
+         FROM __pgt_recon_before pre LEFT JOIN __pgt_recon_after post \
+           ON {row_match} AND pre.{occurrence} = post.{occurrence} \
+         WHERE post.{occurrence} IS NULL OR ({different}) \
+         UNION ALL \
+         SELECT post.__pgt_row_id, 'I'::text AS __pgt_action, {post_cols}, NULL::tid AS {delete_ctid} \
+         FROM __pgt_recon_after post LEFT JOIN __pgt_recon_before pre \
+           ON {row_match} AND pre.{occurrence} = post.{occurrence} \
+         WHERE pre.{occurrence} IS NULL OR ({different})"
+        ),
+        delete_column: delete_ctid,
+        columns: csv,
+    }))
 }
 
 /// EC01-2: Reconcile the stream table against the full-query result set.
@@ -312,6 +519,77 @@ pub fn cleanup_cross_cycle_phantoms(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_scalar_reconciliation_accepts_only_count_output() {
+        use crate::dvm::operators::test_helpers::*;
+        let leaf = scan(1, "source", "public", "s", &["id"]);
+        let count = aggregate(vec![], vec![count_star("n")], leaf.clone());
+        assert!(super::is_scalar_count(&count));
+        assert!(!super::is_scalar_count(&aggregate(
+            vec![colref("id")],
+            vec![count_star("n")],
+            leaf.clone()
+        )));
+        assert!(!super::is_scalar_count(&aggregate(
+            vec![],
+            vec![sum_col("id", "n")],
+            leaf
+        )));
+        assert!(!super::is_scalar_count(&filter(lit("true"), count)));
+    }
+
+    #[test]
+    fn test_exact_rowwise_join_tree_excludes_nonpointwise_operators() {
+        use crate::dvm::operators::test_helpers::*;
+        use crate::dvm::parser::OpTree;
+        let leaf = scan(1, "source", "public", "s", &["id"]);
+        let join = inner_join(lit("true"), leaf.clone(), leaf.clone());
+        assert_eq!(super::exact_rowwise_join_scan_count(&join), Some(2));
+        assert_eq!(
+            super::exact_rowwise_join_scan_count(&filter(lit("true"), join.clone())),
+            Some(2)
+        );
+        assert_eq!(
+            super::exact_rowwise_join_scan_count(&left_join(
+                lit("true"),
+                leaf.clone(),
+                leaf.clone()
+            )),
+            None
+        );
+        assert_eq!(
+            super::exact_rowwise_join_scan_count(&distinct(join.clone())),
+            None
+        );
+        assert_eq!(
+            super::exact_rowwise_join_scan_count(&aggregate(vec![], vec![count_star("n")], join)),
+            None
+        );
+        let mut lateral = OpTree::LateralFunction {
+            func_sql: "generate_series(1, s.id)".into(),
+            alias: "g".into(),
+            column_aliases: vec!["value".into()],
+            declared_columns: vec![],
+            with_ordinality: false,
+            is_left_join: false,
+            join_condition: None,
+            child: Box::new(leaf),
+        };
+        assert_eq!(super::exact_rowwise_join_scan_count(&lateral), Some(1));
+        assert_eq!(
+            super::exact_rowwise_join_scan_count(&inner_join(
+                lit("true"),
+                lateral.clone(),
+                lateral.clone()
+            )),
+            Some(2)
+        );
+        if let OpTree::LateralFunction { is_left_join, .. } = &mut lateral {
+            *is_left_join = true;
+        }
+        assert_eq!(super::exact_rowwise_join_scan_count(&lateral), None);
+    }
+
     #[test]
     fn test_content_signature_supports_wide_rows() {
         let columns = (0..51)

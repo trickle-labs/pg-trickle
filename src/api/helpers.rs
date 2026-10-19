@@ -1134,6 +1134,7 @@ struct VolatilityCollector {
     function_calls: Vec<AnalyzedFunctionCall>,
     enum_io_function_oids: Vec<pg_sys::Oid>,
     worst: char,
+    reject_sublinks: bool,
 }
 
 #[cfg(not(test))]
@@ -1190,12 +1191,16 @@ fn is_safe_row_identity_encoder(oid: pg_sys::Oid) -> Result<bool, PgTrickleError
 /// `pg_proc`, but enum DDL invalidates dependent stream tables, so enum I/O is
 /// safe here.
 #[cfg(not(test))]
-fn analyzed_query_volatility(query_node: *mut pg_sys::Query) -> Result<char, PgTrickleError> {
+fn analyzed_query_volatility(
+    query_node: *mut pg_sys::Query,
+    reject_sublinks: bool,
+) -> Result<char, PgTrickleError> {
     let mut collector = VolatilityCollector {
         function_oids: Vec::new(),
         function_calls: Vec::new(),
         enum_io_function_oids: Vec::new(),
         worst: 'i',
+        reject_sublinks,
     };
 
     // SAFETY: query_node is a valid analyzed Query allocated by PostgreSQL's
@@ -1384,6 +1389,9 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
         }
 
         let collector = &mut *(context as *mut VolatilityCollector);
+        if collector.reject_sublinks && pgrx::is_a(node, pg_sys::NodeTag::T_SubLink) {
+            collector.worst = 'v';
+        }
         if pgrx::is_a(node, pg_sys::NodeTag::T_FuncExpr) {
             let function = &*(node as *const pg_sys::FuncExpr);
             let args = pgrx::PgList::<pg_sys::Node>::from_pg(function.args);
@@ -1484,7 +1492,10 @@ unsafe extern "C-unwind" fn collect_volatility_nodes(
 }
 
 #[cfg(test)]
-fn analyzed_query_volatility(_query_node: *mut pg_sys::Query) -> Result<char, PgTrickleError> {
+fn analyzed_query_volatility(
+    _query_node: *mut pg_sys::Query,
+    _reject_sublinks: bool,
+) -> Result<char, PgTrickleError> {
     Ok('i')
 }
 
@@ -1531,7 +1542,13 @@ fn analyze_query_tree(query: &str) -> Result<*mut pg_sys::Query, PgTrickleError>
 
 /// Inspect resolved expression volatility without executing the defining query.
 pub(crate) fn defining_query_volatility(query: &str) -> Result<char, PgTrickleError> {
-    analyzed_query_volatility(analyze_query_tree(query)?)
+    analyzed_query_volatility(analyze_query_tree(query)?, false)
+}
+
+pub(crate) fn defining_query_is_immutable_without_sublinks(
+    query: &str,
+) -> Result<bool, PgTrickleError> {
+    Ok(analyzed_query_volatility(analyze_query_tree(query)?, true)? == 'i')
 }
 
 /// Validate a defining query and extract its output columns and volatility via
@@ -1593,7 +1610,7 @@ pub(crate) fn validate_defining_query(
             column.typmod = typmod;
         }
 
-        let volatility = analyzed_query_volatility(query_node);
+        let volatility = analyzed_query_volatility(query_node, false);
 
         Ok((columns, volatility?))
     }

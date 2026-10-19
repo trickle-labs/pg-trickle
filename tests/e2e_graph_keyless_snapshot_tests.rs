@@ -8,6 +8,294 @@ mod reference_clients;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles() {
+    use std::collections::BTreeMap;
+    type Row = (i32, i32, Option<String>);
+    const QUERY: &str = "SELECT l.id, g.value, r.label FROM public.point_left l
+        CROSS JOIN LATERAL generate_series(1, l.n) g(value)
+        JOIN public.point_right r ON r.id = l.id";
+    async fn rows(db: &E2eDb, query: &str) -> Vec<Row> {
+        let mut rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(query.to_string()))
+            .fetch_all(&db.pool)
+            .await
+            .expect("read complete rowwise result");
+        rows.sort();
+        rows
+    }
+    'profiles: for (extra, exact_allowed, reduced_join_limits, nested) in [
+        ("", Some(true), false, false),
+        (
+            ", current_setting('server_version') AS runtime_setting",
+            None,
+            false,
+            false,
+        ),
+        (", (SELECT 1) AS scalar_guard", Some(false), false, false),
+        ("", Some(false), true, false),
+        ("", Some(false), false, true),
+    ] {
+        let reference_query = if nested {
+            "SELECT l.id, l.n AS value, r.label FROM public.point_left l JOIN public.point_right r ON r.id = l.id JOIN public.point_dim d1 ON d1.id = l.id JOIN public.point_dim d2 ON d2.id = l.id".to_string()
+        } else {
+            QUERY.to_string()
+        };
+        let query = reference_query.replacen("r.label FROM", &format!("r.label{extra} FROM"), 1);
+        let mut db = E2eDb::new().await.with_extension().await;
+        if reduced_join_limits {
+            let options = db.pool.connect_options().as_ref().clone().options([
+                ("pg_trickle.deep_join_l0_scan_threshold", "1"),
+                ("pg_trickle.part3_max_scan_count", "1"),
+            ]);
+            db.pool.close().await;
+            db.pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(5)
+                .connect_with(options)
+                .await
+                .expect("connect with reduced join limits");
+        }
+        sqlx::raw_sql(
+            "CREATE TABLE point_left (id int NOT NULL, n int NOT NULL);
+        CREATE TABLE point_right (id int NOT NULL, label text);
+        CREATE TABLE point_dim (id int NOT NULL);
+        INSERT INTO point_left VALUES (1,2), (2,1);
+        INSERT INTO point_right VALUES (1,'old'), (2,NULL);
+        INSERT INTO point_dim VALUES (1), (2)",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("create rowwise sources");
+        for (name, query) in [
+            ("point_join", query.as_str()),
+            (
+                "point_terminal",
+                "SELECT id, value, label FROM public.point_join",
+            ),
+        ] {
+            let created = sqlx::query("SELECT pgtrickle.create_stream_table(name => $1, query => $2, schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, orchestration_mode => 'EXTERNAL')")
+                .bind(name).bind(query).execute(&db.pool).await;
+            if exact_allowed.is_none() {
+                assert!(
+                    created
+                        .expect_err("stable expressions must retain their admission barrier")
+                        .to_string()
+                        .contains("STABLE")
+                );
+                continue 'profiles;
+            }
+            created.expect("create rowwise graph");
+        }
+        let root = "public.point_terminal";
+        let digest = reference_clients::graph_digest(&db.pool, root).await;
+        reference_clients::refresh_graph(&db.pool, root, &digest).await;
+        let contract = reference_clients::stream_contract_digest(&db.pool, root).await;
+        let consumer = reference_clients::register(&db.pool, root, root, &contract).await;
+        let mut tx = db.pool.begin().await.expect("begin rowwise baseline");
+        let (token, _) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+        reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await;
+        tx.commit().await.expect("commit rowwise baseline");
+        for (cycle, mutation) in [
+        "INSERT INTO point_left VALUES (1,2), (1,2); UPDATE point_right SET label = 'new' WHERE id = 1",
+        "DELETE FROM point_right WHERE id = 1",
+        "INSERT INTO point_right VALUES (1,NULL), (1,NULL)",
+        "DELETE FROM point_left WHERE ctid IN (SELECT ctid FROM point_left WHERE id = 1 LIMIT 2)",
+    ].into_iter().enumerate() {
+        let before = rows(&db, &reference_query).await;
+        sqlx::raw_sql(mutation).execute(&db.pool).await.expect("commit simultaneous rowwise changes");
+        if nested && cycle == 0 {
+            db.execute("INSERT INTO point_dim VALUES (1)").await;
+        }
+        let after = rows(&db, &reference_query).await;
+        let mut weights = BTreeMap::<Row, i64>::new();
+        for row in before { *weights.entry(row).or_default() -= 1; }
+        for row in after.clone() { *weights.entry(row).or_default() += 1; }
+        let mut expected = Vec::new();
+        for ((id, value, label), weight) in weights {
+            for _ in 0..weight.unsigned_abs() {
+                expected.push((if weight < 0 { "DELETE".to_string() } else { "INSERT".to_string() }, id, value, label.clone()));
+            }
+        }
+        expected.sort();
+        let mut tx = db.pool.begin().await.expect("begin exact rowwise refresh");
+        reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+        let batch = reference_clients::pending_batch(&mut *tx, &consumer.consumer_id).await;
+        let mut actual: Vec<(String, i32, i32, Option<String>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT action, id, value, label FROM {} WHERE batch_token = $1", consumer.delta_relation
+        ))).bind(batch.batch_token).fetch_all(&mut *tx).await.expect("read every rowwise delta occurrence");
+        actual.sort();
+        assert_eq!(batch.mode, "EXACT");
+        assert_eq!(actual, expected, "mutation cycle {cycle}");
+        assert_eq!(batch.row_count, actual.len() as i64);
+        reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
+        tx.commit().await.expect("commit rowwise refresh and exact acknowledgement");
+        assert_eq!(rows(&db, "SELECT id, value, label FROM point_join").await, after);
+        assert_eq!(rows(&db, "SELECT id, value, label FROM point_terminal").await, after);
+        let strategy: String = db.query_scalar("SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'point_join' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+            if exact_allowed == Some(true) {
+            assert_eq!(strategy, if cycle == 0 { "explicit_dml_reconciled" } else { "explicit_dml_exact_join" });
+        } else {
+            assert_ne!(strategy, "explicit_dml_exact_join", "extra={extra}, reduced_limits={reduced_join_limits}");
+        }
+    }
+        reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+        assert_eq!(
+            rows(&db, "SELECT id, value, label FROM point_terminal").await,
+            rows(&db, &reference_query).await
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_delivery() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE recon_rows (value text);
+         INSERT INTO recon_rows VALUES (NULL), (NULL), ('kept');
+         CREATE TABLE recon_dim (id int PRIMARY KEY, label text);
+         INSERT INTO recon_dim VALUES (1, 'before')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("create join sources");
+    let joins = (1..=8)
+        .map(|i| format!(" JOIN dim_leaf d{i} ON d{i}.id = 1"))
+        .collect::<String>();
+    let columns = (1..=8)
+        .map(|i| format!(", d{i}.label AS label{i}"))
+        .collect::<String>();
+    let query = format!("SELECT r.value AS value{columns} FROM row_leaf r{joins}");
+    let count_query = format!("SELECT count(r.value IS NULL) AS total_rows FROM row_leaf r{joins}");
+    let group_query =
+        format!("SELECT r.value, count(*) AS copies FROM row_leaf r{joins} GROUP BY r.value");
+    let terminal_query = format!(
+        "SELECT j.value, {} FROM recon_join j LEFT JOIN recon_count c ON false LEFT JOIN recon_groups g ON false",
+        (1..=8)
+            .map(|i| format!("j.label{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (name, query) in [
+        ("row_leaf", "SELECT value FROM recon_rows"),
+        ("dim_leaf", "SELECT id, label FROM recon_dim"),
+        ("recon_join", query.as_str()),
+        ("recon_count", count_query.as_str()),
+        ("recon_groups", group_query.as_str()),
+        ("recon_terminal", terminal_query.as_str()),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table(name => $1, query => $2, schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, orchestration_mode => 'EXTERNAL')")
+            .bind(name).bind(query).execute(&db.pool).await.expect("create join graph");
+    }
+    let root = "public.recon_terminal";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    db.execute("INSERT INTO recon_rows VALUES ('bootstrap')")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    db.assert_st_matches_query("recon_join", &query).await;
+    db.assert_st_matches_query("recon_terminal", &query).await;
+    db.execute("DELETE FROM recon_rows WHERE value = 'bootstrap'")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    sqlx::raw_sql(
+        "CREATE UNIQUE INDEX recon_count_rows_key ON recon_count(total_rows);
+        CREATE TABLE recon_foreign_ref (id int PRIMARY KEY, total_rows bigint NOT NULL
+            REFERENCES recon_count(total_rows) ON UPDATE CASCADE ON DELETE CASCADE);
+        INSERT INTO recon_foreign_ref VALUES (1,3)",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install UPDATE-sensitive constraint");
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    let mut consumers = Vec::new();
+    for relation in ["public.recon_join", root] {
+        let contract = reference_clients::stream_contract_digest(&db.pool, relation).await;
+        let consumer = reference_clients::register(&db.pool, relation, relation, &contract).await;
+        let mut tx = db.pool.begin().await.expect("begin baseline");
+        let (token, _) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+        reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await;
+        tx.commit().await.expect("ack baseline");
+        consumers.push(consumer);
+    }
+    db.execute("INSERT INTO recon_rows VALUES (NULL)").await;
+    db.execute("UPDATE recon_dim SET label = 'after'").await;
+    let before: String = db
+        .query_scalar(
+            "SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_join'",
+        )
+        .await;
+    for commit in [false, true] {
+        let mut tx = db.pool.begin().await.expect("begin exact refresh");
+        sqlx::query("SET LOCAL enable_nestloop = off")
+            .execute(&mut *tx)
+            .await
+            .expect("set caller planner preference");
+        reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+        let nestloop: String = sqlx::query_scalar("SHOW enable_nestloop")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read caller planner preference");
+        assert_eq!(nestloop, "off");
+        let referenced_rows: i64 =
+            sqlx::query_scalar("SELECT total_rows FROM recon_foreign_ref WHERE id = 1")
+                .fetch_one(&mut *tx)
+                .await
+                .expect("aggregate UPDATE must preserve the referencing row");
+        assert_eq!(referenced_rows, 4);
+        for consumer in &consumers {
+            let batch = reference_clients::pending_batch(&mut *tx, &consumer.consumer_id).await;
+            let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT action, value, label8 FROM {} WHERE batch_token = $1 ORDER BY action, value NULLS FIRST", consumer.delta_relation
+            ))).bind(batch.batch_token).fetch_all(&mut *tx).await.expect("read exact join delta");
+            assert_eq!(batch.mode, "EXACT");
+            assert_eq!(batch.row_count, 7);
+            assert_eq!(
+                rows,
+                vec![
+                    ("DELETE".into(), None, "before".into()),
+                    ("DELETE".into(), None, "before".into()),
+                    ("DELETE".into(), Some("kept".into()), "before".into()),
+                    ("INSERT".into(), None, "after".into()),
+                    ("INSERT".into(), None, "after".into()),
+                    ("INSERT".into(), None, "after".into()),
+                    ("INSERT".into(), Some("kept".into()), "after".into()),
+                ]
+            );
+            reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
+        }
+        if commit {
+            tx.commit().await.expect("commit exact delivery");
+        } else {
+            tx.rollback()
+                .await
+                .expect("rollback refresh and acknowledgements");
+            let after: String = db.query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_join'").await;
+            assert_eq!(after, before);
+            assert_eq!(db.count("recon_terminal").await, 3);
+            assert_eq!(
+                db.query_scalar::<i64>("SELECT total_rows FROM recon_foreign_ref WHERE id=1")
+                    .await,
+                3
+            );
+        }
+    }
+    db.assert_st_matches_query("recon_join", &query).await;
+    db.assert_st_matches_query("recon_terminal", &query).await;
+    assert_eq!(
+        db.query_scalar::<i64>("SELECT total_rows FROM recon_count")
+            .await,
+        4
+    );
+    let groups: Vec<(Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT value, copies, __pgt_count FROM recon_groups ORDER BY value NULLS FIRST",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read group maintenance state");
+    assert_eq!(groups, vec![(None, 3, 3), (Some("kept".into()), 1, 1)]);
+    let strategy: String = db.query_scalar("SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'recon_join' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert_eq!(strategy, "reconciliation_delta");
+}
+
+#[tokio::test]
 async fn test_graph_keyless_snapshot_preserves_duplicate_multiplicity() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE source (value INT NOT NULL)").await;

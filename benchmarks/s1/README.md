@@ -9,15 +9,25 @@ The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
 functions and ran slower; that change was dropped and its measurement is retained,
 and does not qualify the throughput gate.
 
+The follow-up also reuses parsed query trees and resolved CDC buffer OIDs.
+For immutable pointwise inner joins with at most two table inputs, a completed reconciled baseline permits
+ordinary differential maintenance without another complete comparison.
+Eligible large graph joins use the required multiset comparison to produce the
+apply delta directly, retaining duplicate occurrences and scalar COUNT state.
+Constraint triggers, rules and row security keep the existing UPDATE path.
+Graph statistics cover the bounded stages and materialized delta actually read.
+The focused regressions check complete typed output deltas, NULL duplicates,
+multi-cycle changes, rollback, foreign-key cascades and owner privileges.
+
 The unchanged workload requires 300 admissions at >=60 cases/minute, complete
 case/source vectors, zero future receipts, and a 1,000-case due burst with
 p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
 below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
 container memory, 45 minutes, or less than 10 GiB host free space. These are
 sampled limits, not a per-operation memory guarantee.
-The supervisor retries recognized PostgreSQL restart connection gaps at most
-four times, one second apart, because the frozen worker-health checks restart
-the server. Persistent failures, timeouts and other errors stop the run.
+The supervisor uses the bounded PostgreSQL restart handling described below
+because the frozen worker-health checks restart the server. Persistent
+failures, timeouts and other errors stop the run.
 
 The workflow runs both images sequentially on the same native Linux amd64
 runner. This environment differs from the earlier amd64 runs emulated on an
@@ -53,6 +63,12 @@ physical PGDATA and cgroup memory during recognized connection restart errors,
 retains prior SQL counters, and records every unavailable SQL sample. A gap of
 60 seconds fails supervision. Other SQL errors still fail immediately. This
 does not change the frozen harness's readiness checks, workload or limits.
+
+Run 39294113404 completed its corrected control at 23.3414/minute with only
+the approved rate failure. The candidate then failed the frozen fresh-server
+60-second readiness check while the Docker initialization server was shutting
+down; it admitted no churn cases. Supervision itself recorded no errors.
+This is retained as a startup failure, with no candidate throughput score.
 
 The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
 It uses the same source pins, MDM correction, workload and limits. Its image

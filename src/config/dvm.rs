@@ -383,12 +383,10 @@ pub static PGS_DELTA_WORK_MEM: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// planner statistics are reliable.
 pub static PGS_DELTA_ENABLE_NESTLOOP: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// PERF-5: Run ANALYZE on change buffer tables before delta SQL execution.
+/// PERF-5: Analyze the relations read by delta execution.
 ///
-/// When enabled, `ANALYZE pgtrickle_changes.changes_<oid>` is run before
-/// the delta SQL is executed. This ensures PostgreSQL has accurate row
-/// count estimates for change buffer tables, which are truncated and
-/// refilled every refresh cycle (auto-analyze never fires on them).
+/// Graph refreshes analyze their bounded CDC stages and materialized deltas;
+/// other refreshes analyze persistent source change buffers.
 pub static PGS_ANALYZE_BEFORE_DELTA: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// UX-7: DIFF output row format for aggregate UPDATE-splits.
@@ -964,13 +962,12 @@ pub fn register_dvm_gucs() {
         GucFlags::default(),
     );
 
-    // PERF-5: ANALYZE change buffer before delta execution.
+    // PERF-5: ANALYZE relations used by delta execution.
     GucRegistry::define_bool_guc(
         c"pg_trickle.analyze_before_delta",
-        c"Run ANALYZE on change buffer tables before delta SQL execution.",
-        c"When true (default), ANALYZE is run on each source's change buffer \
-           before executing the delta SQL. Ensures accurate row count estimates \
-           since auto-analyze never fires on truncated-and-refilled buffers.",
+        c"Analyze relations used by delta execution.",
+        c"When true (default), graph refreshes analyze bounded CDC stages and \
+           materialized deltas. Other refreshes analyze persistent source change buffers.",
         &PGS_ANALYZE_BEFORE_DELTA,
         GucContext::Suset,
         GucFlags::default(),
