@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
         CHECK (orchestration_mode IN ('MANAGED', 'EXTERNAL')),
     -- v0.93.0: generation of the result-affecting execution contract.
     contract_generation BIGINT NOT NULL DEFAULT 1 CHECK (contract_generation > 0)
-) WITH (fillfactor = 50);
+);
 
 CREATE OR REPLACE FUNCTION pgtrickle._bump_contract_generation()
 RETURNS trigger
