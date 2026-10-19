@@ -170,6 +170,32 @@ The summarizer rejects incomplete runs and reports each job's result, wait
 and execution minutes. Record cancelled/failed runs as such, never as passing
 performance comparisons.
 
+### Matched allocation replay
+
+Dispatch `ci.yml` with `compare_pr_allocations=true` on the comparison branch
+to run only the paired experiment. Normal PR, push, nightly and manual jobs
+retain their existing behavior when this input is false.
+
+Both allocations use the production/test trees at merged commit
+`0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14`, Rust 1.99.1, `ubuntu-24.04`,
+disabled build caches and zero test retries. A single producer freezes all
+three PostgreSQL images and extracts one extension package for both sides.
+Its cost is reported separately. Each allocation runs five workload jobs:
+the existing integration suites, the same three light shards, and full E2E.
+The before allocation replays the broad full inventory from `b2ebaa8d`
+(after #1189); the after allocation uses the checked bounded list and adds
+the existing DVM components to integration. Fixed recovery witnesses and
+isolated atomicity execution are held constant on both sides.
+
+This measures the affected tier workloads, including cold test compilation.
+Unchanged unit, release, shipping, LSN and security jobs are excluded from
+both sides. Replay job counts and minutes must not be labeled whole-PR totals;
+the new `PR correctness` aggregation job is also outside this experiment.
+Queue time is observed separately and is not a causal performance claim.
+Source/tool/runner versions, image/package checksums and every step result
+are retained as artifacts. A failed job or mismatched environment makes the
+paired result inconclusive, rather than a passing speedup measurement.
+
 ## Verification record (2026-10-18)
 
 The local probes used a freshly rebuilt x86-64 PostgreSQL 18.6 image and the
