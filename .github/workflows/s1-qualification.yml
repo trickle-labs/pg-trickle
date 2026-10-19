@@ -16,8 +16,9 @@ concurrency:
 
 jobs:
   qualify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
+    runs-on: ubuntu-24.04
+    # Allow both 45-minute supervisors and artifact upload to finish on failure.
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v7
         with:
