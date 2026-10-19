@@ -210,6 +210,17 @@ per job as residual host variability; GitHub's hosted image revision cannot be
 selected by the `ubuntu-24.04` label. This is a single paired containerized replay,
 not a population estimate or a reconstruction of historical queue conditions.
 
+The first [containerized replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39292981857)
+exposed another one-shot fixture assumption in the mixed view/stream-table
+diamond. Its category update left `Cable` in the joined result (three rows
+instead of two). A controlled source-writer lock reproduces that exact stale
+row in both full and light harnesses after a completed manual attempt. The
+fixture now uses the existing exact-convergence helper at each diamond branch
+and the join, releasing its writer only after witnessing the held-back attempt.
+All original final row assertions remain. Both 35-check targets passed after
+repair; reverting only the convergence calls makes the controlled case fail
+in both harnesses. The failed hosted replay is not a speedup measurement.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 

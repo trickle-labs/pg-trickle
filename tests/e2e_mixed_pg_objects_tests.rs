@@ -809,15 +809,19 @@ async fn test_mixed_diamond_with_view_branch() {
     // Widget=9.99, Cable=4.99
     assert_eq!(db.count("public.md_st_hw_priced").await, 2);
 
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['md_st_hw_products', 'md_st_prices', 'md_st_hw_priced'])")
+        .await;
+
     // Add a new hardware product with price
     db.execute("INSERT INTO md_products VALUES (4, 'Bolt', 'hardware')")
         .await;
     db.execute("INSERT INTO md_prices VALUES (4, 1.99)").await;
 
     // Refresh both branches then the join
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_prices").await;
-    db.refresh_st("md_st_hw_priced").await;
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_prices").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
@@ -828,8 +832,45 @@ async fn test_mixed_diamond_with_view_branch() {
     // Change a product from hardware to digital
     db.execute("UPDATE md_products SET category = 'digital' WHERE name = 'Cable'")
         .await;
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_hw_priced").await;
+    let mut writer = db.pool.begin().await.expect("begin controlled view writer");
+    sqlx::query("LOCK TABLE md_products IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold controlled view writer");
+    let last_refresh: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    tokio::join!(
+        async {
+            db.refresh_st_until_converged("md_st_hw_products").await;
+            db.refresh_st_until_converged("md_st_hw_priced").await;
+        },
+        async {
+            assert!(
+                db.wait_for_condition(
+                    "view branch update held back by a source writer",
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                         JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                         WHERE st.pgt_name = 'md_st_hw_products' AND h.refresh_id > {last_refresh} \
+                           AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED')"
+                    ),
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_millis(50),
+                )
+                .await,
+                "view branch must complete a held-back refresh before releasing the writer"
+            );
+            let stale_product: bool = db
+                .query_scalar("SELECT EXISTS(SELECT 1 FROM md_st_hw_products WHERE name = 'Cable')")
+                .await;
+            assert!(stale_product, "writer holdback must preserve Cable");
+            writer
+                .rollback()
+                .await
+                .expect("release controlled view writer");
+        }
+    );
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
