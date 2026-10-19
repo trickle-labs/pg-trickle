@@ -270,16 +270,33 @@ pub(crate) fn reconciliation_delta_sql(
         .map_err(|e| PgTrickleError::SpiError(format!("native reconciliation eligibility for {table}: {e}")))?
         .unwrap_or(false);
         if native_comparison {
-            // Compare visible values before encoding identities, so unchanged rows need no encoder call.
+            // Counted intermediates retain EXCEPT ALL; plain replacements benefit from one grouped pass.
+            let changes = if has_pgt_count {
+                format!(
+                    "SELECT {row_id} AS __pgt_row_id, 'D'::text AS __pgt_action, sub.* FROM (\
+                         SELECT {csv} FROM {table} EXCEPT ALL SELECT {csv} FROM __pgt_recon_expected) sub \
+                     UNION ALL \
+                     SELECT {row_id} AS __pgt_row_id, 'I'::text AS __pgt_action, sub.* FROM (\
+                         SELECT {csv} FROM __pgt_recon_expected EXCEPT ALL SELECT {csv} FROM {table}) sub"
+                )
+            } else {
+                format!(
+                    "WITH __pgt_recon_weights AS MATERIALIZED (\
+                         SELECT {csv}, SUM({weight}) AS {weight} FROM (\
+                             SELECT {csv}, -1 AS {weight} FROM {table} \
+                             UNION ALL SELECT {csv}, 1 AS {weight} FROM __pgt_recon_expected\
+                         ) signs GROUP BY {csv} HAVING SUM({weight}) <> 0) \
+                     SELECT {row_id} AS __pgt_row_id, \
+                            CASE WHEN sub.{weight} < 0 THEN 'D'::text ELSE 'I'::text END AS __pgt_action, {csv} \
+                     FROM __pgt_recon_weights sub CROSS JOIN LATERAL \
+                          pg_catalog.generate_series(1::bigint, pg_catalog.abs(sub.{weight})) \
+                          AS __pgt_expansion({occurrence})"
+                )
+            };
             return Ok(Some(ReconciliationDelta {
                 sql: format!(
                     "WITH __pgt_recon_expected AS MATERIALIZED ({materialization_query}), \
-                     __pgt_recon_changes AS MATERIALIZED (\
-                         SELECT {row_id} AS __pgt_row_id, 'D'::text AS __pgt_action, sub.* FROM (\
-                             SELECT {csv} FROM {table} EXCEPT ALL SELECT {csv} FROM __pgt_recon_expected) sub \
-                         UNION ALL \
-                         SELECT {row_id} AS __pgt_row_id, 'I'::text AS __pgt_action, sub.* FROM (\
-                             SELECT {csv} FROM __pgt_recon_expected EXCEPT ALL SELECT {csv} FROM {table}) sub), \
+                     __pgt_recon_changes AS MATERIALIZED ({changes}), \
                      __pgt_recon_deletions AS (\
                          SELECT __pgt_row_id{state}, count(*) AS {weight} FROM __pgt_recon_changes \
                          WHERE __pgt_action = 'D' GROUP BY __pgt_row_id{state}) \

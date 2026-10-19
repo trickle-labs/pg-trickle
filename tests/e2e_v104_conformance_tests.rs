@@ -662,6 +662,18 @@ async fn test_v104_graph_source_owner_can_delegate_coordinator() {
             assert!(error.to_string().contains("MAINTAIN"), "{error}");
         }
     }
+    let digest_before =
+        reference_clients::graph_digest(&db.pool, "public.v104_delegated_root").await;
+    db.execute("ALTER TABLE v104_delegated_upstream ENABLE ROW LEVEL SECURITY")
+        .await;
+    let digest_after =
+        reference_clients::graph_digest(&db.pool, "public.v104_delegated_root").await;
+    assert_ne!(
+        digest_before, digest_after,
+        "a new contract snapshot must reload upstream relation attributes"
+    );
+    db.execute("ALTER TABLE v104_delegated_upstream DISABLE ROW LEVEL SECURITY")
+        .await;
 
     db.execute("REVOKE MAINTAIN ON v104_delegated_source FROM v104_graph_coordinator")
         .await;
