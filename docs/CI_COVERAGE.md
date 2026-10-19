@@ -244,6 +244,19 @@ earlier local attempt failed during PostgreSQL template-lock connection setup;
 that infrastructure failure remains part of the verification history.
 Both 86-check CTE targets passed without retries after repair.
 
+The [next paired replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39301975393)
+passed both integration allocations and all six light shards, with matching
+controls in their eight records. Its bounded full job exposed a stale
+bit-aggregate fixture after an insert: the `eng` group retained count 3 and
+permissions 7 instead of count 4 and permissions 23. That fixture now also
+uses the existing convergence helper before its unchanged exact oracle.
+The failed run is inconclusive. Comparison invocations now collect all selected
+parallel failures rather than stopping at the first one; test failures and
+cancellations still fail the run. Normal PR invocations keep their existing
+early-failure behavior.
+Both 36-check refresh targets passed without retries after the bit-aggregate
+fixture repair; the exact wrong-row oracle remains unchanged.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 
