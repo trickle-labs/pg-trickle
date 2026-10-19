@@ -506,14 +506,34 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
         "SELECT pgtrickle.resume_scheduler(ARRAY['public.{scheduler}'])"
     ))
     .await;
-    let scheduler_witness = wait_for_barrier(
+    let witness = wait_for_barrier(
         &db,
         scheduler_id,
         phase,
         scheduler_blocker,
         Duration::from_secs(90),
-    )
-    .await;
+    );
+    tokio::pin!(witness);
+    let scheduler_witness = loop {
+        tokio::select! {
+            result = &mut witness => break result,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // A pre-resume watermark can finish an empty tick; keep the pending change due.
+                sqlx::query(
+                    "WITH due AS (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                         WHERE pgt_id = $1 AND last_refresh_at > now() - interval '1 hour' \
+                         FOR UPDATE SKIP LOCKED) \
+                     UPDATE pgtrickle.pgt_stream_tables st \
+                         SET last_refresh_at = now() - interval '2 hours' \
+                         FROM due WHERE st.pgt_id = due.pgt_id",
+                )
+                .bind(scheduler_id)
+                .execute(&db.pool)
+                .await
+                .expect("keep scheduler fixture due without waiting on its row lock");
+            }
+        }
+    };
     // Keep the barrier held beyond the former 100ms lock deadline.
     tokio::time::sleep(Duration::from_millis(250)).await;
     // Compare rollback to the last committed boundary; a no-data scheduler tick may finish first.
