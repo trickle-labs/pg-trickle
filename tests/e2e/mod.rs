@@ -1569,6 +1569,33 @@ impl E2eDb {
         }
     }
 
+    /// Refresh a public fixture until its exact schema and multiset match its defining query.
+    /// Completed manual windows can defer source changes under writer holdback.
+    pub async fn refresh_st_until_converged(&self, name: &str) {
+        let defining_query: String = sqlx::query_scalar(
+            "SELECT defining_query FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'public' AND pgt_name = $1",
+        )
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .expect("load stream table defining query");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            self.refresh_st_with_retry(name).await;
+            let Err(diff) = oracle::compare_st_to_query(self, name, &defining_query).await else {
+                return;
+            };
+            assert!(
+                diff.schema_mismatch.is_none()
+                    && diff.comparison_error.is_none()
+                    && std::time::Instant::now() < deadline,
+                "stream table '{name}' failed to converge: {diff}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     /// Drop a stream table via `pgtrickle.drop_stream_table()`.
     pub async fn drop_st(&self, name: &str) {
         self.execute(&format!("SELECT pgtrickle.drop_stream_table('{name}')"))

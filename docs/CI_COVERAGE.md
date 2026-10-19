@@ -150,6 +150,14 @@ adds no component setup job; `PR correctness` adds one small aggregation job.
 The 161 → 100 full-target reduction is an allocation count, not a measured
 runtime speedup.
 
+The completed [ready-PR run at `b3855f1a`](https://github.com/trickle-labs/pg-trickle/actions/runs/39214902371)
+passed on 2026-10-19 with 18 active jobs, 146.333 execution minutes and
+294.500 summed creation-to-start minutes. These are observations, not a
+controlled speedup against the historical 19-job run above: that baseline
+predates #1189 and uses different test fixtures. Issue #1188 remains open for
+a matched before/after comparison using the same fixed sources and runner
+class, with cache state and wait measured separately.
+
 Capture a **completed** run, including all paginated matrix jobs:
 
 ```bash
@@ -179,13 +187,18 @@ runner performance measurements.
 | 67 candidate full-harness duplicates | 1205 passed with two retries; the replay led to retaining 16 worker-sensitive targets in the final 100-target full allocation |
 | Isolated refresh-atomicity phase | All 12 passed serially with retries disabled |
 | Path and artifact placement | 26 matching-library path cases and all three real-artifact consumer layouts passed; downloaded library digests matched and cached leftovers were removed |
-| Hosted ready-PR execution and controlled before/after timings | Not completed; Actions remained queued |
+| Hosted ready-PR execution | Passed at `b3855f1a` on 2026-10-19: full suite 1214/1214, isolated atomicity 12/12, ten recovery repetitions, all three light shards and `PR correctness` |
+| Controlled before/after timings | Open; the historical baseline predates #1189 and is not a matched comparison |
 
 The full-harness DAG schedule-change probe reported an extra stale `d` group
-in `ops_l1`, then passed on retry and in an isolated no-retry run. The target
-remains pre-merge. The other retry was Docker port discovery and also passed
-an isolated no-retry run. Retried success is not treated as proof that these
-first-attempt failures are harmless.
+in `ops_l1`. A controlled source-writer lock now reproduces exactly that
+extra `d = 99` row: the one-shot manual refresh completed a held-back window
+before its pending delete was consumed. DAG operations and cascade fixtures
+now share the bounded exact-convergence helper. The schedule-change regression
+pauses scheduling and releases its writer only after witnessing the completed
+held-back attempt and stale group; manual refresh must then remove the group
+at all three layers. The final source-row assertions remain unchanged.
+The other retry was Docker port discovery and passed an isolated no-retry run.
 
 `test_wal_trigger_fallback_undecoded_commit_requires_rebaseline` failed in the
 full probe and again in a separate no-retry run: the observed pending receipt
@@ -205,9 +218,10 @@ passed three independent runs without retries. The Docker setup case passed
 separately. The hosted getting-started failure was traced to a refresh helper
 that treated a NOTICE-only skip as completion; its lock regression and all 15
 getting-started checks passed in both full and light harnesses after repair.
-Production recovery behavior and data assertions are unchanged. The full sweep
-with failed attempts is **not green**; hosted verification of the repairs is
-still required.
+Production recovery behavior and data assertions are unchanged. The local
+sweep with failed attempts remains **not green**. Subsequent hosted verification
+at `b3855f1a` passed all selected checks without automatic full-suite retries;
+it is separate evidence and does not erase the earlier failures.
 
 Later hosted runs exposed cascade delete and multi-level DML assertions that
 assumed every completed manual refresh had consumed the latest changes.
