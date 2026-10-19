@@ -196,6 +196,14 @@ Source/tool/runner versions, image/package checksums and every step result
 are retained as artifacts. A failed job or mismatched environment makes the
 paired result inconclusive, rather than a passing speedup measurement.
 
+After saving the completed run/jobs JSON above, download only the replay
+evidence (the shared image archive is not needed for the report):
+
+```bash
+gh run download RUN_ID --pattern 'allocation-before-*' --pattern 'allocation-after-*' --dir /tmp/ci-allocation-RUN_ID
+python3 scripts/compare_ci_allocations.py /tmp/ci-run.json /tmp/ci-jobs.json /tmp/ci-allocation-RUN_ID
+```
+
 ## Verification record (2026-10-18)
 
 The local probes used a freshly rebuilt x86-64 PostgreSQL 18.6 image and the
