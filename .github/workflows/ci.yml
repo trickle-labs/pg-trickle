@@ -143,6 +143,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
       # M-9 (v0.55.0): Upload unit-test coverage to Codecov for PR gate.
@@ -216,6 +217,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
   unit-tests-windows:
@@ -303,6 +305,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
@@ -718,6 +721,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
   # ── Upgrade completeness check (every PR) ───────────────────────────────
@@ -1868,6 +1872,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{ github.event.pull_request.head.sha }}
 
   pr-correctness:
