@@ -222,6 +222,27 @@ and the join, releasing its writer only after witnessing the held-back attempt.
 All original final row assertions remain. Both 35-check targets passed after
 repair; reverting only the convergence calls makes the controlled case fail
 in both harnesses. The failed hosted replay is not a speedup measurement.
+Its broad allocation also exposed a CTE insert fixture with the same one-shot
+assumption (two rows instead of four), now using the convergence helper, and
+a circular-dependency fixture whose session-only `SET` was lost across pooled
+connections. The circular allow/reject cases now use the existing configuration
+reload helper so every backend sees the intended setting. Dispatching its
+replacement triggered the existing concurrency rule and cancelled the still
+running broad job; this failed/cancelled run used 11 jobs and 184.467 summed
+execution minutes, recorded only as experiment overhead. The premature
+replacement was also stopped before building inputs so these failures could
+be repaired before another paired replay.
+Comparison dispatches now use distinct concurrency groups to retain earlier
+attempts. The stopped replacement used one execution minute in its producer;
+its unexpanded matrix placeholder consumed zero execution time.
+The local circular follow-up exposed an additional terminal-state sampling
+race: one peer was still `ACTIVE` after the first reached `ERROR`. The test
+now requires both members to reach `ERROR` together before the deadline;
+it also fails if that deadline expires, where the old conditional could pass.
+The repaired nine-check circular target passed without retries. A separate
+earlier local attempt failed during PostgreSQL template-lock connection setup;
+that infrastructure failure remains part of the verification history.
+Both 86-check CTE targets passed without retries after repair.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):

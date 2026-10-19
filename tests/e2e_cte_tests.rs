@@ -141,7 +141,7 @@ async fn test_cte_differential_refresh_inserts() {
     // Insert new rows
     db.execute("INSERT INTO inv VALUES (3, 'SKU-C', 30), (4, 'SKU-D', 40)")
         .await;
-    db.refresh_st("inv_cte_st").await;
+    db.refresh_st_until_converged("inv_cte_st").await;
 
     assert_eq!(db.count("public.inv_cte_st").await, 4);
 }
