@@ -281,6 +281,28 @@ pub(crate) fn reconciliation_delta_sql(
                 .map(|column| format!("pre.{column} IS NOT DISTINCT FROM w.{column}"))
                 .collect::<Vec<_>>()
                 .join(" AND ");
+            let (deletion_keys, deletion_match, deletion_partition) = if complete {
+                (
+                    format!("__pgt_row_id{state}"),
+                    format!("pre.__pgt_row_id = w.__pgt_row_id{pre_match}"),
+                    format!("pre.__pgt_row_id{pre_state}"),
+                )
+            } else {
+                (
+                    format!(
+                        "{csv}, pg_catalog.hash_record_extended(ROW({csv}), 0::bigint) AS {occurrence}"
+                    ),
+                    format!(
+                        "pg_catalog.hash_record_extended(ROW({pre_cols}), 0::bigint) = w.{occurrence} AND {native_match}"
+                    ),
+                    pre_cols.clone(),
+                )
+            };
+            let deletion_groups = if complete {
+                format!("__pgt_row_id{state}")
+            } else {
+                csv.clone()
+            };
             // Counted intermediates retain EXCEPT ALL; plain replacements benefit from one grouped pass.
             let changes = if has_pgt_count {
                 format!(
@@ -315,15 +337,12 @@ pub(crate) fn reconciliation_delta_sql(
                     "WITH __pgt_recon_expected AS MATERIALIZED ({materialization_query}), \
                      __pgt_recon_changes AS MATERIALIZED ({changes}), \
                      __pgt_recon_deletions AS (\
-                         SELECT {csv}, count(*) AS {weight}, \
-                                pg_catalog.hash_record_extended(ROW({csv}), 0::bigint) AS {occurrence} \
-                         FROM __pgt_recon_changes WHERE __pgt_action = 'D' GROUP BY {csv}) \
+                         SELECT {deletion_keys}, count(*) AS {weight} \
+                         FROM __pgt_recon_changes WHERE __pgt_action = 'D' GROUP BY {deletion_groups}) \
                      SELECT __pgt_row_id, 'D'::text AS __pgt_action, {csv}, {delete_ctid} FROM (\
                          SELECT pre.__pgt_row_id, {pre_cols}, pre.ctid AS {delete_ctid}, w.{weight}, \
-                                row_number() OVER (PARTITION BY {pre_cols} ORDER BY pre.ctid) AS {occurrence} \
-                         FROM {table} pre JOIN __pgt_recon_deletions w \
-                           ON pg_catalog.hash_record_extended(ROW({pre_cols}), 0::bigint) = w.{occurrence} \
-                          AND {native_match}\
+                                row_number() OVER (PARTITION BY {deletion_partition} ORDER BY pre.ctid) AS {occurrence} \
+                         FROM {table} pre JOIN __pgt_recon_deletions w ON {deletion_match}\
                      ) deletes WHERE {occurrence} <= {weight} \
                      UNION ALL \
                      SELECT __pgt_row_id, 'I'::text AS __pgt_action, {csv}, NULL::tid AS {delete_ctid} \

@@ -35,7 +35,8 @@ of the redundant pre-snapshot within the refresh transaction.
 Small immutable computed projections with a reconciled baseline can reuse their
 mandatory comparison too. Native full-value matching retains the actual stored
 row identity and physical deletion target, including duplicate NULL occurrences.
-A record hash narrows the join; full NULL-safe equality verifies every match.
+A record hash narrows incomplete-identity joins; full NULL-safe equality verifies
+every match. Complete identities retain direct identity matching.
 The regression changes the caller's timezone and checks complete temporal deltas.
 
 The unchanged workload requires 300 admissions at >=60 cases/minute, complete
@@ -97,6 +98,17 @@ diagnostic, it did not materially improve the full workload and was discarded.
 Its source `ca4c5faba9c0c5198c5442ba25b20946e747a6c4`, exact image
 `sha256:36ee69d30e83a17a08314cad2b99b8bb2a633679eea1db05e9da4d905a9bf7f1`,
 raw failure, complete observations and portable image remain retained.
+
+The subsequent pointwise/projection candidate, source
+`6d12294d4079ff9cb5f30db9ee8b7fd5c29fe09e`, image
+`sha256:2e1439bcd726e7c50ef2a852ed1b782ebfb0cb88305fae7077361948cca3103b`,
+completed at 59.97136027709061/minute and remains a failure. All 1,200 source
+and 300 case vectors matched, with zero future receipts and all other gates
+passing. Due-burst p95/max were 77.284419/82.261 seconds; conservative storage
+was 3,408,026,079 bytes and peak sampled memory 2,076,282,880 bytes. The raw
+exit, official checker rejection, full vectors, logs and runnable archive are
+retained. An admission-to-admission partial rate omitted the initial timing
+offset; only the unchanged official SQL window determines the final rate.
 
 Memory sampling now handles a confirmed stopped/removed container consistently
 with the existing SQL/disk sampling paths: it records an explicit
