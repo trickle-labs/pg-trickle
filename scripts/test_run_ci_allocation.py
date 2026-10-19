@@ -39,7 +39,7 @@ class AllocationReplayTests(unittest.TestCase):
             with patch.object(run_ci_allocation, 'ROOT', root), patch.object(
                 run_ci_allocation, 'output', return_value='fixed tool/source'
             ), patch('sys.argv', ['run_ci_allocation.py', 'after', 'integration']), patch.dict(
-                run_ci_allocation.os.environ
+                run_ci_allocation.os.environ, {'CI_ALLOCATION_CONTAINER': 'sha256:fixed'}
             ), patch.object(run_ci_allocation.subprocess, 'run') as run:
                 run.side_effect = [SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]
                 self.assertEqual(run_ci_allocation.main(), 1)
@@ -57,6 +57,14 @@ class AllocationReplayTests(unittest.TestCase):
                 'sys.argv', ['run_ci_allocation.py', 'before', 'full']
             ), patch.dict(run_ci_allocation.os.environ):
                 with self.assertRaisesRegex(RuntimeError, 'cold workspace'):
+                    run_ci_allocation.main()
+
+    def test_native_host_replay_is_rejected_before_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(run_ci_allocation, 'ROOT', Path(directory)), patch(
+                'sys.argv', ['run_ci_allocation.py', 'before', 'full']
+            ), patch.dict(run_ci_allocation.os.environ, {}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, 'frozen toolchain container'):
                     run_ci_allocation.main()
 
 

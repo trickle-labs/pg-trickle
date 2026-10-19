@@ -57,6 +57,8 @@ def main():
     os.environ['NEXTEST_RETRIES'] = '0'
     if (ROOT / 'target/debug').exists():
         raise RuntimeError('comparison requires a cold workspace build directory')
+    if not os.environ.get('CI_ALLOCATION_CONTAINER', '').startswith('sha256:'):
+        raise RuntimeError('comparison requires the frozen toolchain container')
     directory = ROOT / 'target/allocation-comparison'
     directory.mkdir(parents=True, exist_ok=True)
     os.environ['FAILURE_RECOVERY_ARTIFACT_DIR'] = str(directory / 'recovery')
@@ -70,6 +72,10 @@ def main():
         'postgresql': output(['pg_config', '--version']),
         'runner_image': os.environ.get('ImageOS'),
         'runner_image_version': os.environ.get('ImageVersion'),
+        'workload_image': os.environ['CI_ALLOCATION_CONTAINER'],
+        'container_os': output(['cat', '/etc/os-release']),
+        'host_kernel': output(['uname', '-r']),
+        'host_docker': output(['docker', 'version', '--format', '{{.Server.Version}}']),
         'package_checksums': (ROOT / 'comparison-inputs/package.sha256').read_text(),
         'image_checksums': (ROOT / 'comparison-inputs/images.sha256').read_text(),
         'build_cache': 'disabled', 'retries': 0,

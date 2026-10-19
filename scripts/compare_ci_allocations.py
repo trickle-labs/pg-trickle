@@ -11,7 +11,7 @@ from ci_run_metrics import summarize
 TIERS = {'integration', 'light-1', 'light-2', 'light-3', 'full'}
 IDENTITY_FIELDS = (
     'comparison_sha', 'sources', 'rustc', 'nextest', 'postgresql',
-    'runner_image', 'runner_image_version', 'package_checksums', 'image_checksums',
+    'runner_image', 'workload_image', 'container_os', 'package_checksums', 'image_checksums',
 )
 
 
@@ -46,12 +46,18 @@ def compare(run, jobs, artifacts):
             report['errors'].append(f'wrong artifact identity for {allocation}/{tier}')
         if identity.get('comparison_sha') != run['head_sha']:
             report['errors'].append(f'artifact belongs to a different commit for {allocation}/{tier}')
+        if not re.fullmatch(r'sha256:[0-9a-f]{64}', identity.get('workload_image', '')):
+            report['errors'].append(f'missing immutable workload image for {allocation}/{tier}')
         if identity['build_cache'] != 'disabled' or identity['retries'] != 0:
             report['errors'].append(f'cache/retry policy mismatch for {allocation}/{tier}')
         if not steps or any(step['exit_code'] != 0 for step in steps):
             report['errors'].append(f'failed or missing steps for {allocation}/{tier}')
         identities.append(identity)
         groups[allocation].append({**row, 'tier': tier,
+                                   'host_runner_image_version': identity.get('runner_image_version'),
+                                   'host_kernel': identity.get('host_kernel'),
+                                   'host_docker': identity.get('host_docker'),
+                                   'steps': steps,
                                    'workload_minutes': sum(step['seconds'] for step in steps) / 60})
     expected = {(allocation, tier) for allocation in groups for tier in TIERS}
     if seen != expected:
@@ -71,10 +77,11 @@ def compare(run, jobs, artifacts):
     report['shared_jobs'] = [row for row in metrics['jobs'] if not re.search(r'Replay \(', row['name'])]
     report['valid'] = not report['errors']
     if report['valid']:
-        before = report['allocations']['before']['execution_minutes']
-        after = report['allocations']['after']['execution_minutes']
-        report['observed_execution_minutes_saved'] = round(before - after, 3)
-        report['observed_execution_percent_saved'] = round(100 * (before - after) / before, 2)
+        for metric in ('execution', 'workload'):
+            before = report['allocations']['before'][f'{metric}_minutes']
+            after = report['allocations']['after'][f'{metric}_minutes']
+            report[f'observed_{metric}_minutes_saved'] = round(before - after, 3)
+            report[f'observed_{metric}_percent_saved'] = round(100 * (before - after) / before, 2)
         report['matched_identity'] = {field: identities[0][field] for field in IDENTITY_FIELDS}
     return report
 

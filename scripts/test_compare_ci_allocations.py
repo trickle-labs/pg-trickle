@@ -24,7 +24,7 @@ class PairedReportTests(unittest.TestCase):
                 folder.mkdir()
                 identity = {field: 'fixed' for field in compare_ci_allocations.IDENTITY_FIELDS}
                 identity.update(allocation=allocation, tier=tier, retries=0, build_cache='disabled',
-                                comparison_sha=run['head_sha'])
+                                comparison_sha=run['head_sha'], workload_image='sha256:' + 'a' * 64)
                 (folder / 'identity.json').write_text(json.dumps(identity))
                 (folder / 'steps.json').write_text(json.dumps([{'exit_code': 0, 'seconds': 60}]))
         return run, jobs
@@ -38,6 +38,7 @@ class PairedReportTests(unittest.TestCase):
             self.assertEqual(report['allocations']['before']['job_count'], 5)
             self.assertEqual(report['allocations']['after']['execution_minutes'], 10)
             self.assertEqual(report['allocations']['after']['workload_minutes'], 5)
+            self.assertEqual(report['observed_workload_minutes_saved'], 0)
 
     def test_different_source_digest_cannot_produce_a_speedup_claim(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +79,22 @@ class PairedReportTests(unittest.TestCase):
             self.assertFalse(report['valid'])
             self.assertTrue(any('different commit' in error for error in report['errors']))
             self.assertNotIn('observed_execution_minutes_saved', report)
+
+    def test_pinned_workload_image_allows_disclosed_host_image_rollouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run, jobs = self.fixture(root)
+            for index, path in enumerate(root.glob('*/identity.json')):
+                identity = json.loads(path.read_text())
+                identity['runner_image_version'] = f'host-revision-{index}'
+                path.write_text(json.dumps(identity))
+            report = compare_ci_allocations.compare(run, jobs, root)
+            self.assertTrue(report['valid'], report['errors'])
+            path = root / 'allocation-after-full/identity.json'
+            identity = json.loads(path.read_text())
+            identity['workload_image'] = 'sha256:' + 'b' * 64
+            path.write_text(json.dumps(identity))
+            self.assertFalse(compare_ci_allocations.compare(run, jobs, root)['valid'])
 
 
 if __name__ == '__main__':

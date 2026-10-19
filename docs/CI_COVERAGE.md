@@ -177,9 +177,12 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at merged commit
-`0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14`, Rust 1.99.1, `ubuntu-24.04`,
-disabled build caches and zero test retries. A single producer freezes all
-three PostgreSQL images and extracts one extension package for both sides.
+`0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14`, the `ubuntu-24.04` runner class,
+cold workspace build directories and zero test retries. A single producer
+freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
+images and one extension package for both sides. Both sides execute inside
+that exact toolchain image, including its identical registry cache. The
+producer smoke-tests Docker/socket/mount access in both full and light harnesses.
 Its cost is reported separately. Each allocation runs five workload jobs:
 the existing integration suites, the same three light shards, and full E2E.
 The before allocation replays the broad full inventory from `b2ebaa8d`
@@ -195,6 +198,17 @@ Queue time is observed separately and is not a causal performance claim.
 Source/tool/runner versions, image/package checksums and every step result
 are retained as artifacts. A failed job or mismatched environment makes the
 paired result inconclusive, rather than a passing speedup measurement.
+
+The first [native replay attempt](https://github.com/trickle-labs/pg-trickle/actions/runs/39287515498)
+was stopped as inconclusive after completed jobs exposed hosted image revisions
+`20261018.339.1` and `20261012.334.1`. Its results are not a speedup claim.
+The cancelled pilot used 11 jobs and 147.083 summed execution minutes, recorded
+as experiment overhead rather than either allocation's measured cost.
+The replacement fixes compilation and test userspace in one immutable container.
+Hosted image revision, host kernel and Docker-server version remain disclosed
+per job as residual host variability; GitHub's hosted image revision cannot be
+selected by the `ubuntu-24.04` label. This is a single paired containerized replay,
+not a population estimate or a reconstruction of historical queue conditions.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
