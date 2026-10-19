@@ -25,6 +25,15 @@ encoding only changed row identities. Other types retain the existing comparison
 The focused regressions check complete typed output deltas, NULL duplicates,
 multi-cycle changes, rollback, foreign-key cascades and owner privileges.
 
+Fresh installations reserve half of each `pgt_stream_tables` heap page for HOT
+metadata updates (`fillfactor=50`). This changes physical placement, with normal
+WAL durability and the same logical catalog. A diagnostic with identical metadata
+rows and 5,600 committed updates reduced new-page updates from 5,205 at
+fillfactor 100 to 827 at 50; that diagnostic is not a qualification result.
+Existing installations can apply the same setting with
+`ALTER TABLE pgtrickle.pgt_stream_tables SET (fillfactor=50)`; it affects subsequent
+tuple placement without rewriting the table.
+
 The unchanged workload requires 300 admissions at >=60 cases/minute, complete
 case/source vectors, zero future receipts, and a 1,000-case due burst with
 p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
@@ -69,6 +78,22 @@ physical PGDATA and cgroup memory during recognized connection restart errors,
 retains prior SQL counters, and records every unavailable SQL sample. A gap of
 60 seconds fails supervision. Other SQL errors still fail immediately. This
 does not change the frozen harness's readiness checks, workload or limits.
+
+The complete ARM64 candidate from source `17c49e7e52c0e15ef155adbf4c1608725a5c55f1`,
+image `sha256:29d448459fa81c35c5d85558061f984b023345b5f89320da93a747932faf8df4`,
+failed the rate gate at 59.369956913836965/minute. Its complete 1,200 source and
+300 case vectors matched, with zero future receipts. A cgroup read raced with
+container teardown and was also retained as a measurement error; the default
+complete-result checker rejected the run. Earlier complete candidates at
+57.6127, 59.1360 and 59.0177/minute remain failures as well.
+
+Memory sampling now handles a confirmed stopped/removed container consistently
+with the existing SQL/disk sampling paths: it records an explicit
+`exited_container_samples` receipt and retains previous memory/storage peaks.
+A failed memory read from a running container still stops supervision. Fault
+injection verifies both paths and preservation of the preceding resource sample.
+The failed run above remains unchanged. Workload, candidate rate, readiness,
+sampling interval, resource limits and complete-vector requirements are unchanged.
 
 Run 39294113404 completed its corrected control at 23.3414/minute with only
 the approved rate failure. The candidate then failed the frozen fresh-server

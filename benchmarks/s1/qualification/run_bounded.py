@@ -87,6 +87,7 @@ def main(image, run_name, profile_cases=None):
     postgres_unavailable_since = {}
     peak_memory_bytes = 0
     measurement_errors = []
+    exited_container_samples = []
     stop_reason = None
     started = time.monotonic()
     names = set()
@@ -188,10 +189,13 @@ def main(image, run_name, profile_cases=None):
                              "--format", "{{.State.Running}}"],
                             capture_output=True, text=True, timeout=15)
                         exited = container_has_exited(state.returncode, state.stdout, state.stderr)
-                        measurement_errors.append({"container": name, "exit_code": stats.returncode,
-                                                   "container_exited": exited})
                         if exited:
+                            exited_container_samples.append({"container": name,
+                                "elapsed_seconds": time.monotonic() - started,
+                                "measurement": "cgroup_memory", "container_exited": True})
                             continue
+                        measurement_errors.append({"container": name, "exit_code": stats.returncode,
+                                                   "container_exited": False})
                         stop_reason = "memory measurement failed for running container"
                         break
                     memory_bytes += int(stats.stdout.strip())
@@ -240,6 +244,7 @@ def main(image, run_name, profile_cases=None):
                     code = process.wait(timeout=30)
     result = {"image": image, "exit_code": code, "stop_reason": stop_reason,
               "measurement_errors": measurement_errors,
+              "exited_container_samples": exited_container_samples,
               "supervision_error": supervision_error,
               "peak_memory_bytes": peak_memory_bytes,
               "elapsed_seconds": time.monotonic() - started,

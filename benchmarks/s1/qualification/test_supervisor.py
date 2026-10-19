@@ -177,4 +177,45 @@ for message in ("permission denied", "du: cannot access '/data/global/pg_control
         assert bounded.disk_metrics([]).returncode == 1
         assert run_mock.call_count == 1
 
+for exited in (False, True):
+    processes = []
+    persists = not exited
+    memory_reads = [0]
+
+    def memory_run(args, **kwargs):
+        if args[1] == "inspect":
+            value = (image if args[-1] == "{{.Image}}" else
+                     ("false" if exited else "true") if args[-1] == "{{.State.Running}}" else
+                     image + " true")
+            return subprocess.CompletedProcess(args, 0, value + "\n", "")
+        if args[1] == "stop":
+            processes[0].code = 1
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "exec":
+            if "psql" in args:
+                return subprocess.CompletedProcess(args, 0, '{"database_bytes":1,"wal_bytes":2}', "")
+            if "du -sk" in args[-1]:
+                return subprocess.CompletedProcess(args, 0, "100 /data\n", "")
+            memory_reads[0] += 1
+            if memory_reads[0] == 1:
+                return subprocess.CompletedProcess(args, 0, "128\n", "")
+            if exited:
+                processes[0].code = 0
+            return subprocess.CompletedProcess(args, 1, "", "memory read failed")
+        raise AssertionError(args)
+
+    with tempfile.TemporaryDirectory(prefix="issue1168-memory-exit-") as directory:
+        root = Path(directory)
+        with patch.object(bounded, "__file__", str(root / "run_bounded.py")), \
+             patch.object(bounded.subprocess, "Popen", RestartProcess), \
+             patch.object(bounded.subprocess, "run", memory_run), \
+             patch.object(bounded.time, "sleep"):
+            assert bounded.main(image, "memory") == int(not exited)
+        receipt = json.loads((root / "memory/bounded-run.json").read_text())
+        assert receipt["peak_memory_bytes"] == 128
+        assert receipt["conservative_used_bytes"] >= 102400
+        assert bool(receipt["measurement_errors"]) != exited
+        assert bool(receipt["exited_container_samples"]) == exited
+        assert (receipt["stop_reason"] is None) == exited
+
 print("supervisor fault-injection and bounded restart retry checks: PASS")
