@@ -227,7 +227,7 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
 - Require an explicit rebuild of dependent stream tables when WAL capture falls back to triggers, preserving committed changes still pending in WAL or unapplied receipts (#1159).
 - Reduce differential-refresh work by pruning empty graph CDC stages, filtering nested join snapshots to affected keys, and avoiding reconciliation scratch tables when stored results already match the defining query.
-- Restrict LEFT JOIN old/current left snapshots to keys present in the right delta, preserving duplicate rows and NULL-padding transitions while reducing repeated snapshot expansion.
+- Avoid JIT compilation during small graph-delta applies when planner hints are enabled; restore the caller's JIT setting before returning.
 - Reconstruct nested joins from keyless stream-table changes using the pre-change snapshot, preserving exact downstream deletions during graph refresh.
 - Preserve empty exact output batches when explicit differential DML writes no rows.
 - Preserve duplicate multiplicity in keyless snapshots and scope delta lookups by source relation when UNION branches reuse aliases.

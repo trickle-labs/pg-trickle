@@ -3072,6 +3072,17 @@ pub fn execute_differential_refresh_with_tuning(
     }
 
     let ((merge_count, strategy_label), downstream_capture) = with_stream_owner(st, || {
+        // Tiny graph deltas otherwise compile thousands of JIT functions on every apply.
+        if crate::refresh::current_graph_refresh_id().is_some()
+            && crate::config::pg_trickle_merge_planner_hints()
+            && total_change_count < PLANNER_HINT_NESTLOOP_THRESHOLD
+        {
+            Spi::run("SET LOCAL jit = off").map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "disable small graph delta JIT for {schema}.{name}: {e}"
+                ))
+            })?;
+        }
         let mut downstream_capture = None;
         let result = if let Some((plan, accumulator, raw_delta, finalize, insert_only_minmax)) =
             &vector_runtime

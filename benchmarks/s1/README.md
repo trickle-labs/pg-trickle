@@ -3,6 +3,11 @@
 Run the frozen R53 joint-stack workload from [issue #1168](https://github.com/trickle-labs/pg-trickle/issues/1168)
 against exact control and candidate Docker images. The candidate contains the
 graph-refresh optimizations merged in #1169 and the keyless-delta fix in #1171.
+The follow-up avoids JIT compilation within owner-executed graph applies below 100 source changes when
+`planner_aggressive` is enabled. The caller's JIT setting is restored on exit.
+The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
+functions and ran slower; that change was dropped and its measurement is retained,
+and does not qualify the throughput gate.
 
 The unchanged workload requires 300 admissions at >=60 cases/minute, complete
 case/source vectors, zero future receipts, and a 1,000-case due burst with

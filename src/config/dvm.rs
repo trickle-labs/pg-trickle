@@ -14,6 +14,7 @@ pub const MAX_DIFF_CTES: usize = 10_000;
 ///
 /// When enabled (default), the refresh executor estimates the delta size and
 /// applies `SET LOCAL` planner hints before MERGE execution:
+/// - graph delta < 100 source changes: disable JIT only within the owner apply
 /// - delta >= 100 rows: `SET LOCAL enable_nestloop = off` (favour hash joins)
 /// - delta >= 10 000 rows: additionally `SET LOCAL work_mem = '<N>MB'`
 ///

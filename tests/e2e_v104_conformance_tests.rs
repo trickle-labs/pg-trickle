@@ -296,123 +296,93 @@ async fn test_graph_refresh_scopes_nested_join_snapshots_and_empty_stages() {
 }
 
 #[tokio::test]
-async fn test_graph_left_join_snapshots_scope_changed_keys_preserving_duplicates_and_rollback() {
+async fn test_graph_small_delta_jit_scope_preserves_caller_setting_and_hint_opt_out() {
     let db = E2eDb::new().await.with_extension().await;
     sqlx::raw_sql(
-        "CREATE TABLE left_scope_source (id int NOT NULL, value int NOT NULL);
-         CREATE TABLE left_scope_first (id int PRIMARY KEY, tag int NOT NULL);
-         CREATE TABLE left_scope_second (id int PRIMARY KEY, tag int NOT NULL);
-         INSERT INTO left_scope_source SELECT i, i FROM generate_series(1, 4000) i;
-         INSERT INTO left_scope_source VALUES (1, 1);
-         INSERT INTO left_scope_first SELECT i, 0 FROM generate_series(1, 4000) i;
-         INSERT INTO left_scope_second SELECT i, 0 FROM generate_series(1, 4000) i;
-         CREATE FUNCTION left_scope_value(value int) RETURNS TABLE (normalized int)
-         LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
-         BEGIN RETURN QUERY SELECT value; END $$;
+        "CREATE TABLE graph_jit_source (id int PRIMARY KEY, value int NOT NULL);
+         INSERT INTO graph_jit_source VALUES (1, 1);
          SELECT pgtrickle.create_stream_table(
-             name => 'left_scope_st',
-             query => 'SELECT l.id, l.value, r.tag AS first_tag, s.tag AS second_tag
-                       FROM (SELECT src.id, n.normalized AS value FROM left_scope_source src
-                             CROSS JOIN LATERAL public.left_scope_value(src.value) AS n(normalized)) l
-                       LEFT JOIN left_scope_first r ON l.id = r.id
-                       LEFT JOIN left_scope_second s ON l.id = s.id',
+             name => 'graph_jit_st', query => 'SELECT id, value FROM graph_jit_source',
              schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
              orchestration_mode => 'EXTERNAL')",
     )
     .execute(&db.pool)
     .await
-    .expect("install nested left-join fixture");
-    let root = "public.left_scope_st";
+    .expect("install JIT graph fixture");
+    let root = "public.graph_jit_st";
+    sqlx::raw_sql(
+        "CREATE TABLE graph_jit_seen (enabled boolean NOT NULL);
+         CREATE FUNCTION graph_jit_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO public.graph_jit_seen VALUES (current_setting('jit')::boolean);
+               RETURN NULL; END $$;
+         CREATE TRIGGER graph_jit_audit AFTER INSERT OR UPDATE OR DELETE ON graph_jit_st
+             FOR EACH ROW EXECUTE FUNCTION graph_jit_audit()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("observe actual apply JIT setting");
     let digest = reference_clients::graph_digest(&db.pool, root).await;
     reference_clients::refresh_graph(&db.pool, root, &digest).await;
-    let baseline: Vec<(i32, i32, Option<i32>, Option<i32>)> = (1..=4000)
-        .chain(std::iter::once(1))
-        .map(|id| (id, id, Some(0), Some(0)))
-        .collect();
-    let mut baseline = baseline;
-    baseline.sort();
 
-    let mut tx = db.pool.begin().await.expect("begin simultaneous changes");
-    sqlx::raw_sql(
-        "SET LOCAL track_functions = 'all';
-         UPDATE left_scope_source SET value = 101 WHERE id = 1;
-         UPDATE left_scope_first SET tag = 102 WHERE id = 1;
-         UPDATE left_scope_second SET tag = 202 WHERE id = 2",
-    )
-    .execute(&mut *tx)
-    .await
-    .expect("change both sides of nested left joins");
-    reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
-    let calls: i64 = sqlx::query_scalar(
-        "SELECT calls FROM pg_stat_xact_user_functions
-         WHERE funcid = 'left_scope_value(int)'::regprocedure",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .expect("read nested left-join normalization calls");
-    eprintln!("nested LEFT JOIN normalization calls: {calls}");
-    // Reconciliation and one nested per-leaf snapshot remain; avoid repeated full expansion.
-    assert!(
-        (4001..8500).contains(&calls),
-        "normalization calls: {calls}"
-    );
-    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
-        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
-    )
-    .fetch_all(&mut *tx)
-    .await
-    .expect("read complete simultaneous-change result");
-    let expected: Vec<_> = baseline
-        .iter()
-        .map(|&(id, value, first, second)| match id {
-            1 => (id, 101, Some(102), second),
-            2 => (id, value, first, Some(202)),
-            _ => (id, value, first, second),
-        })
-        .collect();
-    assert_eq!(rows, expected);
-    tx.rollback().await.expect("rollback nested graph refresh");
-    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
-        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .expect("read complete rolled-back result");
-    assert_eq!(rows, baseline);
-
-    db.execute("DELETE FROM left_scope_first WHERE id = 1")
-        .await;
-    db.execute("DELETE FROM left_scope_second WHERE id = 2")
-        .await;
-    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
-    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
-        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .expect("read complete last-match deletion result");
-    let expected: Vec<_> = baseline
-        .iter()
-        .map(|&(id, value, first, second)| match id {
-            1 => (id, value, None, second),
-            2 => (id, value, first, None),
-            _ => (id, value, first, second),
-        })
-        .collect();
-    assert_eq!(rows, expected);
-
-    db.execute("INSERT INTO left_scope_first VALUES (1, 0)")
-        .await;
-    db.execute("INSERT INTO left_scope_second VALUES (2, 0)")
-        .await;
-    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
-    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
-        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .expect("read complete first-match insertion result");
-    assert_eq!(rows, baseline);
+    for (index, (aggressive, caller_jit, expected_jit)) in [
+        (true, true, false),
+        (false, true, true),
+        (true, false, false),
+        (true, true, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut tx = db.pool.begin().await.expect("begin JIT scope check");
+        sqlx::query("SELECT set_config('pg_trickle.planner_aggressive', $1, true), set_config('jit', $2, true)")
+            .bind(if aggressive { "on" } else { "off" })
+            .bind(if caller_jit { "on" } else { "off" })
+            .execute(&mut *tx)
+            .await
+            .expect("set caller planner settings");
+        sqlx::query("TRUNCATE graph_jit_seen")
+            .execute(&mut *tx)
+            .await
+            .expect("clear apply observations");
+        let mutation = if index == 3 {
+            "INSERT INTO graph_jit_source SELECT i, i FROM generate_series(2, 101) i"
+        } else {
+            "UPDATE graph_jit_source SET value = value + 1 WHERE id = 1"
+        };
+        sqlx::query(sqlx::AssertSqlSafe(mutation))
+            .execute(&mut *tx)
+            .await
+            .expect("change graph source");
+        reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+        let seen: Vec<bool> =
+            sqlx::query_scalar("SELECT DISTINCT enabled FROM graph_jit_seen ORDER BY enabled")
+                .fetch_all(&mut *tx)
+                .await
+                .expect("read actual apply settings");
+        assert_eq!(seen, vec![expected_jit], "JIT scope case {index}");
+        let after: bool = sqlx::query_scalar("SELECT current_setting('jit')::boolean")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read caller JIT setting after refresh");
+        assert_eq!(
+            after, caller_jit,
+            "JIT must restore within the same transaction"
+        );
+        let rows: Vec<(i32, i32)> =
+            sqlx::query_as("SELECT id, value FROM graph_jit_st ORDER BY id")
+                .fetch_all(&mut *tx)
+                .await
+                .expect("read complete JIT graph output");
+        let expected = if index == 3 {
+            std::iter::once((1, 4))
+                .chain((2..=101).map(|id| (id, id)))
+                .collect()
+        } else {
+            vec![(1, index as i32 + 2)]
+        };
+        assert_eq!(rows, expected);
+        tx.commit().await.expect("commit JIT scope case");
+    }
 }
 
 #[tokio::test]

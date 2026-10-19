@@ -705,11 +705,12 @@ Consolidated switch for all MERGE planner hints. Replaces the deprecated `merge_
 | Restart Required | No |
 
 When enabled, the refresh executor estimates the delta size and applies optimizer hints within the transaction:
+- **Graph delta < 100 source changes**: disable JIT within the owner-executed apply, then restore the caller's setting. Generated delta plans can otherwise compile thousands of functions to apply just a few rows.
 - **Delta ≥ 100 rows**: `SET LOCAL enable_nestloop = off` — forces hash joins instead of nested-loop joins.
 - **Delta ≥ 10,000 rows**: additionally `SET LOCAL work_mem = '<N>MB'` (see [pg_trickle.merge_work_mem_mb](#pg_tricklemerge_work_mem_mb)).
 
 **Tuning Guidance:**
-- **Most workloads**: Leave at `true` — the hints improve tail latency without affecting small deltas.
+- **Most workloads**: Leave at `true` — the hints improve tail latency.
 - **Custom plan overrides**: Set to `false` if you manage planner settings yourself or if the hints conflict with your `pg_hint_plan` configuration.
 - **Memory-constrained environments**: When enabled, large deltas (≥ 10,000 rows) raise `work_mem` to 64 MB (configurable via [`merge_work_mem_mb`](#pg_tricklemerge_work_mem_mb)). If your server has limited RAM and runs many concurrent refreshes, this can cause unexpected memory pressure or temp-file spills. Monitor `temp_blks_written` in `pg_stat_statements` and consider lowering `merge_work_mem_mb` or disabling this GUC if spills are frequent.
 
