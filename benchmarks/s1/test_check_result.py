@@ -22,6 +22,7 @@ observed = {"image_id": bounded["image"], "checks": [{"name": n, "result": "pass
                          "churn_partial_sources": [r for p in progress for r in p["expected_source_rows"]],
                          "churn_partial_cases": [p["expected_case_state"].copy() for p in progress]}}
 assert check_result(bounded, observed, progress)["s1_result"] == "PASS"
+assert check_result(bounded, observed, progress, baseline=True)["s1_result"] == "BASELINE_COMPLETE"
 for failure in ("blocked", "diagnostic", "slow", "source", "case", "receipt", "memory"):
     b, o = deepcopy(bounded), deepcopy(observed)
     if failure == "blocked":
@@ -44,4 +45,44 @@ for failure in ("blocked", "diagnostic", "slow", "source", "case", "receipt", "m
         pass
     else:
         raise AssertionError(f"accepted {failure} result")
+
+baseline_b, baseline_o = deepcopy(bounded), deepcopy(observed)
+baseline_b["exit_code"] = 1
+baseline_o["workload"]["observed_churn_cases_per_minute"] = 27.0
+baseline_o["checks"][-1] = {"name": names[-1], "target_cases_per_minute": 60,
+                            "observed_cases_per_minute": 27.0, "churn_cases": 300,
+                            "window_minutes": 5, "result": "failed"}
+baseline_o["failure"] = str(baseline_o["checks"][-1])
+summary = check_result(baseline_b, baseline_o, progress, baseline=True)
+assert summary["s1_result"] == "BASELINE_COMPLETE"
+assert summary["throughput_gate"] == "failed_below_60" and summary["raw_harness_exit_code"] == 1
+for failure in ("candidate", "other_error", "other_gate", "incomplete", "source", "case",
+                "receipt", "memory", "supervision", "exit", "diagnostic"):
+    b, o = deepcopy(baseline_b), deepcopy(baseline_o)
+    if failure == "other_error":
+        o["failure"] = "unrelated SPI error"
+    elif failure == "other_gate":
+        o["checks"][0]["result"] = "failed"
+    elif failure == "incomplete":
+        o["workload"]["churn_admissions"].pop()
+    elif failure == "source":
+        o["workload"]["churn_partial_sources"].pop()
+    elif failure == "case":
+        o["workload"]["churn_partial_cases"][0]["unexpected"] = True
+    elif failure == "receipt":
+        o["workload"]["churn_partial_receipts"] = [{}]
+    elif failure == "memory":
+        b["peak_memory_bytes"] = 4 * 1024**3
+    elif failure == "supervision":
+        b["supervision_error"] = "lost measurement"
+    elif failure == "exit":
+        b["exit_code"] = -9
+    elif failure == "diagnostic":
+        o["diagnostic_profile"] = {}
+    try:
+        check_result(b, o, progress, baseline=failure != "candidate")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"accepted baseline {failure}")
 print("S1 complete-result and full-vector rejection checks: PASS")

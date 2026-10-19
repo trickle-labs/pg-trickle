@@ -4,13 +4,36 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("bounded", Path(__file__).with_name("run_bounded.py"))
 bounded = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bounded)
 image = "sha256:" + "a" * 64
 name = "pgreact-s1-123456abcdef"
+
+with tempfile.TemporaryDirectory(prefix="issue1168-logs-") as directory:
+    path = Path(directory) / "full.log"
+    first, second = Mock(), Mock()
+    first.poll.return_value = None
+    first.wait.return_value = 0
+    with patch.object(bounded.subprocess, "Popen", side_effect=[first, second]) as popen:
+        previous = bounded.capture_logs(name, path)
+        assert bounded.capture_logs(name, path, previous) is previous
+        assert popen.call_count == 1
+        path.write_text("before restart\n")
+        first.poll.return_value = 0
+        following = bounded.capture_logs(name, path, previous)
+        assert previous[1].closed and following[0] is second
+        assert popen.call_count == 2 and path.read_text() == ""
+        following[1].close()
+    first.wait.return_value = 1
+    try:
+        bounded.capture_logs(name, path, previous)
+    except RuntimeError as error:
+        assert str(error) == "container log capture failed"
+    else:
+        raise AssertionError("failed log capture must fail supervision")
 
 for failure in ("timeout", "daemon"):
     stopped = []
@@ -76,5 +99,19 @@ for failures, expected_calls in ((2, 3), (5, 5)):
 with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "permission denied")) as run_mock:
     assert bounded.postgres_metrics([]).returncode == 1
     assert run_mock.call_count == 1
+
+vanished = subprocess.CompletedProcess([], 1, "1024 /data\n", "du: cannot access '/data/base/22293/t1_61725': No such file or directory\n")
+healthy = subprocess.CompletedProcess([], 0, "1024 /data\n", "")
+for failures, expected_calls in ((2, 3), (5, 5)):
+    with patch.object(bounded.subprocess, "run", side_effect=[vanished] * failures + [healthy]) as run_mock, \
+         patch.object(bounded.time, "sleep"):
+        result = bounded.disk_metrics([])
+    assert run_mock.call_count == expected_calls
+    assert result is (healthy if failures == 2 else vanished)
+for message in ("permission denied", "du: cannot access '/data/global/pg_control': No such file or directory",
+                vanished.stderr + "permission denied"):
+    with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", message)) as run_mock:
+        assert bounded.disk_metrics([]).returncode == 1
+        assert run_mock.call_count == 1
 
 print("supervisor fault-injection and bounded restart retry checks: PASS")

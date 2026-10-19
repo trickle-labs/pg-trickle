@@ -89,8 +89,9 @@ jobs:
           PGREACT_S1_BATCH_SIZE: '32'
         run: |
           image=$(docker image inspect s1-control:qualification --format '{{.Id}}')
-          python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300
-          python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/control-300
+          # The baseline checker accepts only the explicitly approved sole below-60 failure.
+          python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300 || true
+          python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/control-300 --baseline
       - name: Qualify candidate, unchanged 300 admissions
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.mdm_grants.outcome == 'success' }}
         env:

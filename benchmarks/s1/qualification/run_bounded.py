@@ -35,6 +35,37 @@ def postgres_metrics(args):
         time.sleep(1)
 
 
+def capture_logs(name, path, previous=None):
+    if previous is not None:
+        follower, stream = previous
+        if follower.poll() is None:
+            return previous
+        stream.close()
+        if follower.wait(timeout=0) != 0:
+            raise RuntimeError("container log capture failed")
+    # Docker ends a follow stream on restart; replay retained logs before following again.
+    stream = path.open("w")
+    try:
+        follower = subprocess.Popen(["docker", "logs", "--follow", "--timestamps", name],
+                                    stdout=stream, stderr=subprocess.STDOUT)
+    except BaseException:
+        stream.close()
+        raise
+    return follower, stream
+
+
+def disk_metrics(args):
+    # Temporary relations can disappear while du walks PostgreSQL's data directory.
+    vanished = r"du: cannot access '.*/base/[0-9]+/t[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?': No such file or directory"
+    for attempt in range(5):
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        transient = result.stderr.splitlines()
+        if (result.returncode == 0 or not transient or attempt == 4
+                or not all(re.fullmatch(vanished, line) for line in transient)):
+            return result
+        time.sleep(0.2)
+
+
 def main(image, run_name, profile_cases=None):
     root = Path(__file__).resolve().parent
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", image)
@@ -111,20 +142,15 @@ def main(image, run_name, profile_cases=None):
                     assert identity == image, (name, identity)
                     if running != "true":
                         continue
-                    if name not in log_followers:
-                        stream = (run / f"{name}-full.log").open("w")
-                        follower = subprocess.Popen(
-                            ["docker", "logs", "--follow", "--timestamps", name],
-                            stdout=stream, stderr=subprocess.STDOUT)
-                        log_followers[name] = (follower, stream)
+                    log_followers[name] = capture_logs(
+                        name, run / f"{name}-full.log", log_followers.get(name))
                     measured = postgres_metrics(
                         ["docker", "exec", name, "psql", "-XAtq", "-U", "postgres",
                          "-d", "postgres", "-c", "SELECT json_build_object('database_bytes',"
                          "(SELECT sum(pg_database_size(oid)) FROM pg_database),"
                          "'wal_bytes',(SELECT wal_bytes FROM pg_stat_wal))"])
-                    disk = subprocess.run(
-                        ["docker", "exec", name, "sh", "-c", 'du -sk "$PGDATA"'],
-                        capture_output=True, text=True, timeout=15)
+                    disk = disk_metrics(
+                        ["docker", "exec", name, "sh", "-c", 'du -sk "$PGDATA"'])
                     if measured.returncode or disk.returncode:
                         state = subprocess.run(
                             ["docker", "inspect", name,

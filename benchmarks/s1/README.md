@@ -24,6 +24,14 @@ runner. This environment differs from the earlier amd64 runs emulated on an
 ARM64 Docker host; historical rates cannot establish a speedup on this host.
 The workload and acceptance thresholds are unchanged.
 
+On 2026-10-19 the user explicitly approved accepting a slower **complete
+control** as the comparison baseline. `check_result.py --baseline` accepts only
+the frozen harness's sole below-60 rate failure after all 300 admissions,
+complete vectors and every other gate pass. It retains the raw failure and
+exit status and labels the summary `BASELINE_COMPLETE`, with the failed rate
+gate visible. Other control failures remain comparison blockers. The default
+candidate checker still requires at least 60/minute and no failed gates.
+
 The builder cleans the pg-trickle package before compiling either source tree,
 retaining dependency caches. Run 39255297739 exposed a stale Cargo artifact:
 the candidate reused the control library despite a different source checkout.
@@ -31,7 +39,13 @@ Those native candidate observations do not measure the JIT optimization.
 Qualification now requires different pg-trickle library hashes, identical
 MDM/React hashes, and a runtime JIT-scope regression on the actual candidate.
 The supervisor retains full timestamped container logs and includes their bytes
-in the storage budget; a failed log capture fails supervision.
+in the storage budget; it replays Docker's retained logs when an intentional
+restart ends a follow stream. A failed log capture fails supervision.
+Run 39268153170 passed the library and actual-binary guards, then both images
+were stopped by `du` racing with deleted PostgreSQL temporary relations. These
+remain explicit supervision failures. Disk sampling now retries only that exact
+temporary-relation ENOENT condition, at most four times 200 ms apart; permission,
+other missing-file, timeout and persistent errors still stop the run.
 
 The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
 It uses the same source pins, MDM correction, workload and limits. Its image
