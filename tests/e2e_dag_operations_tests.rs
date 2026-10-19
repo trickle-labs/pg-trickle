@@ -179,6 +179,7 @@ async fn test_alter_schedule_mid_pipeline() {
     assert_eq!(schedule, "5s");
 
     // Keep both mutation cycles under manual control after changing the schedule.
+    #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['ops_l1', 'ops_l2', 'ops_l3'])")
         .await;
 
