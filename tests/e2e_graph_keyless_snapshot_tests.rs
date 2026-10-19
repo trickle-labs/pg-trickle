@@ -242,8 +242,8 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
 async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_delivery() {
     let db = E2eDb::new().await.with_extension().await;
     sqlx::raw_sql(
-        "CREATE TABLE recon_rows (value text);
-         INSERT INTO recon_rows VALUES (NULL), (NULL), ('kept');
+        "CREATE TABLE recon_rows (value text, active bool DEFAULT true, level smallint DEFAULT 42, payload bytea DEFAULT decode('00ff', 'hex'), typed_value varchar, key_uuid uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid);
+         INSERT INTO recon_rows(value) VALUES (NULL), (NULL), ('kept');
          CREATE TABLE recon_dim (id int PRIMARY KEY, label text);
          INSERT INTO recon_dim VALUES (1, 'before')",
     )
@@ -256,20 +256,25 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
     let columns = (1..=8)
         .map(|i| format!(", d{i}.label AS label{i}"))
         .collect::<String>();
-    let query = format!("SELECT r.value AS value{columns} FROM row_leaf r{joins}");
+    let query = format!(
+        "SELECT r.value AS value{columns}, r.active, r.level, r.payload, r.typed_value, r.key_uuid FROM row_leaf r{joins}"
+    );
     let count_query =
         format!("SELECT count(r.value IS NULL)::bigint AS total_rows FROM row_leaf r{joins}");
     let group_query =
         format!("SELECT r.value, count(*) AS copies FROM row_leaf r{joins} GROUP BY r.value");
     let terminal_query = format!(
-        "SELECT j.value, {} FROM recon_join j LEFT JOIN recon_count c ON false LEFT JOIN recon_groups g ON false",
+        "SELECT j.value, {}, j.active, j.level, j.payload, j.typed_value, j.key_uuid FROM recon_join j LEFT JOIN recon_count c ON false LEFT JOIN recon_groups g ON false",
         (1..=8)
             .map(|i| format!("j.label{i}"))
             .collect::<Vec<_>>()
             .join(", ")
     );
     for (name, query) in [
-        ("row_leaf", "SELECT value FROM recon_rows"),
+        (
+            "row_leaf",
+            "SELECT value, active, level, payload, typed_value, key_uuid FROM recon_rows",
+        ),
         ("dim_leaf", "SELECT id, label FROM recon_dim"),
         ("recon_join", query.as_str()),
         ("recon_count", count_query.as_str()),
@@ -282,7 +287,7 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
     let root = "public.recon_terminal";
     let digest = reference_clients::graph_digest(&db.pool, root).await;
     reference_clients::refresh_graph(&db.pool, root, &digest).await;
-    db.execute("INSERT INTO recon_rows VALUES ('bootstrap')")
+    db.execute("INSERT INTO recon_rows(value) VALUES ('bootstrap')")
         .await;
     reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
     db.assert_st_matches_query("recon_join", &query).await;
@@ -315,7 +320,9 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
         tx.commit().await.expect("ack baseline");
         consumers.push(consumer);
     }
-    db.execute("INSERT INTO recon_rows VALUES (NULL)").await;
+    db.execute("INSERT INTO recon_rows(value) VALUES (NULL)")
+        .await;
+    db.execute("UPDATE recon_rows SET active = false, level = 43, payload = decode('ff00', 'hex'), typed_value = 'after', key_uuid = '00000000-0000-0000-0000-000000000002'::uuid").await;
     db.execute("UPDATE recon_dim SET label = 'after'").await;
     let before: String = db
         .query_scalar(
@@ -329,6 +336,12 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
             .await
             .expect("set caller planner preference");
         reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+        let no_snapshot: bool = sqlx::query_scalar("SELECT to_regclass(format('pg_temp.__pgt_pre_%s', pgt_id)) IS NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'recon_join'")
+            .fetch_one(&mut *tx).await.expect("inspect exact replacement capture");
+        assert!(
+            no_snapshot,
+            "exact bag replacement must reuse its delta for capture"
+        );
         let nestloop: String = sqlx::query_scalar("SHOW enable_nestloop")
             .fetch_one(&mut *tx)
             .await

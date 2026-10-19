@@ -603,16 +603,13 @@ pub fn stream_table_contract(
     ))
 }
 
-fn graph_contract_data(
-    roots: &[pg_sys::Oid],
-) -> Result<
-    (
-        name!(contract_version, i16),
-        name!(graph_digest, Vec<u8>),
-        name!(contract, JsonB),
-    ),
-    PgTrickleError,
-> {
+struct BuiltGraphContract {
+    digest: Vec<u8>,
+    json: Value,
+    members: BTreeMap<u32, StreamTableMeta>,
+}
+
+fn graph_contract_data(roots: &[pg_sys::Oid]) -> Result<BuiltGraphContract, PgTrickleError> {
     if roots.is_empty() {
         return Err(integration_error(
             "PGT_EXT_GRAPH_INVALID",
@@ -777,7 +774,11 @@ fn graph_contract_data(
         "topological_order": topological_order,
         "sources": source_map.values().collect::<Vec<_>>()
     });
-    Ok((CONTRACT_VERSION, digest.to_vec(), JsonB(json)))
+    Ok(BuiltGraphContract {
+        digest: digest.to_vec(),
+        json,
+        members,
+    })
 }
 
 /// Return a canonical contract for the complete upstream closure of roots.
@@ -804,7 +805,7 @@ pub fn graph_contract(
         raise(error);
     }
     match graph_contract_data(&roots) {
-        Ok(row) => TableIterator::once(row),
+        Ok(graph) => TableIterator::once((CONTRACT_VERSION, graph.digest, JsonB(graph.json))),
         Err(error) => raise(error),
     }
 }
@@ -923,7 +924,11 @@ pub fn refresh_graph_strict(
             crate::refresh::FullPolicy::Allow
         };
         crate::api::recovery::assert_capture_ready()?;
-        let (_, initial_digest, JsonB(initial_graph)) = graph_contract_data(&roots)?;
+        let BuiltGraphContract {
+            digest: initial_digest,
+            json: initial_graph,
+            members: mut initial_members,
+        } = graph_contract_data(&roots)?;
         if expected_graph_digest != initial_digest {
             return Err(integration_error(
                 "PGT_EXT_CONTRACT_MISMATCH",
@@ -943,7 +948,9 @@ pub fn refresh_graph_strict(
             let relid = value.as_u64().ok_or_else(|| {
                 integration_error("PGT_EXT_GRAPH_INVALID", "graph member identity is invalid")
             })? as u32;
-            let meta = StreamTableMeta::get_by_relid(pg_sys::Oid::from(relid))?;
+            let meta = initial_members.remove(&relid).ok_or_else(|| {
+                integration_error("PGT_EXT_GRAPH_INVALID", "graph contract member is missing")
+            })?;
             crate::api::helpers::authorize_stream_table_refresh(
                 crate::api::helpers::outer_user_id(),
                 pg_sys::Oid::from(relid),
@@ -977,7 +984,11 @@ pub fn refresh_graph_strict(
             .ok_or_else(|| integration_error("PGT_EXT_GRAPH_BUSY", "graph member disappeared"))?;
         }
         let locks_elapsed = locks_started.elapsed();
-        let (_, graph_digest, JsonB(graph)) = graph_contract_data(&roots)?;
+        let BuiltGraphContract {
+            digest: graph_digest,
+            json: graph,
+            members: mut fresh_members,
+        } = graph_contract_data(&roots)?;
         if expected_graph_digest != graph_digest {
             return Err(integration_error(
                 "PGT_EXT_CONTRACT_MISMATCH",
@@ -999,7 +1010,12 @@ pub fn refresh_graph_strict(
                 })? as u32;
                 Ok((
                     relid,
-                    StreamTableMeta::get_by_relid(pg_sys::Oid::from(relid))?,
+                    fresh_members.remove(&relid).ok_or_else(|| {
+                        integration_error(
+                            "PGT_EXT_GRAPH_INVALID",
+                            "graph contract member is missing",
+                        )
+                    })?,
                 ))
             })
             .collect::<Result<Vec<_>, PgTrickleError>>()?;

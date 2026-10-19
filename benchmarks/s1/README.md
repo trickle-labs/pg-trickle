@@ -16,6 +16,12 @@ Eligible large graph joins use the required multiset comparison to produce the
 apply delta directly, retaining duplicate occurrences and bigint scalar-aggregate state.
 Constraint triggers, rules and row security keep the existing UPDATE path.
 Graph statistics cover the bounded stages and materialized delta actually read.
+Graph refresh also reuses the metadata already validated in each contract snapshot
+and loads manual-refresh upstream metadata once. Eligible exact replacement deltas
+without hidden counts can feed split downstream capture directly.
+For supported boolean, bytea, integer, text, varchar and UUID outputs with
+deterministic collations, native `EXCEPT ALL` compares full multisets before
+encoding only changed row identities. Other types retain the existing comparison.
 The focused regressions check complete typed output deltas, NULL duplicates,
 multi-cycle changes, rollback, foreign-key cascades and owner privileges.
 

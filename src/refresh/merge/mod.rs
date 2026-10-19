@@ -2940,6 +2940,9 @@ pub fn execute_differential_refresh_with_tuning(
         resolved.trigger_using_sql = format!("({})", delta.sql);
     }
     let uses_reconciliation_delta = reconciliation_delta.is_some();
+    let capture_reconciliation_delta = uses_reconciliation_delta
+        && !parsed_query.tree.needs_pgt_count()
+        && crate::config::pg_trickle_diff_output_format() == crate::config::DiffOutputFormat::Split;
     drop(parsed_query);
 
     // ── A1-2/A1-3: Partition-key range predicate injection ───────────
@@ -3075,7 +3078,10 @@ pub fn execute_differential_refresh_with_tuning(
     } else {
         None
     };
-    let prepared_diff_capture_cols = if use_explicit_dml && needs_downstream_capture {
+    let prepared_diff_capture_cols = if use_explicit_dml
+        && needs_downstream_capture
+        && !capture_reconciliation_delta
+    {
         let cols = get_st_user_columns(st);
         if !cols.is_empty() {
             let col_list = cols
@@ -3437,7 +3443,8 @@ pub fn execute_differential_refresh_with_tuning(
             // the true effective delta (including value-change DELETEs) after
             // the DML completes.
             let needs_diff_capture = needs_downstream_capture;
-            let diff_capture_cols = if needs_diff_capture {
+            // The exact replacement delta already describes the committed visible multiset.
+            let diff_capture_cols = if needs_diff_capture && !capture_reconciliation_delta {
                 let cols = prepared_diff_capture_cols.clone().unwrap_or_default();
                 let col_list = cols
                     .iter()

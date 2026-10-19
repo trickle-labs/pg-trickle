@@ -232,6 +232,45 @@ pub(crate) fn reconciliation_delta_sql(
         } else {
             ""
         };
+        // shortcut: use native multiset comparison only for these exact scalar types; broaden with type conformance coverage.
+        let native_comparison = Spi::get_one_with_args::<bool>(
+            "SELECT pg_catalog.bool_and(a.atttypid IN ('pg_catalog.bool'::pg_catalog.regtype, 'pg_catalog.bytea'::pg_catalog.regtype, \
+                 'pg_catalog.int2'::pg_catalog.regtype, 'pg_catalog.int4'::pg_catalog.regtype, 'pg_catalog.int8'::pg_catalog.regtype, \
+                 'pg_catalog.text'::pg_catalog.regtype, 'pg_catalog.varchar'::pg_catalog.regtype, 'pg_catalog.uuid'::pg_catalog.regtype) \
+                 AND (a.attcollation = 0 OR c.collisdeterministic)) \
+             FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation \
+             WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped",
+            &[st.pgt_relid.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("native reconciliation eligibility for {table}: {e}")))?
+        .unwrap_or(false);
+        if native_comparison {
+            // Compare visible values before encoding identities, so unchanged rows need no encoder call.
+            return Ok(Some(ReconciliationDelta {
+                sql: format!(
+                    "WITH __pgt_recon_expected AS MATERIALIZED ({materialization_query}), \
+                     __pgt_recon_changes AS MATERIALIZED (\
+                         SELECT {row_id} AS __pgt_row_id, 'D'::text AS __pgt_action, sub.* FROM (\
+                             SELECT {csv} FROM {table} EXCEPT ALL SELECT {csv} FROM __pgt_recon_expected) sub \
+                         UNION ALL \
+                         SELECT {row_id} AS __pgt_row_id, 'I'::text AS __pgt_action, sub.* FROM (\
+                             SELECT {csv} FROM __pgt_recon_expected EXCEPT ALL SELECT {csv} FROM {table}) sub), \
+                     __pgt_recon_deletions AS (\
+                         SELECT __pgt_row_id{state}, count(*) AS {weight} FROM __pgt_recon_changes \
+                         WHERE __pgt_action = 'D' GROUP BY __pgt_row_id{state}) \
+                     SELECT __pgt_row_id, 'D'::text AS __pgt_action, {csv}, {delete_ctid} FROM (\
+                         SELECT pre.__pgt_row_id, {pre_cols}, pre.ctid AS {delete_ctid}, w.{weight}, \
+                                row_number() OVER (PARTITION BY pre.__pgt_row_id{pre_state} ORDER BY pre.ctid) AS {occurrence} \
+                         FROM {table} pre JOIN __pgt_recon_deletions w ON pre.__pgt_row_id = w.__pgt_row_id{pre_match}\
+                     ) deletes WHERE {occurrence} <= {weight} \
+                     UNION ALL \
+                     SELECT __pgt_row_id, 'I'::text AS __pgt_action, {csv}, NULL::tid AS {delete_ctid} \
+                     FROM __pgt_recon_changes WHERE __pgt_action = 'I'"
+                ),
+                delete_column: delete_ctid,
+                columns: csv,
+            }));
+        }
         // Complete identities prove equal content; number only changed groups.
         let sql = format!(
             "WITH __pgt_recon_expected AS MATERIALIZED (\
