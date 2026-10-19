@@ -38,6 +38,32 @@ use e2e::E2eDb;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// A completed manual window can defer changes under writer holdback; require exact convergence.
+async fn refresh_cascade_layer(db: &E2eDb, name: &str) {
+    let defining_query: String = sqlx::query_scalar(
+        "SELECT defining_query FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_schema = 'public' AND pgt_name = $1",
+    )
+    .bind(name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("load cascade layer defining query");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        db.refresh_st_with_retry(name).await;
+        let Err(diff) = e2e::oracle::compare_st_to_query(db, name, &defining_query).await else {
+            return;
+        };
+        assert!(
+            diff.schema_mismatch.is_none()
+                && diff.comparison_error.is_none()
+                && std::time::Instant::now() < deadline,
+            "cascade layer '{name}' failed to converge: {diff}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// Set up a simple two-layer cascade:
 ///   base_table `orders` → ST `order_summary` → ST `order_report`
 ///
@@ -204,8 +230,8 @@ async fn test_st_on_st_cascade_propagates_insert() {
 
     // Refresh in topological order (upstream first).
     // Use retry variant: background scheduler may race for the advisory lock.
-    db.refresh_st_with_retry("order_summary").await;
-    db.refresh_st_with_retry("order_report").await;
+    refresh_cascade_layer(&db, "order_summary").await;
+    refresh_cascade_layer(&db, "order_report").await;
 
     // Verify the change cascaded
     let post_east_amount: String = db
@@ -239,8 +265,8 @@ async fn test_st_on_st_cascade_propagates_delete() {
     // Delete the West order
     db.execute("DELETE FROM orders WHERE region = 'West'").await;
 
-    db.refresh_st_with_retry("order_summary").await;
-    db.refresh_st_with_retry("order_report").await;
+    refresh_cascade_layer(&db, "order_summary").await;
+    refresh_cascade_layer(&db, "order_report").await;
 
     // West had order_count=1; after delete it's 0, so the WHERE clause
     // in order_report (order_count > 0) will exclude it
@@ -657,12 +683,10 @@ async fn test_three_layer_cascade_insert_propagates() {
         .await;
 
     // Refresh all three layers in topological order.
-    // Use refresh_st_with_retry for cascade layers: the background scheduler
-    // may detect upstream data_timestamp has advanced and start a concurrent
-    // refresh before the test's explicit call.
-    db.refresh_st_with_retry("category_totals").await;
-    db.refresh_st_with_retry("category_flags").await;
-    db.refresh_st_with_retry("big_categories").await;
+    // Each layer must consume its pending changes before refreshing its downstream.
+    refresh_cascade_layer(&db, "category_totals").await;
+    refresh_cascade_layer(&db, "category_flags").await;
+    refresh_cascade_layer(&db, "big_categories").await;
 
     // C has total=50 > 25, so it should appear in big_categories
     assert_eq!(
@@ -744,11 +768,9 @@ async fn test_three_layer_cascade_update_propagates() {
     db.execute("UPDATE products SET price = 250 WHERE category = 'Y' AND price = 50")
         .await;
 
-    db.refresh_st_with_retry("prod_summary").await;
-    db.refresh_st_with_retry("prod_labels").await;
-    // Use refresh_st_with_retry: background scheduler may start a concurrent
-    // refresh of premium_categories after prod_labels.data_timestamp advances.
-    db.refresh_st_with_retry("premium_categories").await;
+    refresh_cascade_layer(&db, "prod_summary").await;
+    refresh_cascade_layer(&db, "prod_labels").await;
+    refresh_cascade_layer(&db, "premium_categories").await;
 
     // Both X (300) and Y (250) should now be premium
     assert_eq!(
@@ -892,8 +914,8 @@ async fn test_st_on_st_uses_differential_not_full() {
     .await;
 
     // Populate both STs in topological order
-    db.refresh_st_with_retry("ssd_upstream").await;
-    db.refresh_st_with_retry("ssd_downstream").await;
+    refresh_cascade_layer(&db, "ssd_upstream").await;
+    refresh_cascade_layer(&db, "ssd_downstream").await;
 
     // Enable fast scheduler
     configure_fast_scheduler(&db).await;
@@ -1045,9 +1067,9 @@ async fn test_three_layer_cascade_delete_propagates() {
     db.execute("DELETE FROM stst3_del_src WHERE category = 'A'")
         .await;
 
-    db.refresh_st_with_retry("stst3_del_l1").await;
-    db.refresh_st_with_retry("stst3_del_l2").await;
-    db.refresh_st_with_retry("stst3_del_l3").await;
+    refresh_cascade_layer(&db, "stst3_del_l1").await;
+    refresh_cascade_layer(&db, "stst3_del_l2").await;
+    refresh_cascade_layer(&db, "stst3_del_l3").await;
 
     // A should be gone entirely
     assert_eq!(
@@ -1141,10 +1163,10 @@ async fn test_four_layer_cascade_insert_propagates() {
         .await;
 
     // Refresh all 4 layers
-    db.refresh_st_with_retry("stst3_4l_l1").await;
-    db.refresh_st_with_retry("stst3_4l_l2").await;
-    db.refresh_st_with_retry("stst3_4l_l3").await;
-    db.refresh_st_with_retry("stst3_4l_l4").await;
+    refresh_cascade_layer(&db, "stst3_4l_l1").await;
+    refresh_cascade_layer(&db, "stst3_4l_l2").await;
+    refresh_cascade_layer(&db, "stst3_4l_l3").await;
+    refresh_cascade_layer(&db, "stst3_4l_l4").await;
 
     assert_eq!(
         db.count("public.stst3_4l_l4").await,
@@ -1229,22 +1251,10 @@ async fn test_four_layer_cascade_delete_propagates() {
     db.execute("DELETE FROM stst3_4ld_src WHERE grp = 'c'")
         .await;
 
-    db.refresh_st_with_retry("stst3_4ld_l1").await;
-    db.refresh_st_with_retry("stst3_4ld_l2").await;
-    db.refresh_st_with_retry("stst3_4ld_l3").await;
-    db.refresh_st_with_retry("stst3_4ld_l4").await;
-
-    // Manual windows can be held back by CDC writers; allow the scheduler to propagate them.
-    assert!(
-        db.wait_for_condition(
-            "four-layer cascade delete",
-            "SELECT count(*) = 1 AND count(*) FILTER (WHERE grp = 'b') = 1 FROM stst3_4ld_l4",
-            std::time::Duration::from_secs(90),
-            std::time::Duration::from_millis(50),
-        )
-        .await,
-        "four-layer cascade must converge after deleting c"
-    );
+    refresh_cascade_layer(&db, "stst3_4ld_l1").await;
+    refresh_cascade_layer(&db, "stst3_4ld_l2").await;
+    refresh_cascade_layer(&db, "stst3_4ld_l3").await;
+    refresh_cascade_layer(&db, "stst3_4ld_l4").await;
 
     assert_eq!(
         db.count("public.stst3_4ld_l4").await,
@@ -1322,9 +1332,9 @@ async fn test_mixed_refresh_modes_in_cascade() {
     db.execute("UPDATE stst3_mix_src SET val = 100 WHERE grp = 'b' AND val = 30")
         .await;
 
-    db.refresh_st_with_retry("stst3_mix_l1").await;
-    db.refresh_st_with_retry("stst3_mix_l2").await;
-    db.refresh_st_with_retry("stst3_mix_l3").await;
+    refresh_cascade_layer(&db, "stst3_mix_l1").await;
+    refresh_cascade_layer(&db, "stst3_mix_l2").await;
+    refresh_cascade_layer(&db, "stst3_mix_l3").await;
 
     // a: 30*3=90 (>50, still in); b: 100*3=300 (>50, in); c: 5*3=15 (<50, out)
     assert_eq!(
@@ -1391,19 +1401,73 @@ async fn test_cascade_concurrent_dml_at_multiple_levels() {
     .await;
 
     // Step 1: Refresh only L1 (L2, L3 still stale from initial)
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['stst3_conc_l1', 'stst3_conc_l2', 'stst3_conc_l3'])")
+        .await;
     db.execute("INSERT INTO stst3_conc_src (grp, val) VALUES ('a', 30)")
         .await;
-    db.refresh_st_with_retry("stst3_conc_l1").await;
-    // L1 now has a=40, b=20 but L2/L3 still see old data
+    let mut writer = db
+        .pool
+        .begin()
+        .await
+        .expect("begin controlled source writer");
+    sqlx::query("LOCK TABLE stst3_conc_src IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold source writer lock");
+    let last_refresh: i64 = db
+        .query_scalar("SELECT COALESCE(MAX(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+        .await;
+    tokio::join!(refresh_cascade_layer(&db, "stst3_conc_l1"), async {
+        assert!(
+            db.wait_for_condition(
+                "manual refresh held back by a source writer",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+                     JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+                     WHERE st.pgt_name = 'stst3_conc_l1' AND h.refresh_id > {last_refresh} \
+                       AND h.initiated_by = 'MANUAL' AND h.status = 'COMPLETED')"
+                ),
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_millis(50),
+            )
+            .await,
+            "manual refresh must complete a held-back attempt before the writer is released"
+        );
+        let held_total: i64 = db
+            .query_scalar("SELECT total FROM stst3_conc_l1 WHERE grp = 'a'")
+            .await;
+        assert_eq!(
+            held_total, 10,
+            "writer holdback must preserve the old result"
+        );
+        writer
+            .rollback()
+            .await
+            .expect("release controlled source writer");
+    });
+    let l1_total: i64 = db
+        .query_scalar("SELECT total FROM stst3_conc_l1 WHERE grp = 'a'")
+        .await;
+    assert_eq!(
+        l1_total, 40,
+        "L1 must consume the first insert before the second DML"
+    );
+    let l2_total: i64 = db
+        .query_scalar("SELECT total FROM stst3_conc_l2 WHERE grp = 'a'")
+        .await;
+    assert_eq!(
+        l2_total, 10,
+        "L2 must retain pending changes from the first cycle"
+    );
 
     // Step 2: More DML before L2/L3 have caught up
     db.execute("INSERT INTO stst3_conc_src (grp, val) VALUES ('b', 80)")
         .await;
 
     // Refresh all in order — L1 picks up second insert, L2 catches up to both
-    db.refresh_st_with_retry("stst3_conc_l1").await;
-    db.refresh_st_with_retry("stst3_conc_l2").await;
-    db.refresh_st_with_retry("stst3_conc_l3").await;
+    refresh_cascade_layer(&db, "stst3_conc_l1").await;
+    refresh_cascade_layer(&db, "stst3_conc_l2").await;
+    refresh_cascade_layer(&db, "stst3_conc_l3").await;
 
     // a: 10+30 = 40, b: 20+80 = 100
     let a_total: i64 = db
@@ -1564,10 +1628,10 @@ async fn test_four_layer_cascade_update_propagates() {
     db.execute("UPDATE stst3_4lu_src SET val = 80 WHERE grp = 'p' AND val = 10")
         .await;
 
-    db.refresh_st_with_retry("stst3_4lu_l1").await;
-    db.refresh_st_with_retry("stst3_4lu_l2").await;
-    db.refresh_st_with_retry("stst3_4lu_l3").await;
-    db.refresh_st_with_retry("stst3_4lu_l4").await;
+    refresh_cascade_layer(&db, "stst3_4lu_l1").await;
+    refresh_cascade_layer(&db, "stst3_4lu_l2").await;
+    refresh_cascade_layer(&db, "stst3_4lu_l3").await;
+    refresh_cascade_layer(&db, "stst3_4lu_l4").await;
 
     // p: 80+20=100, doubled=200, adjusted=205 (>100, now included)
     // q: 50, doubled=100, adjusted=105 (>100, still included)

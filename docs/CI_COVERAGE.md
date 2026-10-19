@@ -209,14 +209,17 @@ Production recovery behavior and data assertions are unchanged. The full sweep
 with failed attempts is **not green**; hosted verification of the repairs is
 still required.
 
-The next hosted run exposed a four-layer cascade delete assertion that assumed
-every completed manual refresh had consumed the latest changes. A controlled
-CDC writer lock reproduced the same stale two-row result despite four completed
-manual attempts: the documented writer holdback can defer their source windows.
-The test now waits up to 90 seconds for exactly the expected `b` row while the
-scheduler remains active, then keeps its original count, membership and exact
-query assertions. The controlled holdback probe and all 19 cascade checks
-passed without retries after this correction.
+Later hosted runs exposed cascade delete and multi-level DML assertions that
+assumed every completed manual refresh had consumed the latest changes.
+Controlled writer locks reproduced both stale results despite completed manual
+attempts: the documented writer holdback can defer their source windows.
+Cascade fixtures now manually refresh each layer until the existing exact
+schema/multiset oracle matches its defining query, with a 90-second deadline;
+schema and comparator errors fail immediately. The multi-level DML regression
+pauses scheduling, witnesses a completed held-back attempt, then releases its
+writer and requires L1 to converge while L2 remains stale before the next DML.
+All original final assertions remain. All 19 cascade checks passed without
+test retries after this correction.
 
 The broader follow-up sweep also exposed a recovery negative control whose
 one-second statement timeout could expire while it prepared the wrong-PID
