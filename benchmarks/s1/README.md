@@ -55,6 +55,7 @@ Local supervision checks need only Python's standard library:
 ```sh
 python3 benchmarks/s1/check_frozen_harness.py
 python3 benchmarks/s1/test_bootstrap_compat.py
+python3 benchmarks/s1/test_check_result.py
 python3 benchmarks/s1/qualification/run_bounded.py --self-check
 python3 benchmarks/s1/qualification/test_supervisor.py
 ```
@@ -76,6 +77,11 @@ invalidation path. The helper-mutation checks remain mandatory. Both images
 use the same adapter, and its input patterns must match exactly once.
 `frozen-harness.json` records the original and adapted file hashes.
 Diagnostic case-count overrides do not qualify the throughput gate.
+
+`check_result.py <run-directory>` independently requires all S1 gates and
+complete source/case vectors. An input-blocked harness that exits zero is
+rejected, as are diagnostics, incomplete runs, future receipts, or resource
+limit failures.
 
 A passing S1 run covers this upstream throughput issue. React owner-outcome,
 outage/recovery, and signed operating-envelope release gates remain separate;

@@ -56,6 +56,7 @@ jobs:
             tar --null -T - -czf _s1/evidence/candidate-source.tar.gz
           python3 benchmarks/s1/check_frozen_harness.py
           python3 benchmarks/s1/test_bootstrap_compat.py
+          python3 benchmarks/s1/test_check_result.py
           python3 benchmarks/s1/qualification/run_bounded.py --self-check
           python3 benchmarks/s1/qualification/test_supervisor.py
       - name: Build exact control and candidate images
@@ -82,6 +83,7 @@ jobs:
         run: |
           image=$(docker image inspect s1-control:qualification --format '{{.Id}}')
           python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300
+          python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/control-300
       - name: Qualify candidate, unchanged 300 admissions
         if: always() && steps.build.outcome == 'success'
         env:
@@ -89,6 +91,7 @@ jobs:
         run: |
           image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
           python3 benchmarks/s1/qualification/run_bounded.py "$image" candidate-300
+          python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/candidate-300
       - name: Hash complete evidence
         if: always()
         run: |
