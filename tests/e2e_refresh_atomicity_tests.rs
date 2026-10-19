@@ -467,6 +467,11 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
 
     // The scheduled fixture starts at the current committed source result.
     db.create_st(&scheduler, &query, "1h", "DIFFERENTIAL").await;
+    // Drain any no-data tick before making the faulted mutation due.
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['public.{scheduler}'])"
+    ))
+    .await;
     db.refresh_st(&scheduler).await;
     let scheduler_id = pgt_id(&db, &scheduler).await;
     let scheduler_checkpoint = format!("public.{scheduler}_checkpoint");
@@ -497,6 +502,10 @@ async fn run_apply_or_finalize_failure_pair(phase: &str) {
         .commit()
         .await
         .expect("commit scheduler setup transaction");
+    db.execute(&format!(
+        "SELECT pgtrickle.resume_scheduler(ARRAY['public.{scheduler}'])"
+    ))
+    .await;
     let scheduler_witness = wait_for_barrier(
         &db,
         scheduler_id,
