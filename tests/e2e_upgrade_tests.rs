@@ -32,6 +32,16 @@ const CURRENT_PG_TRICKLE_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[tokio::test]
 async fn test_upgrade_catalog_schema_stability() {
     let db = E2eDb::new().await.with_extension().await;
+    let reserves_update_space: bool = db
+        .query_scalar(
+            "SELECT reloptions @> ARRAY['fillfactor=50'] \
+             FROM pg_catalog.pg_class WHERE oid='pgtrickle.pgt_stream_tables'::regclass",
+        )
+        .await;
+    assert!(
+        reserves_update_space,
+        "metadata updates need reserved HOT space"
+    );
 
     // Expected columns in pgt_stream_tables (alphabetical)
     let expected_columns = vec![
