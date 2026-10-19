@@ -296,6 +296,126 @@ async fn test_graph_refresh_scopes_nested_join_snapshots_and_empty_stages() {
 }
 
 #[tokio::test]
+async fn test_graph_left_join_snapshots_scope_changed_keys_preserving_duplicates_and_rollback() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(
+        "CREATE TABLE left_scope_source (id int NOT NULL, value int NOT NULL);
+         CREATE TABLE left_scope_first (id int PRIMARY KEY, tag int NOT NULL);
+         CREATE TABLE left_scope_second (id int PRIMARY KEY, tag int NOT NULL);
+         INSERT INTO left_scope_source SELECT i, i FROM generate_series(1, 4000) i;
+         INSERT INTO left_scope_source VALUES (1, 1);
+         INSERT INTO left_scope_first SELECT i, 0 FROM generate_series(1, 4000) i;
+         INSERT INTO left_scope_second SELECT i, 0 FROM generate_series(1, 4000) i;
+         CREATE FUNCTION left_scope_value(value int) RETURNS TABLE (normalized int)
+         LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+         BEGIN RETURN QUERY SELECT value; END $$;
+         SELECT pgtrickle.create_stream_table(
+             name => 'left_scope_st',
+             query => 'SELECT l.id, l.value, r.tag AS first_tag, s.tag AS second_tag
+                       FROM (SELECT src.id, n.normalized AS value FROM left_scope_source src
+                             CROSS JOIN LATERAL public.left_scope_value(src.value) AS n(normalized)) l
+                       LEFT JOIN left_scope_first r ON l.id = r.id
+                       LEFT JOIN left_scope_second s ON l.id = s.id',
+             schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false,
+             orchestration_mode => 'EXTERNAL')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install nested left-join fixture");
+    let root = "public.left_scope_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    let baseline: Vec<(i32, i32, Option<i32>, Option<i32>)> = (1..=4000)
+        .chain(std::iter::once(1))
+        .map(|id| (id, id, Some(0), Some(0)))
+        .collect();
+    let mut baseline = baseline;
+    baseline.sort();
+
+    let mut tx = db.pool.begin().await.expect("begin simultaneous changes");
+    sqlx::raw_sql(
+        "SET LOCAL track_functions = 'all';
+         UPDATE left_scope_source SET value = 101 WHERE id = 1;
+         UPDATE left_scope_first SET tag = 102 WHERE id = 1;
+         UPDATE left_scope_second SET tag = 202 WHERE id = 2",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("change both sides of nested left joins");
+    reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT calls FROM pg_stat_xact_user_functions
+         WHERE funcid = 'left_scope_value(int)'::regprocedure",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read nested left-join normalization calls");
+    eprintln!("nested LEFT JOIN normalization calls: {calls}");
+    // Reconciliation and one nested per-leaf snapshot remain; avoid repeated full expansion.
+    assert!(
+        (4001..8500).contains(&calls),
+        "normalization calls: {calls}"
+    );
+    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("read complete simultaneous-change result");
+    let expected: Vec<_> = baseline
+        .iter()
+        .map(|&(id, value, first, second)| match id {
+            1 => (id, 101, Some(102), second),
+            2 => (id, value, first, Some(202)),
+            _ => (id, value, first, second),
+        })
+        .collect();
+    assert_eq!(rows, expected);
+    tx.rollback().await.expect("rollback nested graph refresh");
+    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read complete rolled-back result");
+    assert_eq!(rows, baseline);
+
+    db.execute("DELETE FROM left_scope_first WHERE id = 1")
+        .await;
+    db.execute("DELETE FROM left_scope_second WHERE id = 2")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read complete last-match deletion result");
+    let expected: Vec<_> = baseline
+        .iter()
+        .map(|&(id, value, first, second)| match id {
+            1 => (id, value, None, second),
+            2 => (id, value, first, None),
+            _ => (id, value, first, second),
+        })
+        .collect();
+    assert_eq!(rows, expected);
+
+    db.execute("INSERT INTO left_scope_first VALUES (1, 0)")
+        .await;
+    db.execute("INSERT INTO left_scope_second VALUES (2, 0)")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let rows: Vec<(i32, i32, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT id, value, first_tag, second_tag FROM left_scope_st ORDER BY id, value",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read complete first-match insertion result");
+    assert_eq!(rows, baseline);
+}
+
+#[tokio::test]
 async fn test_v104_capabilities_are_stable_by_default() {
     let db = E2eDb::new().await.with_extension().await;
 

@@ -36,10 +36,10 @@
 //! cancels this by emitting ΔL_D ⋈ ΔR rows with the ΔR action flipped.
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
+use crate::dvm::operators::join::{extract_equijoin_keys, mark_leaf_delta_ctes_not_materialized};
 use crate::dvm::operators::join_common::{
-    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, is_simple_child,
-    rewrite_join_condition, snapshot_join_column_name,
+    build_filtered_leaf_snapshot_sql, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
+    is_simple_child, rewrite_expr_for_join, rewrite_join_condition, snapshot_join_column_name,
 };
 use crate::dvm::parser::OpTree;
 use crate::dvm::snapshot::SnapshotPlan;
@@ -90,6 +90,30 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     let right_table = build_snapshot_sql(right);
     let left_table = build_snapshot_sql(left);
+    let equi_keys = extract_equijoin_keys(
+        &rewrite_expr_for_join(condition, left, "__pgt_left", right, "__pgt_right"),
+        "__pgt_left",
+        "__pgt_right",
+    );
+    let left_filter = equi_keys
+        .iter()
+        .map(|(left_key, right_key)| {
+            format!(
+                "{left_key} IN (SELECT DISTINCT {right_key} FROM {})",
+                right_result.cte_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    if !left_filter.is_empty() {
+        ctx.mark_cte_not_materialized(&right_result.cte_name);
+    }
+    // Only Parts 2/4/5 read left snapshots; each requires a matching right delta.
+    let left_table = if left_filter.is_empty() {
+        left_table
+    } else {
+        format!("(SELECT * FROM {left_table} __pgt_l1 WHERE {left_filter})")
+    };
 
     // Build column references with AS aliases for disambiguation
     let dl_cols: Vec<String> = left_cols
@@ -253,14 +277,20 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let left_part2_source = if use_per_leaf_l0 {
         let pre_change = ctx.get_or_register_snapshot_cte(left);
         mark_leaf_delta_ctes_not_materialized(left, ctx);
-        pre_change
+        if left_filter.is_empty() {
+            pre_change
+        } else {
+            // shortcut: keys filter the shared snapshot; push into leaves if reconstruction dominates.
+            format!("(SELECT * FROM {pre_change} __pgt_l0 WHERE {left_filter})")
+        }
     } else if use_combined_l0 {
-        build_leaf_snapshot_sql(
+        build_filtered_leaf_snapshot_sql(
             left,
             &left_result.cte_name,
             left_cols,
             ctx.fallback_leaf_oids(),
             ctx.st_source_pgt_ids(),
+            (!left_filter.is_empty()).then_some(left_filter.as_str()),
         )
     } else {
         left_table.clone()
@@ -582,6 +612,25 @@ mod tests {
         // Output columns should be disambiguated
         assert!(result.columns.contains(&"o__id".to_string()));
         assert!(result.columns.contains(&"c__name".to_string()));
+    }
+
+    #[test]
+    fn test_diff_left_join_scopes_old_and_current_left_by_right_delta() {
+        let left = left_join(
+            eq_cond("a", "id", "b", "id"),
+            scan(1, "a", "public", "a", &["id"]),
+            scan(2, "b", "public", "b", &["id"]),
+        );
+        let tree = left_join(
+            eq_cond("a", "id", "c", "id"),
+            left,
+            scan(3, "c", "public", "c", &["id"]),
+        );
+        let mut ctx = test_ctx();
+        let result = diff_left_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+        assert_sql_contains(&sql, "__pgt_l0 WHERE a__id IN (SELECT DISTINCT id FROM");
+        assert_sql_contains(&sql, "__pgt_l1 WHERE a__id IN (SELECT DISTINCT id FROM");
     }
 
     #[test]

@@ -689,7 +689,7 @@ type EquiKeyPair = (String, String);
 /// Falls back gracefully: if the condition is too complex (OR, functions,
 /// non-equality operators), returns an empty vec and we skip the
 /// semi-join optimization.
-fn extract_equijoin_keys(
+pub(super) fn extract_equijoin_keys(
     condition: &Expr,
     left_alias: &str,
     right_alias: &str,
