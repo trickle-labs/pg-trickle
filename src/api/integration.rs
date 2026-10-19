@@ -650,9 +650,8 @@ fn graph_contract_data(
         validate_mode_for_refresh(EXTERNAL, meta.refresh_mode)?;
         for dep in StDependency::get_for_st(meta.pgt_id)? {
             if dep.source_type == "STREAM_TABLE" {
-                let upstream = StreamTableMeta::get_by_relid(dep.source_relid)?;
                 edges.insert((dep.source_relid.to_u32(), relid));
-                pending.push(upstream.pgt_relid.to_u32());
+                pending.push(dep.source_relid.to_u32());
             }
         }
         members.insert(relid, meta);

@@ -103,19 +103,32 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
         rows.sort();
         rows
     }
-    'profiles: for (extra, exact_allowed, reduced_join_limits, nested) in [
-        ("", Some(true), false, false),
+    'profiles: for (extra, exact_allowed, reduced_join_limits, nested, three_inputs) in [
+        ("", Some(true), false, false, false),
         (
             ", current_setting('server_version') AS runtime_setting",
             None,
             false,
             false,
+            false,
         ),
-        (", (SELECT 1) AS scalar_guard", Some(false), false, false),
-        ("", Some(false), true, false),
-        ("", Some(false), false, true),
+        (
+            ", (SELECT 1) AS scalar_guard",
+            Some(false),
+            false,
+            false,
+            false,
+        ),
+        ("", Some(false), true, false, false),
+        ("", Some(false), false, true, false),
+        ("", Some(true), false, false, true),
     ] {
-        let reference_query = if nested {
+        let reference_query = if three_inputs {
+            format!(
+                "{} JOIN public.point_dim d1 ON d1.id = r.id",
+                QUERY.replacen("SELECT l.id", "SELECT r.id + 0 AS id", 1)
+            )
+        } else if nested {
             "SELECT l.id, l.n AS value, r.label FROM public.point_left l JOIN public.point_right r ON r.id = l.id JOIN public.point_dim d1 ON d1.id = l.id JOIN public.point_dim d2 ON d2.id = l.id".to_string()
         } else {
             QUERY.to_string()
@@ -182,7 +195,7 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
     ].into_iter().enumerate() {
         let before = rows(&db, &reference_query).await;
         sqlx::raw_sql(mutation).execute(&db.pool).await.expect("commit simultaneous rowwise changes");
-        if nested && cycle == 0 {
+        if (nested || three_inputs) && cycle == 0 {
             db.execute("INSERT INTO point_dim VALUES (1)").await;
         }
         let after = rows(&db, &reference_query).await;
@@ -204,7 +217,7 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
         ))).bind(batch.batch_token).fetch_all(&mut *tx).await.expect("read every rowwise delta occurrence");
         actual.sort();
         assert_eq!(batch.mode, "EXACT");
-        assert_eq!(actual, expected, "cycle={cycle}, extra={extra}, reduced_limits={reduced_join_limits}, nested={nested}");
+        assert_eq!(actual, expected, "cycle={cycle}, extra={extra}, reduced_limits={reduced_join_limits}, nested={nested}, three_inputs={three_inputs}");
         assert_eq!(batch.row_count, actual.len() as i64);
         reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
         tx.commit().await.expect("commit rowwise refresh and exact acknowledgement");
@@ -212,7 +225,7 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
         assert_eq!(rows(&db, "SELECT id, value, label FROM point_terminal").await, after);
         let strategy: String = db.query_scalar("SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'point_join' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
             if exact_allowed == Some(true) {
-            assert_eq!(strategy, if cycle == 0 { "explicit_dml_reconciled" } else { "explicit_dml_exact_join" });
+            assert_eq!(strategy, if cycle == 0 { "explicit_dml_reconciled" } else { "explicit_dml_exact_join" }, "cycle={cycle}, three_inputs={three_inputs}");
         } else {
             assert_ne!(strategy, "explicit_dml_exact_join", "extra={extra}, reduced_limits={reduced_join_limits}");
         }
@@ -244,7 +257,8 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
         .map(|i| format!(", d{i}.label AS label{i}"))
         .collect::<String>();
     let query = format!("SELECT r.value AS value{columns} FROM row_leaf r{joins}");
-    let count_query = format!("SELECT count(r.value IS NULL) AS total_rows FROM row_leaf r{joins}");
+    let count_query =
+        format!("SELECT count(r.value IS NULL)::bigint AS total_rows FROM row_leaf r{joins}");
     let group_query =
         format!("SELECT r.value, count(*) AS copies FROM row_leaf r{joins} GROUP BY r.value");
     let terminal_query = format!(
@@ -276,6 +290,11 @@ async fn test_graph_large_join_delta_preserves_null_duplicates_rollback_and_deli
     db.execute("DELETE FROM recon_rows WHERE value = 'bootstrap'")
         .await;
     reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let count_strategy: String = db.query_scalar("SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'recon_count' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1").await;
+    assert_eq!(
+        count_strategy, "reconciliation_delta",
+        "scalar COUNT bigint projection should reuse comparison"
+    );
     sqlx::raw_sql(
         "CREATE UNIQUE INDEX recon_count_rows_key ON recon_count(total_rows);
         CREATE TABLE recon_foreign_ref (id int PRIMARY KEY, total_rows bigint NOT NULL

@@ -2884,17 +2884,15 @@ pub fn execute_differential_refresh_with_tuning(
             .iter()
             .all(|dep| matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE"))
         && exact_join_scans.is_some_and(|count| {
-            // shortcut: retain reconciliation above two scans until deeper-join conformance is complete.
-            count <= 2
+            // shortcut: retain reconciliation above three scans until deeper-join conformance is complete.
+            count <= 3
                 && count <= crate::config::pg_trickle_deep_join_l0_scan_threshold()
                 && count <= crate::config::pg_trickle_part3_max_scan_count()
         })
         && super::phd1::supports_reconciliation_replace(st)?
         && with_stream_owner(st, || {
-            let (_, complete) = dvm::row_id_expr_for_query_and_complete_output(
-                &effective_defining_query,
-                &parsed_query.tree.output_columns(),
-            );
+            let complete =
+                dvm::row_id_covers_output(&parsed_query.tree, &parsed_query.tree.output_columns());
             Ok(complete
                 && crate::api::defining_query_is_immutable_without_sublinks(
                     &effective_defining_query,
@@ -2930,8 +2928,9 @@ pub fn execute_differential_refresh_with_tuning(
             super::phd1::reconciliation_delta_sql(
                 st,
                 &effective_defining_query,
+                &parsed_query.tree,
                 parsed_query.tree.needs_pgt_count(),
-                super::phd1::is_scalar_count(&parsed_query.tree),
+                super::phd1::is_scalar_aggregate(&parsed_query.tree),
             )
         })?
     } else {

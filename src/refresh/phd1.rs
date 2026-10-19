@@ -49,11 +49,10 @@ pub(crate) fn has_reconciled_baseline(pgt_id: i64) -> Result<bool, PgTrickleErro
     ))
 }
 
-pub(crate) fn is_scalar_count(tree: &crate::dvm::parser::OpTree) -> bool {
-    use crate::dvm::parser::{AggFunc, OpTree};
+pub(crate) fn is_scalar_aggregate(tree: &crate::dvm::parser::OpTree) -> bool {
+    use crate::dvm::parser::OpTree;
     matches!(tree, OpTree::Aggregate { group_by, aggregates, .. }
-        if group_by.is_empty() && !aggregates.is_empty()
-            && aggregates.iter().all(|agg| matches!(agg.function, AggFunc::Count | AggFunc::CountStar)))
+        if group_by.is_empty() && !aggregates.is_empty())
 }
 
 pub(crate) fn supports_reconciliation_replace(
@@ -138,15 +137,35 @@ pub(crate) struct ReconciliationDelta {
 pub(crate) fn reconciliation_delta_sql(
     st: &crate::catalog::StreamTableMeta,
     defining_query: &str,
+    tree: &crate::dvm::parser::OpTree,
     has_pgt_count: bool,
-    scalar_count: bool,
+    scalar_aggregate: bool,
 ) -> Result<Option<ReconciliationDelta>, PgTrickleError> {
     let mut columns = crate::dvm::get_defining_query_columns(defining_query)?;
-    let (row_id, complete) =
-        crate::dvm::row_id_expr_for_query_and_complete_output(defining_query, &columns);
-    if columns.is_empty() || !(complete || scalar_count) {
+    let complete = crate::dvm::row_id_covers_output(tree, &columns);
+    if columns.is_empty() || !(complete || scalar_aggregate) {
         return Ok(None);
     }
+    if !complete {
+        // Scalar projections can produce types without equality, such as json.
+        let int8_output = Spi::get_one_with_args::<bool>(
+            "SELECT bool_and(atttypid = 'pg_catalog.int8'::regtype) \
+             FROM pg_catalog.pg_attribute WHERE attrelid = $1 AND attnum > 0 \
+             AND NOT attisdropped AND attname NOT IN ('__pgt_row_id', '__pgt_count')",
+            &[st.pgt_relid.into()],
+        )
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "scalar output eligibility for {}.{}: {e}",
+                st.pgt_schema, st.pgt_name
+            ))
+        })?
+        .unwrap_or(false);
+        if !int8_output {
+            return Ok(None);
+        }
+    }
+    let row_id = crate::dvm::row_id_expr_for_tree(defining_query, Some(tree));
     let materialization_query = if has_pgt_count {
         columns.push("__pgt_count".to_string());
         crate::api::inject_pgt_count(defining_query)
@@ -520,22 +539,27 @@ pub fn cleanup_cross_cycle_phantoms(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_scalar_reconciliation_accepts_only_count_output() {
+    fn test_scalar_reconciliation_requires_singleton_shape() {
         use crate::dvm::operators::test_helpers::*;
         let leaf = scan(1, "source", "public", "s", &["id"]);
         let count = aggregate(vec![], vec![count_star("n")], leaf.clone());
-        assert!(super::is_scalar_count(&count));
-        assert!(!super::is_scalar_count(&aggregate(
+        assert!(super::is_scalar_aggregate(&count));
+        assert!(!super::is_scalar_aggregate(&project(
+            vec![colref("n")],
+            vec!["n"],
+            count.clone()
+        )));
+        assert!(!super::is_scalar_aggregate(&aggregate(
             vec![colref("id")],
             vec![count_star("n")],
             leaf.clone()
         )));
-        assert!(!super::is_scalar_count(&aggregate(
+        assert!(super::is_scalar_aggregate(&aggregate(
             vec![],
             vec![sum_col("id", "n")],
             leaf
         )));
-        assert!(!super::is_scalar_count(&filter(lit("true"), count)));
+        assert!(!super::is_scalar_aggregate(&filter(lit("true"), count)));
     }
 
     #[test]

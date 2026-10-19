@@ -10,10 +10,10 @@ functions and ran slower; that change was dropped and its measurement is retaine
 and does not qualify the throughput gate.
 
 The follow-up also reuses parsed query trees and resolved CDC buffer OIDs.
-For immutable pointwise inner joins with at most two table inputs, a completed reconciled baseline permits
+For immutable pointwise inner joins with at most three table inputs, a completed reconciled baseline permits
 ordinary differential maintenance without another complete comparison.
 Eligible large graph joins use the required multiset comparison to produce the
-apply delta directly, retaining duplicate occurrences and scalar COUNT state.
+apply delta directly, retaining duplicate occurrences and bigint scalar-aggregate state.
 Constraint triggers, rules and row security keep the existing UPDATE path.
 Graph statistics cover the bounded stages and materialized delta actually read.
 The focused regressions check complete typed output deltas, NULL duplicates,
@@ -69,6 +69,20 @@ the approved rate failure. The candidate then failed the frozen fresh-server
 60-second readiness check while the Docker initialization server was shutting
 down; it admitted no churn cases. Supervision itself recorded no errors.
 This is retained as a startup failure, with no candidate throughput score.
+
+Run 39304244497 likewise completed its corrected native amd64 control at
+21.0940/minute, then failed candidate fresh-server readiness before churn.
+Its complete artifact has 66 verified file hashes; no candidate rate is inferred.
+
+The complete ARM64 candidate from source `a75c10ff71642f6fa7483610ed6f5ed5863b7f43`,
+image `sha256:b3d768acb3e2ae962543d68b363b7948256daf1890be1d6dd88989e957955d3a`,
+failed only the throughput gate at 45.0327/minute. All 300 admissions, 1,200
+source-row vectors and 300 case vectors passed, with zero future receipts.
+Due-burst p95/max were 76.631159/81.643393 seconds, conservative storage was
+3,549,250,675 bytes and peak sampled memory was 2,009,587,712 bytes.
+Raw exit 1, full observations, logs, resource accounting, exact compiled-source
+proof and the runnable image archive remain under `target/issue1168-completion/`.
+This failed candidate is never accepted using the control-only baseline policy.
 
 The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
 It uses the same source pins, MDM correction, workload and limits. Its image
