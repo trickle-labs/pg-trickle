@@ -182,6 +182,14 @@ def main():
                 "a released pg_mdm adapter compatible with pg_trickle 0.108.3, or an approved supported artifact pair"]
             print("INPUT_BLOCKED: installed pg_mdm rejects the pg_trickle differential capability profile", flush=True)
             return
+        react_admission = json.loads(sql("SELECT pgreact_internal.pgtrickle_integration_status()", "postgres"))
+        assert react_admission["extension_version"] == "0.108.3" and react_admission["qualified"], react_admission
+        rejected_admission = json.loads(sql(
+            "BEGIN; SET LOCAL pg_trickle.enabled=on; "
+            "SELECT pgreact_internal.pgtrickle_integration_status(); ROLLBACK", "postgres"))
+        assert rejected_admission["qualified"] is False, rejected_admission
+        observations["react_runtime_admission"] = {"qualified": react_admission,
+                                                  "scheduler_enabled_rejected": rejected_admission}
         upstream_fixture = output / "mdm-e2e-upstream.sql"
         command("docker", "cp", container + ":/tests/e2e.sql", str(upstream_fixture))
         original = upstream_fixture.read_bytes()

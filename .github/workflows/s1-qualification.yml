@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: s1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   qualify:
     runs-on: ubuntu-latest
@@ -36,6 +40,9 @@ jobs:
         run: |
           test "$(uname -m)" = x86_64
           mkdir -p _s1/evidence
+          cp .github/workflows/s1-qualification.yml _s1/evidence/
+          tar --exclude='*/__pycache__' --exclude='*/control-300' --exclude='*/candidate-300' \
+            -czf _s1/evidence/qualification-source.tar.gz benchmarks/s1
           uname -a > _s1/evidence/host.txt
           lscpu >> _s1/evidence/host.txt
           docker info > _s1/evidence/docker.txt
@@ -63,7 +70,9 @@ jobs:
             docker image inspect "s1-$image:qualification" > "_s1/evidence/$image-image.json"
             docker run --rm --entrypoint sha256sum "s1-$image:qualification" \
               /usr/lib/postgresql/18/lib/pg_trickle.so /usr/lib/postgresql/18/lib/pg_mdm.so \
-              /usr/lib/postgresql/18/lib/pg_react.so > "_s1/evidence/$image-libraries.sha256"
+              /usr/lib/postgresql/18/lib/pg_react.so \
+              /usr/share/postgresql/18/extension/pg_react--0.46.0.sql \
+              /usr/share/postgresql/18/extension/pg_react--0.46.1.sql > "_s1/evidence/$image-libraries.sha256"
           done
       - name: Qualify corrected control, unchanged 300 admissions
         if: steps.build.outcome == 'success'

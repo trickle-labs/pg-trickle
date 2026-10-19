@@ -38,7 +38,7 @@
   "adaptations": {
     "run_bounded.py": "Invoke Docker directly instead of rtk proxy; no supervision threshold changes",
     "test_supervisor.py": "Match direct Docker command positions",
-    "tests/integrations/pg-mdm/time/audit-r53-repair.py": "Retain original bootstrap bytes and hashes; adapt only two helper-audit resolver strategy assertions for #1171 exact deltas",
+    "tests/integrations/pg-mdm/time/audit-r53-repair.py": "Retain original bootstrap bytes and hashes; adapt only two helper-audit resolver strategy assertions for #1171 exact deltas; verify reconstructed React exact-version admission and rejection with scheduler enabled",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "Fail-closed, narrowly matched bootstrap adapter; original helper audit checks remain"
   },
   "qualified_files": {
@@ -53,7 +53,7 @@
     "showcase/mdm-stewardship/01-fixture.sql": "cab7cbe1d02f3d435c12f8ea0bf8c078069626da9b33677a0f3ff3ad2f4cac4a",
     "showcase/mdm-stewardship/02-read-only-package.sql": "f1b41ed7a641f79a7e89dbfad9e560cac5846f989c7c3d00446f5e538b9a837d",
     "test_supervisor.py": "41b09453ce4a83cc63baed9852346f4d7e287bd82bc16dc3d3be7f9538d1eb5c",
-    "tests/integrations/pg-mdm/time/audit-r53-repair.py": "d8cca94b8ac491f1eeb976c48b2dbf1b3129e1698691324db21fb6a78a900b9d",
+    "tests/integrations/pg-mdm/time/audit-r53-repair.py": "e66e75220afe3789a6ca37459873c197cf3da0d99364e941bedb5f7f9bc89ba8",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "7b1a5a6051a206ffc56816bbc79ad9e957cd0404a36c6d68d36faf17b1ae9bb5",
     "tests/integrations/pg-mdm/time/boundaries.sql": "8ea5931a9fd0e62753b391b46d27040e23dc36d23b19fb193ec499d9adb097cc",
     "tests/integrations/pg-mdm/time/idle.sql": "0789246af7071271336dc8cecb8e865022c86068701bb7eafd375c489ec93779",

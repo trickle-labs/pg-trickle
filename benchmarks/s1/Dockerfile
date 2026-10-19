@@ -47,6 +47,11 @@ COPY _s1/mdm/tests/e2e.sql _s1/mdm/tests/e2e_policy.sql /tests/
 COPY _s1/mdm/sql/configure_helper.sql /sql/configure_helper.sql
 COPY _s1/react/bin/pg-reactd /usr/local/bin/pg-reactd
 COPY _s1/react/docker/00-pg-trickle.sql /docker-entrypoint-initdb.d/10-pg-react.sql
+# Reconstruct the R53 stack's exact patch-version admission; keep every runtime/capability check.
+RUN sed -i 's/0\.108\.0/0.108.3/g' \
+    /usr/share/postgresql/18/extension/pg_react--0.46.0.sql \
+    /usr/share/postgresql/18/extension/pg_react--0.46.1.sql
 ENV PG_REACT_INIT_VERSION=0.46.1
 LABEL pg_mdm.source_revision="eef7937180d504e62ce1076074bbeed8cef5d5a7"
+LABEL qualification.react_pg_trickle_pin="0.108.3"
 USER postgres
