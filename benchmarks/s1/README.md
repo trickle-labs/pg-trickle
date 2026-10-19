@@ -47,6 +47,13 @@ remain explicit supervision failures. Disk sampling now retries only that exact
 temporary-relation ENOENT condition, at most four times 200 ms apart; permission,
 other missing-file, timeout and persistent errors still stop the run.
 
+Run 39275675630 then expired the five-attempt SQL metric retry while PostgreSQL
+was intentionally starting or stopping. The supervisor now continues sampling
+physical PGDATA and cgroup memory during recognized connection restart errors,
+retains prior SQL counters, and records every unavailable SQL sample. A gap of
+60 seconds fails supervision. Other SQL errors still fail immediately. This
+does not change the frozen harness's readiness checks, workload or limits.
+
 The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
 It uses the same source pins, MDM correction, workload and limits. Its image
 identities, compiler manifest, host and observations must be retained separately

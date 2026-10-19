@@ -37,8 +37,8 @@
     "tests/integrations/pg-mdm/v0.48-adjacent-upgrade.sql": "ca84ce45865c9d2a1cf037d9d67d421bda3f8cbbcaf24d4480dc215021cd1b8f"
   },
   "adaptations": {
-    "run_bounded.py": "Invoke Docker directly instead of rtk proxy; retry transient PostgreSQL restart connection failures at most four times one second apart; preserve resource and workload thresholds and fail on persistent or other errors; retain full container logs and account for their bytes, failing on log capture errors; reconnect full log capture after intentional container restarts; retry only du ENOENT on disappearing PostgreSQL temporary relation files at most four times 200ms apart, failing on other/persistent errors",
-    "test_supervisor.py": "Match direct Docker command positions; cover transient and persistent restart gaps plus non-restart errors; assert full container logs are retained; check live-stream reuse, replay after restart and log capture failure; verify transient/persistent temporary file races and other disk errors",
+    "run_bounded.py": "Invoke Docker directly instead of rtk proxy; retry transient PostgreSQL restart connection failures at most four times one second apart; preserve resource and workload thresholds and fail on persistent or other errors; retain full container logs and account for their bytes, failing on log capture errors; reconnect full log capture after intentional container restarts; retry only du ENOENT on disappearing PostgreSQL temporary relation files at most four times 200ms apart, failing on other/persistent errors; continue PGDATA and cgroup sampling during recognized SQL connection restart gaps, retain prior SQL counters and record each gap, failing after 60 seconds of SQL metric unavailability",
+    "test_supervisor.py": "Match direct Docker command positions; cover transient and persistent restart gaps plus non-restart errors; assert full container logs are retained; check live-stream reuse, replay after restart and log capture failure; verify transient/persistent temporary file races and other disk errors; fault-inject SQL restart gaps to verify disk/memory sampling continues and a persistent 60-second gap fails closed",
     "tests/integrations/pg-mdm/time/audit-r53-repair.py": "Retain original bootstrap bytes and hashes; adapt only two helper-audit resolver strategy assertions for #1171 exact deltas; verify reconstructed React exact-version admission and rejection with scheduler enabled",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "Fail-closed, narrowly matched bootstrap adapter; original helper audit checks remain"
   },
@@ -50,10 +50,10 @@
     "integrations/pg-mdm/sql/request-store.sql": "94a4b474bbb4a1d610857f0f3ba41077e8fc94632ce1e9198008035ba7d8cf2a",
     "integrations/pg-mdm/sql/routing.sql": "f1a83c261e8f0231e816f264419ff985481b180652f82083e1f0bc4b5d6e18be",
     "integrations/pg-mdm/sql/typed-flow.sql": "b53646d0b62e31c2b834c0325acb8be9418ada4808017a2c8579ad45866c3bf8",
-    "run_bounded.py": "ac304266a05ab7bc0ac68d1541fe0369749909c84ae4ab974bc826bff67b3fbb",
+    "run_bounded.py": "ff14cfb6e3904c951a9e683f215987da719f3e5f9c6a2bb392e1aeed359f3ade",
     "showcase/mdm-stewardship/01-fixture.sql": "cab7cbe1d02f3d435c12f8ea0bf8c078069626da9b33677a0f3ff3ad2f4cac4a",
     "showcase/mdm-stewardship/02-read-only-package.sql": "f1b41ed7a641f79a7e89dbfad9e560cac5846f989c7c3d00446f5e538b9a837d",
-    "test_supervisor.py": "973d7b267ff24e5496c3617a3941b2fb2dd258744b37ae5737bae74a8a768f5c",
+    "test_supervisor.py": "15918bfcedf4cdf2b811382b3dfe6d3de48f40fad280085dff1e169e882fc351",
     "tests/integrations/pg-mdm/time/audit-r53-repair.py": "e66e75220afe3789a6ca37459873c197cf3da0d99364e941bedb5f7f9bc89ba8",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "7b1a5a6051a206ffc56816bbc79ad9e957cd0404a36c6d68d36faf17b1ae9bb5",
     "tests/integrations/pg-mdm/time/boundaries.sql": "8ea5931a9fd0e62753b391b46d27040e23dc36d23b19fb193ec499d9adb097cc",

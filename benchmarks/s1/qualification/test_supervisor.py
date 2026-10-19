@@ -88,7 +88,7 @@ for failure in ("timeout", "daemon"):
             assert (root / failure / f"{name}-full.log").read_text() == "retained full log\n"
 
 for failures, expected_calls in ((2, 3), (5, 5)):
-    failed = subprocess.CompletedProcess([], 2, "", "connection to server failed: No such file or directory")
+    failed = subprocess.CompletedProcess([], 2, "", "psql: error: connection to server failed: No such file or directory")
     healthy = subprocess.CompletedProcess([], 0, '{"database_bytes":1,"wal_bytes":2}', "")
     with patch.object(bounded.subprocess, "run", side_effect=[failed] * failures + [healthy]) as run_mock, \
          patch.object(bounded.time, "sleep") as sleep_mock:
@@ -99,6 +99,69 @@ for failures, expected_calls in ((2, 3), (5, 5)):
 with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "permission denied")) as run_mock:
     assert bounded.postgres_metrics([]).returncode == 1
     assert run_mock.call_count == 1
+
+assert not bounded.postgres_is_restarting(subprocess.CompletedProcess([], 1, "", "ERROR: No such file or directory"))
+
+for persists in (False, True):
+    processes = []
+    clock = [0]
+
+    class RestartProcess:
+        def __init__(self, args, stdout, **kwargs):
+            self.logs = args[1] == "logs"
+            self.code = None
+            stdout.write("retained restart log\n" if self.logs else f"CONTAINER: {name}\n")
+            stdout.flush()
+            processes.append(self)
+
+        def poll(self):
+            return self.code
+
+        def wait(self, timeout):
+            if self.logs:
+                return 0
+            self.code = 1 if persists else 0
+            return self.code
+
+        def terminate(self):
+            self.code = -15
+
+    def restart_run(args, **kwargs):
+        if args[1] == "inspect":
+            value = image if args[-1] == "{{.Image}}" else image + " true"
+            return subprocess.CompletedProcess(args, 0, value + "\n", "")
+        if args[1] == "stop":
+            processes[0].code = 1
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "exec":
+            if "psql" in args:
+                return subprocess.CompletedProcess(args, 2, "", "psql: error: connection to server failed: the database system is shutting down")
+            return subprocess.CompletedProcess(args, 0, "100 /data\n" if "du -sk" in args[-1] else "128\n", "")
+        raise AssertionError(args)
+
+    def advance(seconds):
+        if seconds == 10:
+            if persists:
+                clock[0] = 61
+            else:
+                processes[0].code = 0
+
+    with tempfile.TemporaryDirectory(prefix="issue1168-restart-sampling-") as directory:
+        root = Path(directory)
+        with patch.object(bounded, "__file__", str(root / "run_bounded.py")), \
+             patch.object(bounded.subprocess, "Popen", RestartProcess), \
+             patch.object(bounded.subprocess, "run", restart_run), \
+             patch.object(bounded.time, "monotonic", lambda: clock[0]), \
+             patch.object(bounded.time, "sleep", advance):
+            assert bounded.main(image, "restart") == int(persists)
+        receipt = json.loads((root / "restart/bounded-run.json").read_text())
+        sample = json.loads((root / "restart/resource-samples.jsonl").read_text().splitlines()[0])
+        assert sample["containers"][name]["data_bytes"] == 102400
+        assert sample["memory_bytes"] == 128
+        assert name in sample["postgres_metrics_unavailable"]
+        assert (receipt["supervision_error"] is None) != persists
+        if persists:
+            assert "PostgreSQL metrics unavailable for 60 seconds" in receipt["supervision_error"]
 
 vanished = subprocess.CompletedProcess([], 1, "1024 /data\n", "du: cannot access '/data/base/22293/t1_61725': No such file or directory\n")
 healthy = subprocess.CompletedProcess([], 0, "1024 /data\n", "")

@@ -23,14 +23,18 @@ def container_has_exited(code, stdout, stderr):
                               for message in ("no such object:", "no such container:")))
 
 
+def postgres_is_restarting(result):
+    return (result.returncode != 0 and 'connection to server' in result.stderr
+            and any(message in result.stderr for message in (
+                'No such file or directory', 'the database system is starting up',
+                'the database system is shutting down', 'server closed the connection unexpectedly')))
+
+
 def postgres_metrics(args):
     # The frozen worker-health checks deliberately restart PostgreSQL.
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
-        restarting = any(message in result.stderr for message in (
-            'No such file or directory', 'the database system is starting up',
-            'the database system is shutting down', 'server closed the connection unexpectedly'))
-        if result.returncode == 0 or not restarting or attempt == 4:
+        if not postgres_is_restarting(result) or attempt == 4:
             return result
         time.sleep(1)
 
@@ -80,6 +84,7 @@ def main(image, run_name, profile_cases=None):
         assert 1 <= profile_cases <= 300
         env["R53_PROFILE_CASE_COUNT"] = str(profile_cases)
     samples = {}
+    postgres_unavailable_since = {}
     peak_memory_bytes = 0
     measurement_errors = []
     stop_reason = None
@@ -129,6 +134,7 @@ def main(image, run_name, profile_cases=None):
                 text = (run / "run.log").read_text()
                 names = set(re.findall(r"^CONTAINER: (pgreact-s1-[0-9a-f]{12})$", text, re.M))
                 memory_bytes = 0
+                postgres_unavailable = {}
                 for name in sorted(names):
                     inspected = subprocess.run(
                         ["docker", "inspect", name,
@@ -151,7 +157,7 @@ def main(image, run_name, profile_cases=None):
                          "'wal_bytes',(SELECT wal_bytes FROM pg_stat_wal))"])
                     disk = disk_metrics(
                         ["docker", "exec", name, "sh", "-c", 'du -sk "$PGDATA"'])
-                    if measured.returncode or disk.returncode:
+                    if disk.returncode or measured.returncode and not postgres_is_restarting(measured):
                         state = subprocess.run(
                             ["docker", "inspect", name,
                              "--format", "{{.State.Running}}"],
@@ -159,7 +165,17 @@ def main(image, run_name, profile_cases=None):
                         if container_has_exited(state.returncode, state.stdout, state.stderr):
                             continue
                         raise RuntimeError(f"resource measurement failed: {measured.stderr} {disk.stderr}")
-                    row = json.loads(measured.stdout)
+                    if measured.returncode:
+                        now = time.monotonic()
+                        since = postgres_unavailable_since.setdefault(name, now)
+                        if now - since >= 60:
+                            raise RuntimeError(f"PostgreSQL metrics unavailable for 60 seconds: {measured.stderr}")
+                        postgres_unavailable[name] = {"seconds": now - since, "error": measured.stderr}
+                        row = {key: samples.get(name, {}).get(key, 0)
+                               for key in ("database_bytes", "wal_bytes")}
+                    else:
+                        postgres_unavailable_since.pop(name, None)
+                        row = json.loads(measured.stdout)
                     row["data_bytes"] = int(disk.stdout.split()[0]) * 1024
                     samples[name] = {key: max(value, samples.get(name, {}).get(key, 0))
                                      for key, value in row.items()}
@@ -190,6 +206,7 @@ def main(image, run_name, profile_cases=None):
                     receipts.write(json.dumps({"elapsed_seconds": time.monotonic() - started,
                                                "containers": samples, "log_bytes": log_bytes,
                                                "memory_bytes": memory_bytes,
+                                               "postgres_metrics_unavailable": postgres_unavailable,
                                                "host_free_bytes": host_free_bytes,
                                                "conservative_used_bytes": used}) + "\n")
                 if (used >= 9 * 1024**3 or memory_bytes >= 4 * 1024**3
