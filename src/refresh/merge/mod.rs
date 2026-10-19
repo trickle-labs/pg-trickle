@@ -2874,8 +2874,9 @@ pub fn execute_differential_refresh_with_tuning(
     let use_vector_agg = vector_plan.is_some();
     let reconciled_baseline =
         graph_same_pass && query_has_join && super::phd1::has_reconciled_baseline(st.pgt_id)?;
-    let exact_join_scans = super::phd1::exact_rowwise_join_scan_count(&parsed_query.tree);
-    let exact_rowwise_join = reconciled_baseline
+    let exact_pointwise_scans = super::phd1::exact_rowwise_join_scan_count(&parsed_query.tree);
+    let exact_pointwise = graph_same_pass
+        && (query_has_join || !resolved.is_deduplicated)
         && use_explicit_dml
         && !user_triggers_active
         && !is_distributed_st
@@ -2883,7 +2884,7 @@ pub fn execute_differential_refresh_with_tuning(
         && dependencies
             .iter()
             .all(|dep| matches!(dep.source_type.as_str(), "TABLE" | "STREAM_TABLE"))
-        && exact_join_scans.is_some_and(|count| {
+        && exact_pointwise_scans.is_some_and(|count| {
             // shortcut: retain reconciliation above three scans until deeper-join conformance is complete.
             count <= 3
                 && count <= crate::config::pg_trickle_deep_join_l0_scan_threshold()
@@ -2898,6 +2899,7 @@ pub fn execute_differential_refresh_with_tuning(
                     &effective_defining_query,
                 )?)
         })?;
+    let exact_rowwise_join = reconciled_baseline && exact_pointwise;
     // Reuse the mandatory comparison instead of paying for a large join delta too.
     // Upstream stream tables are fixed by this graph pass's shared safe boundary.
     let reconciliation_delta = if graph_same_pass
@@ -2916,7 +2918,8 @@ pub fn execute_differential_refresh_with_tuning(
         && parsed_query.tree.nonnull_aux_columns().is_empty()
         && !parsed_query.tree.needs_dual_count()
         && !parsed_query.tree.needs_union_dedup_count()
-        && resolved.trigger_using_sql.len() >= 32 * 1024
+        && (resolved.trigger_using_sql.len() >= 32 * 1024
+            || (reconciled_baseline && !exact_rowwise_join))
         && dependencies
             .iter()
             .all(|dep| dep.source_type == "STREAM_TABLE")
@@ -2940,7 +2943,11 @@ pub fn execute_differential_refresh_with_tuning(
         resolved.trigger_using_sql = format!("({})", delta.sql);
     }
     let uses_reconciliation_delta = reconciliation_delta.is_some();
-    let capture_reconciliation_delta = uses_reconciliation_delta
+    // The non-deduplicated pointwise path already normalizes net I/D multiplicities.
+    let capture_exact_delta = (uses_reconciliation_delta
+        || (exact_pointwise
+            && (!query_has_join || reconciled_baseline)
+            && !resolved.is_deduplicated))
         && !parsed_query.tree.needs_pgt_count()
         && crate::config::pg_trickle_diff_output_format() == crate::config::DiffOutputFormat::Split;
     drop(parsed_query);
@@ -3095,7 +3102,7 @@ pub fn execute_differential_refresh_with_tuning(
     };
     let prepared_diff_capture_cols = if use_explicit_dml
         && needs_downstream_capture
-        && !capture_reconciliation_delta
+        && !capture_exact_delta
     {
         let cols = get_st_user_columns(st);
         if !cols.is_empty() {
@@ -3458,8 +3465,8 @@ pub fn execute_differential_refresh_with_tuning(
             // the true effective delta (including value-change DELETEs) after
             // the DML completes.
             let needs_diff_capture = needs_downstream_capture;
-            // The exact replacement delta already describes the committed visible multiset.
-            let diff_capture_cols = if needs_diff_capture && !capture_reconciliation_delta {
+            // These exact normalized deltas already describe the committed visible multiset.
+            let diff_capture_cols = if needs_diff_capture && !capture_exact_delta {
                 let cols = prepared_diff_capture_cols.clone().unwrap_or_default();
                 let col_list = cols
                     .iter()

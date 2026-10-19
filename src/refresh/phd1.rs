@@ -166,10 +166,33 @@ pub(crate) fn reconciliation_delta_sql(
 ) -> Result<Option<ReconciliationDelta>, PgTrickleError> {
     let mut columns = crate::dvm::get_defining_query_columns(defining_query)?;
     let complete = crate::dvm::row_id_covers_output(tree, &columns);
-    if columns.is_empty() || !(complete || scalar_aggregate) {
+    let table = format!(
+        "{}.{}",
+        crate::sql_builder::ident(&st.pgt_schema),
+        crate::sql_builder::ident(&st.pgt_name)
+    );
+    // shortcut: use native multiset comparison only for these exact scalar types; broaden with type conformance coverage.
+    let native_comparison = Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.bool_and(a.atttypid IN ('pg_catalog.bool'::pg_catalog.regtype, 'pg_catalog.bytea'::pg_catalog.regtype, \
+             'pg_catalog.int2'::pg_catalog.regtype, 'pg_catalog.int4'::pg_catalog.regtype, 'pg_catalog.int8'::pg_catalog.regtype, \
+             'pg_catalog.text'::pg_catalog.regtype, 'pg_catalog.varchar'::pg_catalog.regtype, 'pg_catalog.uuid'::pg_catalog.regtype, \
+             'pg_catalog.date'::pg_catalog.regtype, 'pg_catalog.timestamp'::pg_catalog.regtype, 'pg_catalog.timestamptz'::pg_catalog.regtype) \
+             AND (a.attcollation = 0 OR c.collisdeterministic)) \
+         FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation \
+         WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped",
+        &[st.pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("native reconciliation eligibility for {table}: {e}")))?
+    .unwrap_or(false);
+    let native_projection = native_comparison
+        && matches!(
+            tree,
+            crate::dvm::parser::OpTree::Project { .. } | crate::dvm::parser::OpTree::Filter { .. }
+        );
+    if columns.is_empty() || !(complete || scalar_aggregate || native_projection) {
         return Ok(None);
     }
-    if !complete {
+    if !complete && scalar_aggregate {
         // Scalar projections can produce types without equality, such as json.
         let int8_output = Spi::get_one_with_args::<bool>(
             "SELECT bool_and(atttypid = 'pg_catalog.int8'::regtype) \
@@ -197,11 +220,6 @@ pub(crate) fn reconciliation_delta_sql(
     } else {
         query.to_string()
     };
-    let table = format!(
-        "{}.{}",
-        crate::sql_builder::ident(&st.pgt_schema),
-        crate::sql_builder::ident(&st.pgt_name)
-    );
     let cols = columns
         .iter()
         .map(|column| crate::sql_builder::ident(column))
@@ -231,7 +249,7 @@ pub(crate) fn reconciliation_delta_sql(
         .collect::<Vec<_>>()
         .join(" OR ");
     let row_match = "pre.__pgt_row_id = post.__pgt_row_id";
-    if complete {
+    if complete || native_projection {
         let mut weight = "__pgt_recon_weight".to_string();
         while columns.contains(&weight) {
             weight.push('_');
@@ -257,19 +275,12 @@ pub(crate) fn reconciliation_delta_sql(
         } else {
             ""
         };
-        // shortcut: use native multiset comparison only for these exact scalar types; broaden with type conformance coverage.
-        let native_comparison = Spi::get_one_with_args::<bool>(
-            "SELECT pg_catalog.bool_and(a.atttypid IN ('pg_catalog.bool'::pg_catalog.regtype, 'pg_catalog.bytea'::pg_catalog.regtype, \
-                 'pg_catalog.int2'::pg_catalog.regtype, 'pg_catalog.int4'::pg_catalog.regtype, 'pg_catalog.int8'::pg_catalog.regtype, \
-                 'pg_catalog.text'::pg_catalog.regtype, 'pg_catalog.varchar'::pg_catalog.regtype, 'pg_catalog.uuid'::pg_catalog.regtype) \
-                 AND (a.attcollation = 0 OR c.collisdeterministic)) \
-             FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation \
-             WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped",
-            &[st.pgt_relid.into()],
-        )
-        .map_err(|e| PgTrickleError::SpiError(format!("native reconciliation eligibility for {table}: {e}")))?
-        .unwrap_or(false);
         if native_comparison {
+            let native_match = cols
+                .iter()
+                .map(|column| format!("pre.{column} IS NOT DISTINCT FROM w.{column}"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
             // Counted intermediates retain EXCEPT ALL; plain replacements benefit from one grouped pass.
             let changes = if has_pgt_count {
                 format!(
@@ -280,6 +291,11 @@ pub(crate) fn reconciliation_delta_sql(
                          SELECT {csv} FROM __pgt_recon_expected EXCEPT ALL SELECT {csv} FROM {table}) sub"
                 )
             } else {
+                let weighted_cols = cols
+                    .iter()
+                    .map(|column| format!("w.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(
                     "WITH __pgt_recon_weights AS MATERIALIZED (\
                          SELECT {csv}, SUM({weight}) AS {weight} FROM (\
@@ -287,9 +303,10 @@ pub(crate) fn reconciliation_delta_sql(
                              UNION ALL SELECT {csv}, 1 AS {weight} FROM __pgt_recon_expected\
                          ) signs GROUP BY {csv} HAVING SUM({weight}) <> 0) \
                      SELECT {row_id} AS __pgt_row_id, \
-                            CASE WHEN sub.{weight} < 0 THEN 'D'::text ELSE 'I'::text END AS __pgt_action, {csv} \
-                     FROM __pgt_recon_weights sub CROSS JOIN LATERAL \
-                          pg_catalog.generate_series(1::bigint, pg_catalog.abs(sub.{weight})) \
+                            CASE WHEN w.{weight} < 0 THEN 'D'::text ELSE 'I'::text END AS __pgt_action, sub.* \
+                     FROM __pgt_recon_weights w \
+                     CROSS JOIN LATERAL (SELECT {weighted_cols}) sub CROSS JOIN LATERAL \
+                          pg_catalog.generate_series(1::bigint, pg_catalog.abs(w.{weight})) \
                           AS __pgt_expansion({occurrence})"
                 )
             };
@@ -298,12 +315,15 @@ pub(crate) fn reconciliation_delta_sql(
                     "WITH __pgt_recon_expected AS MATERIALIZED ({materialization_query}), \
                      __pgt_recon_changes AS MATERIALIZED ({changes}), \
                      __pgt_recon_deletions AS (\
-                         SELECT __pgt_row_id{state}, count(*) AS {weight} FROM __pgt_recon_changes \
-                         WHERE __pgt_action = 'D' GROUP BY __pgt_row_id{state}) \
+                         SELECT {csv}, count(*) AS {weight}, \
+                                pg_catalog.hash_record_extended(ROW({csv}), 0::bigint) AS {occurrence} \
+                         FROM __pgt_recon_changes WHERE __pgt_action = 'D' GROUP BY {csv}) \
                      SELECT __pgt_row_id, 'D'::text AS __pgt_action, {csv}, {delete_ctid} FROM (\
                          SELECT pre.__pgt_row_id, {pre_cols}, pre.ctid AS {delete_ctid}, w.{weight}, \
-                                row_number() OVER (PARTITION BY pre.__pgt_row_id{pre_state} ORDER BY pre.ctid) AS {occurrence} \
-                         FROM {table} pre JOIN __pgt_recon_deletions w ON pre.__pgt_row_id = w.__pgt_row_id{pre_match}\
+                                row_number() OVER (PARTITION BY {pre_cols} ORDER BY pre.ctid) AS {occurrence} \
+                         FROM {table} pre JOIN __pgt_recon_deletions w \
+                           ON pg_catalog.hash_record_extended(ROW({pre_cols}), 0::bigint) = w.{occurrence} \
+                          AND {native_match}\
                      ) deletes WHERE {occurrence} <= {weight} \
                      UNION ALL \
                      SELECT __pgt_row_id, 'I'::text AS __pgt_action, {csv}, NULL::tid AS {delete_ctid} \

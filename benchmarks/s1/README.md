@@ -19,20 +19,24 @@ Graph statistics cover the bounded stages and materialized delta actually read.
 Graph refresh also reuses the metadata already validated in each contract snapshot
 and loads manual-refresh upstream metadata once. Eligible exact replacement deltas
 without hidden counts can feed split downstream capture directly.
-For supported boolean, bytea, integer, text, varchar and UUID outputs with
-deterministic collations, native `EXCEPT ALL` compares full multisets before
-encoding only changed row identities. Other types retain the existing comparison.
+For supported boolean, bytea, integer, text, varchar, UUID and temporal outputs
+with deterministic collations, native comparison operates on complete multisets
+before encoding changed row identities. Plain replacements group signed weights;
+counted intermediates retain `EXCEPT ALL`. Other types retain the existing comparison.
 The focused regressions check complete typed output deltas, NULL duplicates,
 multi-cycle changes, rollback, foreign-key cascades and owner privileges.
 
-Fresh installations reserve half of each `pgt_stream_tables` heap page for HOT
-metadata updates (`fillfactor=50`). This changes physical placement, with normal
-WAL durability and the same logical catalog. A diagnostic with identical metadata
-rows and 5,600 committed updates reduced new-page updates from 5,205 at
-fillfactor 100 to 827 at 50; that diagnostic is not a qualification result.
-Existing installations can apply the same setting with
-`ALTER TABLE pgtrickle.pgt_stream_tables SET (fillfactor=50)`; it affects subsequent
-tuple placement without rewriting the table.
+Normalized pointwise deltas can also feed split downstream capture, with joins
+requiring the guarded exact baseline, avoiding another pre/post snapshot. This requires
+the existing weight-normalization wrapper and excludes hidden count state.
+The regression checks duplicate occurrences, NULLs, cancellation and absence
+of the redundant pre-snapshot within the refresh transaction.
+
+Small immutable computed projections with a reconciled baseline can reuse their
+mandatory comparison too. Native full-value matching retains the actual stored
+row identity and physical deletion target, including duplicate NULL occurrences.
+A record hash narrows the join; full NULL-safe equality verifies every match.
+The regression changes the caller's timezone and checks complete temporal deltas.
 
 The unchanged workload requires 300 admissions at >=60 cases/minute, complete
 case/source vectors, zero future receipts, and a 1,000-case due burst with
@@ -86,6 +90,13 @@ failed the rate gate at 59.369956913836965/minute. Its complete 1,200 source and
 container teardown and was also retained as a measurement error; the default
 complete-result checker rejected the run. Earlier complete candidates at
 57.6127, 59.1360 and 59.0177/minute remain failures as well.
+
+A metadata fillfactor-50 prototype completed at 59.4198/minute, with all vectors
+and other gates passing. Despite fewer new-page updates in a temporary-table
+diagnostic, it did not materially improve the full workload and was discarded.
+Its source `ca4c5faba9c0c5198c5442ba25b20946e747a6c4`, exact image
+`sha256:36ee69d30e83a17a08314cad2b99b8bb2a633679eea1db05e9da4d905a9bf7f1`,
+raw failure, complete observations and portable image remain retained.
 
 Memory sampling now handles a confirmed stopped/removed container consistently
 with the existing SQL/disk sampling paths: it records an explicit

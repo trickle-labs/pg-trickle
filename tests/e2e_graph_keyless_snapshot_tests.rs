@@ -8,6 +8,88 @@ mod reference_clients;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_graph_small_projection_delta_preserves_temporal_null_duplicates() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql("CREATE TABLE temporal_rows(value text, day date, local_stamp timestamp, stamp timestamptz);
+        INSERT INTO temporal_rows VALUES
+        (NULL, '2026-01-02', '2026-01-02 03:04:05', '2026-01-02 03:04:05+00'),
+        (NULL, '2026-01-02', '2026-01-02 03:04:05', '2026-01-02 03:04:05+00'),
+        ('old', '2026-01-02', '2026-01-02 03:04:05', '2026-01-02 03:04:05+00');
+        CREATE TABLE temporal_dim(id int)")
+        .execute(&db.pool).await.expect("create temporal sources");
+    let query = "SELECT r.value, r.day, r.local_stamp, r.stamp, CASE WHEN r.value IS NULL THEN 0 ELSE 1 END AS priority FROM temporal_leaf r LEFT JOIN temporal_unused d ON false";
+    for (name, query) in [
+        (
+            "temporal_leaf",
+            "SELECT value, day, local_stamp, stamp FROM temporal_rows",
+        ),
+        ("temporal_unused", "SELECT id FROM temporal_dim"),
+        ("temporal_project", query),
+        (
+            "temporal_terminal",
+            "SELECT value, day, local_stamp, stamp, priority FROM temporal_project",
+        ),
+    ] {
+        sqlx::query("SELECT pgtrickle.create_stream_table(name => $1, query => $2, schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, orchestration_mode => 'EXTERNAL')")
+            .bind(name).bind(query).execute(&db.pool).await.expect("create temporal graph");
+    }
+    let root = "public.temporal_terminal";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    db.execute("UPDATE temporal_rows SET value = 'warm' WHERE value = 'old'")
+        .await;
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let contract = reference_clients::stream_contract_digest(&db.pool, root).await;
+    let consumer = reference_clients::register(&db.pool, root, root, &contract).await;
+    let mut tx = db.pool.begin().await.expect("begin temporal baseline");
+    let (token, _) = reference_clients::begin_resnapshot(&mut *tx, &consumer.consumer_id).await;
+    reference_clients::ack_resnapshot(&mut *tx, &consumer.consumer_id, &token).await;
+    tx.commit().await.expect("commit temporal baseline");
+    db.execute("DELETE FROM temporal_rows WHERE ctid IN (SELECT ctid FROM temporal_rows WHERE value IS NULL LIMIT 1)").await;
+    db.execute("UPDATE temporal_rows SET value = 'new' WHERE value = 'warm'")
+        .await;
+    let mut tx = db.pool.begin().await.expect("begin temporal refresh");
+    sqlx::query("SET LOCAL TimeZone = 'Pacific/Auckland'")
+        .execute(&mut *tx)
+        .await
+        .expect("change presentation timezone");
+    reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+    let strategy: String = sqlx::query_scalar("SELECT merge_strategy_used FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'temporal_project' AND h.status = 'COMPLETED' ORDER BY h.refresh_id DESC LIMIT 1")
+        .fetch_one(&mut *tx).await.expect("read projection strategy");
+    assert_eq!(strategy, "reconciliation_delta");
+    let batch = reference_clients::pending_batch(&mut *tx, &consumer.consumer_id).await;
+    let rows: Vec<(String, Option<String>, String, String, String, i32)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT action, value, day::text, local_stamp::text, (stamp AT TIME ZONE 'UTC')::text, priority FROM {} WHERE batch_token = $1 ORDER BY action, value NULLS FIRST", consumer.delta_relation)))
+        .bind(batch.batch_token).fetch_all(&mut *tx).await.expect("read complete temporal delta");
+    let expected = [
+        ("DELETE", None, 0),
+        ("DELETE", Some("warm"), 1),
+        ("INSERT", Some("new"), 1),
+    ]
+    .into_iter()
+    .map(|(action, value, priority)| {
+        (
+            action.to_string(),
+            value.map(str::to_string),
+            "2026-01-02".to_string(),
+            "2026-01-02 03:04:05".to_string(),
+            "2026-01-02 03:04:05".to_string(),
+            priority,
+        )
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(batch.mode, "EXACT");
+    assert_eq!(batch.row_count, 3);
+    assert_eq!(rows, expected);
+    reference_clients::ack(&mut *tx, &consumer.consumer_id, batch.batch_token).await;
+    tx.commit()
+        .await
+        .expect("commit temporal refresh and acknowledgement");
+    db.assert_st_matches_query("temporal_project", query).await;
+    db.assert_st_matches_query("temporal_terminal", query).await;
+}
+
+#[tokio::test]
 async fn test_graph_join_keeps_row_security_admission_barrier_after_reconciled_baseline() {
     const QUERY: &str =
         "SELECT l.id, r.label FROM public.rls_left l JOIN public.rls_right r USING (id)";
@@ -192,6 +274,7 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
         "DELETE FROM point_right WHERE id = 1",
         "INSERT INTO point_right VALUES (1,NULL), (1,NULL)",
         "DELETE FROM point_left WHERE ctid IN (SELECT ctid FROM point_left WHERE id = 1 LIMIT 2)",
+        "UPDATE point_right SET label = 'transient' WHERE id = 1; UPDATE point_right SET label = NULL WHERE id = 1",
     ].into_iter().enumerate() {
         let before = rows(&db, &reference_query).await;
         sqlx::raw_sql(mutation).execute(&db.pool).await.expect("commit simultaneous rowwise changes");
@@ -211,6 +294,16 @@ async fn test_graph_rowwise_join_delivers_bulk_duplicates_across_mutation_cycles
         expected.sort();
         let mut tx = db.pool.begin().await.expect("begin exact rowwise refresh");
         reference_clients::refresh_graph_without_full(&mut *tx, root, &digest).await;
+        if exact_allowed == Some(true) && cycle > 0 {
+            let pre_snapshot: Option<String> = sqlx::query_scalar(
+                "SELECT to_regclass('pg_temp.__pgt_pre_' || pgt_id::text)::text \
+                 FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'point_join'",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .expect("inspect pointwise capture staging");
+            assert!(pre_snapshot.is_none(), "exact join capture must reuse its normalized delta");
+        }
         let batch = reference_clients::pending_batch(&mut *tx, &consumer.consumer_id).await;
         let mut actual: Vec<(String, i32, i32, Option<String>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT action, id, value, label FROM {} WHERE batch_token = $1", consumer.delta_relation
