@@ -36,7 +36,7 @@ def commands(allocation, tier):
              '--test', 'e2e_refresh_atomicity_tests', '--test-threads', '1'],
         ]
     else:
-        result = [['python3', 'scripts/ci_pr_suite.py']]
+        result = [['python3', 'scripts/ci_pr_suite.py', '--no-fail-fast']]
     return result + [['bash', 'scripts/run_failure_recovery_repetition.sh']]
 
 

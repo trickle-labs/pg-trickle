@@ -177,7 +177,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`ea03efce676c6d9477dbbdb750d870f0b7fe7fad`, the `ubuntu-24.04` runner class,
+`ae4f945d626b1b06638a550d2226b3d620aaa831`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -190,7 +190,7 @@ The before allocation replays the broad full inventory from `b2ebaa8d`
 the existing DVM components to integration. Fixed recovery witnesses and
 isolated atomicity execution are held constant on both sides.
 Production sources match merged PR #1190 (`0cbd84dc`); both sides also include
-the mixed-view diamond, CTE and circular fixture repairs described below.
+the mixed-view diamond, CTE, circular and bit-aggregate fixture repairs below.
 
 This measures the affected tier workloads, including cold test compilation.
 Unchanged unit, release, shipping, LSN and security jobs are excluded from

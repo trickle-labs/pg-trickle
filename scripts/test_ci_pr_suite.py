@@ -76,6 +76,15 @@ class AllocationTests(unittest.TestCase):
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
 
+    def test_comparison_collects_all_selected_failures_without_changing_result(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch(
+                "sys.argv", ["ci_pr_suite.py", "--no-fail-fast"]
+            ), patch("ci_pr_suite.subprocess.run") as run:
+                run.return_value.returncode = status
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertIn("--no-fail-fast", run.call_args_list[0].args[0])
+
 
 class VerdictTests(unittest.TestCase):
     def needs(self, *, runtime=True):

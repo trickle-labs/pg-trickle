@@ -26,7 +26,8 @@ class AllocationReplayTests(unittest.TestCase):
         self.assertIn('e2e_*', before[0])
         self.assertIn('not binary(=e2e_refresh_atomicity_tests)', before[0])
         self.assertIn('e2e_refresh_atomicity_tests', before[1])
-        self.assertEqual(after[0], ['python3', 'scripts/ci_pr_suite.py'])
+        self.assertEqual(after[0], ['python3', 'scripts/ci_pr_suite.py', '--no-fail-fast'])
+        self.assertIn('--no-fail-fast', before[0])
         self.assertEqual(before[-1], after[-1])
 
     def test_failed_step_is_retained_and_does_not_skip_later_evidence(self):

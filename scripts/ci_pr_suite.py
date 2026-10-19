@@ -43,12 +43,15 @@ def targets(root: Path = ROOT) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true", help="validate and list targets without Docker")
+    parser.add_argument("--no-fail-fast", action="store_true", help="retain all selected failure evidence")
     args = parser.parse_args()
     selected = targets()
     if args.list:
         print("\n".join(selected))
         return 0
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
+    if args.no_fail_fast:
+        command.append("--no-fail-fast")
     for name in selected:
         if name != "e2e_refresh_atomicity_tests":
             command.extend(["--test", name])
