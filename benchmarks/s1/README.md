@@ -24,12 +24,31 @@ runner. This environment differs from the earlier amd64 runs emulated on an
 ARM64 Docker host; historical rates cannot establish a speedup on this host.
 The workload and acceptance thresholds are unchanged.
 
+The builder cleans the pg-trickle package before compiling either source tree,
+retaining dependency caches. Run 39255297739 exposed a stale Cargo artifact:
+the candidate reused the control library despite a different source checkout.
+Those native candidate observations do not measure the JIT optimization.
+Qualification now requires different pg-trickle library hashes, identical
+MDM/React hashes, and a runtime JIT-scope regression on the actual candidate.
+The supervisor retains full timestamped container logs and includes their bytes
+in the storage budget; a failed log capture fails supervision.
+
+The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
+It uses the same source pins, MDM correction, workload and limits. Its image
+identities, compiler manifest, host and observations must be retained separately
+from amd64; a passing ARM64 result is specific to that declared platform.
+The GitHub workflow continues to measure the native amd64 pair.
+
 The user also approved `mdm-grants.patch` for **both** images after native run
 39255297739 deadlocked on admission 236. MDM had reissued GRANT on every graph
 table before each refresh; its catalog writes can deadlock with ANALYZE while
 graph refresh waits for a SHARE storage lock. The patch checks existing SELECT
 access and locks storage before granting missing access. `test_grant_analyze.py`
 reproduces the old lock cycle in PostgreSQL 18.4 and checks both corrected paths.
+`test_mdm_grants.py` runs the actual MDM binary after bootstrap, checks that
+repeat refresh leaves graph-storage catalog rows unchanged, and verifies that
+revoked SELECT is restored. Only this isolated catalog-write regression disables
+autovacuum to exclude unrelated statistics writes; S1 keeps its frozen settings.
 The original MDM source remains pinned; the exact patch is retained with the
 qualification source and applied explicitly by the Dockerfile. The failed run
 remains a failure, with no complete throughput or paired speedup score.
@@ -84,6 +103,19 @@ For a locally built exact joint-stack image:
 PGREACT_S1_BATCH_SIZE=32 python3 benchmarks/s1/qualification/run_bounded.py \
   sha256:<full-image-id> candidate-300
 ```
+
+For the approved native ARM64 profile, prepare the same source checkouts as
+the workflow, build `Dockerfile.arm64-sdk` with `--platform linux/arm64`, then
+build both images with the shared `Dockerfile`, `--platform linux/arm64` and
+`--build-arg S1_BUILDER=<that-local-sdk-tag>`. Set `TRICKLE_SOURCE=_s1/control`
+only for the control build. Retain `/sdk-manifest.txt` from the SDK and its image
+identity. The SDK uses Rust 1.98.0 and pgrx 0.18.0; its installed PostgreSQL 18
+header/package versions are recorded in that manifest. The runtime remains the
+pinned PostgreSQL 18.4 image. Cargo build caches are separated by architecture.
+Run the full supervisor and complete-result checker sequentially for both
+exact image IDs on the same idle Docker host.
+Set `DOCKER_DEFAULT_PLATFORM=linux/arm64` for the ARM64 supervisor invocation;
+the frozen harness inherits this explicit platform selection for Docker runs.
 
 Run names must be new; existing observations are never overwritten. The
 supervisor directly invokes Docker instead of requiring the original host's

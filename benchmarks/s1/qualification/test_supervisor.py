@@ -17,15 +17,16 @@ for failure in ("timeout", "daemon"):
 
     class Process:
         def __init__(self, args, stdout, **kwargs):
+            self.logs = args[1] == "logs"
             self.code = None
-            stdout.write(f"CONTAINER: {name}\n")
+            stdout.write("retained full log\n" if self.logs else f"CONTAINER: {name}\n")
             stdout.flush()
 
         def poll(self):
             return self.code
 
         def wait(self, timeout):
-            self.code = 1
+            self.code = 0 if self.logs else 1
             return self.code
 
         def terminate(self):
@@ -60,6 +61,8 @@ for failure in ("timeout", "daemon"):
         assert receipt["supervision_error"].startswith(
             "TimeoutExpired:" if failure == "timeout" else "RuntimeError: container inspection failed:"), receipt
         assert (root / failure / "supervision-error.log").is_file()
+        if failure == "timeout":
+            assert (root / failure / f"{name}-full.log").read_text() == "retained full log\n"
 
 for failures, expected_calls in ((2, 3), (5, 5)):
     failed = subprocess.CompletedProcess([], 2, "", "connection to server failed: No such file or directory")

@@ -60,6 +60,22 @@ def main(image, run_name, profile_cases=None):
         with (run / "run.log").open("w") as log, ExitStack() as cleanup:
             process = subprocess.Popen([sys.executable, str(harness), image, str(output)],
                                        stdout=log, stderr=subprocess.STDOUT, env=env)
+            log_followers = {}
+
+            def finish_logs():
+                for follower, stream in log_followers.values():
+                    try:
+                        code = follower.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        follower.terminate()
+                        follower.wait(timeout=15)
+                        raise RuntimeError("container log capture did not finish")
+                    finally:
+                        stream.close()
+                    if code != 0:
+                        raise RuntimeError(f"container log capture failed: {code}")
+
+            cleanup.callback(finish_logs)
 
             def stop_owned():
                 if process.poll() is not None:
@@ -95,6 +111,12 @@ def main(image, run_name, profile_cases=None):
                     assert identity == image, (name, identity)
                     if running != "true":
                         continue
+                    if name not in log_followers:
+                        stream = (run / f"{name}-full.log").open("w")
+                        follower = subprocess.Popen(
+                            ["docker", "logs", "--follow", "--timestamps", name],
+                            stdout=stream, stderr=subprocess.STDOUT)
+                        log_followers[name] = (follower, stream)
                     measured = postgres_metrics(
                         ["docker", "exec", name, "psql", "-XAtq", "-U", "postgres",
                          "-d", "postgres", "-c", "SELECT json_build_object('database_bytes',"

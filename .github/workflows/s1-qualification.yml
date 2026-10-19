@@ -77,6 +77,12 @@ jobs:
               /usr/share/postgresql/18/extension/pg_react--0.46.0.sql \
               /usr/share/postgresql/18/extension/pg_react--0.46.1.sql > "_s1/evidence/$image-libraries.sha256"
           done
+          python3 -c 'from pathlib import Path; r=Path("_s1/evidence"); c=(r/"control-libraries.sha256").read_text().splitlines(); n=(r/"candidate-libraries.sha256").read_text().splitlines(); assert c[0] != n[0], "control and candidate reused the same pg_trickle library"; assert c[1:] == n[1:], "MDM/React dependency binaries differ"'
+      - name: Check actual MDM grants and candidate JIT behavior
+        id: mdm_grants
+        run: |
+          image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
+          python3 benchmarks/s1/test_mdm_grants.py "$image" _s1/evidence/mdm-grant-regression
       - name: Qualify corrected control, unchanged 300 admissions
         if: steps.build.outcome == 'success'
         env:
@@ -86,7 +92,7 @@ jobs:
           python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300
           python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/control-300
       - name: Qualify candidate, unchanged 300 admissions
-        if: always() && steps.build.outcome == 'success'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.mdm_grants.outcome == 'success' }}
         env:
           PGREACT_S1_BATCH_SIZE: '32'
         run: |
