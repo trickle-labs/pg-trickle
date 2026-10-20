@@ -1718,9 +1718,7 @@ pub fn execute_differential_refresh_with_tuning(
     // historical refresh timings and use the cost model to predict
     // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
     if fallback_reason.is_none() && !skip_ratio_check && total_change_count > 0 {
-        let complexity = with_stream_owner(st, || {
-            Ok(classify_query_complexity(&effective_defining_query))
-        })?;
+        let complexity = classify_query_complexity(&effective_defining_query);
         if let Some(hist) = query_refresh_history_stats(st.pgt_id)
             && cost_model_prefers_full(
                 hist.avg_ms_per_delta,
@@ -3885,9 +3883,7 @@ pub fn execute_differential_refresh_with_tuning(
         // derived from recent refresh history.  The cost model computes
         // the crossover delta ratio where INCR cost equals FULL cost,
         // adjusted for query complexity class.
-        let complexity = with_stream_owner(st, || {
-            Ok(classify_query_complexity(&effective_defining_query))
-        })?;
+        let complexity = classify_query_complexity(&effective_defining_query);
         let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
             Some(cost_threshold) => {
                 // Weighted blend: 60% ratio-based, 40% cost-based.

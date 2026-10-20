@@ -10,6 +10,16 @@ functions and ran slower; that change was dropped and its measurement is retaine
 and does not qualify the throughput gate.
 
 The follow-up also reuses parsed query trees and resolved CDC buffer OIDs.
+Incremental refresh admission uses fresh resolved volatility analysis without
+creating an output-schema probe view whose column information is discarded.
+CREATE/ALTER still inspect exact output types and typmods where needed.
+Pure string cost classification does not switch execution roles. Source-commit
+buffer discovery uses direct joins for base and stream-table dependencies,
+retaining identical buffers, timestamp calculations and safe-bound filters.
+The retained 73-table catalog diagnostic found identical complete vectors and
+reduced aggregate lookup execution from 43.182 ms to 11.354 ms; this is not a
+qualification score. The regression checks oldest timestamps from both kinds
+of dependency.
 For immutable pointwise inner joins with at most three table inputs, a completed reconciled baseline permits
 ordinary differential maintenance without another complete comparison.
 Eligible large graph joins use the required multiset comparison to produce the
@@ -109,6 +119,13 @@ was 3,408,026,079 bytes and peak sampled memory 2,076,282,880 bytes. The raw
 exit, official checker rejection, full vectors, logs and runnable archive are
 retained. An admission-to-admission partial rate omitted the initial timing
 offset; only the unchanged official SQL window determines the final rate.
+
+Direct identity matching, source `f1c7b373f347ff6bd8ff76bde7b4de893fd0bd0c`,
+image `sha256:19963a62f001cca4be118f770b73d6c3e2580c39b1bb7cb6aafbaf15448a9bb6`,
+then completed at 59.90644968878966/minute and also remains a failure. Its
+complete vectors and all other gates passed: due p95/max 76.085647/80.941095
+seconds, conservative storage 3,428,191,327 bytes, peak memory 1,890,263,040
+bytes. The exact image, full observations and official rejection are retained.
 
 Memory sampling now handles a confirmed stopped/removed container consistently
 with the existing SQL/disk sampling paths: it records an explicit

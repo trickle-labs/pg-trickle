@@ -2335,18 +2335,18 @@ impl RefreshRecord {
         let keys: Vec<(String, i64)> = Spi::connect(|client| {
             let rows = client
                 .select(
-                    "SELECT DISTINCT cb.buffer_key::text, cb.source_id
-                       FROM pgtrickle.pgt_change_buffers cb
-                       JOIN pgtrickle.pgt_dependencies d
-                         ON ((d.source_type = 'STREAM_TABLE'
-                              AND cb.source_kind = 'STREAM_TABLE'
-                              AND cb.source_id = (SELECT st.pgt_id
-                                                    FROM pgtrickle.pgt_stream_tables st
-                                                   WHERE st.pgt_relid = d.source_relid))
-                          OR (d.source_type <> 'STREAM_TABLE'
-                              AND cb.source_kind = 'BASE'
-                              AND cb.source_id = d.source_relid::bigint))
-                      WHERE d.pgt_id = $1",
+                    "SELECT cb.buffer_key::text, cb.source_id
+                       FROM pgtrickle.pgt_dependencies d
+                       JOIN pgtrickle.pgt_change_buffers cb
+                         ON cb.source_kind = 'BASE' AND cb.source_id = d.source_relid::bigint
+                      WHERE d.pgt_id = $1 AND d.source_type <> 'STREAM_TABLE'
+                      UNION
+                     SELECT cb.buffer_key::text, cb.source_id
+                       FROM pgtrickle.pgt_dependencies d
+                       JOIN pgtrickle.pgt_stream_tables st ON st.pgt_relid = d.source_relid
+                       JOIN pgtrickle.pgt_change_buffers cb
+                         ON cb.source_kind = 'STREAM_TABLE' AND cb.source_id = st.pgt_id
+                      WHERE d.pgt_id = $1 AND d.source_type = 'STREAM_TABLE'",
                     None,
                     &[pgt_id.into()],
                 )

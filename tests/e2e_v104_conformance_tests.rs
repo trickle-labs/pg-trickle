@@ -12,6 +12,111 @@ const CREATE_STREAM_ARGS: &str = "text, text, text, text, boolean, text, text, t
      text, integer, double precision, text, boolean, text, integer, text, text";
 
 #[tokio::test]
+async fn test_refresh_source_commit_timestamp_tracks_base_and_stream_dependencies() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql("CREATE TABLE commit_a(id int PRIMARY KEY);
+        CREATE TABLE commit_b(id int PRIMARY KEY);
+        SELECT pgtrickle.create_stream_table(name => 'commit_leaf', query => 'SELECT id FROM commit_b', schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => true);
+        SELECT pgtrickle.create_stream_table(name => 'commit_root', query => 'SELECT id FROM commit_a UNION ALL SELECT id FROM commit_leaf', schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => true);
+        INSERT INTO commit_a VALUES (1);
+        INSERT INTO commit_b VALUES (2)")
+        .execute(&db.pool).await.expect("create mixed source dependencies");
+    let base_buffer: String = db.query_scalar("SELECT buffer_key::text FROM pgtrickle.pgt_change_buffers WHERE source_kind = 'BASE' AND source_id = 'commit_a'::regclass::oid::bigint").await;
+    let upstream_buffer: String = db.query_scalar("SELECT buffer_key::text FROM pgtrickle.pgt_change_buffers WHERE source_kind = 'BASE' AND source_id = 'commit_b'::regclass::oid::bigint").await;
+    db.execute(&format!(
+        "UPDATE pgtrickle_changes.\"{base_buffer}\" SET source_commit_at = '2020-01-01 00:00:00+00'"
+    ))
+    .await;
+    db.execute(&format!("UPDATE pgtrickle_changes.\"{upstream_buffer}\" SET source_commit_at = '2019-01-01 00:00:00+00'" )).await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('commit_leaf')")
+        .await;
+    for (mutation, oldest) in [
+        ("", "2019-01-01 00:00:00+00"),
+        ("INSERT INTO commit_a VALUES (3)", "2018-01-01 00:00:00+00"),
+    ] {
+        if !mutation.is_empty() {
+            db.execute(mutation).await;
+            db.execute(&format!(
+                "UPDATE pgtrickle_changes.\"{base_buffer}\" SET source_commit_at = '{oldest}'"
+            ))
+            .await;
+        }
+        db.execute("SELECT pgtrickle.refresh_stream_table('commit_root')")
+            .await;
+        let correct: bool = sqlx::query_scalar("SELECT source_commit_at = $1::timestamptz FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING (pgt_id) WHERE s.pgt_name = 'commit_root' AND h.status = 'COMPLETED' ORDER BY refresh_id DESC LIMIT 1")
+            .bind(oldest).fetch_one(&db.pool).await.expect("read oldest admitted source commit");
+        assert!(
+            correct,
+            "oldest source commit must include both dependency kinds"
+        );
+        db.assert_st_matches_query(
+            "commit_root",
+            "SELECT id FROM commit_a UNION ALL SELECT id FROM commit_leaf",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_graph_refresh_rechecks_volatility_without_output_schema_ddl() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql("CREATE TABLE admission_source(id int PRIMARY KEY, label varchar(12), amount numeric(9,2));
+        INSERT INTO admission_source VALUES (1, 'Before', 12.34);
+        CREATE FUNCTION admission_label(varchar) RETURNS text LANGUAGE SQL IMMUTABLE AS 'SELECT lower($1)';
+        SELECT pgtrickle.create_stream_table(name => 'admission_st',
+            query => 'SELECT id, label, amount, admission_label(label) AS normalized FROM admission_source',
+            schedule => '1h', refresh_mode => 'DIFFERENTIAL', initialize => false, orchestration_mode => 'EXTERNAL')")
+        .execute(&db.pool).await.expect("create typed admission graph");
+    let root = "public.admission_st";
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    reference_clients::refresh_graph(&db.pool, root, &digest).await;
+    sqlx::raw_sql("CREATE TABLE admission_schema_probes(object_identity text);
+        CREATE FUNCTION audit_admission_schema() RETURNS event_trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            INSERT INTO public.admission_schema_probes SELECT object_identity
+            FROM pg_event_trigger_ddl_commands()
+            WHERE command_tag = 'CREATE VIEW' AND position('__pgt_validate_output_' in object_identity) > 0;
+        END $$;
+        CREATE EVENT TRIGGER audit_admission_schema ON ddl_command_end EXECUTE FUNCTION audit_admission_schema();
+        UPDATE admission_source SET label = 'After'")
+        .execute(&db.pool).await.expect("audit refresh-only schema inspection");
+    reference_clients::refresh_graph_without_full(&db.pool, root, &digest).await;
+    let probes: i64 = db
+        .query_scalar("SELECT count(*) FROM admission_schema_probes")
+        .await;
+    assert_eq!(
+        probes, 0,
+        "refresh admission does not consume output typmods"
+    );
+    let types: Vec<String> = sqlx::query_scalar("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'admission_st'::regclass AND attname IN ('label', 'amount') ORDER BY attname")
+        .fetch_all(&db.pool).await.expect("read retained output typmods");
+    assert_eq!(types, vec!["numeric(9,2)", "character varying(12)"]);
+    let normalized: String = db.query_scalar("SELECT normalized FROM admission_st").await;
+    assert_eq!(normalized, "after");
+    let frontier: String = db.query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'admission_st'").await;
+    // Isolate admission from the separate DDL-triggered reinitialization barrier.
+    sqlx::raw_sql(
+        "ALTER FUNCTION admission_label(varchar) VOLATILE;
+        UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = false WHERE pgt_name = 'admission_st';
+        UPDATE admission_source SET label = 'Rejected'",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("change resolved function volatility");
+    let digest = reference_clients::graph_digest(&db.pool, root).await;
+    let error = sqlx::query("SELECT graph_refresh_id FROM pgtrickle.refresh_graph_strict(ARRAY[$1::regclass], $2::bytea, 'ERROR')")
+        .bind(root).bind(&digest).execute(&db.pool).await.expect_err("fresh volatility must still reject refresh");
+    assert!(
+        error.to_string().to_lowercase().contains("volatile"),
+        "{error}"
+    );
+    let after: String = db.query_scalar("SELECT frontier::text FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'admission_st'").await;
+    assert_eq!(after, frontier);
+    let normalized: String = db.query_scalar("SELECT normalized FROM admission_st").await;
+    assert_eq!(normalized, "after");
+}
+
+#[tokio::test]
 async fn test_graph_buffer_schema_checks_reject_wrong_type_and_nullable_identity() {
     let db = E2eDb::new().await.with_extension().await;
     sqlx::raw_sql(

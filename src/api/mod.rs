@@ -1567,7 +1567,7 @@ pub(crate) fn validate_incremental_mode_for_query(
     if mode == RefreshMode::Full {
         return Ok(());
     }
-    let (_, query_volatility) = validate_defining_query(defining_query)?;
+    let query_volatility = helpers::defining_query_volatility(defining_query)?;
     let result = crate::dvm::parse_defining_query_full(defining_query)?;
     crate::dvm::check_ivm_support_with_registry(&result)?;
     let mut source_oids = result.tree.source_oids();
