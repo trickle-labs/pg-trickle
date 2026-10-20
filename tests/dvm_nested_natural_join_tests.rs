@@ -236,6 +236,9 @@ async fn test_diff_nested_natural_join_innermost_insert_fully_matched() {
 
     reset_nested_nj_fixture(&db).await;
 
+    db.execute("INSERT INTO public.sales VALUES (1, 10, 100)")
+        .await;
+
     // Existing branches and regions
     db.execute("INSERT INTO public.branches VALUES (10, 20, 'Downtown')")
         .await;
@@ -246,7 +249,7 @@ async fn test_diff_nested_natural_join_innermost_insert_fully_matched() {
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_1 \
          (lsn, action, __pgt_row_id, id, branch_id, amount) \
-         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(1), 10, 100)",
+         VALUES ('0/1', 'I', pgtrickle.test_int_to_row_id(1), 1, 10, 100)",
     )
     .await;
 
@@ -288,7 +291,7 @@ async fn test_diff_nested_natural_join_outermost_delete() {
     db.execute(
         "INSERT INTO pgtrickle_changes.changes_3 \
          (lsn, action, __pgt_row_id, region_id, name) \
-         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(20), 'North')",
+         VALUES ('0/1', 'D', pgtrickle.test_int_to_row_id(20), 20, 'North')",
     )
     .await;
 

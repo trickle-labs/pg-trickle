@@ -3636,6 +3636,12 @@ SELECT pgtrickle.create_stream_table(
 
 When a view is inlined, the user's original SQL is stored in the `original_query` catalog column for reinit and introspection. The `defining_query` column contains the expanded (post-inlining) form.
 
+`JOIN ... USING (...)` clauses are preserved during view inlining. Differential
+maintenance resolves each USING key to its input relation, including a unique
+input within a nested join. A USING key shared by multiple inputs of an already
+nested join requires an explicit `JOIN ... ON` condition; it is rejected rather
+than treated as a cross join.
+
 **DDL hooks:** `CREATE OR REPLACE VIEW` on a view that was inlined into a stream table marks that ST for reinit. `DROP VIEW` sets affected STs to ERROR status.
 
 **Materialized views** are **rejected** in DIFFERENTIAL mode — their stale-snapshot semantics prevent CDC triggers from tracking changes.  Use the underlying query directly, or switch to FULL mode. In FULL mode, materialized views are allowed (no CDC needed).

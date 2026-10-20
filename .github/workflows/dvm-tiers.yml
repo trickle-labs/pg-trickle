@@ -1,9 +1,7 @@
 name: DVM deep tiers (COR-18)
 
-# COR-18 (v0.87.6): bounded pull-request DVM jobs already run in ci.yml's
-# e2e-smoke job (corpus, composition, metamorphic, strategy, failpoint,
-# negative-control, light typed-generator sample). This workflow adds the
-# deeper, scheduled tiers on top of that PR gate:
+# PR corpus, composition, failpoint and negative controls stay in ci.yml.
+# Metamorphic combinations and the strategy cross-product run here:
 #
 #   nightly  - a bounded subset for fast trend feedback. Reruns the same
 #              corpus/composition/metamorphic/shrink checks the PR gate runs,
@@ -134,6 +132,16 @@ jobs:
       - name: Run DVM active negative controls (weekly only)
         if: steps.tier.outputs.tier == 'weekly'
         run: cargo nextest run --profile ci --test e2e_dvm_negative_control_tests --no-capture
+
+      - name: Run Nexmark workload combinations (weekly only)
+        if: steps.tier.outputs.tier == 'weekly'
+        run: cargo nextest run --profile ci --test e2e_nexmark_tests --run-ignored all --no-capture
+
+      - name: Run TPC-H DAG combinations (weekly only)
+        if: steps.tier.outputs.tier == 'weekly'
+        env:
+          TPCH_SCALE: '0.01'
+        run: cargo nextest run --profile ci --test e2e_tpch_dag_tests --run-ignored all --no-capture
 
       - name: Run DVM release gate (structural steps only, no live database)
         run: python3 scripts/dvm_release_gate.py

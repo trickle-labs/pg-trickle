@@ -3,7 +3,7 @@
 #
 # Automatic triggers (expensive jobs selected by .github/ci-paths.yml):
 #   Draft PR      : quick validation, LSN proof; unit/integration for runtime
-#   Ready PR      : + packaged E2E and path-selected sensitive gates
+#   Ready PR      : + packaged E2E, bounded full E2E, subsystem gates
 #   push → main   : unit/integration, packaged E2E, smoke, benchmark tracking
 #   Nightly       : full matrix, E2E, dbt, CNPG, performance gates
 #   Manual        : full matrix; opt in to benchmark comparison
@@ -96,6 +96,9 @@ jobs:
           python3 scripts/check_lsn_verification.py --contract-only
           python3 -m unittest discover -s scripts -p 'test_*.py'
 
+      - name: Validate PR coverage allocation
+        run: python3 scripts/ci_pr_suite.py --list
+
   lsn-verification:
     name: Checked LSN proof and semantic mutation control
     needs: release-qualification-contract
@@ -140,6 +143,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
       # M-9 (v0.55.0): Upload unit-test coverage to Codecov for PR gate.
@@ -213,6 +217,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
   unit-tests-windows:
@@ -292,11 +297,15 @@ jobs:
             --test scenario_tests \
             --test workflow_tests \
             --test property_tests
+
+      - name: Run execution-backed DVM component tests
+        run: bash ./scripts/run_dvm_integration_tests.sh pg18
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v6
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
   # ── v0.87 paired pgbench overhead gate ─────────────────────────────────
@@ -359,7 +368,9 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Package extension
-        run: bash ./scripts/run_light_e2e_tests.sh --package-only
+        run: |
+          rm -rf target/release/pg_trickle-pg18
+          bash ./scripts/run_light_e2e_tests.sh --package-only
 
       - name: Upload extension package
         uses: actions/upload-artifact@v7
@@ -387,6 +398,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Remove cached extension package
+        run: rm -rf target/release/pg_trickle-pg18
 
       - name: Download extension package
         uses: actions/download-artifact@v8
@@ -448,11 +462,14 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      - name: Remove cached extension package
+        run: rm -rf target/release/pg_trickle-pg18
+
       - name: Download extension package
         uses: actions/download-artifact@v8
         with:
           name: light-e2e-package
-          path: target/release
+          path: target/release/pg_trickle-pg18
 
       - name: Pull postgres:18.6 image
         run: docker pull postgres:18.6
@@ -479,11 +496,14 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      - name: Remove cached extension package
+        run: rm -rf target/release/pg_trickle-pg18
+
       - name: Download extension package
         uses: actions/download-artifact@v8
         with:
           name: light-e2e-package
-          path: target/release
+          path: target/release/pg_trickle-pg18
 
       - name: Download proof record
         uses: actions/download-artifact@v8
@@ -535,18 +555,12 @@ jobs:
           if-no-files-found: warn
 
   # ── A46-14: Full-image PR smoke test ────────────────────────────────────
-  # Runs on ordinary PRs and push-to-main. Sensitive PRs use the larger gate
-  # below instead, so they do not build two images for overlapping coverage.
+  # Ready runtime PRs use the bounded full gate below instead.
   e2e-smoke:
     name: E2E smoke test (PR gate)
     needs: detect-e2e-gates
     runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'push' ||
-       (github.event_name == 'pull_request' &&
-        needs.detect-e2e-gates.result == 'success' &&
-        needs.detect-e2e-gates.outputs.dvm_changed != 'true' &&
-        needs.detect-e2e-gates.outputs.security_changed != 'true'))
+    if: github.event_name == 'push'
     timeout-minutes: 30
     steps:
       - name: Free up disk space
@@ -707,6 +721,7 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{github.event.pull_request.head.sha}}
 
   # ── Upgrade completeness check (every PR) ───────────────────────────────
@@ -1706,8 +1721,6 @@ jobs:
     runs-on: ubuntu-latest
     if: needs.release-qualification-contract.outputs.runtime == 'true' && ((github.event_name == 'pull_request' && !github.event.pull_request.draft) || github.event_name == 'push')
     outputs:
-      dvm_changed: ${{ steps.filter.outputs.dvm_changed }}
-      security_changed: ${{ steps.filter.outputs.security_changed }}
       failure_recovery_changed: ${{ steps.filter.outputs.failure_recovery_changed }}
       unsafe_boundary_changed: ${{ steps.filter.outputs.unsafe_boundary_changed }}
     steps:
@@ -1720,16 +1733,11 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           filters: |
-            dvm_changed:
-              - 'src/dvm/**'
-              - 'src/refresh/**'
-              - 'src/cdc/**'
-            security_changed:
-              - 'src/ivm.rs'
-              - 'src/cdc/**'
-              - 'src/refresh/**'
-              - 'sql/*.sql'
             failure_recovery_changed:
+              - 'src/refresh/**'
+              - 'src/cdc/**'
+              - 'src/ivm.rs'
+              - 'sql/*.sql'
               - 'src/api/refresh_ops.rs'
               - 'src/config/scheduler.rs'
               - 'src/scheduler/**'
@@ -1739,6 +1747,8 @@ jobs:
               - 'tests/e2e_cleanup_chaos_tests.rs'
               - 'scripts/run_failure_recovery_repetition.sh'
               - '.github/workflows/ci.yml'
+              - '.github/ci-suites.json'
+              - 'scripts/ci_pr_suite.py'
             unsafe_boundary_changed:
               - 'Cargo.toml'
               - 'src/error.rs'
@@ -1781,11 +1791,7 @@ jobs:
   e2e-sensitive-gate:
     name: Sensitive E2E gate
     needs: detect-e2e-gates
-    if: >
-      github.event_name == 'pull_request' &&
-      (needs.detect-e2e-gates.outputs.dvm_changed == 'true' ||
-       needs.detect-e2e-gates.outputs.security_changed == 'true' ||
-       needs.detect-e2e-gates.outputs.failure_recovery_changed == 'true')
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1843,23 +1849,8 @@ jobs:
           BUILDX_CACHE_SCOPE: pgtrickle-e2e
         run: ./tests/build_e2e_image.sh
 
-      - name: Run full E2E test suite
-        if: needs.detect-e2e-gates.outputs.dvm_changed == 'true'
-        # These scheduler failure schedules run in the dedicated no-retry
-        # repetition step below, isolated from the full-suite container load.
-        run: cargo nextest run --profile ci --test 'e2e_*' -E 'not binary(/^e2e_refresh_atomicity_tests$/)'
-
-      - name: Run security-focused E2E tests
-        if: >
-          needs.detect-e2e-gates.outputs.dvm_changed != 'true' &&
-          needs.detect-e2e-gates.outputs.security_changed == 'true'
-        run: |
-          cargo nextest run --profile ci \
-            --test e2e_safety_tests \
-            --test e2e_ivm_tests \
-            --test e2e_failure_recovery_tests \
-            --test e2e_wal_cdc_tests \
-            --test e2e_rls_wal_tests
+      - name: Run bounded installed-extension PR suite
+        run: python3 scripts/ci_pr_suite.py
 
       - name: Repeat failure-recovery schedules
         if: >
@@ -1881,4 +1872,34 @@ jobs:
         if: always()
         with:
           report_paths: 'target/nextest/ci/junit.xml'
+          annotate_only: true
           commit: ${{ github.event.pull_request.head.sha }}
+
+  pr-correctness:
+    name: PR correctness
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - release-qualification-contract
+      - lsn-verification
+      - upgrade-check
+      - unit-tests
+      - integration-tests
+      - otel-collector-contract
+      - windows-compile-gate
+      - detect-e2e-gates
+      - light-e2e-package
+      - light-e2e-tests
+      - release-evidence-runtime
+      - lsn-candidate-runtime
+      - e2e-sensitive-gate
+      - unsafe-boundary-asan
+      - shipping-image-upgrade
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require every selected suite to succeed
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+          CI_DRAFT: ${{ github.event.pull_request.draft }}
+        run: python3 scripts/check_ci_results.py

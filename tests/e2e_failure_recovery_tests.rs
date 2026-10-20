@@ -310,7 +310,7 @@ async fn test_failure_witness_controls_reject_missing_fault() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_control_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
+        &["SET lock_timeout = '0'", "SET statement_timeout = '0'"],
     )
     .await;
     assert!(
@@ -345,10 +345,11 @@ async fn test_failure_witness_controls_reject_missing_fault() {
         .await
         .expect("failed to acquire wrong-PID blocker");
 
+    // Keep the target blocked until the wrong-PID observation, regardless of setup latency.
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_control_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
+        &["SET lock_timeout = '0'", "SET statement_timeout = '0'"],
     )
     .await;
     assert!(
@@ -368,10 +369,16 @@ async fn test_failure_witness_controls_reject_missing_fault() {
         .await
         .expect("failed to get wrong cancellation target PID");
     let wrong_target_handle = tokio::spawn(async move {
-        sqlx::query("SELECT pg_sleep(5)")
+        sqlx::query("SELECT 1 FROM fr_control_src")
             .execute(&mut *wrong_target)
             .await
     });
+    assert!(
+        wait_for_blocked_refresh(&db.pool, wrong_pid, blocker_pid, Duration::from_secs(5))
+            .await
+            .is_some(),
+        "wrong cancellation target never reached the controlled lock wait"
+    );
     let mut cancel_conn = db
         .pool
         .acquire()
@@ -394,17 +401,28 @@ async fn test_failure_witness_controls_reject_missing_fault() {
         .is_some(),
         "cancelling the wrong backend must not remove the target witness"
     );
-    let _ = wrong_target_handle.await;
+    assert_refresh_failure(
+        wrong_target_handle
+            .await
+            .expect("wrong-target task panicked")
+            .map(|_| ()),
+        "57014",
+        "user request",
+    );
 
-    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
-    assert_refresh_failure(result, "57014", "statement timeout");
-    let cleanup = cleanup.expect("refresh-session cleanup failed");
-    assert_eq!(cleanup.session_pid, refresh_pid);
-    assert_eq!(cleanup.after, cleanup.baseline);
     sqlx::query("ROLLBACK")
         .execute(&mut *blocker)
         .await
         .expect("failed to release wrong-PID blocker");
+
+    let (result, cleanup) = refresh_handle.await.expect("refresh task panicked");
+    assert!(
+        result.is_ok(),
+        "wrong-PID cancellation must leave the target refresh successful"
+    );
+    let cleanup = cleanup.expect("refresh-session cleanup failed");
+    assert_eq!(cleanup.session_pid, refresh_pid);
+    assert_eq!(cleanup.after, cleanup.baseline);
 
     // Disabling scheduler injection must leave the normal scheduler path
     // successful and must not fabricate a failure marker.
@@ -517,7 +535,8 @@ async fn test_statement_timeout_during_refresh_recovers() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_timeout_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
+        // Leave the five-second witness deadline strictly before the injected fault.
+        &["SET lock_timeout = '0'", "SET statement_timeout = '10s'"],
     )
     .await;
     let witness =
@@ -579,7 +598,8 @@ async fn test_lock_timeout_during_refresh() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_lock_st",
-        &["SET lock_timeout = '250ms'", "SET statement_timeout = '0'"],
+        // Leave the five-second witness deadline strictly before the injected fault.
+        &["SET lock_timeout = '10s'", "SET statement_timeout = '0'"],
     )
     .await;
     let witness =
@@ -975,7 +995,8 @@ async fn test_no_resource_leak_after_timeout() {
     let (refresh_handle, refresh_pid) = start_blocked_refresh(
         &db,
         "fr_leak_st",
-        &["SET lock_timeout = '0'", "SET statement_timeout = '1s'"],
+        // Leave the five-second witness deadline strictly before the injected fault.
+        &["SET lock_timeout = '0'", "SET statement_timeout = '10s'"],
     )
     .await;
     let witness =

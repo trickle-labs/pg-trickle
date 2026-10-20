@@ -5,13 +5,12 @@
 //!
 //! Test scenario:
 //!   1. Create source table + DIFFERENTIAL stream table.
-//!   2. Insert rows → changes land in the CDC buffer.
-//!   3. Enable the `pg_trickle.test_chaos_for_table` GUC (set to 'chaos_st').
+//!   2. Pause scheduling and insert rows → changes land in the CDC buffer.
+//!   3. Pre-seed `consecutive_errors` to `max_consecutive_errors − 1`.
+//!   4. Enable the `pg_trickle.test_chaos_for_table` GUC and resume scheduling.
 //!      The scheduler reaches the real refresh error path and injects a
 //!      retryable failure before apply on every eligible tick.
-//!   4. Pre-seed `consecutive_errors` to `max_consecutive_errors − 1` so that
-//!      only a single increment is needed to reach the threshold.
-//!   5. After `max_consecutive_errors` failures the scheduler sets the stream
+//!   5. At `max_consecutive_errors` failures the scheduler sets the stream
 //!      table status to SUSPENDED.
 //!   6. Disable chaos by resetting the GUC.
 //!   7. Resume the stream table.
@@ -131,17 +130,13 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
     let initial_count: i64 = db.count("public.chaos_st").await;
     assert_eq!(initial_count, 3, "initial population should have 3 rows");
 
-    // ── 2. Enable chaos via test-mode GUC ────────────────────────────
-    //
-    // Setting `pg_trickle.test_chaos_for_table = 'chaos_st'` injects a
-    // retryable error through the scheduler's normal refresh failure path.
-    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "'chaos_st'", "chaos_st")
+    // Pause before setup so neither idle failures nor successful refreshes race the fixture.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.chaos_st'])")
         .await;
 
     // ── 3. Insert additional rows → pending changes in CDC buffer ────
     //
-    // With chaos active the scheduler will never run the actual refresh, so
-    // these rows stay as pending changes.  After chaos is disabled and the
+    // While paused these rows stay as pending changes. After chaos is disabled and the
     // stream table is resumed, the scheduler processes all pending changes.
     db.execute("INSERT INTO chaos_src VALUES (4, 'delta'), (5, 'epsilon')")
         .await;
@@ -156,6 +151,12 @@ async fn test_cleanup_consecutive_delete_failures_alerts_and_suspends() {
          WHERE pgt_name = 'chaos_st'",
     )
     .await;
+
+    // Arm the failure only after pending differential work and its counter are ready.
+    db.alter_system_set_and_wait("pg_trickle.test_chaos_for_table", "'chaos_st'", "chaos_st")
+        .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['public.chaos_st'])")
+        .await;
 
     // ── 4. Wait for auto-suspension ──────────────────────────────────
     //

@@ -84,6 +84,12 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.assert_st_matches_query("rls_wal_st", query).await;
 
     wait_for_wal_mode(&db, "rls_wal_src").await;
+    // Drain cutover work before establishing the baseline for differential mutations.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
+        .await;
+    db.refresh_st_with_retry("rls_wal_st").await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
     db.execute("INSERT INTO rls_wal_src VALUES (3, 30, 'c')")
         .await;
     db.execute("UPDATE rls_wal_src SET val = 'b2' WHERE id = 2")

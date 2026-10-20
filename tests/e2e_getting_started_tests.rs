@@ -489,6 +489,53 @@ async fn test_getting_started_step4c_department_rename_cascades() {
     assert_eq!(platform_path, "Company > R&D > Platform");
 }
 
+#[tokio::test]
+async fn test_getting_started_refresh_retry_waits_for_concurrent_lock() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE retry_source (id INT PRIMARY KEY)")
+        .await;
+    db.create_st(
+        "retry_report",
+        "SELECT id FROM retry_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['retry_report'])")
+        .await;
+
+    for (id, lock_sql) in [
+        "SELECT pg_advisory_xact_lock(pgt_id) FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retry_report'",
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retry_report' FOR UPDATE",
+    ]
+    .iter()
+    .enumerate()
+    {
+        db.execute(&format!("INSERT INTO retry_source VALUES ({id})"))
+            .await;
+        let mut lock = db.pool.begin().await.expect("begin competing refresh");
+        sqlx::query(sqlx::AssertSqlSafe(*lock_sql))
+            .execute(&mut *lock)
+            .await
+            .expect("hold competing refresh lock");
+
+        let refresh = db.refresh_st_with_retry("retry_report");
+        tokio::pin!(refresh);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), &mut refresh)
+                .await
+                .is_err(),
+            "refresh helper must wait when the SQL API skips a busy refresh"
+        );
+        lock.commit().await.expect("release competing refresh lock");
+        refresh.await;
+        db.assert_st_matches_query("retry_report", "SELECT id FROM retry_source")
+            .await;
+    }
+    db.refresh_st_with_retry("retry_report").await;
+}
+
 // ── Step 4c → 4d combined (regression: G17-STBASE) ───────────────────────────
 
 /// Regression — G17-STBASE: rename a department (step 4c, which produces D+I

@@ -1,0 +1,21 @@
+import json
+import subprocess
+from pathlib import Path
+
+queries = {
+    'direct_mdm_projection': 'SELECT case_key, due_at FROM pgreact_mdm.intent_deployer_policy_cases_v1',
+    'simple_on_join': 'SELECT c.case_key, c.due_at FROM pgreact_mdm.intent_deployer_policy_cases_v1 c JOIN s1_audit.source s ON c.case_key = s.case_key',
+    'simple_using_join': 'SELECT c.case_key, c.due_at FROM pgreact_mdm.intent_deployer_policy_cases_v1 c JOIN s1_audit.source s USING (case_key)',
+    'aliased_due_timestamp': 'SELECT c.case_key, c.due_at AS deadline FROM pgreact_mdm.intent_deployer_policy_cases_v1 c JOIN s1_audit.source s ON c.case_key = s.case_key',
+    'original_composed_view': 'SELECT * FROM s1_audit.candidate',
+}
+results = []
+for name, query in queries.items():
+    cols = 'case_key, deadline' if name in ('aliased_due_timestamp', 'original_composed_view') else 'case_key, due_at'
+    sql = f"""BEGIN;
+SELECT pgtrickle.create_stream_table('s1_audit.reduction', $q${query}$q$, '1h', 'DIFFERENTIAL');
+SELECT NOT EXISTS ((SELECT {cols} FROM s1_audit.reduction EXCEPT ALL {query}) UNION ALL ({query} EXCEPT ALL SELECT {cols} FROM s1_audit.reduction)) AS exact_result;
+ROLLBACK;"""
+    result = subprocess.run(['docker', 'exec', sys_container := __import__('sys').argv[1], 'psql', '-XAtq', '-U', 'postgres', '-d', 's1_idle', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=verbose', '-c', sql], capture_output=True, text=True)
+    results.append(dict(name=name, query=query, caller='postgres (producer reduction only)', exit=result.returncode, stdout=result.stdout, stderr=result.stderr))
+Path(__import__('sys').argv[2]).write_text(json.dumps(results, indent=2) + '\n')

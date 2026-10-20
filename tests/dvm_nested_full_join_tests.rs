@@ -5,8 +5,8 @@
 //!       FULL JOIN categories c ON p.cat_id = c.id
 //!
 //! Delta output columns (all nullable — either side can be NULL-padded):
-//!   join__o__id, join__o__prod_id, join__o__amount,
-//!   join__p__id, join__p__cat_id, join__p__name,
+//!   full_join__o__id, full_join__o__prod_id, full_join__o__amount,
+//!   full_join__p__id, full_join__p__cat_id, full_join__p__name,
 //!   c__id, c__label.
 
 mod common;
@@ -216,12 +216,12 @@ async fn reset_nested_fj_fixture(db: &TestDb) {
 /// All columns are nullable because either side of a FULL JOIN can be NULL-padded.
 type NestedFjRow = (
     String,         // __pgt_action
-    Option<i32>,    // join__o__id
-    Option<i32>,    // join__o__prod_id
-    Option<i32>,    // join__o__amount
-    Option<i32>,    // join__p__id
-    Option<i32>,    // join__p__cat_id
-    Option<String>, // join__p__name
+    Option<i32>,    // full_join__o__id
+    Option<i32>,    // full_join__o__prod_id
+    Option<i32>,    // full_join__o__amount
+    Option<i32>,    // full_join__p__id
+    Option<i32>,    // full_join__p__cat_id
+    Option<String>, // full_join__p__name
     Option<i32>,    // c__id
     Option<String>, // c__label
 );
@@ -229,18 +229,18 @@ type NestedFjRow = (
 async fn query_nested_fj_rows(db: &TestDb, sql: &str) -> Vec<NestedFjRow> {
     sqlx::query_as::<_, NestedFjRow>(sqlx::AssertSqlSafe(format!(
         r#"SELECT __pgt_action,
-                  "join__o__id",
-                  "join__o__prod_id",
-                  "join__o__amount",
-                  "join__p__id",
-                  "join__p__cat_id",
-                  "join__p__name",
+                  "full_join__o__id",
+                  "full_join__o__prod_id",
+                  "full_join__o__amount",
+                  "full_join__p__id",
+                  "full_join__p__cat_id",
+                  "full_join__p__name",
                   "c__id",
                   "c__label"
            FROM ({sql}) delta
            ORDER BY __pgt_action,
-                    "join__o__id" NULLS LAST,
-                    "join__p__id" NULLS LAST,
+                    "full_join__o__id" NULLS LAST,
+                    "full_join__p__id" NULLS LAST,
                     "c__id" NULLS LAST"#
     )))
     .fetch_all(&db.pool)
@@ -251,7 +251,7 @@ async fn query_nested_fj_rows(db: &TestDb, sql: &str) -> Vec<NestedFjRow> {
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 /// Order inserted, product and category both exist: the delta cascades through
-/// both FULL JOINs and emits a fully-matched I row with all columns populated.
+/// both FULL JOINs, retracting the old NULL-padded row before inserting the match.
 ///
 /// Inner Part 1a → outer Part 1a: full cascade of a matching innermost insert.
 #[tokio::test]
@@ -262,6 +262,8 @@ async fn test_diff_nested_full_join_innermost_insert_fully_matched() {
         .expect("nested full-join differentiation should succeed");
 
     reset_nested_fj_fixture(&db).await;
+    db.execute("INSERT INTO public.orders VALUES (1, 10, 100)")
+        .await;
     db.execute("INSERT INTO public.products   VALUES (10, 5, 'Widget')")
         .await;
     db.execute("INSERT INTO public.categories VALUES (5, 'Electronics')")
@@ -277,17 +279,30 @@ async fn test_diff_nested_full_join_innermost_insert_fully_matched() {
 
     assert_eq!(
         query_nested_fj_rows(&db, &sql).await,
-        vec![(
-            "I".to_string(),
-            Some(1),
-            Some(10),
-            Some(100),
-            Some(10),
-            Some(5),
-            Some("Widget".to_string()),
-            Some(5),
-            Some("Electronics".to_string()),
-        )]
+        vec![
+            (
+                "D".to_string(),
+                None,
+                None,
+                None,
+                Some(10),
+                Some(5),
+                Some("Widget".to_string()),
+                Some(5),
+                Some("Electronics".to_string()),
+            ),
+            (
+                "I".to_string(),
+                Some(1),
+                Some(10),
+                Some(100),
+                Some(10),
+                Some(5),
+                Some("Widget".to_string()),
+                Some(5),
+                Some("Electronics".to_string()),
+            ),
+        ]
     );
 }
 

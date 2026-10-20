@@ -1,0 +1,17 @@
+PASS: compatibility
+PASS: fresh/adjacent-upgrade compatibility and callable privileges
+PASS: refresh-permission
+PASS: mdm-bootstrap
+PASS: mdm-policy-fixtures
+PASS: idle-seed
+PASS: v0.47
+PASS: v0.47-typed
+PASS: v0.48-codec
+PASS: v0.47-live-setup
+PASS: v0.47-live
+PASS: v0.48-codec
+PASS: v0.48-live
+PASS: v0.48-security
+PASS: sample-boundaries
+PASS: idle-setup
+PASS: future idle deadline -> actual MDM receipt; registered callback failure and role reset; complete case/source vectors
