@@ -271,7 +271,7 @@ async fn test_upgrade_drop_recreate_roundtrip() {
 
     // Mutate and refresh
     db.execute("INSERT INTO lr_src VALUES (3, 'again')").await;
-    db.refresh_st("lr_st_new").await;
+    db.refresh_st_until_converged("lr_st_new").await;
     db.assert_st_matches_query("public.lr_st_new", "SELECT id, val FROM lr_src")
         .await;
 }

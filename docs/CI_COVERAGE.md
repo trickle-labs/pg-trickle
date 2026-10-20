@@ -257,6 +257,22 @@ early-failure behavior.
 Both 36-check refresh targets passed without retries after the bit-aggregate
 fixture repair; the exact wrong-row oracle remains unchanged.
 
+The [following replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39312835865)
+passed the bounded allocation but failed three broad-only fixture checks:
+the cleanup chaos test suspended on a `NO_DATA` attempt with its error counter
+pre-seeded to two; the guide report had not consumed its renamed upstream
+window; and the extension drop/recreate fixture had not consumed its insert.
+The chaos fixture now requires three real failed history rows before suspension
+and retains its final DIFFERENTIAL/40001/failpoint and recovery assertions.
+Guide data assertions and the upgrade roundtrip use exact convergence; guide
+pipelines pause automatic scheduling so combined/sequential mutation windows
+stay under manual control. The busy-refresh lock regression remains separate.
+All 37 locally eligible checks in these three targets passed without retries
+(17 upgrade checks remain ignored). This failed hosted attempt consumed 228.267
+summed execution minutes, with 71.700 summed creation-to-start minutes; neither
+is a passing speedup result. Earlier failed/cancelled attempts consumed another
+546.917 execution minutes. All failed attempts remain experiment overhead.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 

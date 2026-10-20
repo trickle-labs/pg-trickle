@@ -145,6 +145,10 @@ async fn create_department_stats(db: &E2eDb) {
 async fn create_department_report(db: &E2eDb) {
     db.create_st("department_report", Q_REPORT, "1m", "DIFFERENTIAL")
         .await;
+    // Keep combined and sequential mutation windows under the guide's manual control.
+    #[cfg(not(feature = "light-e2e"))]
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['department_tree', 'department_stats', 'department_report'])")
+        .await;
 }
 
 // ── Step 2 ───────────────────────────────────────────────────────────────────
@@ -312,8 +316,8 @@ async fn test_getting_started_step4a_employee_insert_cascades() {
         .await;
 
     // Refresh in source-to-sink order (department_tree not involved)
-    db.refresh_st("department_stats").await;
-    db.refresh_st("department_report").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // Frontend: 1 → 2 employees; 110000 → 215000
     let (post_hc, post_sal): (i64, String) = sqlx::query_as(
@@ -363,9 +367,9 @@ async fn test_getting_started_step4b_department_insert_cascades_all_layers() {
         .await;
 
     // Refresh all three layers in dependency order
-    db.refresh_st("department_tree").await;
-    db.refresh_st("department_stats").await;
-    db.refresh_st("department_report").await;
+    db.refresh_st_until_converged("department_tree").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // department_tree: DevOps at depth 2 with correct path
     let (devops_path, devops_depth): (String, i32) =
@@ -417,9 +421,9 @@ async fn test_getting_started_step4c_department_rename_cascades() {
     db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
         .await;
 
-    db.refresh_st("department_tree").await;
-    db.refresh_st("department_stats").await;
-    db.refresh_st("department_report").await;
+    db.refresh_st_until_converged("department_tree").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // department_tree: no path contains "Engineering"
     let old_path_count: i64 = db
@@ -560,7 +564,7 @@ async fn test_getting_started_step4c_then_4d_combined_regression() {
     // D+I pairs land in the ST change buffer for department_stats.
     db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
         .await;
-    db.refresh_st_with_retry("department_tree").await;
+    db.refresh_st_until_converged("department_tree").await;
 
     // Step 4d: delete Bob immediately — department_stats now has BOTH pending
     // ST-source changes (from the DRed cascade above) and a base-table change
@@ -570,8 +574,8 @@ async fn test_getting_started_step4c_then_4d_combined_regression() {
 
     // Refresh department_stats (DIFFERENTIAL — L₀ + EC-02 correction handles
     // the combined ST + base-table changes correctly).
-    db.refresh_st_with_retry("department_stats").await;
-    db.refresh_st_with_retry("department_report").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // Backend must exist with headcount=1 (only Alice remains).
     let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
@@ -631,9 +635,9 @@ async fn test_getting_started_step4c_then_4d_sequential_regression() {
     // ── Cycle 1: rename Engineering → R&D ────────────────────────────
     db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
         .await;
-    db.refresh_st_with_retry("department_tree").await;
-    db.refresh_st_with_retry("department_stats").await;
-    db.refresh_st_with_retry("department_report").await;
+    db.refresh_st_until_converged("department_tree").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // All 7 department rows must exist with correct __pgt_count.
     // (setup_base_tables creates 7 departments — DevOps is added in step 2.4b
@@ -656,8 +660,8 @@ async fn test_getting_started_step4c_then_4d_sequential_regression() {
 
     // ── Cycle 2: delete Bob ──────────────────────────────────────────
     db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
-    db.refresh_st_with_retry("department_stats").await;
-    db.refresh_st_with_retry("department_report").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // Backend must still exist with headcount=1 (only Alice remains).
     let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
@@ -719,8 +723,8 @@ async fn test_getting_started_step4d_employee_delete_updates_aggregates() {
 
     db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
 
-    db.refresh_st("department_stats").await;
-    db.refresh_st("department_report").await;
+    db.refresh_st_until_converged("department_stats").await;
+    db.refresh_st_until_converged("department_report").await;
 
     // Backend: 2 → 1 employee; 235000 → 120000
     let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
@@ -902,7 +906,7 @@ async fn test_getting_started_func_call_group_by_differential_against_base_table
     // refresh_st() takes the DIFFERENTIAL path here (source is a plain TABLE,
     // not a stream table): this is where the bug would have manifested as
     // "column d.split_part(sku, '-', 1) does not exist".
-    db.refresh_st("product_summary").await;
+    db.refresh_st_until_converged("product_summary").await;
 
     let post_count: i64 = db
         .query_scalar(
