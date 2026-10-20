@@ -34,9 +34,10 @@ Every candidate correctness, permission, worker-health, latency and resource
 gate passed; supervision recorded no measurement errors or stop reason. The
 full local vectors, observations, timestamped logs and resource samples remain
 under `benchmarks/s1/qualification/native-arm64-84e-{control,candidate}-300/`.
-The workflow below now runs the same strict profile on a native ARM64 Linux
-runner. The earlier native amd64 failure remains retained separately and is
-not replaced by this ARM64 result.
+The workflow below now builds the documented native ARM64 SDK on a native
+ARM64 Linux runner, records its manifest and image identity, and uses it for
+both exact images. The earlier native amd64 failure remains retained
+separately and is not replaced by this ARM64 result.
 
 ## Archived earlier native ARM64 qualification
 
