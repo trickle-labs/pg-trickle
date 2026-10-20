@@ -810,6 +810,7 @@ async fn test_mixed_diamond_with_view_branch() {
     assert_eq!(db.count("public.md_st_hw_priced").await, 2);
 
     // Manual refreshes can be skipped while a scheduler owns the same node.
+    #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.md_st_hw_products', 'public.md_st_prices', 'public.md_st_hw_priced'])")
         .await;
 
