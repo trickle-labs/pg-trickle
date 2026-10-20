@@ -34,6 +34,12 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
 
     db.execute(
         "CREATE TABLE rls_wal_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)",
