@@ -475,10 +475,10 @@ async fn test_v104_delta_reference_consumer_reads_and_acknowledges() {
         "SELECT pgtrickle.create_stream_table(\
              name => 'v104_delta_st',\
              query => 'SELECT a.id, a.value FROM v104_delta_source a \
-                       JOIN v104_delta_source b USING (id) \
-                       JOIN v104_delta_source c USING (id) \
-                       JOIN v104_delta_source d USING (id) \
-                       JOIN v104_delta_source e USING (id)',\
+                       JOIN v104_delta_source b ON a.id = b.id \
+                       JOIN v104_delta_source c ON a.id = c.id \
+                       JOIN v104_delta_source d ON a.id = d.id \
+                       JOIN v104_delta_source e ON a.id = e.id',\
              schedule => '1h',\n             refresh_mode => 'DIFFERENTIAL',\
              initialize => false,\
              orchestration_mode => 'EXTERNAL'\
