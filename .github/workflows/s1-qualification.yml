@@ -78,6 +78,12 @@ jobs:
               /usr/share/postgresql/18/extension/pg_react--0.46.1.sql > "_s1/evidence/$image-libraries.sha256"
           done
           python3 -c 'from pathlib import Path; r=Path("_s1/evidence"); c=(r/"control-libraries.sha256").read_text().splitlines(); n=(r/"candidate-libraries.sha256").read_text().splitlines(); assert c[0] != n[0], "control and candidate reused the same pg_trickle library"; assert c[1:] == n[1:], "MDM/React dependency binaries differ"'
+      - name: Check temporary-server isolation and unchanged runtime settings
+        run: |
+          for component in control candidate; do
+            image=$(docker image inspect "s1-$component:qualification" --format '{{.Id}}')
+            python3 benchmarks/s1/test_docker_bootstrap.py "$image" "_s1/evidence/bootstrap-$component"
+          done
       - name: Check actual MDM grants and candidate JIT behavior
         id: mdm_grants
         run: |

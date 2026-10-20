@@ -11,6 +11,15 @@ and does not qualify the throughput gate.
 
 ## Completed native ARM64 qualification
 
+The recorded result below applies to its exact archived images. A subsequent
+bootstrap correction disables background workers only in Docker's temporary
+initialization server, avoiding its shutdown race. Both control and candidate
+receive the same entrypoint correction; the final server receives the original
+arguments and worker settings. CI verifies temporary-server isolation and the
+unchanged runtime settings on both images before running qualification. This
+changes image identities and does not transfer the archived throughput score
+to the rebuilt images. The workload, readiness bound and rate gates are unchanged.
+
 The exact candidate from source `a89347261896efa26162e707c782d1c2a2e9d28b`, image
 `sha256:3a84aac71ae8b0f1ed73a7480dcb85205d14f7e948b864200da52e58ba04f316`,
 passes the unchanged strict candidate checker with raw exit 0. The explicitly
