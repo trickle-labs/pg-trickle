@@ -365,6 +365,18 @@ used 0.183 execution minutes and 9.633 queue-proxy minutes; no replay ran.
 Including the producer check, failed/cancelled experiment overhead is now
 1,413.784 execution minutes.
 
+The next dispatch, [run `39410203313`](https://github.com/trickle-labs/pg-trickle/actions/runs/39410203313),
+completed both broad allocations but remains invalid: the bounded `after`
+suite failed the RLS/WAL effective-mode and before-receipt fallback cases,
+while the `before` suite passed 2,179/2,182 checks. Its three failures were
+the disabled-worker resume timeout, an auto-refresh wait timeout, and the
+chained-stream fixture observing two rows instead of three. The two targeted
+cases passed together in a local serial no-retry run; the CI scheduling fix
+now runs them serially on both sides. The validator rejected the pair. It used
+11 jobs, 218.883 execution minutes and 142.267 summed creation-to-start
+minutes; failed/cancelled experiment overhead is now 1,632.667 execution
+minutes. No cost difference is reported.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 
