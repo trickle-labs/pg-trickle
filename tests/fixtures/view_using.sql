@@ -107,5 +107,12 @@ BEGIN
                   WHERE pgt_schema = 'using_repro' AND pgt_name = 'rolled_back') THEN
         RAISE EXCEPTION 'rolled-back USING creation left storage or metadata';
     END IF;
+    IF (SELECT count(*) FROM pgtrickle.pgt_refresh_history
+        WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables
+                        WHERE pgt_schema = 'using_repro' AND pgt_name = 'result')
+          AND action = 'DIFFERENTIAL' AND status = 'COMPLETED'
+          AND NOT was_full_fallback) <> 3 THEN
+        RAISE EXCEPTION 'USING refreshes fell back or rollback retained refresh history';
+    END IF;
 END
 $rollback$;

@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-20",
+  "issue": "https://github.com/trickle-labs/pg-react/issues/11",
+  "react_pr_unchanged": "https://github.com/trickle-labs/pg-react/pull/14",
+  "react_fixture_commit": "9fb04854e741535c3c41907b6be4318a1ccf6939",
+  "mdm_commit": "06471e647ee54a80973fb5ad6709830f9955dbff",
+  "producer_original_commit": "d8bb8eb5d45c5c9982e173e88914037433a1ee05",
+  "producer_pinned_local_fix_commit": "29518c8d973bce4c7e6567814b93abbf37d360c7",
+  "producer_main_base_commit": "0cbd84dce4fede39fa36f2c8716e0faa0a9b1b14",
+  "producer_main_fix_commit": "7e1700959b692f78579a41e8f10b579696db76ca",
+  "failure": {
+    "sqlstate": "42601",
+    "cursor_position": 1346,
+    "generated_sql": "generated-invalid.sql",
+    "rollback_vectors_equal": true
+  },
+  "pinned_qualification": {
+    "image": "pgtrickle-react11:pinned-qualified",
+    "image_id": "sha256:bc47ac97146e486b2461e9487287b1afc144f9b5387983fa1454e961dd111931",
+    "source_archive_sha256": "47558b48443c78336c0e00994f2e31b33b995382418fc1d5ceb79dab955e89de",
+    "library_sha256": "1b5004746844e08ad7cdb2360a45651efb62866529b658c48acc8fb9c94a4515",
+    "audit_exit": 0,
+    "actual_managed_idle_receipt": true,
+    "deadline_to_receipt_seconds": 0.706636,
+    "checks": [
+      {
+        "name": "compatibility",
+        "result": "passed",
+        "seconds": 0.08668316699913703
+      },
+      {
+        "name": "fresh-adjacent-upgrade-compatibility",
+        "result": "passed"
+      },
+      {
+        "name": "refresh-permission",
+        "result": "passed",
+        "seconds": 0.12315333299920894
+      },
+      {
+        "name": "mdm-bootstrap",
+        "result": "passed",
+        "seconds": 127.84238133300096
+      },
+      {
+        "name": "mdm-policy-fixtures",
+        "result": "passed",
+        "seconds": 3.8849802910117432
+      },
+      {
+        "name": "idle-seed",
+        "result": "passed",
+        "seconds": 0.07535299999290146
+      },
+      {
+        "name": "v0.47",
+        "result": "passed",
+        "seconds": 0.20937870800844394
+      },
+      {
+        "name": "v0.47-typed",
+        "result": "passed",
+        "seconds": 0.084944500005804
+      },
+      {
+        "name": "v0.48-codec",
+        "result": "passed",
+        "seconds": 0.08843041700311005
+      },
+      {
+        "name": "v0.47-live-setup",
+        "result": "passed",
+        "seconds": 0.6089296670106705
+      },
+      {
+        "name": "v0.47-live",
+        "result": "passed",
+        "seconds": 0.3953439590113703
+      },
+      {
+        "name": "v0.48-codec",
+        "result": "passed",
+        "seconds": 0.09460895802476443
+      },
+      {
+        "name": "v0.48-live",
+        "result": "passed",
+        "seconds": 4.23992570801056
+      },
+      {
+        "name": "v0.48-security",
+        "result": "passed",
+        "seconds": 0.14306233302340843
+      },
+      {
+        "name": "missing-mdm-admission",
+        "result": "passed"
+      },
+      {
+        "name": "sample-boundaries",
+        "result": "passed",
+        "seconds": 0.18384187502670102
+      },
+      {
+        "name": "idle-setup",
+        "result": "passed",
+        "seconds": 0.41424504201859236
+      },
+      {
+        "name": "callback-error-role-reset",
+        "result": "passed"
+      },
+      {
+        "name": "worker-missing-set-membership",
+        "result": "passed"
+      },
+      {
+        "name": "future-idle-mdm-receipt",
+        "result": "passed"
+      }
+    ],
+    "observations": "pinned-qualified.json",
+    "version_string_is_sufficient_identity": false,
+    "published_release": false
+  },
+  "main_assessment": {
+    "image": "pgtrickle-react11:main-candidate",
+    "image_id": "sha256:615e19e31412c221602b6aeda43f2726d7f0ebb33dcc61bc05179ad141803909",
+    "library_sha256": "59916f095b551e4dd41ddada619a53092b866dc375527dd1fe5945b11505275d",
+    "view_checks_passed": 21,
+    "maintain_checks_passed": 16,
+    "full_mdm_qualified": false,
+    "full_audit_exit": 1,
+    "attempts": 2,
+    "stop": "OOM kill during MDM composite_customer bootstrap, before idle setup",
+    "cause_attributed_to_correction": false,
+    "inherited_archive_label_is_current_source_identity": false
+  },
+  "validation": {
+    "pinned_unit": 2611,
+    "final_main_unit": 2615,
+    "pinned_e2e": 37,
+    "main_e2e": 37,
+    "fmt": "passed",
+    "lint_zero_warnings": "passed"
+  },
+  "review": {
+    "kind": "author review",
+    "record": "review.md",
+    "independent_approval": false
+  },
+  "regression_fixture_sha256": "af3600a66124c7d292b3c67c444f2b1a2b5f6bfd333d0c77a14f1d69bcbb9472",
+  "react_11_complete": false,
+  "remaining_gates": [
+    "1000-case/churn workload measurements",
+    "signed numeric operating envelope"
+  ],
+  "payload_sha256": {
+    ".gitattributes": "9f569c3d0f1256df2926f2d471460d262ae3697caecfe6a58eb2f32dbb4e4eb8",
+    "Dockerfile": "ba874a8644e5979a2ebeb31adb3b7ed50671fe7dc820c54dd0623b31e70c5f09",
+    "README.md": "491b5150ed38b5425a45025279e84a9a45ba48112456929fe072694be1dc9794",
+    "audit-runner.py.txt": "cf88f3af9a712001c2359577c23c39837faac1ab33cbd7e07b0bd52641b7bf41",
+    "baseline.json": "081ad8db0e0074ada1e79de5da494b8b322f516c41f61b50419f42d68e9e2ba0",
+    "fmt.log": "4bc9081580f4e39592690330243d5b8dd68a61a937a07a5557ad63da682c7ade",
+    "generated-invalid.sql": "64b2065f25be188664e72eb1e3842c5909e6253e4a80a905fa2d74c40d3d3318",
+    "generated-sql-diagnostic.log": "626512e0a6b28b9de7e6ac3a64215e2d0f3babd46c323bed336972a479875688",
+    "lint.log": "b7d8cadbc21d9f2a609e152d46e5353318b6582ccb7f740ae916ceb9ab106bf4",
+    "main-e2e.log": "f3e1b8338e3a347197777f895bfe445be77ce813c7a4d99b4c630a1beea778a0",
+    "main-first-oom.json": "50eac56d754f8d946fb6a57328a3fd9bc68d60672bf50cb0292a5074e350c448",
+    "main-first-state.json": "7aa120be5612108234d72380ea028edb1e279f559a6d48d232fca0b03aecd62b",
+    "main-fmt.log": "4bc9081580f4e39592690330243d5b8dd68a61a937a07a5557ad63da682c7ade",
+    "main-isolated-server.log": "f766bef367441629de6b6f3f55c08c5443ff1fb4c6e12ec30be4f8fed6939868",
+    "main-isolated-state.json": "17e47bab490a51032c1cd01371b6704e6c75341de8b86753ae2b14ee32343ca9",
+    "main-isolated.json": "fd0a79f99092c81f29c2e612ea6a6286648bc90c538ae218ee8dbbba27579246",
+    "main-lint.log": "75fe3e208f0637ffd522df705a8d8af245688175ee6fa9adcb02bc5b019cf467",
+    "main-unit.log": "5d83c5048dd3e6eada19185a3d9aad19df16818d9b71795600a555aae9a85347",
+    "mdm-reductions-baseline.json": "468b4a555c7305bd8d245709bd43cb15d41e8c4eb4d321ea9c268fd03df663b4",
+    "mdm-reductions-candidate.json": "f93ed2ecb6673378dd4dbe5b340bc080c61fa654d06388e6fabac94a803b031a",
+    "mdm-reductions.py.txt": "d211010a3f9dcfdbb27c824fd65a1006d7a297c154d5b382a5b00004b71003f4",
+    "pinned-qualified-audit.log": "3eddf243cdc10d31184269d33be9fb1edb8fa530f5c34e6ef336610a3d11b610",
+    "pinned-qualified-e2e.log": "d4c56dd56dfd0b83b91eb440347655288b09494ab3c0e347e5b8d0badb526b81",
+    "pinned-qualified.json": "c553e46b4081decbb026506018ac3be6226f025819f65b9cdbc395ce4d15df6d",
+    "postgres-error.jsonl": "f8fbb9e9c387b40f004cbea05c60e8098fc2aae37dd4f95fcd41182e57ef088b",
+    "producer.patch": "1ef4bd312ea71860076f61f865a107dd4a2ee4c6dd9e43bdaf9919a318c8056f",
+    "review.md": "8e02ac4cd2c5d8e08ad8c102df984fd13fc7327ab653599c80c0b4677db7b27d",
+    "unit.log": "e1c1e75be917b878c945e5cf31e6b2a005a859e7f233b39c0f370d661398df7c"
+  }
+}

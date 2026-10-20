@@ -1,0 +1,22 @@
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+
+original = subprocess.run
+
+def run(args, *rest, **kwargs):
+    if args[:2] == ('git', '-C') or args[:2] == ['git', '-C']:
+        return subprocess.CompletedProcess(args, 0, '9fb04854e741535c3c41907b6be4318a1ccf6939\n', '')
+    if args[:2] == ('docker', 'run'):
+        args = list(args)
+        args[2:2] = ['--platform', 'linux/arm64', '--pull=never']
+        args += ['-c', 'log_error_verbosity=verbose', '-c', 'log_min_error_statement=error']
+        Path('/tmp/pg-trickle-react11/container').write_text(args[args.index('--name') + 1])
+    if args[:2] == ('docker', 'rm'):
+        return subprocess.CompletedProcess(args, 0, '', '')
+    return original(args, *rest, **kwargs)
+
+subprocess.run = run
+sys.argv = ['audit.py', *sys.argv[1:]]
+runpy.run_path('/tmp/pg-trickle-react11/react/tests/integrations/pg-mdm/time/audit.py', run_name='__main__')

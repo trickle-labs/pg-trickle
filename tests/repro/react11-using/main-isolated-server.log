@@ -1,0 +1,100 @@
+2026-10-20 07:21:52.851 UTC [80] LOCATION:  LogCheckpointStart, xlog.c:6704
+2026-10-20 07:21:53.274 UTC [80] LOG:  00000: checkpoint complete: wrote 13100 buffers (80.0%), wrote 5 SLRU buffers; 0 WAL file(s) added, 0 removed, 8 recycled; write=0.201 s, sync=0.212 s, total=0.423 s; sync files=6106, longest=0.018 s, average=0.001 s; distance=125270 kB, estimate=125270 kB; lsn=0/91B7220, redo lsn=0/91B7100
+2026-10-20 07:21:53.274 UTC [80] LOCATION:  LogCheckpointEnd, xlog.c:6794
+2026-10-20 07:21:53.276 UTC [85] WARNING:  01000: pg_trickle launcher: could not spawn scheduler for database 'capability_errors'
+2026-10-20 07:21:53.276 UTC [85] LOCATION:  pg_trickle::scheduler::scheduler_loop::pg_trickle_launcher_main::pg_trickle_launcher_main_inner, scheduler_loop.rs:332
+2026-10-20 07:21:53.276 UTC [85] WARNING:  01000: pg_trickle launcher: could not spawn scheduler for database 'graph_conformance'
+2026-10-20 07:21:53.276 UTC [85] LOCATION:  pg_trickle::scheduler::scheduler_loop::pg_trickle_launcher_main::pg_trickle_launcher_main_inner, scheduler_loop.rs:332
+2026-10-20 07:21:53.353 UTC [300] WARNING:  01000: pg_trickle: DIFFERENTIAL mode with group-rescan aggregates [block_records]. These aggregates re-scan affected groups from source data on each refresh. This is correct but may be slower than algebraic aggregates (COUNT, SUM, AVG). Use FULL mode if group-rescan performance is unacceptable, or replace with algebraic alternatives where possible.
+2026-10-20 07:21:53.353 UTC [300] CONTEXT:  SQL statement "SELECT pgtrickle.create_stream_table(name => $1::text, query => $2::text, schedule => 'calculated', refresh_mode => $3::text, initialize => false, cdc_mode => 'trigger', orchestration_mode => 'EXTERNAL')"
+	SQL statement "SELECT *                     FROM mdm.create(proposed)"
+	PL/pgSQL function inline_code_block line 47 at SQL statement
+2026-10-20 07:21:53.353 UTC [300] LOCATION:  pg_trickle::api::validate_and_parse_query, mod.rs:1392
+2026-10-20 07:21:53.415 UTC [300] WARNING:  01000: pg_trickle: DIFFERENTIAL mode with group-rescan aggregates [block_records]. These aggregates re-scan affected groups from source data on each refresh. This is correct but may be slower than algebraic aggregates (COUNT, SUM, AVG). Use FULL mode if group-rescan performance is unacceptable, or replace with algebraic alternatives where possible.
+2026-10-20 07:21:53.415 UTC [300] CONTEXT:  SQL statement "SELECT pgtrickle.create_stream_table(name => $1::text, query => $2::text, schedule => 'calculated', refresh_mode => $3::text, initialize => false, cdc_mode => 'trigger', orchestration_mode => 'EXTERNAL')"
+	SQL statement "SELECT *                     FROM mdm.create(proposed)"
+	PL/pgSQL function inline_code_block line 47 at SQL statement
+2026-10-20 07:21:53.415 UTC [300] LOCATION:  pg_trickle::api::validate_and_parse_query, mod.rs:1392
+2026-10-20 07:21:53.457 UTC [300] WARNING:  01000: pg_trickle: DIFFERENTIAL mode with group-rescan aggregates [block_records]. These aggregates re-scan affected groups from source data on each refresh. This is correct but may be slower than algebraic aggregates (COUNT, SUM, AVG). Use FULL mode if group-rescan performance is unacceptable, or replace with algebraic alternatives where possible.
+2026-10-20 07:21:53.457 UTC [300] CONTEXT:  SQL statement "SELECT pgtrickle.create_stream_table(name => $1::text, query => $2::text, schedule => 'calculated', refresh_mode => $3::text, initialize => false, cdc_mode => 'trigger', orchestration_mode => 'EXTERNAL')"
+	SQL statement "SELECT *                     FROM mdm.create(proposed)"
+	PL/pgSQL function inline_code_block line 47 at SQL statement
+2026-10-20 07:21:53.457 UTC [300] LOCATION:  pg_trickle::api::validate_and_parse_query, mod.rs:1392
+2026-10-20 07:21:53.479 UTC [300] WARNING:  01000: [pg_trickle] JOIN_SOURCE_COUNT_HIGH: The defining query references 9 joined sources, above the configured warning threshold of 6. HINT: Reduce or split the join graph, or accept the measured refresh and write cost.
+2026-10-20 07:21:53.479 UTC [300] CONTEXT:  SQL statement "SELECT pgtrickle.create_stream_table(name => $1::text, query => $2::text, schedule => 'calculated', refresh_mode => $3::text, initialize => false, cdc_mode => 'trigger', orchestration_mode => 'EXTERNAL')"
+	SQL statement "SELECT *                     FROM mdm.create(proposed)"
+	PL/pgSQL function inline_code_block line 47 at SQL statement
+2026-10-20 07:21:53.479 UTC [300] LOCATION:  pg_trickle::api::emit_creation_warnings, mod.rs:996
+2026-10-20 07:21:53.496 UTC [300] WARNING:  01000: pg_trickle: DIFFERENTIAL mode with group-rescan aggregates [left_sort_key, right_sort_key]. These aggregates re-scan affected groups from source data on each refresh. This is correct but may be slower than algebraic aggregates (COUNT, SUM, AVG). Use FULL mode if group-rescan performance is unacceptable, or replace with algebraic alternatives where possible.
+2026-10-20 07:21:53.496 UTC [300] CONTEXT:  SQL statement "SELECT pgtrickle.create_stream_table(name => $1::text, query => $2::text, schedule => 'calculated', refresh_mode => $3::text, initialize => false, cdc_mode => 'trigger', orchestration_mode => 'EXTERNAL')"
+	SQL statement "SELECT *                     FROM mdm.create(proposed)"
+	PL/pgSQL function inline_code_block line 47 at SQL statement
+2026-10-20 07:21:53.496 UTC [300] LOCATION:  pg_trickle::api::validate_and_parse_query, mod.rs:1392
+2026-10-20 07:21:53.503 UTC [300] WARNING:  01000: pg_trickle: DIFFERENTIAL mode with group-rescan aggregates [candidate_pairs]. These aggregates re-scan affected groups from source data on each refresh. This is correct but may be slower than algebraic aggregates (COUNT, SUM, AVG). Use FULL mode if group-rescan performance is unacceptable, or replace with algebraic alternatives where possible.
+2026-10-20 07:21:53.503 UTC [300] CONTEXT:  SQL statement "SELECT pgtrickle.create_stream_table(name => $1::text, query => $2::text, schedule => 'calculated', refresh_mode => $3::text, initialize => false, cdc_mode => 'trigger', orchestration_mode => 'EXTERNAL')"
+	SQL statement "SELECT *                     FROM mdm.create(proposed)"
+	PL/pgSQL function inline_code_block line 47 at SQL statement
+2026-10-20 07:21:53.503 UTC [300] LOCATION:  pg_trickle::api::validate_and_parse_query, mod.rs:1392
+2026-10-20 07:21:54.645 UTC [85] WARNING:  01000: pg_trickle launcher: could not spawn scheduler for database 'capability_errors'
+2026-10-20 07:21:54.645 UTC [85] LOCATION:  pg_trickle::scheduler::scheduler_loop::pg_trickle_launcher_main::pg_trickle_launcher_main_inner, scheduler_loop.rs:332
+2026-10-20 07:22:04.633 UTC [1] LOG:  00000: client backend (PID 303) was terminated by signal 9: Killed
+2026-10-20 07:22:04.633 UTC [1] DETAIL:  Failed process was running: DO $$
+	DECLARE
+	    source_id_before uuid;
+	    source_key_before bytea;
+	    source_id_after uuid;
+	    source_key_after bytea;
+	    source_active_after boolean;
+	    deactivated jsonb;
+	    reactivated jsonb;
+	BEGIN
+	    SELECT source_record_id, source_record_key
+	      INTO STRICT source_id_before, source_key_before
+	      FROM public.e2e_composite_source_records()
+	     WHERE tenant_id = 101 AND customer_id = 1001;
+	    DELETE FROM public.crm_customer_composite
+	     WHERE tenant_id = 101 AND customer_id = 1001;
+	    deactivated := mdm.refresh('composite_customer', 'ALLOW');
+	    SELECT source_record_id, source_record_key, active
+	      INTO source_id_after, source_key_after, source_active_after
+	      FROM public.e2e_composite_source_records()
+	     WHERE source_record_id = source_id_before;
+	    IF source_id_after IS DISTINCT FROM source_id_before
+	       OR source_key_after IS DISTINCT FROM source_key_before
+	       OR source_active_after IS DISTINCT FROM false THEN
+	        RAISE EXCEPTION 'deactivation did not preserve the
+2026-10-20 07:22:04.633 UTC [1] LOCATION:  LogChildExit, postmaster.c:2835
+2026-10-20 07:22:04.633 UTC [1] LOG:  00000: terminating any other active server processes
+2026-10-20 07:22:04.633 UTC [1] LOCATION:  HandleChildCrash, postmaster.c:2785
+2026-10-20 07:22:04.638 UTC [1] LOG:  00000: all server processes terminated; reinitializing
+2026-10-20 07:22:04.638 UTC [1] LOCATION:  PostmasterStateMachine, postmaster.c:3186
+2026-10-20 07:22:04.675 UTC [308] LOG:  00000: database system was interrupted; last known up at 2026-10-20 07:21:53 UTC
+2026-10-20 07:22:04.675 UTC [308] LOCATION:  StartupXLOG, xlog.c:5544
+2026-10-20 07:22:04.943 UTC [308] LOG:  00000: database system was not properly shut down; automatic recovery in progress
+2026-10-20 07:22:04.943 UTC [308] LOCATION:  InitWalRecovery, xlogrecovery.c:965
+2026-10-20 07:22:04.947 UTC [308] LOG:  00000: redo starts at 0/91B7100
+2026-10-20 07:22:04.947 UTC [308] LOCATION:  PerformWalRecovery, xlogrecovery.c:1767
+2026-10-20 07:22:04.948 UTC [308] WARNING:  01000: could not open directory "base/37248": No such file or directory
+2026-10-20 07:22:04.948 UTC [308] CONTEXT:  WAL redo at 0/91B7388 for Database/DROP: dir 1663/37248
+2026-10-20 07:22:04.948 UTC [308] LOCATION:  rmtree, rmtree.c:63
+2026-10-20 07:22:04.948 UTC [308] WARNING:  01000: some useless files may be left behind in old database directory "base/37248"
+2026-10-20 07:22:04.948 UTC [308] CONTEXT:  WAL redo at 0/91B7388 for Database/DROP: dir 1663/37248
+2026-10-20 07:22:04.948 UTC [308] LOCATION:  dbase_redo, dbcommands.c:3452
+2026-10-20 07:22:04.982 UTC [308] LOG:  00000: invalid record length at 0/9A933F0: expected at least 24, got 0
+2026-10-20 07:22:04.982 UTC [308] LOCATION:  ReadRecord, xlogrecovery.c:3217
+2026-10-20 07:22:04.982 UTC [308] LOG:  00000: redo done at 0/9A933C8 system usage: CPU: user: 0.02 s, system: 0.01 s, elapsed: 0.03 s
+2026-10-20 07:22:04.982 UTC [308] LOCATION:  PerformWalRecovery, xlogrecovery.c:1902
+2026-10-20 07:22:04.993 UTC [309] LOG:  00000: checkpoint starting: end-of-recovery immediate wait
+2026-10-20 07:22:04.993 UTC [309] LOCATION:  LogCheckpointStart, xlog.c:6704
+2026-10-20 07:22:05.034 UTC [309] LOG:  00000: checkpoint complete: wrote 1288 buffers (7.9%), wrote 2 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.013 s, sync=0.027 s, total=0.042 s; sync files=445, longest=0.011 s, average=0.001 s; distance=9072 kB, estimate=9072 kB; lsn=0/9A933F0, redo lsn=0/9A933F0
+2026-10-20 07:22:05.034 UTC [309] LOCATION:  LogCheckpointEnd, xlog.c:6794
+2026-10-20 07:22:05.049 UTC [1] LOG:  00000: database system is ready to accept connections
+2026-10-20 07:22:05.049 UTC [1] LOCATION:  process_pm_child_exit, postmaster.c:2331
+2026-10-20 07:22:05.068 UTC [313] WARNING:  01000: pg_trickle launcher: could not spawn scheduler for database 'capability_errors'
+2026-10-20 07:22:05.068 UTC [313] LOCATION:  pg_trickle::scheduler::scheduler_loop::pg_trickle_launcher_main::pg_trickle_launcher_main_inner, scheduler_loop.rs:332
+2026-10-20 07:27:04.143 UTC [309] LOG:  00000: checkpoint starting: time
+2026-10-20 07:27:04.143 UTC [309] LOCATION:  LogCheckpointStart, xlog.c:6704
+2026-10-20 07:27:05.361 UTC [313] WARNING:  01000: pg_trickle launcher: could not spawn scheduler for database 'capability_errors'
+2026-10-20 07:27:05.361 UTC [313] LOCATION:  pg_trickle::scheduler::scheduler_loop::pg_trickle_launcher_main::pg_trickle_launcher_main_inner, scheduler_loop.rs:332
+2026-10-20 07:27:13.480 UTC [309] LOG:  00000: checkpoint complete: wrote 90 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=9.321 s, sync=0.006 s, total=9.338 s; sync files=9, longest=0.002 s, average=0.001 s; distance=443 kB, estimate=8209 kB; lsn=0/9B027F0, redo lsn=0/9B02030
+2026-10-20 07:27:13.480 UTC [309] LOCATION:  LogCheckpointEnd, xlog.c:6794
