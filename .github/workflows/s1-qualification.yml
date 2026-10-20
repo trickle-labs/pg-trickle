@@ -4,6 +4,16 @@ on:
   pull_request:
     paths:
       - 'benchmarks/s1/**'
+      - 'src/**'
+      - 'sql/**'
+      - 'verification/**'
+      - 'benches/**'
+      - 'scripts/gen_test_schema.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'pg_trickle.control'
+      - '.cargo/**'
       - '.github/workflows/s1-qualification.yml'
   workflow_dispatch:
 
@@ -154,3 +164,8 @@ jobs:
             _s1/evidence/
             benchmarks/s1/qualification/control-300/
             benchmarks/s1/qualification/candidate-300/
+      - name: Enforce approved 10-CPU ARM64 qualification profile
+        if: ${{ always() && steps.profile.outputs.qualify != 'true' }}
+        run: |
+          echo '::error::S1 throughput is NOT QUALIFIED: the approved 10-CPU ARM64 Docker profile was unavailable. Diagnostic evidence was uploaded, but neither the 300-admission candidate gate nor its paired baseline was run.'
+          exit 1
