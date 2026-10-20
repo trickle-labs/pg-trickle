@@ -1,0 +1,3 @@
+# Preserve captured terminal bytes and unified-diff context in replay evidence.
+*.log -whitespace
+*.patch -whitespace
