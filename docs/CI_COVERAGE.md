@@ -177,7 +177,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`88c8a3672d7a3e023d0fc01122a9729c30873387`, the `ubuntu-24.04` runner class,
+`91f3a03957d577e7c4e8a3a8b4fed482219a995c`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -352,6 +352,15 @@ after cost difference is reported. The run used 11 jobs, 219.417 execution
 minutes and 235.717 summed creation-to-start minutes. Failed/cancelled
 experiment overhead is now 1,413.601 execution minutes. These costs are not
 allocation savings; issue #1188 remains open pending a valid matched replay.
+
+The next dispatch, [run `39408759659`](https://github.com/trickle-labs/pg-trickle/actions/runs/39408759659),
+stopped at the producer's frozen-source guard before building or replaying
+anything. It correctly rejected the two test-file changes against the old
+`88c8` pin. The pin now advances to `91f3a039`, which contains those fixture
+repairs while production sources still match merged #1190. One producer job
+used 0.183 execution minutes and 9.633 queue-proxy minutes; no replay ran.
+Including the producer check, failed/cancelled experiment overhead is now
+1,413.784 execution minutes.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
