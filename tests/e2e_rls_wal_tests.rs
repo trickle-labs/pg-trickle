@@ -100,13 +100,15 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.refresh_st_with_retry("rls_wal_st").await;
-    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
-        .await;
+    // Keep refreshes paused until all source mutations are committed so one
+    // differential pass exercises the complete batch.
     db.execute("INSERT INTO rls_wal_src VALUES (3, 30, 'c')")
         .await;
     db.execute("UPDATE rls_wal_src SET val = 'b2' WHERE id = 2")
         .await;
     db.execute("DELETE FROM rls_wal_src WHERE id = 1").await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
 
     let converged = db
         .wait_for_condition(
@@ -134,23 +136,36 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let diagnostic: String = db
         .query_scalar(
             "SELECT format(\
-                'strategy=%s; owner=%s (bypassrls=%s); fallback=%s: %s; last_action=%s; last_reason=%s: %s', \
+                'strategy=%s; cdc_mode=%s; needs_reinit=%s; owner=%s (bypassrls=%s); fallback=%s: %s; last_action=%s (%s); last_error=%s; last_reason=%s: %s', \
                 current_setting('pg_trickle.refresh_strategy'), \
+                coalesce(dep.cdc_mode::text, 'none'), st.needs_reinit, \
                 pg_get_userbyid(c.relowner), r.rolbypassrls, \
                 coalesce(st.refresh_reason, 'none'), \
                 coalesce(st.refresh_reason_detail, 'none'), \
                 coalesce(h.action, 'none'), \
+                coalesce(h.status, 'none'), \
+                coalesce(f.error_message, 'none'), \
                 coalesce(h.refresh_reason, 'none'), \
                 coalesce(h.refresh_reason_detail, 'none')) \
              FROM pgtrickle.pgt_stream_tables st \
              JOIN pg_class c ON c.oid = st.pgt_relid \
              JOIN pg_roles r ON r.oid = c.relowner \
              LEFT JOIN LATERAL ( \
-                SELECT action, refresh_reason, refresh_reason_detail \
+                SELECT cdc_mode FROM pgtrickle.pgt_dependencies \
+                WHERE pgt_id = st.pgt_id AND source_type = 'TABLE' \
+                ORDER BY source_relid LIMIT 1 \
+             ) dep ON true \
+             LEFT JOIN LATERAL ( \
+                SELECT action, status, refresh_reason, refresh_reason_detail \
                 FROM pgtrickle.pgt_refresh_history \
                 WHERE pgt_id = st.pgt_id AND status = 'COMPLETED' \
                 ORDER BY refresh_id DESC LIMIT 1 \
              ) h ON true \
+             LEFT JOIN LATERAL ( \
+                SELECT error_message FROM pgtrickle.pgt_refresh_history \
+                WHERE pgt_id = st.pgt_id AND status = 'FAILED' \
+                ORDER BY refresh_id DESC LIMIT 1 \
+             ) f ON true \
              WHERE st.pgt_name = 'rls_wal_st'",
         )
         .await;
