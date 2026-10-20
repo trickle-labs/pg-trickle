@@ -12,6 +12,46 @@ mod e2e;
 
 use e2e::E2eDb;
 
+#[tokio::test]
+async fn test_view_inline_using_preserves_results_privileges_and_rollback() {
+    let db = E2eDb::new().await.with_extension().await;
+    sqlx::raw_sql(include_str!("fixtures/view_using.sql"))
+        .execute(&db.pool)
+        .await
+        .expect("nested USING regression");
+}
+
+#[tokio::test]
+async fn test_view_inline_using_quoted_key_preserves_outer_join_results() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.differential_max_change_ratio = 1",
+        "CREATE TABLE vi_using_left (\"Case Key\" int PRIMARY KEY, value int)",
+        "CREATE TABLE vi_using_right (\"Case Key\" int PRIMARY KEY)",
+        "INSERT INTO vi_using_left VALUES (1, 10), (2, NULL)",
+        "INSERT INTO vi_using_right VALUES (1), (3)",
+        "CREATE VIEW vi_using_view AS SELECT * FROM vi_using_left",
+    ])
+    .await;
+    for (name, join) in [
+        ("vi_using_inner", "JOIN"),
+        ("vi_using_left_st", "LEFT JOIN"),
+        ("vi_using_right_st", "RIGHT JOIN"),
+        ("vi_using_full", "FULL JOIN"),
+    ] {
+        let query = format!(
+            "SELECT c.\"Case Key\" AS case_key, c.value \
+             FROM vi_using_view c {join} vi_using_right s USING (\"Case Key\")"
+        );
+        db.create_st(name, &query, "1h", "DIFFERENTIAL").await;
+        db.assert_st_matches_query(name, &query).await;
+        db.execute("UPDATE vi_using_left SET value = value + 1 WHERE \"Case Key\" = 1")
+            .await;
+        db.refresh_st(name).await;
+        db.assert_st_matches_query(name, &query).await;
+    }
+}
+
 // ── Basic View Inlining (DIFFERENTIAL) ─────────────────────────────────
 
 #[tokio::test]
