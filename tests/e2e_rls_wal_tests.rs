@@ -40,6 +40,13 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
         "differential",
     )
     .await;
+    let database: String = db.query_scalar("SELECT current_database()").await;
+    // Refresh jobs use fresh background-worker connections; pin their GUC default here.
+    db.execute(&format!(
+        "ALTER DATABASE \"{}\" SET pg_trickle.refresh_strategy = 'differential'",
+        database.replace('"', "\"\"")
+    ))
+    .await;
 
     db.execute(
         "CREATE TABLE rls_wal_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)",
@@ -56,8 +63,7 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("CREATE POLICY tenant_only ON rls_wal_src USING (tenant_id = 10)")
         .await;
 
-    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
-    let wal_owner = format!("rls_wal_owner_{}", db_suffix.replace('-', "_"));
+    let wal_owner = format!("rls_wal_owner_{}", database.replace('-', "_"));
     db.execute(&format!("CREATE ROLE {wal_owner} LOGIN BYPASSRLS"))
         .await;
     db.execute(&format!(
@@ -125,5 +131,28 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let effective_mode: String = db
         .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'")
         .await;
-    assert_eq!(effective_mode, "DIFFERENTIAL");
+    let diagnostic: String = db
+        .query_scalar(
+            "SELECT format(\
+                'strategy=%s; owner=%s (bypassrls=%s); fallback=%s: %s; last_action=%s; last_reason=%s: %s', \
+                current_setting('pg_trickle.refresh_strategy'), \
+                pg_get_userbyid(c.relowner), r.rolbypassrls, \
+                coalesce(st.refresh_reason, 'none'), \
+                coalesce(st.refresh_reason_detail, 'none'), \
+                coalesce(h.action, 'none'), \
+                coalesce(h.refresh_reason, 'none'), \
+                coalesce(h.refresh_reason_detail, 'none')) \
+             FROM pgtrickle.pgt_stream_tables st \
+             JOIN pg_class c ON c.oid = st.pgt_relid \
+             JOIN pg_roles r ON r.oid = c.relowner \
+             LEFT JOIN LATERAL ( \
+                SELECT action, refresh_reason, refresh_reason_detail \
+                FROM pgtrickle.pgt_refresh_history \
+                WHERE pgt_id = st.pgt_id AND status = 'COMPLETED' \
+                ORDER BY refresh_id DESC LIMIT 1 \
+             ) h ON true \
+             WHERE st.pgt_name = 'rls_wal_st'",
+        )
+        .await;
+    assert_eq!(effective_mode, "DIFFERENTIAL", "{diagnostic}");
 }
