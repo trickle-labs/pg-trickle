@@ -969,14 +969,19 @@ fn acknowledge_receipt_batch(
             let max_changes = i32::try_from(expected.len()).map_err(|_| {
                 PgTrickleError::WalTransitionError("WAL receipt batch is too large".into())
             })?;
-            let sql = format!(
-                "SELECT lsn::text, xid::text, data \
-                   FROM pg_logical_slot_get_changes('{}', NULL, {})",
-                first.slot_name, max_changes
-            );
+            let sql = "SELECT lsn::text, xid::text, data \
+                         FROM pg_logical_slot_get_changes($1::name, $2::pg_lsn, $3::integer)";
             let actual = Spi::connect(|client| {
                 let rows = client
-                    .select(&sql, None, &[])
+                    .select(
+                        sql,
+                        None,
+                        &[
+                            first.slot_name.as_str().into(),
+                            through_lsn.into(),
+                            max_changes.into(),
+                        ],
+                    )
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 let mut values = Vec::new();
                 for row in rows {
