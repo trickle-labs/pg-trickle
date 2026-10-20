@@ -377,7 +377,7 @@ async fn test_view_inline_full_mode() {
     assert_eq!(count, 2);
 
     db.execute("INSERT INTO vi_full_base VALUES (3, 'z')").await;
-    db.refresh_st("vi_st_full").await;
+    db.refresh_st_until_converged("vi_st_full").await;
 
     assert_eq!(
         db.count("public.vi_st_full").await,

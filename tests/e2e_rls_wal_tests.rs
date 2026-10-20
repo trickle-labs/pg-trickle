@@ -33,13 +33,22 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
     db.alter_system_set_and_wait(
         "pg_trickle.refresh_strategy",
         "'differential'",
         "differential",
     )
     .await;
+    // Load the override at server startup, before any scheduler can apply mutations.
+    db.pool.close().await;
+    let restarted = tokio::process::Command::new("docker")
+        .args(["restart", db.container_id()])
+        .output()
+        .await
+        .expect("restart the configured RLS fixture");
+    assert!(restarted.status.success(), "RLS fixture restart failed");
+    db.pool = db.reconnect_after_restart().await;
 
     db.execute(
         "CREATE TABLE rls_wal_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)",
@@ -94,6 +103,7 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.refresh_st_with_retry("rls_wal_st").await;
+    wait_for_wal_mode(&db, "rls_wal_src").await;
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.execute("INSERT INTO rls_wal_src VALUES (3, 30, 'c')")
@@ -125,5 +135,13 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let effective_mode: String = db
         .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'")
         .await;
-    assert_eq!(effective_mode, "DIFFERENTIAL");
+    let history: String = db
+        .query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(h) ORDER BY h.refresh_id), '[]'::jsonb)::text \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'rls_wal_st'",
+        )
+        .await;
+    assert_eq!(effective_mode, "DIFFERENTIAL", "refresh history: {history}");
 }

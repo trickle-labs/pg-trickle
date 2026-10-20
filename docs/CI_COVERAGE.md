@@ -293,6 +293,50 @@ pair consumed 215.217 execution minutes and 0.550 creation-to-start minutes;
 all failed/cancelled experiment attempts so far consumed 990.401 execution
 minutes, recorded as experiment overhead rather than allocation savings.
 
+The [following replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39382059821)
+passed both integration allocations and all six light shards, whose eight
+identity records matched. The bounded full allocation passed 1,211/1,214:
+RLS/WAL still observed FULL, the auto-partition fixture retained count 3
+instead of 4, and the FULL/view fixture retained two rows instead of three.
+The latter two now use the existing exact-convergence helper before their
+unchanged row assertions. The broad allocation passed 2,178/2,182: monitoring
+teardown deadlocked, a fallback fixture counted one buffered row before replay,
+the earliest WAL witness timed out again, and a watermark test missed its
+initial auto-refresh. That watermark fixture now captures its timestamp before
+the write, using the existing timestamp-aware wait helper.
+
+The RLS mode, teardown and WAL failures did not reproduce in a 45-check local
+run against this hosted attempt's exact archived extension image; they are not
+claimed to have a confirmed causal diagnosis. Twenty independent RLS probes
+against the earlier local image also passed without retries. Fixture setup
+now loads the RLS strategy and the pre-receipt witness at retained-server
+startup, rather than relying on a frontend reload acknowledgement or only
+restarting a scheduler. WAL setup retains its database/volume identity check
+and acquires the phase blocker before the target commit. The no-buffered-copy
+witness now checks the target row ID 2 specifically: an older baseline row is
+not a copy of that pending commit. Receipt, crash, exact-journal, recovery-mode
+and final DIFFERENTIAL assertions remain. Failure diagnostics retain refresh
+history, buffered rows, capture/slot and worker state, and full teardown errors.
+The teardown assertion still runs in both full allocations without a retry.
+
+A subsequent local post-restart baseline-guard run passed 13/14 but reproduced
+the earliest fallback timeout. Its diagnostics showed both consumers back in
+`TRANSITIONING` after baseline setup, despite the earlier WAL-mode check.
+The fallback fixture now rechecks WAL readiness after all setup refreshes and restarts,
+before committing the target row; the RLS fixture does the same after its
+cutover drain. A six-target startup-adjusted run passed all 112 eligible checks
+without retries before this additional guard; the failed 13/14 follow-up remains
+part of the record. The two stale-row repairs also passed all 33 checks in the
+light harness without retries.
+The final RLS/WAL recovery follow-up passed all 18 checks without retries,
+including the post-restart baseline guard and recovery negative controls.
+Formatting and lint passed with zero warnings.
+
+Both ten-repetition recovery steps and the broad serial atomicity phase passed.
+This failed pair remains inconclusive: 11 jobs used 203.783 execution minutes
+and 278.933 summed creation-to-start minutes. Failed/cancelled experiment
+overhead is now 1,194.184 execution minutes; none is allocation savings.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 

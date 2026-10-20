@@ -267,34 +267,6 @@ async fn set_wal_phase(db: &E2eDb, oid: i64, phase: &str, value: &str) {
         &format!("wal:{oid}:{value}"),
     )
     .await;
-    if phase != "before_receipt" {
-        return;
-    }
-    // Before receipt commit, a batch decoded with old settings cannot be replayed
-    // to witness this boundary. Arm a fresh scheduler before committing its row.
-    let scheduler_pid: i32 = db
-        .query_scalar(
-            "SELECT pid FROM pg_stat_activity \
-             WHERE backend_type = 'pg_trickle scheduler' AND datname = current_database()",
-        )
-        .await;
-    terminate_backend(db, scheduler_pid).await;
-    assert!(
-        db.wait_for_condition(
-            "previous WAL scheduler exits before arming",
-            &format!(
-                "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = {scheduler_pid})"
-            ),
-            WAIT,
-            Duration::from_millis(50),
-        )
-        .await,
-        "previous WAL scheduler did not exit"
-    );
-    assert!(
-        db.wait_for_scheduler(WAIT).await,
-        "armed WAL scheduler did not start"
-    );
 }
 
 async fn clear_wal_phase(db: &E2eDb) {
@@ -352,7 +324,19 @@ async fn wait_for_wal_barrier(db: &E2eDb, oid: i64, phase: &str, blocker_pid: i3
             return pid;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("WAL decoder did not reach {phase} for source OID {oid}");
+            let state: String = db
+                .query_scalar(
+                    "SELECT jsonb_build_object(\
+                        'dependencies', (SELECT jsonb_agg(to_jsonb(d)) FROM pgtrickle.pgt_dependencies d),\
+                        'workers', (SELECT jsonb_agg(jsonb_build_object(\
+                            'pid', pid, 'backend_type', backend_type, 'application_name', application_name,\
+                            'state', state, 'wait_event', wait_event, 'query', query))\
+                            FROM pg_stat_activity WHERE datname = current_database()),\
+                        'slots', (SELECT jsonb_agg(to_jsonb(s)) FROM pg_replication_slots s)\
+                    )::text",
+                )
+                .await;
+            panic!("WAL decoder did not reach {phase} for source OID {oid}; state={state}");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -520,12 +504,16 @@ async fn receipt_slot_reached(db: &E2eDb, slot: &str, oid: i64, value: &str) -> 
 }
 
 async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
-    let fixture = setup_wal_fixture(phase).await;
+    let mut fixture = setup_wal_fixture(phase).await;
     let sentinel_table = format!("wal_{}_identity", phase.replace('-', "_"));
     let value = format!("{phase}-committed");
     let next_value = format!("{phase}-next-batch");
-    let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     set_wal_phase(&fixture.db, fixture.oid, phase, &value).await;
+    if phase == "before_receipt" {
+        // A missed pre-receipt batch cannot be replayed; load the witness at server startup.
+        fixture.db.pool = restart_and_check_named(&fixture, &sentinel_table).await;
+    }
+    let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, &value).await;
     let worker_pid = wait_for_wal_barrier(&fixture.db, fixture.oid, phase, blocker_pid).await;
 
@@ -742,17 +730,49 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     let buffer = db.change_buffer_table(fixture.oid).await;
     let value = format!("fallback-{phase}-pending");
-    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     set_wal_phase(db, fixture.oid, phase, &value).await;
+    if phase == "before_receipt" {
+        let sentinel = format!("wal_fallback_{phase}_identity");
+        fixture.db.pool = restart_and_check_named(&fixture, &sentinel).await;
+        for stream in [&fixture.stream, &shared] {
+            fixture
+                .db
+                .execute(&format!(
+                    "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
+                ))
+                .await;
+            fixture.db.refresh_st_with_retry(stream).await;
+            assert!(
+                fixture
+                    .db
+                    .query_scalar::<bool>(&format!(
+                        "SELECT NOT needs_reinit AND frontier IS NOT NULL \
+                         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
+                    ))
+                    .await,
+                "consumer baseline must survive witness setup"
+            );
+        }
+    }
+    let db = &fixture.db;
+    // Baseline rebuilds can restart CDC cutover after the earlier WAL check.
+    wait_for_cdc_mode(db, &fixture.source, "WAL").await;
+    let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
     wait_for_wal_barrier(db, fixture.oid, phase, blocker_pid).await;
+    let buffered: String = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb)::text \
+             FROM {buffer} b WHERE action <> 'S'"
+        ))
+        .await;
     assert_eq!(
         db.query_scalar::<i64>(&format!(
-            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S' AND id = 2"
         ))
         .await,
         0,
-        "pending commit must have no trigger or replay copy"
+        "pending commit must have no trigger or replay copy; buffered={buffered}"
     );
     assert!(exact_diff(&db.pool, &fixture.stream, &fixture.journal).await > 0);
     if phase == "before_replay" {
