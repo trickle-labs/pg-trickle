@@ -197,6 +197,42 @@ pub use types::*;
 pub use validation::*;
 pub use window_plan::*;
 
+fn join_using_columns(join: &pg_sys::JoinExpr) -> Result<Vec<String>, PgTrickleError> {
+    pg_list::<pg_sys::Node>(join.usingClause)
+        .iter_ptr()
+        .map(|node| {
+            let name = cast_node!(node, T_String, pg_sys::String).ok_or_else(|| {
+                PgTrickleError::QueryParseError("Invalid USING column name".into())
+            })?;
+            Ok(pg_cstr_to_str(name.sval)?.to_string())
+        })
+        .collect()
+}
+
+fn join_using_column(tree: &OpTree, column: &str) -> Result<Expr, PgTrickleError> {
+    // shortcut: nested merged USING keys require explicit ON until merged-column provenance is represented.
+    match tree {
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            match (
+                left.output_columns().iter().any(|name| name == column),
+                right.output_columns().iter().any(|name| name == column),
+            ) {
+                (true, false) => join_using_column(left, column),
+                (false, true) => join_using_column(right, column),
+                _ => Err(PgTrickleError::UnsupportedOperator(format!(
+                    "USING column '{column}' must resolve to one input in a nested join; use an explicit JOIN ... ON condition"
+                ))),
+            }
+        }
+        _ => Ok(Expr::ColumnRef {
+            table_alias: Some(tree.alias().to_string()),
+            column_name: column.to_string(),
+        }),
+    }
+}
+
 // ── SAF-2: Safe façades for common unsafe FFI operations ──────────────────
 //
 // These thin wrappers encapsulate the single `// SAFETY:` reasoning block
@@ -4048,6 +4084,23 @@ mod tests {
             pk_columns: vec![],
             alias: alias.to_string(),
         }
+    }
+
+    #[test]
+    fn test_using_column_resolves_nested_input_and_rejects_ambiguous_input() {
+        let mut tree = OpTree::InnerJoin {
+            condition: Expr::Literal("TRUE".into()),
+            left: Box::new(make_scan(1, "cases", "c", &["case_key"])),
+            right: Box::new(make_scan(2, "bindings", "b", &["binding_id"])),
+        };
+        assert_eq!(
+            join_using_column(&tree, "binding_id").unwrap().to_sql(),
+            "\"b\".\"binding_id\""
+        );
+        if let OpTree::InnerJoin { left, .. } = &mut tree {
+            **left = make_scan(1, "cases", "c", &["binding_id"]);
+        }
+        assert!(join_using_column(&tree, "binding_id").is_err());
     }
 
     #[test]
