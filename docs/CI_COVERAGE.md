@@ -282,6 +282,16 @@ workers, retaining the RLS, WAL, exact-row and effective-mode assertions. The
 local target passed all four checks without retries; two unchanged oracle
 helper cases were marked leaky by nextest. The actual RLS/WAL check passed.
 The failed hosted pair remains inconclusive.
+Its broad allocation passed 2,181/2,182 checks but timed out before witnessing
+the `before_receipt` WAL failpoint; no crash was performed in that failed case.
+The phase helper now starts a fresh, armed scheduler before the target commit
+for that boundary. Later durable-receipt phases retain their existing path.
+All 14 local recovery checks then passed without retries (one cleanup case
+was marked leaky). An earlier variant that restarted every phase failed two
+later-phase witnesses and was narrowed before publication. The failed hosted
+pair consumed 215.217 execution minutes and 0.550 creation-to-start minutes;
+all failed/cancelled experiment attempts so far consumed 990.401 execution
+minutes, recorded as experiment overhead rather than allocation savings.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):

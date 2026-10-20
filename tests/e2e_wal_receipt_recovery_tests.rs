@@ -267,6 +267,34 @@ async fn set_wal_phase(db: &E2eDb, oid: i64, phase: &str, value: &str) {
         &format!("wal:{oid}:{value}"),
     )
     .await;
+    if phase != "before_receipt" {
+        return;
+    }
+    // Before receipt commit, a batch decoded with old settings cannot be replayed
+    // to witness this boundary. Arm a fresh scheduler before committing its row.
+    let scheduler_pid: i32 = db
+        .query_scalar(
+            "SELECT pid FROM pg_stat_activity \
+             WHERE backend_type = 'pg_trickle scheduler' AND datname = current_database()",
+        )
+        .await;
+    terminate_backend(db, scheduler_pid).await;
+    assert!(
+        db.wait_for_condition(
+            "previous WAL scheduler exits before arming",
+            &format!(
+                "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = {scheduler_pid})"
+            ),
+            WAIT,
+            Duration::from_millis(50),
+        )
+        .await,
+        "previous WAL scheduler did not exit"
+    );
+    assert!(
+        db.wait_for_scheduler(WAIT).await,
+        "armed WAL scheduler did not start"
+    );
 }
 
 async fn clear_wal_phase(db: &E2eDb) {
