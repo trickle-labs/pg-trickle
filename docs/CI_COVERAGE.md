@@ -55,8 +55,8 @@ be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
 decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
 case and before-receipt WAL fallback case run in a separate one-thread step
-after the parallel suite. Their restart and cutover assertions stay pre-merge
-while avoiding contention with other E2E containers.
+after the light shards. The paired full allocations run one at a time so these
+restart and cutover assertions do not overlap the other side's broad E2E suite.
 
 The remaining 51 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation
@@ -180,7 +180,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`91f3a03957d577e7c4e8a3a8b4fed482219a995c`, the `ubuntu-24.04` runner class,
+`7e881c759c09ff15515685dc62f25f7a6d112fad`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -366,15 +366,23 @@ Including the producer check, failed/cancelled experiment overhead is now
 1,413.784 execution minutes.
 
 The next dispatch, [run `39410203313`](https://github.com/trickle-labs/pg-trickle/actions/runs/39410203313),
-completed both broad allocations but remains invalid: the bounded `after`
-suite failed the RLS/WAL effective-mode and before-receipt fallback cases,
-while the `before` suite passed 2,179/2,182 checks. Its three failures were
-the disabled-worker resume timeout, an auto-refresh wait timeout, and the
-chained-stream fixture observing two rows instead of three. The two targeted
-cases passed together in a local serial no-retry run; the CI scheduling fix
-now runs them serially on both sides. The validator rejected the pair. It used
-11 jobs, 218.883 execution minutes and 142.267 summed creation-to-start
-minutes; failed/cancelled experiment overhead is now 1,632.667 execution
+was also invalid: both full allocations failed. The bounded suite failed the
+RLS/WAL effective-mode and before-receipt fallback cases; the broad suite
+passed 2,179/2,182, with failures in disabled-worker resume, an auto-refresh
+wait, and chained-stream row count.
+
+The following [run `39420981755`](https://github.com/trickle-labs/pg-trickle/actions/runs/39420981755)
+confirmed the RLS/WAL effective-mode case passes when isolated. Its
+before-receipt fallback case still timed out on both sides, with two consumers
+stuck in `TRANSITIONING`, the decoder at the cutover LSN, and autovacuum and
+the scheduler both waiting on buffer content. The broad `before` suite passed
+2,179/2,180; its only failure was the window delete fixture reading three rows
+instead of two. That fixture now uses the existing convergence helper without
+changing its oracle. The comparison jobs now run after/light work first and
+serialize the two full allocations, preventing the sensitive tests from
+overlapping the opposite full suite. The validator rejected the run; it used
+11 jobs, 229.633 execution minutes and 131.650 summed creation-to-start
+minutes. Failed/cancelled experiment overhead is now 1,862.300 execution
 minutes. No cost difference is reported.
 
 After saving the completed run/jobs JSON above, download only the replay

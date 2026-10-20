@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Verify frozen production and test sources
-        run: git diff --exit-code 91f3a03957d577e7c4e8a3a8b4fed482219a995c -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+        run: git diff --exit-code 7e881c759c09ff15515685dc62f25f7a6d112fad -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - name: Read the builder image from GHCR
@@ -81,13 +81,13 @@ jobs:
       fail-fast: false
       matrix:
         allocation: [before, after]
-        tier: [integration, light-1, light-2, light-3, full]
+        tier: [integration, light-1, light-2, light-3]
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Verify frozen production and test sources
-        run: git diff --exit-code 91f3a03957d577e7c4e8a3a8b4fed482219a995c -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+        run: git diff --exit-code 7e881c759c09ff15515685dc62f25f7a6d112fad -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
       - name: Free runner space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
       - uses: actions/download-artifact@v8
@@ -111,6 +111,49 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: allocation-${{ matrix.allocation }}-${{ matrix.tier }}
+          path: target/allocation-comparison/
+          if-no-files-found: warn
+          retention-days: 14
+
+  replay-full:
+    name: Replay (${{ matrix.allocation }}, full)
+    needs: [prepare, replay]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        allocation: [before, after]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify frozen production and test sources
+        run: git diff --exit-code 7e881c759c09ff15515685dc62f25f7a6d112fad -- src tests verification Cargo.toml Cargo.lock pg_trickle.control
+      - name: Free runner space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+      - uses: actions/download-artifact@v8
+        with:
+          name: allocation-inputs
+          path: comparison-inputs
+      - name: Verify and load identical inputs
+        run: |
+          cd comparison-inputs
+          sha256sum -c package.sha256
+          sha256sum -c images.sha256
+          docker load --input images.tar
+      - name: Record environment and run the allocation
+        env:
+          ALLOCATION: ${{ matrix.allocation }}
+          TIER: full
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/comparison-inputs/package
+        run: bash scripts/in_ci_allocation_container.sh python3 scripts/run_ci_allocation.py "$ALLOCATION" "$TIER"
+      - name: Retain every attempt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allocation-${{ matrix.allocation }}-full
           path: target/allocation-comparison/
           if-no-files-found: warn
           retention-days: 14
