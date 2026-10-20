@@ -9,7 +9,36 @@ The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
 functions and ran slower; that change was dropped and its measurement is retained,
 and does not qualify the throughput gate.
 
-## Completed native ARM64 qualification
+## Current parser-corrected native ARM64 qualification
+
+On 2026-10-20, the exact candidate built from source `84e15eabebcb84af49fd528d8c30c5e2e8d3348a`
+passed the full native ARM64 Docker qualification. Its image was
+`sha256:087e7188049c1ba79ec0f4b5c85e8eddaae7500d934cdc079c7691ad4f685fc0`;
+the separately identified control was built from the approved source
+`1c0345791979907e2c1418b0008ea15d58311cb9` as
+`sha256:671cd2c7f21a3973cfe554b0a9c460b603c32bbcfec599b7b028784e871cefc7`.
+Both images use the same corrected MDM grant patch and pinned React/MDM sources.
+
+| Measurement | Candidate | Corrected control |
+| --- | --- | --- |
+| Admissions/minute | **60.036187212083334** | 27.209718099565716 |
+| Complete admissions | 300 | 300 |
+| Source/case vectors | 1,200 / 300, exact | 1,200 / 300, exact |
+| Future receipts | 0 | 0 |
+| Due-burst p95 / maximum | 109.177932 / 114.117059 s | 109.627996 / 114.512779 s |
+| Conservative storage | 3,422,608,052 bytes | 3,418,885,308 bytes |
+| Peak sampled memory | 2,044,936,192 bytes | 1,948,774,400 bytes |
+| Strict result | **PASS, raw exit 0** | BASELINE_COMPLETE; rate failed, raw exit 1 |
+
+Every candidate correctness, permission, worker-health, latency and resource
+gate passed; supervision recorded no measurement errors or stop reason. The
+full local vectors, observations, timestamped logs and resource samples remain
+under `benchmarks/s1/qualification/native-arm64-84e-{control,candidate}-300/`.
+The workflow below now runs the same strict profile on a native ARM64 Linux
+runner. The earlier native amd64 failure remains retained separately and is
+not replaced by this ARM64 result.
+
+## Archived earlier native ARM64 qualification
 
 The recorded result below applies to its exact archived images. A subsequent
 bootstrap correction disables background workers only in Docker's temporary
@@ -121,10 +150,10 @@ The supervisor uses the bounded PostgreSQL restart handling described below
 because the frozen worker-health checks restart the server. Persistent
 failures, timeouts and other errors stop the run.
 
-The workflow runs both images sequentially on the same native Linux amd64
-runner. This environment differs from the earlier amd64 runs emulated on an
-ARM64 Docker host; historical rates cannot establish a speedup on this host.
-The workload and acceptance thresholds are unchanged.
+The GitHub workflow runs both images sequentially on a native Linux ARM64
+runner with the Docker platform pinned to `linux/arm64`. This is the separately
+approved ARM64 profile; it does not imply a native amd64 throughput result. The
+workload, candidate floor and all other acceptance thresholds are unchanged.
 
 On 2026-10-19 the user explicitly approved accepting a slower **complete
 control** as the comparison baseline. `check_result.py --baseline` accepts only
@@ -219,9 +248,8 @@ This failed candidate is never accepted using the control-only baseline policy.
 
 The user approved a separate native Linux ARM64 Docker profile on 2026-10-19.
 It uses the same source pins, MDM correction, workload and limits. Its image
-identities, compiler manifest, host and observations must be retained separately
+identities, compiler manifest, host and observations are retained separately
 from amd64; a passing ARM64 result is specific to that declared platform.
-The GitHub workflow continues to measure the native amd64 pair.
 
 The user also approved `mdm-grants.patch` for **both** images after native run
 39255297739 deadlocked on admission 236. MDM had reissued GRANT on every graph

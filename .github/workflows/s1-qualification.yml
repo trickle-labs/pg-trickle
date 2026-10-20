@@ -1,4 +1,4 @@
-name: S1 exact-image qualification
+name: S1 exact-image qualification (native ARM64)
 
 on:
   pull_request:
@@ -11,12 +11,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: s1-${{ github.event.pull_request.number || github.ref }}
+  group: s1-arm64-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   qualify:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
+    env:
+      DOCKER_DEFAULT_PLATFORM: linux/arm64
     # Allow both 45-minute supervisors and artifact upload to finish on failure.
     timeout-minutes: 130
     steps:
@@ -39,7 +41,7 @@ jobs:
           path: _s1/react
       - name: Retain source, environment, and supervision checks
         run: |
-          test "$(uname -m)" = x86_64
+          test "$(uname -m)" = aarch64
           mkdir -p _s1/evidence
           cp .github/workflows/s1-qualification.yml _s1/evidence/
           tar --exclude='*/__pycache__' --exclude='*/control-300' --exclude='*/candidate-300' \
@@ -63,10 +65,10 @@ jobs:
       - name: Build exact control and candidate images
         id: build
         run: |
-          docker build --platform linux/amd64 --provenance=false -f benchmarks/s1/Dockerfile \
+          docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \
             --build-arg TRICKLE_SOURCE=_s1/control -t s1-control:qualification . \
             > _s1/evidence/build-control.log 2>&1 || { tail -100 _s1/evidence/build-control.log; exit 1; }
-          docker build --platform linux/amd64 --provenance=false -f benchmarks/s1/Dockerfile \
+          docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \
             -t s1-candidate:qualification . \
             > _s1/evidence/build-candidate.log 2>&1 || { tail -100 _s1/evidence/build-candidate.log; exit 1; }
           for image in control candidate; do
@@ -115,7 +117,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: s1-exact-image-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: s1-arm64-exact-image-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 90
           path: |
             _s1/evidence/
