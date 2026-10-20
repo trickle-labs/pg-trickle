@@ -147,7 +147,9 @@ integration job using the existing pg_stub/Testcontainers runner. Refresh,
 CDC and scheduler paths select additional failure-recovery repetitions;
 unsafe-boundary paths keep instrumented qualification.
 The bounded full suite disables automatic retries; investigate a failure
-before explicitly rerunning it.
+before explicitly rerunning it. The RLS/WAL owner-mode and before-receipt
+fallback regressions run serially after the parallel suite, preserving their
+restart and cutover assertions without competing with other E2E containers.
 
 [The coverage map](docs/CI_COVERAGE.md) explains the unique behavior at each
 layer, every deferred suite's workflow and failure ownership, verification,

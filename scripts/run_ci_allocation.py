@@ -13,6 +13,19 @@ INTEGRATION = [
     'catalog_tests', 'extension_tests', 'monitoring_tests', 'smoke_tests',
     'resilience_tests', 'scenario_tests', 'workflow_tests', 'property_tests',
 ]
+SERIAL_CASES = [
+    ("e2e_rls_wal_tests", "test_rls_bypassrls_owner_differential_wal_matches_query"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
+]
+
+
+def serial_case_command():
+    command = ['./scripts/run_e2e_tests.sh', '--profile', 'ci', '--retries', '0',
+               '--no-fail-fast', '--test-threads', '1']
+    for binary, _ in SERIAL_CASES:
+        command.extend(['--test', binary])
+    command.extend(['-E', ' | '.join(f'test(={test})' for _, test in SERIAL_CASES)])
+    return command
 
 
 def commands(allocation, tier):
@@ -31,9 +44,13 @@ def commands(allocation, tier):
         result = [
             ['./scripts/run_e2e_tests.sh', '--profile', 'ci', '--retries', '0',
              '--no-fail-fast', '--test', 'e2e_*', '-E',
-             'not binary(=e2e_refresh_atomicity_tests)'],
+             ' & '.join([
+                 'not binary(=e2e_refresh_atomicity_tests)',
+                 *(f'not (binary(={binary}) & test(={test}))' for binary, test in SERIAL_CASES),
+             ])],
             ['./scripts/run_e2e_tests.sh', '--profile', 'ci', '--retries', '0',
              '--test', 'e2e_refresh_atomicity_tests', '--test-threads', '1'],
+            serial_case_command(),
         ]
     else:
         result = [['python3', 'scripts/ci_pr_suite.py', '--no-fail-fast']]

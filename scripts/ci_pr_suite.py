@@ -10,6 +10,10 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+SERIAL_CASES = [
+    ("e2e_rls_wal_tests", "test_rls_bypassrls_owner_differential_wal_matches_query"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
+]
 
 
 def targets(root: Path = ROOT) -> list[str]:
@@ -37,6 +41,10 @@ def targets(root: Path = ROOT) -> list[str]:
         source = (root / "tests" / f"{binary}.rs").read_text()
         if binary not in full or f"fn {test}(" not in source:
             raise ValueError(f"missing scheduled combination: {case}")
+    for binary, test in SERIAL_CASES:
+        source = (root / "tests" / f"{binary}.rs").read_text()
+        if binary not in full or f"fn {test}(" not in source:
+            raise ValueError(f"missing serial correctness case: {binary}::{test}")
     return full
 
 
@@ -60,16 +68,26 @@ def main() -> int:
     for case in cases:
         binary, test = case.split("::")
         excluded.append(f"not (binary(={binary}) & test(={test}))")
+    for binary, test in SERIAL_CASES:
+        excluded.append(f"not (binary(={binary}) & test(={test}))")
     if excluded:
         command.extend(["-E", " & ".join(excluded)])
     status = subprocess.run(command, cwd=ROOT).returncode
     if status:
         return status
     # Keep witnessed barriers isolated from the parallel suite's container load.
-    return subprocess.run([
+    status = subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
         "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
     ], cwd=ROOT).returncode
+    if status:
+        return status
+    serial = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
+              "--no-fail-fast", "--test-threads", "1"]
+    for binary, _ in SERIAL_CASES:
+        serial.extend(["--test", binary])
+    serial.extend(["-E", " | ".join(f"test(={test})" for _, test in SERIAL_CASES)])
+    return subprocess.run(serial, cwd=ROOT).returncode
 
 
 if __name__ == "__main__":

@@ -53,7 +53,10 @@ light execution alone does not establish equivalent worker protection.
 The bounded full suite disables test retries so a correctness failure cannot
 be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
-decision rather than an automatic correctness verdict.
+decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
+case and before-receipt WAL fallback case run in a separate one-thread step
+after the parallel suite. Their restart and cutover assertions stay pre-merge
+while avoiding contention with other E2E containers.
 
 The remaining 51 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import check_ci_results
 import ci_pr_suite
+import run_ci_allocation
 
 
 class AllocationTests(unittest.TestCase):
@@ -24,6 +25,33 @@ class AllocationTests(unittest.TestCase):
             "e2e_monitoring_tests", "e2e_stmt_cdc_tests",
         ):
             self.assertIn(name, full)
+
+    def test_sensitive_cases_are_run_serially_on_both_allocations(self):
+        expected = [
+            "./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
+            "--no-fail-fast", "--test-threads", "1", "--test", "e2e_rls_wal_tests",
+            "--test", "e2e_wal_receipt_recovery_tests", "-E",
+            "test(=test_rls_bypassrls_owner_differential_wal_matches_query) | "
+            "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline)",
+        ]
+        with patch("sys.argv", ["ci_pr_suite.py"]), patch(
+            "ci_pr_suite.subprocess.run", side_effect=[
+                SimpleNamespace(returncode=0), SimpleNamespace(returncode=0),
+                SimpleNamespace(returncode=0),
+            ],
+        ) as run:
+            self.assertEqual(ci_pr_suite.main(), 0)
+        self.assertIn(
+            "not (binary(=e2e_rls_wal_tests) & test(=test_rls_bypassrls_owner_differential_wal_matches_query))",
+            run.call_args_list[0].args[0][-1],
+        )
+        self.assertEqual(run.call_args_list[2].args[0], expected)
+
+        before = run_ci_allocation.commands("before", "full")
+        after = run_ci_allocation.commands("after", "full")
+        self.assertIn("not (binary(=e2e_rls_wal_tests)", before[0][-1])
+        self.assertEqual(before[2], expected)
+        self.assertEqual(after[0][1:3], ["scripts/ci_pr_suite.py", "--no-fail-fast"])
 
     def fixture(self, root):
         (root / "tests").mkdir()
@@ -68,13 +96,14 @@ class AllocationTests(unittest.TestCase):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
-                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, status)]
+                run.side_effect = [SimpleNamespace(returncode=value) for value in (0, 0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
                 self.assertEqual(run.call_args_list[1].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
                 ])
+                self.assertIn("--test-threads", run.call_args_list[2].args[0])
 
     def test_comparison_collects_all_selected_failures_without_changing_result(self):
         for status in (0, 1, 130):

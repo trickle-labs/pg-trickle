@@ -24,8 +24,15 @@ class AllocationReplayTests(unittest.TestCase):
         before = run_ci_allocation.commands('before', 'full')
         after = run_ci_allocation.commands('after', 'full')
         self.assertIn('e2e_*', before[0])
-        self.assertIn('not binary(=e2e_refresh_atomicity_tests)', before[0])
+        expression = before[0][before[0].index('-E') + 1]
+        self.assertIn('not binary(=e2e_refresh_atomicity_tests)', expression)
+        self.assertIn('test_rls_bypassrls_owner_differential_wal_matches_query', expression)
+        self.assertIn('test_wal_trigger_fallback_undecoded_commit_requires_rebaseline', expression)
         self.assertIn('e2e_refresh_atomicity_tests', before[1])
+        self.assertIn('--test-threads', before[2])
+        serial_expression = before[2][before[2].index('-E') + 1]
+        self.assertIn('test(=test_rls_bypassrls_owner_differential_wal_matches_query)', serial_expression)
+        self.assertIn('test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline)', serial_expression)
         self.assertEqual(after[0], ['python3', 'scripts/ci_pr_suite.py', '--no-fail-fast'])
         self.assertIn('--no-fail-fast', before[0])
         self.assertEqual(before[-1], after[-1])
