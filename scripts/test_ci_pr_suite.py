@@ -62,18 +62,44 @@ class AllocationTests(unittest.TestCase):
                 self.assertEqual(command[:3], ["./scripts/run_e2e_tests.sh", "--profile", "ci"])
                 self.assertNotIn("e2e_*", command)
                 self.assertEqual(command[command.index("--retries") + 1], "0")
+                self.assertIn(
+                    "not (binary(=e2e_wal_receipt_recovery_tests) & "
+                    "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline))",
+                    command[command.index("-E") + 1],
+                )
 
     def test_atomicity_runs_isolated_without_retries_and_propagates_failure(self):
-        for status in (0, 1, 130):
+        for status in (1, 130):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
             ) as run:
                 run.side_effect = [SimpleNamespace(returncode=value) for value in (0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
+                self.assertNotIn(
+                    "test_wal_trigger_fallback_received_receipt_requires_rebaseline",
+                    run.call_args_list[0].args[0],
+                )
                 self.assertEqual(run.call_args_list[1].args[0], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
                     "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+                ])
+                self.assertEqual(len(run.call_args_list), 2)
+
+    def test_wal_receipt_barrier_runs_isolated_without_retries(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
+                "ci_pr_suite.subprocess.run"
+            ) as run:
+                run.side_effect = [
+                    SimpleNamespace(returncode=value) for value in (0, 0, status)
+                ]
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertEqual(run.call_args_list[2].args[0], [
+                    "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
+                    "e2e_wal_receipt_recovery_tests", "-E",
+                    "test(test_wal_trigger_fallback_received_receipt_requires_rebaseline)",
+                    "--test-threads", "1", "--retries", "0",
                 ])
 
 

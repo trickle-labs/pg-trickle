@@ -53,7 +53,10 @@ def main() -> int:
         if name != "e2e_refresh_atomicity_tests":
             command.extend(["--test", name])
     cases = json.loads((ROOT / ".github/ci-suites.json").read_text())["scheduled_cases"]
-    excluded = []
+    excluded = [
+        "not (binary(=e2e_wal_receipt_recovery_tests) & "
+        "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline))"
+    ]
     for case in cases:
         binary, test = case.split("::")
         excluded.append(f"not (binary(={binary}) & test(={test}))")
@@ -63,9 +66,17 @@ def main() -> int:
     if status:
         return status
     # Keep witnessed barriers isolated from the parallel suite's container load.
-    return subprocess.run([
+    status = subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
         "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+    ], cwd=ROOT).returncode
+    if status:
+        return status
+    return subprocess.run([
+        "./scripts/run_e2e_tests.sh", "--profile", "ci",
+        "--test", "e2e_wal_receipt_recovery_tests",
+        "-E", "test(test_wal_trigger_fallback_received_receipt_requires_rebaseline)",
+        "--test-threads", "1", "--retries", "0",
     ], cwd=ROOT).returncode
 
 
