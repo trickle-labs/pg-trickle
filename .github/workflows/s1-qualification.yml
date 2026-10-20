@@ -1,4 +1,4 @@
-name: S1 exact-image qualification (native ARM64)
+name: S1 exact-image qualification (approved ARM64 Docker profile)
 
 on:
   pull_request:
@@ -62,7 +62,22 @@ jobs:
           python3 benchmarks/s1/qualification/run_bounded.py --self-check
           python3 benchmarks/s1/qualification/test_supervisor.py
           python3 benchmarks/s1/test_grant_analyze.py _s1/evidence/grant-analyze-results.json
+      - name: Check approved ARM64 Docker CPU profile
+        id: profile
+        run: |
+          cpus=$(docker info --format '{{.NCPU}}')
+          if [ "$cpus" -lt 10 ]; then
+            echo "qualify=false" >> "$GITHUB_OUTPUT"
+            printf '{"result":"SKIPPED_UNQUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":10}\n' "$cpus" \
+              > _s1/evidence/profile-gate.json
+            echo "::notice::S1 qualification needs the approved 10-CPU ARM64 Docker profile; this runner exposes $cpus CPUs. No rate gate was assessed."
+          else
+            echo "qualify=true" >> "$GITHUB_OUTPUT"
+            printf '{"result":"QUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":10}\n' "$cpus" \
+              > _s1/evidence/profile-gate.json
+          fi
       - name: Build native ARM64 SDK
+        if: steps.profile.outputs.qualify == 'true'
         run: |
           docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile.arm64-sdk \
             -t s1-arm64-sdk:qualification . \
@@ -72,6 +87,7 @@ jobs:
             > _s1/evidence/sdk-manifest.txt
       - name: Build exact control and candidate images
         id: build
+        if: steps.profile.outputs.qualify == 'true'
         run: |
           docker build --platform linux/arm64 --provenance=false -f benchmarks/s1/Dockerfile \
             --build-arg S1_BUILDER=s1-arm64-sdk:qualification \
@@ -91,6 +107,7 @@ jobs:
           done
           python3 -c 'from pathlib import Path; r=Path("_s1/evidence"); c=(r/"control-libraries.sha256").read_text().splitlines(); n=(r/"candidate-libraries.sha256").read_text().splitlines(); assert c[0] != n[0], "control and candidate reused the same pg_trickle library"; assert c[1:] == n[1:], "MDM/React dependency binaries differ"'
       - name: Check temporary-server isolation and unchanged runtime settings
+        if: steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success'
         run: |
           for component in control candidate; do
             image=$(docker image inspect "s1-$component:qualification" --format '{{.Id}}')
@@ -98,11 +115,12 @@ jobs:
           done
       - name: Check actual MDM grants and candidate JIT behavior
         id: mdm_grants
+        if: steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success'
         run: |
           image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
           python3 benchmarks/s1/test_mdm_grants.py "$image" _s1/evidence/mdm-grant-regression
       - name: Qualify corrected control, unchanged 300 admissions
-        if: steps.build.outcome == 'success'
+        if: steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success'
         env:
           PGREACT_S1_BATCH_SIZE: '32'
         run: |
@@ -111,7 +129,7 @@ jobs:
           python3 benchmarks/s1/qualification/run_bounded.py "$image" control-300 || true
           python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/control-300 --baseline
       - name: Qualify candidate, unchanged 300 admissions
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.mdm_grants.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.profile.outputs.qualify == 'true' && steps.build.outcome == 'success' && steps.mdm_grants.outcome == 'success' }}
         env:
           PGREACT_S1_BATCH_SIZE: '32'
         run: |
@@ -121,8 +139,11 @@ jobs:
       - name: Hash complete evidence
         if: always()
         run: |
-          find _s1/evidence benchmarks/s1/qualification/control-300 benchmarks/s1/qualification/candidate-300 \
-            -type f ! -name SHA256SUMS -print0 2>/dev/null |
+          paths=(_s1/evidence)
+          for run in benchmarks/s1/qualification/control-300 benchmarks/s1/qualification/candidate-300; do
+            if [ -d "$run" ]; then paths+=("$run"); fi
+          done
+          find "${paths[@]}" -type f ! -name SHA256SUMS -print0 |
             sort -z | xargs -0 sha256sum > _s1/evidence/SHA256SUMS
       - uses: actions/upload-artifact@v7
         if: always()

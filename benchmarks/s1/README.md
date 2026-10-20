@@ -9,35 +9,50 @@ The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
 functions and ran slower; that change was dropped and its measurement is retained,
 and does not qualify the throughput gate.
 
-## Current parser-corrected native ARM64 qualification
+## Current merged-head native ARM64 qualification
 
-On 2026-10-20, the exact candidate built from source `84e15eabebcb84af49fd528d8c30c5e2e8d3348a`
-passed the full native ARM64 Docker qualification. Its image was
-`sha256:087e7188049c1ba79ec0f4b5c85e8eddaae7500d934cdc079c7691ad4f685fc0`;
-the separately identified control was built from the approved source
-`1c0345791979907e2c1418b0008ea15d58311cb9` as
+On 2026-10-20, the exact PR-head candidate from source
+`7642630ba121b3dfb85eb71f75041085d9246c63` passed the full qualification on
+the separately approved ARM64 Docker profile: Apple M1 Pro, Docker Desktop,
+10 CPUs and 7.75 GiB of Docker-reported memory. Its image was
+`sha256:5a8ea79af5c57798e14293bb53cef9aaefe3a26ce119e3063fd9a931790c9cc6`.
+The complete corrected control remains the approved source
+`1c0345791979907e2c1418b0008ea15d58311cb9`, image
 `sha256:671cd2c7f21a3973cfe554b0a9c460b603c32bbcfec599b7b028784e871cefc7`.
 Both images use the same corrected MDM grant patch and pinned React/MDM sources.
 
 | Measurement | Candidate | Corrected control |
 | --- | --- | --- |
-| Admissions/minute | **60.036187212083334** | 27.209718099565716 |
+| Admissions/minute | **60.0018300558167** | 27.209718099565716 |
 | Complete admissions | 300 | 300 |
 | Source/case vectors | 1,200 / 300, exact | 1,200 / 300, exact |
 | Future receipts | 0 | 0 |
-| Due-burst p95 / maximum | 109.177932 / 114.117059 s | 109.627996 / 114.512779 s |
-| Conservative storage | 3,422,608,052 bytes | 3,418,885,308 bytes |
-| Peak sampled memory | 2,044,936,192 bytes | 1,948,774,400 bytes |
+| Due-burst p95 / maximum | 109.030465 / 113.924526 s | 109.627996 / 114.512779 s |
+| Conservative storage | 3,413,170,045 bytes | 3,418,885,308 bytes |
+| Peak sampled memory | 2,020,134,912 bytes | 1,948,774,400 bytes |
 | Strict result | **PASS, raw exit 0** | BASELINE_COMPLETE; rate failed, raw exit 1 |
 
 Every candidate correctness, permission, worker-health, latency and resource
 gate passed; supervision recorded no measurement errors or stop reason. The
-full local vectors, observations, timestamped logs and resource samples remain
-under `benchmarks/s1/qualification/native-arm64-84e-{control,candidate}-300/`.
-The workflow below now builds the documented native ARM64 SDK on a native
-ARM64 Linux runner, records its manifest and image identity, and uses it for
-both exact images. The earlier native amd64 failure remains retained
-separately and is not replaced by this ARM64 result.
+complete merged-head vectors, observations, timestamped logs, image identities
+and checksums remain under `target/issue1168-completion/native-arm64-764-head/`.
+The exact-head [GitHub-hosted diagnostic run](https://github.com/trickle-labs/pg-trickle/actions/runs/39405849795)
+used native Linux ARM64 with a 4-core Neoverse-N2 runner and 15.57 GiB Docker
+memory. It completed all 300 admissions and vectors; correctness, latency and
+resource checks passed, but throughput was 53.063326/min against the unchanged
+60/min gate. Its due-burst p95 / maximum were 120.034429 / 125.504278 seconds,
+storage growth was 95,606,259 bytes, and peak sampled memory was 1,859,428,352
+bytes. This is retained separately under
+`target/issue1168-completion/gha-39405849795/`; the verified artifact has 105
+checksummed files. It does not replace the approved 10-CPU Docker result.
+
+The workflow records a runner with fewer than 10 Docker CPUs as
+`SKIPPED_UNQUALIFIED_PROFILE` and does not assess its rate gate. At 10 or more
+CPUs it builds the documented ARM64 SDK and both exact images, then applies
+the unchanged strict candidate gate. The passing result is only 0.0018 cases
+per minute above the floor, so the narrow throughput margin remains a material
+limitation. The earlier native amd64 failure remains retained separately and
+is not replaced by this ARM64 result.
 
 ## Archived earlier native ARM64 qualification
 
