@@ -335,7 +335,23 @@ Formatting and lint passed with zero warnings.
 Both ten-repetition recovery steps and the broad serial atomicity phase passed.
 This failed pair remains inconclusive: 11 jobs used 203.783 execution minutes
 and 278.933 summed creation-to-start minutes. Failed/cancelled experiment
-overhead is now 1,194.184 execution minutes; none is allocation savings.
+overhead was 1,194.184 execution minutes before the next attempt; none is
+allocation savings.
+
+The [2026-10-20 matched replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39394922140)
+used the same frozen inputs in all ten replay records, and all six light shards
+plus both integration jobs passed. The bounded full job also passed. The broad
+full job failed 3 of 2,182 checks (2,179 passed, 135 skipped): two one-shot
+fixture assertions now use `refresh_st_with_retry` or exact convergence, with
+their assertions unchanged. The third was the RLS/WAL effective-mode check;
+its history showed a FULL `SCHEMA_CHANGED` reinitialization after a transient
+connection reset. The isolated RLS/WAL target passed without retries, so the
+cause remains unconfirmed and its strict DIFFERENTIAL assertion remains.
+Because the broad job failed, the validator rejects this pair and no before /
+after cost difference is reported. The run used 11 jobs, 219.417 execution
+minutes and 235.717 summed creation-to-start minutes. Failed/cancelled
+experiment overhead is now 1,413.601 execution minutes. These costs are not
+allocation savings; issue #1188 remains open pending a valid matched replay.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
