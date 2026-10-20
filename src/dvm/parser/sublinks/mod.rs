@@ -3948,14 +3948,8 @@ unsafe fn parse_from_item_inner(
                 .into_iter()
                 .map(|column_name| Expr::BinaryOp {
                     op: "=".into(),
-                    left: Box::new(Expr::ColumnRef {
-                        table_alias: Some(left.alias().to_string()),
-                        column_name: column_name.clone(),
-                    }),
-                    right: Box::new(Expr::ColumnRef {
-                        table_alias: Some(right.alias().to_string()),
-                        column_name,
-                    }),
+                    left: Box::new(using_column_expr(&left, &column_name)),
+                    right: Box::new(using_column_expr(&right, &column_name)),
                 })
                 .collect();
             super::rewrites::join_and_predicates(predicates)?

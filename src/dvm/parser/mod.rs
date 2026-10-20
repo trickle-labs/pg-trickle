@@ -107,6 +107,43 @@ fn join_using_columns(join: &pg_sys::JoinExpr) -> Result<Vec<String>, PgTrickleE
         .collect()
 }
 
+fn using_column_expr(tree: &OpTree, column: &str) -> Expr {
+    match tree {
+        OpTree::FullJoin { left, right, .. }
+            if left.output_columns().iter().any(|name| name == column)
+                && right.output_columns().iter().any(|name| name == column) =>
+        {
+            Expr::FuncCall {
+                func_name: "COALESCE".into(),
+                args: vec![
+                    using_column_expr(left, column),
+                    using_column_expr(right, column),
+                ],
+            }
+        }
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            let source = if left.output_columns().iter().any(|name| name == column) {
+                left
+            } else {
+                right
+            };
+            using_column_expr(source, column)
+        }
+        OpTree::Filter { child, .. } => using_column_expr(child, column),
+        OpTree::LateralFunction { child, .. } | OpTree::LateralSubquery { child, .. }
+            if child.output_columns().iter().any(|name| name == column) =>
+        {
+            using_column_expr(child, column)
+        }
+        _ => Expr::ColumnRef {
+            table_alias: Some(tree.alias().to_string()),
+            column_name: column.to_string(),
+        },
+    }
+}
+
 fn deparse_join_sql(
     join: &pg_sys::JoinExpr,
     left: &str,
@@ -497,6 +534,26 @@ fn query_has_recursive_cte_inner(query: &str) -> Result<bool, PgTrickleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_using_column_expr_resolves_nested_outer_join_keys() {
+        use crate::dvm::operators::test_helpers::*;
+        let left = scan(1, "left_source", "public", "l", &["id"]);
+        let right = scan(2, "right_source", "public", "r", &["id", "right_only"]);
+        let inner = inner_join(lit("true"), left.clone(), right.clone());
+        let outer = left_join(lit("true"), left.clone(), right.clone());
+        let full = full_join(lit("true"), left, right);
+        assert_eq!(using_column_expr(&inner, "id").to_sql(), "\"l\".\"id\"");
+        assert_eq!(using_column_expr(&outer, "id").to_sql(), "\"l\".\"id\"");
+        assert_eq!(
+            using_column_expr(&full, "id").to_sql(),
+            "COALESCE(\"l\".\"id\", \"r\".\"id\")"
+        );
+        assert_eq!(
+            using_column_expr(&full, "right_only").to_sql(),
+            "\"r\".\"right_only\""
+        );
+    }
 
     // ── Helper constructors ─────────────────────────────────────────
 
