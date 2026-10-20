@@ -180,7 +180,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`7e881c759c09ff15515685dc62f25f7a6d112fad`, the `ubuntu-24.04` runner class,
+`8b17d96b525280579344b329fbccf0c6b6e77456`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
