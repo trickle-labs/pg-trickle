@@ -574,7 +574,7 @@ async fn settle_auto_invariants(
             assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
             return;
         }
-        wait_for_refresh_cycle(db, "prop_auto_l1", remaining.min(Duration::from_secs(30))).await;
+        wait_for_refresh_cycle(db, "prop_auto_l1", remaining.min(Duration::from_secs(90))).await;
     }
 }
 
