@@ -9,6 +9,46 @@ The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
 functions and ran slower; that change was dropped and its measurement is retained,
 and does not qualify the throughput gate.
 
+## Completed native ARM64 qualification
+
+The exact candidate from source `a89347261896efa26162e707c782d1c2a2e9d28b`, image
+`sha256:3a84aac71ae8b0f1ed73a7480dcb85205d14f7e948b864200da52e58ba04f316`,
+passes the unchanged strict candidate checker with raw exit 0. The explicitly
+approved corrected control is complete; its raw below-60 failure and exit 1
+remain preserved under the control-only baseline policy.
+
+| Measurement | Candidate | Corrected control |
+| --- | --- | --- |
+| Admissions/minute | **60.02924744994256** | 27.092425905801132 |
+| Complete admissions | 300 | 300 |
+| Source/case vectors | 1,200 / 300, exact | 1,200 / 300, exact |
+| Future receipts | 0 | 0 |
+| Due-burst p95 / maximum | 76.069447 / 80.866423 s | 109.314041 / 114.155216 s |
+| Conservative storage | 3,317,364,733 bytes | 3,415,481,585 bytes |
+| Peak sampled memory | 1,965,625,344 bytes | 1,764,052,992 bytes |
+| Strict result | PASS | BASELINE_COMPLETE; rate failed |
+
+All correctness, permission, worker-health and resource gates pass. Candidate
+supervision recorded no measurement errors or stop reason. The initial Docker
+inventory was empty; host-start receipts contain only its two exact-image
+containers. Local tests, builds and compression were stopped during timing.
+
+The [qualification record](arm64-qualification.json) retains source/image pins,
+commands, explicit control/profile approvals, archive hashes and the manifest
+of full local observations, vectors, logs and resource measurements under
+`target/issue1168-completion/`. Both runnable images and the exact candidate
+source are archived there. Earlier failures remain unchanged below and in
+their retained run directories; unchanged images were not rerun to replace
+an unfavorable rate.
+
+This result qualifies the approved Linux ARM64 Docker profile. Native amd64
+performance has not qualified. The harness paces admissions at 60/minute, so
+this result does not establish capacity above that offered rate. Formatting,
+zero-warning lint, 2,618 Docker units, 49 focused graph/ownership/atomicity/
+conformance checks and actual MDM/JIT guards pass for the exact candidate.
+Full local integration/E2E, TPC-H and dbt suites were not run; one known
+standalone PostgreSQL error-stub unit is excluded.
+
 The follow-up also reuses parsed query trees and resolved CDC buffer OIDs.
 Incremental refresh admission uses fresh resolved volatility analysis without
 creating an output-schema probe view whose column information is discarded.

@@ -1,0 +1,105 @@
+{
+  "issue": "https://github.com/trickle-labs/pg-trickle/issues/1168",
+  "result": "PASS on the explicitly approved native ARM64 Docker profile",
+  "qualified_at_utc": "2026-10-20T00:18:31.067305+00:00",
+  "candidate_source": "a89347261896efa26162e707c782d1c2a2e9d28b",
+  "control_source": "1c0345791979907e2c1418b0008ea15d58311cb9",
+  "candidate": {
+    "image": "sha256:3a84aac71ae8b0f1ed73a7480dcb85205d14f7e948b864200da52e58ba04f316",
+    "admissions": 300,
+    "source_rows": 1200,
+    "case_vectors": 300,
+    "future_receipts": 0,
+    "cases_per_minute": 60.02924744994256,
+    "due_p95_seconds": 76.069447,
+    "due_max_seconds": 80.866423,
+    "conservative_used_bytes": 3317364733,
+    "peak_memory_bytes": 1965625344,
+    "raw_harness_exit_code": 0,
+    "throughput_gate": "passed",
+    "s1_result": "PASS"
+  },
+  "control": {
+    "image": "sha256:3dfb4ba448c497b41f413fff53d2d2ac1f91776c9dd952f3c447fa573a51cacb",
+    "admissions": 300,
+    "source_rows": 1200,
+    "case_vectors": 300,
+    "future_receipts": 0,
+    "cases_per_minute": 27.092425905801132,
+    "due_p95_seconds": 109.314041,
+    "due_max_seconds": 114.155216,
+    "conservative_used_bytes": 3415481585,
+    "peak_memory_bytes": 1764052992,
+    "raw_harness_exit_code": 1,
+    "throughput_gate": "failed_below_60",
+    "s1_result": "BASELINE_COMPLETE"
+  },
+  "host": {
+    "Architecture": "aarch64",
+    "OSType": "linux",
+    "NCPU": 10,
+    "MemTotal": 8319504384,
+    "OperatingSystem": "Docker Desktop",
+    "KernelVersion": "7.0.14-linuxkit"
+  },
+  "isolation": {
+    "initial_active_containers": 0,
+    "distinct_started_containers": 2,
+    "only_exact_candidate_started": true,
+    "local_tests_builds_compression_stopped_during_timing": true
+  },
+  "supervision": {
+    "memory_limit_bytes": 4294967296,
+    "storage_stop_bytes": 9663676416,
+    "storage_acceptance_bytes": 10737418240,
+    "wall_limit_seconds": 2700,
+    "elapsed_seconds": 528.0488986669952,
+    "measurement_errors": [],
+    "stop_reason": null
+  },
+  "approved_adjustments": [
+    "Corrected control source explicitly approved after the original exact control deadlocked; original failure retained.",
+    "Identical MDM grant correction explicitly approved for both images.",
+    "Separate native ARM64 Docker pair explicitly approved.",
+    "Complete slower control explicitly approved as baseline; raw below-60 failure and exit 1 preserved; candidate >=60 unchanged."
+  ],
+  "fixed_inputs": {
+    "mdm_source": "eef7937180d504e62ce1076074bbeed8cef5d5a7",
+    "react_source": "f19d9b2c5f3d947705ea26aa1619a989f08ae1dc",
+    "mdm_grant_patch_sha256": "a3dd34646b51a89cb52b3e424dfe17c48dab0f632ef585cb06cfbfa4934de388",
+    "frozen_harness_manifest_sha256": "c04926b0c450637186a81cb2ee9fd6a9304a1274deac7c7b795606801bdbd499",
+    "original_workload_and_sql_hash_check": "PASS",
+    "all_429_compiled_inputs_match_candidate_source": true,
+    "mdm_react_libraries_and_react_sql_identical_between_images": true
+  },
+  "validation": {
+    "fmt": "PASS",
+    "lint": "PASS, zero warnings",
+    "docker_units_passed": 2618,
+    "focused_docker_checks_passed": 49,
+    "actual_mdm_and_jit_guards": "PASS",
+    "amd64_unit_and_integration_ci": "PASS at candidate code commit",
+    "skipped": [
+      "Known standalone PostgreSQL error-stub unit test_get_current_table_ref_non_scan",
+      "Full local integration/E2E, TPC-H and dbt suites"
+    ],
+    "native_amd64_performance": "Not qualified; separate workflow, no ARM64-to-amd64 performance claim"
+  },
+  "commands": [
+    "DOCKER_DEFAULT_PLATFORM=linux/arm64 PGREACT_S1_BATCH_SIZE=32 python3 benchmarks/s1/qualification/run_bounded.py sha256:3a84aac71ae8b0f1ed73a7480dcb85205d14f7e948b864200da52e58ba04f316 arm64-source-commit-join-300",
+    "python3 benchmarks/s1/check_result.py target/issue1168-completion/arm64-complete-runs/arm64-source-commit-join-300",
+    "python3 benchmarks/s1/check_result.py target/issue1168-completion/arm64-complete-runs/arm64-control-300 --baseline",
+    "python3 benchmarks/s1/check_frozen_harness.py"
+  ],
+  "retained_evidence_root": "target/issue1168-completion",
+  "evidence_file_count": 95,
+  "evidence_manifest": "source-commit-join-evidence-files.sha256.json",
+  "evidence_manifest_sha256": "b3793659336848e8620be1e28128afd23ebe0816ef5e84d28b7ff1fd063663d7",
+  "candidate_image_archive": "arm64-source-commit-join-image.tar.gz",
+  "candidate_image_archive_sha256": "36aa5e2fab7b2dc5c0068a9b0095eef43e26c9f5fa73d0ce1777546c980994da",
+  "control_image_archive": "arm64-corrected-control-image.tar.gz",
+  "control_image_archive_sha256": "a7223b9ca496f0d2f100754cedc54c0e1bdddc931fa582bb7cb3437265f5ee66",
+  "source_archive_sha256": "4ee78a2ca10b6e9628337fac1ac6431f3083beffd7ce16ca1a39dfbee660fbeb",
+  "compiled_inputs_manifest_sha256": "632cc17543ee1efd0a76257adb085bc7690a70673c8ae8df59b7db936ab1bb12",
+  "prior_failures": "All original failures remain in arm64-complete-runs and native artifacts; failed candidates never use the control-only baseline policy."
+}
