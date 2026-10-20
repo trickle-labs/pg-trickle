@@ -198,6 +198,7 @@ async fn test_consecutive_errors_tracked_and_reset() {
     )
     .await;
     // Keep scheduler refreshes from turning manual attempts into busy notices.
+    #[cfg(not(feature = "light-e2e"))]
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['public.err_cnt_st'])")
         .await;
 
