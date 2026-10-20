@@ -95,6 +95,51 @@ macro_rules! cast_node {
     }};
 }
 
+fn join_using_columns(join: &pg_sys::JoinExpr) -> Result<Vec<String>, PgTrickleError> {
+    pg_list::<pg_sys::Node>(join.usingClause)
+        .iter_ptr()
+        .map(|node| {
+            let value = cast_node!(node, T_String, pg_sys::String).ok_or_else(|| {
+                PgTrickleError::QueryParseError("JOIN USING contains a non-column name".into())
+            })?;
+            Ok(pg_cstr_to_str(value.sval)?.to_string())
+        })
+        .collect()
+}
+
+fn deparse_join_sql(
+    join: &pg_sys::JoinExpr,
+    left: &str,
+    right: &str,
+) -> Result<String, PgTrickleError> {
+    let join_type = match join.jointype {
+        pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
+        pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
+        pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
+        pg_sys::JoinType::JOIN_INNER
+            if join.quals.is_null() && join.usingClause.is_null() && !join.isNatural =>
+        {
+            "CROSS JOIN"
+        }
+        _ => "JOIN",
+    };
+    let clause = if !join.usingClause.is_null() {
+        let columns = join_using_columns(join)?
+            .iter()
+            .map(|column| crate::sql_builder::ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" USING ({columns})")
+    } else if !join.quals.is_null() {
+        // SAFETY: quals belongs to this live raw-parser JoinExpr.
+        format!(" ON {}", unsafe { node_to_expr(join.quals)? }.to_sql())
+    } else {
+        String::new()
+    };
+    let natural = if join.isNatural { "NATURAL " } else { "" };
+    Ok(format!("{left} {natural}{join_type} {right}{clause}"))
+}
+
 /// Parse a SQL string into a list of `RawStmt` nodes.
 ///
 /// Must be called within a PostgreSQL backend with a valid memory context.

@@ -20,6 +20,19 @@ unchanged runtime settings on both images before running qualification. This
 changes image identities and does not transfer the archived throughput score
 to the rebuilt images. The workload, readiness bound and rate gates are unchanged.
 
+The subsequent parser correction preserves `JOIN ... USING` predicates in
+differential plans and SQL rewrites. It fixes the compiler-v9 graph's extra
+rows after a composite-key insert. This changes compiled extension inputs;
+the archived result below does not qualify this new candidate.
+
+Native amd64 run 39375497790 completed both images after the bootstrap fix.
+The control completed at 23.057896203519824/minute under the approved baseline
+policy. Candidate `sha256:cb37bdd19af6251d78c82d2e354e21faba4c9befefc8ab8fad0734f469822490`
+failed throughput at 49.79070394611743/minute, with the other recorded gates
+passing. Its raw exit 1 and all 102 verified artifact hashes remain retained
+under `target/issue1168-completion/native-d221d05/`. This failure is not
+accepted by the candidate checker or replaced by the archived ARM64 score.
+
 The exact candidate from source `a89347261896efa26162e707c782d1c2a2e9d28b`, image
 `sha256:3a84aac71ae8b0f1ed73a7480dcb85205d14f7e948b864200da52e58ba04f316`,
 passes the unchanged strict candidate checker with raw exit 0. The explicitly

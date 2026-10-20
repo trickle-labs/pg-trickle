@@ -3943,7 +3943,23 @@ unsafe fn parse_from_item_inner(
             };
         }
 
-        let condition = if join.quals.is_null() {
+        let condition = if !join.usingClause.is_null() {
+            let predicates = join_using_columns(join)?
+                .into_iter()
+                .map(|column_name| Expr::BinaryOp {
+                    op: "=".into(),
+                    left: Box::new(Expr::ColumnRef {
+                        table_alias: Some(left.alias().to_string()),
+                        column_name: column_name.clone(),
+                    }),
+                    right: Box::new(Expr::ColumnRef {
+                        table_alias: Some(right.alias().to_string()),
+                        column_name,
+                    }),
+                })
+                .collect();
+            super::rewrites::join_and_predicates(predicates)?
+        } else if join.quals.is_null() {
             Expr::Literal("TRUE".into())
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
@@ -6041,21 +6057,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
         let left = unsafe { deparse_from_item_to_sql(join.larg)? };
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let right = unsafe { deparse_from_item_to_sql(join.rarg)? };
-        let join_type = match join.jointype {
-            pg_sys::JoinType::JOIN_INNER => "JOIN",
-            pg_sys::JoinType::JOIN_LEFT => "LEFT JOIN",
-            pg_sys::JoinType::JOIN_FULL => "FULL JOIN",
-            pg_sys::JoinType::JOIN_RIGHT => "RIGHT JOIN",
-            _ => "JOIN",
-        };
-        let condition = if join.quals.is_null() {
-            "TRUE".to_string()
-        } else {
-            // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = safe_node_to_expr(join.quals)?;
-            expr.to_sql()
-        };
-        Ok(format!("{left} {join_type} {right} ON {condition}"))
+        deparse_join_sql(join, &left, &right)
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
