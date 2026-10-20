@@ -180,7 +180,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`8b17d96b525280579344b329fbccf0c6b6e77456`, the `ubuntu-24.04` runner class,
+`f9037c69afbfbd70fd3ed1d3bb37642c2c1cf266`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -384,6 +384,22 @@ overlapping the opposite full suite. The validator rejected the run; it used
 11 jobs, 229.633 execution minutes and 131.650 summed creation-to-start
 minutes. Failed/cancelled experiment overhead is now 1,862.300 execution
 minutes. No cost difference is reported.
+
+The [serialized replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39433887308)
+still failed both full allocations. The broad side passed 2,178/2,180 checks;
+the JSON aggregate and placeholder-cache fixtures now wait for a completed
+manual refresh. The bounded side passed 1,211/1,212; its auto-refresh property
+test timed out waiting for a scheduler cycle during a 30-second inner wait
+within the existing 90-second overall deadline. That inner wait now uses the
+full remaining deadline, preserving the exact invariant checks. The serial
+before-receipt case failed again on the broad side: consumers stayed in
+`TRANSITIONING` at the cutover LSN while autovacuum and the scheduler waited on
+buffer content. The receipt-table autovacuum setting is now disabled in this
+controlled fixture; this diagnosis still needs hosted verification. The two
+full jobs ran sequentially, so cross-allocation overlap was not the cause. The
+invalid run used 11 jobs, 228.967 execution minutes and 60.733 summed
+creation-to-start minutes. Failed/cancelled experiment overhead is now
+2,091.267 execution minutes. No before/after cost difference is reported.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
