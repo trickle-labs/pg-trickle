@@ -273,6 +273,16 @@ summed execution minutes, with 71.700 summed creation-to-start minutes; neither
 is a passing speedup result. Earlier failed/cancelled attempts consumed another
 546.917 execution minutes. All failed attempts remain experiment overhead.
 
+The [next replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39373735709)
+completed all 1,214 bounded checks with one failure: the RLS/WAL data oracle
+passed but its final effective-mode assertion observed FULL. The fixture left
+`refresh_strategy` at adaptive `auto` while requiring DIFFERENTIAL on a tiny,
+high-churn source. It now explicitly selects the differential strategy for its
+workers, retaining the RLS, WAL, exact-row and effective-mode assertions. The
+local target passed all four checks without retries; two unchanged oracle
+helper cases were marked leaky by nextest. The actual RLS/WAL check passed.
+The failed hosted pair remains inconclusive.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 
