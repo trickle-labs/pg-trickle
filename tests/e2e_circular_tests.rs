@@ -541,21 +541,14 @@ async fn test_circular_nonconvergence_error_status() {
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
     let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await;
+    assert!(got_error, "cyc_nc_a did not reach ERROR on non-convergence");
 
     // Note: Since each iteration generates new rows unconditionally, it is guaranteed
     // to never converge, making it a reliable test.
-    if got_error {
-        let status_b: String = db
-            .query_scalar(
-                "SELECT status FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'cyc_nc_b'",
-            )
-            .await;
-        assert_eq!(
-            status_b, "ERROR",
-            "Both SCC members should be ERROR on non-convergence"
-        );
-    }
+    assert!(
+        wait_for_status(&db, "cyc_nc_b", "ERROR", Duration::from_secs(10)).await,
+        "cyc_nc_b did not reach ERROR after cyc_nc_a on non-convergence"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
