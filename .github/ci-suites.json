@@ -116,5 +116,8 @@
   "scheduled_cases": {
     "e2e_dvm_metamorphic_tests::test_v08714_live_metamorphic_families": "Nightly/manual dvm-tiers.yml and full ci.yml; exhaustive rewrite families. The batching/multi-source history regression stays in the PR suite.",
     "e2e_dvm_strategy_tests::test_v0876_strategy_variants_converge_for_corpus_cases": "Weekly/manual dvm-tiers.yml and nightly/manual full ci.yml; corpus mode cross-product. The transaction barrier/resource-boundary test stays in the PR suite."
+  },
+  "isolated_cases": {
+    "e2e_mixed_mode_dag_tests::test_diamond_convergence_cascades_with_one_active_branch": "Run in the serial PR phase to avoid contention from parallel E2E containers."
   }
 }

@@ -63,7 +63,7 @@ class AllocationTests(unittest.TestCase):
                 self.assertNotIn("e2e_*", command)
                 self.assertEqual(command[command.index("--retries") + 1], "0")
 
-    def test_atomicity_runs_isolated_without_retries_and_propagates_failure(self):
+    def test_serial_phase_runs_atomicity_and_isolated_cases_without_retries(self):
         for status in (0, 1, 130):
             with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py"]), patch(
                 "ci_pr_suite.subprocess.run"
@@ -71,10 +71,20 @@ class AllocationTests(unittest.TestCase):
                 run.side_effect = [SimpleNamespace(returncode=value) for value in (0, status)]
                 self.assertEqual(ci_pr_suite.main(), status)
                 self.assertNotIn("e2e_refresh_atomicity_tests", run.call_args_list[0].args[0])
-                self.assertEqual(run.call_args_list[1].args[0], [
+                main_filter = run.call_args_list[0].args[0][
+                    run.call_args_list[0].args[0].index("-E") + 1
+                ]
+                self.assertIn(
+                    "not (binary(=e2e_mixed_mode_dag_tests) & test(=test_diamond_convergence_cascades_with_one_active_branch))",
+                    main_filter,
+                )
+                command = run.call_args_list[1].args[0]
+                self.assertEqual(command[:6], [
                     "./scripts/run_e2e_tests.sh", "--profile", "ci", "--test",
-                    "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
+                    "e2e_refresh_atomicity_tests", "--test",
                 ])
+                self.assertIn("e2e_mixed_mode_dag_tests", command)
+                self.assertEqual(command[command.index("-E") + 1], "binary(=e2e_refresh_atomicity_tests) | (binary(=e2e_mixed_mode_dag_tests) & test(=test_diamond_convergence_cascades_with_one_active_branch))")
 
 
 class VerdictTests(unittest.TestCase):

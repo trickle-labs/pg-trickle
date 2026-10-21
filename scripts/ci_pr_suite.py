@@ -37,6 +37,11 @@ def targets(root: Path = ROOT) -> list[str]:
         source = (root / "tests" / f"{binary}.rs").read_text()
         if binary not in full or f"fn {test}(" not in source:
             raise ValueError(f"missing scheduled combination: {case}")
+    for case in policy.get("isolated_cases", {}):
+        binary, test = case.split("::")
+        source = (root / "tests" / f"{binary}.rs").read_text()
+        if binary not in full or f"fn {test}(" not in source:
+            raise ValueError(f"missing isolated combination: {case}")
     return full
 
 
@@ -52,7 +57,8 @@ def main() -> int:
     for name in selected:
         if name != "e2e_refresh_atomicity_tests":
             command.extend(["--test", name])
-    cases = json.loads((ROOT / ".github/ci-suites.json").read_text())["scheduled_cases"]
+    policy = json.loads((ROOT / ".github/ci-suites.json").read_text())
+    cases = {**policy["scheduled_cases"], **policy.get("isolated_cases", {})}
     excluded = []
     for case in cases:
         binary, test = case.split("::")
@@ -63,10 +69,21 @@ def main() -> int:
     if status:
         return status
     # Keep witnessed barriers isolated from the parallel suite's container load.
-    return subprocess.run([
+    isolated = list(policy.get("isolated_cases", {}))
+    expression = "binary(=e2e_refresh_atomicity_tests)"
+    expression += " | " + " | ".join(
+        f"(binary(={binary}) & test(={test}))"
+        for binary, test in (case.split("::") for case in isolated)
+    ) if isolated else ""
+    command = [
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
-        "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
-    ], cwd=ROOT).returncode
+        "--test", "e2e_refresh_atomicity_tests",
+    ]
+    if isolated:
+        for binary in sorted({case.split("::")[0] for case in isolated}):
+            command.extend(["--test", binary])
+    command.extend(["--test-threads", "1", "--retries", "0", "-E", expression])
+    return subprocess.run(command, cwd=ROOT).returncode
 
 
 if __name__ == "__main__":
