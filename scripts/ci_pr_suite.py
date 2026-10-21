@@ -22,6 +22,8 @@ SERIAL_CASES = [
     ("e2e_v043_tests", "test_t_a44_10_insert_correctness"),
     ("e2e_v107_wal_transition_tests", "test_v107_auto_wal_transition_captures_changes"),
     ("e2e_lsn_contract_tests", "test_lsn_manual_refresh_fixed_snapshots_preserve_frontier"),
+    ("e2e_lsn_contract_tests", "test_lsn_scheduler_cdc_holdback_recovers_after_long_writer"),
+    ("e2e_property_circular_tests", "test_prop_monotone_cycle_small_graph_converges"),
 ]
 
 

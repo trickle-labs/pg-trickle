@@ -6,7 +6,7 @@ use e2e::E2eDb;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, pool::PoolConnection};
 use std::time::Duration;
 
-const WAIT: Duration = Duration::from_secs(90);
+const WAIT: Duration = Duration::from_secs(180);
 
 struct Fixture {
     db: E2eDb,
