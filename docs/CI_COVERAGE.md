@@ -180,7 +180,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`e938c7e45b7a7a107f48dfb4744d179af67d5aa6`, the `ubuntu-24.04` runner class,
+`0c5849c48bebb830242f38a6e6f056c865dc1ff4`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -413,6 +413,21 @@ the bounded suite stopped after that failure, it did not run its serial WAL
 cases. The pair is invalid; it used 11 jobs, 209.950 execution minutes and
 107.550 summed creation-to-start minutes. Failed/cancelled experiment overhead
 is now 2,301.217 execution minutes. No cost difference is reported.
+
+The [next replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39548295282)
+passed both integration allocations and all six light shards. The baseline
+broad suite passed 2,178/2,180; its GUC aggregate fixture missed the completed
+manual refresh, and the unchanged-upstream baseline asserted transaction
+identity even though no upstream changes existed. The bounded allocation
+passed 1,211/1,212; both allocations reproduced the before-receipt WAL stall
+after an extra pre-witness restart, with both consumers stuck in
+`TRANSITIONING` at the cutover LSN. The fixture now keeps WAL steady until the
+actual crash witness, waits for every dependency to reach the requested CDC
+mode, and the two broad-only assertions now match their intended invariants.
+The recovery repetition passed 10/10 on both sides. This invalid pair used
+11 jobs, 220.550 execution minutes and 107.250 summed creation-to-start
+minutes. Failed/cancelled experiment overhead is now 2,521.767 execution
+minutes. No cost difference is reported.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
