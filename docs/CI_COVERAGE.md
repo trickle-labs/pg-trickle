@@ -180,7 +180,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`0c5849c48bebb830242f38a6e6f056c865dc1ff4`, the `ubuntu-24.04` runner class,
+`d5739fa37aabe1b085a7ced79e27a9ab00b2bdf3`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -428,6 +428,21 @@ The recovery repetition passed 10/10 on both sides. This invalid pair used
 11 jobs, 220.550 execution minutes and 107.250 summed creation-to-start
 minutes. Failed/cancelled experiment overhead is now 2,521.767 execution
 minutes. No cost difference is reported.
+
+The [next paired replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39564224459)
+passed integration and all six light allocations. The broad baseline full suite
+passed 2,177/2,180: the backward-compatibility and CTE cascade count checks
+failed, and the WAL semantic-control fixture timed out before its replay
+barrier. The bounded full allocation passed 1,211/1,212; only
+`test_scheduler_unchanged_upstream_baseline_preserves_counts` failed while
+waiting for its scheduled sibling refresh. Its 60-second wait was too short
+under parallel full-suite load and is now 120 seconds; the scheduler and exact
+result assertions remain. Recovery repetition passed 10/10 on both sides.
+The invalid pair used 11 jobs, 223.533 execution minutes and 257.817 summed
+creation-to-start minutes. Its full allocation jobs took 80.417 minutes before
+and 41.800 minutes after, but the unequal suites and failed correctness checks
+make this unsuitable as a cost comparison. Failed/cancelled experiment
+overhead is now 2,745.300 execution minutes.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
