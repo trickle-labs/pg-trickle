@@ -3854,7 +3854,9 @@ fn execute_scheduled_refresh(
     // D-3 TEST-MODE: exercise the real scheduler failure path after the
     // attempt is recorded but before refresh apply.  The normal refresh
     // error branch persists the FAILED history row and retry state.
-    let test_failure = if config::pg_trickle_test_chaos_for_table() == st.pgt_name
+    // A no-data tick has no refresh apply point to fail; wait for real work.
+    let test_failure = if action != RefreshAction::NoData
+        && config::pg_trickle_test_chaos_for_table() == st.pgt_name
         && config::pg_trickle_test_chaos_phase() == "before_apply"
     {
         const SERIALIZATION_FAILURE_SQLSTATE: u32 =
