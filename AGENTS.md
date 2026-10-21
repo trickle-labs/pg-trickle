@@ -127,3 +127,8 @@ Use the five default triage labels. See `docs/agents/triage-labels.md`.
 ### Domain docs
 
 Use the single-context layout. See `docs/agents/domain.md`.
+
+### Repository wiki
+
+Use the project OpenWiki skill and MCP server for requested wiki generation or
+maintenance. See `docs/agents/openwiki.md` and `openwiki/INSTRUCTIONS.md`.

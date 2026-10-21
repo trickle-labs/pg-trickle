@@ -3,6 +3,10 @@
 runtime:
   - '**'
   - '!**/*.md'
+  - '!openwiki/**'
+  - '!.openwikiignore'
+  - '!.agents/skills/openwiki/**'
+  - '!.codex/config.toml'
   - '!docs/**'
   - '!scripts/**'
   - '!benchmarks/**'
