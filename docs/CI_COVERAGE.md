@@ -54,9 +54,9 @@ The bounded full suite disables test retries so a correctness failure cannot
 be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
 decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
-case and before-receipt WAL fallback case run in a separate one-thread step
-after the light shards. The paired full allocations run one at a time so these
-restart and cutover assertions do not overlap the other side's broad E2E suite.
+case and seven WAL receipt-recovery cases that use advisory-lock witnesses run
+one thread at a time after the parallel full suite. The paired full allocations
+also run one at a time so restart and cutover assertions do not overlap.
 
 The remaining 51 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation
@@ -443,6 +443,22 @@ creation-to-start minutes. Its full allocation jobs took 80.417 minutes before
 and 41.800 minutes after, but the unequal suites and failed correctness checks
 make this unsuitable as a cost comparison. Failed/cancelled experiment
 overhead is now 2,745.300 execution minutes.
+
+The [next paired replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39592595933)
+passed integration, all six light allocations and the 2,180-test broad baseline
+suite, including isolated refresh atomicity and ten recovery repetitions. The
+bounded full suite passed 1,211/1,212; its sole failure,
+`test_wal_trigger_fallback_received_receipt_requires_rebaseline`, timed out
+waiting for the `before_replay` barrier while the scheduler was in
+`TRANSITIONING` at the cutover LSN and waiting on `BufferContent`. The
+unchanged-upstream scheduler case now passed with its 120-second wait. All
+seven WAL receipt-recovery tests that use advisory-lock witnesses are now
+removed from the parallel invocation and retained in the serial one-thread
+step on both allocations. This pair remains invalid. It used 11 jobs, 215.650
+execution minutes and 224.867 summed creation-to-start minutes. The full jobs
+took 62.450 minutes before and 43.817 minutes after; the failed, unequal runs
+are not a cost comparison. Failed/cancelled experiment overhead is now
+2,960.950 execution minutes.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):

@@ -15,14 +15,20 @@ INTEGRATION = [
 ]
 SERIAL_CASES = [
     ("e2e_rls_wal_tests", "test_rls_bypassrls_owner_differential_wal_matches_query"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_before_receipt_commit_preserves_committed_changes"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_receipt_commit_before_ack_converges_once"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_apply_before_ack_does_not_reapply"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_after_slot_advance_finishes_acknowledgement"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
+    ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_semantic_controls_are_detected"),
 ]
 
 
 def serial_case_command():
     command = ['./scripts/run_e2e_tests.sh', '--profile', 'ci', '--retries', '0',
                '--no-fail-fast', '--test-threads', '1']
-    for binary, _ in SERIAL_CASES:
+    for binary in dict.fromkeys(binary for binary, _ in SERIAL_CASES):
         command.extend(['--test', binary])
     command.extend(['-E', ' | '.join(f'test(={test})' for _, test in SERIAL_CASES)])
     return command

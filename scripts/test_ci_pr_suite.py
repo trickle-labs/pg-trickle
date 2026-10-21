@@ -32,7 +32,13 @@ class AllocationTests(unittest.TestCase):
             "--no-fail-fast", "--test-threads", "1", "--test", "e2e_rls_wal_tests",
             "--test", "e2e_wal_receipt_recovery_tests", "-E",
             "test(=test_rls_bypassrls_owner_differential_wal_matches_query) | "
-            "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline)",
+            "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
+            "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
+            "test(=test_wal_recovery_after_apply_before_ack_does_not_reapply) | "
+            "test(=test_wal_recovery_after_slot_advance_finishes_acknowledgement) | "
+            "test(=test_wal_trigger_fallback_received_receipt_requires_rebaseline) | "
+            "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
+            "test(=test_wal_recovery_semantic_controls_are_detected)",
         ]
         with patch("sys.argv", ["ci_pr_suite.py"]), patch(
             "ci_pr_suite.subprocess.run", side_effect=[
