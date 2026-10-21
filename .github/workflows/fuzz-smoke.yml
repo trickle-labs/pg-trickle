@@ -10,6 +10,7 @@ on:
       - 'fuzz/**'
       - 'src/**/*.rs'
       - '.github/workflows/fuzz-smoke.yml'
+      - '!**/AGENTS.md'
   workflow_dispatch:
     inputs:
       fuzz_seconds:
