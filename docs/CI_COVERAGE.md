@@ -55,10 +55,13 @@ be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
 decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
 case, seven WAL receipt-recovery cases that use advisory-lock witnesses, the
-D+I insert oracle, the automatic WAL-transition case, and the fixed-snapshot
-LSN case run one thread at a time after the parallel full suite. This preserves
-their exact assertions while isolating shared worker state and barrier timing
-from parallel E2E load.
+D+I insert oracle, the automatic WAL-transition case, two LSN scheduler cases,
+the fixed-snapshot LSN case and the monotone circular fixpoint case run one
+thread at a time after the parallel full suite. This preserves their exact
+assertions while isolating shared worker state and barrier timing from parallel
+E2E load. The long-writer recovery wait is 120 seconds and WAL transition
+witnesses wait up to 180 seconds under hosted-runner load; assertions and
+zero-retry behavior are unchanged.
 The paired full allocations also run one at a time so restart and cutover
 assertions do not overlap.
 
@@ -184,7 +187,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`d5739fa37aabe1b085a7ced79e27a9ab00b2bdf3`, the `ubuntu-24.04` runner class,
+`a97727f`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
