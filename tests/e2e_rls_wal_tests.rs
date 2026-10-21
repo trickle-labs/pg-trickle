@@ -154,5 +154,8 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
             "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'",
         )
         .await;
-    assert!(!needs_reinit, "RLS WAL stream should not need reinitialization");
+    assert!(
+        !needs_reinit,
+        "RLS WAL stream should not need reinitialization"
+    );
 }
