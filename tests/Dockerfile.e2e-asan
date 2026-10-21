@@ -19,10 +19,11 @@ RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
       "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" && \
     mkdir -p /tmp/postgresql && tar -xjf /tmp/postgresql.tar.bz2 --strip-components=1 -C /tmp/postgresql && \
     cd /tmp/postgresql && \
-    CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
-    LDFLAGS='-fsanitize=address' ./configure --prefix=/usr/local/pgsql \
+    ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
-    make -j"$(nproc)" && make install && \
+    make -j"$(nproc)" \
+      CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
+      LDFLAGS='-fsanitize=address' && make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
 RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
