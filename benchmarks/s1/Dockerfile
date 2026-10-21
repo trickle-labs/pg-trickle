@@ -12,8 +12,8 @@ COPY ${TRICKLE_SOURCE}/src/ src/
 COPY ${TRICKLE_SOURCE}/verification/ verification/
 COPY ${TRICKLE_SOURCE}/benches/ benches/
 COPY ${TRICKLE_SOURCE}/sql/ sql/
-COPY ${TRICKLE_SOURCE}/scripts/gen_test_schema.py scripts/gen_test_schema.py
-COPY ${TRICKLE_SOURCE}/.cargo/config.toml .cargo/config.toml
+COPY scripts/gen_test_schema.py scripts/gen_test_schema.py
+COPY .cargo/config.toml .cargo/config.toml
 # Old checkout mtimes must not reuse another source tree's compiled library.
 RUN --mount=type=cache,id=s1-${TARGETARCH}-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=s1-${TARGETARCH}-git,sharing=locked,target=/usr/local/cargo/git \

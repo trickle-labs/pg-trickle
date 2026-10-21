@@ -9,7 +9,36 @@ The LEFT JOIN-only diagnostic reduced row expansion but compiled more JIT
 functions and ran slower; that change was dropped and its measurement is retained,
 and does not qualify the throughput gate.
 
-## Current merged-head native ARM64 qualification
+## PR #1191 exact-head ARM64 run
+
+The exact candidate source `2d102645ccc6779c508514ee22b4a55603bdc281` and
+approved control source `1c0345791979907e2c1418b0008ea15d58311cb9` were built
+and run sequentially on the Apple M1 Pro's native ARM64 Docker profile (10 CPUs).
+Candidate and control dependency binaries match; only `pg_trickle.so` differs.
+The complete run and build evidence is under
+`qualification/local-arm64-1191/`.
+
+| Measurement | Candidate | Corrected control |
+| --- | ---: | ---: |
+| Admissions/minute | 59.363743 | 26.771501 |
+| Complete admissions | 300 | 300 |
+| Source/case vectors | 1,200 / 300 | 1,200 / 300 |
+| Future receipts | 0 | 0 |
+| Due-burst p95 / maximum | 109.629 / 114.516 s | 80.128 / 85.169 s |
+| Conservative storage | 3,434,478,459 bytes | 3,476,631,101 bytes |
+| Peak sampled memory | 2,072,399,872 bytes | 2,025,267,200 bytes |
+| Result | PASS within rate tolerance; raw harness exit 1 | BASELINE_COMPLETE; raw harness exit 1 |
+
+The workload still offers 60 admissions/minute. At the user's direction, the
+candidate checker accepts 59–<60/minute only when throughput is the sole raw
+failure and all vectors, receipts, due-burst, permissions and resource gates
+pass. Rates below 59/minute still fail. The raw 60/minute failure remains in the
+evidence; the tolerance is visible as `PASS_WITH_RATE_TOLERANCE`.
+The hosted ARM64 runner exposes fewer than 10 Docker CPUs, so CI verifies this
+checksummed local run and its exact compiled-input hashes instead of treating
+an unrun hosted measurement as a result.
+
+## Previous merged-head native ARM64 qualification
 
 On 2026-10-20, the exact PR-head candidate from source
 `7642630ba121b3dfb85eb71f75041085d9246c63` passed the full qualification on
@@ -46,13 +75,11 @@ bytes. This is retained separately under
 `target/issue1168-completion/gha-39405849795/`; the verified artifact has 105
 checksummed files. It does not replace the approved 10-CPU Docker result.
 
-The workflow records a runner with fewer than 10 Docker CPUs as
-`SKIPPED_UNQUALIFIED_PROFILE` and does not assess its rate gate. At 10 or more
-CPUs it builds the documented ARM64 SDK and both exact images, then applies
-the unchanged strict candidate gate. The passing result is only 0.0018 cases
-per minute above the floor, so the narrow throughput margin remains a material
-limitation. The earlier native amd64 failure remains retained separately and
-is not replaced by this ARM64 result.
+When this result was recorded, the workflow marked a runner with fewer than 10
+Docker CPUs `SKIPPED_UNQUALIFIED_PROFILE`; the current PR #1191 workflow instead
+validates the checksummed local proof above. This earlier candidate was only
+0.0018 cases per minute above 60, so its narrow margin remains part of the
+history. The earlier native amd64 failure remains retained separately.
 
 ## Archived earlier native ARM64 qualification
 
@@ -156,20 +183,22 @@ A record hash narrows incomplete-identity joins; full NULL-safe equality verifie
 every match. Complete identities retain direct identity matching.
 The regression changes the caller's timezone and checks complete temporal deltas.
 
-The unchanged workload requires 300 admissions at >=60 cases/minute, complete
+The workload offers 60 admissions/minute and requires 300 admissions, complete
 case/source vectors, zero future receipts, and a 1,000-case due burst with
 p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
 below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
 container memory, 45 minutes, or less than 10 GiB host free space. These are
 sampled limits, not a per-operation memory guarantee.
+The PR #1191 candidate may use the documented 59–<60/minute rate tolerance
+only when throughput is its sole failed gate.
 The supervisor uses the bounded PostgreSQL restart handling described below
 because the frozen worker-health checks restart the server. Persistent
 failures, timeouts and other errors stop the run.
 
-The GitHub workflow runs both images sequentially on a native Linux ARM64
-runner with the Docker platform pinned to `linux/arm64`. This is the separately
-approved ARM64 profile; it does not imply a native amd64 throughput result. The
-workload, candidate floor and all other acceptance thresholds are unchanged.
+When an approved 10-CPU native ARM64 runner is available, the GitHub workflow
+builds and runs both images there. On a smaller hosted runner, it verifies the
+committed 10-CPU evidence and compiled-input hashes instead. Neither path
+implies a native amd64 throughput result.
 
 On 2026-10-19 the user explicitly approved accepting a slower **complete
 control** as the comparison baseline. `check_result.py --baseline` accepts only
@@ -177,7 +206,8 @@ the frozen harness's sole below-60 rate failure after all 300 admissions,
 complete vectors and every other gate pass. It retains the raw failure and
 exit status and labels the summary `BASELINE_COMPLETE`, with the failed rate
 gate visible. Other control failures remain comparison blockers. The default
-candidate checker still requires at least 60/minute and no failed gates.
+candidate checker requires at least 60/minute, or 59–<60/minute when the rate
+gate is its sole raw failure; every other gate must pass.
 
 The builder cleans the pg-trickle package before compiling either source tree,
 retaining dependency caches. Run 39255297739 exposed a stale Cargo artifact:

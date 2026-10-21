@@ -56,6 +56,26 @@ baseline_o["failure"] = str(baseline_o["checks"][-1])
 summary = check_result(baseline_b, baseline_o, progress, baseline=True)
 assert summary["s1_result"] == "BASELINE_COMPLETE"
 assert summary["throughput_gate"] == "failed_below_60" and summary["raw_harness_exit_code"] == 1
+tolerated_b, tolerated_o = deepcopy(bounded), deepcopy(observed)
+tolerated_b["exit_code"] = 1
+tolerated_o["workload"]["observed_churn_cases_per_minute"] = 59.36
+tolerated_o["checks"][-1] = {"name": names[-1], "target_cases_per_minute": 60,
+                              "observed_cases_per_minute": 59.36, "churn_cases": 300,
+                              "window_minutes": 5, "result": "failed"}
+tolerated_o["failure"] = str(tolerated_o["checks"][-1])
+summary = check_result(tolerated_b, tolerated_o, progress)
+assert summary["s1_result"] == "PASS_WITH_RATE_TOLERANCE"
+assert summary["raw_harness_exit_code"] == 1
+below_floor_b, below_floor_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
+below_floor_o["workload"]["observed_churn_cases_per_minute"] = 58.99
+below_floor_o["checks"][-1]["observed_cases_per_minute"] = 58.99
+below_floor_o["failure"] = str(below_floor_o["checks"][-1])
+try:
+    check_result(below_floor_b, below_floor_o, progress)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("accepted candidate below the rate tolerance")
 for failure in ("candidate", "other_error", "other_gate", "incomplete", "source", "case",
                 "receipt", "memory", "supervision", "exit", "diagnostic"):
     b, o = deepcopy(baseline_b), deepcopy(baseline_o)
