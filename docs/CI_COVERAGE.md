@@ -180,7 +180,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`f9037c69afbfbd70fd3ed1d3bb37642c2c1cf266`, the `ubuntu-24.04` runner class,
+`e938c7e45b7a7a107f48dfb4744d179af67d5aa6`, the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -400,6 +400,19 @@ full jobs ran sequentially, so cross-allocation overlap was not the cause. The
 invalid run used 11 jobs, 228.967 execution minutes and 60.733 summed
 creation-to-start minutes. Failed/cancelled experiment overhead is now
 2,091.267 execution minutes. No before/after cost difference is reported.
+
+The next [replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39456096246)
+passed the broad inventory 2,180/2,180. Its serial before-receipt case still
+timed out after restart: the scheduler remained in `BufferContent` wait after
+receipt-table autovacuum was disabled, so that fixture setting did not resolve
+the cutover stall and has been removed. The bounded side passed 1,211/1,212;
+`test_scheduler_resumes_after_watermark_unstuck` sampled its auto-refresh
+baseline after the triggering insert, so it now captures `data_timestamp`
+before the write and waits with the existing timestamp-aware helper. Because
+the bounded suite stopped after that failure, it did not run its serial WAL
+cases. The pair is invalid; it used 11 jobs, 209.950 execution minutes and
+107.550 summed creation-to-start minutes. Failed/cancelled experiment overhead
+is now 2,301.217 execution minutes. No cost difference is reported.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
