@@ -477,7 +477,10 @@ async fn test_autorefresh_staggered_schedules() {
             Duration::from_millis(200),
         )
         .await;
-    assert!(initialized, "staggered chain should produce its initial result");
+    assert!(
+        initialized,
+        "staggered chain should produce its initial result"
+    );
 
     // Now insert new data
     db.execute("INSERT INTO ars_src VALUES (2, 20)").await;
