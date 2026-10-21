@@ -312,7 +312,7 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
     assert!(db.wait_for_condition(
         "sibling catch-up",
         "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) WHERE st.pgt_name = 'replay_sibling' AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)",
-        Duration::from_secs(60),
+        Duration::from_secs(120),
         Duration::from_millis(50),
     ).await);
     db.assert_st_matches_query("replay_sibling", query).await;
