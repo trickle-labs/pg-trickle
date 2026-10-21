@@ -56,8 +56,10 @@ rerunning it; ordinary infrastructure retries remain an explicit operator
 decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
 case, seven WAL receipt-recovery cases that use advisory-lock witnesses, the
 D+I insert oracle, the automatic WAL-transition case, two LSN scheduler cases,
-the fixed-snapshot LSN case and the monotone circular fixpoint case run one
-thread at a time after the parallel full suite. This preserves their exact
+the fixed-snapshot LSN case, the monotone circular fixpoint case, the
+three-layer no-spurious-refresh witness, the STDDEV_SAMP update oracle, and
+the revoked-source permission witness run one thread at a time after the
+parallel full suite. This preserves their exact
 assertions while isolating shared worker state and barrier timing from parallel
 E2E load. The long-writer recovery wait is 120 seconds and WAL transition
 witnesses wait up to 180 seconds under hosted-runner load; assertions and

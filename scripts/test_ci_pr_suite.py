@@ -32,7 +32,8 @@ class AllocationTests(unittest.TestCase):
             "--no-fail-fast", "--test-threads", "1", "--test", "e2e_rls_wal_tests",
             "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
             "--test", "e2e_v107_wal_transition_tests", "--test", "e2e_lsn_contract_tests",
-            "--test", "e2e_property_circular_tests", "-E",
+            "--test", "e2e_property_circular_tests", "--test", "e2e_dag_autorefresh_tests",
+            "--test", "e2e_refresh_tests", "--test", "e2e_v0878_security_tests", "-E",
             "test(=test_rls_bypassrls_owner_differential_wal_matches_query) | "
             "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
             "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
@@ -45,7 +46,10 @@ class AllocationTests(unittest.TestCase):
             "test(=test_v107_auto_wal_transition_captures_changes) | "
             "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier) | "
             "test(=test_lsn_scheduler_cdc_holdback_recovers_after_long_writer) | "
-            "test(=test_prop_monotone_cycle_small_graph_converges)",
+            "test(=test_prop_monotone_cycle_small_graph_converges) | "
+            "test(=test_autorefresh_no_spurious_3_layer) | "
+            "test(=test_stddev_samp_differential_mode) | "
+            "test(=test_v0878_revoked_source_preserves_state_and_stages)",
         ]
         with patch("sys.argv", ["ci_pr_suite.py"]), patch(
             "ci_pr_suite.subprocess.run", side_effect=[
@@ -56,6 +60,10 @@ class AllocationTests(unittest.TestCase):
             self.assertEqual(ci_pr_suite.main(), 0)
         self.assertIn(
             "not (binary(=e2e_rls_wal_tests) & test(=test_rls_bypassrls_owner_differential_wal_matches_query))",
+            run.call_args_list[0].args[0][-1],
+        )
+        self.assertIn(
+            "not (binary(=e2e_refresh_tests) & test(=test_stddev_samp_differential_mode))",
             run.call_args_list[0].args[0][-1],
         )
         self.assertEqual(run.call_args_list[2].args[0], expected)

@@ -855,7 +855,7 @@ async fn test_stddev_samp_differential_mode() {
     // Update a value
     db.execute("UPDATE sds_src SET amount = 350 WHERE id = 3")
         .await;
-    db.refresh_st("sds_st").await;
+    db.refresh_st_until_converged("sds_st").await;
 
     db.assert_st_matches_query(
         "public.sds_st",

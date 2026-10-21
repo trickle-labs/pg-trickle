@@ -24,6 +24,9 @@ SERIAL_CASES = [
     ("e2e_lsn_contract_tests", "test_lsn_manual_refresh_fixed_snapshots_preserve_frontier"),
     ("e2e_lsn_contract_tests", "test_lsn_scheduler_cdc_holdback_recovers_after_long_writer"),
     ("e2e_property_circular_tests", "test_prop_monotone_cycle_small_graph_converges"),
+    ("e2e_dag_autorefresh_tests", "test_autorefresh_no_spurious_3_layer"),
+    ("e2e_refresh_tests", "test_stddev_samp_differential_mode"),
+    ("e2e_v0878_security_tests", "test_v0878_revoked_source_preserves_state_and_stages"),
 ]
 
 
