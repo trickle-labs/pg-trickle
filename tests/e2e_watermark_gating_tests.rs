@@ -1100,11 +1100,17 @@ async fn test_scheduler_resumes_after_watermark_unstuck() {
     )
     .await;
 
-    // Trigger initial refresh.
+    let initial_ts = db
+        .query_scalar_opt::<String>(
+            "SELECT data_timestamp::text FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'resume_report'",
+        )
+        .await;
+    // Capture the baseline before a fast scheduler can consume this change.
     db.execute("INSERT INTO resume_a VALUES (99, 'trigger')")
         .await;
     let refreshed = db
-        .wait_for_auto_refresh("resume_report", Duration::from_secs(60))
+        .wait_for_auto_refresh_since("resume_report", initial_ts, Duration::from_secs(60))
         .await;
     assert!(refreshed, "scheduler should auto-refresh before gating");
 
