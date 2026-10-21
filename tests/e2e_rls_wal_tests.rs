@@ -130,6 +130,30 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     );
     db.assert_st_matches_query("rls_wal_st", query).await;
 
+    // A WAL cutover can require a protected FULL reinitialization after the
+    // first convergence. Test differential replay only after that cutover has
+    // settled and a new committed change is available to process.
+    wait_for_wal_mode(&db, "rls_wal_src").await;
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
+        .await;
+    db.refresh_st_with_retry("rls_wal_st").await;
+    db.execute("INSERT INTO rls_wal_src VALUES (4, 40, 'd')")
+        .await;
+    db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
+    let differential = db
+        .wait_for_condition(
+            "RLS WAL differential replay after cutover",
+            "SELECT effective_refresh_mode = 'DIFFERENTIAL' \
+                    AND EXISTS (SELECT 1 FROM rls_wal_st WHERE id = 4 AND val = 'd') \
+                    FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'",
+            Duration::from_secs(90),
+            Duration::from_millis(200),
+        )
+        .await;
+    assert!(differential, "RLS WAL must apply a differential update after cutover");
+    db.assert_st_matches_query("rls_wal_st", query).await;
+
     let effective_mode: String = db
         .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'")
         .await;
