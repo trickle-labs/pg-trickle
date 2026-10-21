@@ -1,0 +1,474 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:e3d1f58ff4398d1e933fdeca3108bbfab66333cc68819f84b211ff8100529222",
+  "claims": [
+    {
+      "id": "claim_86d8d219127d46cc9d6ea9eaf93fee0f",
+      "statement": "Shared preload initializes shared memory and the static launcher; loading pg_trickle outside shared_preload_libraries leaves background scheduling and shared memory disabled.",
+      "evidence": [
+        {
+          "resource": "repo://src/lib.rs#L94-L127",
+          "version": "repo-lines-v1:sha256:53b5d118c4e9e72a2e67c15e5e5c3107c566383bfc72a41911b40b2a80695e51:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYxY2ViZjc0Mzk2ZjViNzY0NWE5OGFiMjIzMTk1YTAxOTJlZTYyMDk1Mzc3MjQ0NzEyMGFmZWE0MzQ5NTZkNzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk2YzFlMGQ2NmNjMmYyZWU2MmRlOWZjY2ZkZDM3ZDhlY2EyN2FiOTg4MGEwNWI2MjUzZTBmY2JmYjk4MDUxMzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVkNGU1YjVkZjIzNzYxOGE4ZjdhZTMyYmI5YWJhODllYWIwMjFhMzY0OWRlNjkwZGJiNmZlOTJkOTQ1ZTBlZGIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2de47fafd18f4fbe89d1ec3afb6c155d",
+      "statement": "The launcher discovers databases, checks existing schedulers, and dynamically starts per-database schedulers, with standby promotion waiting and installation/respawn backoff rather than a guaranteed fixed discovery period.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L188-L368",
+          "version": "repo-lines-v1:sha256:67a3081df59bab35d45952abedd3fabe517f3400a49d31b680a3feea2ba7b7e7:eyJzZWxlY3RlZExpbmVDb3VudCI6MTgxLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5OGI0Y2JiMTJmMTIwNWQyOGFiNDUzN2Q4YzJlNzExNWY5OGJjZjY2ZmNhMDQ2OGRmMjgzY2VmNDU2YjRlNmRiIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0ODkzZjQwZTM3ODFlYjg5NmM4MmQwNDZhMDgwNjdhMTFlMzVjZGYyZjFkZmFmMjZmZWE5MGI4ZGI2Njc2NDEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlMWVlMTIwNmYzNmM4ZTU5NzAyNjM4ZDdkOWQyNDlhYTdlYWU2OThlZDAxYTA5MjkxZmRlM2M1NGE0OGFjZDMyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJiNTYxZDMzYWEyMGM4MWRjOTUyM2YwMGRmZjNlMzBhMWE3OWIzYmEzNmE4ZTU0MGI4YWU4MDllNWM2YmI0NTJmIn0"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L97-L179",
+          "version": "repo-lines-v1:sha256:6c7cc956fe2e3fe859d6fcad27f9d794b8160dfcdaf6e2bc09f6205fd95e9d38:eyJzZWxlY3RlZExpbmVDb3VudCI6ODMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0MWY2NmRhZDlmMWI1OTYyMTkwNGI2YzFkMzRmMzk3YjkyYjExODg1ZjY0Y2QwZTFhODI2ZGJmMDAzM2M2MGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFmNzI5NzViN2NjMWQ1NGJmY2NlNzNkYWRiMjg5ZjgzN2NkZTM1YzZjMDJkNTIzMGE1M2RlNGY3M2RjZWIyZjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM0OGQ5YWZkZjdlNjhmODEyOWRhODE3MTRmMDI0YWVjNjYwMjhhM2E4NzNjNzA0ZjE1OGQ2ZGM2N2Y5NWYwZDkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRiOTkwOTMxMjE5MmEwOTliOGJjMTc2ZmM0N2RmNTdhN2U5MDQzZDBhYmI5NjhmZDEyYjRiZDYxZjBhNzI1YjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7587c79d1216470bb3c08e1900158a35",
+      "statement": "Coordinator startup recovers interrupted refresh records and reconciles parallel jobs and worker tokens before normal scheduling.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/mod.rs#L1605-L1640",
+          "version": "repo-lines-v1:sha256:f3bc74b91f294eb924dfc8f6418ccac12f32dc8c2d992190c4127307548beb47:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkyNDZlNzhjYjZhNWRiMDA4ODdhYTc3ZTVmODkxNGY1ZTNmY2VjNDE5ZTk5MGRhZWI0ZGY1M2Y2YWY5NGU2NTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3OWQxYTljOTQxYjM5YjJiYzZiNDU0NWEwM2NhZDI2OWU3YWI4ZTdiOTNhMDkwZWE4ODQwNTRjNmQ4OGJhNTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBiMzNkM2EwNjVhYmU4MDkyNDNhNmJmYjdhMDA5NDQ1NzY1MzBjMWE3ZTYzZWQyYTI0NjJiMWE2NjA5OTk4NWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiNTNkMjhjMGMyZDUyYmU3ODI3YTY0NDdjNDRlMjBiMjY1MmM5ZWMwNTM1OGYyZjRmMWNkODU0ZmE2MjVhMjUifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L576-L592",
+          "version": "repo-lines-v1:sha256:fb6b01c968e1e75ca1b4042a3c8120852975bb3cc795af6e0bd877998b3282ae:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxY2M0NWFmYTIyMjg2YjlmZTY4MGI0ZGYwNzYxMDNmOGFjZmEyN2RkMjg2M2JmYTBmOWM0YTJmMGQ2NTc0YTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJjNzQ2ZWEyODM0MTgzOTIzYjViNGIxY2EwOThmMmM0MWE1NWMyY2NkNGVkZWRiZjMyZWM1OTQ1MWUxYWE5NzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMyMTBmYjQ4OWEyMTQ4OWE0MWQxN2U1OGI2ZGRhOGExY2JkYWNkZDE1YWIzZDE0OGNhZGFkZjEyY2M4Mzk1NzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQyNDhhOTk2ZGMzMmI4ZjEwZjgyZjQ0YTk3MjJiZTRlYzIxZGE3ZDg1ZmY0ZGU4NWUyMDU1OWMzNTYyNDAxNjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_55f140444a994b9b9392976cee491989",
+      "statement": "Parallel dispatch reserves capacity before durable enqueue, persists unit metadata and immutable dispatch tick bounds plus slot generation, and defers spawning until after the enqueue transaction commits.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L1028-L1096",
+          "version": "repo-lines-v1:sha256:dbb13d6efe25c02efa44d755bbb8f6affae82e2b42a68e2d859ec0333782f558:eyJzZWxlY3RlZExpbmVDb3VudCI6NjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzZjE2YmYwNmUwMDNmMmU2MDc2YWZlNzE1MjU2MmRhYjZiZjI5YzJlN2IxYjVlYjhkZThlNGM4MTMyNTRjMTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzNTdhMzdkYTA1MDAxOTU2ZWYwNDQyZTA3ZGJkOThjNThlMGFmNmY3MTVmZjVhMjg3MDhjMGMzN2M3NzNmMTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0NGNhYjk2NzZlOWFiNDU3MjIxMjQ5YTUzYmUxYjI0MzIxOTNhZDc5OTBlYjE5OWY2ZTM2NGZkNjg5NDRjNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAyOGJjYmMxNjFlOWZlMWJhOTEzZDEwMjI3YWRhNzc4MDNhODYwOWI3ZWIwNzJiMTFjODRlMmM3YWNkNGQxMDgifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L1900-L1966",
+          "version": "repo-lines-v1:sha256:5bb0c05c1c0165e40c4a10359de45b2ec4b2a6c0c24ac69bc633e8f9b5c27c7e:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjNjQ3OWNjMjMwNDQwZmQ0MWU4MjI0MjE4Njc5Njk4NTU5ZDI4OTNiZDY3YjQzODBhZmFiODExYjM4YTU1YWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkzNTU3MzY5ZDk2N2ZlOWYxYjcyNTdhNWJhZGMwMGJiYjFmY2EwYTg0M2Q1NGM1NWI3MTY3Zjc5MjY1MTdmMTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_701881b2cd89425ba508120a0dc828d0",
+      "statement": "A refresh worker promotes its generation-tagged reservation, claims QUEUED work, rejects generation mismatch, missing immutable tick bounds and obsolete DAG jobs, and persists outcomes before normal token release.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L140-L239",
+          "version": "repo-lines-v1:sha256:2432f2b0e13ca5e349844fca1de6eba655d9d9f0ef98e8216bd83ba61b740e01:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI2NGEzOTM4YmYzZDM2YzU1MGZkYmM0MjI4ODc4NGZmNDE0ODgwYTU2ZjUwNmVlMWE1MmFlNTEzODhmYThhNGQ1IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIwMmI0MDViYTFhNGRkMjJjYmQ3NzkwYzA3MzcyZTQyN2E4YTM5NDkyYmZlNzQyMjBkODFhYmEyMTlkNzE2ZjRjIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI4MGY4Zjc1YTM0NzYwZjcwMDQzYzg1YzI5ZGRkNTA0YmVjZmNjMGJhMDJkNTk2Y2EyY2QxNWY4ZTFjMzdhOTY0IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI0M2YyZGUxMmFiZjFjNTYzYjIxYmZjMTc1OGJiYzk3NzQ2OTkzOGMwMTEzNTQxZTgwM2VkZjJjODlmYTcxNDk3In0"
+        },
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L242-L395",
+          "version": "repo-lines-v1:sha256:55bc9b3c04f7c2573d6e7e73797f58eae236acf817a4c856f12b3c3eb87e11ab:eyJzZWxlY3RlZExpbmVDb3VudCI6MTU0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIyYjgyYWYyZTcyYzNiODJlOTBmYWVkNzgyZDVkMDdkYjAyZWYxZTEwYWNkN2NmMjY0NGY0ZTM5NTAzOGQ2MzA2IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIwMWJhNDcxOWM4MGI2ZmU5MTFiMDkxYTdjMDUxMjRiNjRlZWVjZTk2NGUwOWMwNThlZjhmOTgwNWRhY2E1NDZiIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJhNDczNWYxZjY0ZWMxOWVjMzNmZjI1ZWUzYmQyNzRiMTMzNDI3NDE2MTViYzg1M2JjYjJmOGU1OTJkOGNhMDlhIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI4ZTJhZDVhNmM4YmFlMDhmYjFiZTY5Mjc1NDc4NjQzMGQ0N2M5MGVlMDcyM2U0NmYyZDE2ZGFlNzZiMDY4OTJiIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_3ec035eb74db481695d0dc81df6c66ba",
+      "statement": "Interval freshness targets use persisted next_due_at controller state; controller proposals consider pending age, queue delay, compatible mode cost, load, overrides and memory-constrained batch sizing, conservatively making pending work with unknown age due.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/controller.rs#L130-L148",
+          "version": "repo-lines-v1:sha256:1def68b0bb3d9c04b5a99c782046998fcc1765893ceabe570912857075405b5b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJjODkyN2ZiYmU1Mzk3ZmJkM2Q5ODRiZGQ5NGM4MmIyODk1Mzg4N2ZhYTFkMDZlM2VlY2I3YWJiODkyZGE5ZTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgzZDFiNWJkNWY3YjI1N2UxZmZlZTE1ZmUyMDcwZjMzZWQ5OWFjNGM1NWNjZjQwMTgwN2VkZGQ1YjE0OGQyNmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkxNDNlYTVkOTUzOWEzZjFiODA4N2E2OGU2MjY0NDFiNjA1NWRkMmQzZTgwNzEzYmE5ODRjNjMyYzM1MjUxNDcifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/controller.rs#L459-L543",
+          "version": "repo-lines-v1:sha256:44479aae85614f4068c98a3d45638531be3bdc155409b311a0341e4c539abffd:eyJzZWxlY3RlZExpbmVDb3VudCI6ODUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0MDM0NTkxZjNiNDJkZDI5NTg4YTE1MzNjYWZlNDA0OTgxNzAwMzYyYmRiODNiNTUwNzQ3ODM4NTk0OWE0MzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjlmMTcxNzg4OWRjNTQyOTIwZTk2MDA3OGFlNjczNzhlNmQ2NDM2MjQyMWIyYTEwNjBjYzU1OWFjMDY4ZmMwNjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ0M2MzZTg1ZTlkYWM5MDQwYTdjNGFmM2FlMzc4MzhmYjhiYTA1NjlhYzk4Y2Q5ZjViNzFiODRjOGNjMzlkZjYifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L2336-L2349",
+          "version": "repo-lines-v1:sha256:e6e8ddf8f61fc81dcc0e31a67dd0b8439c2f6fc093b562c3453a226eac7ae926:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRiZGFkYmQ4NzA3ZmI2YTI5NzI5YTdkYjcyMTFhYWM0MTk5YWZkYWM3MDk2OTExZGZhZmJiY2VjNzc4ODg3YWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ4MGVhYTY2ZTVlMzFjNjE1ODAyN2Q3NjQwYzdkYTRhMjNjNDhiNDM1NGQ1MWM1ZDk1YzExMDdkNDBhYTU2Y2YiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUwODEyODExOWM3M2UyN2FlZjI1YjBmOWFlOWU2MWU2YzI2YjBjYjg4MDk4MTQ1MGZkMDliZTNkZGM2ODgxMWEifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L2434-L2459",
+          "version": "repo-lines-v1:sha256:7abd2d8f3cb3bfdd346c8586f7b2059dfeb03e0327e0d57ec0b74f6cba262306:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY3NTA1MjhjYmEzMmNiZTRhOTU3MTMyNzdmMjZhYzQ0MjVlYTljMGJkZDFlNWU0M2U5ZDM5NWE4ZmJkNDU4ZWYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEyMjdjNzA1MDZhYjI5N2QzMTNkOTdlMzlkYTZlZjhiZmVhZjRjOTZiZmZiZjM4YTEyY2E5ZGY5ZDQ5Nzc5NGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImViOGRjMTUzMTIzNzJkYTk1YThlNGVkZWI0NTBjZDQyM2NjYjNkOWMzMTAzNWQ0NWYxMzhlYzEzMzFhMDNiMTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_05436c804c874210a16aeaabc6208add",
+      "statement": "Freshness-controller status distinguishes insufficient data and unavailable evidence from meeting or at-risk targets, with separate sample-aware hysteresis for breach and infeasibility transitions.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/controller.rs#L460-L490",
+          "version": "repo-lines-v1:sha256:c9ef43caccc8760d987bc1f87b2a9d63f36e88649588fc2ef7dfeefb052d37f4:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxYWRlZjRlOTA1NjhmMWI2ZmNjYTk2NDMxMTI3NWE2ODRkZWMwOTUzMTcwZDU1ODA2ODBiYTFkYmVmNzc0NGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkOWUxMjU0NjQyNTU3NmQzZGVhZThjOWI5ZGJmMTI4ZDVkNmRkYWY1ZDdmZTg1NzkzNDkyN2RlZmZhM2I5ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImExNWQ0MzdkMDU0ZTE2ZTgyYWQxM2JkYzljMTkyY2QyNzQ3OGI3NzI5MDU3MDhhYWFiNWY0OTgyMjQyN2RiYWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA0NWVlYWJhZWRjMmEzYjRiNDYyMzQ2ODg5MzYwYzI4MTVlN2VmYmFhNWM4MzAwMDQxZDIyMzQyZmI2ZDJkN2IifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/controller.rs#L659-L749",
+          "version": "repo-lines-v1:sha256:931052e16032b6002d497808eb510affc9d47496cfc9501fa895688f795122e9:eyJzZWxlY3RlZExpbmVDb3VudCI6OTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1OGZhZDgzY2JhYmE1NTAwY2ExZGRmNjJkNDBmMTMzNGRhN2NkMDk3MmFiMzg0MDMzNjM3ODFkOGQ4Zjg4ZWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3MTZhZjcwOWZlZDM0OWNiNzdjYjRkYTYyZjk2ZjI3NTEyMmE4MzEzMTRlNGM1NmNkZjdlOGI4ZmZhNDFjZTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFkMjU4MTRhYjM3NjkxMzA3NWJkNTk4MzMzYzQ5ZDljNTI2MzUwMzVlMTI3N2Q0ZjllYzQwZjMxNmJkZDY5NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdhNjFiNDhjMmQwYzNmNTkxNGIxYWQwN2RlNDY2MDhjZDhiMWM3MGEyODJkYzliMDhkMTliYzQ2YmI2MjgzMzUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8111ed4e0a0645c28dd4aab52c08a782",
+      "statement": "Legacy duration schedules use last_refresh_at including no-data runs, with optional tier multipliers and stable jitter; cron schedules use cron due matching without tier multipliers.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/mod.rs#L2351-L2425",
+          "version": "repo-lines-v1:sha256:650a25dec5e2da46976f228ec0059bd50a81ddde29ca7c6958377099219542a9:eyJzZWxlY3RlZExpbmVDb3VudCI6NzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcwMWY2MWNmOTUyY2VhZmQzZWM3ODM0YjgzMDE0OTk3MmY3YTljM2VkZmEyOTBjMjY2NzdhZjEwOTBhM2YyYjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAyNjU4M2MyMzI5MTJlOGU5ZGM0OWFjNTkwMDA1ZTRiZWQ5ZGJlOGEyY2NjMTNjYWEwYzYyMTE1OGE2NGQyNjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkyMjQ0NDU1YTY5N2I5Y2M2NjVlM2Y3MTI4YTk5MTQzZmNlZDM0OTk4M2E3MzQ1ZGU2NTZhMThhMjk4MWE3MGEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_cb615fa9d6704595ac1c5f128a8d9c61",
+      "statement": "CALCULATED nodes inherit the minimum effective downstream schedule in the DAG, while runtime due checks depend on upstream pending changes.",
+      "evidence": [
+        {
+          "resource": "repo://src/dag.rs#L630-L690",
+          "version": "repo-lines-v1:sha256:bfa5e7328206d09d0aa2a00b7c85d551eb904889382cdee3e2ecf13a727c310d:eyJzZWxlY3RlZExpbmVDb3VudCI6NjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY0NDkzM2JlYmY3OGIxOGFkNjc4Mjk0MzM1NjdjYzk4MWNlYjdiM2FlOGIyZTRlNjA5NjRlOWYwNDQ4MjJmNTUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNjM2I4NWFkOTVkM2RhYTJiNGVkNjRiMzlhMjcyMjEzZGRkYWFlMTcyNjhmOGUzMzk5MmU4M2MxZTcxMDUyZGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkyNGQ3OTFmOTdhZGNiZDc4YmYyYzU3YzlmY2ViZDY4ZmE3MzMwYzY4NTI2Yzk3ZDAwOTQ2ZTFlNzliNmJjZjMifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L2427-L2431",
+          "version": "repo-lines-v1:sha256:4f85ceb543ae3599b42a01ac6182df2e921a47cbae51b4bdec69f5857a9eba56:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMTc3ZTEwMjY4ZDgyYTY3YTVmYjU5Mzc0ZWNhMmU5NGVkYzdmMzQ0MDlhNDE4MmI2MWNiMDE4MTQ5MjY1MWRjNCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNmRhMmY0YWNmMzliM2RkNDdmMjY4ZWI4OTIyNzQwZmFmNGVjZThlMGIyYTFhMzNhZDliMjk3YWZiMzljYzU3NyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjAxZTk2Y2QyNDQ1ZTc2NGM5ODdiZWM4ZDYwMzU5NmMxM2U2NjVhMzMwNTUxMDYzMWExYWRmMjg5ZTY5MmRmOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzliNTUxM2VhNDU1ZDVlZjM5MGZmZDZmYWVhODg3YzFiOThlODg1MTQxN2RiZThhMDIzNjU0NjY0ZWRjM2RiZCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_f20fc4de0f944136b111bfcf4bb64d75",
+      "statement": "Ordinary scheduler checks exclude EXTERNAL, MANUAL and IMMEDIATE tables before initialization checks, and worker execution also guards EXTERNAL members; FULL non-immutable queries may need reevaluation without source changes.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/mod.rs#L196-L225",
+          "version": "repo-lines-v1:sha256:8e99d8d09279554fdba0786e37a5aa6848ae7d5f8c625540aaf0f7a5f3a7a83e:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxNGVjYzY1MjJkMjk5YjEwZjhmN2M1ZWZlMDBjMWQ3OWRmNWI4OTZmMWEwZTZkNGZkYzEyNDhlMThlZjE3MmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNhNGY4MmJmNTkzM2Q3NDgxNjY2NjcwYjU2YWYwNGJjZDFlNmUzMTQwODVlOTI0OTY5NTIzMDMwN2MwMGMxYjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY1MTdlOWVkODIzOWQyMTYwMWQ2OGM5MTM3MWJlY2RmYjQyMmYxMmU4MDgwM2UyYTdlZjc1M2M4ODI0MzAxZGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZjMjZmNzk2N2Y0ZTNjOWUyMDczYmI2ODY1NWYxN2EyZjdmYTQ5YjNmYjczMmY5OWYwZjdmZWMyMjZmOTBkNWYifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L2270-L2349",
+          "version": "repo-lines-v1:sha256:ee2434d7965d7cd464e509d9bc7f708b39c9a8e8728dd1004518c93d00e393c9:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkYWMwNmRiMWMyOGQwMGQxNjUwMTI0YzgzODk1NmI1YzlmMTVmZjVmODI5ZWNkYTk3YThjOTg1YmVkZTYwNjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUwODEyODExOWM3M2UyN2FlZjI1YjBmOWFlOWU2MWU2YzI2YjBjYjg4MDk4MTQ1MGZkMDliZTNkZGM2ODgxMWEifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L335-L347",
+          "version": "repo-lines-v1:sha256:6000e01f46b0e391ca83819b64e4454cd097f735357df0b4fa5a4a79bcd727c7:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc0OWVjNTFhYjA1Yjc4ZjljMTk1M2RlYjk3N2Y3NDMxOTQ1MDg3NmVhMmZiODE0NjQ2YTc5MDEwZTI5ZTA5MTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkzNjQxMjczMjhmY2UyZjUwY2U4YzQ5MDc2YzQ5ZjdhOGM4ZWJlZDEwMjk1Yjc5MGVlYTJlYzNhMjE2YWI3ZmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQxZjY2ZjhkMjAzYjI3NjRlMWUxYTZjNzdlYjY0MmQ5ZWEzNDM3ZGRmN2Q0NzI4MjcyZDliZTdhYjc4ZTgxZjgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c67fa20bc4984aeb9f40ec383c830c59",
+      "statement": "The execution-unit DAG collapses diamond consistency groups and IMMEDIATE closures, preserves inter-unit dependencies, and supports singleton, atomic, repeatable-read, cyclic SCC and fused-chain units.",
+      "evidence": [
+        {
+          "resource": "repo://src/dag.rs#L1530-L1605",
+          "version": "repo-lines-v1:sha256:a330a11dde6a63686fb6414a28058572860dffc8146db658b2472e6d59cec047:eyJzZWxlY3RlZExpbmVDb3VudCI6NzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzY2MwZmUzNzUyYTJhMDQ2N2ZlYTc4OWQ5Njc1OWZmZThiYzQxZmM1ODM5ZTU5ODU4YTcwZjE0YTA5M2Q5MDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY2NDk2MjYyZmU5NzJmMWYyYzBiNGViNmU3ZTM3MGM3MjU3YzA0YjJhYzRlNTE3NzJjMjM1YmE2NDZkODhiYzIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJkNjc1NDk2MzM2NTc1ZmRiOTQ4ODNkMTg4OWRjNWY0NmM3Mzc0ZmI1N2Q2MTRiODQyYTU0MWZkZjE4NmZmNzEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQwYThjNWFmN2QxMjkzZDg0ZmM0YzY4MjcyMGQxYmQ1MzcwMTM5NTBjZDVhZmU0NTVmMDQzYTUwOTYxYzBkM2YifQ"
+        },
+        {
+          "resource": "repo://src/dag.rs#L1707-L1920",
+          "version": "repo-lines-v1:sha256:61225bdc224b8ecc8ffa6fc5e8d5b5c483eb7895637d2f1a0230c6658ebf76d0:eyJzZWxlY3RlZExpbmVDb3VudCI6MjE0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJjMTZhN2EzOWYwNmEwYWIyNmZkYjExZjYyOWEyODc3NzQ1N2M2NzFmYzAwMzcyZjg3Zjc3ODBlODkwMjU0ZTFkIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJhOTc5Mzk4NTBhNDQ4NzY5NTljMzk5YmI3YTgwMGVmOTI1M2VkY2JlYThlYjhmMDA4OGVkMDIwOWU0N2NlNjMxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI5NjM2OWFlMDY3NTI1MzA5OGU1OTExN2IzN2VhMzY5ODdhMDJhNjE2MDE4Njc3YjQ1Zjc3YTBmZDVlOTVmNzUwIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJkMzFiZTgzNGJlYTViOTlmNTEwN2VmZDc5ZTdmNzQxOTQyMzA5MjgxZDVmMmY0M2UwZTQ3NzU1MzQwYjRmY2RmIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_67c374a1982d4707bb07e614afb90ae9",
+      "statement": "Diamond fastest policy schedules when any member is due while slowest waits for all; singleton execution uses READ COMMITTED, grouped execution is transactional, and repeatable-read groups explicitly upgrade isolation.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/mod.rs#L187-L195",
+          "version": "repo-lines-v1:sha256:1508f242ed0fa0ce687daef8643e9eec82f64a838f1b0999c08449ee0dd740df:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWQwNDA0ODZjNWEzNzMzYWJiM2M3NzM3OWNlYzczODUxYWQyN2EzYTZmOGE1ZGQ0NjQ0ZDhjMzkyOWJlMDUzYyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDkyNGVlNzk4YjllOTM4M2E4NmIyNGNiM2JhOTJmNzE2NDYxMDNmODM1ZjhhYjg1ZGM3MDRmYWFiM2JkNjgxMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTllNzYzNTVjZjExOTk0ODBjM2Y5OTgzNmIxNDg2Yzg0MWQ4OTFmYWFkOTA0YzYwOGUwOTMwMjJkMzc1N2FlZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZGM5ZTQ4ZDc1Y2Q1MDM5MTIzMGY0ZTQxNDUxMjAyNDYzMWIxMDAzYzU2N2VjODdmNGI4MGFjZjkwMjcxYjFjZCJ9"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L1935-L1992",
+          "version": "repo-lines-v1:sha256:b12869382c48d221ae52717cebd88014248d154c72abbb7acabe9c98e08883c3:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwYmQ4OTk4YjczNGNmYTRlNGVhM2FlNDdhNGEzOGY5Zjg4MjU5ZGIzOTgzNjdlYmZlZjQyYTk4MmVlYWE2NGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY1MzY0ZDRjYzc3MjY5NTQ2Y2FmNzY2ZTA0NTk3MjYzYjk2ZDVkOTg2Mjg2Njk4MWZjNjk2NzMyYTI2ZDEzZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRhNDY1N2M2ZTNiOGQ2YmJmMWI4MDZiYmY0ZTliOGZiNzA0NmFmZDhiNTg4MzE5MjBkMDg4MzE0YjdmMjJmZTUifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L285-L328",
+          "version": "repo-lines-v1:sha256:88dae1d42c529cc6b42630af15d3d4ef116e4936a42911b64b85bef3508c300c:eyJzZWxlY3RlZExpbmVDb3VudCI6NDQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkY2UwNjk5YzExOWY4YzdkNmE3NjEzMTRmZTA1NDQ0NWE4NjQ0OTU2N2ZjNWU5OTczNWQ0ODE5ZTZlNDk1YWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQxZDcxYmYwZjBjODZlYTRkMzdjY2NmNWNiY2Q1ZDczMTExYjFkYmRmZWI4ZGZkNTI1ODdmNmJiYzZhYzdjNTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI1MmYyNWJlMzc3YmE1MmRhNWIyNWRmZDVlMzJmMzk2MDQwZGI0NDdiMzNlMzgzZTNmZGNiZTRkYjBkYWY2NTkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_281b1a03964344b5b1f8f4919a25995f",
+      "statement": "Dispatcher success advances downstream readiness, but its wave-completion succeeded flag is also used after permanent failure or exhausted retries to prevent permanently blocked waves and does not imply successful data refresh.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L806-L915",
+          "version": "repo-lines-v1:sha256:8e568e0068db65b5e8c849e167ceced2c52bd155856d4672d63e6818f88dad8f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIyMzYzNmRjMzM0MGEyYmUyYzg1YjI5OWE1MTc2ZDdmNTdiZTRjY2ZhOGZjZjdmM2IzNjY5ZjUxM2E3ZmJmMjBjIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJiODM5ZjMxYjU4NWM3MDE0NjI5OWRmNzM5YTEyZjA2NTBjYTdkNmVlM2NkY2Y0MzkxODBhNTE1MTQxMmEyMzkzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI3MjY4YTU3NjgzZTRkNTlhYTVlZTg1NzRlMWViMzQ3MmE5ZWZiMDZmZmYwZGZlNjFmZDAxYzkzM2I4YWZiNDgxIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5NTk4Y2UzZjk3ZWY3M2I2NzlmNjYwOGUyMjkzODRhNTM4OWI5MDJjNjk4YmMyNzY1NWNhNTkzZWU5MTRhODYzIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_a12109422b2d4828b6443737f0ccae40",
+      "statement": "Shared-memory coordination uses lightweight locks and atomics; bounded DAG invalidation overflow forces a full rebuild, and database scheduler slots keep database-local scheduler, queue and tick state.",
+      "evidence": [
+        {
+          "resource": "repo://src/shmem.rs#L1-L43",
+          "version": "repo-lines-v1:sha256:9292c53d02018099c1a1f8e95bb78899a5b6619e25439d3a1fc988e13145387b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhmZjlkNzE2OWYxZjIyN2UzOTY2NzBlNjRmZjY1YzUxY2MyYmY1MDMzYmNiZmE4MzJlMjYwM2ZlNDE0YTVhMjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4MDg2MTk3MGM5YzhiZTQwYjM3MmNjNjNjODliNmIyZWQyMzBkYWE1YWQ4YWIzZDRlZjljMTU2M2Q0ZDc0MDUifQ"
+        },
+        {
+          "resource": "repo://src/shmem.rs#L77-L123",
+          "version": "repo-lines-v1:sha256:089cf33cdbdd7ac471e36421d976c8a63b805ed48619f8e94d3ecb226aaae023:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEwZTBiMjFhZmM0MTZjZWQwMGExZTk2YmI0NmZiNjVlNDhmMDE5MGQ0ODk5OTg2ZDdjZjg1ODMzZGQ5ZDdhMjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkMmNkZTdhNThmNzc5ZDQ3ZjZkMDg4MjBmNjZhYjc0MDU0MzdiZjliMzc2YWFmNTMxYjIwOGFlNzI4YzViNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMzZTY3MTUzODNhNmM3MWY4N2UyOWM2NzcyNDkzMjM3NDczZTYyYzYwMjQ4MzZhMjM1MTk0ZTAzZDdlY2ZlMTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk3MzQ0N2ExZDIzN2JjNjQ1MmI1MGFkMDg1MGFjMTJkODAxZmFiNGY5NjJkNjhiMDU3MjdiOTExYTUzZjZlNGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4bab92391a6840b0a90bce97d134d9d2",
+      "statement": "Worker-slot bind, promotion and release match generation identities, while dispatch admission combines cluster/PostgreSQL/adaptive limits with per-database quota and burst capacity.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/cost.rs",
+          "version": "repo-file-v1:sha256:9852663a56d60f95c9a50d0b7651529abed90054ca8db0a6572993aa48f90d0f"
+        },
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L683-L716",
+          "version": "repo-lines-v1:sha256:13954851995e1a10242e95ef1482b6f28f59cd8c3e0b9680bcd7b0e67e809e39:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA3ZTY4YjhmYWZkNzExOWYxOWRiY2EyYzVkYjNhMjkxYWVlYjA0MzY1Yjk0NjEwMzBmOWU5NmRkYThhN2IyMDYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMyNTJiM2MwMmFmZTE5MzI3NjE0OWMzMGM4ZDE1MDgxY2Y1Y2ZiNGIwNmE4YzliMGNiNzQxNWI0MDBlYTgxODUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY3YWMyODFkZTBlMzk5MTExNWJiMTcwOTJjNzA1MGY5N2NlYjY1ZWM4NjBhN2FkMzlhOTVjZGFiMTIzNTVkY2QifQ"
+        },
+        {
+          "resource": "repo://src/shmem.rs#L490-L603",
+          "version": "repo-lines-v1:sha256:e36bdd0f450de73a9a438469ab3f7e5e9cc4512cdaff66311a5be2f7133f1489:eyJzZWxlY3RlZExpbmVDb3VudCI6MTE0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIzMzYxNWIxMDdiZWUyMmNkYTQyMWI4YjgwMzdhN2MzYTZiODgzN2E3NWI1OThkNGU5ZTdjNzkxNzUyZDE0ODRlIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIwMWJhNDcxOWM4MGI2ZmU5MTFiMDkxYTdjMDUxMjRiNjRlZWVjZTk2NGUwOWMwNThlZjhmOTgwNWRhY2E1NDZiIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2ZTI0NzI5M2YyYjU5N2U3YjY0NjZlMWY4YzNjZGEyNjA5ZTBhYzZlOTA0YTViMGZhZGNmMzkzZTIzNjZlNzczIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI0NWY1YTU0ODcyMzU0Njg5YzcxMjJmYTk4MjZhMDE4ZjA1OTRmZjBiZmMwMGRhNTEyNzgyZGJhMTQ4YmE5ZmE1In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_7743e97897ea467a9d0af81cdb3d09c7",
+      "statement": "Worker capacity reservations and correctness tick watermarks are separate: dispatch requires a watermark to enqueue and workers reject jobs missing the immutable dispatch bound.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L1028-L1054",
+          "version": "repo-lines-v1:sha256:a6128bbb935aaddbe25969a956f78aaa96efc470f9f098a22205a6f91564feae:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzZjE2YmYwNmUwMDNmMmU2MDc2YWZlNzE1MjU2MmRhYjZiZjI5YzJlN2IxYjVlYjhkZThlNGM4MTMyNTRjMTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZhMjBhMzkzNmY3ZDgxMmU1OWQ3OTIxZWE4ZTVhNDQ0MjI1Y2ZiM2E3ZTVhN2ExMjg2M2M4NDg4ZTU0NTEzMGMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0NGNhYjk2NzZlOWFiNDU3MjIxMjQ5YTUzYmUxYjI0MzIxOTNhZDc5OTBlYjE5OWY2ZTM2NGZkNjg5NDRjNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY4MWY0NDE3YTE5YTgzNmI0MzQ3MmJiZmRlOWFiZjI3NGQ5MTI4NmVjNzM4MWU5ZmY5ZmM2NTMyZGYwZjUwYzAifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L216-L225",
+          "version": "repo-lines-v1:sha256:962cc0781e57b32713348d044d4932ce736f263c5ed96361354a1d9fd8da7762:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNmZGE0NmM0MGM3NGJmZjdkODI5ZWI5MGQwZGM4OGRkZmU0NzM0YWZjNzFhMWQzYTA2NGFiMjg4NGY0MjkwMzUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAyYjQwNWJhMWE0ZGQyMmNiZDc3OTBjMDczNzJlNDI3YThhMzk0OTJiZmU3NDIyMGQ4MWFiYTIxOWQ3MTZmNGMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE0NzM1ZjFmNjRlYzE5ZWMzM2ZmMjVlZTNiZDI3NGIxMzM0Mjc0MTYxNWJjODUzYmNiMmY4ZTU5MmQ4Y2EwOWEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE2ZTFhZTc2Njc0NDIzZmVkN2RjOTFhYzM1MTI5YWJlZTU2MGYwMzJjOTFlYTNmZTFlZjgxODg1ZjVjMWVlZTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e3f2b4b816c0434e8a1b4ec4d2bbf75a",
+      "statement": "Refresh exclusion uses transaction-owned catalog-row FOR UPDATE SKIP LOCKED locks; internal subtransaction guards restore PostgreSQL memory context and resource owner on commit, rollback and unfinished drop.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/mod.rs#L121-L185",
+          "version": "repo-lines-v1:sha256:038809457f8ee45209d136f8bbfd325026282a604ed6f7734d814e311ac80821:eyJzZWxlY3RlZExpbmVDb3VudCI6NjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU0NTBlNzdhNDRlMDk3NzJmNTM3YTcwODliZmMyY2MwNjc4NWY0OWQ1YzcyYzc3N2RlOTNmZDUwYWNlZjYzOGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdjNDAzNjkzNmQ4NDk3NzY5MTM0ZDU0ODgwMDA4NjkxZTQ1MDFjYTRkYTQwYWIyNGRiMTg0ZWI0YWZhMTY2NWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU4MmUzNTczYjM1ZmEzZWVhY2QzYTA4YmExMWU4NDg2ZmE2NjU0NTNhZDY0NGRkODBlOTYzM2VhNTEwY2E0OGMifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L3728-L3766",
+          "version": "repo-lines-v1:sha256:d3649b0f9d50d2dec7a8a45198fabbeddf9b37808ee7c6aa9652b16626bca3af:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhmNDFmZDdkNDMwNTBhMGU3OTkxMzZjMDJhMDQ1NmQzNjcxNDM4MDg4MTNkZjdmOGQ3OGRiODllYTI0OWJjNzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkyM2E1OTc4OTM3ODBiYzEzNmJjZDYzNmEwOGUzMTI3OWQ5MWE3M2FlZDZmYzE5NWFkYjUwZjNmZTk2NjgxNzEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM5NTc0MGIzMmE2NWQ4MTIyYTJlYWU2MDlmNDEwYmM0N2FmZTk1MmYxYzBiNTk1NzdlOWY4ZjU0NzEwMTc3NmYifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L4558-L4565",
+          "version": "repo-lines-v1:sha256:e6cc36a962d1d03e43c585798463a0b44a8d52fe2b35569d86e263b051fcdbd4:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDQ1NGU1MjJmNGZmZjA4NzVlYzA4YzIyNzhhZjAxN2IyNzdlMzExMDc2ZjE0ODUzNmQ1N2NkYzVhYzM1NDE4MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMjIwMzRjZDIzOTljM2Q5NGZjZThkZjRmNDgwOThlNDE0ZDFlYTg3ZWZhMGU3MzVkYjYwNmFmMWRiZjg3NWEwZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMGRhZWVlNTUxMzcxZTk1YmZlNjhhNmY1MmQyNTc4MmE5MTg0MjMyOTQ5NWU5MjlkNjE1MzUwY2UwMzUzODBkZiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_3fff50781a184e32b7cd02b47c8496eb",
+      "statement": "The pg_trickle memory budget bounds owned accumulation components, treats storage limits as guards rather than lossy caps, and permits component overrides only to tighten derived limits.",
+      "evidence": [
+        {
+          "resource": "repo://src/config/memory.rs#L1-L127",
+          "version": "repo-lines-v1:sha256:0acf2858f53afb8e9b57566c475c9109ef9599589278a6518b3777338930350b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTI3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJjNmI3MjY4NDYxOTQxZGJjOWE2NzI1NTQwM2JmNDcxNjE2MGI2YTgzMGVjMzExMGFhMjViNGE1OWM1MGI5NmU5IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJlNmIwNDQ5MTQ2OTcyMmU4MzYzYTk0ZTQwNDQ1MzhlMDEzYTJhMjE3ZTM2YjFlNTY4YmE2MGFjYjdiNGM4ZjJlIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_f309c1d21ce14ef8a93b671731ac2c05",
+      "statement": "Delta-template caches are backend-local and flushed lazily when the shared cache generation advances, independently of worker-slot generations and DAG versions.",
+      "evidence": [
+        {
+          "resource": "repo://src/dvm/mod.rs#L917-L939",
+          "version": "repo-lines-v1:sha256:c5362119aa2052e95bf350661889630c46562449a5266fb62dc825a41c2c8100:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQyNjM2ZjI5ZDI1ZmQ1OTZhODdhZjRhYjExMjJmYjIxMGY2ZTRiOGI1NDVjZmUwYzliYTAwOGExYzA5ODZhNTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlZTQwMGEzZjZjY2MzYWE0YjJlYzhiNWY3ODMwYzhhMGIyNWU4NjhkMjU2NmFhNmE2NWIwYjZiNjhiNjM5YzIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdkNTE0NWZhYmM3YjJlODIwMzI0NTU4MWE3MzVjNTJmZDFkZjU5MDk0NGY1ZTc0ZjdkMDgxOTE1MGI1Y2JhNjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlODNhOTAwYjIwOWI4Yzg2NDZmNzg0Nzg5YWU3ZTFlMDk3YjljY2ZiYjlkMDRjODRiOTkzMTk2NzA2OWY2MjUifQ"
+        },
+        {
+          "resource": "repo://src/shmem.rs#L263-L278",
+          "version": "repo-lines-v1:sha256:8555dec57175f805328d699a5bd01f37c1da2f554e350741c64c67968e7b0e35:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyMzkyNTE0MjIxYWQ4YzhmNjk0YmZkNGJmZjBmNzk0Y2Y2NGU1YjU2ZjhkZTkzMmM2YTRjNDBiYzAzNzRmNDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjViNGZlZWQzZDA3MDYyYmQ5MjRiZWEwMTY4MDNkZmIwYmQ0YTYwOGE0MTQzM2IzZjc3ZDcwNjllNzBjZTI3ZGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE4MWRhMmY0MGE5MTMyYmM1ZTU5OGU1NzQwNjhlYTZmNGFlNGM2MWVlYjk1ODkzMmM0ZmJlMTIyNGIxZTQ4NzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ3MzRlZmE1NGRmNmNmMzViZjE2NTAzMzA5ZTkxYWIzYTU5NGJiMGQwNTk1ZWRjZTI4OGU3YTg1NzEzZmI4N2UifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9b511c469b9349739aedfedc6c58fa21",
+      "statement": "Load shedding applies to sequential and parallel scheduling without discarding committed buffered changes, and parallel work also honors pause and retry-backoff admission gates.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L941-L975",
+          "version": "repo-lines-v1:sha256:7c9ce5ca6aeb700548ad7d0a3eb98b53b4a76fa4c936794ab0a22aadae71b848:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJmYTQ4M2M4OTk1MzRlOWY0ZGVkOWZlNzU2ZmNiNDg0NzVlZmJjMGE0NDBlOGVhYzNkNWJhMGYxOWJiMmE5OTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI4YjcyMjMxYTQzNmQxZmU2YzFjMDA2OWM0YWVlOTJjNjBhMWVmZmFmNjE5NGQ4ODM5MWE4YmNkYTdjNTA3ZDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc0NGNhYjk2NzZlOWFiNDU3MjIxMjQ5YTUzYmUxYjI0MzIxOTNhZDc5OTBlYjE5OWY2ZTM2NGZkNjg5NDRjNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFkMGJhNWFlZWMyYjk5N2UxZDc5N2M2NjAxNTMyMWQ2YzIzMGU2YzYxYTY3MWU4ODllMDkxZGI5YTdjMzllMTAifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs",
+          "version": "repo-file-v1:sha256:75fc547e0e4b7b2045cd5e19f9debfa4612d0f8f25c05b8402cc35e87749eb8f"
+        }
+      ]
+    },
+    {
+      "id": "claim_f0fe433179784e469f73509b25d7cec9",
+      "statement": "Retryable job failures update per-root retry state, successes reset it, permanent failures set member ERROR state as a safety net, and dead-worker reconciliation reaps orphaned jobs and stale slots using live-process and queued-job evidence.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L1134-L1270",
+          "version": "repo-lines-v1:sha256:ac74d6cbb5f3eb987a9c9cce1be1f5c0892f5a0157d226a283e46e56b1791c36:eyJzZWxlY3RlZExpbmVDb3VudCI6MTM3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJmNzZiOTMxZmY4Y2RlNDE3YjZmMjIzNjk5MmI0YzNiMWJkNzJlMzllNWFhYTYwNTU2NjUxMWU4N2FmNDE4MzNiIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0Y2FjMThiNTAwMDMxM2JhMTU4NTJmOTRjMDY5YjAyZjEwMmFlZTNhYTViYWEyNzQ3NDEyNDg4YjIyZTU1MjA5IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIwNWI4YzlmMDVkOTkzYzRkOGEwYjk0MTZiNWM4OWEwODk0ZDAyOWIyMTQ1MzA2NzA1ZTg4MTFiNDQyZTRkYmU5In0"
+        },
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L723-L755",
+          "version": "repo-lines-v1:sha256:0f7af42b0a86d144ab310076c8cd25e7d493c6c41adb2ef1100c487d0bd4b8e0:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3MmVmYWM0MWJlMjM0ZjU2YWUwMzJiY2JhZTg0YmY1Yzk5ZDYzNjNiOGExODE5ODU5NzVkYjQzM2NhMTFiNDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjA0NDkxNDY5NzIyZTgzNjNhOTRlNDA0NDUzOGUwMTNhMmEyMTdlMzZiMWU1NjhiYTYwYWNiN2I0YzhmMmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU5YTllYTYwMTk5OWI2N2Q5MTAxZjJkZjA1OWY2Y2E3NWI1NzAxZmM1NTE3M2UzOWY2MDU5ZjhhMzcwODY4NTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRjNmM5Mjk3MDFkNDk3OTVhNTJjZmQzYzkyMDdmNjliMjI0MjBjYTVlN2U3N2EyOTg1ODdkMjliM2UyNWFiZDQifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/dispatch.rs#L806-L888",
+          "version": "repo-lines-v1:sha256:9ce7621ee14faf31b34585a9214ddcdafbb01a1b8751cb359698130b794c0b1c:eyJzZWxlY3RlZExpbmVDb3VudCI6ODMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzNjM2ZGMzMzQwYTJiZTJjODViMjk5YTUxNzZkN2Y1N2JlNGNjZmE4ZmNmN2YzYjM2NjlmNTEzYTdmYmYyMGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3YTVmZmEzZTA5NWRmMDViNmIzMzMzODcxYWJhMWMxYjNlMjVhYjNkYmYxZDQ5MmYxNTRjMmNjMmIxMjJmNTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcyNjhhNTc2ODNlNGQ1OWFhNWVlODU3NGUxZWIzNDcyYTllZmIwNmZmZjBkZmU2MWZkMDFjOTMzYjhhZmI0ODEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU4ZjQ4MDJlY2Y3NmMxMDNhYjYyZmVjMjEzOTkzM2Q1OTZmYzE0ODlhOWRlN2NlZmViMzY0ZTlhZjFmYWUxNjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ccad8da026384e1e8ba26f7424cf3dbe",
+      "statement": "The coordinator processes SIGHUP configuration reloads and drain requests even when scheduling is disabled, skips scheduled work when enabled is off, keeps capture active during CDC consumption pause, and cleans up scheduler metadata on SIGTERM or detected extension removal.",
+      "evidence": [
+        {
+          "resource": "repo://src/lib.rs#L101-L106",
+          "version": "repo-lines-v1:sha256:82abdd97b06cd0029e921bdf07baef6f06631677aea1db0e0382c5f8ea8dc24a:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzRjM2FjNjVkNDI1MWJlYTUyYWE4N2QyNjI1Y2NiMDc5YzBkNGUzZGEyNTRkZjU5NzUzNjc2MTdjNTY1OGZkMyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMGNlMjg4ODI4MWM1N2FhMDZjYmY2MzdiYzhkMDRjNGFhYWUzMmI3OWMxZDliYzZmMGQxNzJlNzZiM2ZhODhiNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTA0ZDZkYTU4NWNmMGMxNDU1NTY3ZDdiNzM3YTI2Njc3NDM4MzExM2U3MDQ3ZjA5M2EwNTNkOTkzMWI5ZmM0NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYThmMjkyZmRmZTA1OGYwOGNkODFiYTQwNzA0MDljN2Y2ZDI2YTNmYTIxZjVkMjAxNDg4MjU3NWFhODczMzcxYyJ9"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L687-L775",
+          "version": "repo-lines-v1:sha256:2f3afbc86192f144a869c44e20ed27f4f563cea4674981fefea6f71fd54e54c2:eyJzZWxlY3RlZExpbmVDb3VudCI6ODksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNlZGI2NGNlZTY1Mzg3NzAzYTMyMzljZDU4Y2VhMjY0MDAwYTdlNTZmYmYyYTI3MjNkMDVhYzEwZmM4ZTFhZGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlkMzFhYzk4Y2M4ZjBjY2Q5OTRmNmRjNzI5ZDkyNGMzZGVkZGU1MjNmNDQwZTYzNjFiOTM4NTk3MzE4M2UxZWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRhOWY4NmQyOGU3ODRmOWZkMzFmYjcyZDE1ZjYwY2JjZWFhZmRkNjY5Y2JkNWI2ZGE3ODg4YTAyMzMyMWViYjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU5MzhmZmI0MTEyYThmODYwNDg2MzFkZTBmZjA2YWU5YjQ5MGVlMWZiYmEzM2UxZGE4YmExZTk3ZWQzOWE0NmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e9de6665670743359e03d60e472d3c9c",
+      "statement": "worker_pool_status exposes capacity, adaptive and queue diagnostics; parallel_job_status exposes queued/running and recently completed jobs with PIDs and timing, using a default 300-second recent window.",
+      "evidence": [
+        {
+          "resource": "repo://src/monitor/health.rs#L1235-L1396",
+          "version": "repo-lines-v1:sha256:f36c25c7727cd59455785d690fbd6ac2f2998407b6566bf137afaaabdb035cb9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYyLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIwYWQ2NjIzY2NlYzYzMDQxZjQwZjRmNmQ4MWFjOTdlZTA0ZDMwZTc3YmM0NDg4MzQ0ZjY0MDRjNzBlZWEzZWEwIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIyMzFiMTQwY2JkNzQ4YTcyNmI3MGYwMzc0NzkzZjllZDk4MGMzNTRmYzlhYTJmNjg3MGE4ZjgyMDY4MzAyOGM0IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlZjhkMGRhMjJhZWZiNGVjNzliYTc4ZjY5YzU0M2MyYjgzZDUxYmE5ZTQxNDE5ZWQyOWFlYTdiZjU4NDJmMTEyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJkZTVmNjNiNDJmYWM4M2IzMDEzNDNlMTMyY2E5M2VmM2VmYzQ2NDBjM2ZjODljYWJiMzc1Zjg5NDhlNGNmY2RlIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_fbfb7f74ec594c81a5dcd04cc9cc9c94",
+      "statement": "Coordinator shared last-wake diagnostics are refreshed on a periodic sixty-second cadence rather than every scheduler tick.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L659-L672",
+          "version": "repo-lines-v1:sha256:d129a9377d50d7c4ccd3f22fee2761d872dca6cd3bef3cf9b711b5143cdacc33:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEwNGNkYThiYjhmOGViMjhjMjkxYmFhZjdiOWEzMjMwYWRjNzVjOWE3NTBiNGUwZGI0ZjlkMDAyMDlmMmJjM2MiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRlNDYyYmQ4NWVhMzUyMjgyMmE5YWQzZWIyNDA5OWIwMzJhMWI2MjdiZWNmZDdjNTgzMWU5OTI3ZDRiYWM0MGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMwZmNkY2IzMjZmZmZjODM5OTNkZTllNmQwM2U1NTk2NTNhODI1YWY5ZTc0YWEyMTQxZjRiZTU2OGMxYWFlMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNmN2U0NTkzOTQzMzkxNDJjYmNkNGYyNGE5YmQ1NGE0NGEyZmRlNTY0YzBhMTM4ZTgzMzM4NDIxNzY4YjdiMGEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_168d3534fc7b4f4b96372512600736b6",
+      "statement": "Monitoring distinguishes schedule staleness from exact source-commit-to-visible freshness percentiles; no-data staleness uses last_refresh_at and never-refreshed stale status remains unknown.",
+      "evidence": [
+        {
+          "resource": "repo://src/monitor/mod.rs#L311-L390",
+          "version": "repo-lines-v1:sha256:1207171c63111af032f5d8a5065bb5aaca805a535453e008aa9439cbfc23ec82:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5ODIwOTBlNmRjZGM5YmNjMzRiYzU2NjE4MWIxMjg5ZTQ1NzQ3YmNmZWY5NjkwM2UxZmI1ZTM3MTg4YTM3OGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2OTgyNTE3OTI0ZmU4ZDNlMTU2NjcxMTViMWY1YTIwMThlMGQ1NWNlNWEwMDFiMWUyZDVlMzFiOGIyNDEyMmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdlOTA5ZTY5NzdlODE1MzIyNDg3NTJlYjIwYThiODMzNzFiN2U4NDY3MTVkMmIzMmU1NGI0ZDNlOTdjYjlhYzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM2ZDdmYTQ5ODYzMDkxZDMwZWI2YzViOGJiZDM5YzFkNGI2OTNlMmZmOTM2YmYwZWYyN2Y4MTI4MWJhNGI2YTkifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_monitoring_tests.rs#L275-L317",
+          "version": "repo-lines-v1:sha256:1705a0b76d4384aa435bd10310bfdca62b2f74da05d8251144f82ce642570759:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxOTQ4NGVlZGYzNjRmYjhjMTJmMWViOThmYmY2YTliNGY2NTBmNDI3ODc0YThkNzM1OTAxMGFhZGU0MzFiYzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1OTM3Njc5MWU2OTQ3NmY3YTA3MTg5NmRjMjViOTEzN2VmODQyM2UzZTk2MzQwY2NmYWMzMzIzZDQyY2E1MWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlYWYyZGE3NDcxZGZiZGM4NDJiYmFjZmIwNWNiNmIxM2U5ZjdmNDY0OThkNDBkZWExNjcyMmJmOTcwYWFjMjIifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_monitoring_tests.rs#L371-L417",
+          "version": "repo-lines-v1:sha256:77cef06e2509be31c9b77fcbabfb607d62106a153d950b7db356398b0d977282:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxOTQ4NGVlZGYzNjRmYjhjMTJmMWViOThmYmY2YTliNGY2NTBmNDI3ODc0YThkNzM1OTAxMGFhZGU0MzFiYzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI5MDQ5ZjZhYTk2ZDY0MGQ3NzY2NDExNGJmOTQyYWIyOWExN2YwODhjOGFmYmZlZGE0MWE1MjU1YWEyMDY2YTkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1OTM3Njc5MWU2OTQ3NmY3YTA3MTg5NmRjMjViOTEzN2VmODQyM2UzZTk2MzQwY2NmYWMzMzIzZDQyY2E1MWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ1ODE5NTE2YjNlMjA4NTQ5NGYyODE5NGMwMGZkZDZiZjRlMGJmMzA3ZWU0MWFlOTNjODFiZTVlZTU4Zjk5OTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a08c2a84b782495fb3947358c349e69b",
+      "statement": "The pg_trickle_alert NOTIFY event contract includes failure, falling-behind, buffer, watermark and freshness events, with some scheduler reminders throttled using successful emission time.",
+      "evidence": [
+        {
+          "resource": "repo://src/monitor/alert.rs#L11-L68",
+          "version": "repo-lines-v1:sha256:b978b85149c35393008c675b5ca1a5d4278358850c94901b2e3a61c8623bb7d5:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmMDk4ZWU4YjU0ZTc3N2M2NDBmYWUwNzJiMmRlZjE4NDM5Y2M2Zjk0ZDEzODkyN2I4ZWRiZmVlNGIwYzgwNGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZiYWYzZDlkZmJiMjI1NzgyOTEyOWEwMWFjN2JhZGExNmUxYWRhNmQ0Mzc5ODViZTRkOTQ3OTgwMWQ2ZjFmNjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM4M2VmMDdlMDkzYjU5NGRmNzk5NGE2OTgyOTJkMzJhN2QyYzhiZGZlNjhmZThhYzZkNDVlZTVhZmUxYTQwNjEifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L48-L89",
+          "version": "repo-lines-v1:sha256:c5a8858e9abdcf273334e4c7cce2a47b3766406e27fb811ce751e5ae0a8efc7a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc4ODg0OGM2YWQ5ZWI4ODFjMzIzYTI4NmM2NmQ3ZGVmYjlhNWMzOTk2NTU0NTQ1NTY0NzE2NjFhMjljMWUxZmEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImExOTEyYjI1ODU3ZmFiZDJhMjcwYTRjYjhhYWNjZWJiMDFmZWZiNGIzOTVhZjM0NzFjMGIxMzJlZGFjNGUxZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNmNGVhYzA2YzE1YWU2MWNhZDQ1MjUyYmE0YzI3ODNjNWM3ZmI1YWZkMzI3NzM5ZmM3YTNhNjdiMTZkZDlhNDMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1f74b22e7d50491d82cb56574e8ee246",
+      "statement": "The optional scheduler-hosted OpenMetrics server is disabled at port zero, uses bounded nonblocking request processing and collection deadlines, and warns without stopping refresh scheduling when binding fails; each per-database scheduler attempts its own configured listener.",
+      "evidence": [
+        {
+          "resource": "repo://src/metrics_server.rs#L44-L110",
+          "version": "repo-lines-v1:sha256:407123a22c5ab5eac76f07e8e9c9eed5205cc0c27efaf2e04becfa6427388034:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE0YjAzN2NkMTZhYzQwYzdlODRhZmM0MjUwMDg2MmNiYTQxMThlNDNkMWI0ZjVjZGE0MWE5NWZmMmRlMWUzYmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4MGZhZTE0MzEyNjc4MjllMTg4ZTI2ZDJhMmU2ODAwNDgxNDZjMWYzNjI2NDUzNjY5OWE3Y2Q5MjliOGU4MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc5NzU1YjQzNThlNzdkNzRjOTgxZDYxMjY2MjgxYjU5MDI3OTVhNTAxNTI0OWQ1OWVlZDRlYzUxMmJmMzQwYjgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZjZThkMTM3ZmE0NGFjNjY0OGIzYTRhNmY1NmY1MGJhYmE2NzczNDE0NWQwNDc0YTRlNTU1Njk3ZmQyNmJlYzgifQ"
+        },
+        {
+          "resource": "repo://src/metrics_server.rs#L7-L11",
+          "version": "repo-lines-v1:sha256:84ab6ab0328d1bbdb76d31069e2200a3ac903a308def2e63183c132b66bd67cf:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmQ2YmVjYmViOTk2OTE5ZjFkOTI0YjFkOGFjMTQxYTk1MGJmOGYzOGI4NjIxMWNhYmFjNmUzN2E0ZGQ5YjNiNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYWNkNTkzNzQzYWRiY2QzYmJmNGQ2OWFlODdlYTdiMTdmMTI4MTFkNDUxMjlmM2IxYTU3ZjFiYTU2MmEyYWNmNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOTQ4MDFmMTcwZTZlZGE2YTlhNmNkMTI1MGQ4NjFjZGE3MDkyNTliNzI2NWNjZWY4Yjk1MjIwM2Q5MzYzY2VhYSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNmUzZDE4MmJhYTE5NDM3MGNjYjhmODg1NWVhNmYwNGY5YTkyMTgwMTQyM2FjMzNiNWM0YjhhYTMwOTNmMjM4ZiJ9"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L602-L617",
+          "version": "repo-lines-v1:sha256:571a1ec19ff561067ce126923408a67f81f67e7756c9b8119df0d78a27fc0cf3:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiNDMwN2ZlMGJkMzAyZTUzOWIzMzU2MWFjYTVkYzE2ZjJjNGNlOTRhYmIzMDNhMzU5YTkzM2UyMjM2ZGExNzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkOWUxMjU0NjQyNTU3NmQzZGVhZThjOWI5ZGJmMTI4ZDVkNmRkYWY1ZDdmZTg1NzkzNDkyN2RlZmZhM2I5ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJkOTU2NGQ1NGRjNDAxNDlhYTNlYzI0ZTcyZGRjNjFjOTgzYzU5OGRjMDdlNDBiZDJmNDg0MDRkYmI3NzYzZjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY5YzQ4YmUzNTI1Mzk4NzVkYmY1OTQyYjEyZDA4NWRkYzI2YmUyOGFmYmM4ODM4YmNkYzI5YzlkNGJjNGQyNTIifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L648-L656",
+          "version": "repo-lines-v1:sha256:fb2d6a5145df16dcc4740425c3035d9614e56ecf9366d8e916bd88f330b8d172:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWRkMjRjMTUzODRmNGE5MzI2YWQ5YmQyNjUxYzg4NmQzZmQ4YTg5NzE2YTNiN2VhNWJhOGQ3NGE1ZTI3ZjUzMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNGU0NjJiZDg1ZWEzNTIyODIyYTlhZDNlYjI0MDk5YjAzMmExYjYyN2JlY2ZkN2M1ODMxZTk5MjdkNGJhYzQwZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjViNjgwODgzOTkzYjBiNzExNjEwZjc4MTAyZGY4MTY1N2U2MzFkZjAwNjBhNzg4YzQwMGE4MThjYzFiOTQ0ZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTZiYzE4ZGMzYWU2NWJjOTFlN2E1NGYzNzk4ZDAyZTUxNmM0MTA5M2U0MzAzNTAzN2NiMTc0NDhiZTM0NTlkZCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_9d6dbba56c6a45788f9542234d871862",
+      "statement": "Prometheus interval-target freshness metrics read bounded controller summaries rather than reconstructing percentile history during scrapes.",
+      "evidence": [
+        {
+          "resource": "repo://src/monitor/mod.rs#L311-L390",
+          "version": "repo-lines-v1:sha256:1207171c63111af032f5d8a5065bb5aaca805a535453e008aa9439cbfc23ec82:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5ODIwOTBlNmRjZGM5YmNjMzRiYzU2NjE4MWIxMjg5ZTQ1NzQ3YmNmZWY5NjkwM2UxZmI1ZTM3MTg4YTM3OGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2OTgyNTE3OTI0ZmU4ZDNlMTU2NjcxMTViMWY1YTIwMThlMGQ1NWNlNWEwMDFiMWUyZDVlMzFiOGIyNDEyMmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdlOTA5ZTY5NzdlODE1MzIyNDg3NTJlYjIwYThiODMzNzFiN2U4NDY3MTVkMmIzMmU1NGI0ZDNlOTdjYjlhYzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM2ZDdmYTQ5ODYzMDkxZDMwZWI2YzViOGJiZDM5YzFkNGI2OTNlMmZmOTM2YmYwZWYyN2Y4MTI4MWJhNGI2YTkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2aa9e04774634e94847b5e481e71a074",
+      "statement": "Optional tracing propagates W3C session trace context through CDC buffers and emits spans when enabled with an endpoint; asynchronous best-effort export does not fail refresh execution, and endpoint-configured freshness metric export has a separate periodic path.",
+      "evidence": [
+        {
+          "resource": "repo://src/otel.rs#L1-L22",
+          "version": "repo-lines-v1:sha256:affcc4197481bbd2d0747fa830b5b1690a4405e7a4bdbaff4f749a30389cb6a5:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE0NTBhYzhkMWRkOTY1YTY3Mzg4YWRlOTI2Y2ZkNDI2ZDQyZDAxOWM3NWZkMGQxYjM2NmZhOTc2ZWUwNDY2NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZkZDQ4Y2NiYjIxM2IxM2EwMWZkMzZlNjQ1YjE3MmY1MzY0MzA1MWM3NDA2ODY5ZDBlMTM4NzJmMzA0ZDc4OGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhhY2IyYWFlYmFlM2NlODk1N2Y1NDNmOWQ1MzZmMTVkMTRjODBlZWQ1NWZiOTI4YjI2YTMzYzY4NTBhYTQ3MDIifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L674-L683",
+          "version": "repo-lines-v1:sha256:54cd6fcdaa121621fa117393f2f751f3ce4b186db5f9fa8f5a731e7443f33ecb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxYjljZTI4MThkZDcxMzY2YmQ5MWExOTgwMzFmN2E5N2M1MWQwNzQzMDhiY2U1Y2EyNzc3OGYwY2RmNGE2YjkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBjNjQ3OWNjMjMwNDQwZmQ0MWU4MjI0MjE4Njc5Njk4NTU5ZDI4OTNiZDY3YjQzODBhZmFiODExYjM4YTU1YWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmN2I4MjE3OGNmYzQ2ZmIyMDJlODQ3YWVkMWQ5ZWFlOGU0NWUwZWRkOGUxMTk4Nzg2MTU1ZDJmZjNjZWI1MmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRhOWY4NmQyOGU3ODRmOWZkMzFmYjcyZDE1ZjYwY2JjZWFhZmRkNjY5Y2JkNWI2ZGE3ODg4YTAyMzMyMWViYjkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ec4d8c386fad4cc18ef703a1d9926a79",
+      "statement": "Focused worker E2E tests cover automatic schedule refresh, history persistence and a bounded disabled-scheduler no-refresh window followed by reenablement.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_bgworker_tests.rs#L271-L326",
+          "version": "repo-lines-v1:sha256:4049531925ab78c1cb378466d3ff47b4ea1f9bb5f46ece82311751ca08fd3d28:eyJzZWxlY3RlZExpbmVDb3VudCI6NTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcxNWIyMGY4ZTliNWIwMWY3ODUxOGUwYzNjYTA3N2FmMGYyODYzZGFlOWZkMDgwOWE4YzJiMzRmZDkyYTg4YjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNjNTNmNTNkNjk3MTVhNjI1MzYyM2IyZTJmYjA0MDExMGY2YjE0ODY2NTA1YzZjZGM4ZjIzMmZmZjBlMTkxZDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQxZjQ3MjZiNjIyMjA2YmY5NDUwZDllNzJiNWYxN2E5YmRjNzNkYmUzZDVjNTJmMzVlNGU1MzcyY2E4MThiOTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEyN2Q0ODU1ZDE3ZmM4ZjQ3YjM1Zjk0MjMzN2M0YzQ4YzZkNWJjZDllOWZjOTA0OWIxZjFmYWYyMzE0ZDA5ZGEifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_bgworker_tests.rs#L369-L416",
+          "version": "repo-lines-v1:sha256:9680d19c9afe4c56612ca07bf7045561efa9d773a64429f6563792a550a3a740:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM2NmMxZjMwNWFhY2MxODIyNjEyNTY4YmRhN2JiNDhlNTFkNjFlZGQ5YzA0ZGMxMzE5MjVhNDY5OTk4ZjFhMzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwMGY4YmM1NGEyYTg0YWFmZmMxNzk1M2NmNjgzNjEyOWVhNjViZDI3M2RlYmU3YWY2ZjVkNTg2ZmFiM2RiNjIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEwYzRkNjJlN2FkNjdkNTEzOTExYmYzNGYwMjIzZDY3YjUyODE3YWQxODZjMWE3YmQxYjVjMmQ1MTEwN2IzMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRhZDdmYTRlNzhjNjAxNjc3NTk5Mjg4MzYwOTc5MzgxZDY4OTkxMGZlOGMyZmE4MTU4YjcwZDJmYjY3ZmI4MDIifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_bgworker_tests.rs#L587-L686",
+          "version": "repo-lines-v1:sha256:52fe354d7873aca896075899d6b99006ac126ef1bc967031fb4ef71f66fc6f67:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI1OThhMGM1MzNhZDI3OGI1Yzk0ZTZkMTllMDkzZDU2MjNjNjc0MzVlMTg0ODE4N2EwMzExZjJjOWRhOWU1YzgyIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2NTc0YmU1MDBmZGI0NDljYjMzNWQ3NmU2ZjI0ZWFiNTVkODkxNWU5YTQ4OGJkODAzOWI2NjIxNDhjZjA5NWY4IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MCwiZm9sbG93aW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_659de14af4b34ed381a222157c99b924",
+      "statement": "Concurrent-DAG E2E tests exercise inter-layer DML visibility, concurrent-insert convergence and rollback isolation using staged refreshes, rather than proving every dynamic-dispatch grouping policy.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_dag_concurrent_tests.rs#L23-L92",
+          "version": "repo-lines-v1:sha256:4d494c148cdc0527513c28ffdbe44c217dc4cdd6b954583071e5a1b4b053c57c:eyJzZWxlY3RlZExpbmVDb3VudCI6NzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwOGQ4ZDZhODBiNzU1YTVmZTNhMGExNjA4NTM5NDk3NDBkZjI2MTViZjU4MDAxNzZkZTkwN2M2NWNlMWIzMjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNkODM1MDQzOTdmYWEyNTllMzY5ODc4OTUwY2QzMmE0OWEzNmZjMTdiZDA2NzJkODBiMjViYTljYTkyZmYyNmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNlNWE1ZmMxMDAzZTdkNzZkN2NmZTE3ZjViMTVlYzVmYTJmZmI4Y2QzZWIzMjkyOTdmNmM5YTZlNDJlYzZlNGIifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_dag_concurrent_tests.rs#L98-L263",
+          "version": "repo-lines-v1:sha256:41da37384e6a94b54541ce5b6ecd6dafeb7000e844daabfffb27fcc8b82f38d2:eyJzZWxlY3RlZExpbmVDb3VudCI6MTY2LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiZGViZGQ4MzJjNDg5M2E0ZjFhYzYzYjg0Nzk5ZWIxZDliZGExZmYxNDM5NzdmOWUyZTdjNTU2ZTA3ZTdhOTAzIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJiM2Y4Nzg3MTUyNDIxNjNlYWIwZjBlZDk2YWI3ZmY4ODliMTA2MDhlMWRmODhlMDY0NGM0MGU5MzU4M2JkMTZkIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MCwiZm9sbG93aW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_5c75fc49e5154f5785f44c49d93496af",
+      "statement": "Focused monitoring tests cover no-data stale reporting, unknown stale status before first refresh, and cache-stat shape and monotonicity.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_monitoring_tests.rs#L275-L317",
+          "version": "repo-lines-v1:sha256:1705a0b76d4384aa435bd10310bfdca62b2f74da05d8251144f82ce642570759:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxOTQ4NGVlZGYzNjRmYjhjMTJmMWViOThmYmY2YTliNGY2NTBmNDI3ODc0YThkNzM1OTAxMGFhZGU0MzFiYzgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE1OTM3Njc5MWU2OTQ3NmY3YTA3MTg5NmRjMjViOTEzN2VmODQyM2UzZTk2MzQwY2NmYWMzMzIzZDQyY2E1MWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlYWYyZGE3NDcxZGZiZGM4NDJiYmFjZmIwNWNiNmIxM2U5ZjdmNDY0OThkNDBkZWExNjcyMmJmOTcwYWFjMjIifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_monitoring_tests.rs#L371-L497",
+          "version": "repo-lines-v1:sha256:3aff1126631287d9b1ae7471946e7947ca592494be583f21586846459242f68b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTI3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI1MTk0ODRlZWRmMzY0ZmI4YzEyZjFlYjk4ZmJmNmE5YjRmNjUwZjQyNzg3NGE4ZDczNTkwMTBhYWRlNDMxYmM4IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJhNTkzNzY3OTFlNjk0NzZmN2EwNzE4OTZkYzI1YjkxMzdlZjg0MjNlM2U5NjM0MGNjZmFjMzMyM2Q0MmNhNTFlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MCwiZm9sbG93aW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1In0"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.7.2",
+    "at": "2026-10-21T18:25:47.780Z"
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "pages": {
+    "/openwiki/architecture/change-capture.md": {
+      "pageVersion": "sha256:da4ce7a846e60afc9287f4f139425de754b77506b38a29652974869b39143418",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/architecture/security-boundaries.md": {
+      "pageVersion": "sha256:c4cf79de9b6ec2d99753fdb3528a197b799d9545621401cae36ebbb026577647",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/architecture/stream-table-lifecycle.md": {
+      "pageVersion": "sha256:8644be74c81e79ff2c569c68d94e7631c7501ca87463046ab13e3da5718274bc",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/concepts/differential-maintenance.md": {
+      "pageVersion": "sha256:bd00ef11108cbee8ffabb2678fd734fa89e126e35119ff3ca400de16973501b6",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/integrations/consumer-contracts.md": {
+      "pageVersion": "sha256:697f092e1e8c809d8c808c0343f86ed86b92d8557622fa268477e7f6c2374980",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/integrations/dbt-materialization.md": {
+      "pageVersion": "sha256:f41802d46f64e43d34e1a4588a31ef1c2bc731b345d504a708eae456e5c0530d",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/operations/recovery-and-upgrades.md": {
+      "pageVersion": "sha256:48d3b2cde38849304c0bf1b135222d89173fa279085d52dd12549877943c93a3",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/operations/scheduling-and-observability.md": {
+      "pageVersion": "sha256:e3d1f58ff4398d1e933fdeca3108bbfab66333cc68819f84b211ff8100529222",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/quickstart.md": {
+      "pageVersion": "sha256:bbde4c1e193e952bf56d84e92a4452f3b37a3571a21ad3fb314224019cf98ee4",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/testing/change-verification.md": {
+      "pageVersion": "sha256:cb43d674a85ac5509938ae407256a5de18eb56b3c2d282654d397e354228260a",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    },
+    "/openwiki/workflows/refresh-correctness.md": {
+      "pageVersion": "sha256:bafa6b4df0014fdebf6687186d7c2bcad626f0bd1cf21baec730fdb81a151baf",
+      "completedBy": "openwiki/0.7.2",
+      "completedRunId": "089bdbf3-d93a-43e6-8600-fed22bb57175",
+      "gitHead": "c772d04ad5935392fcc8de2892d8fed5ac58802c",
+      "sourceFingerprint": "sha256:520c96757228f63c5399f314b9902632703ebdd09da6c3d3799529c845b25e2c"
+    }
+  }
+}
