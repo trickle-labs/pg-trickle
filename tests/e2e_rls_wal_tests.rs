@@ -151,7 +151,10 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
             Duration::from_millis(200),
         )
         .await;
-    assert!(differential, "RLS WAL must apply a differential update after cutover");
+    assert!(
+        differential,
+        "RLS WAL must apply a differential update after cutover"
+    );
     db.assert_st_matches_query("rls_wal_st", query).await;
 
     let effective_mode: String = db
