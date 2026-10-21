@@ -1,0 +1,366 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:f41802d46f64e43d34e1a4588a31ef1c2bc731b345d504a708eae456e5c0530d",
+  "claims": [
+    {
+      "id": "claim_f3e332759d8b4b84b4819b924d115489",
+      "statement": "The dbt package is Jinja-only and uses stock dbt-postgres; its PostgreSQL stream_table materialization translates compiled model SQL into extension SQL API calls rather than implementing a Python adapter.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/AGENTS.md#L3-L13",
+          "version": "repo-lines-v1:sha256:2deebd4d4ef3561326318bb89f132be560a14c4dc5fda3977c05e11fc4d586c6:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3YWRhMjdmMTFjMWMwY2M4YzE5ODViYmVlMjllODBmZTMxYTE5YzFlZmJkZTMzNzE2MDZkOGRjZWZiNjg0YzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQzODllNmU1OWY0M2JkNTNkNWMyYTZiNWFkZTVmMjc1YjQzNGRiMDMwMzdkNzM0YzVhZWY5NTcxNGQ1OWQzZTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjoyLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI0MTFlZDYyMDc3Y2I3Nzg5NTBiZjY1MTM1MDQ3NzQ0ZDk3MDhmYTRkNjM2YmZmZTc3ZTliYmZhZWFjNzcxNTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVmN2NhMTY2ZjE3YzAxYjllZjFiZTZlNjUyZGE4Mjg1MWEwZWJjODQxNWNmNDcxOGQwOWVlNTdhZDcyZDc1YTMifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L35-L100",
+          "version": "repo-lines-v1:sha256:f27e8cfc7f3a78904c112e9343e4048c873e4f9f7d0686f4235a84e9cd745cbf:eyJzZWxlY3RlZExpbmVDb3VudCI6NjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVhNmRhNWExMTdhM2NmMWYwODdhYTkyMjgxZGE1YTU5ZjcxYjA1OWE2M2UzYjQyZWQ2ZjAxNjk1ZTBkZTA1MmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ2ZGUzMjNjZGEyZWNlNDFkOThmZTc5M2QzYzM0ODM3OWRkYTg2ZGIwMTI1MDVlYTBiNGMwNzFmNzQwMzZkNWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY5OGY3NmMwN2U2MTVlYjFmMGNjZjVhMjg4MDliYzU4MjU1ZDM2OGNjNmU4NDg4YTE3NzRiZDU2OTI1NWMxOWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhYTg0NGRkZWM0Nzg0M2U0NDMyMGExOGUzMmRkN2RhZmI0YTdjMTE4YWZhZDg2MTQyNmQ2YjAxYmZiZTQxNzIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2b58544e73cb48c9a4e2cf3c14357b43",
+      "statement": "The package manifest permits dbt >=1.9.0,<2.0.0, while the integration runner defaults to dbt Core and dbt-postgres 1.10 in a dedicated .venv-dbt.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/dbt_project.yml",
+          "version": "repo-file-v1:sha256:fdb9738d4042be1d6c05ea98de81446525badac22aae4ba20b8806ec64ae3579"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/integration_tests/scripts/run_dbt_tests.sh#L140-L159",
+          "version": "repo-lines-v1:sha256:9147b841eaf0410d98275247bf4ebfc29352ed1ba6c0595894552b4f6304ebe5:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4ODAyYzc4OTU0ODNjNzdmMTA3MTZhMTcyOGNkMTc3NjJjNGFkZDRkOWQ2MzJkNzI0NmEyNDcwODVhMGY4MGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdkZWUyNDAxYmQ2MThlNzcyZWI4YWVmYjdiMmE5NjgyNjI4ZTU2YmQxZGIyNzI3MGUyZjQ2OWU2NGQzYzk3ZjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY2NmRlOWFhZDg5N2I3ZTU4MmY1ODhjMTI0OGRkY2RjM2RmZDhjYjk0OTMyOTFhNGI5MDdhYjMyMzY1MGI2ODAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcxYTBiOTVmOGVhNzAyMGZhMTZjODUxMTE4MjQyMzZhZmRmZGEzM2Q4Y2I4NmFhNmE1OTg1NjVkMDZhZmU0MGUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/integration_tests/scripts/run_dbt_tests.sh#L22-L27",
+          "version": "repo-lines-v1:sha256:2bda7eb183bd0d016447c0339addbe728a5309cdf72b193f105d28c3324a887f:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDAwYzc5ZGVmODJmZjI0MzkxY2NiMWYxMzA2NWU1YWY2N2E5YWQwYjRlZjVjZGZlZTRiMTg1YzY5Njc1MThiZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMmVhYWUwMDQxZjg5ZDIzNGU1YzljYzczOTdhNGNkYmI5YmExYmI0MDEzNTQ3ZTgzYTBiMThmMWYwZDViYjIzNCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMWM1N2Q3YWEzNWJlZTMxYzQ3MWU5YmIxY2NjMDNkNTdhMDcyYjAxYTEyZWJiMTUyNDg1Nzc3MDJlNTYxZmQ3YSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmU3ZDE2MTcyMzJjN2E5OWNhMTM3N2YxMjIyODZkZmJjOGIzNDgwN2Y4ZTA1ZTNmYTJiNDU1ZmU5MGYwZWNiMiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_9a2e5386761b49e6ad54522f9eddb73a",
+      "statement": "The materialization derives its reported table relation from this, separately constructs the API target using stream_table_schema/name overrides, and currently defaults to schedule 1m, refresh mode AUTO, and initialize true.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L164-L173",
+          "version": "repo-lines-v1:sha256:af8ccbfe2e1f1da187956076461b102ca8b5f4ff26b59a4308f4144bb511f662:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBmZmVjZGE3YWJlNzllOTMzM2Y4OWUyMmJhMzMxNDhkMmMyMGEzMWM0YmMzYWE0N2EzN2NiMmU0NzM3MDBkMzMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE5OWQ2YmVkZjBiOTUxYmNkYjc1N2ZhMWU4MmE2YWI4YTlhMmQzNDJkZmM1YzZiYThjMjNmN2FmMmFiZmUwYmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzZjU5NTU1Mzk3NDcyMDAwNDJlNjZhZTFlMWYxZjg4MzI3NDliZmM3YzgxNTczMmUxZTNiYTg3NGJkOWI0NDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhODQwYzQ5MmYwOTdiYmU1NWVmOTEwOWUxZjU3ZmM3ODczZWQ5NTZkZWYwMTRmMjBjZTBjZTllMTQyNmNhYjcifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L35-L71",
+          "version": "repo-lines-v1:sha256:04124cf298e2626a588f56b7b0c8e8c3aac264a10e037c8061b989ebe61d366c:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVhNmRhNWExMTdhM2NmMWYwODdhYTkyMjgxZGE1YTU5ZjcxYjA1OWE2M2UzYjQyZWQ2ZjAxNjk1ZTBkZTA1MmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYyNzBjNmJlYWRmNDVhZTRkNGYyOTNmYzJjZGVjYmEyODQ2YTc2YmJhM2Y3MTFiMjM4ZDNiOTlmZjBlYmUwMmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY5OGY3NmMwN2U2MTVlYjFmMGNjZjVhMjg4MDliYzU4MjU1ZDM2OGNjNmU4NDg4YTE3NzRiZDU2OTI1NWMxOWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUzNzVkYjdmMjgxYzg0Y2Q0MTMxYTEzM2ExMzRlM2YzNzczYzQzNTRjMjUxNjI3YzZlNDZjZmM0YjA5MWU5MmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_182e169ff7cf4a64ac52202b4f3b4075",
+      "statement": "Stream-table existence is checked in pgt_stream_tables rather than solely dbt's cache, before pre-hooks; the helper handles a two-part name by splitting on dots and otherwise uses target.schema.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L65-L81",
+          "version": "repo-lines-v1:sha256:0c0b1fc3637a62e48deefa8e0724451335ecf998f0c730d23c6ca21910ffeef9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVjYmM5YmRiM2ZhNzBkYWRiNGZmYWMxNTVkNDczODk5MWU2ZjI1YjhlNGY0OTIyZTlmNDkzYjRjOGZlZDYxZDYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViYTRiYzA3ZmY4MWEzMzZkMTAzZTBhNDIxOWU2NzIwNTNhOWZlNzdlMzg5YTA5ZTg4ZTk1NDIxNTQ3YmY2ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA3MTBjYTJlOWI0MWYxODFiMDA4M2QzNmM1ZTIwY2RjN2MwOTBkNjAxNzQ0MzJiMzdhNWYyNTFkMTVlNmZiMmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE0MDE1YzQ5NTEzNTc3YmIyZDZhYWI4YWZlMjkyY2Q0YTk1NjUzZjMzYWUyNjI1ZWE2NDFmOGMzYjMxODQxN2UifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/stream_table_exists.sql#L11-L35",
+          "version": "repo-lines-v1:sha256:1cb909a147087cf60c3fe6f6085e0caf38574f699bb4c9260335fb5b9b2688ea:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzMGZmNjEwNjIwNTQ5Yjk5NTk1NThlN2FkMTUzNjkxNmQ5ZWY0MWNkZGEzZDI0OGM2Yzg2NGEwNmU5MmYwY2EiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ2YjgwZTMyYzFlYTgwMmIzMTYzMDQ0YTVhZDYwYzI1OGM2YzE2YTExYmU0Y2VkMzIzYWY1MGYwNzBmZjRjYjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE4MDMxY2FkZjQ0ODM3MzExZmYwOGFlOTQwOTRhN2RlZThkYTMxMjc0YmE1YTcxZDIzNjMxNmU4OTIwYzFkMDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a5dd8e7ce9a04775b9b826ed2a03163f",
+      "statement": "Full refresh uses should_full_refresh(), commits a drop for an existing stream table and then uses ordinary create, bypassing create-or-replace even when available.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/create_stream_table.sql#L35-L56",
+          "version": "repo-lines-v1:sha256:110d9667f6ee1e019167acede2876076187bf1d06f8e85be147770ec59fb96bc:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0NDQzODU1ZTdlYjZiNDM4MzAwODcwMmM2ZmUyMmQ1ODA3YmIwYzc3ZjhlODEyNjNlYmU4NjIyMzJhOTdhYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwZDc4ZTg0OGUzZTRkMTliMjVjYTY0MDNmNjExZDg0YjllYzVhOTMxNzUzNjlmMjMyMjgzNjE5MGY1YzRkNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVlZmMyYmI4NWQ5ZDk4Y2MyM2ZlZmFmMThjZWQyOWJlYThlNjRkMTIxNmQ2ODk3Y2UyNGU1Njk2ZWQ4M2JjNTEifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/drop_stream_table.sql#L10-L19",
+          "version": "repo-lines-v1:sha256:8c12c9532b47a6aa3e4780ea8d540f06c0eb9a8fb910258c9d585be34611e93d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2MjY4YTM5N2VjMjZkNmQ4N2JlOTYwMTUwYzNlMDc1Y2Q1NjYyOGQyZWU1MTczZjg1MGYyZTVkNGU1MTc5ZjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwNjNiMGUyOTIzYTlkY2U0ZWViMzE3MjMwOWU4Yjc1ZDI3ZTliOGU3NTY5Mzg5NDAxM2RiZDcxNDZiYzZjZDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE1OTEwMTlhMDhiZGE1OGVlOGUzYmZhM2QxZDMzY2ZkNzQ4N2YwNGFmNWZkZmNlNDA3NGI1M2MxYmE0MjU1NTUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L61-L128",
+          "version": "repo-lines-v1:sha256:dbfba2c45906f304e799001f4cdf4b1a540c5123b30a38988c0952c4b3683798:eyJzZWxlY3RlZExpbmVDb3VudCI6NjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlZGE0ODk4MGU5YjlhODE5MjFhY2I5OTI3NjE5YjZlMzM2YzY5YjY0ZTA2YjE3M2IwOTNhOTFkYWFmMmU1MWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0YzJkYmQ5YjUxNjM5MTQ4MTJjNGIxNGM4ZTQzMWQ2MmU0NWRjY2YyN2YwZjNlYzUxNDgzY2RiOTE0YzhkNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBkOGUwN2M0ZjJkMmExNDliMWY4ZTRiYTg4NTFiNTcwODUxMDU1YWZjZDNkNjVkNTMxMmY3YzI4ZDUxZmM1ODMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFlZjAyNTA3M2UwZjJmM2E2MWY4NjBjOTEzMDhkOGRkYTUwOTk2ZDdlNTkyZDQ4NWM2MmQwNDRlMzg4ZDc4MTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ae623336aa50499d92213c1ceab365bf",
+      "statement": "Create-or-replace capability detection probes pg_proc and pg_namespace for a function name and caches the boolean in the dbt context; it does not validate the function signature or all option compatibility.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/has_create_or_replace.sql#L10-L34",
+          "version": "repo-lines-v1:sha256:85258151acb6c4746ab51b304b931c4bd1b3c942a1d4ced7a0a17bd0be7c8436:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM2YmVhMjdlNzJhODc1MzJjMjA2M2RiZWUwYmFlYTE4OWNlYTJiNjg2NzNlYjM3YzE4YjhiMzNhM2Y4ZmQxMTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjljMjdkNzM0ODQ3NWIyNDFlZDU2Nzc3MDAyMmYxOGI0YWE3M2ZiMGNkMTk3ZWI2NDNlMGFkOTkwOWEwNjdmYjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_24b37818e7e24d57b4e562a8eceab1db",
+      "statement": "Ordinary runs use create-or-replace when available; the server creates absent tables and compares rewritten, whitespace-normalized queries and configuration for existing tables before no-op or delegation to alter.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L86-L100",
+          "version": "repo-lines-v1:sha256:c73068f839128157feb32c5b5a9ae6447ac0a4d9ae93d0afa8b7b321cca9735f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc3ZDQ3YTVjNGJlYWVmYmQ5MDBjNmMyMzIzM2NmY2VlYTBiZGY4YWUxMzA3Yzc2ZTNiNmUzOWI4YjI0Y2E0YWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ2ZGUzMjNjZGEyZWNlNDFkOThmZTc5M2QzYzM0ODM3OWRkYTg2ZGIwMTI1MDVlYTBiNGMwNzFmNzQwMzZkNWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkyMDdkNDYwNDhjNDljZGQ0MzhlZGJmNWIzMWFhYzU1MjM0ZTRmN2ExMDljNTc1YjgzM2ZhM2MzOWMzOTg3ZjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhYTg0NGRkZWM0Nzg0M2U0NDMyMGExOGUzMmRkN2RhZmI0YTdjMTE4YWZhZDg2MTQyNmQ2YjAxYmZiZTQxNzIifQ"
+        },
+        {
+          "resource": "repo://src/api/create.rs#L615-L679",
+          "version": "repo-lines-v1:sha256:a77401ded73f00b1a6131f82cbdc06a13690a8f1902c1772fac4d61a1ac65e5f:eyJzZWxlY3RlZExpbmVDb3VudCI6NjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyZjY2NGI1YTMzNjY2OGM4OWY0OTg5MjAxMjhjY2MyMjdhZGNlMTZiMGQzOGQ5NWViMmRmYjdlN2RiOGYyZjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUzYjNjOWFlYTQwNjJkMDYyMjgxNzk0OWU0MjBiODdjMjA0YzMxZGE2MmJkZWUxZjEzNWU3MDMwNWQwYTE5MTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMwYTAxMjNkOGIxMGIwYmExMGM3YjUzMGMzNDNlMWY2ZmJiNGVlZTc4MjYxMDQyNmNjNzI0YTRiOWJlY2U2YjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjgxYzBhZmRjNTY5NTRkMmZiMTBkN2MyMTA1NzkyZTBkYmViNjUyMDViMGY1Yjc1ZWQxNGVjNTg5MTE5MTk0ZjMifQ"
+        },
+        {
+          "resource": "repo://src/api/create.rs#L702-L720",
+          "version": "repo-lines-v1:sha256:bef258f3121540b5749e6ca8a6aecccb1345780c3dd634cd7ba649560fcbd825:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRiMGRhYWEwNmZlYzdjMWNhNTFlMThkOGMzOTM0Yjc4MGE4ODA1MWFiN2JmYWVmNDFlNmVhMDBkZWZkZGU2ZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM1YmZkZmM4MTdkODkxMDQ2YzQ2MzdlY2IyMmY1MGM2NzhjOTRkNDAyYjNiNGIyZTNkZDMxOGJiYjUwNmZmNzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM1MjgwZmVmNjM3MjhkOTc0MGU5NTEzNDc0NmZjOGE1YjgyNzBiZmE5M2IwZmFkMjU5MzNlY2YxYjk3NzgyOTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM5NDI5YTQyNDQ0Zjk0Yzc4MGFlNzExMmQzNDk5ZGE3M2M5MTAzNjcyMmM2NmJkOTdhYmRhMzU2NTg1YzcwYWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fc56e8702e02487ab5780a93bf1fcd5f",
+      "statement": "The current fallback path alters changed defining queries in place using the query parameter rather than dropping and recreating them, contrary to older package guidance.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/AGENTS.md#L224-L230",
+          "version": "repo-lines-v1:sha256:a220e7d9e42580a53004834981003da730efb9de3ff1495fe249b75793c031d2:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTJjM2Y1YWZlMDI0YTdkMThkNGE3MDQ4MDM3ZTIxN2YwYmNjMDI1N2FmYzNmZDNhZWEwNGI4YmQ4NDdjNjEyZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiN2I2M2RjOTQ4YThhOTVlOTQ1ZWZlYWI3Zjg3MGY2MTNjNjNjNDMyYjU3ZGY2NjIyNjU3YjMyYWY4MGI1YzBkYSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiN2RiMjBlYzg3YWM4NmNmYzEzOGJmMWMxYmJlOTk3MzhjZjUyNzM3YTlkNmIwM2VlOGViZjVlZmI2NDg5Y2VmNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzk1MWUzYTU3MmVjMmM1M2Q4OTUyZDQyMTc2NWFiNDVhY2VhYzM1NzViNmI0ZmZhNzA1YTI2OTY3NWIyN2U5NSJ9"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/alter_stream_table.sql#L75-L93",
+          "version": "repo-lines-v1:sha256:fb8510e9dd2e85b17815a18ef97c37929e3fb6f8f2ef3b64440655e7a357b3ba:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3ZTkwMzI3ZTE5Zjk2MDQ2YjU4NzAzODg4OTM4MDRiNmZjMzFiOGNiMjIyMWVkMWYwNjI1OTY5MjYwZGM2MzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiZjRlMDg2ODZlOTJlYmRkMTY0MGU5NTA1NTUxZDhmYmIyMDdhY2U1NjkwOWFlMzljMmFhMmZiNzgxNWU1NGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYxODk0M2EyYTMyMjhiNWI5NGYyMmNjZjZhMTFiNTgyMjcwOThiZGE1Y2QwMDljYjE5MWMyMTZlMDhlNGIwZjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM2NzI1MmE4ODc3MDc4N2RmNjJiY2MzNmJjZWQyZjA2NTBhZDM1NzdkYjY4N2RhZjgxZTJjMmQxZDkxMzEzNGUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L144-L160",
+          "version": "repo-lines-v1:sha256:6ca7fd129e18a1f6f375aa52b5c28f9f3c1a66e564475e16034c97f7b7f4494c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQxYzk4NTdiZDdmMzg2MzdjODIzYzM5ZGYxMjVmYTNhYmI3ZGUxZjZhMzY4MDI0YTVjYjUwMWM0N2Y3MzU4OTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU0YzJkYmQ5YjUxNjM5MTQ4MTJjNGIxNGM4ZTQzMWQ2MmU0NWRjY2YyN2YwZjNlYzUxNDgzY2RiOTE0YzhkNzYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjEwOGUxYzYxNDc4ZDgyYjNlNTU1MjExYTg5YjA0MmI4NjZmN2U3YmU5YTM4ZTExZTdjNTcyMzQxMzhkMGQzZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQzZjU5NTU1Mzk3NDcyMDAwNDJlNjZhZTFlMWYxZjg4MzI3NDliZmM3YzgxNTczMmUxZTNiYTg3NGJkOWI0NDcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_179dff9e1f104ab499c4ae95aa364336",
+      "statement": "Status and fuse settings are applied separately via metadata lookup and alter; first ordinary create applies configured status, whereas first create-or-replace with status alone skips this follow-up unless the table previously existed or a fuse setting is supplied.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L102-L143",
+          "version": "repo-lines-v1:sha256:d2abf503e3b1dfb3b9e36ffb793d1dd2ec43b724d0727c3d1ce7aa052c5e3a6a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE1ZjA3OGE4ODZiNjNiNWQ2ZjkxMzVjZjg1MzBkODgyMGQzZmMyMGNiOTkzODA3NmNhMWU1YmI3ZTU3N2ZmYjkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI4NDcxOTUyODI2NzQzMjkyNzEyYTAzZTI5ZWMwNDM2NzY4OGFjNzJlY2YyZWM0YzYxYTY5ZTRjMjczMTg5YWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE2ZTdlZGI4ZmUwMGYwMzU3OTBkYWY5OGZlZDY4Yjk0YzAwYzcxNzA2MWMzNTY3ZGJkYWUyYWYyODlmNzdiODIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjllNjZlZDBkYmVkNmEzZTdjMzA5NzRhNDEzMDczMDczZjk0Y2VlMTYyZjY1YjdkYjQ2MmQyZGFmZmVmMzU1ZTIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_37c23f7c8f584196af8e578bd8558c31",
+      "statement": "The alter wrapper skips work without metadata and sends NULL for unchanged compared fields, but any non-null append_only or differential threshold option forces needs_alter; the materialization passes append_only=false by default.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/alter_stream_table.sql#L26-L96",
+          "version": "repo-lines-v1:sha256:313b474440c7b38e9f2aaaf127776f6af370a32dcd22aa5f3c7e6e21fca1e11c:eyJzZWxlY3RlZExpbmVDb3VudCI6NzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwZDM0YzM3OWYwOWZiNzhmYjhlNWM1YjY1NzUyZTNmY2ZkMjNjOThkYjI4MTRkYzMxNTMxNDhlZWUzOTllZDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViYTRiYzA3ZmY4MWEzMzZkMTAzZTBhNDIxOWU2NzIwNTNhOWZlNzdlMzg5YTA5ZTg4ZTk1NDIxNTQ3YmY2ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRkZGRhZDg0MDQ2MWQ3NjZiYTRiNjFmYTc4MmUzMGE2ZDdlMjE0NTUzY2EwNmE0NjgwNGJkZTFhODA0ZjBhODgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L153-L160",
+          "version": "repo-lines-v1:sha256:d8d6684f969e50607aa509570e07a85aa3185a55a65f00152156d187893dbc69:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjRkNjYwM2JhYjQ0ZTk1ZTg0ZjEzOTVmM2M1MGRmZDBhMGE3NmY3ZGYzMjRjZWM5NWJhM2ViNjA0MDI5YWIwNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTRjMmRiZDliNTE2MzkxNDgxMmM0YjE0YzhlNDMxZDYyZTQ1ZGNjZjI3ZjBmM2VjNTE0ODNjZGI5MTRjOGQ3NiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzBjNmU0MWQyZThiMDU2ZDhlYTdlNmVkMzBhMzRjOTY3ZDYzNTY0NjY5NjY0M2EyYjlhMWJhOGY5ZTc0NDkxYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDNmNTk1NTUzOTc0NzIwMDA0MmU2NmFlMWUxZjFmODgzMjc0OWJmYzdjODE1NzMyZTFlM2JhODc0YmQ5YjQ0NyJ9"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L51-L60",
+          "version": "repo-lines-v1:sha256:8b7b3b9d8058741bdb3a85154e8296ad0253e490f406fdaa76e8c684f3d0b52c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBhZjZlYTMzYzdhNjM5NGE4MjgwNTgwOTY3YTFhNzU2ZGM4NDk4NGQ2ZDdkNTc3ODE5YmYxY2JkOTU5OTMwODAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVkZjlkNDk2ZDhmMTQzODFiNDYwNmVkMmE4NjAxZTZhMjU0NWU5ZjYxZmExN2ExYmM0Y2Q2YWY1ZjBmMmQ2YTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcyNWIxZmVmMGU1NTJjNDNlN2QwMzFiMmQ4YjU0YWQ2M2YyM2MzZmQ3NTg1NjA4NjNmYzgwYTY0MjUyMjhiMmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIwNzVmZDNkMDY5OGIwZjg3MWY3YTgxZjYwYTM0MjJiMmNiOTJlM2U5ODdjZjM1YmIxNTA0MmFkNzM2NjIxMmQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e5b8269a49654e3d87241ce58d5ee577",
+      "statement": "The materialization executes main SELECT 1, runs post-hooks, and returns the relation derived from this without an explicit cache_new call or rebuilding the relation for stream-table naming overrides.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L164-L175",
+          "version": "repo-lines-v1:sha256:8858669808ba35da2f95a0964d97ff1595f796d794f6f83fac84c47d9d5e028d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBmZmVjZGE3YWJlNzllOTMzM2Y4OWUyMmJhMzMxNDhkMmMyMGEzMWM0YmMzYWE0N2EzN2NiMmU0NzM3MDBkMzMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY3ODRkNzMyNGY1OTJkYjkyNDlkMTZjYmYzY2ViMTgyNGZjMjg2MzY3NGViNmI1MzJiZDA1MzZiNTRmM2IzYzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzZjU5NTU1Mzk3NDcyMDAwNDJlNjZhZTFlMWYxZjg4MzI3NDliZmM3YzgxNTczMmUxZTNiYTg3NGJkOWI0NDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L35-L46",
+          "version": "repo-lines-v1:sha256:2dc15bed5988cd5c880f44f42f3368d4c084de10635d33eefcd5faa4161a9d91:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVhNmRhNWExMTdhM2NmMWYwODdhYTkyMjgxZGE1YTU5ZjcxYjA1OWE2M2UzYjQyZWQ2ZjAxNjk1ZTBkZTA1MmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA3NDA5ZDNlYzkwYmZkNjcwN2I4MDQxMzZhYmFmZTQ5ZTcwOGExNmNkZmQwZmM1OTJhMDcwNzZkM2Q4YmFkNDkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY5OGY3NmMwN2U2MTVlYjFmMGNjZjVhMjg4MDliYzU4MjU1ZDM2OGNjNmU4NDg4YTE3NzRiZDU2OTI1NWMxOWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhlN2QzNDU5YmE1MGIzNTJmM2RhNTkwZDJlMGY0ZjgyMGVhMDNhYzYwZDhmMTA2MTMwYWVhMjEzZmJhZWMyMWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_db07e72504cf461baa9cdc7e2f8ca680",
+      "statement": "All mutating adapter macros use statement blocks with auto_begin=False and fetch_result=False around explicit BEGIN/COMMIT; run_query is not an independent DDL connection or commit boundary.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/AGENTS.md#L140-L164",
+          "version": "repo-lines-v1:sha256:93c76a9d701ac90637d2d2aa71fe613cc790edea2af6a5ee74b5734286ef112a:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgxNmUxOGM3ZGIyZmFjMTQ1NGM0YmQ4ZTNjZjY1ODhhZjhmZGE3MGY4MGUzMGJjZDEwY2Q5NzQ1ZTFjYjVhMWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRkZjJiMWZmOTgxZTYxZTc5NDQ1Y2Q2OGM0ZTRmMWJmODExOTZiYTY1NmZiZGVjMjU4NjhlOWIwMTkwZWRkMGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc1NWUxNjdhZTY3ZmJlODc3MmQ2YWNlYWU2YjU0MTc2YTYxYWE4OTliYTVkY2I1Yzg3NWRhYzNlMmFiYTI2M2IiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdmOTZlY2RhYzJiYWU2NjI5MDE0NThhNDhkODhlOTlmY2VhYWI3ZjEyNDkwNzViODRjNzEyNmVmYjJiMmY5YjYifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/alter_stream_table.sql#L75-L93",
+          "version": "repo-lines-v1:sha256:fb8510e9dd2e85b17815a18ef97c37929e3fb6f8f2ef3b64440655e7a357b3ba:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3ZTkwMzI3ZTE5Zjk2MDQ2YjU4NzAzODg4OTM4MDRiNmZjMzFiOGNiMjIyMWVkMWYwNjI1OTY5MjYwZGM2MzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiZjRlMDg2ODZlOTJlYmRkMTY0MGU5NTA1NTUxZDhmYmIyMDdhY2U1NjkwOWFlMzljMmFhMmZiNzgxNWU1NGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYxODk0M2EyYTMyMjhiNWI5NGYyMmNjZjZhMTFiNTgyMjcwOThiZGE1Y2QwMDljYjE5MWMyMTZlMDhlNGIwZjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM2NzI1MmE4ODc3MDc4N2RmNjJiY2MzNmJjZWQyZjA2NTBhZDM1NzdkYjY4N2RhZjgxZTJjMmQxZDkxMzEzNGUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/create_or_replace_stream_table.sql#L28-L56",
+          "version": "repo-lines-v1:sha256:0071f92ee4976ad2bf765d871595df60622c03da9157e2a2dd039d71d71c78a1:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1MjE0OGE5N2ZlOWMxYjZkODU2ZGJkZTM4MWIwYWZhYjY3NzNhNzgzMjdjNzZjNmQ0MTU1ZTZjZDhlOWYzNTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1YmJiZTMxNTRmOTFkYTk1OTQzNGZiZDgzMTM3MzMyNTMzNjhhMDY4ZWE3MWUzYmZkYjRhN2EzODgxNWMxODMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI0NTgzMDUyMDc0ZDU5ZjQwOWVmZDJhZDRkYzNhOThhOGZmMGUyNWM2YjJmZTBhZjUzNGZjMGFkMzY5YzgxMjIifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/create_stream_table.sql#L28-L56",
+          "version": "repo-lines-v1:sha256:bd1a235a3454b869de424288cb7bd2dc374d835b85e5878f82674cb6e608b010:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1MjE0OGE5N2ZlOWMxYjZkODU2ZGJkZTM4MWIwYWZhYjY3NzNhNzgzMjdjNzZjNmQ0MTU1ZTZjZDhlOWYzNTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc3YzBmYTE0MTg3NmJhNjI0NjNkZDRkNjE3MDQ1OGI4ZTU1ZTM4ZDlmYjI2Zjc1Njc1NjJlNGQ5MzQ4NzM3ZjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVlZmMyYmI4NWQ5ZDk4Y2MyM2ZlZmFmMThjZWQyOWJlYThlNjRkMTIxNmQ2ODk3Y2UyNGU1Njk2ZWQ4M2JjNTEifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/drop_stream_table.sql#L10-L19",
+          "version": "repo-lines-v1:sha256:8c12c9532b47a6aa3e4780ea8d540f06c0eb9a8fb910258c9d585be34611e93d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2MjY4YTM5N2VjMjZkNmQ4N2JlOTYwMTUwYzNlMDc1Y2Q1NjYyOGQyZWU1MTczZjg1MGYyZTVkNGU1MTc5ZjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwNjNiMGUyOTIzYTlkY2U0ZWViMzE3MjMwOWU4Yjc1ZDI3ZTliOGU3NTY5Mzg5NDAxM2RiZDcxNDZiYzZjZDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE1OTEwMTlhMDhiZGE1OGVlOGUzYmZhM2QxZDMzY2ZkNzQ4N2YwNGFmNWZkZmNlNDA3NGI1M2MxYmE0MjU1NTUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/refresh_stream_table.sql#L9-L18",
+          "version": "repo-lines-v1:sha256:4790d1584ecfe4394fb4055f23ce2e27a028d1a4a8967a1beac215395381be6c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIzMTM0ZjM0NWZjMTg1ZmEzMTliYzQyNDliNTViMDI2NjIxMjgzMjVjNzk0ZmFiNjkyZjBiNTEzNDFlZGMyMDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwNjNiMGUyOTIzYTlkY2U0ZWViMzE3MjMwOWU4Yjc1ZDI3ZTliOGU3NTY5Mzg5NDAxM2RiZDcxNDZiYzZjZDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkxZmQ5MzhjM2QyMjJjYTNlZTMzNzg3YzIwMDRjNGRjODllMjQwZGE2YjE4NzQyMDRkMzk0MTg1N2RmYjcyMzMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2a97f1b121f54faea5d0b34403528908",
+      "statement": "Lifecycle mutations are not atomic with the whole dbt model: committed drops, creates, and alters cannot be undone by failure in a later lifecycle step or post-hook.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/alter_stream_table.sql#L75-L93",
+          "version": "repo-lines-v1:sha256:fb8510e9dd2e85b17815a18ef97c37929e3fb6f8f2ef3b64440655e7a357b3ba:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3ZTkwMzI3ZTE5Zjk2MDQ2YjU4NzAzODg4OTM4MDRiNmZjMzFiOGNiMjIyMWVkMWYwNjI1OTY5MjYwZGM2MzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiZjRlMDg2ODZlOTJlYmRkMTY0MGU5NTA1NTUxZDhmYmIyMDdhY2U1NjkwOWFlMzljMmFhMmZiNzgxNWU1NGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYxODk0M2EyYTMyMjhiNWI5NGYyMmNjZjZhMTFiNTgyMjcwOThiZGE1Y2QwMDljYjE5MWMyMTZlMDhlNGIwZjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM2NzI1MmE4ODc3MDc4N2RmNjJiY2MzNmJjZWQyZjA2NTBhZDM1NzdkYjY4N2RhZjgxZTJjMmQxZDkxMzEzNGUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/create_stream_table.sql#L35-L56",
+          "version": "repo-lines-v1:sha256:110d9667f6ee1e019167acede2876076187bf1d06f8e85be147770ec59fb96bc:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0NDQzODU1ZTdlYjZiNDM4MzAwODcwMmM2ZmUyMmQ1ODA3YmIwYzc3ZjhlODEyNjNlYmU4NjIyMzJhOTdhYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgyYzMwMzI1NjNjY2E0NTBlNGI3MjhhYzYwYWU5MjhlY2E4YzVmYjZkMDUxODVlOGVmNDQ2Y2M1NWMwOWQ1YzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwZDc4ZTg0OGUzZTRkMTliMjVjYTY0MDNmNjExZDg0YjllYzVhOTMxNzUzNjlmMjMyMjgzNjE5MGY1YzRkNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVlZmMyYmI4NWQ5ZDk4Y2MyM2ZlZmFmMThjZWQyOWJlYThlNjRkMTIxNmQ2ODk3Y2UyNGU1Njk2ZWQ4M2JjNTEifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/drop_stream_table.sql#L15-L19",
+          "version": "repo-lines-v1:sha256:6071eca10102e34387a2e21f4a6db62f4f124926bf065d6ae9a6d49985b8c7db:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNDVhNzA0Mjg0ZmMxOTNlMDQyZmYwOTk1NDdlMGJlZWVhOTVjMDM2MWZhODU0NDcxZGE5NjVmM2M1ZmViYjI4ZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODJjMzAzMjU2M2NjYTQ1MGU0YjcyOGFjNjBhZTkyOGVjYThjNWZiNmQwNTE4NWU4ZWY0NDZjYzU1YzA5ZDVjMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiM2YyMDA2ZjI0ZmYwOTNiODM4NjZkNTBkMmUyMTE1MjFkMjQyNjY4MzgyMGI1MTc4YzdhZGE1MTA1ODYzM2ExNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjIsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTU5MTAxOWEwOGJkYTU4ZWU4ZTNiZmEzZDFkMzNjZmQ3NDg3ZjA0YWY1ZmRmY2U0MDc0YjUzYzFiYTQyNTU1NSJ9"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/materializations/stream_table.sql#L77-L173",
+          "version": "repo-lines-v1:sha256:47097b409c57512c510771d2aad3b033b2dedb9cddde798b4d3ec225f2a08688:eyJzZWxlY3RlZExpbmVDb3VudCI6OTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI2MGJmODZjZjM2MjY0YzhkN2ExMTM1ZjQ1ZTQwMzYzNWU0MDk1ZThjYjc2NzBjMGUxNzVmZGQzZjk2MDcxMWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE5OWQ2YmVkZjBiOTUxYmNkYjc1N2ZhMWU4MmE2YWI4YTlhMmQzNDJkZmM1YzZiYThjMjNmN2FmMmFiZmUwYmQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNkMzZmMWM5YjhlMTViOTNiMDUxOGVmOTkwMDQ0NGUzNjNjZmRlODE2YmQ4NTExNTg4OWQxYmQyNmEwZDI4YTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhODQwYzQ5MmYwOTdiYmU1NWVmOTEwOWUxZjU3ZmM3ODczZWQ5NTZkZWYwMTRmMjBjZTBjZTllMTQyNmNhYjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b4210c1f8286455c9114734b9b6e7d3f",
+      "statement": "String-valued API and catalog inputs use dbt.string_literal, but compiled defining queries are embedded with fixed $pgtrickle$ delimiters and numeric/boolean options are rendered directly, so universal arbitrary-string escaping must not be assumed.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/alter_stream_table.sql#L78-L90",
+          "version": "repo-lines-v1:sha256:d28639b4bceaf5d4f5ff1da3febb7f15e11c0da8cdb836f7c4afe74940b09fe3:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkNTI0OWI3ODgyYWRmMjRmZTM0Y2ViNmQ3YWE2NDVjMjU4NTg1ZTdiM2VjMzUwNjY2ZDcyNmRlMDNlMjliYjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2Y2IzNzJlNTYzZTM5NGUzYzUyOTUzMDM3MmZkOGYwYWE3Mjc1NzhkYzhjY2MzMmUwYzcxODU0OTkzMDA5NmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY5MjU0ZTA2NWNjNDc1YmYxMjdjZGJlZmRiYzM2ODMwZWRhY2NhY2JmZDIzNDI3NDI5ZTI1NTdiM2EzZGQxOGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQwZDdmZGEyOTE5ZmQxZTE2OGQ2ZDk5MjBmMzNiYTQyMjFmMTc2NGQyZTU2ODg4MDZkOTc4M2U0MTM3NjA1NzkifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/create_or_replace_stream_table.sql#L35-L54",
+          "version": "repo-lines-v1:sha256:a1c2109cc621af0e4402f73ae47c456e80fe1a8b83755fb70c13ec8cfb782e94:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiZTE4YzJkMzFjZWM1YWI1YWE5YTM0Nzg2MGFjYTNkZjhlMGJiZThjOThmY2E1ZTBlMmZiY2Y4MjUwNjlhNWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwZDc4ZTg0OGUzZTRkMTliMjVjYTY0MDNmNjExZDg0YjllYzVhOTMxNzUzNjlmMjMyMjgzNjE5MGY1YzRkNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFhMmNlM2YwOTUzY2UyNzFhN2MyOGU1MWYxYThkYWU1ZDQzMDI5ZWQ2NjEyZTM3NDBjMjZhMjlhNmE2ZDA0MjIifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/adapters/create_stream_table.sql#L35-L54",
+          "version": "repo-lines-v1:sha256:b233ce61e98382c9ed48aea2348468ceb820727b63a2167271d40e53746e911c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0NDQzODU1ZTdlYjZiNDM4MzAwODcwMmM2ZmUyMmQ1ODA3YmIwYzc3ZjhlODEyNjNlYmU4NjIyMzJhOTdhYjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0ZTQyMDhjZDZmZmI4YzRhMzU0N2IyZjU0YWRhMTk5NzhjM2YzNjVlNzhmOTUwMmVmNTE0NWNkZDJhYTg1NDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwZDc4ZTg0OGUzZTRkMTliMjVjYTY0MDNmNjExZDg0YjllYzVhOTMxNzUzNjlmMjMyMjgzNjE5MGY1YzRkNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQ4MmVlMmEzOTQyMzA4NGQ1MzYyNjk3YzJlOWY0NWZlMjY5ODhmY2I1NjEzOGFiYjRlZWU4MDkwNmU2N2NjODAifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/stream_table_exists.sql#L23-L28",
+          "version": "repo-lines-v1:sha256:08fed1a6d81a3936449efa96202b476b7296f767214892076ab8a6b4d3cbd183:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjQ3MjhkZjlhMGY2MzUzZDZlZWIwMDc1ZjE1ZTc1ZTk5NzY5ODI4ZTYzNzk1ODlkODU5ODlmMWU3ZWNkYTBmMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiM2U4NzRkZjE2M2Q5N2Q1MmQ2YWZhNjU0MWU2ZGM5NzRhNzM1MzYyNWU3ZjEyOTM5ZWZhZjIxMzM2MDZlMTQ3ZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYjhmMjU3MTMyNmE1MTlhYmNmOWQzNTUwYzg5MGFjZDI0ZDEyN2M0Yjg5ZTJjZWU3OTNjNWIwZTYwMTU3NzNiYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDg5ZTJjM2EyN2Y5OTRiYTllZTIyNWE1NmM4NWU4OTgzYzAyOTJjYWE5M2RlNjI3NTgzN2JhZTU1NGZiNTVkMCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_acd7ed2e133840f282f52cda669f0e79",
+      "statement": "Package change guidance requires execute guards for run_query, result/row checks before indexing, none for missing metadata, focused prefixed wrappers, no Python adapter or dispatch, preservation of hooks/reporting, integration testing, and changelog updates.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/AGENTS.md#L212-L254",
+          "version": "repo-lines-v1:sha256:69b8aa863094b571cb8b52c870e568baa81dfb6b7b2057c2bad8d822c1ca309e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA1ZjA2ODMxYmFkYmIzZDNlNDgwOTg2MzFhOTZiNjY2NzE2MDE1NjMzYjU2MzUwZTNlYTk1ODM0MmFiNjBjYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwZmYwOTAwN2ZjODZiNjMwYTNmM2FmYjRiODBiODdlMzY2NWY0MmU2MmVhNDMwMGYwMTgzMzRmZDBiNjU1M2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE4ZjgzMzIwNTE3NTY3Yzg1YjdkN2ZmMGYyYTBjNDIwOTE3OTE3NTgyZDA2YjhlYWE2NzgzNzk0ZDc3ZDI5MzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/AGENTS.md#L92-L164",
+          "version": "repo-lines-v1:sha256:06dab99b283d4cdc8d27083f0d80d6d318f22039d5be2d9dcb5b5a498a3849a6:eyJzZWxlY3RlZExpbmVDb3VudCI6NzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5MTcwNTZhNjFlYmM5ZDk1ODA0YTFlODZmOThkZTMyYjUxNGRhYWE3YjIzZDU4N2FmOTMwZjJlMDQ0YjRlNWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRkZjJiMWZmOTgxZTYxZTc5NDQ1Y2Q2OGM0ZTRmMWJmODExOTZiYTY1NmZiZGVjMjU4NjhlOWIwMTkwZWRkMGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAxZTFiY2JkOTgwOGVhMGFiNzg0OWQxZDkxYjQ2YTE4NzUxODZjZjk2Y2JmZjc4ZGJiNmU3ZGFjNmI5ZGVkMWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdmOTZlY2RhYzJiYWU2NjI5MDE0NThhNDhkODhlOTlmY2VhYWI3ZjEyNDkwNzViODRjNzEyNmVmYjJiMmY5YjYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b79495aee52d483eb92be82985aef76a",
+      "statement": "The existence, capability, and metadata helpers guard execution and return false/none defaults, but some operations directly iterate results.rows without checking results first.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/operations/check_cdc_health.sql#L12-L25",
+          "version": "repo-lines-v1:sha256:9f08f7b3696a16c913382239b8a9fba52974ae4116893684d9f17639e0105237:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdiZDQxN2VlNjA0Nzc2NGMxYzJmNjUwNDlhNDExODAwZDQ1OGVlM2VmYWVhYzRhNzAzNGM3OGVlODJmMmFkNzYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNjNDQ0NDMzODlmNjkzZmI0OWU2YTIyMTRlNmZkOTQzZGVjYzVkODNiOGJhZDRlNTVkYmFjOTQ2ZmY2Yjk4NjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJkYThhY2JmMTQ3MDdmNzI3OTAzNTk1ZDVjMWJlYmIxOTM1YmQwZjQ1NTA2MTBkNWI1ZTlkZWEwZjdmYmY2MzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUxYjY2MjA2MmM5N2RiNzRmZmY0ZTAwMTY4M2I0ZGZjNjZmOWEzMTdiMWI5NzhiMWZlNjQ1NThkYWJjZTZhZDAifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/operations/refresh_all.sql#L80-L84",
+          "version": "repo-lines-v1:sha256:e683b1493d2e81401ff7d07584bd447645f7ae1c45bfe8361c5f3ee69177bf5f:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGI5MDczMWJhNjI3YzdkZGZiNTJlYmRkZjhiOWJhYTRkNWE2MTM1N2Y0YmE0NDIxMWIyZDI4M2UzNmM2YzQwZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTdjMDc0ZWQ1MTZlYWNkMTkwZGJlOWZiYzc3M2Y4Y2EzM2ZkMmVkNWUzNTIwMDAwMDAxOTUyOTNiMTg2YTNjNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDJkOWUwZjVhZjMzMDNkY2YzOWI3M2ZhYWQyMmY5YzY5OGFiZTkzYTBiODQ3MzgxYjk2NmQyYzEwMjU1OWMzNyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYTUxMjQwZDVmMmQ1YWRhN2ViNmZhYTJiZWNiZWVlZjZhNjQwYjI2NzQ5NThjODUzYWY2MTVkZDNmYWZjZDA5MCJ9"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/get_stream_table_info.sql",
+          "version": "repo-file-v1:sha256:8c0d383ddd89a6232fee73cb6ba269968777e0022344f01166c8c312e2d93b88"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/has_create_or_replace.sql",
+          "version": "repo-file-v1:sha256:ce58d53e2b5ed103ea5bb7cce7964e9ea6e297e04f3a448ca76a7b249def1e99"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/stream_table_exists.sql",
+          "version": "repo-file-v1:sha256:59fdab3dac8891521841f07889efe948e336043831f64cf7198af60c0a23c12f"
+        }
+      ]
+    },
+    {
+      "id": "claim_a1f60c5615974c8db9291f7eff279f73",
+      "statement": "Single-table refresh qualifies the supplied name, while refresh-all selects graph-managed models using catalog dependency order and has an existence-based fallback for tables not found in its active-table ordering.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/operations/refresh.sql#L15-L24",
+          "version": "repo-lines-v1:sha256:6f84540c20d7c5c3c0c48c664a51d4b05d5bd5c8c4b5b394d3e3ed9b09dcdc06:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJkMzA5ZjhhZDNmZmFmNDcwM2YyMDQ4ZjJkNjJmMzI1YjAzYTVkMzllMjk1MDg5ZmQ2OTRkMTVjZTUzM2RmYTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhkY2M0MzczNDc0OTBjODYzZmZhM2VmODJlYzZjYjViZjQ3M2RlMDljZGRkOTI1YmYzZmI3MGFmNTZhZmQzZjgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVjYzVjZTI1OWVkZWQ2MDk3YWU5ZGM5OWFhMTFjMDcxYjZiZGJhZjk5MjY5MmRhYWI1YjIxZmM4ZGM2YTlhYmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/operations/refresh_all.sql#L19-L110",
+          "version": "repo-lines-v1:sha256:d76a99b7c51de92e80c7fdfad2c7fa2da00b83965891683287c2ecbf5965e5b1:eyJzZWxlY3RlZExpbmVDb3VudCI6OTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU1ZTc0Yzg4NzM2NWQ1MmMyMjY4NTlkZGQzNGE3MjZhNTI1NmYzYWVlNGExMTE0NGMxYjg3YTVhNWNjZGU4OGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViYTRiYzA3ZmY4MWEzMzZkMTAzZTBhNDIxOWU2NzIwNTNhOWZlNzdlMzg5YTA5ZTg4ZTk1NDIxNTQ3YmY2ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcyZDA3ZWZmYjE0YjdmZjc5Y2EwM2E0ZjRiZjgwZTk5MmQ0YThhMzNkZjc1YzhjMmRhNWU5MWQ3MjgxZjVhM2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9a5b5eb1339a4bdcb812844a42bed6a3",
+      "statement": "Graph-scoped drop only deletes catalog-present stream_table models, whereas force-drop enumerates and drops all catalog stream tables including non-dbt tables.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/operations/drop_all.sql#L19-L53",
+          "version": "repo-lines-v1:sha256:0aa879a1753b28f9750b0d3f4d39e43d4e20c45ad0b593544731659119fda2ef:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIyNDRhNDZlOTAwOTQ1MzkyMDA5ZjgzNjFkNmNjOWQxZjdkM2M3MTAyNzY2NzFjNDlkYTBkZTcyM2U4MTQxMjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViYTRiYzA3ZmY4MWEzMzZkMTAzZTBhNDIxOWU2NzIwNTNhOWZlNzdlMzg5YTA5ZTg4ZTk1NDIxNTQ3YmY2ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjkxNzcyMDE5NWRiODJkZTY5ZGNkOTc2YzlkMTgyNjg3ODI1MzQ0MDNiZWJkMTEyNTg3ZmE1ZWU5OGYyYzA1MjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d0a6d6333d6d4034be68b1e7e29487db",
+      "statement": "CDC health checking raises a compiler error for unhealthy returned sources; the status helper classifies drained before paused, errors, staleness, and healthy, returns not_found for missing results, and exposes CDC pause and force-full settings.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/operations/check_cdc_health.sql#L11-L31",
+          "version": "repo-lines-v1:sha256:7390988839fa0a03c05456a0f5104c1f9692e27b6512f5b9b275a93fe130822c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJjOGFjNGZkZTdjYzNiYTUyNTI1ZmM4MzI2ZTBlY2ZlYTNiMTM5MzYyZTE5NDA0MzRkNjY2MjZiMTlmZWY3NmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImViYTRiYzA3ZmY4MWEzMzZkMTAzZTBhNDIxOWU2NzIwNTNhOWZlNzdlMzg5YTA5ZTg4ZTk1NDIxNTQ3YmY2ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJmYzFjMDU1Yzc4YzU5MGIwMDUyOTUxYWRkODBlNTc4ZmIyNjNiZDI4MzBhMGJlZDRkNWFkZTIwNmYyOWU5NzgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/stream_table_status.sql#L29-L100",
+          "version": "repo-lines-v1:sha256:e629e397896163b8c20018a765ebfe6d223ad4c9f4e9d343ceb78b11d51c98e3:eyJzZWxlY3RlZExpbmVDb3VudCI6NzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNmZWY4ZWRhNTU5YmQ3ZjhlOWIwNTMwNWU4N2IxY2E1YWU1ZjMzZTlmZTUzN2Y3ZjgzMzkxOGVmMGY3ZjU5OTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE2NjMyNmJiYTliNjM0MzcwYzgxNTFjM2Y3Y2E4ZmYzZWFhNzNiYzVhNDc1MGFiYjZlNGJiMmU0NjhhNWZkZDQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMyOTg4MWRjMzE0NTFhNGMxZmNhNjE3NzI0OGViYWI2MGEyMzQzNGI5NDdiMmQxYzczNTE4MDU2NWM3MzAwODMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e5e6b87cde5f4a64a6fd41775a11626e",
+      "statement": "The generic stream_table_healthy test directly queries the monitoring view for pause, errors, and staleness; missing catalog entries produce no failing rows and it does not reproduce the helper's drained/CDC-pause classification.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/macros/utils/stream_table_status.sql#L61-L72",
+          "version": "repo-lines-v1:sha256:9a45200ed7ac5b347b21dfafc56b6bde7338294a4d4fc1b7e55796eb5bc9896b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhNDc0MTk2YzdlYWMyM2UzMTllNzk2MDI2MTI2ZWEyOGE0YmJhMDM0ZjdlZTBmODFlMmQ0Mjg2ZDk5OWJmY2IiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI4NDcxOTUyODI2NzQzMjkyNzEyYTAzZTI5ZWMwNDM2NzY4OGFjNzJlY2YyZWM0YzYxYTY5ZTRjMjczMTg5YWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM0NzJjOWRjYWVmZTg3NjNkOTQ5NTY1ZmRmNzY5NzBkYWFiYjIxOGUzY2NjM2U0MzQ4NTQ5MDNiZGQzNmE0OWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM0OTFjMDE2ZjNmMzY4YjliNTlhMTYxMjkzOWQ2OTk5ZWFiMzI5MDk2Yjk2MjFjYjc2NDU0MGM3Mjg3NWI1YTMifQ"
+        },
+        {
+          "resource": "repo://dbt-pgtrickle/tests/generic/stream_table_healthy.sql#L18-L48",
+          "version": "repo-lines-v1:sha256:3a3551066d6d459a97069686a573769ac5d6b9d7c88febfc2db5736fa6707e08:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE3NDBmZWE0ZmUxNDFkZGZiMzkzMGVjYWZkYzQ4ZDFhZjVhYjc3MWEyNjVlNDMxYjg2MDc1NjQzOTgyODg3MjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlkMWY0MmQ2NjlkNTUzMjE1NzUzODM3NmU4NGQyZWExNDJhM2RkMjZlMThmYzgwYjA5ZDBmYWYyZDdlYzcwYTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNlZDM4MmM1NjJhZmE1ZGNhZGU4NTcyOTllNzAwMDU2MGZkZjRlMzU2MmMwNDIzNjk0MzhjMzFiZDQyMTA1ZGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_67f21f93ae52413fb87de346c914e4f7",
+      "statement": "just test-dbt rebuilds the extension E2E image and just test-dbt-fast reuses it; the runner starts a fresh container on default port 15432 and removes it unless keep-container is requested.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/integration_tests/scripts/run_dbt_tests.sh#L22-L108",
+          "version": "repo-lines-v1:sha256:882f9e1da4f8091306dd0bb1c6698dbf9989a729cc9de79fa0929519c788c28a:eyJzZWxlY3RlZExpbmVDb3VudCI6ODcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwMGM3OWRlZjgyZmYyNDM5MWNjYjFmMTMwNjVlNWFmNjdhOWFkMGI0ZWY1Y2RmZWU0YjE4NWM2OTY3NTE4YmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJlNjhiMjVhYjQwNmVlYjJjMDgxN2EyZGE4ZTczMDc2OWI4ZTVhY2Q1N2I4YzkzYzQwNjY1NWVkOGRjOGE5ZjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFjNTdkN2FhMzViZWUzMWM0NzFlOWJiMWNjYzAzZDU3YTA3MmIwMWExMmViYjE1MjQ4NTc3NzAyZTU2MWZkN2EiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNlZjVmZjE1MjMwMzI0MjRhODI2YzIzMDQ1NTA2NGI4NGRlNjg5ZTVkMWNhMWE1YzJmNTdkZDk5NmZhMjgyMDIifQ"
+        },
+        {
+          "resource": "repo://justfile#L600-L610",
+          "version": "repo-lines-v1:sha256:f02b12da5c4c5c3ec8dd05214524251f07f8abe82e2a364748b59e07e801528a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhMDhlOTY2NzI1YjYwYzNhMDRiYjhhZTAwY2M1ZGJmYmUyZDljYjU3YTM2ZGJkZmY4MjJlMDI2NmYxZGU2YWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2MzZmYzNjMjY3NmQzZWQ2ZThkMjJhMWY2MDEyZGY0MjVlMWJhYmVhNGY1NjQ4ZTJlNTJlMTY0OTViYTE5YjIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ0M2Y5OTI3YWE3MDk4ODk1NTk1YWFiN2U4YzI1NDE5Y2NhNTQ1MTI5OTYyZTRlNzg0OTRkNGRhNjdlMDQ4ZTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiNTdiYjM1NGZjZDY2MWI0MjExNTlkNDMyZWRkOTcwMzM3YTA3N2UyMGIzNDY2ODIxMThmYjE5MGFlMTQ3NjkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9a9285171f744c768d21fd2a6901d30d",
+      "statement": "The integration runner exercises dependencies, seeds, initial creation, a schedule change from 1m to 3m, repeated runs, full refresh, refresh/freshness operations, and graph-scoped drop; its post-alter assertion is excluded from initial and recreated-state tests.",
+      "evidence": [
+        {
+          "resource": "repo://dbt-pgtrickle/integration_tests/scripts/run_dbt_tests.sh#L175-L258",
+          "version": "repo-lines-v1:sha256:9f126e7f6bac56b0daaabb677e4b8e68e32abab9f5be1ab41ee9a8cfad1d1b82:eyJzZWxlY3RlZExpbmVDb3VudCI6ODQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNiZDRhYmIwOTc0ZjkwMmU4ODZiZWIzNjljODg3NjBiZDBmZjcyZTY4N2Y3OGY1NzQ5NDI4YTNiMjQ0ZDk1NGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzOGI5YTY2NjhmOWVmZWNjMDkzZmVmMTA3ZmI1MGJkMTM4N2NmOWIzOGExMjI5Zjk5OTliMmIxZjFhNTFhYjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZkZjAzN2NkMGQzN2JlOTI1ZTUyYTI0N2U1NzEyODAxYTMzNjMwYzU2NjZmNGMzNWUwZGU0MzZkN2Y0NmQxMGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc4OTI4ZTRkMWI2YjI1MjY5ZTk2NTM2OGVhMjg3NTcxZWViODUzMzNkNWMzOTk1NDVjM2M2MjRhZWUwMzQyNTIifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.7.2",
+    "at": "2026-10-21T18:25:47.780Z"
+  }
+}
