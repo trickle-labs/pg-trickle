@@ -462,24 +462,40 @@ async fn test_autorefresh_staggered_schedules() {
     )
     .await;
 
-    // Wait for initial cycle at every layer.
-    wait_for_chain_refresh_cycles(
-        &db,
-        &["ars_l1", "ars_l2", "ars_l3"],
-        Duration::from_secs(30),
-    )
-    .await;
+    // Creation may have already initialized every layer. In that case no
+    // second refresh is required until source data changes; waiting for
+    // last_refresh_at to advance would time out on an already-settled L3.
+    // Synchronize on the initial result rather than an unrelated extra tick.
+    let initialized = db
+        .wait_for_condition(
+            "initial staggered chain result",
+            "SELECT (SELECT count(*) FROM ars_l1) = 1 \
+                    AND (SELECT count(*) FROM ars_l2) = 1 \
+                    AND (SELECT count(*) FROM ars_l3) = 1 \
+                    AND EXISTS (SELECT 1 FROM ars_l3 WHERE id = 1 AND result = 21)",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
+        .await;
+    assert!(initialized, "staggered chain should produce its initial result");
 
     // Now insert new data
     db.execute("INSERT INTO ars_src VALUES (2, 20)").await;
 
-    // L3 should eventually converge — give it enough time for L2's 3s schedule
-    let refreshed = db
-        .wait_for_auto_refresh("ars_l3", Duration::from_secs(60))
+    // L3 must converge after L2's slower 3s schedule. Assert the result,
+    // not just a timestamp advance, which can precede propagation.
+    let converged = db
+        .wait_for_condition(
+            "staggered chain after source insert",
+            "SELECT (SELECT count(*) FROM ars_l3) = 2 \
+                    AND EXISTS (SELECT 1 FROM ars_l3 WHERE id = 2 AND result = 41)",
+            Duration::from_secs(90),
+            Duration::from_millis(200),
+        )
         .await;
     assert!(
-        refreshed,
-        "ars_l3 should eventually auto-refresh after base mutation with staggered schedules"
+        converged,
+        "ars_l3 should eventually converge after base mutation with staggered schedules"
     );
 
     // Verify final correctness
