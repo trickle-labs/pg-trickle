@@ -22,6 +22,8 @@ SERIAL_CASES = [
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_semantic_controls_are_detected"),
+    ("e2e_v043_tests", "test_t_a44_10_insert_correctness"),
+    ("e2e_v107_wal_transition_tests", "test_v107_auto_wal_transition_captures_changes"),
 ]
 
 

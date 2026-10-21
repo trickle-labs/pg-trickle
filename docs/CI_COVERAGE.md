@@ -54,9 +54,12 @@ The bounded full suite disables test retries so a correctness failure cannot
 be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
 decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
-case and seven WAL receipt-recovery cases that use advisory-lock witnesses run
-one thread at a time after the parallel full suite. The paired full allocations
-also run one at a time so restart and cutover assertions do not overlap.
+case, seven WAL receipt-recovery cases that use advisory-lock witnesses, the
+D+I insert oracle, and the automatic WAL-transition case run one thread at a
+time after the parallel full suite. This preserves their exact assertions
+while isolating shared worker state and barrier timing from parallel E2E load.
+The paired full allocations also run one at a time so restart and cutover
+assertions do not overlap.
 
 The remaining 51 light targets use the installed extension for parser,
 manual-refresh, DDL and operator checks. Their second full-harness invocation
@@ -459,6 +462,18 @@ execution minutes and 224.867 summed creation-to-start minutes. The full jobs
 took 62.450 minutes before and 43.817 minutes after; the failed, unequal runs
 are not a cost comparison. Failed/cancelled experiment overhead is now
 2,960.950 execution minutes.
+
+The [next matched replay](https://github.com/trickle-labs/pg-trickle/actions/runs/39616553797)
+passed both integration checks and all six light shards. Its broad baseline
+full suite ran 2,174 tests: 2,172 passed and two failed. The D+I insert oracle
+found one missing row, and `test_v107_auto_wal_transition_captures_changes`
+timed out with capture still in `TRIGGER` instead of `WAL`. The separately
+isolated atomicity suite passed 12/12, the eight serial WAL/RLS cases passed
+8/8, and recovery repetition passed 10/10. These failures appeared only in
+the broad parallel invocation; both cases are retained and now run serially
+after it. The bounded full replay for this run was still running when this
+record was added, so this pair is not a valid cost comparison. Do not report
+a speedup from it.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):

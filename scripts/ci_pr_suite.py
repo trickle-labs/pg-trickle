@@ -19,6 +19,8 @@ SERIAL_CASES = [
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_received_receipt_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_trigger_fallback_undecoded_commit_requires_rebaseline"),
     ("e2e_wal_receipt_recovery_tests", "test_wal_recovery_semantic_controls_are_detected"),
+    ("e2e_v043_tests", "test_t_a44_10_insert_correctness"),
+    ("e2e_v107_wal_transition_tests", "test_v107_auto_wal_transition_captures_changes"),
 ]
 
 
@@ -81,7 +83,7 @@ def main() -> int:
     status = subprocess.run(command, cwd=ROOT).returncode
     if status:
         return status
-    # Keep witnessed barriers isolated from the parallel suite's container load.
+    # Keep shared-worker and barrier cases isolated from the parallel suite load.
     status = subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",
         "--test", "e2e_refresh_atomicity_tests", "--test-threads", "1", "--retries", "0",
