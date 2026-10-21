@@ -11,6 +11,8 @@ on:
       - 'INSTALL.md'
       - 'CHANGELOG.md'
       - 'ROADMAP.md'
+      - '!**/AGENTS.md'
+      - '!docs/agents/openwiki.md'
   workflow_dispatch:
 
 # Only one deployment at a time; cancel in-progress runs on new pushes

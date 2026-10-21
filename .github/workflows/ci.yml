@@ -16,9 +16,23 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/AGENTS.md'
+      - 'openwiki/**'
+      - '.openwikiignore'
+      - '.agents/skills/openwiki/**'
+      - '.codex/config.toml'
+      - 'docs/agents/openwiki.md'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    paths-ignore:
+      - '**/AGENTS.md'
+      - 'openwiki/**'
+      - '.openwikiignore'
+      - '.agents/skills/openwiki/**'
+      - '.codex/config.toml'
+      - 'docs/agents/openwiki.md'
   schedule:
     - cron: '0 3 * * *'  # Daily 03:00 UTC — full matrix
   workflow_dispatch:
@@ -58,7 +72,7 @@ jobs:
       packages: read
     uses: ./.github/workflows/ci-allocation-comparison.yml
 
-  # Keep contracts on every PR, including .github/workflows/release.yml and
+  # Keep contracts on every selected PR, including .github/workflows/release.yml and
   # tests/release/** changes; job selection only defers expensive runtime work.
   release-qualification-contract:
     if: ${{ !inputs.compare_pr_allocations }}
