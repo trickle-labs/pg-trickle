@@ -489,10 +489,7 @@ async fn run_update_to_null_case(mode: &str) {
         ],
         "DELETE must preserve the old value; INSERT must contain SQL NULL"
     );
-    assert_eq!(
-        cdc_mode(&db, &source).await.as_deref(),
-        Some(expected_mode.as_str())
-    );
+    wait_for_cdc_mode(&db, &source, &expected_mode).await;
     let reinit_reason: Option<String> = db
         .query_scalar_opt(&format!(
             "SELECT refresh_reason || ': ' || refresh_reason_detail \
