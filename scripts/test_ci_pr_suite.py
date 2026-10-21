@@ -31,7 +31,7 @@ class AllocationTests(unittest.TestCase):
             "./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0",
             "--no-fail-fast", "--test-threads", "1", "--test", "e2e_rls_wal_tests",
             "--test", "e2e_wal_receipt_recovery_tests", "--test", "e2e_v043_tests",
-            "--test", "e2e_v107_wal_transition_tests", "-E",
+            "--test", "e2e_v107_wal_transition_tests", "--test", "e2e_lsn_contract_tests", "-E",
             "test(=test_rls_bypassrls_owner_differential_wal_matches_query) | "
             "test(=test_wal_recovery_before_receipt_commit_preserves_committed_changes) | "
             "test(=test_wal_recovery_after_receipt_commit_before_ack_converges_once) | "
@@ -41,7 +41,8 @@ class AllocationTests(unittest.TestCase):
             "test(=test_wal_trigger_fallback_undecoded_commit_requires_rebaseline) | "
             "test(=test_wal_recovery_semantic_controls_are_detected) | "
             "test(=test_t_a44_10_insert_correctness) | "
-            "test(=test_v107_auto_wal_transition_captures_changes)",
+            "test(=test_v107_auto_wal_transition_captures_changes) | "
+            "test(=test_lsn_manual_refresh_fixed_snapshots_preserve_frontier)",
         ]
         with patch("sys.argv", ["ci_pr_suite.py"]), patch(
             "ci_pr_suite.subprocess.run", side_effect=[

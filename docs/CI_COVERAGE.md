@@ -55,9 +55,10 @@ be hidden by a later successful attempt. Investigate a failed run before
 rerunning it; ordinary infrastructure retries remain an explicit operator
 decision rather than an automatic correctness verdict. The RLS/WAL owner-mode
 case, seven WAL receipt-recovery cases that use advisory-lock witnesses, the
-D+I insert oracle, and the automatic WAL-transition case run one thread at a
-time after the parallel full suite. This preserves their exact assertions
-while isolating shared worker state and barrier timing from parallel E2E load.
+D+I insert oracle, the automatic WAL-transition case, and the fixed-snapshot
+LSN case run one thread at a time after the parallel full suite. This preserves
+their exact assertions while isolating shared worker state and barrier timing
+from parallel E2E load.
 The paired full allocations also run one at a time so restart and cutover
 assertions do not overlap.
 
@@ -467,13 +468,18 @@ The [next matched replay](https://github.com/trickle-labs/pg-trickle/actions/run
 passed both integration checks and all six light shards. Its broad baseline
 full suite ran 2,174 tests: 2,172 passed and two failed. The D+I insert oracle
 found one missing row, and `test_v107_auto_wal_transition_captures_changes`
-timed out with capture still in `TRIGGER` instead of `WAL`. The separately
-isolated atomicity suite passed 12/12, the eight serial WAL/RLS cases passed
-8/8, and recovery repetition passed 10/10. These failures appeared only in
-the broad parallel invocation; both cases are retained and now run serially
-after it. The bounded full replay for this run was still running when this
-record was added, so this pair is not a valid cost comparison. Do not report
-a speedup from it.
+timed out with capture still in `TRIGGER` instead of `WAL`. The bounded full
+suite ran 1,206 tests: 1,205 passed and
+`test_lsn_manual_refresh_fixed_snapshots_preserve_frontier` failed with a
+serialization error during a concurrent refresh. The separately isolated
+atomicity suite passed 12/12, the eight serial WAL/RLS cases passed 8/8, and
+recovery repetition passed 10/10 on both allocations. All three newly exposed
+parallel-load cases are retained in the one-thread step for the next replay.
+This pair used 11 jobs, 219.600 execution minutes and 319.717 summed
+creation-to-start minutes; its full jobs took 65.683 minutes before and
+46.400 after. Failed suites make it an invalid cost comparison. Failed and
+cancelled experiment overhead is now 3,180.550 execution minutes. Do not
+report a speedup from it.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
