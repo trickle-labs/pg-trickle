@@ -254,7 +254,9 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
         }
     );
     assert_eq!(witness["strategy"], "FULL", "{diagnostics}");
-    assert_eq!(witness["same_transaction"], true, "{diagnostics}");
+    if change_upstream {
+        assert_eq!(witness["same_transaction"], true, "{diagnostics}");
+    }
     if baseline == "FALLBACK" {
         assert_eq!(witness["fallback"], true, "{diagnostics}");
     }

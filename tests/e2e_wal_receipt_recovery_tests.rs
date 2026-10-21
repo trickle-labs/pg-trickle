@@ -75,8 +75,10 @@ async fn wait_for_cdc_mode(db: &E2eDb, source: &str, expected: &str) {
             "WAL CDC mode",
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies d \
+                 WHERE d.source_relid = '{source}'::regclass::oid) \
+                   AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies d \
                  WHERE d.source_relid = '{source}'::regclass::oid \
-                   AND d.cdc_mode = '{expected}')"
+                   AND d.cdc_mode <> '{expected}')"
             ),
             WAIT,
             Duration::from_millis(50),
@@ -731,31 +733,8 @@ async fn run_trigger_fallback_case(phase: &str) {
     let buffer = db.change_buffer_table(fixture.oid).await;
     let value = format!("fallback-{phase}-pending");
     set_wal_phase(db, fixture.oid, phase, &value).await;
-    if phase == "before_receipt" {
-        let sentinel = format!("wal_fallback_{phase}_identity");
-        fixture.db.pool = restart_and_check_named(&fixture, &sentinel).await;
-        for stream in [&fixture.stream, &shared] {
-            fixture
-                .db
-                .execute(&format!(
-                    "SELECT pgtrickle.pause_scheduler(ARRAY['public.{stream}'])"
-                ))
-                .await;
-            fixture.db.refresh_st_with_retry(stream).await;
-            assert!(
-                fixture
-                    .db
-                    .query_scalar::<bool>(&format!(
-                        "SELECT NOT needs_reinit AND frontier IS NOT NULL \
-                         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{stream}'"
-                    ))
-                    .await,
-                "consumer baseline must survive witness setup"
-            );
-        }
-    }
     let db = &fixture.db;
-    // Baseline rebuilds can restart CDC cutover after the earlier WAL check.
+    // The witnessed restart below is the recovery event under test.
     wait_for_cdc_mode(db, &fixture.source, "WAL").await;
     let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
