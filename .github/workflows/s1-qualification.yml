@@ -184,7 +184,53 @@ jobs:
           current_head=$(git rev-parse HEAD)
           test "$archived_head" = "2d102645ccc6779c508514ee22b4a55603bdc281"
           test "$(git -C _s1/historical rev-parse HEAD)" = "$archived_head"
-          (cd _s1/historical && shasum -a 256 -c "$GITHUB_WORKSPACE/$evidence/build-evidence/compiled-inputs.sha256")
+          # The historical build manifest contains five inputs from its
+          # archived build context that differ from its reported Git SHA.
+          # Verify all 429 entries and record this exact divergence; do not
+          # silently claim those five inputs or the current source matched.
+          set +e
+          (cd _s1/historical && shasum -a 256 -c "$GITHUB_WORKSPACE/$evidence/build-evidence/compiled-inputs.sha256") \
+            > _s1/evidence/historical-compiled-inputs.log 2>&1
+          compiled_exit=$?
+          set -e
+          HISTORICAL_CHECK_EXIT="$compiled_exit" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          archive = Path("benchmarks/s1/qualification/local-arm64-1191")
+          manifest = archive / "build-evidence/compiled-inputs.sha256"
+          log = Path("_s1/evidence/historical-compiled-inputs.log")
+          entries = [line for line in manifest.read_text().splitlines() if line.strip()]
+          statuses = [line for line in log.read_text().splitlines()
+                      if line.endswith(": OK") or line.endswith(": FAILED")]
+          failed = sorted(line[:-len(": FAILED")] for line in statuses
+                          if line.endswith(": FAILED"))
+          known = sorted((
+              ".dockerignore",
+              ".github/workflows/s1-qualification.yml",
+              "benchmarks/s1/Dockerfile",
+              "benchmarks/s1/check_result.py",
+              "benchmarks/s1/test_check_result.py",
+          ))
+          assert len(entries) == len(statuses) == 429, (len(entries), len(statuses))
+          assert failed in ([], known), {
+              "error": "unexpected historical build-context divergence",
+              "failed": failed, "known": known,
+          }
+          assert int(os.environ["HISTORICAL_CHECK_EXIT"]) == (1 if failed else 0)
+          report = {
+              "status": ("HISTORICAL_BUILD_INPUTS_DIFFER_FROM_COMMIT"
+                         if failed else "HISTORICAL_COMMIT_INPUTS_MATCH"),
+              "archived_compiled_inputs": len(entries),
+              "verified_matching_inputs": len(entries) - len(failed),
+              "unverified_build_inputs": failed,
+              "historical_rate_is_current_head_qualification": False,
+          }
+          Path("_s1/evidence/historical-input-integrity.json").write_text(
+              json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report))
+          PY
           printf '{"status":"HISTORICAL_ONLY_NOT_CURRENT_SOURCE_QUALIFIED","archive_head":"%s","current_head":"%s","approved_docker_cpus_required":10}\n' \
             "$archived_head" "$current_head" > _s1/evidence/historical-scope.json
           local_run_dir="$RUNNER_TEMP/s1-local-arm64-1191"
