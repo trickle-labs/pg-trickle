@@ -281,7 +281,13 @@ async fn compare(
         let mut replay_failure = failure(
             scenario,
             "I-02",
-            "MultisetMismatch",
+            if diff.comparison_error.is_some() {
+                "OracleFailure"
+            } else if diff.schema_mismatch.is_some() {
+                "SchemaMismatch"
+            } else {
+                "MultisetMismatch"
+            },
             phase,
             cycle,
             None,
@@ -410,6 +416,23 @@ async fn replay_inner(db: &E2eDb, scenario: &Scenario) -> Result<(), ReplayFailu
             None,
         )
         .await?;
+        if let Err(product_failure) = e2e::oracle::assert_effective_refresh_mode(
+            db,
+            &scenario.query.stream_table,
+            &scenario.expected_capability.expected_mode,
+        )
+        .await
+        {
+            return Err(failure(
+                scenario,
+                "I-04",
+                "SilentFallback",
+                format!("{} refresh mode", cycle.name),
+                Some(cycle_index),
+                None,
+                product_failure.reason,
+            ));
+        }
         compare(
             db,
             scenario,

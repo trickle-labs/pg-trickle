@@ -57,6 +57,9 @@
   },
   "negative_control": {
     "reason": "Schema/query/mutations are all legitimately correct (copied from cor939_two_leaf_snapshot), but expected_capability.expected_mode is deliberately set to BATCH while requested_refresh_mode is DIFFERENTIAL. The stream table will actually run in DIFFERENTIAL mode, so mode_check in dvm_replay.py (and assert_effective_refresh_mode in the Rust replay path) MUST raise SilentFallback.",
-    "expected_failure_class": "SilentFallback"
+    "expected_failure_class": "SilentFallback",
+    "expected_phase": "initial refresh mode",
+    "expected_cycle": null,
+    "expected_mutation": null
   }
 }
