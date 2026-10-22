@@ -51,7 +51,9 @@ fails that postcondition; it is not a compile-error mutation control.
   evidence: complete message count, one COMMIT, all receipts acknowledged,
   exact journal result, WAL capture mode and absence of full reinitialization.
   A separate two-writer test commits the transaction with newer row LSNs first,
-  waits until it is consumed, then commits the older row and requires catch-up.
+  waits until its receipt is acknowledged, then commits the older row and
+  requires catch-up. The stream frontier may remain held by the writer fence
+  while that older transaction is open.
 
 The SQL prefix selection, PostgreSQL output ordering, source transaction
 boundaries, SPI behavior, slot side effects, source ownership and crash

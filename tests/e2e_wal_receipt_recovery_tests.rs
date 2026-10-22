@@ -518,7 +518,7 @@ async fn test_wal_receipt_commit_order_preserves_late_old_lsn_transaction() {
         "early-new-lsn",
     )
     .await;
-    wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+    // The writer fence may hold the stream frontier while the older transaction is open.
     late.commit().await.unwrap();
     wait_for_receipt(
         &fixture.db.pool,
