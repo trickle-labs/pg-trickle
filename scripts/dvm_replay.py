@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -86,6 +87,8 @@ def replay_sql(scenario: dict) -> str:
     statements = [f"CREATE SCHEMA {scenario['schema']['name']}"]
     statements += scenario["schema"]["setup_sql"]
     statements += scenario["initial_data"]
+    if execution.get("require_differential_history", False):
+        statements += ["SET pg_trickle.refresh_strategy = 'differential'", "SET pg_trickle.differential_max_change_ratio = 0"]
     statements.append(
         "SELECT pgtrickle.create_stream_table("
         + f"'{query['stream_table']}', "
@@ -160,6 +163,27 @@ def mode_check(scenario: dict, database: str | None) -> None:
         raise ReplayFailure(
             "SilentFallback", f"expected {expected['expected_mode']}, got {mode!r}"
         )
+
+
+def execute_mutation(database: str | None, sql: str) -> int:
+    # Execute the complete script in one session, preserving BEGIN/SAVEPOINT cuts.
+    if re.match(r"^\s*SELECT\b", sql, flags=re.IGNORECASE):
+        return int(psql(database, f"WITH changed AS ({sql.rstrip(';')}) SELECT count(*) FROM changed", tuples=True))
+    output = psql(database, sql)
+    return sum(int(match[2]) for line in output.splitlines()
+               if (match := re.fullmatch(r"(INSERT \d+|UPDATE|DELETE) (\d+)", line.strip())))
+
+
+def changed_route_check(scenario: dict, database: str | None, previous: int) -> None:
+    name = scenario["query"]["stream_table"]
+    observed = psql(database,
+        "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h "
+        "JOIN pgtrickle.pgt_stream_tables s ON s.pgt_id = h.pgt_id "
+        f"WHERE s.pgt_schema || '.' || s.pgt_name = '{name}' AND h.refresh_id > {previous} "
+        "AND h.status = 'COMPLETED' AND h.action = 'DIFFERENTIAL' AND NOT h.was_full_fallback)",
+        tuples=True)
+    if observed != "t":
+        raise ReplayFailure("SilentFallback", "no fresh completed differential history without fallback")
 
 
 def artifact(scenario: dict, scenario_path: Path, failure: dict) -> Path:
@@ -275,6 +299,9 @@ def run(path: Path, database: str | None, expect_negative_control: bool = False)
             + f"'{scenario['execution']['requested_refresh_mode']}')",
         )
         refresh = f"SELECT pgtrickle.refresh_stream_table('{query['stream_table']}')"
+        require_changed = scenario["execution"].get("require_differential_history", False)
+        if require_changed:
+            refresh = "SET pg_trickle.refresh_strategy = 'differential'; SET pg_trickle.differential_max_change_ratio = 0; " + refresh
         phase = "initial refresh"
         psql(database, refresh)
         phase = "initial refresh mode"
@@ -282,15 +309,10 @@ def run(path: Path, database: str | None, expect_negative_control: bool = False)
         phase = "initial exact comparison"
         exact_check(scenario, database)
         for cycle_index, cycle in enumerate(scenario["cycles"]):
+            previous = int(psql(database, "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history", tuples=True)) if require_changed else 0
             phase = f"{cycle['name']} mutation"
             for mutation_index, mutation in enumerate(cycle["mutations"]):
-                count = psql(
-                    database,
-                    f"WITH changed AS ({mutation['sql'].rstrip(';')}) "
-                    "SELECT count(*) FROM changed",
-                    tuples=True,
-                )
-                affected = int(count)
+                affected = execute_mutation(database, mutation["sql"])
                 if affected != mutation["expected_affected_rows"]:
                     raise ReplayFailure(
                         "GeneratorInvalid", f"expected {mutation['expected_affected_rows']} "
@@ -301,6 +323,9 @@ def run(path: Path, database: str | None, expect_negative_control: bool = False)
             psql(database, refresh)
             phase = f"{cycle['name']} refresh mode"
             mode_check(scenario, database)
+            if require_changed:
+                phase = f"{cycle['name']} changed-data route"
+                changed_route_check(scenario, database, previous)
             phase = f"{cycle['name']} exact comparison"
             exact_check(scenario, database)
     except (RuntimeError, ValueError, OSError) as error:

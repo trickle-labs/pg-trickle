@@ -64,11 +64,11 @@ impl Lcg {
     }
 
     fn choice<T: Clone>(&mut self, options: &[T]) -> T {
-        options[(self.next() as usize) % options.len()].clone()
+        options[((self.next() >> 32) as usize) % options.len()].clone()
     }
 
     fn range(&mut self, lo: u64, hi: u64) -> u64 {
-        lo + (self.next() % (hi - lo + 1))
+        lo + ((self.next() >> 32) % (hi - lo + 1))
     }
 }
 
@@ -78,6 +78,31 @@ struct TestTable {
     name: String,
     cols: Vec<(String, &'static str)>, // (column_name, sql_type)
     row_count: usize,
+}
+
+fn scalar_literals(data_type: &str) -> &'static [&'static str] {
+    match data_type {
+        "INT" | "BIGINT" => &["NULL", "-2147483648", "-1", "0", "1", "2147483647"],
+        "NUMERIC" => &[
+            "NULL",
+            "-1",
+            "0",
+            "1.0",
+            "1.00",
+            "'NaN'",
+            "'Infinity'",
+            "'-Infinity'",
+        ],
+        "TEXT" => &[
+            "NULL",
+            "'alpha'",
+            "'beta'",
+            "'gamma'",
+            "'delta'",
+            "'epsilon'",
+        ],
+        _ => panic!("generator type has no literal domain: {data_type}"),
+    }
 }
 
 impl TestTable {
@@ -93,16 +118,7 @@ impl TestTable {
         for i in 1..=(self.row_count) {
             let mut vals: Vec<String> = vec![i.to_string()];
             for (_, t) in &self.cols {
-                let v = match *t {
-                    "INT" => (rng.range(1, 100) as i64).to_string(),
-                    "BIGINT" => (rng.range(1, 1000) as i64).to_string(),
-                    "NUMERIC" => format!("{}", rng.range(1, 500)),
-                    "TEXT" => {
-                        let choices = ["alpha", "beta", "gamma", "delta", "epsilon"];
-                        format!("'{}'", rng.choice(&choices))
-                    }
-                    _ => "0".to_string(),
-                };
+                let v = rng.choice(scalar_literals(t)).to_string();
                 vals.push(v);
             }
             rows.push(format!("({})", vals.join(", ")));
@@ -209,8 +225,11 @@ fn gen_aggregate_query(rng: &mut Lcg, idx: usize) -> GeneratedQuery {
     };
     let agg_func = rng.choice(&["SUM", "COUNT", "MAX", "MIN"]);
 
-    let (agg_expr, agg_alias) = if agg_func == "COUNT" || num_cols.is_empty() {
+    let (agg_expr, agg_alias) = if num_cols.is_empty() {
         ("COUNT(*)".to_string(), "cnt".to_string())
+    } else if agg_func == "COUNT" {
+        let c = rng.choice(&num_cols);
+        (format!("COUNT({c})"), "cnt".to_string())
     } else {
         let c = rng.choice(&num_cols);
         (format!("{agg_func}({c})"), "agg_result".to_string())
@@ -799,16 +818,7 @@ fn stateful_dml_mutations() -> usize {
 fn gen_insert_dml(rng: &mut Lcg, tbl: &TestTable, id: u64) -> String {
     let mut vals: Vec<String> = vec![id.to_string()];
     for (_, t) in &tbl.cols {
-        let v = match *t {
-            "INT" => (rng.range(1, 100) as i64).to_string(),
-            "BIGINT" => (rng.range(1, 1000) as i64).to_string(),
-            "NUMERIC" => format!("{}", rng.range(1, 500)),
-            "TEXT" => {
-                let choices = ["alpha", "beta", "gamma", "delta", "epsilon"];
-                format!("'{}'", rng.choice(&choices))
-            }
-            _ => "0".to_string(),
-        };
+        let v = rng.choice(scalar_literals(t)).to_string();
         vals.push(v);
     }
     format!("INSERT INTO {} VALUES ({})", tbl.name, vals.join(", "))
@@ -819,14 +829,46 @@ fn gen_update_dml(rng: &mut Lcg, tbl: &TestTable) -> Option<String> {
     if num_cols.is_empty() {
         return None;
     }
-    let (col, _) = rng.choice(&num_cols);
-    let new_val = rng.range(1, 100);
+    let (col, data_type) = rng.choice(&num_cols);
+    let new_val = rng.choice(scalar_literals(data_type));
     Some(format!(
         "UPDATE {name} SET {col} = {new_val} WHERE id = (SELECT id FROM {name} LIMIT 1)",
         name = tbl.name,
         col = col,
         new_val = new_val,
     ))
+}
+
+#[test]
+fn test_sqlancer_literal_domains_reach_semantic_boundaries() {
+    for data_type in ["INT", "BIGINT", "NUMERIC", "TEXT"] {
+        let mut rng = Lcg::new(1217);
+        let reached = (0..256)
+            .map(|_| rng.choice(scalar_literals(data_type)))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            reached,
+            scalar_literals(data_type).iter().copied().collect()
+        );
+        let table = TestTable {
+            name: "domain".to_string(),
+            cols: vec![("v".to_string(), data_type)],
+            row_count: 1,
+        };
+        let updates = (0..256)
+            .filter_map(|_| gen_update_dml(&mut rng, &table))
+            .collect::<Vec<_>>();
+        if data_type != "TEXT" {
+            for literal in scalar_literals(data_type) {
+                assert!(
+                    updates
+                        .iter()
+                        .any(|sql| sql.contains(&format!(" = {literal} WHERE"))),
+                    "{data_type}: {literal}"
+                );
+            }
+        }
+    }
 }
 
 fn gen_delete_dml(tbl: &TestTable) -> String {
