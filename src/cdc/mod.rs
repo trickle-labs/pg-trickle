@@ -2742,9 +2742,8 @@ fn build_pk_hash_stmt_expr(
 
 /// WB-1: Build the `changed_cols` VARBIT expression for statement-level UPDATE triggers.
 ///
-/// Uses `n."col" IS DISTINCT FROM o."col"` (transition table aliases) instead
-/// of `NEW."col" IS DISTINCT FROM OLD."col"`.
-/// Bit at position `i` (leftmost = 0) is B'1' when column `i` changed.
+/// Uses the same conservative image policy as row-level capture with the
+/// transition table aliases. Bit position `i` follows capture column order.
 fn build_changed_cols_bitmask_stmt_expr(
     pk_columns: &[String],
     columns: &[(String, String)],
@@ -2754,22 +2753,12 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, type_name)| {
+        .map(|(col_name, _)| {
             let qcol = col_name.replace('"', "\"\"");
-            // pgvector types (vector, halfvec, sparsevec) do not define an '='
-            // operator, so IS DISTINCT FROM (which uses '=') would fail.
-            // Cast to text for comparison — text always supports equality.
-            if triggers::is_pgvector_type(type_name) {
-                format!(
-                    "(CASE WHEN n.\"{qcol}\"::text IS DISTINCT FROM o.\"{qcol}\"::text \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            } else {
-                format!(
-                    "(CASE WHEN n.\"{qcol}\" IS DISTINCT FROM o.\"{qcol}\" \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            }
+            crate::cdc_elision::changed_column_sql(
+                &format!("o.\"{qcol}\""),
+                &format!("n.\"{qcol}\""),
+            )
         })
         .collect();
     Some(parts.join(" ||\n\t\t        "))
