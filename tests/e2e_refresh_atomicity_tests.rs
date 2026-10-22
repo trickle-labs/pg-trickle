@@ -155,8 +155,10 @@ async fn clear_chaos(db: &E2eDb) {
 }
 
 async fn configure_scheduler(db: &E2eDb) {
+    // Observer polling must not defer the scheduled fault witness on small CI hosts.
     for (setting, value, expected) in [
         ("pg_trickle.scheduler_interval_ms", "100", "100"),
+        ("pg_trickle.load_shed_threshold", "0", "0"),
         ("pg_trickle.min_schedule_seconds", "1", "1"),
         ("pg_trickle.auto_backoff", "off", "off"),
         ("pg_trickle.max_consecutive_errors", "1", "1"),
