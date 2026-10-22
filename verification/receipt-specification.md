@@ -61,8 +61,10 @@ durability are **not** established by this arithmetic proof. Existing receipt
 barriers and retained-cluster recovery tests remain necessary. In particular,
 the proof does not turn a maximum observed LSN into a complete recoverable
 prefix and does not authorize cleanup, reset, restore or source reuse.
-Independent specification review remains pending; the arithmetic postcondition
-and executable control are not a proof of the transaction-framing adapter.
+An independent read-only agent review accepted the bounded arithmetic
+specification at `c06b71252c86aa6e0b1da2e68927280cb9e5de65`. See
+[the review record](specification-reviews.md). The arithmetic postcondition and
+executable control are not a proof of the transaction-framing adapter.
 
 ## Reproduction and CI
 
@@ -88,3 +90,10 @@ matching caller/build-input hashes, the named receipt E2E case and matching
 packaged/installed library bytes. The existing packaged-candidate CI job runs
 this mode after the receipt test. A configured workflow is not evidence that
 its installed-candidate qualification has run successfully.
+
+The binding helper trusts the surrounding build/test runner for build origin
+and successful execution of the supplied test names. The historical local
+observations had a NULL candidate commit; they establish package/install byte
+equality, not independent frozen-build provenance. Current binding rejects
+missing or mismatched runtime commit fields. The suite's duplicated-result
+control tests the bag oracle, rather than a duplicate-replay executable mutant.
