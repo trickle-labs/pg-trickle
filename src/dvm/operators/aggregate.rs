@@ -4081,7 +4081,10 @@ mod tests {
                     assert!(
                         sql.starts_with(&format!(
                             "SUM(CASE WHEN __pgt_action = '{action}' AND keep THEN "
-                        )),
+                        )) || (sql.starts_with("COUNT(")
+                            && sql.ends_with(&format!(
+                                "FILTER (WHERE __pgt_action = '{action}' AND keep)"
+                            ))),
                         "FILTER must guard every argument-dependent expression: {sql}"
                     );
                     assert!(sql.contains("100 / v"), "missing argument: {sql}");
