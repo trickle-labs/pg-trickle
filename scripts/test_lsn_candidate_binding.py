@@ -59,6 +59,36 @@ class CandidateBindingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_lifecycle_binding_requires_every_semantic_control_and_callers(self) -> None:
+        self.source = binding.ROOT / "verification/aggregate_lifecycle.rs"
+        contract = binding.PROOF_CONTRACTS["aggregate_lifecycle"]
+        names = ["unknown-not-retracted", "missing-retraction", "retained-empty-group",
+                 "missing-global-empty-result", "non-null-empty-sum"]
+        self.proof.update({
+            "schema": contract["schema"], "source_sha256": binding.digest(self.source),
+            "obligations": sorted(contract["obligations"]),
+            "production_inputs": {path: binding.digest(binding.ROOT / path) for path in contract["inputs"]},
+            "semantic_mutations": {name: {"returncode": 1, "failure_kind": "postcondition",
+                                           "summary": "verification results:: 5 verified, 1 errors"}
+                                   for name in names},
+        })
+        arguments = dict(proof=self.proof, source=self.source, package_dir=self.package,
+                         installation=self.installation, runtime_cases=binding.LIFECYCLE_CASES,
+                         candidate_commit="fixture-commit", proof_kind="aggregate_lifecycle")
+        self.assertEqual(binding.validate_binding(**arguments)["schema"],
+                         "pg-trickle-aggregate-lifecycle-candidate-binding-v1")
+        for name in names:
+            control = self.proof["semantic_mutations"].pop(name)
+            with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
+            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = control
+        self.proof["production_inputs"]["src/dvm/operators/filter.rs"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "production input differs"):
+            binding.validate_binding(**arguments)
+
     def test_receipt_binding_checks_production_inputs_and_installed_bytes(self) -> None:
         self.source = binding.ROOT / "verification/receipt.rs"
         self.proof.update({
