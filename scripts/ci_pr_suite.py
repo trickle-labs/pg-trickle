@@ -19,6 +19,11 @@ def targets(root: Path = ROOT) -> list[str]:
     inventory = {path.stem for path in (root / "tests").glob("e2e_*.rs")}
     full = policy["pr_full"]
     pure = policy["pr_pure"]
+    shard_2 = policy["pr_full_shard_2"]
+    if (len(shard_2) != len(set(shard_2)) or not set(shard_2) <= set(full)
+            or (full and (not shard_2 or set(shard_2) == set(full)))
+            or "e2e_refresh_atomicity_tests" in shard_2):
+        raise ValueError("invalid full-suite shard allocation")
     deferred = set(policy["scheduled_only"])
     if (len(full) != len(set(full)) or len(pure) != len(set(pure))
             or set(pure) & (set(full) | light | deferred)
@@ -51,8 +56,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true", help="validate and list targets without Docker")
     parser.add_argument("--pure", action="store_true", help="run database-free harness contracts")
+    parser.add_argument("--shard", type=int, choices=(1, 2), help="run one duration-balanced full shard")
     args = parser.parse_args()
     selected = targets()
+    if args.shard:
+        shard_2 = json.loads((ROOT / ".github/ci-suites.json").read_text())["pr_full_shard_2"]
+        selected = [name for name in selected if (name in shard_2) == (args.shard == 2)]
     if args.list:
         print("\n".join(selected))
         return 0
@@ -75,6 +84,8 @@ def main() -> int:
     status = subprocess.run(command, cwd=ROOT).returncode
     if status:
         return status
+    if "e2e_refresh_atomicity_tests" not in selected:
+        return 0
     # Keep witnessed barriers isolated from the parallel suite's container load.
     return subprocess.run([
         "./scripts/run_e2e_tests.sh", "--profile", "ci",

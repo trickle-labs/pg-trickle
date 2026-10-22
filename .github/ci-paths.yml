@@ -48,6 +48,7 @@ harness:
   - '.github/ci-paths.yml'
   - '.github/ci-suites.json'
   - 'scripts/ci_pr_suite.py'
+  - 'scripts/ci_prepare_disk.sh'
   - '!**/*.md'
 
 benchmarks:
@@ -92,6 +93,7 @@ failure_recovery_changed:
   - '.github/workflows/ci.yml'
   - '.github/ci-suites.json'
   - 'scripts/ci_pr_suite.py'
+  - 'scripts/ci_prepare_disk.sh'
 unsafe_boundary_changed:
   - '.github/ci-paths.yml'
   - 'Cargo.toml'

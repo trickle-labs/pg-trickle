@@ -21,7 +21,7 @@ until allocated. The source of truth is
 | CDC source-transaction atomicity | Frontier and capture decision tests | Synthetic buffers only; cannot prove triggers or transactions | Light statement/row CDC and edge cases; full WAL CDC, receipts, publication crash recovery and WAL transition |
 | Transaction visibility and committed-change durability | LSN proof and pure decision logic | Cannot prove snapshot acquisition or commit boundaries | Full long-transaction visibility, snapshot consistency, refresh atomicity, strategy transaction barrier and failure recovery |
 | Scheduler, worker lifecycle, DAG visibility | Scheduler/DAG decision tests | No workers | Full bootstrap/watermark gating, background workers, circular/immediate/mixed-mode scheduling, DAG auto-refresh and property snapshots |
-| Recovery, interrupted finalization, cancellation | Recovery classification tests | No crash/restart lifecycle | Full failpoint, cleanup chaos, error state, window recovery, publication crash and refresh-atomicity suites; relevant changes also repeat witnessed schedules ten times without retries |
+| Recovery, interrupted finalization, cancellation | Recovery classification tests | No crash/restart lifecycle | Full failpoint, cleanup chaos, error state, window recovery, publication crash and refresh-atomicity suites; relevant changes also repeat every witnessed schedule twice without retries; ten passes run nightly |
 | Ownership, RLS, grants, permissions | Privilege-boundary/static SECURITY DEFINER contracts | Catalog DDL checks only | Light ownership/RLS; full safety, RLS/WAL, versioned security regressions, MAINTAIN grants, guard and replica boundaries; relevant unsafe paths keep ASan |
 | Public SQL API, catalogs, DDL, dump, upgrade | Static API/catalog/release contracts | Existing `catalog_tests` etc. install generated DDL | Light create/alter/drop/schema/dump tests; full versioned conformance and upgrades; shipping-image upgrade stays |
 | Release/candidate identity | Release evidence and LSN rejection controls | Cannot attest installed code | Existing release proof controls, light/full LSN runtime and candidate binding stay separate and unchanged |
@@ -36,7 +36,7 @@ the packaged extension. Neither substitutes for the installed tests above.
 
 For runtime or harness changes, Linux unit/catalog/component checks run even
 on drafts. Ready PRs add the existing 91-target, three-shard light suite and
-an explicit 99-target full suite and one database-free harness target. The old sensitive DVM gate selected all 161
+an explicit 99-target full suite across two duration-balanced runners and one database-free harness target. The old sensitive DVM gate selected all 161
 E2E targets in addition to light E2E. The new full suite retains permanent
 corpus, identity, versioned security and conformance regressions in both
 harnesses. All targets with `cfg(not(feature = "light-e2e"))` stay in the full
@@ -75,9 +75,13 @@ and the strategy transaction-barrier/resource-boundary test. Only the named
 exhaustive live rewrite and corpus-mode cross-product cases move to scheduled
 tiers. The fixed seeded diamond topology combinations also move; deterministic
 diamond regressions and DAG/snapshot/Z-set property traces remain on PRs.
-Refresh-atomicity witnesses run serially without retries after the parallel
-full suite, preserving their isolation from its container load. Selected
-failure-recovery paths additionally retain the ten witnessed repetitions.
+Refresh-atomicity witnesses run serially without retries after shard 1's parallel
+suite, preserving their isolation from its runner's container load. Shard 2 runs
+on a separate runner. Selected failure-recovery paths additionally run two
+isolated passes of all 13 witnessed schedules on shard 1. Ten passes run daily
+and manually in `production-recovery-qualification`; all attempt logs are retained
+and any failed attempt fails the job. This defers additional timing exploration,
+not a unique failure scenario or assertion.
 
 Runtime selection uses [.github/ci-paths.yml](../.github/ci-paths.yml), with
 unclassified inputs retaining runtime coverage. Ordinary docs changes avoid
@@ -95,6 +99,7 @@ changes. Unsafe-path selection and instrumented checks remain in place.
 | DVM live metamorphic combinations | `dvm-tiers.yml`, daily 02:30 UTC and manual nightly/weekly |
 | DVM corpus × refresh/CDC strategy combinations | `dvm-tiers.yml`, Monday 04:00 UTC and manual weekly; also daily full CI |
 | Seeded diamond topology combinations | Daily/manual full `ci.yml` |
+| Ten isolated passes of every witnessed failure-recovery schedule (two remain on sensitive PRs) | `ci.yml` production recovery job, daily 03:00 UTC/manual; 14-day witness artifacts |
 | Ignored Nexmark and TPC-H DAG workload combinations | `dvm-tiers.yml`, Monday 04:00 UTC and manual weekly (DAG SF-0.01) |
 | TPC-H scale matrix | `tpch-nightly.yml`, daily/manual; `ci.yml` retains its ignored TPC-H step |
 | Ignored refresh/CDC performance matrices | `e2e-benchmarks.yml`, Sunday 02:00 UTC/manual |
@@ -115,7 +120,9 @@ candidate-binding contracts remain mandatory for their respective workflows.
 `PR correctness` uses `always()` and inspects all pre-merge CI dependencies.
 Every selected check must report `success`; failure, cancellation and
 unexpected skip fail the aggregate. Draft/doc-only omissions are explicit.
-Matrix failure/cancellation is propagated through `needs.light-e2e-tests`.
+Matrix failure/cancellation is propagated through `needs.light-e2e-tests` and
+`needs.e2e-sensitive-gate`. The static contract job also runs the pinned proof;
+its success is required before packaging and candidate binding.
 `ready_for_review` and `converted_to_draft` remain trigger events; concurrency
 cancels superseded runs, with event names separating pushes from schedules.
 
@@ -248,8 +255,9 @@ proxy. Neither proves the cause of runner queueing.
 
 Earlier packaging was investigated and rejected: `check_lsn_verification.py`
 explicitly requires proof before candidate package construction. That dependency
-and the independent candidate-binding dependency remain intact. Removing it
-would redefine an existing release control and is unnecessary for this change.
+and the independent candidate-binding dependency remain intact, now pointing to
+the consolidated contract/proof job described below. Starting packaging before
+proof completion remains prohibited.
 
 The mixed-scheduling helper now polls the existing exact schema/multiset oracle
 against the original fixture SQL, in topological order. It never triggers manual
@@ -290,7 +298,7 @@ warm setup is small, light features differ from full features, and worker/cluste
 isolation is part of the coverage. Component-runner batching and disk cleanup
 are plausible follow-ups, but neither has a matched measurement here.
 
-### Validation and matched experiment
+### First-pass validation and matched experiment
 
 The local comparison used production source `00d21749bc20af8b19940b857fae461e0ccfe471`
 and one freshly built PostgreSQL 18.6 image, `pg-ci-pyramid:baseline`
@@ -337,8 +345,8 @@ the unchanged suite passed with local socket access.
 | Draft-to-ready, failed/cancelled/missing/unexpected-skip verdicts | Passed contract tests, including missing selection flags |
 
 The package, light test runner, DVM operator code and full-image contents are
-unchanged. Full unmodified suites and ASan/recovery repetitions were not rerun
-locally; the ready PR selects them. Logs, saved REST responses, failed attempts
+unchanged. In this first pass, full unmodified suites and ASan/recovery repetitions
+were not rerun locally; follow-up validation is recorded below. Logs, saved REST responses, failed attempts
 and per-case timing JSON are retained locally under `target/ci-pyramid-20261022/`.
 
 The 50% median improvement remains a target, **not a measured result**. To assess
@@ -357,6 +365,122 @@ below for CI and every companion workflow on each update. This costs roughly
 3,400 runner minutes at the observed rate, before failures, and requires separate
 authorization. Creating this PR exercises the candidate graph once; it does not
 establish the requested hosted median/p90 result.
+
+### Follow-up toward a 30-minute PR budget
+
+The first candidate run [39825485460](https://github.com/trickle-labs/pg-trickle/actions/runs/39825485460)
+was still queued when this follow-up began. It supplies no after measurement.
+The earlier 80.4% local improvement applies only to mixed scheduling tests.
+
+The next changes address execution and the package dependency chain together:
+
+| Rank / change | Observed cost and expected effect | Coverage and tradeoff |
+|---|---|---|
+| 1. Run the unchanged pinned Verus baseline and semantic mutation control at the end of the existing static contract job | In run 39778269500 the 29-second proof job waited 10.10 minutes after the static job completed. Consolidation removes that queue boundary, while adding the proof execution to the selector job | Proof still runs on drafts and docs-only changes. Packaging and candidate binding depend on its successful job; artifact identity and rejection checks are unchanged. Mutation tests reject skipped/ignored proof steps and packaging that bypasses proof |
+| 2. Keep two isolated recovery passes on sensitive PRs; run ten nightly | The ten-pass step took 11.98 minutes; eight fewer passes estimates 9.58 minutes less PR execution | Every one of the 13 schedules, SQLSTATE, cleanup assertion, lock witness and negative control remains. Every atomicity case also stays serial in the ordinary full suite. Additional opportunities to expose timing-dependent faults move to daily 03:00 UTC/manual production recovery qualification. This reduces pre-merge repetition confidence, not scenario coverage; maintainers own nightly failures |
+| 3. Two full-suite runners, balanced by observed duration | After the scheduler fix, the old parallel tests represent about 20 minutes of four-slot execution. Two groups estimate 11.6 minutes each including shard 1's isolated work | Every target runs exactly once across the pair. The second runner repeats image/setup and common compilation work; no assertion, timeout or local concurrency limit changes. Matrix `fail-fast: false` preserves evidence from both runners |
+| 4. Clean installed SDKs only when less than 60 GiB is available | Light shard 2 started with 87 GiB free, then spent 5.92 minutes deleting 22 GiB. The three light shards spent 9.45 minutes total in cleanup; full E2E spent 3.60 and release controls 3.67 | `ci_prepare_disk.sh` keeps the previous SDK cleanup on tighter Linux Actions runners and logs disk space. The 60 GiB trigger conservatively covers the documented 30+ GiB build cache plus Docker/test growth. Low-space and high-space branches are tested without deleting real files |
+
+`pr_full_shard_2` in `ci-suites.json` is a static subset of `pr_full`; everything
+else goes to shard 1. The validator rejects unknown/duplicate targets, empty
+partitions and moving atomicity into the second shard. New explicitly allocated
+targets conservatively enter shard 1. The allocation tests prove the union is
+the entire full list, with no overlap, and preserve serial atomicity and both
+shards' failure/cancellation propagation. `PR correctness` requires the matrix
+aggregate to succeed, including its existing unexpected-skip rejection.
+
+The partition uses per-target successful test durations from run 39778269500,
+with the mixed-scheduling weight scaled by the measured local 56.33/286.81 ratio.
+Shard 1 is reserved for atomicity, failure recovery and failpoints; the remaining
+targets were assigned longest-first to the lighter lane. Atomicity (36 seconds)
+and two recovery passes (719/5 seconds) were charged to lane 1 serially. The
+result is 48/51 targets, approximately 2,784/2,782 four-slot-equivalent seconds.
+The all-ignored WAL and feature-gated unsafe targets had no ordinary-run timing;
+their allocation and separate qualification remain unchanged. These are initial
+weights, not hosted after measurements; rebalance only after observing both lanes.
+
+This does **not** establish a 30-minute gate. In the same baseline, independent
+release-proof controls finished at minute 58.77 and light shard 1 at minute
+54.22. They would become the longest path if only full E2E were accelerated.
+Holding the observed queues fixed, proof consolidation advances the package
+chain by roughly 10.10 minutes. Avoiding release-control cleanup would remove
+another 3.67 minutes, giving an illustrative overall result near
+**45 minutes**, not 30. The full branch estimates roughly 35–39 minutes,
+depending on how much host compilation is shared versus target-specific. These
+estimates assume both full runners are available with similar waits; an extra
+runner can instead delay package consumers.
+
+For runner cost, the extra full runner repeats roughly 6.9 minutes of setup,
+image build and other overhead after avoiding cleanup, plus an uncertain amount of common compilation.
+Removing eight recovery passes saves about 9.6 minutes per sensitive PR, and the
+scheduler fix saves about four. If the new runners also have ample space, the
+combined projection is roughly 151–158 runner minutes versus the 174.60-minute
+baseline. Low-disk runners still pay the original cleanup cost. Nightly gains
+about 12 minutes of repetition plus any additional test compilation in an existing
+job, without an additional setup job. Measure
+all-workflow cost as well as wall time; do not add a third shard without evidence.
+Cold proof-image pulls now delay release of the other runtime jobs, so they
+must be separated from the warm baseline when evaluating p90 and first-failure latency.
+
+Binary archive reuse was considered but would add a producer dependency, artifact
+transfer and compatibility checks; it is not needed for this small change.
+Broadly deferring property/worker suites was rejected: their individual observed
+costs are small beside setup/queueing, and they exercise real extension boundaries.
+Production code and candidate package construction are unchanged. The failpoint
+fixture correction below retains the failed-attempt witness and strengthens
+the committed-mode check with a deterministic precondition.
+
+The controlled hosted experiment above still applies, now including both full
+lanes and nightly repetition evidence. Compare ready-runtime and sensitive
+updates separately, retain failed attempts, and check median, p90 and total
+runner minutes. The 30-minute goal and original 50% reduction remain unverified.
+
+Follow-up validation uses the same unchanged production image and macOS ARM64 /
+emulated linux/amd64 setup as the first pass. The two groups run sequentially on
+one local host to preserve witness isolation; their maximum is not a measured
+two-runner wall time. `cargo nextest list --message-format json` applied to the
+previous selector and both new selectors proved exactly 1,213 selected cases
+before and after, with zero overlap and the identical 31 existing skips. The
+full/pure/scheduled target and case allocations were also compared with the
+previous commit and are unchanged.
+
+The pinned Verus baseline passed locally and its semantic mutation was rejected.
+All 44 Python script checks passed, including proof bypass mutations, selection,
+verdicts, both shard exits, witness log retention and guarded disk preparation.
+All workflows passed actionlint; both changed shell scripts passed `bash -n`.
+The ruleset was re-read before changing job names and still contained no required
+status checks. No repository settings were changed and no workflows were manually dispatched.
+
+| Follow-up local execution | Result |
+|---|---|
+| Full shard 1, before the failpoint fixture correction | 561/561 passed, 807.566 seconds test execution; then 12/12 atomicity checks passed serially in 57.066 seconds. Whole invocation: 912.79 seconds including compilation |
+| Full shard 2 | 640/640 passed, 814.264 seconds test execution; whole invocation 856.54 seconds including compilation |
+| Initial two-pass recovery probe | First pass 13/13 passed; second failed the failpoint case (`NO_DATA` versus `DIFFERENTIAL`) and left 12 cases unrun. This probe is not green |
+| Controlled reproduction, old assertion | Failed deterministically after explicitly establishing a completed scheduler `NO_DATA` refresh |
+| Corrected failpoint target | 14/14 passed without retries, 13.585 seconds |
+| Corrected two-pass recovery probe | 13/13 passed in each isolated pass, 26 total; 201.24 seconds whole invocation, no retries |
+
+The recovery probe found an incorrect fixture assumption: `effective_refresh_mode`
+describes the last **completed** refresh, updated by `refresh::finalize_success`.
+The scheduler's injected failure occurs before apply and records
+`action=DIFFERENTIAL actual_path=NOT_REACHED`; it must not overwrite that committed
+mode. A preceding successful no-data tick therefore legitimately leaves `NO_DATA`.
+The fixture now waits for that explicit completed scheduler baseline, then asserts
+the failed attempt is still DIFFERENTIAL and the committed mode remains exactly
+NO_DATA. Requested/admitted mode, SQLSTATE, error marker, suspension, checkpoint
+multiset preservation and recovery convergence assertions all remain. The old
+assertion failed under this controlled precondition before being corrected; it was
+not replaced by accepting either mode or by retrying until green.
+
+Logs, both failing attempts, selection JSON and expected negative-control artifacts
+are retained under `target/ci-pyramid-round2-20261022/`. The full replay predates
+this final fixture correction; the affected target and isolated recovery passes
+are revalidated separately. Light E2E, ASan and the ten-pass nightly job were not
+rerun locally; their existing/new destinations remain selected as documented.
+Both corrected passes succeeded; this does not erase the failed initial probe.
+Including serial atomicity and the corrected two-pass probe, local shard 1 used
+18.57 minutes versus shard 2's 14.28. This differs from the hosted duration weights;
+do not retune the hosted allocation solely from an emulated local host.
 
 ## Historical measurements before this improvement
 

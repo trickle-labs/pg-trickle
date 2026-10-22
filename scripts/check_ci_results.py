@@ -14,7 +14,7 @@ def check(needs: dict, *, draft: bool) -> list[str]:
         errors.append("release-qualification-contract: missing/invalid runtime selection")
     runtime = outputs.get("runtime") == "true"
     ready = runtime and not draft
-    required = {"release-qualification-contract", "lsn-verification", "upgrade-check"}
+    required = {"release-qualification-contract", "upgrade-check"}
     if runtime:
         required.update({"unit-tests", "integration-tests"})
     if runtime or outputs.get("monitoring") == "true":
