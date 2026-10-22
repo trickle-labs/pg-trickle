@@ -215,11 +215,19 @@ fn join_using_columns(join: &pg_sys::JoinExpr) -> Result<Vec<String>, PgTrickleE
 // never be accepted as a provenance proof.
 fn inner_join_proves_using_equality(condition: &Expr, left: &Expr, right: &Expr) -> bool {
     match condition {
-        Expr::BinaryOp { op, left: lhs, right: rhs } if op == "=" => {
+        Expr::BinaryOp {
+            op,
+            left: lhs,
+            right: rhs,
+        } if op == "=" => {
             (lhs.to_sql() == left.to_sql() && rhs.to_sql() == right.to_sql())
                 || (lhs.to_sql() == right.to_sql() && rhs.to_sql() == left.to_sql())
         }
-        Expr::BinaryOp { op, left: lhs, right: rhs } if op.eq_ignore_ascii_case("AND") => {
+        Expr::BinaryOp {
+            op,
+            left: lhs,
+            right: rhs,
+        } if op.eq_ignore_ascii_case("AND") => {
             inner_join_proves_using_equality(lhs, left, right)
                 || inner_join_proves_using_equality(rhs, left, right)
         }
@@ -229,9 +237,21 @@ fn inner_join_proves_using_equality(condition: &Expr, left: &Expr, right: &Expr)
 
 fn join_using_column(tree: &OpTree, column: &str) -> Result<Expr, PgTrickleError> {
     match tree {
-        OpTree::InnerJoin { condition, left, right }
-        | OpTree::LeftJoin { condition, left, right }
-        | OpTree::FullJoin { condition, left, right } => {
+        OpTree::InnerJoin {
+            condition,
+            left,
+            right,
+        }
+        | OpTree::LeftJoin {
+            condition,
+            left,
+            right,
+        }
+        | OpTree::FullJoin {
+            condition,
+            left,
+            right,
+        } => {
             match (
                 left.output_columns().iter().any(|name| name == column),
                 right.output_columns().iter().any(|name| name == column),
@@ -4154,7 +4174,10 @@ mod tests {
             left: Box::new(first),
             right: Box::new(make_scan(3, "src", "c", &["id"])),
         };
-        assert_eq!(join_using_column(&second, "id").unwrap().to_sql(), key("a").to_sql());
+        assert_eq!(
+            join_using_column(&second, "id").unwrap().to_sql(),
+            key("a").to_sql()
+        );
 
         // An arbitrary nested ON condition must not silently substitute a
         // key when both inputs expose id but equality is unproven.
