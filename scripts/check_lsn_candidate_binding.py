@@ -25,6 +25,9 @@ REQUIRED_OBLIGATIONS = {
     "lsn_numeric_order",
     "lsn_format_parse_roundtrip",
 }
+RECEIPT_CASES = [
+    "e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions",
+]
 
 
 def digest(path: Path) -> str:
@@ -36,15 +39,22 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def proof_source_digest(proof: dict[str, Any], source: Path) -> str:
-    require(proof.get("schema") == EXPECTED_SCHEMA, "LSN proof record has an unknown schema")
+def proof_source_digest(proof: dict[str, Any], source: Path, proof_kind: str = "lsn") -> str:
+    require(proof_kind in ("lsn", "receipt"), "unknown proof kind")
+    schema = EXPECTED_SCHEMA if proof_kind == "lsn" else "pg-trickle-receipt-verification-v1"
+    obligations = REQUIRED_OBLIGATIONS if proof_kind == "lsn" else {"receipt_ack_row_limit"}
+    require(proof.get("schema") == schema, "proof record has an unknown schema")
     require(proof.get("baseline", {}).get("returncode") == 0, "LSN proof baseline did not pass")
     require(proof.get("semantic_mutation", {}).get("returncode", 0) != 0,
             "LSN semantic mutation was not rejected")
-    require(REQUIRED_OBLIGATIONS.issubset(set(proof.get("obligations", []))),
+    require(obligations.issubset(set(proof.get("obligations", []))),
             "proof record omits a required LSN obligation")
     require(bool(proof.get("compiler_identity")), "proof record omits the compiler identity")
     require(bool(proof.get("solver_identity")), "proof record omits the solver identity")
+    if proof_kind == "receipt":
+        for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]:
+            require(proof.get("production_inputs", {}).get(path) == digest(ROOT / path),
+                    f"receipt production input differs from verified candidate: {path}")
     return digest(source)
 
 
@@ -56,8 +66,9 @@ def validate_binding(
     installation: list[dict[str, Any]],
     runtime_cases: list[str],
     candidate_commit: str,
+    proof_kind: str = "lsn",
 ) -> dict[str, Any]:
-    source_digest = proof_source_digest(proof, source)
+    source_digest = proof_source_digest(proof, source, proof_kind)
     require(
         proof.get("source_sha256") == source_digest,
         "verified source digest does not match the candidate executable source",
@@ -68,7 +79,9 @@ def validate_binding(
         ),
         "proof record does not use the pinned Verus image",
     )
-    require(runtime_cases == EXPECTED_CASES, "runtime evidence must name all required LSN E2E cases")
+    expected_cases = EXPECTED_CASES if proof_kind == "lsn" else RECEIPT_CASES
+    require(runtime_cases == expected_cases,
+            f"runtime evidence must name all required {proof_kind.upper()} E2E cases")
     package_libraries = sorted((package_dir / "usr/lib/postgresql/18/lib").glob("pg_trickle.so"))
     require(len(package_libraries) == 1, "candidate package must contain exactly one pg_trickle.so")
     package_lib = package_libraries[0]
@@ -106,7 +119,7 @@ def validate_binding(
             }
         )
     return {
-        "schema": "pg-trickle-lsn-candidate-binding-v1",
+        "schema": f"pg-trickle-{proof_kind}-candidate-binding-v1",
         "candidate_commit": candidate_commit,
         "workflow": os.environ.get("GITHUB_WORKFLOW", "local"),
         "workflow_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
@@ -125,7 +138,8 @@ def validate_binding(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proof-record", type=Path, required=True)
-    parser.add_argument("--source", type=Path, default=ROOT / "verification/lsn.rs")
+    parser.add_argument("--proof-kind", choices=["lsn", "receipt"], default="lsn")
+    parser.add_argument("--source", type=Path)
     parser.add_argument("--package-dir", type=Path, required=True)
     parser.add_argument("--installation", type=Path, required=True)
     parser.add_argument("--candidate-commit", required=True)
@@ -138,15 +152,16 @@ def main() -> int:
         require(isinstance(installation, list), "installation attestation must be a JSON list")
         record = validate_binding(
             proof=proof,
-            source=args.source.resolve(),
+            source=(args.source or ROOT / f"verification/{args.proof_kind}.rs").resolve(),
             package_dir=args.package_dir.resolve(),
             installation=installation,
             runtime_cases=args.runtime_case,
             candidate_commit=args.candidate_commit,
+            proof_kind=args.proof_kind,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        print(f"LSN source/package/installation binding passed: {args.output}")
+        print(f"{args.proof_kind.upper()} source/package/installation binding passed: {args.output}")
         return 0
     except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError) as error:
         print(f"LSN candidate binding failed closed: {error}", file=sys.stderr)
