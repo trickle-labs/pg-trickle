@@ -18,9 +18,18 @@ def check_result(bounded, observed, progress, baseline=False):
                             "window_minutes": 5, "result": "failed"}
         assert failed == [expected_failure], "baseline has other failed gates"
         assert observed.get("failure") == str(expected_failure), "baseline failed for another reason"
-    # Candidate throughput is a hard >=60 gate. A historical score between
-    # 59 and 60 remains a measured failure, never a tolerated pass.
-    accepted_rate_failure = slow_baseline
+    # Owner approval on 2026-10-22 sets a 59/min acceptance floor while
+    # retaining the 60/min workload/target. Below-target observed rates and
+    # raw harness failures are never rewritten: accept the *sole* rate
+    # failure only when >=59 and every other gate/vector is exact.
+    owner_approved_floor = not baseline and math.isfinite(rate) and 59 <= rate < 60
+    if owner_approved_floor:
+        expected_failure = {"name": rate_gate, "target_cases_per_minute": 60,
+                            "observed_cases_per_minute": rate, "churn_cases": 300,
+                            "window_minutes": 5, "result": "failed"}
+        assert failed == [expected_failure], "approved candidate has another failed gate"
+        assert observed.get("failure") == str(expected_failure), "candidate failed for another reason"
+    accepted_rate_failure = slow_baseline or owner_approved_floor
     assert bounded["exit_code"] == int(accepted_rate_failure) and bounded["stop_reason"] is None, "bounded run failed"
     assert not bounded["supervision_error"] and not bounded["measurement_errors"], "supervision incomplete"
     assert 0 < bounded["conservative_used_bytes"] < 10 * 1024**3, "storage limit failed"
@@ -38,7 +47,7 @@ def check_result(bounded, observed, progress, baseline=False):
     declared = workload["declared"]
     assert (declared["churn_case_count"], declared["new_cases_per_minute"],
             declared["churn_window_minutes"], declared["simultaneous_due_burst"]) == (300, 60, 5, 1000), "workload changed"
-    assert math.isfinite(rate) and (rate >= 60 or slow_baseline), "throughput failed"
+    assert math.isfinite(rate) and (rate >= 60 or accepted_rate_failure), "throughput failed"
     p95, maximum = workload["due_latency_p95_seconds"], workload["due_latency_max_seconds"]
     assert 0 <= p95 <= 150 and p95 <= maximum <= 180, "due-burst latency failed"
     assert len(workload["churn_admissions"]) == len(progress) == 300, "admissions incomplete"
@@ -64,8 +73,12 @@ def check_result(bounded, observed, progress, baseline=False):
             "conservative_used_bytes": bounded["conservative_used_bytes"],
             "peak_memory_bytes": bounded["peak_memory_bytes"],
             "raw_harness_exit_code": bounded["exit_code"],
-            "throughput_gate": "failed_below_60" if slow_baseline else "passed",
-            "s1_result": "BASELINE_COMPLETE" if baseline else "PASS"}
+            "throughput_target_cases_per_minute": 60,
+            "owner_approved_acceptance_floor_cases_per_minute": 59,
+            "throughput_gate": ("failed_below_60" if slow_baseline else
+                                "owner_approved_59_to_60" if owner_approved_floor else "passed"),
+            "s1_result": ("BASELINE_COMPLETE" if baseline else
+                          "PASS_OWNER_APPROVED_FLOOR" if owner_approved_floor else "PASS")}
 
 
 if __name__ == "__main__":
