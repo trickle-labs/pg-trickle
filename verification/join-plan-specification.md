@@ -114,6 +114,20 @@ and package/installed library bytes. Build origin and successful execution of
 the named cases remain trusted runner inputs, not authenticated compilation
 proof. CI regenerates each record for its exact combined candidate.
 
+Frozen executable candidate `d84139858410627102795f493e6436c2ac943eef`
+passes both required installed cases with zero retries (11.179 seconds).
+The two installation observations and extracted package agree on library
+SHA-256 `45c3f93ada2907f527b21a4347c2230e5fc8ee11f43442dbab485e0f59e44c21`.
+The native component suite passes 25/25; ordinary Rust units pass 2629/2629,
+Python checks pass 52/52, and formatting/lint pass without warnings.
+Connected installed join/shared-CDC/full-join-aggregate/aggregate-coverage
+suites pass 63/63 (98.884 seconds), and sequential refresh atomicity passes
+14/14 (74.059 seconds), with no retries or skips in those suite runs.
+The separate scheduled semantic floor reports 53/54 exact differential cases:
+the mixed-join case now passes, while the pre-existing `special_sum` failure
+after deleting Infinity remains open. These selected observations do not
+constitute a passing whole-project qualification.
+
 The checker does not prove arbitrary joins, nested compositions, legacy
 correction terms, arbitrary predicate totality, source capture/window/epoch
 protocols, key encoding, hash uniqueness, scalar canonicalization, SQL
