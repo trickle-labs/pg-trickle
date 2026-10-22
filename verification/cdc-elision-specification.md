@@ -134,8 +134,18 @@ Independent read-only review accepted the bounded R3 specification at
 `3184b55e0ee74d82f55203bf3bd744ab9a675f1e`, including a follow-up inspection of
 the completed installed binding. See [the review record](specification-reviews.md).
 This does not establish the other #1221 obligations or approve a merge.
-The later deferred-history/image-weight additions require a new frozen review;
-the earlier sign-off does not cover those additions.
+The expanded deferred-history/image-weight additions were independently reviewed
+at `87cef53357918e3abb267eda44f2f324308afe4c`. The reviewer found an ordinary SQL
+alias collision at PostgreSQL's 63-byte identifier limit. A native regression
+reproduced SQLSTATE 42702; short numbered aliases resolve it. Follow-up review
+accepted `db909f1b0a97f06b999a68a478258aa21e2e7e73` for the bounded classifier
+claim and inspected ordinary repairs. Full R1/R2/window/compaction correctness
+remains excluded.
+The same candidate passes all three required installed CDC cases within a
+62/62 runtime report, with zero skips/retries. Independent follow-up inspection
+confirms its declared commit and package/installed byte equality, subject to
+the trusted-runner boundary above. The generated semantic floor remains red
+at 16/34 passes.
 
 ## Existing installations and limits
 

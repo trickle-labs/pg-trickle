@@ -59,8 +59,16 @@ accepted; recorded evidence reports 4/0 and four intended 3/1 mutant failures.
 The reviewer found an ordinary SQL blocker: underscore-only alias growth can
 cross PostgreSQL's 63-byte identifier limit and collide after truncation.
 A native regression reproduced SQLSTATE 42702 using valid maximum-length
-payload names. The repair uses short numbered aliases; follow-up review and
-final installed binding remain pending. This review does not establish full
+payload names. Follow-up review at
+`db909f1b0a97f06b999a68a478258aa21e2e7e73` accepted the short numbered alias
+repair and its reproducing/passing native control. The source and proof hashes
+still match, with 4/0 and four intended 3/1 mutant failures. Final follow-up
+inspected 62 passing tests, zero skips/retries and all three required CDC cases.
+All 49 installation observations declare that frozen commit and agree with
+the package library SHA-256
+`e0e4bff4237ed1fdaae7d49e7ada2d39ac87215cc96ec16fd325eb1d84edd99d`.
+The independent semantic floor remains 16/34 passing and 18 failing; no broader
+correctness conclusion follows. This review does not establish full
 R1/R2 normalization/window correctness or persistent compaction.
 
 ## Shared evidence boundary
