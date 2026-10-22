@@ -222,6 +222,11 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Keep aggregate `FILTER` predicates ahead of argument evaluation during
+  differential refresh and auxiliary-state initialization (#1204). After
+  upgrading, rebuild the auxiliary state of existing filtered
+  AVG/statistical/covariance stream tables whose initialization ignored their
+  filters.
 - Prevent manual DIFFERENTIAL refreshes from skipping trigger-captured changes
   when source transactions commit out of LSN order (#1158).
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
