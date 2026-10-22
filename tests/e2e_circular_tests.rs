@@ -596,13 +596,16 @@ async fn test_circular_drop_member_clears_scc_id() {
          SELECT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
-    // ALTER B to reference A (completes the cycle)
-    db.execute(
+    // ALTER B completes the cycle. SET is session-local, so ensure the
+    // setting and ALTER use the same connection (the pool can otherwise
+    // dispatch them to different backends and reject this valid cycle).
+    db.execute_seq(&[
+        "SET pg_trickle.allow_circular = true",
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
-         query => $$SELECT id, val FROM cyc_drop_src \
+         query => $SELECT id, val FROM cyc_drop_src \
          UNION ALL \
-         SELECT a.id, a.val FROM cyc_drop_a a$$)",
-    )
+         SELECT a.id, a.val FROM cyc_drop_a a$)",
+    ])
     .await;
 
     // Verify both have scc_id
