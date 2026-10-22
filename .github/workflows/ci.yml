@@ -615,8 +615,10 @@ jobs:
           PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
           PGT_RELEASE_ATTESTATION_PATH: target/receipt-full-install-attestation.json
         run: |
-          ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests \
-            -E 'test(=test_wal_receipt_small_limits_preserve_complete_transactions)' --retries 0
+          mkdir -p artifacts/lifecycle-histories
+          ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests --test e2e_refresh_atomicity_tests \
+            -E 'test(=test_wal_receipt_small_limits_preserve_complete_transactions) | test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier)' \
+            --retries 0 2>&1 | tee artifacts/lifecycle-histories/runtime.log
           python3 scripts/check_lsn_candidate_binding.py --proof-kind receipt \
             --proof-record .p2p/work/issue-1222-receipt-prefix/evidence/receipt-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
@@ -673,6 +675,7 @@ jobs:
             .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-candidate-binding.json
             target/cdc-elision-full-install-attestation.json
             .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
+            artifacts/lifecycle-histories/
           retention-days: 30
           if-no-files-found: warn
 

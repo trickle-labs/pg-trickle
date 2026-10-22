@@ -114,6 +114,16 @@ jobs:
       - name: Run DVM composition matrix
         run: cargo nextest run --profile ci --test e2e_dvm_composition_tests --no-capture
 
+      - name: Run extended recovery histories
+        env:
+          PGS_PROP_CASES: '10'
+          PGS_PROP_CYCLES: '12'
+        run: |
+          mkdir -p artifacts/lifecycle-histories
+          ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests --test e2e_refresh_atomicity_tests \
+            -E 'test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier)' \
+            --retries 0 2>&1 | tee artifacts/lifecycle-histories/runtime.log
+
       - name: Run DVM metamorphic checks
         run: cargo nextest run --profile ci --test e2e_dvm_metamorphic_tests --no-capture
 
@@ -154,7 +164,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dvm-tiers-artifacts-${{ github.run_id }}
-          path: artifacts/dvm-fuzz/
+          path: |
+            artifacts/dvm-fuzz/
+            artifacts/lifecycle-histories/
           if-no-files-found: ignore
           retention-days: 30
 

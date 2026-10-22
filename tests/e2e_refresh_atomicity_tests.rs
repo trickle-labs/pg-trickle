@@ -1214,3 +1214,134 @@ async fn test_refresh_early_progress_control_is_detected() {
     db.refresh_st(stream).await;
     assert_recovered_action(&db, stream, &query, "DIFFERENTIAL").await;
 }
+
+#[tokio::test]
+async fn test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    let stream = "atomic_snapshot_cancel";
+    let query = "SELECT id,value FROM atomic_snapshot_source";
+    db.execute("CREATE TABLE atomic_snapshot_source(id INT PRIMARY KEY,value TEXT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO atomic_snapshot_source VALUES(1,'committed')")
+        .await;
+    db.create_st(stream, query, "1h", "DIFFERENTIAL").await;
+    let id = pgt_id(&db, stream).await;
+    let baseline = progress(&db, id).await;
+    snapshot_table(&db, stream, "atomic_snapshot_checkpoint").await;
+    db.execute("UPDATE atomic_snapshot_source SET value='pending'")
+        .await;
+    set_chaos(&db, stream, "after_apply").await;
+    let (mut barrier, blocker) = hold_barrier(&db, id, "after_apply").await;
+    let (refresh, refresh_pid) = start_manual_refresh(&db, stream).await;
+    let witness = wait_for_barrier(&db, id, "after_apply", blocker, Duration::from_secs(10)).await;
+    assert_eq!(witness.pid, refresh_pid);
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let artifact = std::path::Path::new(&directory).join("snapshot-cancel.json");
+    std::fs::write(
+        &artifact,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"after_apply", "refresh_pid":refresh_pid,
+            "blockers":witness.blockers, "wait_event":witness.wait_event,
+            "expected_frontier":baseline.frontier, "stage":"before cancellation",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut connection = db.pool.acquire().await.unwrap();
+    let snapshot_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    let mut snapshot = tokio::spawn(async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT pgtrickle.snapshot_stream_table('atomic_snapshot_cancel')",
+        )
+        .fetch_one(&mut *connection)
+        .await
+    });
+    let mut completed = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::select! {
+            result = &mut snapshot => { completed=Some(result.unwrap().unwrap()); break; }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        let blocked: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+            .bind(refresh_pid)
+            .bind(snapshot_pid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        if blocked {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "snapshot neither completed nor witnessed blocking"
+        );
+    }
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(refresh_pid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(cancelled);
+    let error = tokio::time::timeout(Duration::from_secs(5), refresh)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("canceling statement due to user request"),
+        "{error}"
+    );
+    release_barrier(&mut barrier, id, "after_apply").await;
+    clear_chaos(&db).await;
+    let snapshot_name = match completed {
+        Some(name) => name,
+        None => tokio::time::timeout(Duration::from_secs(5), snapshot)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    };
+    let snapshot_frontier: Option<String> = sqlx::query_scalar(
+        "SELECT frontier::text FROM pgtrickle.pgt_snapshots WHERE snapshot_relid=$1::regclass::oid",
+    )
+    .bind(&snapshot_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(snapshot_frontier, baseline.frontier);
+    db.assert_st_matches_query(
+        "atomic_snapshot_checkpoint",
+        &format!("SELECT id,value FROM {snapshot_name}"),
+    )
+    .await;
+    assert_committed_checkpoint(&db, id, stream, "atomic_snapshot_checkpoint", &baseline).await;
+    db.refresh_st(stream).await;
+    assert_recovered_action(&db, stream, query, "DIFFERENTIAL").await;
+    db.execute("SELECT pgtrickle.snapshot_stream_table('atomic_snapshot_cancel','public.atomic_snapshot_after')").await;
+    db.assert_st_matches_query(
+        "atomic_snapshot_after",
+        &format!("SELECT id,value FROM {stream}"),
+    )
+    .await;
+    std::fs::write(
+        artifact,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "phase":"after_apply", "refresh_pid":refresh_pid,"snapshot_pid":snapshot_pid,
+            "blockers":witness.blockers,"wait_event":witness.wait_event,
+            "expected_frontier":baseline.frontier,"snapshot_frontier":snapshot_frontier,
+            "cancel_error":error.to_string(),"coherent":true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
