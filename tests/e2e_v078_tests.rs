@@ -307,8 +307,7 @@ async fn test_p2_complexity_class_backfill() {
     // Insert rows and trigger first refresh (lazy back-fill).
     db.execute("INSERT INTO src_p2 VALUES (1, 10), (2, 20)")
         .await;
-    db.execute("SELECT pgtrickle.refresh_stream_table('st_p2_join_agg')")
-        .await;
+    db.refresh_st_with_retry("st_p2_join_agg").await;
 
     // P-2: complexity class should be non-null after first refresh.
     let class: Option<String> = db
