@@ -28,7 +28,7 @@ RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
       if make install; then installed=1; break; fi; \
       echo "PostgreSQL ASan install attempt ${attempt} failed; retrying" >&2; \
     done; test "$installed" -eq 1) && \
-    # pg_config is a build-time metadata utility, not a server test target.\n    # Rebuild it without ASan: instrumented pg_config can crash while cargo-pgrx\n    # reads its version, producing an intermittent "invalid version string".\n    make -C src/bin/pg_config clean && \
+    make -C src/bin/pg_config clean && \
     make -C src/bin/pg_config && \
     make -C src/bin/pg_config install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
