@@ -515,6 +515,22 @@ async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
         // A missed pre-receipt batch cannot be replayed; load the witness at server startup.
         fixture.db.pool = restart_and_check_named(&fixture, &sentinel_table).await;
         wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+        commit_row(
+            &fixture.db,
+            &fixture.source,
+            &fixture.journal,
+            3,
+            "restart-readiness",
+        )
+        .await;
+        wait_for_receipt(
+            &fixture.db.pool,
+            fixture.oid,
+            "ACKNOWLEDGED",
+            "restart-readiness",
+        )
+        .await;
+        wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
     }
     let (mut barrier, blocker_pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
     commit_row(&fixture.db, &fixture.source, &fixture.journal, 2, &value).await;
