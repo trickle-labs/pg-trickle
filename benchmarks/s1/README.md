@@ -21,12 +21,22 @@ separate documented baseline exception; all historical raw runs are immutable.
 This amendment **does not waive exact-current-source qualification**: archived
 59.363743/minute source `2d102645ccc6779c508514ee22b4a55603bdc281`
 is not the latest PR #1191 source. Current candidate and corrected control
-must be built and measured on the approved 10-CPU ARM64 profile (or another
-explicitly approved profile), with complete paired correctness, latency,
-resource, source/binary hashes and results. A 4-CPU hosted artifact check is
+must be built and measured on an approved ARM64 profile, with complete paired
+correctness, latency, resource, source/binary hashes and results. A 4-CPU hosted artifact check is
 not an actual current-head benchmark. React #12's separately required signed
 operating envelope, restore/clone, mixed-backlog and other release gates remain
 unapproved.
+
+## Owner-approved hosted ARM64 profile — 2026-10-22
+
+The owner also approved using the GitHub-hosted **4-CPU ARM64** runner as an
+alternative to this laptop's 10-CPU ARM64 Docker profile. The workflow now builds
+and measures the exact current candidate and corrected control on that runner;
+the CPU gate requires at least 4 CPUs. The **59/minute acceptance floor**, frozen
+300 admissions, complete vectors, zero future receipts, latency, supervision and
+resource limits remain unchanged. A measured failure still fails qualification.
+Historical 10-CPU results remain bound to their original sources and images and
+cannot substitute for a new current-source run on either profile.
 
 
 Run the frozen R53 joint-stack workload from [issue #1168](https://github.com/trickle-labs/pg-trickle/issues/1168)
@@ -62,9 +72,9 @@ The frozen workload still offers 60 admissions/minute. Under the **2026-10-22
 owner-approved minimum of 59**, the current checker explicitly labels an
 otherwise-valid sole subtarget rate failure `PASS_OWNER_APPROVED_FLOOR`.
 The original evidence's `PASS_WITH_RATE_TOLERANCE` label is historical and
-retained unchanged. The hosted ARM64 runner exposes fewer than 10 Docker CPUs;
-it must reject using an archive from another candidate source as proof of the
-current candidate, even if that archive is valid under the new floor.
+retained unchanged. An archive from another candidate source cannot prove the
+current candidate, even if that archive is valid under the new floor and its
+host profile is approved.
 
 ## Previous merged-head native ARM64 qualification
 
@@ -104,8 +114,9 @@ bytes. This is retained separately under
 checksummed files. It does not replace the approved 10-CPU Docker result.
 
 When this result was recorded, the workflow marked a runner with fewer than 10
-Docker CPUs `SKIPPED_UNQUALIFIED_PROFILE`; the current PR #1191 workflow instead
-validates the checksummed local proof above. This earlier candidate was only
+Docker CPUs `SKIPPED_UNQUALIFIED_PROFILE`. Historical checks now diagnose archive
+provenance only; current source must be rebuilt and measured on an approved
+profile. This earlier candidate was only
 0.0018 cases per minute above 60, so its narrow margin remains part of the
 history. The earlier native amd64 failure remains retained separately.
 
@@ -224,10 +235,10 @@ The supervisor uses the bounded PostgreSQL restart handling described below
 because the frozen worker-health checks restart the server. Persistent
 failures, timeouts and other errors stop the run.
 
-When an approved 10-CPU native ARM64 runner is available, the GitHub workflow
-builds and runs both images there. On a smaller hosted runner, it verifies the
-committed 10-CPU evidence and compiled-input hashes instead. Neither path
-implies a native amd64 throughput result.
+The GitHub workflow builds and runs both images on the approved 4-CPU native
+ARM64 runner. A runner exposing fewer than 4 Docker CPUs can only inspect the
+historical archive and fails current-source qualification. Neither path implies
+a native amd64 throughput result.
 
 On 2026-10-19 the user explicitly approved accepting a slower **complete
 control** as the comparison baseline. `check_result.py --baseline` accepts only

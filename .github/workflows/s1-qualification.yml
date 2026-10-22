@@ -87,14 +87,14 @@ jobs:
         id: profile
         run: |
           cpus=$(docker info --format '{{.NCPU}}')
-          if [ "$cpus" -lt 10 ]; then
+          if [ "$cpus" -lt 4 ]; then
             echo "qualify=false" >> "$GITHUB_OUTPUT"
-            printf '{"result":"SKIPPED_UNQUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":10}\n' "$cpus" \
+            printf '{"result":"SKIPPED_UNQUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":4}\n' "$cpus" \
               > _s1/evidence/profile-gate.json
-            echo "::notice::S1 qualification needs the approved 10-CPU ARM64 Docker profile; this runner exposes $cpus CPUs. No rate gate was assessed."
+            echo "::notice::S1 qualification needs an approved ARM64 Docker profile with at least 4 CPUs; this runner exposes $cpus CPUs. No rate gate was assessed."
           else
             echo "qualify=true" >> "$GITHUB_OUTPUT"
-            printf '{"result":"QUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":10}\n' "$cpus" \
+            printf '{"result":"QUALIFIED_PROFILE","docker_cpus":%s,"required_minimum_cpus":4}\n' "$cpus" \
               > _s1/evidence/profile-gate.json
           fi
       - name: Build native ARM64 SDK
@@ -231,7 +231,7 @@ jobs:
               json.dumps(report, indent=2) + "\n")
           print(json.dumps(report))
           PY
-          printf '{"status":"HISTORICAL_ONLY_NOT_CURRENT_SOURCE_QUALIFIED","archive_head":"%s","current_head":"%s","approved_docker_cpus_required":10}\n' \
+          printf '{"status":"HISTORICAL_ONLY_NOT_CURRENT_SOURCE_QUALIFIED","archive_head":"%s","current_head":"%s","approved_docker_cpus_required":4}\n' \
             "$archived_head" "$current_head" > _s1/evidence/historical-scope.json
           local_run_dir="$RUNNER_TEMP/s1-local-arm64-1191"
           mkdir -p "$local_run_dir"
@@ -263,8 +263,8 @@ jobs:
             _s1/evidence/
             benchmarks/s1/qualification/control-300/
             benchmarks/s1/qualification/candidate-300/
-      - name: Enforce current-source 10-CPU ARM64 qualification
+      - name: Enforce current-source approved ARM64 qualification
         if: ${{ always() && steps.profile.outputs.qualify != 'true' }}
         run: |
-          echo '::error::Current-source S1 qualification remains REQUIRED: this host has fewer than 10 Docker CPUs. Verified historical evidence (if present) cannot promote this new commit.'
+          echo '::error::Current-source S1 qualification remains REQUIRED: this host has fewer than 4 Docker CPUs. Verified historical evidence (if present) cannot promote this new commit.'
           exit 1
