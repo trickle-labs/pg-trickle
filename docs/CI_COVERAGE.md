@@ -500,6 +500,34 @@ arming the target barrier. Both full allocations failed the serial witness,
 so the pair is invalid and no cost difference is reported. Artifacts are
 retained under `target/ci1188-comparison/run-39729948300/`.
 
+The next repaired replay [run `39747899962`](https://github.com/trickle-labs/pg-trickle/actions/runs/39747899962)
+passed the producer/source guard, both integration allocations and all six
+light shards. Its before broad inventory passed 2,166/2,168; the two failures
+were `test_lateral_multiple_refreshes_converge` (an exact row-count lag after
+manual refresh) and `test_scheduler_clock_auto_cron_expires_without_writes`
+(the 30-second due-time witness expired). Its after bounded inventory passed
+1,200/1,200 (47 skipped), and isolated atomicity passed 12/12. The serial WAL
+phase still failed 1/16 on both sides: the before-receipt witness timed out
+with the dependency in `TRANSITIONING`, the slot at cutover, and the scheduler
+and autovacuum waiting on buffer content. Recovery repetition failed on five
+of ten before attempts and one of ten after attempts: the same failpoint test
+observed `effective_refresh_mode = NO_DATA` where it expected `DIFFERENTIAL`.
+The pair is invalid; do not report a cost difference. Source,
+package and workload-image identities matched. Hosted runner image revisions
+and kernels differed and are retained as host variability. Artifacts and
+identity records are under `target/ci1188-comparison/run-39747899962/`.
+
+The follow-up fixture repair makes the initial DVM refresh require a completed
+manual history row, keeps autovacuum off the ephemeral receipt table while
+testing its lock witness, makes the three lateral refreshes wait for exact
+convergence, and allows 90 seconds for scheduler due-time witnesses. These
+changes preserve the result assertions. The WAL change still needs hosted
+verification; disabling autovacuum is a fixture-isolation hypothesis based
+on both failure snapshots showing the scheduler and autovacuum blocked on
+buffer content. The next paired run freezes these repairs at
+`863eb42f0343c3f0610e7ca92036c840ccd8b586`; later documentation and workflow
+guard commits must leave that source/test tree unchanged.
+
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
 
