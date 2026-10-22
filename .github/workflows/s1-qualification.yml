@@ -186,7 +186,7 @@ jobs:
           test "$(git -C _s1/historical rev-parse HEAD)" = "$archived_head"
           # The historical build manifest contains five inputs from its
           # archived build context that differ from its reported Git SHA.
-          # Verify all 429 entries and record this exact divergence; do not
+          # Verify all 447 archived inputs and record this divergence; do not
           # silently claim those five inputs or the current source matched.
           set +e
           (cd _s1/historical && shasum -a 256 -c "$GITHUB_WORKSPACE/$evidence/build-evidence/compiled-inputs.sha256") \
@@ -213,7 +213,7 @@ jobs:
               "benchmarks/s1/check_result.py",
               "benchmarks/s1/test_check_result.py",
           ))
-          assert len(entries) == len(statuses) == 429, (len(entries), len(statuses))
+          assert len(entries) == len(statuses) == 447, (len(entries), len(statuses))
           assert failed in ([], known), {
               "error": "unexpected historical build-context divergence",
               "failed": failed, "known": known,
