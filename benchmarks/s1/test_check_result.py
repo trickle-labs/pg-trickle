@@ -63,19 +63,31 @@ tolerated_o["checks"][-1] = {"name": names[-1], "target_cases_per_minute": 60,
                               "observed_cases_per_minute": 59.36, "churn_cases": 300,
                               "window_minutes": 5, "result": "failed"}
 tolerated_o["failure"] = str(tolerated_o["checks"][-1])
-summary = check_result(tolerated_b, tolerated_o, progress)
-assert summary["s1_result"] == "PASS_WITH_RATE_TOLERANCE"
-assert summary["raw_harness_exit_code"] == 1
-below_floor_b, below_floor_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
-below_floor_o["workload"]["observed_churn_cases_per_minute"] = 58.99
-below_floor_o["checks"][-1]["observed_cases_per_minute"] = 58.99
-below_floor_o["failure"] = str(below_floor_o["checks"][-1])
+# Both a narrow miss (59.36/min) and a larger miss must fail the exact
+# candidate gate, even if every other vector and resource check passes.
+for below_target in (59.36, 59.999, 58.99):
+    failed_b, failed_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
+    failed_o["workload"]["observed_churn_cases_per_minute"] = below_target
+    failed_o["checks"][-1]["observed_cases_per_minute"] = below_target
+    failed_o["failure"] = str(failed_o["checks"][-1])
+    try:
+        check_result(failed_b, failed_o, progress)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"accepted candidate below 60/min: {below_target}")
+
+# Passing the hard boundary is not sufficient if the harness itself failed.
+at_floor_b, at_floor_o = deepcopy(bounded), deepcopy(observed)
+at_floor_o["workload"]["observed_churn_cases_per_minute"] = 60.0
+assert check_result(at_floor_b, at_floor_o, progress)["s1_result"] == "PASS"
+at_floor_b["exit_code"] = 1
 try:
-    check_result(below_floor_b, below_floor_o, progress)
+    check_result(at_floor_b, at_floor_o, progress)
 except AssertionError:
     pass
 else:
-    raise AssertionError("accepted candidate below the rate tolerance")
+    raise AssertionError("accepted failed candidate harness at 60/min")
 for failure in ("candidate", "other_error", "other_gate", "incomplete", "source", "case",
                 "receipt", "memory", "supervision", "exit", "diagnostic"):
     b, o = deepcopy(baseline_b), deepcopy(baseline_o)
