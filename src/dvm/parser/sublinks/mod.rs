@@ -3952,13 +3952,17 @@ unsafe fn parse_from_item_inner(
                     right: Box::new(join_using_column(&right, &column)?),
                 });
             }
-            Expr::Raw(
-                conditions
-                    .iter()
-                    .map(Expr::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(" AND "),
-            )
+            match conditions.as_slice() {
+                // Keep single-key USING bindings available to endpoint admission.
+                [condition] => condition.clone(),
+                _ => Expr::Raw(
+                    conditions
+                        .iter()
+                        .map(Expr::to_sql)
+                        .collect::<Vec<_>>()
+                        .join(" AND "),
+                ),
+            }
         } else if join.quals.is_null() {
             Expr::Literal("TRUE".into())
         } else {

@@ -1228,6 +1228,7 @@ fn resolve_fenced_endpoint_sources(
              SELECT NOT EXISTS(SELECT 1 FROM sources s WHERE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_locks \
               WHERE relation=s.oid AND pid=pg_backend_pid() AND granted \
                 AND mode IN ('ShareLock','ShareRowExclusiveLock','ExclusiveLock','AccessExclusiveLock'))) \
+             AND current_setting('transaction_isolation') IN ('read committed','read uncommitted') \
              AND EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid=$1) \
              AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies \
                  WHERE source_relid=$1 AND (source_type<>'TABLE' OR cdc_mode<>'TRIGGER'))",

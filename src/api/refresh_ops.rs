@@ -1026,6 +1026,15 @@ fn execute_manual_differential_refresh(
                     && matches!(dep.cdc_mode, crate::catalog::CdcMode::Trigger)
             })
         {
+            if Spi::get_one::<bool>("SELECT current_setting('transaction_isolation') IN ('repeatable read','serializable')")
+                .map_err(|e| PgTrickleError::SpiError(format!("endpoint refresh isolation: {e}")))?
+                .unwrap_or(true)
+            {
+                return Err(PgTrickleError::SafeFrontierUnavailable {
+                    context: format!("manual refresh of {schema}.{table_name}"),
+                    reason: "manual differential endpoint fence requires READ COMMITTED isolation".into(),
+                });
+            }
             // A live endpoint and its capture cut must describe the same source state.
             crate::cdc::lock_source_relations(source_oids)?;
             true

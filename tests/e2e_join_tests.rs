@@ -58,11 +58,42 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
             let untouched: String = db
                 .query_scalar(&format!("SELECT xmin::text FROM {stream} WHERE lid=4"))
                 .await;
+            if index == 0 {
+                for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+                    let mut transaction = db.pool.acquire().await.unwrap();
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "BEGIN ISOLATION LEVEL {isolation}"
+                    )))
+                    .execute(&mut *transaction)
+                    .await
+                    .unwrap();
+                    sqlx::query("SELECT 1")
+                        .execute(&mut *transaction)
+                        .await
+                        .unwrap();
+                    let error = sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SELECT pgtrickle.refresh_stream_table('{stream}')"
+                    )))
+                    .execute(&mut *transaction)
+                    .await
+                    .expect_err("late source locks cannot refresh an old transaction snapshot");
+                    assert!(
+                        error.to_string().contains("requires READ COMMITTED"),
+                        "{error}"
+                    );
+                    sqlx::query("ROLLBACK")
+                        .execute(&mut *transaction)
+                        .await
+                        .unwrap();
+                }
+            }
             let mut connection = db.pool.acquire().await.unwrap();
             for sql in [
                 "SET pg_trickle.refresh_strategy='differential'",
                 "SET pg_trickle.differential_max_change_ratio=0",
                 "SET pg_trickle.dvm_decision_trace=on",
+                "SET pg_trickle.log_delta_sql=on",
+                "SET log_min_messages=debug1",
             ] {
                 sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
                     .execute(&mut *connection)
@@ -84,6 +115,7 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                  DELETE FROM {left} WHERE id=99; COMMIT"
             ));
             for mutation in mutations {
+                let diagnostic_mutation = mutation.clone();
                 sqlx::raw_sql(sqlx::AssertSqlSafe(mutation))
                     .execute(&db.pool)
                     .await
@@ -94,12 +126,33 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                 let before: i64 = db.query_scalar(&format!(
                     "SELECT coalesce(max(h.refresh_id),0) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{stream}'"
                 )).await;
-                sqlx::query(sqlx::AssertSqlSafe(format!(
+                let refreshed = sqlx::query(sqlx::AssertSqlSafe(format!(
                     "SELECT pgtrickle.refresh_stream_table('{stream}')"
                 )))
                 .execute(&mut *connection)
-                .await
-                .expect("endpoint-valid projection must not evaluate mixed pairs");
+                .await;
+                if let Err(error) = refreshed {
+                    let logs = tokio::process::Command::new("docker")
+                        .args(["logs", db.container_id()])
+                        .output()
+                        .await
+                        .unwrap();
+                    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+                        .unwrap_or_else(|_| "artifacts/join-endpoints".into());
+                    std::fs::create_dir_all(&directory).unwrap();
+                    std::fs::write(
+                        std::path::Path::new(&directory).join("join-endpoint-failure.log"),
+                        format!(
+                            "{prefix}: {diagnostic_mutation}\n{error}\n{}{}",
+                            String::from_utf8_lossy(&logs.stdout),
+                            String::from_utf8_lossy(&logs.stderr)
+                        ),
+                    )
+                    .unwrap();
+                    panic!(
+                        "endpoint-valid projection must not evaluate mixed pairs: {prefix}: {diagnostic_mutation}: {error}"
+                    );
+                }
                 e2e::oracle::assert_st_query_exact(
                     &db,
                     &stream,
