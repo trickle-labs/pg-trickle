@@ -155,23 +155,28 @@ jobs:
           set -e
           if [ "$raw_exit" -gt 1 ]; then exit "$raw_exit"; fi
           python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/candidate-300
-      - name: Verify committed local ARM64 qualification evidence
-        id: local-proof
+      - uses: actions/checkout@v7
+        if: steps.profile.outputs.qualify != 'true'
+        with:
+          ref: 2d102645ccc6779c508514ee22b4a55603bdc281
+          path: _s1/historical
+          persist-credentials: false
+      - name: Verify historical ARM64 evidence under its original source
+        id: historical-proof
         if: steps.profile.outputs.qualify != 'true'
         run: |
           evidence=benchmarks/s1/qualification/local-arm64-1191
           (cd "$evidence" && shasum -a 256 -c SHA256SUMS)
-          # A historical verified ZIP remains useful evidence, but only the
-          # *exact source* of that ZIP may substitute for a live 10-CPU run.
-          # Keep the frozen archive/checksums intact after acceptance-policy
-          # updates; reject another source instead of rewriting history.
+          # Verify the archived compiled inputs against *their own* source
+          # commit, not against this policy-change checkout. Historical evidence
+          # can be checked without claiming qualification of the current head.
           archived_head=$(cat "$evidence/build-evidence/candidate-commit.txt")
           current_head=$(git rev-parse HEAD)
-          if [ "$current_head" != "$archived_head" ]; then
-            echo "::error::Archived S1 candidate is $archived_head, not current source $current_head. Qualify the current image on approved 10-CPU ARM64."
-            exit 1
-          fi
-          shasum -a 256 -c "$evidence/build-evidence/compiled-inputs.sha256"
+          test "$archived_head" = "2d102645ccc6779c508514ee22b4a55603bdc281"
+          test "$(git -C _s1/historical rev-parse HEAD)" = "$archived_head"
+          (cd _s1/historical && shasum -a 256 -c "$GITHUB_WORKSPACE/$evidence/build-evidence/compiled-inputs.sha256")
+          printf '{"status":"HISTORICAL_ONLY_NOT_CURRENT_SOURCE_QUALIFIED","archive_head":"%s","current_head":"%s","approved_docker_cpus_required":10}\n' \
+            "$archived_head" "$current_head" > _s1/evidence/historical-scope.json
           local_run_dir="$RUNNER_TEMP/s1-local-arm64-1191"
           mkdir -p "$local_run_dir"
           tar -xzf "$evidence/runs.tar.gz" -C "$local_run_dir"
@@ -202,8 +207,8 @@ jobs:
             _s1/evidence/
             benchmarks/s1/qualification/control-300/
             benchmarks/s1/qualification/candidate-300/
-      - name: Enforce approved 10-CPU ARM64 qualification profile
-        if: ${{ always() && steps.profile.outputs.qualify != 'true' && steps.local-proof.outcome != 'success' }}
+      - name: Enforce current-source 10-CPU ARM64 qualification
+        if: ${{ always() && steps.profile.outputs.qualify != 'true' }}
         run: |
-          echo '::error::S1 qualification unavailable: this runner lacks the approved 10-CPU ARM64 profile and no valid committed local qualification evidence was found.'
+          echo '::error::Current-source S1 qualification remains REQUIRED: this host has fewer than 10 Docker CPUs. Verified historical evidence (if present) cannot promote this new commit.'
           exit 1
