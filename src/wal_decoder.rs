@@ -969,9 +969,12 @@ fn acknowledge_receipt_batch(
             let max_changes = i32::try_from(expected.len()).map_err(|_| {
                 PgTrickleError::WalTransitionError("WAL receipt batch is too large".into())
             })?;
+            // Match receipt LSN order while retaining decoder order for equal LSNs.
             let sql = format!(
                 "SELECT lsn::text, xid::text, data \
-                   FROM pg_logical_slot_get_changes('{}', NULL, {})",
+                   FROM pg_logical_slot_get_changes('{}', NULL, {}) \
+                        WITH ORDINALITY AS decoded \
+                  ORDER BY decoded.lsn, decoded.ordinality",
                 first.slot_name, max_changes
             );
             let actual = Spi::connect(|client| {

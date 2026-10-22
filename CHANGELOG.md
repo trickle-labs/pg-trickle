@@ -222,6 +222,9 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Compare WAL acknowledgements in the same order as persisted receipts,
+  avoiding unnecessary trigger fallback and full reinitialization when
+  concurrent transactions emit changes out of LSN order.
 - Keep aggregate `FILTER` predicates ahead of argument evaluation during
   differential refresh and auxiliary-state initialization (#1204). After
   upgrading, rebuild the auxiliary state of existing filtered
