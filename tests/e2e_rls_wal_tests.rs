@@ -127,8 +127,28 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     );
     db.assert_st_matches_query("rls_wal_st", query).await;
 
-    let effective_mode: String = db
-        .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'")
+    // The effective mode records only the *last* completed refresh. A
+    // subsequent scheduler tick can choose FULL for this tiny table under the
+    // adaptive cost model, so it does not prove which path consumed the WAL
+    // changes. Instead require a completed, non-fallback DIFFERENTIAL attempt
+    // in the durable refresh history.
+    let completed_differential: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
+                WHERE st.pgt_name = 'rls_wal_st'
+                  AND h.status = 'COMPLETED'
+                  AND h.action = 'DIFFERENTIAL'
+                  AND NOT h.was_full_fallback
+                  AND h.merge_strategy_used IS DISTINCT FROM 'FULL'
+                  AND h.merge_strategy_used IS DISTINCT FROM 'TOP_K'
+            )",
+        )
         .await;
-    assert_eq!(effective_mode, "DIFFERENTIAL");
+    assert!(
+        completed_differential,
+        "RLS WAL stream must complete a genuine differential refresh"
+    );
 }
