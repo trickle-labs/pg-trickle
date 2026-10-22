@@ -659,14 +659,25 @@ async fn test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_
                     .await
                     .unwrap();
             }
-            for change in [1, -1] {
-                sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-                    "BEGIN; UPDATE {left} SET v=v+({change}) WHERE id IN(1,2); \
-                     UPDATE {right} SET v=v+({change}) WHERE id IN(10,11); COMMIT"
-                )))
-                .execute(&db.pool)
-                .await
-                .unwrap();
+            let mut mutations = [1, -1]
+                .into_iter()
+                .map(|change| {
+                    format!(
+                        "BEGIN; UPDATE {left} SET v=v+({change}) WHERE id IN(1,2); \
+                         UPDATE {right} SET v=v+({change}) WHERE id IN(10,11); COMMIT"
+                    )
+                })
+                .collect::<Vec<_>>();
+            mutations.push(format!(
+                "BEGIN; INSERT INTO {left} VALUES(1,{a},9); DELETE FROM {left} WHERE id=1 AND v=1; \
+                 INSERT INTO {left} VALUES(99,{a},0); UPDATE {left} SET v=1 WHERE id=99; \
+                 DELETE FROM {left} WHERE id=99; COMMIT"
+            ));
+            for mutation in mutations {
+                sqlx::raw_sql(sqlx::AssertSqlSafe(mutation))
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
                 db.try_execute(&query)
                     .await
                     .expect("the coherent native endpoint must remain valid");

@@ -123,6 +123,16 @@ fn endpoint_key_columns(
     {
         return None;
     }
+    let mut bindings = std::collections::HashSet::new();
+    for (alias, columns) in [(la, lc), (ra, rc)] {
+        for column in columns {
+            if matches!(column.name.as_str(), "__pgt_row_id" | "__pgt_action")
+                || !bindings.insert(snapshot_join_column_name(alias, &column.name))
+            {
+                return None;
+            }
+        }
+    }
     let Expr::BinaryOp {
         op,
         left: a,
@@ -1586,7 +1596,7 @@ mod tests {
                 .any(|event| event.operator == "JoinEndpoint");
             assert_eq!(witnessed, expected);
             if expected {
-                assert!(sql.contains("OPERATOR(pg_catalog.*=)"), "{sql}");
+                assert!(sql.contains("pg_catalog.record_image_eq("), "{sql}");
                 assert!(
                     sql.contains("dense_rank()"),
                     "deferred histories rewind complete images: {sql}"
@@ -1608,6 +1618,13 @@ mod tests {
             ),
         );
         assert!(!computed_projection_needs_endpoints(&tree));
+    }
+
+    #[test]
+    fn test_endpoint_admission_rejects_ambiguous_output_bindings() {
+        let left = scan_with_pk(1, "left_src", "public", "a", &["id", "b__x"], &["id"]);
+        let right = scan_with_pk(2, "right_src", "public", "a__b", &["id", "x"], &["id"]);
+        assert!(endpoint_key_columns(&eq_cond("a", "id", "a__b", "id"), &left, &right).is_none());
     }
 
     #[test]
