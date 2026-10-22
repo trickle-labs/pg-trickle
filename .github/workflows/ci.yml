@@ -1769,8 +1769,10 @@ jobs:
     name: Unsafe boundary ASan qualification
     needs: detect-e2e-gates
     if: >
-      github.event_name == 'pull_request' &&
-      needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'
+      !cancelled() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        needs.detect-e2e-gates.outputs.unsafe_boundary_changed == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
