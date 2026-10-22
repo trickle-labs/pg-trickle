@@ -29,10 +29,13 @@ async fn test_refresh_picks_up_inserts() {
     .await;
     assert_eq!(db.count("public.rf_ins_st").await, 2);
 
-    // Insert new rows
+    // Insert new rows. A completed refresh can legitimately defer a recent
+    // write under the writer-holdback watermark; do not treat that as a
+    // permanent missing insert. Require eventual *exact multiset* equality
+    // with the defining query, not merely the expected row count.
     db.execute("INSERT INTO rf_ins VALUES (3, 'c'), (4, 'd')")
         .await;
-    db.refresh_st("rf_ins_st").await;
+    db.refresh_st_until_converged("rf_ins_st").await;
 
     assert_eq!(db.count("public.rf_ins_st").await, 4);
 }
