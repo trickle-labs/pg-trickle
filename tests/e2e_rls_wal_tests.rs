@@ -33,7 +33,19 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    let db = E2eDb::new_on_postgres_db().await;
+    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
+    // This test qualifies the DIFFERENTIAL WAL path, not AUTO's choice of
+    // whether a tiny relation is cheaper to recompute with FULL. The scheduler
+    // runs in separate backends, so a session SET on the test pool would not
+    // affect its refresh strategy. Scope the override to this test database
+    // before signalling the scheduler via with_extension().
+    db.execute(&format!(
+        "ALTER DATABASE \"{}\" SET pg_trickle.refresh_strategy = 'differential'",
+        db_suffix.replace('"', "\"\""),
+    ))
+    .await;
+    let db = db.with_extension().await;
 
     db.execute(
         "CREATE TABLE rls_wal_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)",
@@ -50,7 +62,6 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.execute("CREATE POLICY tenant_only ON rls_wal_src USING (tenant_id = 10)")
         .await;
 
-    let db_suffix: String = db.query_scalar("SELECT current_database()").await;
     let wal_owner = format!("rls_wal_owner_{}", db_suffix.replace('-', "_"));
     db.execute(&format!("CREATE ROLE {wal_owner} LOGIN BYPASSRLS"))
         .await;
