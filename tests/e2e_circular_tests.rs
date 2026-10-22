@@ -602,9 +602,9 @@ async fn test_circular_drop_member_clears_scc_id() {
     db.execute_seq(&[
         "SET pg_trickle.allow_circular = true",
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
-         query => $SELECT id, val FROM cyc_drop_src \
+         query => $$SELECT id, val FROM cyc_drop_src \
          UNION ALL \
-         SELECT a.id, a.val FROM cyc_drop_a a$)",
+         SELECT a.id, a.val FROM cyc_drop_a a$$)",
     ])
     .await;
 
