@@ -3686,6 +3686,21 @@ fn cost_model_observation(action: RefreshAction, elapsed_ms: f64) -> (Option<f64
     }
 }
 
+// A before-apply chaos failure qualifies a *differential* apply, not an idle
+// scheduler tick. A NO_DATA tick can occur before the writer-holdback watermark
+// exposes a recently committed change. Failing that tick would incorrectly
+// suspend the stream without ever exercising the differential failure path.
+fn should_inject_before_apply_chaos(
+    action: RefreshAction,
+    stream_name: &str,
+    chaos_table: &str,
+    chaos_phase: &str,
+) -> bool {
+    action == RefreshAction::Differential
+        && chaos_table == stream_name
+        && chaos_phase == "before_apply"
+}
+
 /// Execute a scheduled refresh for a stream table.
 ///
 /// Returns a [`RefreshOutcome`] indicating whether the refresh succeeded,
@@ -3854,11 +3869,12 @@ fn execute_scheduled_refresh(
     // D-3 TEST-MODE: exercise the real scheduler failure path after the
     // attempt is recorded but before refresh apply.  The normal refresh
     // error branch persists the FAILED history row and retry state.
-    // A no-data tick has no refresh apply point to fail; wait for real work.
-    let test_failure = if action != RefreshAction::NoData
-        && config::pg_trickle_test_chaos_for_table() == st.pgt_name
-        && config::pg_trickle_test_chaos_phase() == "before_apply"
-    {
+    let test_failure = if should_inject_before_apply_chaos(
+        action,
+        &st.pgt_name,
+        &config::pg_trickle_test_chaos_for_table(),
+        &config::pg_trickle_test_chaos_phase(),
+    ) {
         const SERIALIZATION_FAILURE_SQLSTATE: u32 =
             pgrx::PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE as u32;
         let backend_pid = Spi::get_one::<i32>("SELECT pg_backend_pid()")
@@ -4890,6 +4906,40 @@ mod tests {
         let outcome = RefreshOutcome::RetryableFailure;
         let cloned = outcome.clone();
         assert_eq!(outcome, cloned);
+    }
+
+    #[test]
+    fn test_before_apply_chaos_requires_differential_work() {
+        assert!(should_inject_before_apply_chaos(
+            RefreshAction::Differential,
+            "chaos_st",
+            "chaos_st",
+            "before_apply",
+        ));
+        for action in [
+            RefreshAction::NoData,
+            RefreshAction::Full,
+            RefreshAction::Reinitialize,
+        ] {
+            assert!(!should_inject_before_apply_chaos(
+                action,
+                "chaos_st",
+                "chaos_st",
+                "before_apply",
+            ));
+        }
+        assert!(!should_inject_before_apply_chaos(
+            RefreshAction::Differential,
+            "other_st",
+            "chaos_st",
+            "before_apply",
+        ));
+        assert!(!should_inject_before_apply_chaos(
+            RefreshAction::Differential,
+            "chaos_st",
+            "chaos_st",
+            "after_apply",
+        ));
     }
 
     #[test]
