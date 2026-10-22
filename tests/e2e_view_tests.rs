@@ -77,8 +77,7 @@ async fn test_view_inline_chained_inner_using_proves_merged_key() {
     db.assert_st_matches_query("vi_chain_result", query).await;
 
     // No matching id=1 until a new allowed row is inserted.
-    db.execute("INSERT INTO vi_chain_allowed VALUES (1)")
-        .await;
+    db.execute("INSERT INTO vi_chain_allowed VALUES (1)").await;
     db.refresh_st("vi_chain_result").await;
     db.assert_st_matches_query("vi_chain_result", query).await;
 
