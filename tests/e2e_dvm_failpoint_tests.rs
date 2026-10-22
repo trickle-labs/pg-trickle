@@ -159,11 +159,7 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
         scenario.execution.requested_refresh_mode
     ))
     .await;
-    db.execute(&format!(
-        "SELECT pgtrickle.refresh_stream_table('{}')",
-        scenario.query.stream_table
-    ))
-    .await;
+    db.refresh_st_with_retry(&scenario.query.stream_table).await;
 
     // ── Baseline: stream table matches the direct query ──────────────────
     oracle::compare_st_to_query(

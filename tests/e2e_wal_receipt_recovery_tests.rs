@@ -187,6 +187,9 @@ async fn create_identity_sentinel(db: &E2eDb, table: &str, value: &str) {
 async fn setup_wal_fixture(case_name: &str) -> Fixture {
     let stem = case_name.replace('-', "_");
     let db = E2eDb::new_dedicated().await.with_extension().await;
+    // Avoid autovacuum contending with the short-lived receipt lock witnesses.
+    db.execute("ALTER TABLE pgtrickle.pgt_wal_receipts SET (autovacuum_enabled = false)")
+        .await;
     configure_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
         .await;
