@@ -1781,6 +1781,8 @@ jobs:
 
       - name: Build and run the required instrumented slice
         run: |
+          # Bookworm's ASan runtime can hang at startup with 32-bit mmap randomization.
+          sudo sysctl -w vm.mmap_rnd_bits=28
           docker build --platform=linux/amd64 \
             -f tests/Dockerfile.e2e-asan \
             -t pg_trickle_e2e_asan:contract .
