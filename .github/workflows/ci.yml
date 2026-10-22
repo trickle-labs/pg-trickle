@@ -939,7 +939,8 @@ jobs:
             if [ "$first" = true ]; then first=false; else items="$items,"; fi
             items="$items{\"from\":\"$from\",\"to\":\"$to\"}"
           done
-          items="$items]"
+          # Exercise the health-view migration with the current binary/catalog.
+          items="$items,{\"from\":\"0.108.0\",\"to\":\"$current_version\"}]"
           echo "matrix={\"include\":$items}" >> "$GITHUB_OUTPUT"
           echo "Discovered upgrade pairs: $items"
 
