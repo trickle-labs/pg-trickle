@@ -18,10 +18,13 @@ def targets(root: Path = ROOT) -> list[str]:
     light = set(re.findall(r"^    (e2e_\w+)$", runner, re.MULTILINE))
     inventory = {path.stem for path in (root / "tests").glob("e2e_*.rs")}
     full = policy["pr_full"]
+    pure = policy["pr_pure"]
     deferred = set(policy["scheduled_only"])
-    if len(full) != len(set(full)) or deferred & (set(full) | light):
+    if (len(full) != len(set(full)) or len(pure) != len(set(pure))
+            or set(pure) & (set(full) | light | deferred)
+            or deferred & (set(full) | light)):
         raise ValueError("duplicate or conflicting CI suite allocation")
-    allocated = light | set(full) | deferred
+    allocated = light | set(full) | set(pure) | deferred
     if allocated != inventory:
         raise ValueError(
             f"unmapped targets: {sorted(inventory - allocated)}; "
@@ -32,6 +35,10 @@ def targets(root: Path = ROOT) -> list[str]:
         source = (root / "tests" / f"{name}.rs").read_text()
         if '#[cfg(not(feature = "light-e2e"))]' in source and name not in full:
             raise ValueError(f"full-harness cases omitted from PR: {name}")
+    for name in pure:
+        source = (root / "tests" / f"{name}.rs").read_text()
+        if "#[tokio::test]" in source or "E2eDb::" in source:
+            raise ValueError(f"database test allocated to pure tier: {name}")
     for case in policy["scheduled_cases"]:
         binary, test = case.split("::")
         source = (root / "tests" / f"{binary}.rs").read_text()
@@ -43,11 +50,17 @@ def targets(root: Path = ROOT) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true", help="validate and list targets without Docker")
+    parser.add_argument("--pure", action="store_true", help="run database-free harness contracts")
     args = parser.parse_args()
     selected = targets()
     if args.list:
         print("\n".join(selected))
         return 0
+    if args.pure:
+        command = ["cargo", "test", "--features", "pg18"]
+        for name in json.loads((ROOT / ".github/ci-suites.json").read_text())["pr_pure"]:
+            command.extend(["--test", name])
+        return subprocess.run(command + ["--", "--test-threads=1"], cwd=ROOT).returncode
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     for name in selected:
         if name != "e2e_refresh_atomicity_tests":

@@ -1,4 +1,7 @@
 {
+  "pr_pure": [
+    "e2e_dvm_fuzz_tests"
+  ],
   "pr_full": [
     "e2e_bgworker_tests",
     "e2e_bootstrap_gating_tests",
@@ -20,7 +23,6 @@
     "e2e_drain_mode_tests",
     "e2e_dvm_corpus_tests",
     "e2e_dvm_failpoint_tests",
-    "e2e_dvm_fuzz_tests",
     "e2e_dvm_metamorphic_tests",
     "e2e_dvm_negative_control_tests",
     "e2e_dvm_shrink_tests",

@@ -106,20 +106,26 @@ async fn configure_scheduler(db: &E2eDb, mode: ScheduleMode) {
 /// Refresh a stream table according to the scheduling mode.
 ///
 /// - **Manual**: calls `refresh_st()` directly.
-/// - **Serial/Parallel**: waits for the scheduler to auto-refresh
-///   by polling `data_timestamp`, using `refresh_st_with_retry` as fallback.
-async fn refresh_for_mode(db: &E2eDb, st_name: &str, mode: ScheduleMode) {
+/// - **Serial/Parallel**: waits for exact contents, including an already-completed refresh.
+async fn refresh_for_mode(db: &E2eDb, st_name: &str, query: &str, mode: ScheduleMode) {
     match mode {
         ScheduleMode::Manual => {
             db.refresh_st(st_name).await;
         }
         ScheduleMode::Serial | ScheduleMode::Parallel => {
-            let refreshed = db
-                .wait_for_auto_refresh(st_name, Duration::from_secs(60))
-                .await;
-            if !refreshed {
-                // Fallback: force manual refresh if scheduler didn't fire
-                db.refresh_st_with_retry(st_name).await;
+            // Use original fixture SQL: catalog deparsing can omit NUMERIC typmods.
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            loop {
+                let Err(diff) = e2e::oracle::compare_st_to_query(db, st_name, query).await else {
+                    return;
+                };
+                assert!(
+                    diff.schema_mismatch.is_none()
+                        && diff.comparison_error.is_none()
+                        && std::time::Instant::now() < deadline,
+                    "[{mode}] scheduler did not converge '{st_name}': {diff}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -132,26 +138,50 @@ async fn refresh_for_mode(db: &E2eDb, st_name: &str, mode: ScheduleMode) {
 /// changes propagate through the chain.  Waiting only for the leaf is racy:
 /// the scheduler might refresh the leaf with stale upstream data if the
 /// parent hasn't been refreshed yet in the current cycle.
-async fn refresh_chain_for_mode(db: &E2eDb, st_names: &[&str], mode: ScheduleMode) {
-    match mode {
-        ScheduleMode::Manual => {
-            for name in st_names {
-                db.refresh_st(name).await;
-            }
-        }
-        ScheduleMode::Serial | ScheduleMode::Parallel => {
-            // Wait for each ST in topological order so that downstream STs
-            // observe the refreshed upstream data.
-            for name in st_names {
-                let refreshed = db
-                    .wait_for_auto_refresh(name, Duration::from_secs(90))
-                    .await;
-                if !refreshed {
-                    db.refresh_st_with_retry(name).await;
-                }
-            }
-        }
+async fn refresh_chain_for_mode(db: &E2eDb, streams: &[(&str, &str)], mode: ScheduleMode) {
+    for (name, query) in streams {
+        refresh_for_mode(db, name, query, mode).await;
     }
+}
+
+#[tokio::test]
+async fn test_scheduler_wait_observes_results_without_manual_fallback() {
+    let db = db_for_mode(ScheduleMode::Manual).await;
+    db.execute("CREATE TABLE wait_src (id INT PRIMARY KEY)")
+        .await;
+    db.create_st("wait_st", "SELECT id FROM wait_src", "1m", "DIFFERENTIAL")
+        .await;
+    db.execute("INSERT INTO wait_src VALUES (1)").await;
+
+    // No scheduler runs in this database: a wait must not repair stale results.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            refresh_for_mode(
+                &db,
+                "wait_st",
+                "SELECT id FROM wait_src",
+                ScheduleMode::Serial
+            ),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(db.count("wait_st").await, 0);
+
+    db.refresh_st("wait_st").await;
+    // A completed refresh must not cause another 90-second timestamp wait.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        refresh_for_mode(
+            &db,
+            "wait_st",
+            "SELECT id FROM wait_src",
+            ScheduleMode::Serial,
+        ),
+    )
+    .await
+    .expect("already-correct contents should be observed immediately");
 }
 
 /// Schedule string appropriate for the mode: short for scheduler, long for manual.
@@ -218,7 +248,13 @@ async fn run_view_upstream_differential(mode: ScheduleMode) {
     // INSERT
     db.execute("INSERT INTO msv_products (name, price, active) VALUES ('Doohickey', 5.99, true)")
         .await;
-    refresh_for_mode(&db, "msv_st_products", mode).await;
+    refresh_for_mode(
+        &db,
+        "msv_st_products",
+        "SELECT id, name, price FROM msv_active_products",
+        mode,
+    )
+    .await;
     assert_eq!(
         db.count("public.msv_st_products").await,
         3,
@@ -228,7 +264,13 @@ async fn run_view_upstream_differential(mode: ScheduleMode) {
     // UPDATE: deactivate
     db.execute("UPDATE msv_products SET active = false WHERE name = 'Widget'")
         .await;
-    refresh_for_mode(&db, "msv_st_products", mode).await;
+    refresh_for_mode(
+        &db,
+        "msv_st_products",
+        "SELECT id, name, price FROM msv_active_products",
+        mode,
+    )
+    .await;
     assert_eq!(
         db.count("public.msv_st_products").await,
         2,
@@ -238,7 +280,13 @@ async fn run_view_upstream_differential(mode: ScheduleMode) {
     // DELETE
     db.execute("DELETE FROM msv_products WHERE name = 'Doohickey'")
         .await;
-    refresh_for_mode(&db, "msv_st_products", mode).await;
+    refresh_for_mode(
+        &db,
+        "msv_st_products",
+        "SELECT id, name, price FROM msv_active_products",
+        mode,
+    )
+    .await;
 
     db.assert_st_matches_query(
         "msv_st_products",
@@ -321,7 +369,15 @@ async fn run_multiple_views_joined(mode: ScheduleMode) {
     // Insert a new large order for a gold customer
     db.execute("INSERT INTO msj_orders VALUES (5, 3, 500)")
         .await;
-    refresh_for_mode(&db, "msj_st_gold_large", mode).await;
+    refresh_for_mode(
+        &db,
+        "msj_st_gold_large",
+        "SELECT c.name, o.amount
+         FROM msj_gold_customers c
+         JOIN msj_large_orders o ON c.id = o.customer_id",
+        mode,
+    )
+    .await;
     assert_eq!(
         db.count("public.msj_st_gold_large").await,
         4,
@@ -331,7 +387,15 @@ async fn run_multiple_views_joined(mode: ScheduleMode) {
     // Demote Alice from gold → silver
     db.execute("UPDATE msj_customers SET tier = 'silver' WHERE name = 'Alice'")
         .await;
-    refresh_for_mode(&db, "msj_st_gold_large", mode).await;
+    refresh_for_mode(
+        &db,
+        "msj_st_gold_large",
+        "SELECT c.name, o.amount
+         FROM msj_gold_customers c
+         JOIN msj_large_orders o ON c.id = o.customer_id",
+        mode,
+    )
+    .await;
 
     db.assert_st_matches_query(
         "msj_st_gold_large",
@@ -431,7 +495,21 @@ async fn run_midstream_view_chain(mode: ScheduleMode) {
     )
     .await;
 
-    refresh_chain_for_mode(&db, &["msm_st_product_totals", "msm_st_low_stock"], mode).await;
+    refresh_chain_for_mode(
+        &db,
+        &[
+            (
+                "msm_st_product_totals",
+                "SELECT product, SUM(quantity) AS total_qty FROM msm_v_inventory GROUP BY product",
+            ),
+            (
+                "msm_st_low_stock",
+                "SELECT product, total_qty FROM msm_st_product_totals WHERE total_qty < 200",
+            ),
+        ],
+        mode,
+    )
+    .await;
 
     db.assert_st_matches_query(
         "msm_st_product_totals",
@@ -528,7 +606,26 @@ async fn run_diamond_with_view_branch(mode: ScheduleMode) {
     db.execute("INSERT INTO msd_src (category, amount) VALUES ('x', 40), ('z', 100)")
         .await;
 
-    refresh_chain_for_mode(&db, &["msd_branch_a", "msd_branch_b", "msd_joined"], mode).await;
+    refresh_chain_for_mode(
+        &db,
+        &[
+            (
+                "msd_branch_a",
+                "SELECT category, SUM(amount) AS total FROM msd_v_src GROUP BY category",
+            ),
+            (
+                "msd_branch_b",
+                "SELECT category, COUNT(*) AS cnt FROM msd_src GROUP BY category",
+            ),
+            (
+                "msd_joined",
+                "SELECT a.category, a.total, b.cnt
+              FROM msd_branch_a a JOIN msd_branch_b b ON a.category = b.category",
+            ),
+        ],
+        mode,
+    )
+    .await;
 
     db.assert_st_matches_query(
         "msd_joined",
@@ -632,7 +729,23 @@ async fn run_three_layer_chain(mode: ScheduleMode) {
     )
     .await;
 
-    refresh_chain_for_mode(&db, &["ms3_st_routes", "ms3_st_heavy_routes"], mode).await;
+    refresh_chain_for_mode(
+        &db,
+        &[
+            (
+                "ms3_st_routes",
+                "SELECT origin, destination, SUM(weight_kg) AS total_kg, COUNT(*) AS shipment_count
+         FROM ms3_v_domestic GROUP BY origin, destination",
+            ),
+            (
+                "ms3_st_heavy_routes",
+                "SELECT origin, destination, total_kg
+              FROM ms3_st_routes WHERE total_kg >= 200",
+            ),
+        ],
+        mode,
+    )
+    .await;
 
     let heavy_after: i64 = db.query_scalar("SELECT count(*) FROM ms3_v_report").await;
     assert_eq!(heavy_after, 3, "[{mode}] NYC→CHI should now be heavy");
@@ -641,7 +754,23 @@ async fn run_three_layer_chain(mode: ScheduleMode) {
     db.execute("DELETE FROM ms3_shipments WHERE origin = 'CHI' AND destination = 'MIA'")
         .await;
 
-    refresh_chain_for_mode(&db, &["ms3_st_routes", "ms3_st_heavy_routes"], mode).await;
+    refresh_chain_for_mode(
+        &db,
+        &[
+            (
+                "ms3_st_routes",
+                "SELECT origin, destination, SUM(weight_kg) AS total_kg, COUNT(*) AS shipment_count
+         FROM ms3_v_domestic GROUP BY origin, destination",
+            ),
+            (
+                "ms3_st_heavy_routes",
+                "SELECT origin, destination, total_kg
+              FROM ms3_st_routes WHERE total_kg >= 200",
+            ),
+        ],
+        mode,
+    )
+    .await;
 
     db.assert_st_matches_query(
         "ms3_st_heavy_routes",
@@ -740,9 +869,27 @@ async fn run_parallel_sts_same_view(mode: ScheduleMode) {
         .await;
 
     // Refresh all three
-    refresh_for_mode(&db, "msp_st_errors", mode).await;
-    refresh_for_mode(&db, "msp_st_critical", mode).await;
-    refresh_for_mode(&db, "msp_st_all", mode).await;
+    refresh_for_mode(
+        &db,
+        "msp_st_errors",
+        "SELECT id, event_type, severity FROM msp_v_all_events WHERE event_type = 'error'",
+        mode,
+    )
+    .await;
+    refresh_for_mode(
+        &db,
+        "msp_st_critical",
+        "SELECT id, event_type, severity FROM msp_v_all_events WHERE severity >= 5",
+        mode,
+    )
+    .await;
+    refresh_for_mode(
+        &db,
+        "msp_st_all",
+        "SELECT event_type, COUNT(*) AS cnt FROM msp_v_all_events GROUP BY event_type",
+        mode,
+    )
+    .await;
 
     db.assert_st_matches_query(
         "msp_st_errors",
@@ -805,7 +952,7 @@ async fn run_truncate_propagation(mode: ScheduleMode) {
     assert_eq!(db.count("public.mst_st").await, 3, "[{mode}] initial");
 
     db.execute("TRUNCATE mst_src").await;
-    refresh_for_mode(&db, "mst_st", mode).await;
+    refresh_for_mode(&db, "mst_st", "SELECT id, val FROM mst_view", mode).await;
 
     assert_eq!(
         db.count("public.mst_st").await,
@@ -816,7 +963,7 @@ async fn run_truncate_propagation(mode: ScheduleMode) {
     // Verify recovery
     db.execute("INSERT INTO mst_src VALUES (10, 100), (20, 200)")
         .await;
-    refresh_for_mode(&db, "mst_st", mode).await;
+    refresh_for_mode(&db, "mst_st", "SELECT id, val FROM mst_view", mode).await;
 
     assert_eq!(
         db.count("public.mst_st").await,
@@ -891,7 +1038,14 @@ async fn run_multi_schema(mode: ScheduleMode) {
         "INSERT INTO ms_raw_data.sensor_readings (sensor_id, value) VALUES (1, 25.0), (4, 15.0)",
     )
     .await;
-    refresh_for_mode(&db, "ms_sensor_averages", mode).await;
+    refresh_for_mode(
+        &db,
+        "ms_sensor_averages",
+        "SELECT sensor_id, AVG(value)::numeric(10,2) AS avg_value, COUNT(*) AS reading_count
+         FROM ms_analytics.v_recent_readings GROUP BY sensor_id",
+        mode,
+    )
+    .await;
 
     assert_eq!(
         db.count("public.ms_sensor_averages").await,
@@ -996,7 +1150,18 @@ async fn run_nested_views_chain(mode: ScheduleMode) {
     )
     .await;
 
-    refresh_chain_for_mode(&db, &["msn_st_errors", "msn_st_error_count"], mode).await;
+    refresh_chain_for_mode(
+        &db,
+        &[
+            ("msn_st_errors", "SELECT id, message FROM msn_v_errors"),
+            (
+                "msn_st_error_count",
+                "SELECT COUNT(*) AS error_count FROM msn_st_errors",
+            ),
+        ],
+        mode,
+    )
+    .await;
 
     let new_count: i64 = db
         .query_scalar("SELECT error_count FROM public.msn_st_error_count")
@@ -1064,7 +1229,7 @@ async fn run_transaction_atomicity(mode: ScheduleMode) {
     ])
     .await;
 
-    refresh_for_mode(&db, "msa_st_tx", mode).await;
+    refresh_for_mode(&db, "msa_st_tx", "SELECT id, val FROM msa_v_tx", mode).await;
 
     assert_eq!(
         db.count("public.msa_st_tx").await,

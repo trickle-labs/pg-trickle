@@ -3,7 +3,7 @@
 The PR suite protects committed results through real PostgreSQL execution.
 The inventory is checked by `python3 scripts/ci_pr_suite.py --list`: every
 `tests/e2e_*.rs` target must be in the light allowlist, the explicit full
-list, or a documented scheduled tier. New targets fail the static contract
+list, the database-free `pr_pure` list, or a documented scheduled tier. New targets fail the static contract
 until allocated. The source of truth is
 [ci-suites.json](../.github/ci-suites.json) plus
 [the light allowlist](../scripts/run_light_e2e_tests.sh).
@@ -36,7 +36,7 @@ the packaged extension. Neither substitutes for the installed tests above.
 
 For runtime or harness changes, Linux unit/catalog/component checks run even
 on drafts. Ready PRs add the existing 91-target, three-shard light suite and
-an explicit 100-target full suite. The old sensitive DVM gate selected all 161
+an explicit 99-target full suite and one database-free harness target. The old sensitive DVM gate selected all 161
 E2E targets in addition to light E2E. The new full suite retains permanent
 corpus, identity, versioned security and conformance regressions in both
 harnesses. All targets with `cfg(not(feature = "light-e2e"))` stay in the full
@@ -132,7 +132,233 @@ status check after its first successful run, retaining separately required
 lint/security/release checks if configured later. A reported CI failure does
 not itself configure GitHub to prevent merging.
 
-## Measurements
+## Investigation and focused improvement (2026-10-22)
+
+### Baseline and limits
+
+Read-only REST inspection of `branches/main/protection`, `rulesets/13289237`
+and `rules/branches/main` still found **no required status checks**. The active
+ruleset requires a PR and linear history and blocks deletion/force-push.
+No settings were changed. Consequently, a literal required-check time to green
+is undefined; the useful measure below is the terminal CI verdict, cross-checked
+against the other workflows for the same PR update.
+
+Inspected 100 completed PR CI run records, then job/step timestamps for 12
+selected runs on October 19–22: 11 ready runs (four CI successes, seven failures)
+and one draft. Readiness was checked against PR timeline events, not today's
+draft flag. This is a small, purposive sample, with repeated updates to one PR,
+not an unbiased repository-wide distribution. Timings start at workflow event
+creation, the available proxy for the PR update; webhook delivery latency is
+not available in these responses. Endpoints are job completion timestamps,
+not the later workflow `updated_at` timestamp.
+
+| Ready sample | CI verdict minutes | CI runner minutes | All triggered workflows green? / total runner minutes |
+|---|---:|---:|---|
+| [#1190 harness/allocation](https://github.com/trickle-labs/pg-trickle/actions/runs/39253819455) | 88.02 | 152.82 | Yes / 156.45 |
+| [#1191 sensitive runtime, Oct 20 morning](https://github.com/trickle-labs/pg-trickle/actions/runs/39386589710) | 79.27 | 149.40 | **No: separate S1 qualification failed** |
+| [#1191 sensitive runtime, Oct 20 evening](https://github.com/trickle-labs/pg-trickle/actions/runs/39472934464) | 68.17 | 150.30 | Yes / 164.22 |
+| [#1191 sensitive runtime, Oct 22](https://github.com/trickle-labs/pg-trickle/actions/runs/39778269500) | 69.32 | 160.15 | Yes / 174.60 |
+
+The two all-green sensitive-runtime updates have a median of 68.75 minutes
+and a nearest-rank p90 of 69.32 minutes, but both are from **one PR**. Including
+the harness sample gives median 69.32 and p90 88.02 (n=3). Neither estimates an
+ordinary-runtime population reliably. The three latest inspected ordinary DVM
+updates all failed: [FILTER](https://github.com/trickle-labs/pg-trickle/actions/runs/39776762344),
+[COUNT](https://github.com/trickle-labs/pg-trickle/actions/runs/39773610952), and
+[USING](https://github.com/trickle-labs/pg-trickle/actions/runs/39772678805).
+Their first failed steps ended at 50.75, 53.65 and 65.77 minutes; terminal
+verdicts arrived at 69.05, 84.27 and 88.53 minutes. These are failure latency,
+not time to green. In the FILTER log the actionable assertion appeared about
+five seconds before the failed step ended.
+
+The other retained failures are runs
+[39567538745](https://github.com/trickle-labs/pg-trickle/actions/runs/39567538745),
+[39680531412](https://github.com/trickle-labs/pg-trickle/actions/runs/39680531412),
+[39743634653](https://github.com/trickle-labs/pg-trickle/actions/runs/39743634653), and
+[39744582143](https://github.com/trickle-labs/pg-trickle/actions/runs/39744582143).
+Across all seven failures, the median first-failed-step latency was 55.28 minutes.
+Two ASan jobs timed out after roughly 120 minutes. No failures were discarded
+to obtain a faster passing comparison.
+
+The apparently successful [#1197 run](https://github.com/trickle-labs/pg-trickle/actions/runs/39387305034)
+was a **draft** (23.43 minutes, 11.82 CI runner minutes); its later ready event
+failed. The inspected OpenWiki PRs also changed runtime source/tests, so they
+are mixed changes, not docs-only samples. There is no docs-only hosted timing
+sample in this set. Local selection checks cover docs-only and mixed paths.
+
+### Where the time goes
+
+In run 39778269500, the critical path was contract → sensitive-path detection →
+full E2E → verdict. The full job started 15.18 minutes after the event and ran
+53.97 minutes. Before it started, dependency execution/release consumed 4.10
+elapsed minutes and its own runner wait consumed 11.08 minutes. Its steps were:
+
+| Full job phase | Minutes |
+|---|---:|
+| Disk cleanup | 3.60 |
+| pgrx setup, warm cache | 0.47 |
+| Docker image build (including extension compilation) | 4.95 |
+| Rust test compilation | 6.58 |
+| Parallel full tests: 1,224 cases | 24.32 |
+| Isolated atomicity: 12 cases | 0.60 |
+| Ten witnessed recovery repetitions | 11.98 |
+
+The mixed-scheduling target alone consumed 1,231.90 summed test-seconds;
+individual diamond/chain cases took 186–187 seconds. Several waited 60 or 90
+seconds for another `data_timestamp` advance after the relevant refresh had
+already completed, then manually refreshed on timeout. Those waits both cost
+time and could hide a broken scheduler. This is observed duration plus a
+source-grounded explanation, tested by the local comparison below.
+
+The other lane was contract → LSN proof → package → three light shards and
+release controls; candidate binding additionally required the proof directly.
+Proof execution was only 0.48 minutes, but its queue delayed package eligibility
+until 12.20 minutes after the event. Packaging used 4.13 minutes. Light shard
+jobs took 9.35/14.23/10.22 minutes, including cleanup of 2.23/5.92/1.30 minutes.
+Shard 2 compiled for 3.23 minutes and executed 458 tests in 3.15 minutes. Count
+alone does not explain the imbalance. The package artifact was 6.16 MiB and
+individual upload/download steps were below six seconds. Full-image and host
+package builds repeated extension compilation, but use different build/runtime
+environments; substituting packages requires proving ABI and full-image parity.
+
+The four inspected full/light/component logs restored exact cargo registry,
+target, cargo-pgrx and pgrx-home cache keys. The successful full and light logs
+showed no test retries; all sampled run attempts were attempt 1. Full execution
+still compiled for 6.58 minutes despite the cache hit. Integration spent 4.02
+minutes in catalog tests and 1.72 in DVM components, including ten separate
+Cargo invocations. Setup was generally 0.4–0.8 minutes. Summed job runner wait
+was 129.18 minutes in this run; it is **not** elapsed wall time or runner cost.
+
+Lint, docs drift, unsafe inventory, secret scanning, Semgrep and fuzz replay
+run independently of CI. Dependency/security workflows are selected for their
+own inputs; Build and CodeQL do not currently run on PRs. The sampled S1 branch
+also had a separate qualification workflow absent from main. In the three
+all-green samples CI finished last. `PR correctness` aggregates its CI jobs,
+not these independent workflows. Workflow creation-to-job-creation is reported
+as release delay; creation-to-start is reported separately as a runner-wait
+proxy. Neither proves the cause of runner queueing.
+
+### Changes and coverage
+
+| Rank / change | Expected benefit | Confidence, effort and coverage risk |
+|---|---|---|
+| 1. Observe exact scheduled results instead of waiting for a second timestamp and manually repairing | Remove long no-op waits from the dominant test target | High confidence in the race; small fixture change; stronger scheduler assertion |
+| 2. Fold sensitive-path detection into the existing static selector | Remove one queued job before full E2E/ASan; observed contract-to-detection delays were 2.47, 12.65 and 17.45 minutes in the all-green samples | High confidence; move the same filters; hosted queue effects remain unmeasured |
+| 3. Move structural scenario/shrink assertions to the existing Rust job | Earlier actionable harness failures, without waiting for Docker/image build | High confidence; small allocation change; negligible claimed total-run saving |
+
+Earlier packaging was investigated and rejected: `check_lsn_verification.py`
+explicitly requires proof before candidate package construction. That dependency
+and the independent candidate-binding dependency remain intact. Removing it
+would redefine an existing release control and is unnecessary for this change.
+
+The mixed-scheduling helper now polls the existing exact schema/multiset oracle
+against the original fixture SQL, in topological order. It never triggers manual
+refresh in scheduled modes.
+The original DML, transaction, view, serial/parallel-worker and final-result
+assertions remain installed-extension tests. A regression check proves the
+helper cannot repair stale rows with scheduling disabled and accepts rows that
+were already refreshed. No timeout was shortened, concurrency raised, retry
+added, or recovery/atomicity isolation changed.
+
+`e2e_dvm_fuzz_tests` is explicitly allocated to `pr_pure`, executed by
+`ci_pr_suite.py --pure` in the existing unit job, including on runtime drafts.
+It protects scenario validation, generator/coverage/mutation logic and structural
+shrinking that must preserve the injected defect while removing padding cycles
+and mutations. These assertions use Rust values and fixture JSON only, so they
+can detect the same regressions without PostgreSQL. The pure target's 17 tests
+pass with `DOCKER_HOST` pointing at a nonexistent socket. The live original
+negative-control replay and its exact `GeneratorInvalid` assertion remain in
+`e2e_dvm_shrink_tests`; corpus and negative-control installed tests also remain.
+Nothing here substitutes synthetic buffers or stand-ins for parser, trigger,
+transaction, snapshot, worker or recovery coverage. No assertion moves later.
+
+The allocation validator rejects overlap and obvious database tests in the pure
+tier. Sensitive filters now live in `ci-paths.yml`, with outputs from the existing
+contract job. Their old patterns are preserved; editing the selector additionally
+selects both recovery and ASan qualification. Explicit draft/runtime conditions
+replace the removed selector job's implicit skip propagation. Gate tests cover
+these conditions while retaining proof before package construction and in candidate
+binding and the terminal verdict. Missing dependency records now produce an
+explicit failing verdict, alongside failed, cancelled and unexpectedly skipped
+results. The metrics script adds wall time, successful-run time to green,
+first-failed-step latency, release delay and step durations without confusing
+these with summed runner minutes.
+
+More shards, cross-job test archives, broad fixture/container sharing and further
+suite exclusions were rejected for this change: observed runner waiting is large,
+warm setup is small, light features differ from full features, and worker/cluster
+isolation is part of the coverage. Component-runner batching and disk cleanup
+are plausible follow-ups, but neither has a matched measurement here.
+
+### Validation and matched experiment
+
+The local comparison used production source `00d21749bc20af8b19940b857fae461e0ccfe471`
+and one freshly built PostgreSQL 18.6 image, `pg-ci-pyramid:baseline`
+(`sha256:39690461fe55a958f8d195a63860500e683d5da711c1442e4bc0ef35ca6abded`).
+The Rust clients ran on macOS ARM64; PostgreSQL ran as linux/amd64 under Docker
+emulation. Both variants used the same 30 scenarios, one process per test, four
+concurrent processes, warm compiled binaries and no retries. Compilation is
+excluded. This is one sequential pair, not a hosted median/p90 experiment.
+
+| Local mixed-scheduling comparison | Original | Corrected candidate |
+|---|---:|---:|
+| Passed scenarios | 30/30 | 30/30 |
+| Wall seconds / single-host elapsed minutes | 286.81 / 4.78 | 56.33 / 0.94 |
+| Summed test seconds (not elapsed time) | 1,012.26 | 211.32 |
+| Individual-case nearest-rank p90 seconds | 97.46 | 8.26 |
+
+The measured suite reduction is **80.4%**, or 230.47 seconds. This does not
+establish PR median or p90 improvement. As an explicitly unmeasured illustration,
+transferring that local delta and removing the observed 2.47-minute selector
+delay from run 39778269500, while holding all other queues/costs fixed, would
+put its roughly 69-minute verdict near 63 minutes and total runner cost near
+171 rather than 175 minutes. That is nowhere near a proven 50% PR reduction.
+Earlier eligibility can change contention; hosted p90 still needs measurement.
+
+Failed attempts remain evidence: the first candidate finished in 55.84 seconds
+with **28/30 passing**, and its normal E2E invocation stopped with two failures
+and 20 unrun cases. Using the catalog's deparsed query lost the NUMERIC(10,2)
+type modifier. Passing each fixture's original SQL fixed the comparison while
+retaining the oracle's strict schema checks. Neither failed attempt is counted
+as a passing speedup. The first image build reported an architecture mismatch
+and was replaced by a consistently amd64 build before measurements. Three
+socket-based unit tests initially failed under sandbox networking restrictions;
+the unchanged suite passed with local socket access.
+
+| Validation | Result |
+|---|---|
+| `just fmt`, then `just lint` | Passed, zero warnings |
+| Pure Rust unit suite | 2,615 passed |
+| Database-free harness with unavailable Docker socket | 17 passed |
+| Python script tests, including allocation and verdict contracts | 35 passed |
+| Normal full E2E runner, affected scheduling + live shrink targets, retries 0 | 48 passed, 0 skipped, 60.225 seconds test execution |
+| All workflow YAML through actionlint 1.7.7 | Passed (embedded shellcheck disabled; no shell changes) |
+| Actual picomatch selection checks | Docs, mixed, runtime, harness, allocation, recovery, unsafe and unknown inputs passed; original sensitive patterns preserved |
+| Draft-to-ready, failed/cancelled/missing/unexpected-skip verdicts | Passed contract tests, including missing selection flags |
+
+The package, light test runner, DVM operator code and full-image contents are
+unchanged. Full unmodified suites and ASan/recovery repetitions were not rerun
+locally; the ready PR selects them. Logs, saved REST responses, failed attempts
+and per-case timing JSON are retained locally under `target/ci-pyramid-20261022/`.
+
+The 50% median improvement remains a target, **not a measured result**. To assess
+hosted median/p90, compare at least ten ready runtime updates per variant, split
+ordinary and subsystem-sensitive inputs. Use the same production source, exact
+package candidate, runner labels, feature sets, recovery flags and retry settings;
+record cold/warm cache keys and keep failed/cancelled attempts. Collect jobs from
+every workflow on the update, not only CI. Do not dispatch the broad manual
+matrix as a substitute for the ready-PR graph. The proposed controlled experiment
+is two temporary ready PRs from `00d21749`: a control with only a workflow comment
+change (to select the harness gates) and this candidate, with no production-source
+differences. Alternate ten comment-only workflow updates per branch, completing
+each run before the next; record the exact SHA and every failed/cancelled attempt
+without replacing failures with successful retries. Use the REST capture commands
+below for CI and every companion workflow on each update. This costs roughly
+3,400 runner minutes at the observed rate, before failures, and requires separate
+authorization. Creating this PR exercises the candidate graph once; it does not
+establish the requested hosted median/p90 result.
+
+## Historical measurements before this improvement
 
 The issue's [observed baseline run](https://github.com/trickle-labs/pg-trickle/actions/runs/39047052638)
 at `ceca8f6aa47a8738416e36072aae8e215134f194` is historical, before the

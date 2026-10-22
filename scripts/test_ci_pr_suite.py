@@ -32,8 +32,54 @@ class AllocationTests(unittest.TestCase):
         (root / "tests/e2e_example_tests.rs").write_text("")
         (root / "scripts/run_light_e2e_tests.sh").write_text("    e2e_example_tests\n")
         (root / ".github/ci-suites.json").write_text(json.dumps({
-            "pr_full": [], "scheduled_only": {}, "scheduled_cases": {},
+            "pr_full": [], "pr_pure": [], "scheduled_only": {}, "scheduled_cases": {},
         }))
+
+    def test_pure_tier_rejects_installed_tests_and_conflicting_allocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            policy_path = root / ".github/ci-suites.json"
+            policy = json.loads(policy_path.read_text())
+            policy["pr_pure"] = ["e2e_example_tests"]
+            policy_path.write_text(json.dumps(policy))
+            with self.assertRaisesRegex(ValueError, "conflicting"):
+                ci_pr_suite.targets(root)
+            (root / "scripts/run_light_e2e_tests.sh").write_text("")
+            (root / "tests/e2e_example_tests.rs").write_text("#[tokio::test]")
+            with self.assertRaisesRegex(ValueError, "database test allocated to pure tier"):
+                ci_pr_suite.targets(root)
+
+    def test_pure_runner_and_failure_propagation(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status), patch("sys.argv", ["ci_pr_suite.py", "--pure"]), patch(
+                "ci_pr_suite.subprocess.run"
+            ) as run:
+                run.return_value.returncode = status
+                self.assertEqual(ci_pr_suite.main(), status)
+                self.assertEqual(run.call_args.args[0], [
+                    "cargo", "test", "--features", "pg18", "--test", "e2e_dvm_fuzz_tests",
+                    "--", "--test-threads=1",
+                ])
+
+    def test_proof_dependencies_and_consolidated_sensitive_selection(self):
+        workflow = (ci_pr_suite.ROOT / ".github/workflows/ci.yml").read_text()
+        package = workflow.split("  light-e2e-package:\n")[1].split("  release-evidence-runtime:")[0]
+        self.assertIn("needs: [lsn-verification]", package)
+        self.assertIn("needs.lsn-verification.outputs.runtime", package)
+        candidate = workflow.split("  lsn-candidate-runtime:\n")[1].split("    steps:")[0]
+        self.assertIn("needs: [light-e2e-package, lsn-verification]", candidate)
+        unit = workflow.split("  unit-tests:\n")[1].split("  otel-collector-contract:")[0]
+        self.assertIn("python3 scripts/ci_pr_suite.py --pure", unit)
+        self.assertNotIn("detect-e2e-gates", workflow)
+        for name in ("e2e-sensitive-gate", "unsafe-boundary-asan"):
+            gate = workflow.split(f"  {name}:\n")[1].split("    runs-on:")[0]
+            self.assertIn("needs: release-qualification-contract", gate)
+            self.assertIn("!github.event.pull_request.draft", gate)
+            self.assertIn("needs.release-qualification-contract.outputs.runtime == 'true'", gate)
+        smoke = workflow.split("  e2e-smoke:\n")[1].split("    timeout-minutes:")[0]
+        self.assertIn("github.event_name == 'push'", smoke)
+        self.assertIn("needs.release-qualification-contract.outputs.runtime == 'true'", smoke)
 
     def test_new_target_requires_explicit_allocation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -86,9 +132,9 @@ class VerdictTests(unittest.TestCase):
         for name in ("release-qualification-contract", "lsn-verification", "upgrade-check"):
             needs[name]["result"] = "success"
         needs["release-qualification-contract"]["outputs"]["runtime"] = str(runtime).lower()
-        needs["detect-e2e-gates"]["outputs"] = {
+        needs["release-qualification-contract"]["outputs"].update({
             "unsafe_boundary_changed": "false", "failure_recovery_changed": "false",
-        }
+        })
         if runtime:
             for name in ("unit-tests", "integration-tests", "otel-collector-contract"):
                 needs[name]["result"] = "success"
@@ -110,13 +156,16 @@ class VerdictTests(unittest.TestCase):
         needs = self.needs()
         for job in needs.values():
             job["result"] = "success"
-        needs["detect-e2e-gates"]["outputs"]["unsafe_boundary_changed"] = "true"
+        needs["release-qualification-contract"]["outputs"]["unsafe_boundary_changed"] = "true"
         for name in needs:
-            for status in ("failure", "cancelled", "skipped"):
+            for status in ("failure", "cancelled", "skipped", "missing"):
                 with self.subTest(name=name, status=status):
                     failed = copy.deepcopy(needs)
                     failed[name]["result"] = status
                     self.assertIn(f"{name}: {status}", check_ci_results.check(failed, draft=False))
+            missing = copy.deepcopy(needs)
+            del missing[name]
+            self.assertIn(f"{name}: missing", check_ci_results.check(missing, draft=False))
 
     def test_shipping_and_monitoring_inputs_select_their_checks(self):
         for output, name in (("shipping", "shipping-image-upgrade"), ("monitoring", "otel-collector-contract")):
@@ -131,6 +180,15 @@ class VerdictTests(unittest.TestCase):
             "release-qualification-contract: missing/invalid runtime selection",
             check_ci_results.check(needs, draft=False),
         )
+
+    def test_missing_sensitive_selection_cannot_skip_qualification(self):
+        for flag in ("unsafe_boundary_changed", "failure_recovery_changed"):
+            needs = self.needs()
+            del needs["release-qualification-contract"]["outputs"][flag]
+            self.assertIn(
+                f"release-qualification-contract: missing/invalid {flag}",
+                check_ci_results.check(needs, draft=False),
+            )
 
 
 if __name__ == "__main__":
