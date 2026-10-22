@@ -673,6 +673,10 @@ jobs:
             .p2p/work/issue-1220-aggregate-lifecycle/evidence/lifecycle-candidate-binding.json
             target/cdc-elision-full-install-attestation.json
             .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
+            artifacts/lifecycle-histories/
+            target/join-plan-full-install-attestation.json
+            .p2p/work/issue-1223-join-checker/evidence/join-plan-candidate-binding.json
+            artifacts/join-endpoints/
           retention-days: 30
           if-no-files-found: warn
 
