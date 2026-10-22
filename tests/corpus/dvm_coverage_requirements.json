@@ -2,6 +2,14 @@
   "format_version": 1,
   "release": "0.87.14",
   "required_mandatory_cases": 18,
+  "postgresql_boundary_floor": {
+    "pr_cases": 34,
+    "scheduled_cases": 54,
+    "truth_transitions": 9,
+    "pr_max_bag_size": 2,
+    "scheduled_max_bag_size": 3,
+    "admission": "all selected cases must pass exact comparison and fresh DIFFERENTIAL history without fallback"
+  },
   "pairwise_dimensions": {
     "physical_width": ["minimal", "wide"],
     "logical_width": ["all", "narrow"],

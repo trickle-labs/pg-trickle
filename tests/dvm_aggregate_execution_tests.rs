@@ -13,6 +13,65 @@ use pg_trickle::dvm::DiffContext;
 use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
 
+#[tokio::test]
+async fn test_semantic_ternary_partition_and_plan_variation_preserve_bags() {
+    let db = TestDb::new().await;
+    db.execute("CREATE TABLE semantic_input (k INT, v NUMERIC)")
+        .await;
+    db.execute("INSERT INTO semantic_input VALUES (1,NULL),(1,-1),(1,0),(1,1),(1,1),(2,NULL)")
+        .await;
+    // These transformations admit only deterministic, total expressions and
+    // compare bags, without relying on output order or floating point algebra.
+    let partitioned = "SELECT k,v FROM semantic_input WHERE (v>0) IS TRUE UNION ALL SELECT k,v FROM semantic_input WHERE (v>0) IS FALSE UNION ALL SELECT k,v FROM semantic_input WHERE (v>0) IS UNKNOWN";
+    let same: bool = db.query_scalar(&format!("SELECT NOT EXISTS (((SELECT k,v FROM semantic_input) EXCEPT ALL ({partitioned})) UNION ALL (({partitioned}) EXCEPT ALL (SELECT k,v FROM semantic_input)))")).await;
+    assert!(
+        same,
+        "ternary partition must preserve duplicate and NULL rows"
+    );
+    let wrong: bool = db.query_scalar("SELECT EXISTS ((SELECT k,v FROM semantic_input) EXCEPT ALL (SELECT k,v FROM semantic_input WHERE v>0 UNION ALL SELECT k,v FROM semantic_input WHERE NOT(v>0)))").await;
+    assert!(
+        wrong,
+        "omitting UNKNOWN must be detected by the independent bag oracle"
+    );
+    let query = "SELECT k,COUNT(*) AS rows,COUNT(v) AS arguments,SUM(v) AS total FROM semantic_input GROUP BY k";
+    let mut connection = db.pool.acquire().await.unwrap();
+    sqlx::raw_sql("SET enable_hashagg=on; SET enable_sort=off")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let hash_plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (FORMAT JSON) {query}"
+    )))
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    let hash_rows: Vec<serde_json::Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT to_jsonb(r) FROM ({query}) r ORDER BY k"
+    )))
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql("SET enable_hashagg=off; SET enable_sort=on")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let sorted_plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (FORMAT JSON) {query}"
+    )))
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    let sorted_rows: Vec<serde_json::Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT to_jsonb(r) FROM ({query}) r ORDER BY k"
+    )))
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(hash_plan[0]["Plan"]["Strategy"], "Hashed");
+    assert_eq!(sorted_plan[0]["Plan"]["Strategy"], "Sorted");
+    assert_eq!(hash_rows, sorted_rows);
+}
+
 #[test]
 fn test_lifecycle_having_sql_uses_total_truth_tests_and_identity_guards() {
     let tree = OpTree::Filter {
