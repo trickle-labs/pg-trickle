@@ -56,8 +56,10 @@ pub fn changed_column_sql(old: &str, new: &str) -> String {
 pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
     let vacant = |prefix: &str| {
         let mut name = prefix.to_string();
+        let mut suffix = 0usize;
         while columns.contains(&name) {
-            name.push('_');
+            name = format!("{prefix}_{suffix}");
+            suffix += 1;
         }
         name
     };

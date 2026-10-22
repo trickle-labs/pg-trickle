@@ -58,6 +58,21 @@ async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
         (7, 9),
         "internal aliases must not shadow payload columns"
     );
+    let image_name = format!("__pgt_image{}", "_".repeat(52));
+    let weight_name = format!("__pgt_weight{}", "_".repeat(51));
+    let columns = format!("__pgt_image,__pgt_weight,{image_name},{weight_name}");
+    let collision = format!(
+        "SELECT decode('01','hex') AS __pgt_row_id,'I'::text AS __pgt_action,\
+         7 AS __pgt_image,9 AS __pgt_weight,11 AS {image_name},13 AS {weight_name}"
+    );
+    let rendered = cdc_elision::keyed_weight_sql(&collision, &columns);
+    let payload: (i32, i32, i32, i32) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {columns} FROM {rendered} d"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload, (7, 9, 11, 13), "63-byte payload names survive");
 }
 
 #[tokio::test]

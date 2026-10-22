@@ -52,6 +52,17 @@ SQL/FFI and the formal correctness of the separate cache repair remain outside
 this review. A domain over an admitted builtin would strengthen domain
 conformance; its absence is nonblocking for the exact-OID implementation.
 
+The expanded candidate `87cef53357918e3abb267eda44f2f324308afe4c`
+received a separate review of the deferred history, keyed image adapter and
+statement capture paths. The three unconditional decision contracts were
+accepted; recorded evidence reports 4/0 and four intended 3/1 mutant failures.
+The reviewer found an ordinary SQL blocker: underscore-only alias growth can
+cross PostgreSQL's 63-byte identifier limit and collide after truncation.
+A native regression reproduced SQLSTATE 42702 using valid maximum-length
+payload names. The repair uses short numbered aliases; follow-up review and
+final installed binding remain pending. This review does not establish full
+R1/R2 normalization/window correctness or persistent compaction.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and
