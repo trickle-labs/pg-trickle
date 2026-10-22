@@ -38,7 +38,25 @@ CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
     "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
 ]
+JOIN_PLAN_CASES = [
+    "e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows",
+    "e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut",
+]
 PROOF_CONTRACTS = {
+    "join_plan": {
+        "schema": "pg-trickle-join-plan-verification-v1",
+        "obligations": {"admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference"},
+        "cases": JOIN_PLAN_CASES,
+        "inputs": [
+            "src/lib.rs", "src/api/mod.rs", "src/api/helpers.rs", "src/api/refresh_ops.rs", "src/api/security_context.rs",
+            "src/dvm/parser/validation.rs", "src/dvm/parser/mod.rs", "src/dvm/parser/sublinks/mod.rs", "src/cdc/mod.rs",
+            "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/join.rs",
+            "src/dvm/operators/join_common.rs", "src/dvm/operators/project.rs", "src/dvm/operators/scan.rs",
+            "src/refresh/codegen.rs", "src/refresh/merge/mod.rs", "src/hash.rs",
+            "verification/cdc_elision.rs", "Cargo.toml", "Cargo.lock",
+        ],
+        "mutants": {"unknown-equality-type", "lost-right-scope", "mixed-snapshot-admission", "swapped-binding-admission", "wrong-sign-admission"},
+    },
     "lsn": {
         "schema": EXPECTED_SCHEMA, "obligations": REQUIRED_OBLIGATIONS,
         "cases": EXPECTED_CASES, "inputs": [],
