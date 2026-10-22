@@ -2520,8 +2520,10 @@ WHERE m.__pgt_meta_action IN ('I', 'D')
 /// CTE (e.g. join delta) outputs unqualified column names.
 ///
 /// When a FILTER clause is present, its condition is added as an additional
-/// AND guard in the action condition, so only rows passing the filter
-/// contribute to the aggregate delta.
+/// guard in the outer CASE WHEN or aggregate FILTER, so excluded rows never
+/// evaluate arguments.
+/// Argument-dependent NULL checks must stay inside that CASE, since SQL AND
+/// does not guarantee evaluation order.
 pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
     if agg.is_distinct {
         return (
@@ -2623,10 +2625,10 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
             let guard = format!("{x_col} IS NOT NULL AND {y_col} IS NOT NULL");
             (
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'I' AND {guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
                 ),
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'D' AND {guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
                 ),
             )
         }
@@ -2654,10 +2656,10 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
             // We only need to detect "any change happened" — counting suffices.
             (
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} AND {col} IS NOT NULL THEN 1 ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)"
                 ),
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} AND {col} IS NOT NULL THEN 1 ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)"
                 ),
             )
         }
@@ -2707,10 +2709,10 @@ fn agg_avg_count_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, S
 
     (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN 1 ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} THEN 1 ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN 1 ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} THEN 1 ELSE 0 END ELSE 0 END)"
         ),
     )
 }
@@ -2773,10 +2775,10 @@ fn agg_nonnull_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, Str
         .unwrap_or_else(|| "1".to_string());
     (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)::bigint"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)::bigint"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)::bigint"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)::bigint"
         ),
     )
 }
@@ -2828,42 +2830,42 @@ fn agg_covar_delta_exprs(
 
     let ins = (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({x_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({x_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
-         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
     );
     let del = (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({x_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({x_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
-         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
     );
     (ins, del)
@@ -4011,6 +4013,82 @@ mod tests {
     }
 
     // ── B5: FILTER clause tests ──────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_filter_guards_argument_evaluation() {
+        let child_cols = vec!["v".to_string(), "w".to_string(), "keep".to_string()];
+        for function in [
+            AggFunc::Count,
+            AggFunc::Sum,
+            AggFunc::Avg,
+            AggFunc::StddevPop,
+            AggFunc::VarSamp,
+            AggFunc::CovarPop,
+            AggFunc::RegrCount,
+            AggFunc::BoolAnd,
+        ] {
+            let mut agg = with_filter(count_col("v", "a"), colref("keep"));
+            agg.function = function;
+            agg.argument = Some(binop("/", lit("100"), colref("v")));
+            agg.second_arg = Some(binop("/", lit("100"), colref("w")));
+            let mut exprs = vec![agg_delta_exprs(&agg, &child_cols)];
+            if matches!(agg.function, AggFunc::Sum) {
+                exprs.push(agg_nonnull_delta_exprs(&agg, &child_cols));
+            }
+            if is_algebraic_via_aux(&agg) {
+                exprs.push(agg_avg_count_delta_exprs(&agg, &child_cols));
+            }
+            if agg.function.needs_sum_of_squares() {
+                exprs.push(agg_sum2_delta_exprs(&agg, &child_cols));
+            }
+            if agg.function.needs_cross_products() {
+                let (ins, del) = agg_covar_delta_exprs(&agg, &child_cols);
+                exprs.extend([
+                    (ins.0, del.0),
+                    (ins.1, del.1),
+                    (ins.2, del.2),
+                    (ins.3, del.3),
+                    (ins.4, del.4),
+                ]);
+            }
+            let tree = aggregate(
+                vec![],
+                vec![agg],
+                scan(1, "t", "public", "t", &["v", "w", "keep"]),
+            );
+            let mut initial_args: Vec<String> = tree
+                .avg_aux_columns()
+                .into_iter()
+                .map(|(_, _, arg)| arg)
+                .collect();
+            initial_args.extend(
+                tree.sum2_aux_columns()
+                    .into_iter()
+                    .chain(tree.covar_aux_columns())
+                    .chain(tree.nonnull_aux_columns())
+                    .map(|(_, arg)| arg),
+            );
+            for arg in initial_args {
+                for part in arg.split('|') {
+                    assert!(
+                        part.starts_with("CASE WHEN keep THEN ("),
+                        "initial auxiliary must guard argument evaluation: {part}"
+                    );
+                }
+            }
+            for (ins, del) in exprs {
+                for (action, sql) in [("I", ins), ("D", del)] {
+                    assert!(
+                        sql.starts_with(&format!(
+                            "SUM(CASE WHEN __pgt_action = '{action}' AND keep THEN "
+                        )),
+                        "FILTER must guard every argument-dependent expression: {sql}"
+                    );
+                    assert!(sql.contains("100 / v"), "missing argument: {sql}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_agg_delta_exprs_count_star_with_filter() {
@@ -5585,7 +5663,8 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        assert!(sql.contains("amount IS NOT NULL AND active"));
+        assert!(sql.contains("AND active THEN CASE WHEN amount IS NOT NULL"));
+        assert!(!sql.contains("amount IS NOT NULL AND active"));
         assert!(sql.contains("__pgt_aux_nonnull_total"));
     }
 
