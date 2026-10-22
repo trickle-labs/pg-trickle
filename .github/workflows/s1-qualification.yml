@@ -25,6 +25,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  policy_contract:
+    name: S1 acceptance-policy regressions (not throughput qualification)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the frozen workload and owner-approved 59/min policy
+        run: |
+          set -euo pipefail
+          python3 benchmarks/s1/check_frozen_harness.py
+          python3 benchmarks/s1/test_check_result.py
   qualify:
     runs-on: ubuntu-24.04-arm
     env:
