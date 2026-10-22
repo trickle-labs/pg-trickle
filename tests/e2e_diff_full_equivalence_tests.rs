@@ -259,6 +259,104 @@ async fn test_diff_full_equivalence_aggregate_sum_count() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// AGGREGATE: COUNT of composite datums (#1203)
+// ═══════════════════════════════════════════════════════════════════════
+
+async fn assert_composite_count_equivalence(query: &str) {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TYPE dfe_pair AS (a INT, b INT)").await;
+    db.execute(
+        "CREATE TABLE dfe_composite (id INT PRIMARY KEY, grp INT, \
+         payload dfe_pair, scalar INT, keep BOOLEAN)",
+    )
+    .await;
+    db.execute("INSERT INTO dfe_composite VALUES (1, 1, ROW(1,1), 10, true)")
+        .await;
+    db.execute_seq(&[
+        "LOAD 'pg_trickle'",
+        "SET pg_trickle.cdc_mode = 'trigger'",
+        &format!(
+            "SELECT pgtrickle.create_stream_table('dfe_composite_st', \
+             $q${query}$q$, '1m', 'DIFFERENTIAL')"
+        ),
+    ])
+    .await;
+    db.assert_st_matches_query("dfe_composite_st", query).await;
+
+    for mutation in [
+        "INSERT INTO dfe_composite VALUES \
+         (2,1,ROW(1,NULL),NULL,true), (3,1,ROW(NULL,NULL),30,false), (4,1,NULL,40,NULL)",
+        // Each datum shape transitions to another, including SQL NULL in both directions.
+        "UPDATE dfe_composite SET payload = CASE id \
+         WHEN 1 THEN NULL::dfe_pair WHEN 2 THEN ROW(NULL,NULL)::dfe_pair \
+         WHEN 3 THEN ROW(1,1)::dfe_pair ELSE ROW(1,NULL)::dfe_pair END, \
+         scalar = CASE WHEN scalar IS NULL THEN 20 ELSE NULL END, keep = NOT keep",
+        "UPDATE dfe_composite SET payload = CASE id \
+         WHEN 1 THEN ROW(1,1)::dfe_pair WHEN 2 THEN ROW(1,NULL)::dfe_pair \
+         WHEN 3 THEN ROW(NULL,NULL)::dfe_pair ELSE NULL::dfe_pair END, \
+         grp = 2, scalar = 42, keep = true",
+        "DELETE FROM dfe_composite WHERE id = 2",
+        "DELETE FROM dfe_composite WHERE id = 3",
+        "DELETE FROM dfe_composite WHERE id = 4",
+        "DELETE FROM dfe_composite WHERE id = 1",
+        "INSERT INTO dfe_composite VALUES \
+         (5,1,ROW(NULL,NULL),NULL,true), (6,2,NULL,60,false)",
+        "DELETE FROM dfe_composite",
+    ] {
+        db.execute(mutation).await;
+        db.execute_seq(&[
+            "LOAD 'pg_trickle'",
+            "SET pg_trickle.refresh_strategy = 'differential'",
+            "SET pg_trickle.differential_max_change_ratio = 0",
+            // Exercise the generated SQL rather than the separate vector executor.
+            "SET pg_trickle.aggregate_fast_path = off",
+            "SELECT pgtrickle.refresh_stream_table('dfe_composite_st')",
+        ])
+        .await;
+        assert_differential_mode(&db, "dfe_composite_st").await;
+        let (action, status, fallback, delta_rows): (String, String, bool, i64) = sqlx::query_as(
+            "SELECT h.action, h.status, h.was_full_fallback, h.delta_row_count \
+             FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'dfe_composite_st' \
+             ORDER BY h.refresh_id DESC LIMIT 1",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("refresh history");
+        assert_eq!(action, "DIFFERENTIAL", "mutation: {mutation}");
+        assert_eq!(status, "COMPLETED", "mutation: {mutation}");
+        assert!(!fallback, "FULL fallback after: {mutation}");
+        assert!(delta_rows > 0, "no differential output after: {mutation}");
+        db.assert_st_matches_query("dfe_composite_st", query).await;
+    }
+}
+
+#[tokio::test]
+async fn test_diff_full_equivalence_count_composite_p5() {
+    assert_composite_count_equivalence(
+        "SELECT COUNT(payload) AS n, COUNT(scalar) AS scalar_n, COUNT(*) AS rows_n \
+         FROM dfe_composite",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_diff_full_equivalence_count_composite_general() {
+    // FILTER and expression arguments disqualify P5; also exercise grouped empty input.
+    assert_composite_count_equivalence(
+        "SELECT grp, COUNT(payload) AS n, \
+         COUNT(payload) FILTER (WHERE keep) AS filtered_n, \
+         COUNT(CASE WHEN keep THEN payload ELSE NULL::dfe_pair END) AS expression_n, \
+         COUNT(scalar) AS scalar_n, COUNT(*) AS rows_n, \
+         COUNT(scalar) FILTER (WHERE keep) AS filtered_scalar_n, \
+         COUNT(*) FILTER (WHERE keep) AS filtered_rows_n \
+         FROM dfe_composite GROUP BY grp",
+    )
+    .await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // AGGREGATE: AVG / STDDEV
 // ═══════════════════════════════════════════════════════════════════════
 
