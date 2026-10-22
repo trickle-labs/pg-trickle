@@ -751,6 +751,7 @@ fn generate_delta_query_impl(
     // P2-5: Resolve CDC column ordinals for each source table so the
     // scan operator can build a changed_cols bitmask filter.
     ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
+    ctx.set_source_deferred_keys(resolve_deferred_keys_for_sources(&source_oids)?);
 
     // A-2: Resolve key columns (GROUP BY, JOIN ON, WHERE) per source table
     // so the scan operator can compute a key-only bitmask for value-only
@@ -910,9 +911,8 @@ pub fn generate_delta_query_cached(
         );
     }
 
-    // Salt v0.87.8 templates so catalog-cached SQL from pre-staging releases
-    // cannot be reused under the stream-owner boundary.
-    let query_hash = hash_string(&format!("v0.87.8-stage:{defining_query}"));
+    // Invalidate persisted templates that reduced deferred-key histories by key.
+    let query_hash = hash_string(&format!("v0.108.3-deferred-history:{defining_query}"));
 
     // G8.1: Cross-session cache invalidation — flush if the shared
     // generation counter has advanced past our local snapshot.
@@ -1078,6 +1078,7 @@ pub fn generate_delta_query_cached(
 
         // P2-5: Resolve CDC column ordinals for bitmask filter.
         ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
+        ctx.set_source_deferred_keys(resolve_deferred_keys_for_sources(&source_oids)?);
 
         // A-2: Resolve key columns for value-only UPDATE detection.
         ctx.set_source_key_columns(result.tree.source_key_columns_used());
@@ -1177,6 +1178,25 @@ fn resolve_cdc_columns_for_sources(source_oids: &[u32]) -> HashMap<u32, Vec<Stri
         }
     }
     map
+}
+
+fn resolve_deferred_keys_for_sources(
+    source_oids: &[u32],
+) -> Result<std::collections::HashSet<u32>, PgTrickleError> {
+    let mut deferred = std::collections::HashSet::new();
+    for &oid in source_oids {
+        let is_deferred = pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint \
+             WHERE conrelid=$1 AND contype='p' AND condeferrable)",
+            &[pgrx::pg_sys::Oid::from(oid).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("source {oid} key constraints: {e}")))?
+        .unwrap_or(false);
+        if is_deferred {
+            deferred.insert(oid);
+        }
+    }
+    Ok(deferred)
 }
 
 /// ST-ST-4: Resolve which source OIDs are stream tables and map them

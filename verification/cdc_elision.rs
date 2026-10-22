@@ -1,5 +1,5 @@
-//! Conservative changed-column decisions. PostgreSQL binary images and SQL
-//! lowering are separate conformance boundaries, not axioms about SQL equality.
+//! Conservative changed-column and keyed image-action decisions. PostgreSQL
+//! images and SQL lowering remain separate conformance boundaries.
 
 use vstd::prelude::*;
 
@@ -14,6 +14,21 @@ pub fn keep_change(admitted: bool, image_equal: bool) -> (keep: bool)
     ensures keep == (!admitted || !image_equal),
 {
     !admitted || !image_equal
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageAction { Insert, Delete, Skip }
+
+/// The signed multiplicity belongs to a complete captured image, not its key.
+pub fn image_action(weight: i64) -> (action: ImageAction)
+    ensures
+        (action == ImageAction::Insert) == (weight > 0),
+        (action == ImageAction::Delete) == (weight < 0),
+        (action == ImageAction::Skip) == (weight == 0),
+{
+    if weight > 0 { ImageAction::Insert }
+    else if weight < 0 { ImageAction::Delete }
+    else { ImageAction::Skip }
 }
 }
 
@@ -34,6 +49,40 @@ pub fn changed_column_sql(old: &str, new: &str) -> String {
          THEN CASE WHEN pg_catalog.record_send(ROW({old})) IS DISTINCT FROM \
                         pg_catalog.record_send(ROW({new})) \
                    THEN {different} ELSE {same} END ELSE {unknown} END)::varbit"
+    )
+}
+
+/// Group by PostgreSQL's complete binary record images, including NULL framing.
+pub fn keyed_weight_sql(delta_sql: &str, columns: &str) -> String {
+    let vacant = |prefix: &str| {
+        let mut name = prefix.to_string();
+        while columns.contains(&name) {
+            name.push('_');
+        }
+        name
+    };
+    let image_column = vacant("__pgt_image");
+    let weight_column = vacant("__pgt_weight");
+    let mut signs = Vec::new();
+    for (weight, test) in [(1, "> 0"), (-1, "< 0"), (0, "= 0")] {
+        let action = match image_action(weight) {
+            ImageAction::Insert => "I",
+            ImageAction::Delete => "D",
+            ImageAction::Skip => continue,
+        };
+        signs.push(format!(
+            "({weight_column} {test} AND __pgt_action = '{action}')"
+        ));
+    }
+    format!(
+        "(SELECT DISTINCT ON (__pgt_row_id) __pgt_row_id, __pgt_action, {columns} \
+         FROM (SELECT __images.*, SUM(CASE WHEN __pgt_action='I' THEN 1 ELSE -1 END) \
+               OVER (PARTITION BY __pgt_row_id,{image_column}) AS {weight_column} \
+               FROM (SELECT __raw.*, dense_rank() OVER (PARTITION BY __pgt_row_id \
+                     ORDER BY ROW({columns}) USING OPERATOR(pg_catalog.*<)) AS {image_column} \
+                     FROM ({delta_sql}) __raw) __images) __weighted \
+         WHERE {signs} ORDER BY __pgt_row_id, CASE WHEN __pgt_action='I' THEN 0 ELSE 1 END)",
+        signs = signs.join(" OR "),
     )
 }
 

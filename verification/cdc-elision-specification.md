@@ -1,7 +1,8 @@
 # Conservative CDC changed-column images
 
-This first #1221 slice changes the mask used by row and statement UPDATE
-capture. It does not yet establish scan normalization, shared-buffer compaction,
+This #1221 slice changes UPDATE masks, retains deferred-key source histories
+and classifies keyed image weights. It does not yet prove complete scan
+normalization, shared-buffer compaction,
 source incarnation/epoch transitions, complete transaction histories, or all
 protected consumer windows. Those obligations remain open.
 
@@ -20,7 +21,7 @@ The existing union of consumer columns and scan-side mask intersection remain
 separate integration boundaries.
 
 `verification/cdc_elision.rs` contains the exact production decisions checked
-by Verus: `admitted_image_type` and `keep_change`. They require no unchecked
+by Verus: `admitted_image_type`, `keep_change` and `image_action`. They require no unchecked
 preconditions. `keep_change` retains every unknown policy and every unequal
 image, and elides only the admitted/equal case. `admitted_image_type` admits
 only the PostgreSQL built-in OIDs for fixed-size boolean, int2/int4/int8 and
@@ -70,12 +71,58 @@ the stale second update before repair. Concrete tracing, per-leaf overrides,
 bypass-table, graph and window-state plans now bypass both outer cache lookup
 and storage. This is an ordinary Rust integration repair, not a Verus theorem.
 
+## Deferred keys and complete captured images
+
+A captured history is a signed bag of complete captured rows: INSERT contributes
++1, DELETE contributes -1. Its key locates a logical row; the key alone does not
+identify its payload. A committed deferred-unique source can legally emit
+I(new payload) before D(old payload) for the same key. This differs from a
+genuine I(payload)/D(same payload) transient row. Rollback removes both source
+and trigger-captured effects in the same transaction. Consumers select their
+own `(previous cut, new cut]` before reduction; the ordinary transaction/window
+and source-incarnation contract remains required.
+
+Both production differentiation entry points inspect actual primary-key
+`condeferrable` metadata. Deferred keys bypass first/last-key reduction and
+emit their signed events with payloads and identities intact. Key-change
+metadata is conservative. Immediate keys and keyless/ST-source reducers retain
+their existing paths. New cache salts invalidate previously persisted templates
+that used the old deferred-key reduction.
+
+Statement UPDATE capture also avoids key pairing for deferred primary keys:
+its old/new transition rows can contain duplicate keys before commit. Those
+rows are captured separately with all-column masks. Creation and both rebuild
+paths enforce the actual catalog constraint. Immediate-key pairing constructs
+explicit payload records, so source fields named n/o cannot shadow row aliases.
+
+The keyed MERGE adapter groups events by complete binary record image inside
+each complete row identity. PostgreSQL's
+[binary record operators](https://www.postgresql.org/docs/18/functions-comparisons.html#COMPOSITE-TYPE-COMPARISON)
+distinguish representations that SQL equality merges and work without a
+scalar equality/send/output function, including json. Dense ranks using binary
+record ordering identify equal images; signed SQL sums cancel only within an
+image. `image_action` checks positive=insert, negative=delete and zero=skip.
+The SQL adapter obtains its action predicates from that executable. The
+existing keyed-target rule prefers a surviving insert over an old delete of
+the same identity, implementing an upsert. This requires a valid keyed endpoint;
+it is not a general multiplicity-expanding bag consumer.
+
+Verus proves the weight classifier only. It does **not** prove PostgreSQL's
+image comparisons, SQL sums/window functions, field binding, complete committed
+cuts, catalog metadata, keyed endpoint uniqueness or upsert equivalence. This
+is not yet the full R1/R2 bag/window theorem. Native SQL conformance checks
+numeric scale, json and NULL cancellation; the installed history checks
+same-key replacement, transient cancellation and savepoint rollback for both
+trigger modes against independent source queries. Shared-buffer compaction,
+epoch transitions and every protected consumer window remain outside the proof.
+
 ## Controls and candidate binding
 
-The existing pinned Verus/Z3 runner checks both obligations. Executable
-lost-image-change and unknown-type-elision mutants must fail a postcondition;
+The existing pinned Verus/Z3 runner checks all three obligations. Executable
+lost-image-change, unknown-type-elision, lost-positive-image and
+reversed-negative-image mutants must fail a postcondition;
 compilation/setup failures do not count. The existing candidate-binding helper
-requires both controls, source/caller/build hashes, the named installed case,
+requires all four controls, source/caller/build hashes, all three named installed cases,
 and identical packaged/installed library bytes. CI uses the existing proof and
 candidate jobs, without introducing a tier.
 
@@ -87,6 +134,8 @@ Independent read-only review accepted the bounded R3 specification at
 `3184b55e0ee74d82f55203bf3bd744ab9a675f1e`, including a follow-up inspection of
 the completed installed binding. See [the review record](specification-reviews.md).
 This does not establish the other #1221 obligations or approve a merge.
+The later deferred-history/image-weight additions require a new frozen review;
+the earlier sign-off does not cover those additions.
 
 ## Existing installations and limits
 
@@ -103,3 +152,5 @@ This slice does not silently rewrite or discard existing consumer progress.
 Binary serialization adds capture CPU work; variable-length and unknown types retain more updates.
 The ordinary same-image no-op remains elidable for admitted fixed-size built-ins. No
 throughput improvement or benchmark result is claimed.
+Binary image ranking adds sorting work to keyed weight reduction; no throughput
+claim is made for that change either.

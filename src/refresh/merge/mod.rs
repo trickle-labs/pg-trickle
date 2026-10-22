@@ -1919,7 +1919,7 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.87.8-stage".hash(&mut hasher);
+        "v0.108.3-deferred-history".hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
             st.defining_query.as_ref() as *const str,

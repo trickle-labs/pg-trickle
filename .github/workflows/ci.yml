@@ -647,13 +647,15 @@ jobs:
           PGT_RELEASE_ATTESTATION_PATH: target/cdc-elision-full-install-attestation.json
         run: |
           ./scripts/run_e2e_tests.sh --test e2e_shared_buffer_tests \
-            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders)' --retries 0
+            -E 'test(=test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders) | test(=test_cdc_deferred_replacement_preserves_complete_payload) | test(=test_cdc_statement_payload_names_do_not_shadow_row_aliases)' --retries 0
           python3 scripts/check_lsn_candidate_binding.py --proof-kind cdc_elision \
             --proof-record .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-verification.json \
             --package-dir target/release/pg_trickle-pg18 \
             --installation target/cdc-elision-full-install-attestation.json \
             --candidate-commit "$GITHUB_SHA" \
             --runtime-case e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders \
+            --runtime-case e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload \
+            --runtime-case e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases \
             --output .p2p/work/issue-1221-cdc-observations/evidence/cdc-elision-candidate-binding.json
 
       - name: Upload candidate binding evidence

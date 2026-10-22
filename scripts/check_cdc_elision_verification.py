@@ -10,19 +10,21 @@ import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/cdc_elision.rs"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1221-cdc-observations/evidence"
-OBLIGATIONS = ["admitted_image_type", "keep_change"]
-PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "Cargo.toml", "Cargo.lock"]
+OBLIGATIONS = ["admitted_image_type", "keep_change", "image_action"]
+PRODUCTION_INPUTS = ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"]
 MUTATIONS = {
-    "lost-image-change": "false",
-    "unknown-type-elision": "admitted && !image_equal",
+    "lost-image-change": ("    !admitted || !image_equal\n", "    false\n"),
+    "unknown-type-elision": ("    !admitted || !image_equal\n", "    admitted && !image_equal\n"),
+    "lost-positive-image": ("if weight > 0 { ImageAction::Insert }", "if weight > 0 { ImageAction::Skip }"),
+    "reversed-negative-image": ("else if weight < 0 { ImageAction::Delete }", "else if weight < 0 { ImageAction::Insert }"),
 }
 
 
 def mutate(source: str, name: str) -> str:
-    before = "    !admitted || !image_equal\n"
+    before, after = MUTATIONS[name]
     if source.count(before) != 1:
         raise ValueError("expected exactly one executable CDC keep decision")
-    return source.replace(before, f"    {MUTATIONS[name]}\n", 1)
+    return source.replace(before, after, 1)
 
 
 def check_contract() -> None:
@@ -34,6 +36,8 @@ def check_contract() -> None:
     for path in ["src/cdc/triggers.rs", "src/cdc/mod.rs"]:
         if "crate::cdc_elision::changed_column_sql(" not in (runner.ROOT / path).read_text():
             raise ValueError(f"{path} bypasses the checked CDC policy")
+    if "crate::cdc_elision::keyed_weight_sql(" not in (runner.ROOT / "src/refresh/codegen.rs").read_text():
+        raise ValueError("keyed MERGE does not execute the checked image action adapter")
 
 
 def run_checks() -> None:
@@ -68,7 +72,7 @@ def run_checks() -> None:
             "semantic_mutation": controls["lost-image-change"], "semantic_mutations": controls,
         }
         (EVIDENCE / "cdc-elision-verification.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        print(f"CDC policy verified; both executable mutants rejected. Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
+        print(f"CDC policy verified; all four executable mutants rejected. Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -80,6 +80,7 @@ pub struct CdcContext {
     use_placeholders: bool,
     delta_source: DeltaSource,
     source_cdc_columns: HashMap<u32, Vec<String>>,
+    source_deferred_keys: HashSet<u32>,
     source_key_columns: HashMap<u32, Vec<String>>,
     st_source_pgt_ids: HashMap<u32, i64>,
     source_buffer_names: HashMap<u32, String>,
@@ -632,6 +633,7 @@ impl DiffContext {
                 use_placeholders: false,
                 delta_source: DeltaSource::ChangeBuffer,
                 source_cdc_columns: HashMap::new(),
+                source_deferred_keys: HashSet::new(),
                 source_key_columns: HashMap::new(),
                 st_source_pgt_ids: HashMap::new(),
                 source_buffer_names: HashMap::new(),
@@ -722,6 +724,14 @@ impl DiffContext {
 
     pub(crate) fn set_source_cdc_columns(&mut self, columns: HashMap<u32, Vec<String>>) {
         self.cdc.source_cdc_columns = columns;
+    }
+
+    pub(crate) fn source_has_deferred_key(&self, oid: u32) -> bool {
+        self.cdc.source_deferred_keys.contains(&oid)
+    }
+
+    pub(crate) fn set_source_deferred_keys(&mut self, sources: HashSet<u32>) {
+        self.cdc.source_deferred_keys = sources;
     }
 
     pub(crate) fn source_key_columns(&self) -> &HashMap<u32, Vec<String>> {

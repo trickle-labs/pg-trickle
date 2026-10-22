@@ -11,6 +11,101 @@ mod e2e;
 use e2e::E2eDb;
 
 #[tokio::test]
+async fn test_cdc_deferred_replacement_preserves_complete_payload() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    for mode in ["row", "statement"] {
+        let source = format!("deferred_{mode}");
+        let wide = format!("{source}_rows");
+        let counts = format!("{source}_counts");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED, v INT, n NUMERIC, j JSON)"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,10,1.0,'{{\"x\":1}}'),(2,20,NULL,NULL)"
+        ))
+        .await;
+        let wide_query = format!("SELECT id,v,n,j FROM {source}");
+        let count_query = format!("SELECT COUNT(*) AS n,SUM(v) AS total FROM {source}");
+        for (name, query) in [(&wide, &wide_query), (&counts, &count_query)] {
+            db.try_execute_with_config(&[&format!("SET pg_trickle.cdc_trigger_mode='{mode}'")], &format!("SELECT pgtrickle.create_stream_table('{name}',$q${query}$q$,'24h','DIFFERENTIAL')")).await.unwrap();
+        }
+        let script = format!(
+            "BEGIN; INSERT INTO {source} VALUES (1,99,1.00,'{{\"x\":2}}'); UPDATE {source} SET v=v+1 WHERE id=1; DELETE FROM {source} WHERE id=1 AND v=11; SAVEPOINT s; UPDATE {source} SET v=0 WHERE id=2; ROLLBACK TO s; INSERT INTO {source} VALUES (3,5,NULL,NULL); UPDATE {source} SET v=6 WHERE id=3; DELETE FROM {source} WHERE id=3; COMMIT"
+        );
+        sqlx::raw_sql(sqlx::AssertSqlSafe(script))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for (name, query) in [(&wide, &wide_query), (&counts, &count_query)] {
+            let before: i64 = db
+                .query_scalar(
+                    "SELECT coalesce(max(refresh_id),0) FROM pgtrickle.pgt_refresh_history",
+                )
+                .await;
+            db.try_execute_with_config(
+                &[
+                    "SET pg_trickle.refresh_strategy='differential'",
+                    "SET pg_trickle.differential_max_change_ratio=0",
+                ],
+                &format!("SELECT pgtrickle.refresh_stream_table('{name}')"),
+            )
+            .await
+            .unwrap();
+            let changed: bool = db.query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{name}' AND h.refresh_id>{before} AND h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback)")).await;
+            assert!(
+                changed,
+                "deferred replacement must execute differential maintenance"
+            );
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                name,
+                query,
+                "deferred replacement and genuine transient cancellation",
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_cdc_statement_payload_names_do_not_shadow_row_aliases() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled=false")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    db.execute("CREATE TABLE alias_source (id INT PRIMARY KEY,n NUMERIC,o JSON)")
+        .await;
+    db.execute("INSERT INTO alias_source VALUES (1,1.0,'{\"a\":1}')")
+        .await;
+    let query = "SELECT id,n,o FROM alias_source";
+    db.try_execute_with_config(&["SET pg_trickle.cdc_trigger_mode='statement'"],&format!("SELECT pgtrickle.create_stream_table('alias_result',$q${query}$q$,'24h','DIFFERENTIAL')")).await.unwrap();
+    db.execute("UPDATE alias_source SET n=1.00,o='{\"a\":2}'")
+        .await;
+    db.try_execute_with_config(
+        &[
+            "SET pg_trickle.refresh_strategy='differential'",
+            "SET pg_trickle.differential_max_change_ratio=0",
+        ],
+        "SELECT pgtrickle.refresh_stream_table('alias_result')",
+    )
+    .await
+    .unwrap();
+    e2e::oracle::assert_st_query_exact(
+        &db,
+        "alias_result",
+        query,
+        "payload names versus transition aliases",
+    )
+    .await;
+    let scale: i32 = db.query_scalar("SELECT scale(n) FROM alias_result").await;
+    assert_eq!(scale, 2);
+}
+
+#[tokio::test]
 async fn test_cdc_traced_refreshes_consume_each_current_window() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("ALTER SYSTEM SET pg_trickle.enabled = false")

@@ -16,6 +16,51 @@ use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
 
 #[tokio::test]
+async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {
+    let db = TestDb::new().await;
+    let delta = "SELECT decode('01','hex') AS __pgt_row_id, 'D'::text AS __pgt_action, 1 AS id, 1.0::numeric AS n, '{\"x\":1}'::json AS j \
+                 UNION ALL SELECT decode('01','hex'),'I',1,1.00::numeric,'{\"x\":2}'::json";
+    let rendered = cdc_elision::keyed_weight_sql(delta, "id,n,j");
+    let (action, scale, json): (String, i32, String) = sqlx::query_as(sqlx::AssertSqlSafe(
+        format!("SELECT __pgt_action,scale(n),j::text FROM {rendered} d"),
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (action, scale, json),
+        ("I".to_string(), 2, "{\"x\":2}".to_string())
+    );
+    let scale_delta = "SELECT decode('01','hex') AS __pgt_row_id, 'D'::text AS __pgt_action, 1 AS id, 1.0::numeric AS n \
+                       UNION ALL SELECT decode('01','hex'),'I',1,1.00::numeric";
+    let rendered = cdc_elision::keyed_weight_sql(scale_delta, "id,n");
+    let scale: i32 = db
+        .query_scalar(&format!("SELECT scale(n) FROM {rendered} d"))
+        .await;
+    assert_eq!(scale, 2, "SQL-equal images must not cancel a scale update");
+    let transient = "SELECT decode('01','hex') AS __pgt_row_id, 'I'::text AS __pgt_action, 1 AS id, NULL::json AS j \
+                     UNION ALL SELECT decode('01','hex'),'D',1,NULL::json";
+    let rendered = cdc_elision::keyed_weight_sql(transient, "id,j");
+    let count: i64 = db
+        .query_scalar(&format!("SELECT count(*) FROM {rendered} d"))
+        .await;
+    assert_eq!(count, 0, "genuine same-image cancellation");
+    let collision = "SELECT decode('01','hex') AS __pgt_row_id,'I'::text AS __pgt_action,7 AS __pgt_image,9 AS __pgt_weight";
+    let rendered = cdc_elision::keyed_weight_sql(collision, "__pgt_image,__pgt_weight");
+    let payload: (i32, i32) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT __pgt_image,__pgt_weight FROM {rendered} d"
+    )))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload,
+        (7, 9),
+        "internal aliases must not shadow payload columns"
+    );
+}
+
+#[tokio::test]
 async fn test_cdc_image_policy_preserves_native_scalar_observations() {
     let db = TestDb::new().await;
     db.execute("CREATE DOMAIN image_numeric AS numeric").await;

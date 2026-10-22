@@ -35,6 +35,8 @@ LIFECYCLE_CASES = [
 ]
 CDC_ELISION_CASES = [
     "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
+    "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
+    "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
 ]
 PROOF_CONTRACTS = {
     "lsn": {
@@ -54,10 +56,10 @@ PROOF_CONTRACTS = {
     },
     "cdc_elision": {
         "schema": "pg-trickle-cdc-elision-verification-v1",
-        "obligations": {"admitted_image_type", "keep_change"},
+        "obligations": {"admitted_image_type", "keep_change", "image_action"},
         "cases": CDC_ELISION_CASES,
-        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "Cargo.toml", "Cargo.lock"],
-        "mutants": {"lost-image-change", "unknown-type-elision"},
+        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"],
+        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image"},
     },
 }
 

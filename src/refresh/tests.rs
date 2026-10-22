@@ -2169,8 +2169,8 @@ fn test_build_weight_agg_using_structure() {
     assert!(sql.contains("__pgt_row_id"));
     assert!(sql.contains("__pgt_action"));
     assert!(sql.contains("SUM"));
-    assert!(sql.contains("HAVING"));
-    assert!(sql.contains("GROUP BY"));
+    assert!(sql.contains("dense_rank()"));
+    assert!(sql.contains("USING OPERATOR(pg_catalog.*<)"));
     assert!(sql.contains("ORDER BY"));
 }
 
@@ -2181,7 +2181,7 @@ fn test_build_weight_agg_using_insert_delete_case() {
     assert!(sql.contains("'D'"));
     // Net-weight sign decides the action
     assert!(sql.contains("> 0"));
-    assert!(sql.contains("<> 0"));
+    assert!(sql.contains("< 0"));
 }
 
 // ── build_keyless_weight_agg ────────────────────────────────────────────
