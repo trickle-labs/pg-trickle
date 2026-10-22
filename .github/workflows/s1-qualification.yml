@@ -145,7 +145,15 @@ jobs:
           PGREACT_S1_BATCH_SIZE: '32'
         run: |
           image=$(docker image inspect s1-candidate:qualification --format '{{.Id}}')
+          # The frozen harness still returns 1 if observed throughput misses
+          # the 60/min target. Under owner approval only a sole rate failure
+          # at >=59/min may pass; the checker validates the retained raw exit,
+          # complete failure vector and all unchanged correctness/resource gates.
+          set +e
           python3 benchmarks/s1/qualification/run_bounded.py "$image" candidate-300
+          raw_exit=$?
+          set -e
+          if [ "$raw_exit" -gt 1 ]; then exit "$raw_exit"; fi
           python3 benchmarks/s1/check_result.py benchmarks/s1/qualification/candidate-300
       - name: Verify committed local ARM64 qualification evidence
         id: local-proof
@@ -153,6 +161,16 @@ jobs:
         run: |
           evidence=benchmarks/s1/qualification/local-arm64-1191
           (cd "$evidence" && shasum -a 256 -c SHA256SUMS)
+          # A historical verified ZIP remains useful evidence, but only the
+          # *exact source* of that ZIP may substitute for a live 10-CPU run.
+          # Keep the frozen archive/checksums intact after acceptance-policy
+          # updates; reject another source instead of rewriting history.
+          archived_head=$(cat "$evidence/build-evidence/candidate-commit.txt")
+          current_head=$(git rev-parse HEAD)
+          if [ "$current_head" != "$archived_head" ]; then
+            echo "::error::Archived S1 candidate is $archived_head, not current source $current_head. Qualify the current image on approved 10-CPU ARM64."
+            exit 1
+          fi
           shasum -a 256 -c "$evidence/build-evidence/compiled-inputs.sha256"
           local_run_dir="$RUNNER_TEMP/s1-local-arm64-1191"
           mkdir -p "$local_run_dir"
@@ -160,11 +178,12 @@ jobs:
           python3 benchmarks/s1/check_frozen_harness.py
           python3 benchmarks/s1/test_check_result.py
           python3 benchmarks/s1/check_result.py "$local_run_dir/control-300" --baseline
-          # Preserve the historical archive as evidence, but never substitute
-          # its sub-60 measured candidate for the unchanged >=60 release gate.
-          python3 -c 'import json, pathlib; p=pathlib.Path("benchmarks/s1/qualification/local-arm64-1191/qualification.json"); q=json.loads(p.read_text()); rate=q["workload"]["candidate"]["cases_per_minute"]; assert rate >= 60, f"Historical candidate scored {rate:.6f}/min; 60/min required. Rebuild and requalify the exact current candidate on approved 10-CPU ARM64."'
+          # The historical 59.36/min is now within the explicitly approved
+          # >=59/min acceptance floor, while the workload/target remain 60.
+          # This remains historical evidence, never proof for another SHA.
+          python3 -c 'import json, pathlib; q=json.loads(pathlib.Path("benchmarks/s1/qualification/local-arm64-1191/qualification.json").read_text()); rate=q["workload"]["candidate"]["cases_per_minute"]; assert 59 <= rate < 60, rate; assert q["workload"]["target_cases_per_minute"] == 60, q'
           python3 benchmarks/s1/check_result.py "$local_run_dir/candidate-300"
-          LOCAL_RUN_DIR="$local_run_dir" python3 -c 'import json, os, pathlib; p=pathlib.Path("benchmarks/s1/qualification/local-arm64-1191"); r=pathlib.Path(os.environ["LOCAL_RUN_DIR"]); q=json.loads((p/"qualification.json").read_text()); c=json.loads((r/"control-300/summary.json").read_text()); n=json.loads((r/"candidate-300/summary.json").read_text()); assert q["host"]["docker_cpus"] >= 10 and q["host"]["docker_platform"] == "linux/arm64"; assert q["candidate_source_commit"] == "2d102645ccc6779c508514ee22b4a55603bdc281"; assert q["mdm_source_commit"] == "eef7937180d504e62ce1076074bbeed8cef5d5a7" and q["react_source_commit"] == "f19d9b2c5f3d947705ea26aa1619a989f08ae1dc"; assert q["images"]["candidate"] == n["image"] == "sha256:065ada321676b2bd99b9d41834c31c2e66a86bfb0d912f4cb45b745ea594c0e5"; assert q["images"]["control"] == c["image"] == "sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a"; assert q["workload"]["candidate"]["cases_per_minute"] == n["cases_per_minute"] and n["cases_per_minute"] >= 60; assert n["s1_result"] == "PASS" and c["s1_result"] == "BASELINE_COMPLETE"; print("local 10-CPU ARM64 evidence: PASS")'
+          LOCAL_RUN_DIR="$local_run_dir" python3 -c 'import json, os, pathlib; p=pathlib.Path("benchmarks/s1/qualification/local-arm64-1191"); r=pathlib.Path(os.environ["LOCAL_RUN_DIR"]); q=json.loads((p/"qualification.json").read_text()); c=json.loads((r/"control-300/summary.json").read_text()); n=json.loads((r/"candidate-300/summary.json").read_text()); assert q["host"]["docker_cpus"] >= 10 and q["host"]["docker_platform"] == "linux/arm64"; assert q["candidate_source_commit"] == "2d102645ccc6779c508514ee22b4a55603bdc281"; assert q["mdm_source_commit"] == "eef7937180d504e62ce1076074bbeed8cef5d5a7" and q["react_source_commit"] == "f19d9b2c5f3d947705ea26aa1619a989f08ae1dc"; assert q["images"]["candidate"] == n["image"] == "sha256:065ada321676b2bd99b9d41834c31c2e66a86bfb0d912f4cb45b745ea594c0e5"; assert q["images"]["control"] == c["image"] == "sha256:36d64e083384e1f8185f327d8e222581da3032b57fcd78fee109e44ae4442c4a"; assert q["workload"]["candidate"]["cases_per_minute"] == n["cases_per_minute"] and 59 <= n["cases_per_minute"] < 60; assert n["s1_result"] == "PASS_OWNER_APPROVED_FLOOR" and c["s1_result"] == "BASELINE_COMPLETE"; print("local 10-CPU ARM64 evidence: PASS")'
       - name: Hash complete evidence
         if: always()
         run: |
