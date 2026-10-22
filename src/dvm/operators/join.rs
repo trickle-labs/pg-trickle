@@ -91,6 +91,264 @@ use crate::dvm::operators::join_common::{
 use crate::dvm::parser::{Expr, OpTree};
 use crate::dvm::snapshot::SnapshotPlan;
 use crate::error::PgTrickleError;
+use crate::join_plan::{Boundary, Term};
+
+fn endpoint_key_columns(
+    condition: &Expr,
+    left: &OpTree,
+    right: &OpTree,
+) -> Option<(String, String, u32)> {
+    let (
+        OpTree::Scan {
+            alias: la,
+            columns: lc,
+            pk_columns: lp,
+            ..
+        },
+        OpTree::Scan {
+            alias: ra,
+            columns: rc,
+            pk_columns: rp,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if la == ra
+        || lp.is_empty()
+        || rp.is_empty()
+        || !lp.iter().all(|pk| lc.iter().any(|c| c.name == *pk))
+        || !rp.iter().all(|pk| rc.iter().any(|c| c.name == *pk))
+    {
+        return None;
+    }
+    let Expr::BinaryOp {
+        op,
+        left: a,
+        right: b,
+    } = condition
+    else {
+        return None;
+    };
+    if op != "=" {
+        return None;
+    }
+    let (
+        Expr::ColumnRef {
+            table_alias: Some(aa),
+            column_name: ac,
+        },
+        Expr::ColumnRef {
+            table_alias: Some(ba),
+            column_name: bc,
+        },
+    ) = (a.as_ref(), b.as_ref())
+    else {
+        return None;
+    };
+    let (lk, rk) = if aa == la && ba == ra {
+        (ac, bc)
+    } else if aa == ra && ba == la {
+        (bc, ac)
+    } else {
+        return None;
+    };
+    let lt = lc.iter().find(|c| c.name == *lk)?.type_oid;
+    let rt = rc.iter().find(|c| c.name == *rk)?.type_oid;
+    (lt == rt && crate::join_plan::admitted_equality_type(lt)).then(|| (lk.clone(), rk.clone(), lt))
+}
+
+pub(crate) fn computed_projection_needs_endpoints(tree: &OpTree) -> bool {
+    let OpTree::Project {
+        expressions, child, ..
+    } = tree
+    else {
+        return false;
+    };
+    let OpTree::InnerJoin {
+        condition,
+        left,
+        right,
+    } = child.as_ref()
+    else {
+        return false;
+    };
+    expressions
+        .iter()
+        .any(|e| !matches!(e, Expr::ColumnRef { .. } | Expr::Literal(_)))
+        && endpoint_key_columns(condition, left, right).is_some()
+}
+
+fn scoped_source_endpoints(
+    ctx: &mut DiffContext,
+    source: &OpTree,
+    delta: &DiffResult,
+    key: &str,
+    keys: &str,
+) -> Result<(String, String), PgTrickleError> {
+    let OpTree::Scan { pk_columns, .. } = source else {
+        return Err(PgTrickleError::InternalError(
+            "endpoint source must be a keyed base scan".into(),
+        ));
+    };
+    let fields = |alias: &str| {
+        delta
+            .columns
+            .iter()
+            .map(|c| format!("{alias}.{}", quote_ident(c)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let columns = delta
+        .columns
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let key = quote_ident(key);
+    let predicate = |alias: &str| format!("{alias}.{key} IN (SELECT __pgt_scope_key FROM {keys})");
+    let identity = crate::hash::build_row_identity_expr(
+        "SCAN_KEY",
+        &pk_columns
+            .iter()
+            .map(|c| format!("b.{}", quote_ident(c)))
+            .collect::<Vec<_>>(),
+    );
+    let table = build_snapshot_sql(source);
+    let new = ctx.next_cte_name("join_source_new");
+    ctx.add_cte(
+        new.clone(),
+        format!(
+            "SELECT {fields} FROM {table} b WHERE {predicate}",
+            fields = fields("b"),
+            predicate = predicate("b")
+        ),
+    );
+    // Rewind complete signed images; deferred keys need every captured event.
+    let rewind = format!(
+        "SELECT {identity} AS __pgt_row_id,'I'::text AS __pgt_action,{current} FROM {table} b WHERE {current_predicate} \
+         UNION ALL SELECT d.__pgt_row_id,CASE WHEN d.__pgt_action='I' THEN 'D' ELSE 'I' END,{captured} \
+         FROM {delta} d WHERE {captured_predicate}",
+        current = fields("b"),
+        captured = fields("d"),
+        current_predicate = predicate("b"),
+        captured_predicate = predicate("d"),
+        delta = delta.cte_name,
+    );
+    let old = ctx.next_cte_name("join_source_old");
+    let weighted = crate::cdc_elision::keyed_weight_sql(&rewind, &columns);
+    ctx.add_cte(
+        old.clone(),
+        format!("SELECT {columns} FROM {weighted} __pgt_old WHERE __pgt_action='I'"),
+    );
+    Ok((old, new))
+}
+
+fn diff_keyed_endpoints(
+    ctx: &mut DiffContext,
+    condition: &Expr,
+    left: &OpTree,
+    right: &OpTree,
+    dl: &DiffResult,
+    dr: &DiffResult,
+    (left_key, right_key): (&str, &str),
+) -> Result<DiffResult, PgTrickleError> {
+    let keys = ctx.next_cte_name("join_scope_keys");
+    let mut key_arms = Vec::new();
+    for (include, delta, key) in [
+        (crate::join_plan::scope_pair(true, false), dl, left_key),
+        (crate::join_plan::scope_pair(false, true), dr, right_key),
+    ] {
+        if include {
+            key_arms.push(format!(
+                "SELECT {} AS __pgt_scope_key FROM {}",
+                quote_ident(key),
+                delta.cte_name
+            ));
+        }
+    }
+    if key_arms.is_empty() {
+        key_arms.push(format!(
+            "SELECT {} AS __pgt_scope_key FROM {} WHERE false",
+            quote_ident(left_key),
+            dl.cte_name
+        ));
+    }
+    ctx.add_cte(keys.clone(), key_arms.join(" UNION ALL "));
+    let (l0, l1) = scoped_source_endpoints(ctx, left, dl, left_key, &keys)?;
+    let (r0, r1) = scoped_source_endpoints(ctx, right, dr, right_key, &keys)?;
+    let mut output = Vec::new();
+    let mut selects = Vec::new();
+    for (source, result, alias) in [(left, dl, "l"), (right, dr, "r")] {
+        for column in &result.columns {
+            let name = snapshot_join_column_name(source.alias(), column);
+            selects.push(format!(
+                "{alias}.{} AS {}",
+                quote_ident(column),
+                quote_ident(&name)
+            ));
+            output.push(name);
+        }
+    }
+    let mut identity_parts = build_base_table_key_exprs(left, "l");
+    identity_parts.extend(build_base_table_key_exprs(right, "r"));
+    let identity = crate::hash::build_composite_hash_expr(&identity_parts);
+    let predicate = rewrite_join_condition(condition, left, "l", right, "r");
+    let old = ctx.next_cte_name("join_endpoint_old");
+    let new = ctx.next_cte_name("join_endpoint_new");
+    for (name, l, r) in [(&old, &l0, &r0), (&new, &l1, &r1)] {
+        ctx.add_cte(
+            name.clone(),
+            format!(
+                "SELECT {identity} AS __pgt_row_id,{columns} FROM {l} l JOIN {r} r ON {predicate}",
+                columns = selects.join(", "),
+            ),
+        );
+    }
+    let insert = Term {
+        left_scan: 0,
+        right_scan: 1,
+        left_boundary: Boundary::After,
+        right_boundary: Boundary::After,
+        retract: false,
+    };
+    let delete = Term {
+        left_boundary: Boundary::Before,
+        right_boundary: Boundary::Before,
+        retract: true,
+        ..insert
+    };
+    let sql = crate::join_plan::endpoint_changes_sql(&old, &new, &output, insert, delete)
+        .ok_or_else(|| {
+            PgTrickleError::InternalError(
+                "endpoint join plan has inconsistent source bindings, signs or snapshots".into(),
+            )
+        })?;
+    let name = ctx.next_cte_name("join_endpoint_delta");
+    ctx.add_cte(name.clone(), sql);
+    ctx.record_endpoint_join(&name);
+    let left_output = dl
+        .columns
+        .iter()
+        .map(|c| snapshot_join_column_name(left.alias(), c))
+        .collect::<Vec<_>>();
+    let right_output = dr
+        .columns
+        .iter()
+        .map(|c| snapshot_join_column_name(right.alias(), c))
+        .collect::<Vec<_>>();
+    Ok(DiffResult {
+        cte_name: name,
+        columns: output,
+        schema: dl
+            .schema
+            .renamed(&left_output)
+            .concat(&dr.schema.renamed(&right_output)),
+        is_deduplicated: false,
+        has_key_changed: false,
+    })
+}
 
 // A44-1 (v0.43.0): Part 3 correction term scan count limit is now controlled
 // by the `pg_trickle.part3_max_scan_count` GUC (default 5, previously hardcoded).
@@ -130,6 +388,29 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // Differentiate both children
     let left_result = ctx.diff_node(left)?;
     let right_result = ctx.diff_node(right)?;
+
+    if ctx.endpoint_join_required
+        && let Some((lk, rk, oid)) = endpoint_key_columns(condition, left, right)
+        && ctx.has_builtin_equality(oid)
+        && let (OpTree::Scan { table_oid: lo, .. }, OpTree::Scan { table_oid: ro, .. }) =
+            (left.as_ref(), right.as_ref())
+        && ctx.source_endpoint_is_fenced(*lo)
+        && ctx.source_endpoint_is_fenced(*ro)
+        && matches!(
+            ctx.delta_source(),
+            crate::dvm::diff::DeltaSource::ChangeBuffer
+        )
+    {
+        return diff_keyed_endpoints(
+            ctx,
+            condition,
+            left,
+            right,
+            &left_result,
+            &right_result,
+            (&lk, &rk),
+        );
+    }
 
     // Get the base table references for the current snapshot.
     // For Scan children this is the table name; for nested joins
@@ -874,6 +1155,70 @@ mod tests {
     use proptest::prelude::*;
 
     // ── diff_inner_join tests ───────────────────────────────────────
+
+    #[test]
+    fn test_computed_join_admits_only_fenced_builtin_endpoint_plans() {
+        let left = scan_with_pk(1, "l_src", "public", "l", &["id", "v"], &["id"]);
+        let right = scan_with_pk(2, "r_src", "public", "r", &["id", "v"], &["id"]);
+        let tree = project(
+            vec![binop(
+                "/",
+                lit("100"),
+                binop("-", qcolref("l", "v"), qcolref("r", "v")),
+            )],
+            vec!["quotient"],
+            inner_join(eq_cond("l", "id", "r", "id"), left, right),
+        );
+        assert!(computed_projection_needs_endpoints(&tree));
+        for (builtin, fenced, expected) in [
+            (true, vec![1, 2], true),
+            (false, vec![1, 2], false),
+            (true, vec![1], false),
+            (true, vec![], false),
+        ] {
+            let mut ctx = test_ctx().with_decision_trace();
+            if builtin {
+                ctx.set_builtin_equality_types([23].into_iter().collect());
+            }
+            ctx.set_fenced_endpoint_sources(fenced.into_iter().collect());
+            ctx.set_source_deferred_keys([1, 2].into_iter().collect());
+            let sql = ctx.differentiate(&tree).unwrap();
+            assert_eq!(sql.contains("join_endpoint_delta"), expected, "{sql}");
+            assert!(
+                !ctx.endpoint_join_required,
+                "projection policy must be restored"
+            );
+            let witnessed = ctx
+                .decision_trace()
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event.operator == "JoinEndpoint");
+            assert_eq!(witnessed, expected);
+            if expected {
+                assert!(sql.contains("OPERATOR(pg_catalog.*=)"), "{sql}");
+                assert!(
+                    sql.contains("dense_rank()"),
+                    "deferred histories rewind complete images: {sql}"
+                );
+                assert!(sql.contains("AS __pgt_scope_key"), "{sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_plain_projection_keeps_existing_join_path() {
+        let tree = project(
+            vec![qcolref("l", "id")],
+            vec!["id"],
+            inner_join(
+                eq_cond("l", "id", "r", "id"),
+                scan_with_pk(1, "l_src", "public", "l", &["id"], &["id"]),
+                scan_with_pk(2, "r_src", "public", "r", &["id"], &["id"]),
+            ),
+        );
+        assert!(!computed_projection_needs_endpoints(&tree));
+    }
 
     #[test]
     fn test_diff_inner_join_basic() {

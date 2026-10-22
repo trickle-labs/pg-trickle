@@ -64,6 +64,8 @@ mod hooks;
 pub(crate) mod integration_contract;
 #[allow(dead_code)]
 mod ivm;
+#[path = "../verification/join_plan.rs"]
+pub(crate) mod join_plan;
 #[path = "../verification/lsn.rs"]
 pub(crate) mod lsn;
 #[allow(dead_code)]
