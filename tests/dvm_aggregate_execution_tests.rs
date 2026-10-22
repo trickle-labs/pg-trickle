@@ -49,7 +49,7 @@ async fn test_join_endpoint_sql_preserves_images_retractions_and_bag_duplicates(
          SELECT encode(__pgt_row_id,'hex'),__pgt_action,scale(n),j::text FROM ({sql}) changes ORDER BY 1,2"
     );
     let rows: Vec<(String, String, Option<i32>, Option<String>)> =
-        sqlx::query_as(sqlx::AssertSqlSafe(query))
+        sqlx::query_as(sqlx::AssertSqlSafe(query.clone()))
             .fetch_all(&db.pool)
             .await
             .unwrap();
@@ -73,6 +73,32 @@ async fn test_join_endpoint_sql_preserves_images_retractions_and_bag_duplicates(
     })
     .collect::<Vec<_>>();
     assert_eq!(rows, expected, "endpoint bag/image actions differ");
+    db.execute("CREATE SCHEMA endpoint_shadow").await;
+    db.execute("CREATE FUNCTION endpoint_shadow.never_equal(bytea,bytea) RETURNS boolean LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT false'").await;
+    db.execute("CREATE OPERATOR endpoint_shadow.= (FUNCTION=endpoint_shadow.never_equal,LEFTARG=bytea,RIGHTARG=bytea)").await;
+    let mut connection = db.pool.acquire().await.unwrap();
+    sqlx::query("SET search_path=endpoint_shadow,pg_catalog,public")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let (shadowed, builtin_key): (bool, bool) =
+        sqlx::query_as("SELECT decode('01','hex')=decode('01','hex'),1=1")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    assert!(
+        !shadowed && builtin_key,
+        "control must shadow only internal bytea equality"
+    );
+    let shadow_rows: Vec<(String, String, Option<i32>, Option<String>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(query))
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        shadow_rows, expected,
+        "owner search_path changed complete identity matching"
+    );
     let mixed = join_plan::Term {
         right_boundary: join_plan::Boundary::Before,
         ..insert
