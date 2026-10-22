@@ -597,19 +597,43 @@ async fn test_diamond_convergence_cascades_with_one_active_branch() {
     // Insert into LEFT only — RIGHT stays unchanged
     db.execute("INSERT INTO dconv_left (val) VALUES (30)").await;
 
-    // dconv_tip must cascade because left_branch will refresh (via CDC),
-    // and its last_refresh_at will be newer than dconv_tip's.
+    // Establish that the scheduled FULL upstream has actually consumed the
+    // insert before measuring the CALCULATED downstream's cascade. On busy CI
+    // runners, other long-running scheduler tests can delay either stage past
+    // the old single 60-second end-to-end deadline.
+    let left_refreshed = db
+        .wait_for_condition(
+            "dconv_branch_left scheduler refresh after INSERT",
+            "SELECT COUNT(*) = 3 FROM public.dconv_branch_left",
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+    assert!(
+        left_refreshed,
+        "dconv_branch_left never consumed its INSERT via the scheduler"
+    );
+
+    // dconv_tip must cascade because left_branch refreshed, while right_branch
+    // stays unchanged. Never manually refresh the tip: that would bypass the
+    // scheduler path that this regression test exists to verify.
     let recascaded = db
         .wait_for_condition(
             "dconv_tip re-cascade after left INSERT",
             "SELECT COUNT(*) = 6 FROM public.dconv_tip",
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(180),
             std::time::Duration::from_millis(300),
         )
         .await;
     assert!(
         recascaded,
-        "dconv_tip did not cascade after INSERT into left branch only (expected 6 rows from \
-         3×2 cross join) — last_refresh_at fallback for asymmetric diamond may not be working"
+        "dconv_tip did not cascade after the scheduled left-branch refresh \
+         (expected 6 rows from 3×2 cross join) — last_refresh_at fallback \
+         for the asymmetric diamond may not be working"
     );
+    db.assert_st_matches_query(
+        "dconv_tip",
+        "SELECT l.val AS lval, r.val AS rval FROM dconv_left l CROSS JOIN dconv_right r",
+    )
+    .await;
 }
