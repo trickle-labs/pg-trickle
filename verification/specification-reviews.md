@@ -33,9 +33,28 @@ durability remain unproved. The long-open-transaction receipt/catalog WAL
 growth and resource failure remains unresolved. The duplicate-result fixture
 is an oracle control, not an executable duplicate-replay mutation.
 
+## CDC changed-column elision (#1221)
+
+Reviewer `/root/review_1221` accepted the first R3 slice at
+`3184b55e0ee74d82f55203bf3bd744ab9a675f1e`, with no semantic blocker.
+Exact built-in OID guards enforce the small image policy; both trigger builders
+use the checked decisions and preserve complete transactional D/I capture.
+Independent native conformance covers 186 pairs plus scale and storage
+countercontrols. The pinned baseline reports 2/0; both executable mutants
+report 1/1 intended postcondition failures. Complete shared runtime reports
+16/16, and the frozen named case reports one pass with 15 filtered cases.
+
+Follow-up inspection confirms the declared frozen commit and identical
+package/attested/installed library SHA-256
+`6bde1e1a6c6cb9f4881a51d2bbf6411a17bf8ac2c022f75f7d13c64f178d6920`.
+R1/R2 normalization, compaction/windows, arbitrary observation equivalence,
+SQL/FFI and the formal correctness of the separate cache repair remain outside
+this review. A domain over an admitted builtin would strengthen domain
+conformance; its absence is nonblocking for the exact-OID implementation.
+
 ## Shared evidence boundary
 
-Both reviews identified that candidate binding checks source hashes and
+The reviews identified that candidate binding checks source hashes and
 package/installed-library equality, while trusting the surrounding build and
 test runner for build provenance and successful execution of named cases.
 The helper does not prove source-to-binary compilation. Historical local

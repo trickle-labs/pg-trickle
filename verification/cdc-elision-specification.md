@@ -83,8 +83,10 @@ Binding requires the runtime's declared candidate commit to match the requested
 commit. It trusts the build/test runner for build origin and successful named
 test execution; byte equality is not a source-to-binary compilation proof.
 
-Independent reviewer sign-off is pending; native oracle conformance and this
-source specification do not substitute for that review.
+Independent read-only review accepted the bounded R3 specification at
+`3184b55e0ee74d82f55203bf3bd744ab9a675f1e`, including a follow-up inspection of
+the completed installed binding. See [the review record](specification-reviews.md).
+This does not establish the other #1221 obligations or approve a merge.
 
 ## Existing installations and limits
 
