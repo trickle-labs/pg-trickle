@@ -44,6 +44,8 @@ pub mod config;
 // the main production path but are retained for future use or test support.
 #[path = "../verification/aggregate_lifecycle.rs"]
 pub(crate) mod aggregate_lifecycle;
+#[path = "../verification/cdc_elision.rs"]
+pub(crate) mod cdc_elision;
 #[allow(dead_code)]
 pub mod dag;
 pub(crate) mod diagnostics;

@@ -40,6 +40,7 @@ class CandidateBindingTests(unittest.TestCase):
         }
         self.installation = [
             {
+                "candidate_commit": "fixture-commit",
                 "server": {"container_id": "fixture"},
                 "candidate_files": [
                     {
@@ -58,6 +59,14 @@ class CandidateBindingTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_runtime_commit_must_match_the_requested_candidate(self) -> None:
+        for value in [None, "another-commit"]:
+            self.installation[0]["candidate_commit"] = value
+            with self.assertRaisesRegex(ValueError, "candidate commit is missing or differs"):
+                binding.validate_binding(proof=self.proof, source=self.source,
+                    package_dir=self.package, installation=self.installation,
+                    runtime_cases=binding.EXPECTED_CASES, candidate_commit="fixture-commit")
 
     def test_lifecycle_binding_requires_every_semantic_control_and_callers(self) -> None:
         self.source = binding.ROOT / "verification/aggregate_lifecycle.rs"
@@ -108,6 +117,33 @@ class CandidateBindingTests(unittest.TestCase):
         self.assertEqual(binding.validate_binding(**arguments)["schema"],
                          "pg-trickle-receipt-candidate-binding-v1")
         self.proof["production_inputs"]["src/wal_decoder.rs"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "production input differs"):
+            binding.validate_binding(**arguments)
+
+    def test_cdc_binding_requires_both_controls_and_trigger_callers(self) -> None:
+        self.source = binding.ROOT / "verification/cdc_elision.rs"
+        contract = binding.PROOF_CONTRACTS["cdc_elision"]
+        self.proof.update({
+            "schema": contract["schema"], "source_sha256": binding.digest(self.source),
+            "obligations": sorted(contract["obligations"]),
+            "production_inputs": {path: binding.digest(binding.ROOT / path) for path in contract["inputs"]},
+            "semantic_mutations": {name: {"returncode": 1, "failure_kind": "postcondition",
+                                           "summary": "verification results:: 1 verified, 1 errors"}
+                                   for name in contract["mutants"]},
+        })
+        arguments = dict(proof=self.proof, source=self.source, package_dir=self.package,
+                         installation=self.installation, runtime_cases=binding.CDC_ELISION_CASES,
+                         candidate_commit="fixture-commit", proof_kind="cdc_elision")
+        self.assertEqual(binding.validate_binding(**arguments)["schema"], "pg-trickle-cdc-elision-candidate-binding-v1")
+        for name in contract["mutants"]:
+            control = self.proof["semantic_mutations"].pop(name)
+            with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
+            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = control
+        self.proof["production_inputs"]["src/cdc/triggers.rs"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "production input differs"):
             binding.validate_binding(**arguments)
 

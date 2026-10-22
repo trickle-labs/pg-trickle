@@ -33,6 +33,11 @@ LIFECYCLE_CASES = [
     "e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql",
     "e2e_having_transition_tests::test_having_grouped_and_global_empty_lifecycle_match_postgresql",
 ]
+CDC_ELISION_CASES = [
+    "e2e_shared_buffer_tests::test_shared_numeric_images_preserve_scale_for_both_trigger_modes_and_orders",
+    "e2e_shared_buffer_tests::test_cdc_deferred_replacement_preserves_complete_payload",
+    "e2e_shared_buffer_tests::test_cdc_statement_payload_names_do_not_shadow_row_aliases",
+]
 PROOF_CONTRACTS = {
     "lsn": {
         "schema": EXPECTED_SCHEMA, "obligations": REQUIRED_OBLIGATIONS,
@@ -47,6 +52,14 @@ PROOF_CONTRACTS = {
         "obligations": {"visibility_actions", "group_present", "group_action", "aggregate_is_null"},
         "cases": LIFECYCLE_CASES,
         "inputs": ["src/lib.rs", "src/dvm/operators/filter.rs", "src/dvm/operators/aggregate.rs", "Cargo.toml", "Cargo.lock"],
+        "mutants": {"unknown-not-retracted", "missing-retraction", "retained-empty-group", "missing-global-empty-result", "non-null-empty-sum"},
+    },
+    "cdc_elision": {
+        "schema": "pg-trickle-cdc-elision-verification-v1",
+        "obligations": {"admitted_image_type", "keep_change", "image_action"},
+        "cases": CDC_ELISION_CASES,
+        "inputs": ["src/lib.rs", "src/cdc/triggers.rs", "src/cdc/mod.rs", "src/cdc/rebuild.rs", "src/dvm/mod.rs", "src/dvm/diff.rs", "src/dvm/operators/scan.rs", "src/dvm/operators/project.rs", "src/refresh/codegen.rs", "Cargo.toml", "Cargo.lock"],
+        "mutants": {"lost-image-change", "unknown-type-elision", "lost-positive-image", "reversed-negative-image"},
     },
 }
 
@@ -71,19 +84,17 @@ def proof_source_digest(proof: dict[str, Any], source: Path, proof_kind: str = "
             "proof record omits a required LSN obligation")
     require(bool(proof.get("compiler_identity")), "proof record omits the compiler identity")
     require(bool(proof.get("solver_identity")), "proof record omits the solver identity")
-    if proof_kind == "aggregate_lifecycle":
+    if required := contract.get("mutants"):
         controls = proof.get("semantic_mutations", {})
-        required = {"unknown-not-retracted", "missing-retraction", "retained-empty-group",
-                    "missing-global-empty-result", "non-null-empty-sum"}
         require(isinstance(controls, dict) and required.issubset(controls),
-                "lifecycle proof omits a required executable mutant")
+                f"{proof_kind} proof omits a required executable mutant")
         for name in required:
             control = controls[name]
             require(isinstance(control, dict) and control.get("returncode", 0) != 0
                     and control.get("failure_kind") == "postcondition"
                     and re.search(r"verification results::\s+\d+ verified,\s+[1-9]\d* errors",
                                   control.get("summary", "")) is not None,
-                    f"lifecycle mutant did not fail its intended postcondition: {name}")
+                    f"{proof_kind} mutant did not fail its intended postcondition: {name}")
     for path in contract["inputs"]:
         require(proof.get("production_inputs", {}).get(path) == digest(ROOT / path),
                 f"{proof_kind} production input differs from verified candidate: {path}")
@@ -129,6 +140,8 @@ def validate_binding(
     require(bool(install_observations), "runtime attestation has no candidate pg_trickle.so entry")
     observed: list[dict[str, str]] = []
     for observation in install_observations:
+        require(bool(candidate_commit) and observation.get("candidate_commit") == candidate_commit,
+                "runtime attestation candidate commit is missing or differs from the requested candidate")
         candidate = next(
             item for item in observation["candidate_files"]
             if item.get("path") == "usr/lib/postgresql/18/lib/pg_trickle.so"
@@ -153,6 +166,7 @@ def validate_binding(
     return {
         "schema": f"pg-trickle-{proof_kind.replace('_', '-')}-candidate-binding-v1",
         "candidate_commit": candidate_commit,
+        "provenance_boundary": "Build origin and successful named test execution are supplied by the trusted build/test runner; this record checks source hashes and package/install bytes.",
         "workflow": os.environ.get("GITHUB_WORKFLOW", "local"),
         "workflow_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
         "source": source.relative_to(ROOT).as_posix(),

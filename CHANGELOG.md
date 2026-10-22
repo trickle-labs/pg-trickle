@@ -222,6 +222,19 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Preserve numeric scale-only UPDATEs for narrow and shared CDC consumers in
+  both row and statement trigger modes (#1210, #1221). Changed-column masks use
+  binary images for admitted fixed-size built-in types and conservatively retain
+  variable-length and unknown types. Existing installations must rebuild CDC
+  triggers with the new library and fully refresh results already made stale
+  by omitted updates.
+- Keep concrete differential windows out of the reusable MERGE cache, including
+  decision tracing and per-leaf snapshot overrides, so later refreshes cannot
+  reuse earlier LSN cuts (#1221).
+- Retain deferred-key payload replacements even when their INSERT precedes the
+  old DELETE. Keyed delta reduction compares complete binary row images, so
+  numeric representation changes survive and json payloads need no equality
+  operator (#1180, #1221).
 - Prevent manual DIFFERENTIAL refreshes from skipping trigger-captured changes
   when source transactions commit out of LSN order (#1158).
 - Add versioned V3 row identities whose `bpchar` canonicalization matches PostgreSQL equality; V2 bytes remain unchanged. V2-backed stream tables require protected FULL reinitialization after upgrade.
