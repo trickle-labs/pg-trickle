@@ -380,12 +380,17 @@ async fn configure_fast_scheduler(db: &E2eDb) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
         .await;
+    // Client polling must not defer scheduler work on small CI runners.
+    db.execute("ALTER SYSTEM SET pg_trickle.load_shed_threshold = 0")
+        .await;
     db.reload_config_and_wait().await;
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
         .await;
     db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
+    db.wait_for_setting("pg_trickle.load_shed_threshold", "0")
+        .await;
 
     let sched_running = db
         .wait_for_scheduler(std::time::Duration::from_secs(90))
