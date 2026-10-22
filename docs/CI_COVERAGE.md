@@ -189,7 +189,7 @@ to run only the paired experiment. Normal PR, push, nightly and manual jobs
 retain their existing behavior when this input is false.
 
 Both allocations use the production/test trees at
-`f24c543` (the repaired frozen test tree), the `ubuntu-24.04` runner class,
+`6de32e0` (the repaired frozen test tree), the `ubuntu-24.04` runner class,
 cold workspace build directories and zero test retries. A single producer
 freezes a Rust 1.99.1/nextest 0.9.148 toolchain container, all three PostgreSQL
 images and one extension package for both sides. Both sides execute inside
@@ -485,6 +485,19 @@ creation-to-start minutes; its full jobs took 65.683 minutes before and
 46.400 after. Failed suites make it an invalid cost comparison. Failed and
 cancelled experiment overhead is now 3,180.550 execution minutes. Do not
 report a speedup from it.
+
+The repaired replay [run `39729948300`](https://github.com/trickle-labs/pg-trickle/actions/runs/39729948300)
+passed the producer/source guard, both integration allocations and all six
+light shards. Its broad full suite passed all 2,168 tests (151 skipped), the
+isolated atomicity phase passed, and recovery repetition passed 10/10. The
+serial WAL/RLS phase passed 15/16: after restart, the before-receipt witness
+timed out with the dependency back in `TRANSITIONING`, the slot at cutover,
+and both scheduler/autovacuum waiting on buffer content. The catalog-only
+post-restart `WAL` check did not prove the scheduler had resumed decoding. The
+fixture now waits for a separate, acknowledged readiness receipt before
+arming the target barrier. The paired after full job was still running when
+this note was written, so the pair is invalid and no cost difference is
+reported. Artifacts are retained under `target/ci1188-comparison/run-39729948300/`.
 
 After saving the completed run/jobs JSON above, download only the replay
 evidence (the shared image archive is not needed for the report):
