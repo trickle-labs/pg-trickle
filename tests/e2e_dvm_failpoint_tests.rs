@@ -239,7 +239,15 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .expect("failed to inspect scheduler failure path");
     assert_eq!(requested_mode, "DIFFERENTIAL");
     assert_eq!(refresh_mode, "DIFFERENTIAL");
-    assert_eq!(effective_mode.as_deref(), Some("DIFFERENTIAL"));
+    // effective_refresh_mode describes the last *completed* refresh, not the
+    // failed attempt. A scheduler NO_DATA tick can complete while the writer
+    // holdback window delays the injected DIFFERENTIAL failure. The failed
+    // attempt's history action and failpoint marker above are the evidence
+    // that this test exercised the differential scheduler failure path.
+    assert!(
+        matches!(effective_mode.as_deref(), Some("DIFFERENTIAL" | "NO_DATA")),
+        "unexpected completed refresh mode after differential failure: {effective_mode:?}"
+    );
     assert!(!needs_reinit);
 
     let suspended = wait_for_suspended(&db, pgt_name, Duration::from_secs(60)).await;
