@@ -814,10 +814,12 @@ async fn test_mixed_diamond_with_view_branch() {
         .await;
     db.execute("INSERT INTO md_prices VALUES (4, 1.99)").await;
 
-    // Refresh both branches then the join
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_prices").await;
-    db.refresh_st("md_st_hw_priced").await;
+    // Refresh each source branch to exact convergence before refreshing
+    // the dependent join. A completed refresh may defer recent writes under
+    // writer holdback; a single call does not guarantee propagation.
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_prices").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
@@ -825,11 +827,13 @@ async fn test_mixed_diamond_with_view_branch() {
         "New hardware product should appear in joined ST"
     );
 
-    // Change a product from hardware to digital
+    // Change a product from hardware to digital. The view-backed source
+    // must reflect the removal before checking the downstream join, or its
+    // old row can remain visible until the next source refresh watermark.
     db.execute("UPDATE md_products SET category = 'digital' WHERE name = 'Cable'")
         .await;
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_hw_priced").await;
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
