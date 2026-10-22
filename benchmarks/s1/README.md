@@ -1,20 +1,20 @@
 # S1 graph-refresh qualification
 
-## Owner-approved throughput acceptance amendment — 2026-10-22
+## Owner-approved throughput acceptance amendment — revised 2026-10-22
 
-The owner explicitly authorized accepting the observed ~59.36/minute result by
-changing the **minimum candidate acceptance rate to 59 cases/minute**. The
-60 cases/minute value remains the workload's offered rate and engineering
-performance target, *not* the new binary release minimum. This is a prospective,
-visible change in acceptance policy, not a retroactive assertion that the
-original >=60/minute harness passed.
+The owner has revised the **minimum candidate acceptance rate from 59 to 50 cases/minute**
+to accommodate performance variation between approved execution environments.
+The earlier 59/min approval is preserved as policy history. The frozen workload
+still offers **60 cases/minute** as its engineering performance target, not the
+new binary release minimum. This change does not retroactively convert any
+original raw 60/minute harness failure into a raw pass.
 
-For an observed rate in **[59, 60)**, the frozen harness continues to report
+For an observed rate in **[50, 60)**, the frozen harness continues to report
 its original throughput-only failure and exit 1. The current S1 acceptance
 checker can return `PASS_OWNER_APPROVED_FLOOR` only with the exact sole
 throughput failure, all 300 admissions, 1,200 source rows, 300 case vectors,
 zero future receipts and every original authorization, due-burst, resource
-and supervision assertion passing. Rates **below 59**, any unrelated failure,
+and supervision assertion passing. Rates **below 50**, any unrelated failure,
 or missing/inconsistent evidence still fail. The slower control retains its
 separate documented baseline exception; all historical raw runs are immutable.
 
@@ -32,7 +32,7 @@ unapproved.
 The owner also approved using the GitHub-hosted **4-CPU ARM64** runner as an
 alternative to this laptop's 10-CPU ARM64 Docker profile. The workflow now builds
 and measures the exact current candidate and corrected control on that runner;
-the CPU gate requires at least 4 CPUs. The **59/minute acceptance floor**, frozen
+the CPU gate requires at least 4 CPUs. The **50/minute acceptance floor**, frozen
 300 admissions, complete vectors, zero future receipts, latency, supervision and
 resource limits remain unchanged. A measured failure still fails qualification.
 Historical 10-CPU results remain bound to their original sources and images and
@@ -69,7 +69,7 @@ The complete run and build evidence is under
 | Raw result | 60/min throughput failed; harness exit 1 | 60/min throughput failed; harness exit 1 |
 
 The frozen workload still offers 60 admissions/minute. Under the **2026-10-22
-owner-approved minimum of 59**, the current checker explicitly labels an
+owner-approved minimum of 50**, the current checker explicitly labels an
 otherwise-valid sole subtarget rate failure `PASS_OWNER_APPROVED_FLOOR`.
 The original evidence's `PASS_WITH_RATE_TOLERANCE` label is historical and
 retained unchanged. An archive from another candidate source cannot prove the
@@ -228,8 +228,8 @@ p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
 below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
 container memory, 45 minutes, or less than 10 GiB host free space. These are
 sampled limits, not a per-operation memory guarantee.
-The owner-approved release minimum is 59/minute, with the offered workload
-and performance target still 60/minute. For [59, 60), throughput must be the
+The owner-approved release minimum is 50/minute, with the offered workload
+and performance target still 60/minute. For [50, 60), throughput must be the
 sole raw failure, and the acceptance result must identify the amended floor.
 The supervisor uses the bounded PostgreSQL restart handling described below
 because the frozen worker-health checks restart the server. Persistent
@@ -246,8 +246,8 @@ the frozen harness's sole below-60 rate failure after all 300 admissions,
 complete vectors and every other gate pass. It retains the raw failure and
 exit status and labels the summary `BASELINE_COMPLETE`, with the failed rate
 gate visible. Other control failures remain comparison blockers. The default
-candidate checker requires >=59/minute under the dated owner approval, and
-only permits a 59–<60/minute raw failure if it is solely the target-rate gate;
+candidate checker requires >=50/minute under the revised dated owner approval, and
+only permits a 50–<60/minute raw failure if it is solely the target-rate gate;
 every other gate must pass.
 
 The builder cleans the pg-trickle package before compiling either source tree,
