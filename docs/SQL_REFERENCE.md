@@ -3638,9 +3638,12 @@ When a view is inlined, the user's original SQL is stored in the `original_query
 
 `JOIN ... USING (...)` clauses are preserved during view inlining. Differential
 maintenance resolves each USING key to its input relation, including a unique
-input within a nested join. A USING key shared by multiple inputs of an already
-nested join requires an explicit `JOIN ... ON` condition; it is rejected rather
-than treated as a cross join.
+input within a nested join. For chained INNER `JOIN ... USING` operations, a repeated key can use an
+existing input only when the preceding structured join predicate proves that
+the participating keys are equal. Otherwise ambiguous nested keys are rejected
+rather than treated as a cross join. In particular, NULL-extending outer-join
+provenance is not inferred from an inner-join equality proof; use an explicit
+`JOIN ... ON` for unsupported nested shapes.
 
 **DDL hooks:** `CREATE OR REPLACE VIEW` on a view that was inlined into a stream table marks that ST for reinit. `DROP VIEW` sets affected STs to ERROR status.
 
