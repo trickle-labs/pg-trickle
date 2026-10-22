@@ -1224,8 +1224,11 @@ mod tests {
         let sql = ctx.build_with_query(&result.cte_name);
         let outer_cte_marker = format!("{} AS", result.cte_name);
         let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
-        assert_sql_contains(outer_sql, "WHERE id IN (SELECT DISTINCT a__id FROM");
-        assert_sql_contains(outer_sql, "WHERE a__id IN (SELECT DISTINCT id FROM");
+        // Semi-join keys are rendered as identifiers, not bare SQL text.
+        // Preserve quoting even for ordinary names so mixed-case and
+        // whitespace-containing USING keys use the same safe path.
+        assert_sql_contains(outer_sql, "WHERE \"id\" IN (SELECT DISTINCT \"a__id\" FROM");
+        assert_sql_contains(outer_sql, "WHERE \"a__id\" IN (SELECT DISTINCT \"id\" FROM");
         assert!(sql.lines().any(|line| {
             line.starts_with("__pgt_cte_join_") && line.ends_with(" AS NOT MATERIALIZED (")
         }));
