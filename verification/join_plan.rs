@@ -111,7 +111,7 @@ pub fn endpoint_changes_sql(
         let action = if term.retract { "D" } else { "I" };
         arms.push(format!(
             "SELECT a.__pgt_row_id, '{action}'::text AS __pgt_action, {payload} \
-             FROM {source} a LEFT JOIN {other} b ON a.__pgt_row_id=b.__pgt_row_id \
+             FROM {source} a LEFT JOIN {other} b ON a.__pgt_row_id OPERATOR(pg_catalog.=) b.__pgt_row_id \
              WHERE b.__pgt_row_id IS NULL OR \
                pg_catalog.record_image_eq(ROW({payload}), ROW({other_payload})) IS NOT TRUE",
             payload = fields("a"),

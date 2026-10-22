@@ -77,7 +77,8 @@ window selection and the ordinary keyed-image reducer; Verus does not prove
 those SQL/transaction boundaries.
 
 Old/old and new/new joins retain complete pair identities and payloads.
-Unchanged pair images cancel through complete bytea identity comparison and
+Unchanged pair images cancel through explicitly pg_catalog-qualified complete
+bytea identity comparison and
 `pg_catalog.record_image_eq`, preserving numeric scale, NULLs and types
 without scalar payload equality. Direct record comparison is needed:
 PostgreSQL expands a row-constructor binary operator into field operators.
@@ -85,6 +86,9 @@ The native SQL adapter test uses literal complete identities, independently
 checks exact signed actions and duplicate payload multiplicities, and rejects
 an invalid plan before executing SQL. This is conformance evidence, not a
 proof of PostgreSQL record functions or row-identity encoding.
+The same native case witnesses an owner search path that shadows bytea `=`
+while leaving the admitted integer predicate equality built in, and requires
+identical complete-identity actions under that path.
 
 ## Qualification and trust boundary
 
