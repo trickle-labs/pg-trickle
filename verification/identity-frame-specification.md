@@ -108,8 +108,19 @@ resolution and PostgreSQL execution remain ordinary conformance boundaries.
 
 Both installed cases already pass on the immutable predecessor
 `d84139858410627102795f493e6436c2ac943eef`; final candidate qualification and
-independent review are recorded separately once complete. No pending runtime
-or remote CI run is reported as passing.
+independent review are scoped to executable candidate
+`d2d44f0b30d41f99ee5dd4c3b0451dda460cac20`. Its installed identity suite passes
+17/17 (27.288 seconds), including both required cases, and connected join/shared
+CDC passes 31/31 (44.372 seconds), with no skips or retries. The proof reports
+6 verified/0 errors; all five intended mutants report 5 verified/1 error and
+fail their postcondition. Units pass 2632/2632, Python checks 55/55 and the
+corrected golden/constructor target 2/2. Formatting/lint pass without warnings.
+All 14 installation observations declare that commit and match the extracted
+package SHA-256
+`1ae5694e1aac804fc557623531f2d6f1dc979a5cb572be99a0bc41f766e5d1c0`.
+The source/package/install binding passes. Independent review accepted the
+bounded spec, callers, fixture correction and final qualification evidence;
+see `specification-reviews.md`. No remote CI success is claimed.
 
 Candidate binding hashes the checked source, ordinary adapters, named consumer
 sources, golden fixtures and test cases, and compares packaged/installed
