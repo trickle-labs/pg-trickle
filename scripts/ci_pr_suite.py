@@ -70,9 +70,14 @@ def main() -> int:
         for name in json.loads((ROOT / ".github/ci-suites.json").read_text())["pr_pure"]:
             command.extend(["--test", name])
         return subprocess.run(command + ["--", "--test-threads=1"], cwd=ROOT).returncode
+    # These scheduler-sensitive binaries use process-local shared containers.
+    # Run them without parallel E2E contention so scheduler convergence
+    # failures reflect behavior rather than runner resource pressure.
+    scheduler_isolated = {"e2e_mixed_mode_dag_tests", "e2e_mixed_scheduling_tests"}
+    isolated = [name for name in selected if name in scheduler_isolated]
     command = ["./scripts/run_e2e_tests.sh", "--profile", "ci", "--retries", "0"]
     for name in selected:
-        if name != "e2e_refresh_atomicity_tests":
+        if name != "e2e_refresh_atomicity_tests" and name not in scheduler_isolated:
             command.extend(["--test", name])
     cases = json.loads((ROOT / ".github/ci-suites.json").read_text())["scheduled_cases"]
     excluded = []
@@ -84,6 +89,13 @@ def main() -> int:
     status = subprocess.run(command, cwd=ROOT).returncode
     if status:
         return status
+    for name in isolated:
+        status = subprocess.run([
+            "./scripts/run_e2e_tests.sh", "--profile", "ci",
+            "--test", name, "--test-threads", "1", "--retries", "0",
+        ], cwd=ROOT).returncode
+        if status:
+            return status
     if "e2e_refresh_atomicity_tests" not in selected:
         return 0
     # Keep witnessed barriers isolated from the parallel suite's container load.
