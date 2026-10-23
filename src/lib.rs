@@ -60,6 +60,8 @@ pub mod fuzz_pub;
 mod hash;
 #[allow(dead_code)]
 mod hooks;
+#[path = "../verification/identity_frame.rs"]
+pub(crate) mod identity_frame;
 #[allow(dead_code)]
 pub(crate) mod integration_contract;
 #[allow(dead_code)]
