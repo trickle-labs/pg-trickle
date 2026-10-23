@@ -1,5 +1,44 @@
 # S1 graph-refresh qualification
 
+## Owner-approved throughput acceptance amendment — revised 2026-10-22
+
+The owner has revised the **minimum candidate acceptance rate from 59 to 50 cases/minute**
+to accommodate performance variation between approved execution environments.
+The earlier 59/min approval is preserved as policy history. The frozen workload
+still offers **60 cases/minute** as its engineering performance target, not the
+new binary release minimum. This change does not retroactively convert any
+original raw 60/minute harness failure into a raw pass.
+
+For an observed rate in **[50, 60)**, the frozen harness continues to report
+its original throughput-only failure and exit 1. The current S1 acceptance
+checker can return `PASS_OWNER_APPROVED_FLOOR` only with the exact sole
+throughput failure, all 300 admissions, 1,200 source rows, 300 case vectors,
+zero future receipts and every original authorization, due-burst, resource
+and supervision assertion passing. Rates **below 50**, any unrelated failure,
+or missing/inconsistent evidence still fail. The slower control retains its
+separate documented baseline exception; all historical raw runs are immutable.
+
+This amendment **does not waive exact-current-source qualification**: archived
+59.363743/minute source `2d102645ccc6779c508514ee22b4a55603bdc281`
+is not the latest PR #1191 source. Current candidate and corrected control
+must be built and measured on an approved ARM64 profile, with complete paired
+correctness, latency, resource, source/binary hashes and results. A 4-CPU hosted artifact check is
+not an actual current-head benchmark. React #12's separately required signed
+operating envelope, restore/clone, mixed-backlog and other release gates remain
+unapproved.
+
+## Owner-approved hosted ARM64 profile — 2026-10-22
+
+The owner also approved using the GitHub-hosted **4-CPU ARM64** runner as an
+alternative to this laptop's 10-CPU ARM64 Docker profile. The workflow now builds
+and measures the exact current candidate and corrected control on that runner;
+the CPU gate requires at least 4 CPUs. The **50/minute acceptance floor**, frozen
+300 admissions, complete vectors, zero future receipts, latency, supervision and
+resource limits remain unchanged. A measured failure still fails qualification.
+Historical 10-CPU results remain bound to their original sources and images and
+cannot substitute for a new current-source run on either profile.
+
+
 Run the frozen R53 joint-stack workload from [issue #1168](https://github.com/trickle-labs/pg-trickle/issues/1168)
 against exact control and candidate Docker images. The candidate contains the
 graph-refresh optimizations merged in #1169 and the keyless-delta fix in #1171.
@@ -27,16 +66,15 @@ The complete run and build evidence is under
 | Due-burst p95 / maximum | 109.629 / 114.516 s | 80.128 / 85.169 s |
 | Conservative storage | 3,434,478,459 bytes | 3,476,631,101 bytes |
 | Peak sampled memory | 2,072,399,872 bytes | 2,025,267,200 bytes |
-| Result | PASS within rate tolerance; raw harness exit 1 | BASELINE_COMPLETE; raw harness exit 1 |
+| Raw result | 60/min throughput failed; harness exit 1 | 60/min throughput failed; harness exit 1 |
 
-The workload still offers 60 admissions/minute. At the user's direction, the
-candidate checker accepts 59–<60/minute only when throughput is the sole raw
-failure and all vectors, receipts, due-burst, permissions and resource gates
-pass. Rates below 59/minute still fail. The raw 60/minute failure remains in the
-evidence; the tolerance is visible as `PASS_WITH_RATE_TOLERANCE`.
-The hosted ARM64 runner exposes fewer than 10 Docker CPUs, so CI verifies this
-checksummed local run and its exact compiled-input hashes instead of treating
-an unrun hosted measurement as a result.
+The frozen workload still offers 60 admissions/minute. Under the **2026-10-22
+owner-approved minimum of 50**, the current checker explicitly labels an
+otherwise-valid sole subtarget rate failure `PASS_OWNER_APPROVED_FLOOR`.
+The original evidence's `PASS_WITH_RATE_TOLERANCE` label is historical and
+retained unchanged. An archive from another candidate source cannot prove the
+current candidate, even if that archive is valid under the new floor and its
+host profile is approved.
 
 ## Previous merged-head native ARM64 qualification
 
@@ -76,8 +114,9 @@ bytes. This is retained separately under
 checksummed files. It does not replace the approved 10-CPU Docker result.
 
 When this result was recorded, the workflow marked a runner with fewer than 10
-Docker CPUs `SKIPPED_UNQUALIFIED_PROFILE`; the current PR #1191 workflow instead
-validates the checksummed local proof above. This earlier candidate was only
+Docker CPUs `SKIPPED_UNQUALIFIED_PROFILE`. Historical checks now diagnose archive
+provenance only; current source must be rebuilt and measured on an approved
+profile. This earlier candidate was only
 0.0018 cases per minute above 60, so its narrow margin remains part of the
 history. The earlier native amd64 failure remains retained separately.
 
@@ -189,16 +228,17 @@ p95 <=150 seconds and maximum <=180 seconds. Whole-run storage must remain
 below 10 GiB. The supervisor stops at 9 GiB sampled storage, 4 GiB sampled
 container memory, 45 minutes, or less than 10 GiB host free space. These are
 sampled limits, not a per-operation memory guarantee.
-The PR #1191 candidate may use the documented 59–<60/minute rate tolerance
-only when throughput is its sole failed gate.
+The owner-approved release minimum is 50/minute, with the offered workload
+and performance target still 60/minute. For [50, 60), throughput must be the
+sole raw failure, and the acceptance result must identify the amended floor.
 The supervisor uses the bounded PostgreSQL restart handling described below
 because the frozen worker-health checks restart the server. Persistent
 failures, timeouts and other errors stop the run.
 
-When an approved 10-CPU native ARM64 runner is available, the GitHub workflow
-builds and runs both images there. On a smaller hosted runner, it verifies the
-committed 10-CPU evidence and compiled-input hashes instead. Neither path
-implies a native amd64 throughput result.
+The GitHub workflow builds and runs both images on the approved 4-CPU native
+ARM64 runner. A runner exposing fewer than 4 Docker CPUs can only inspect the
+historical archive and fails current-source qualification. Neither path implies
+a native amd64 throughput result.
 
 On 2026-10-19 the user explicitly approved accepting a slower **complete
 control** as the comparison baseline. `check_result.py --baseline` accepts only
@@ -206,8 +246,9 @@ the frozen harness's sole below-60 rate failure after all 300 admissions,
 complete vectors and every other gate pass. It retains the raw failure and
 exit status and labels the summary `BASELINE_COMPLETE`, with the failed rate
 gate visible. Other control failures remain comparison blockers. The default
-candidate checker requires at least 60/minute, or 59–<60/minute when the rate
-gate is its sole raw failure; every other gate must pass.
+candidate checker requires >=50/minute under the revised dated owner approval, and
+only permits a 50–<60/minute raw failure if it is solely the target-rate gate;
+every other gate must pass.
 
 The builder cleans the pg-trickle package before compiling either source tree,
 retaining dependency caches. Run 39255297739 exposed a stale Cargo artifact:

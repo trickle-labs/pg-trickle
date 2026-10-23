@@ -280,7 +280,8 @@ async fn test_ec01_join_diff_vs_full_converges_under_random_co_deletes() {
             .await;
         }
 
-        db.refresh_st_with_retry("ec01_diff_st").await;
+        // A completed manual window can hold pending input behind a concurrent writer.
+        db.refresh_st_until_converged("ec01_diff_st").await;
         db.refresh_st_with_retry("ec01_full_st").await;
 
         assert_st_query_invariant(&db, "ec01_full_st", query, seed, cycle, "full").await;

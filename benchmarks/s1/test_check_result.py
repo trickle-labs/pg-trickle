@@ -63,19 +63,75 @@ tolerated_o["checks"][-1] = {"name": names[-1], "target_cases_per_minute": 60,
                               "observed_cases_per_minute": 59.36, "churn_cases": 300,
                               "window_minutes": 5, "result": "failed"}
 tolerated_o["failure"] = str(tolerated_o["checks"][-1])
-summary = check_result(tolerated_b, tolerated_o, progress)
-assert summary["s1_result"] == "PASS_WITH_RATE_TOLERANCE"
-assert summary["raw_harness_exit_code"] == 1
-below_floor_b, below_floor_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
-below_floor_o["workload"]["observed_churn_cases_per_minute"] = 58.99
-below_floor_o["checks"][-1]["observed_cases_per_minute"] = 58.99
-below_floor_o["failure"] = str(below_floor_o["checks"][-1])
+# The owner revised the floor to >=50/min on 2026-10-22, keeping the
+# originally offered workload and 60/min target untouched. The original
+# below-target raw failure/exit code must remain visible and *must* be
+# precisely the sole gate failure.
+for approved_rate in (50.0, 50.001, 54.141733583718796, 59.0, 59.36, 59.999):
+    approved_b, approved_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
+    approved_o["workload"]["observed_churn_cases_per_minute"] = approved_rate
+    approved_o["checks"][-1]["observed_cases_per_minute"] = approved_rate
+    approved_o["failure"] = str(approved_o["checks"][-1])
+    summary = check_result(approved_b, approved_o, progress)
+    assert summary["s1_result"] == "PASS_OWNER_APPROVED_FLOOR", summary
+    assert summary["throughput_gate"] == "owner_approved_50_to_60", summary
+    assert summary["throughput_target_cases_per_minute"] == 60
+    assert summary["owner_approved_acceptance_floor_cases_per_minute"] == 50
+    assert summary["raw_harness_exit_code"] == 1
+
+for below_floor in (49.999, 49.99, 49.0):
+    failed_b, failed_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
+    failed_o["workload"]["observed_churn_cases_per_minute"] = below_floor
+    failed_o["checks"][-1]["observed_cases_per_minute"] = below_floor
+    failed_o["failure"] = str(failed_o["checks"][-1])
+    try:
+        check_result(failed_b, failed_o, progress)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"accepted candidate below owner-approved 50/min floor: {below_floor}")
+
+# No non-throughput failure, malformed/extra receipt or incongruent exit can
+# be hidden by being inside the new narrow band.
+for invalid in ("extra_gate", "different_failure", "missing_failure", "zero_exit",
+                "incomplete_cases", "changed_source", "future_receipt", "memory"):
+    failed_b, failed_o = deepcopy(tolerated_b), deepcopy(tolerated_o)
+    if invalid == "extra_gate":
+        failed_o["checks"][0]["result"] = "failed"
+    elif invalid == "different_failure":
+        failed_o["failure"] = "SQLSTATE XX000: unrelated failure"
+    elif invalid == "missing_failure":
+        failed_o.pop("failure")
+    elif invalid == "zero_exit":
+        failed_b["exit_code"] = 0
+    elif invalid == "incomplete_cases":
+        failed_o["workload"]["churn_partial_cases"].pop()
+    elif invalid == "changed_source":
+        failed_o["workload"]["churn_partial_sources"][0]["id"] = -1
+    elif invalid == "future_receipt":
+        failed_o["workload"]["churn_partial_receipts"] = [{}]
+    elif invalid == "memory":
+        failed_b["peak_memory_bytes"] = 4 * 1024**3
+    try:
+        check_result(failed_b, failed_o, progress)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"owner-approved floor hid invalid evidence: {invalid}")
+
+# Full target still passes in the ordinary exit-zero path, not the waiver.
+at_target_b, at_target_o = deepcopy(bounded), deepcopy(observed)
+at_target_o["workload"]["observed_churn_cases_per_minute"] = 60.0
+summary = check_result(at_target_b, at_target_o, progress)
+assert summary["s1_result"] == "PASS" and summary["throughput_gate"] == "passed"
+at_target_b["exit_code"] = 1
 try:
-    check_result(below_floor_b, below_floor_o, progress)
+    check_result(at_target_b, at_target_o, progress)
 except AssertionError:
     pass
 else:
-    raise AssertionError("accepted candidate below the rate tolerance")
+    raise AssertionError("accepted an unexplained exit-one candidate at 60/min")
+
 for failure in ("candidate", "other_error", "other_gate", "incomplete", "source", "case",
                 "receipt", "memory", "supervision", "exit", "diagnostic"):
     b, o = deepcopy(baseline_b), deepcopy(baseline_o)

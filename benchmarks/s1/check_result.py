@@ -12,20 +12,24 @@ def check_result(bounded, observed, progress, baseline=False):
     failed = [row for row in observed["checks"] if row["result"] != "passed"]
     rate = observed.get("workload", {}).get("observed_churn_cases_per_minute", 0)
     slow_baseline = baseline and math.isfinite(rate) and 0 < rate < 60
-    tolerated_candidate = not baseline and math.isfinite(rate) and 59 <= rate < 60
     if slow_baseline:
         expected_failure = {"name": rate_gate, "target_cases_per_minute": 60,
                             "observed_cases_per_minute": rate, "churn_cases": 300,
                             "window_minutes": 5, "result": "failed"}
         assert failed == [expected_failure], "baseline has other failed gates"
         assert observed.get("failure") == str(expected_failure), "baseline failed for another reason"
-    if tolerated_candidate:
+    # Owner approval revised on 2026-10-22 sets a 50/min acceptance floor while
+    # retaining the 60/min workload/target. Below-target observed rates and
+    # raw harness failures are never rewritten: accept the *sole* rate
+    # failure only when >=50 and every other gate/vector is exact.
+    owner_approved_floor = not baseline and math.isfinite(rate) and 50 <= rate < 60
+    if owner_approved_floor:
         expected_failure = {"name": rate_gate, "target_cases_per_minute": 60,
                             "observed_cases_per_minute": rate, "churn_cases": 300,
                             "window_minutes": 5, "result": "failed"}
-        assert failed == [expected_failure], "candidate has other failed gates"
+        assert failed == [expected_failure], "approved candidate has another failed gate"
         assert observed.get("failure") == str(expected_failure), "candidate failed for another reason"
-    accepted_rate_failure = slow_baseline or tolerated_candidate
+    accepted_rate_failure = slow_baseline or owner_approved_floor
     assert bounded["exit_code"] == int(accepted_rate_failure) and bounded["stop_reason"] is None, "bounded run failed"
     assert not bounded["supervision_error"] and not bounded["measurement_errors"], "supervision incomplete"
     assert 0 < bounded["conservative_used_bytes"] < 10 * 1024**3, "storage limit failed"
@@ -69,10 +73,12 @@ def check_result(bounded, observed, progress, baseline=False):
             "conservative_used_bytes": bounded["conservative_used_bytes"],
             "peak_memory_bytes": bounded["peak_memory_bytes"],
             "raw_harness_exit_code": bounded["exit_code"],
+            "throughput_target_cases_per_minute": 60,
+            "owner_approved_acceptance_floor_cases_per_minute": 50,
             "throughput_gate": ("failed_below_60" if slow_baseline else
-                                "passed_within_1_case_per_minute_tolerance" if tolerated_candidate else "passed"),
+                                "owner_approved_50_to_60" if owner_approved_floor else "passed"),
             "s1_result": ("BASELINE_COMPLETE" if baseline else
-                          "PASS_WITH_RATE_TOLERANCE" if tolerated_candidate else "PASS")}
+                          "PASS_OWNER_APPROVED_FLOOR" if owner_approved_floor else "PASS")}
 
 
 if __name__ == "__main__":

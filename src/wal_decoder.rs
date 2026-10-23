@@ -704,10 +704,24 @@ fn load_wal_receipts(
     Spi::connect(|client| {
         let rows = client
             .select(
-                "SELECT receipt_id, slot_name, lsn::text, source_xid::text, data, source_change \
+                // Logical decoding checks its row limit only after a whole transaction.
+                "WITH batch AS (\
+                     SELECT lsn, receipt_id FROM pgtrickle.pgt_wal_receipts \
+                     WHERE source_relid = $1 AND status = $2 \
+                     ORDER BY lsn, receipt_id LIMIT $3\
+                 ), complete_boundary AS (\
+                     SELECT lsn, receipt_id FROM pgtrickle.pgt_wal_receipts \
+                     WHERE source_relid = $1 AND status = $2 AND data LIKE 'COMMIT %' \
+                       AND (lsn, receipt_id) >= (\
+                           SELECT lsn, receipt_id FROM batch \
+                           ORDER BY lsn DESC, receipt_id DESC LIMIT 1\
+                       ) ORDER BY lsn, receipt_id LIMIT 1\
+                 ) \
+                 SELECT receipt_id, slot_name, lsn::text, source_xid::text, data, source_change \
                    FROM pgtrickle.pgt_wal_receipts \
                   WHERE source_relid = $1 AND status = $2 \
-                  ORDER BY lsn, receipt_id LIMIT $3",
+                    AND (lsn, receipt_id) <= (SELECT lsn, receipt_id FROM complete_boundary) \
+                  ORDER BY lsn, receipt_id",
                 None,
                 &[source_oid.into(), status.into(), limit.into()],
             )
@@ -752,18 +766,20 @@ fn set_receipts_status(
     source_oid: pg_sys::Oid,
     from_status: &str,
     to_status: &str,
-    through_lsn: &str,
+    through: &WalReceipt,
 ) -> Result<(), PgTrickleError> {
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_wal_receipts \
             SET status = $2, \
                 acknowledged_at = CASE WHEN $2 = 'ACKNOWLEDGED' THEN now() ELSE acknowledged_at END \
-          WHERE source_relid = $1 AND status = $3 AND lsn <= $4::pg_lsn",
+          WHERE source_relid = $1 AND status = $3 \
+            AND (lsn, receipt_id) <= ($4::pg_lsn, $5)",
         &[
             source_oid.into(),
             to_status.into(),
             from_status.into(),
-            through_lsn.into(),
+            through.lsn.as_str().into(),
+            through.receipt_id.into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(format!("update WAL receipt status: {e}")))
@@ -895,13 +911,10 @@ pub fn replay_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleE
                 }
             }
 
-            let through_lsn = receipts
-                .last()
-                .map(|receipt| receipt.lsn.as_str())
-                .ok_or_else(|| {
-                    PgTrickleError::InternalError("WAL receipt batch is empty".into())
-                })?;
-            set_receipts_status(dep.source_relid, "RECEIVED", "APPLIED", through_lsn)
+            let through = receipts.last().ok_or_else(|| {
+                PgTrickleError::InternalError("WAL receipt batch is empty".into())
+            })?;
+            set_receipts_status(dep.source_relid, "RECEIVED", "APPLIED", through)
         })();
         if let Err(error) = replay_result {
             warning!(
@@ -938,12 +951,10 @@ fn acknowledge_receipt_batch(
     let first = receipts.first().ok_or_else(|| {
         PgTrickleError::InternalError("cannot acknowledge empty WAL batch".into())
     })?;
-    let through_lsn = receipts
-        .last()
-        .map(|receipt| receipt.lsn.as_str())
-        .ok_or_else(|| {
-            PgTrickleError::InternalError("cannot find WAL batch high-water mark".into())
-        })?;
+    let through = receipts.last().ok_or_else(|| {
+        PgTrickleError::InternalError("cannot find WAL batch high-water mark".into())
+    })?;
+    let through_lsn = through.lsn.as_str();
     assert_valid_identifier(&first.slot_name, "replication slot name")?;
 
     if !slot_has_reached(&first.slot_name, through_lsn)? {
@@ -1015,7 +1026,7 @@ fn acknowledge_receipt_batch(
         }
     }
 
-    set_receipts_status(source_oid, "APPLIED", "ACKNOWLEDGED", through_lsn)?;
+    set_receipts_status(source_oid, "APPLIED", "ACKNOWLEDGED", through)?;
     update_acknowledged_watermark(source_oid, through_lsn)?;
     Ok(())
 }
