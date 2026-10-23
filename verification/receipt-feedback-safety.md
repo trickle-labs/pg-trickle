@@ -84,26 +84,38 @@ The shared Verus executable proves the exact n count and the unconditional
 row-decision contract `!source_change && recognized_table && ordinary_dml`. The
 ordinary caller computes these inputs from the canonical source-name set,
 recognized nonempty table framing and parsed action. Four executable mutants
-alter the bound, source guard, recognition guard or action guard; all must fail their
-intended postconditions. This finite predicate proof does not establish parser
+alter the bound, source guard, recognition guard or action guard; all must fail
+their intended postconditions. This predicate proof does not establish parser
 correctness, table classification, the prefix planner loop, transaction/FFI
 semantics or durability. It is not a whole receipt-protocol proof.
 
 Pure tests check all predicate inputs, conservative unrecognized/mixed/TRUNCATE
 cases, mixed buffer/catalog/status DML, exact prefix planning, legacy receipts,
-recovery of already-consumed
-commits, mismatch-before-consume and rejection of partial frames. Installed
+recovery of already-consumed commits, mismatch-before-consume and rejection of
+partial frames. Installed
 qualification must cover repeated source activity without recursive payloads,
 the late-old-row-LSN commit schedule, transaction-size boundaries, and existing
-receipt crash/fallback controls. No installed candidate success is asserted
-until those checks complete. The binding contract requires all three named
+receipt crash/fallback controls. The binding contract requires all three named
 receipt cases and all four intended semantic mutants.
 
-Catalog integrity, current source/partition classification, existing source
+Installed qualification of `1bcd6a8ea39a3c9ad7ab957bf1a0793fa77985f6`
+passes the complete WAL binary (24/24: nineteen scenarios and five helpers),
+fourteen additional core cases and semantic floors 34/34 and 54/54. Six source
+cycles have zero nested receipts, four additional receipts per source
+transaction and maximum payload 87 bytes. All 42 installation observations
+and six bindings match the actual package, library SHA-256
+`d3f7c4709139ac8b40117c7e8faa8846d9b78542f82e3c90f3876ebee80737d4`.
+The other five proof records retain unchanged source/caller hashes. No runtime
+retry was used. Independent read-only review accepted this bounded source and
+evidence; the complete failure logs, fourteen log hashes, eleven frozen input
+hashes and separately hashed revised documentation remain in the task evidence.
+
+Catalog integrity, complete current source/partition classification, existing source
 eligibility/reset guards and PostgreSQL decoding order remain assumptions of
-the ordinary adapter. Arbitrary private-catalog tampering, source incarnation,
+the ordinary adapter. Stale names, omitted partition descendants, changed source
+identity, arbitrary private-catalog tampering, source incarnation,
 cross-cluster LSN identity, every transition schedule and complete protected
 consumer/cleanup proofs remain outside this slice. A source intentionally
 observing its own receipt table is not declared source-free and cannot use the
-bookkeeping skip to suppress real observations. Build provenance remains a
+source-free skip to suppress real observations. Build provenance remains a
 trusted runner input.
