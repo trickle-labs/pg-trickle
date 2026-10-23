@@ -19,7 +19,7 @@ def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-ANSI_ESCAPE = re.compile(r"\\x1b\\[[0-9;]*m")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def plain_output(output: str) -> str:
@@ -54,7 +54,7 @@ def main() -> int:
         raise ValueError("native import moved or temporary control files already exist")
     baseline = run("dvm_aggregate_execution_tests", EVIDENCE / "join-sql-baseline.log")
     baseline_text = plain_output(baseline.stdout)
-    if baseline.returncode or CASE not in baseline_text or not re.search(r"\\b1 passed\\b", baseline_text):
+    if baseline.returncode or CASE not in baseline_text or not re.search(r"\b1 passed\b", baseline_text):
         raise RuntimeError("native endpoint baseline did not execute and pass")
     owned = []
     try:
@@ -73,8 +73,8 @@ def main() -> int:
         # assertion in both cases; a compile or infrastructure failure is not
         # an acceptable mutant kill.
         failed_test = ("test result: FAILED." in mutant_text or
-                       (re.search(r"\\bFAIL\\b", mutant_text) is not None and
-                        re.search(r"\\b1 failed\\b", mutant_text) is not None))
+                       (re.search(r"\bFAIL\b", mutant_text) is not None and
+                        re.search(r"\b1 failed\b", mutant_text) is not None))
         if result.returncode == 0 or not failed_test \
                 or "endpoint bag/image actions differ" not in mutant_text \
                 or "assertion `left == right` failed" not in mutant_text:
