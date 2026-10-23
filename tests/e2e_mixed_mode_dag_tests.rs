@@ -478,16 +478,36 @@ async fn test_calculated_diff_leaf_auto_cascades_from_full_upstream() {
     )
     .await;
 
-    // Wait for the scheduler to auto-populate both STs.
-    // L1 fires on its 1s schedule; L2 fires via the last_refresh_at
-    // fallback when L1's last_refresh_at is newer than L2's.
-    let refreshed =
-        wait_for_scheduler_refresh(&db, "ns8_l2", std::time::Duration::from_secs(60)).await;
+    // Check the scheduled FULL source before measuring its CALCULATED leaf.
+    // Under concurrent packaged E2E load, even unrelated scheduler fixtures
+    // can take several minutes; observing each stage makes a timeout useful.
+    let upstream_refreshed = db
+        .wait_for_condition(
+            "ns8_l1 scheduled FULL refresh",
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'ns8_l1' AND h.status = 'COMPLETED' \
+               AND h.initiated_by = 'SCHEDULER')",
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+    assert!(upstream_refreshed, "ns8_l1 never refreshed via scheduler");
+
+    let refreshed = db
+        .wait_for_condition(
+            "ns8_l2 calculated scheduler cascade",
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history h \
+             JOIN pgtrickle.pgt_stream_tables st USING (pgt_id) \
+             WHERE st.pgt_name = 'ns8_l2' AND h.status = 'COMPLETED' \
+               AND h.initiated_by = 'SCHEDULER')",
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
     assert!(
         refreshed,
-        "ns8_l2 (DIFFERENTIAL/CALCULATED from FULL upstream) never received \
-         a scheduler-driven refresh within 60s — last_refresh_at fallback may \
-         not be working"
+        "ns8_l2 never cascaded from a completed FULL upstream scheduler refresh"
     );
 
     // Verify correctness: doubled should reflect the source data
@@ -501,12 +521,28 @@ async fn test_calculated_diff_leaf_auto_cascades_from_full_upstream() {
     db.execute("INSERT INTO ns8_src (grp, val) VALUES ('a', 5), ('c', 30)")
         .await;
 
+    let upstream_updated = db
+        .wait_for_condition(
+            "ns8_l1 scheduled source mutation",
+            "SELECT EXISTS(SELECT 1 FROM public.ns8_l1 WHERE grp = 'c' AND total = 30)",
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+    assert!(upstream_updated, "ns8_l1 never consumed the source INSERT");
+
     let refreshed2 = db
-        .wait_for_auto_refresh("ns8_l2", std::time::Duration::from_secs(60))
+        .wait_for_condition(
+            "ns8_l2 calculated mutation cascade",
+            "SELECT EXISTS(SELECT 1 FROM public.ns8_l2 WHERE grp = 'c' AND doubled = 60) \
+             AND EXISTS(SELECT 1 FROM public.ns8_l2 WHERE grp = 'a' AND doubled = 30)",
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_millis(300),
+        )
         .await;
     assert!(
         refreshed2,
-        "ns8_l2 did not re-cascade after second INSERT within 60s"
+        "ns8_l2 did not automatically reflect the new upstream results"
     );
 
     db.assert_st_matches_query(
