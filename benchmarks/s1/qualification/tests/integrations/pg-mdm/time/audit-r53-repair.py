@@ -22,7 +22,7 @@ def run_docker_exec_with_launch_retry(args, *, timeout=300, on_retry=None):
     """
     for attempt in range(3):
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        did_not_start = (len(args) >= 4 and args[:2] == ("docker", "exec")
+        did_not_start = (len(args) >= 4 and tuple(args[:2]) == ("docker", "exec")
                          and result.returncode != 0 and not result.stdout
                          and result.stderr.strip() ==
                          "OCI runtime exec failed: exec failed: unable to start container process: "
