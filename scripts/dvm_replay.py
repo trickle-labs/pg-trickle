@@ -144,7 +144,8 @@ def exact_check(scenario: dict, database: str | None) -> None:
             "FROM pg_catalog.pg_attribute "
             f"WHERE attrelid='{relation}'::regclass AND attnum>0 AND NOT attisdropped AND atttypid=1700",
             tuples=True))
-        admitted = [name for name in numeric if name in query["columns"]]
+        admitted = [name for name in numeric
+                    if name in query["columns"] and not name.startswith("__pgt_")]
         if not admitted:
             raise ReplayFailure("OracleFailure", "numeric-scale observation has no admitted public numeric column")
         columns += ", " + ", ".join(

@@ -35,6 +35,10 @@ class NegativeControlTests(unittest.TestCase):
         with patch.object(dvm_replay,"psql",return_value="[]"):
             with self.assertRaisesRegex(dvm_replay.ReplayFailure,"no admitted public numeric"):
                 dvm_replay.exact_check(scenario,"unused")
+        scenario["query"]["columns"]=["__pgt_aux_sum_hidden"]
+        with patch.object(dvm_replay,"psql",return_value='["__pgt_aux_sum_hidden"]'):
+            with self.assertRaisesRegex(dvm_replay.ReplayFailure,"no admitted public numeric"):
+                dvm_replay.exact_check(scenario,"unused")
 
     def test_every_failure_coordinate_must_match(self):
         scenario = dvm_replay.load(CONTROL)
