@@ -26,7 +26,9 @@ A later scheduler transaction performs physical removal. It locks the current
 ACTIVE capture owner `FOR SHARE`, checks database and system identity, takes a
 source advisory transaction lock, and rereads each intent `FOR UPDATE`. It scans
 WAL/TRANSITIONING references across all source OIDs by exact slot name, including
-the existing canonical-name fallback for NULL dependency names. An absent slot
+the existing canonical-name fallback for NULL dependency names. A NULL name on
+the queued source OID conservatively retains the intent even after source DROP
+makes canonical-name resolution impossible. An absent slot
 is distinct from an existing slot with a mismatched database or plugin; physical
 slot NULL fields classify as mismatch. Optional SPI queries return one nullable
 scalar row, so an empty lookup cannot masquerade as a successful classification.

@@ -2187,6 +2187,25 @@ async fn test_dropped_wal_source_retains_retirement_until_last_consumer_commits(
             retirement_pending(&fixture).await,
             "source-drop hook must retain exact slot provenance"
         );
+        let phase = "slot_retirement_kept";
+        let (mut barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, phase, &fixture.slot).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+        assert!(
+            slot_present(&fixture.db, &fixture.slot).await,
+            "source removal cannot retire a surviving WAL consumer's slot"
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        clear_wal_phase(&fixture.db).await;
+        release_wal_barrier(&mut barrier, fixture.oid, phase).await;
+        drop(barrier);
         let mut caller = fixture.db.pool.begin().await.unwrap();
         sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
             .bind(&fixture.stream)
@@ -2241,7 +2260,13 @@ async fn test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_c
     configure_scheduler(&db).await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
         .await;
-    db.execute("CREATE TABLE retirement_orphan_source(id int PRIMARY KEY,value text); ALTER TABLE retirement_orphan_source REPLICA IDENTITY FULL; INSERT INTO retirement_orphan_source VALUES(1,'baseline')").await;
+    for sql in [
+        "CREATE TABLE retirement_orphan_source(id int PRIMARY KEY,value text)",
+        "ALTER TABLE retirement_orphan_source REPLICA IDENTITY FULL",
+        "INSERT INTO retirement_orphan_source VALUES(1,'baseline')",
+    ] {
+        db.execute(sql).await;
+    }
     db.execute("SELECT pgtrickle.create_stream_table(name=>'retirement_orphan_stream',query=>'SELECT id,value FROM retirement_orphan_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')").await;
     let oid = i64::from(db.table_oid("retirement_orphan_source").await);
     let stable: String = db

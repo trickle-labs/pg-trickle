@@ -577,6 +577,11 @@ pub fn drain_retired_replication_slots() -> Result<(), PgTrickleError> {
         let mut active_reference = false;
         for dep in StDependency::get_all()? {
             if matches!(dep.cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
+                // A dropped source cannot resolve a legacy NULL slot name.
+                if dep.slot_name.is_none() && dep.source_relid == source_oid {
+                    active_reference = true;
+                    break;
+                }
                 let expected = dep
                     .slot_name
                     .clone()
