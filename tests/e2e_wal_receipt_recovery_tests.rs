@@ -1503,6 +1503,179 @@ async fn lifecycle_refresh(fixture: &Fixture, stream: &str) {
     );
 }
 
+#[tokio::test]
+async fn test_snapshot_waits_for_committed_refresh_before_loading_frontier() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute_seq(&[
+        "CREATE TABLE snapshot_commit_source(id int PRIMARY KEY,value text)",
+        "INSERT INTO snapshot_commit_source VALUES(1,'old')",
+    ])
+    .await;
+    db.create_st(
+        "snapshot_commit_stream",
+        "SELECT id,value FROM snapshot_commit_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("UPDATE snapshot_commit_source SET value='new'")
+        .await;
+    let mut refresh = db.pool.begin().await.unwrap();
+    let refresh_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *refresh)
+        .await
+        .unwrap();
+    sqlx::raw_sql("SET LOCAL pg_trickle.refresh_strategy='full'; SELECT pgtrickle.refresh_stream_table('snapshot_commit_stream')")
+        .execute(&mut *refresh).await.unwrap();
+    let committed:serde_json::Value=sqlx::query_scalar("SELECT jsonb_build_object('rows',(SELECT jsonb_agg(jsonb_build_array(id,value) ORDER BY id) FROM snapshot_commit_stream),'frontier',frontier) FROM pgtrickle.pgt_stream_tables WHERE pgt_name='snapshot_commit_stream'")
+        .fetch_one(&mut *refresh).await.unwrap();
+    let mut snapshot_conn = db.pool.acquire().await.unwrap();
+    let snapshot_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *snapshot_conn)
+        .await
+        .unwrap();
+    let snapshot = tokio::spawn(async move {
+        sqlx::query_scalar::<_,String>("SELECT pgtrickle.snapshot_stream_table('snapshot_commit_stream','public.snapshot_commit_archive')")
+            .fetch_one(&mut *snapshot_conn).await
+    });
+    assert!(
+        db.wait_for_condition(
+            "snapshot waiting behind actual uncommitted full refresh",
+            &format!("SELECT {refresh_pid}=ANY(pg_blocking_pids({snapshot_pid}))"),
+            Duration::from_secs(10),
+            Duration::from_millis(20)
+        )
+        .await
+    );
+    assert!(
+        !snapshot.is_finished(),
+        "snapshot must be witnessed waiting before commit"
+    );
+    refresh.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(20), snapshot)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let archive:serde_json::Value=db.query_scalar("SELECT jsonb_build_object('rows',(SELECT jsonb_agg(jsonb_build_array(id,value) ORDER BY id) FROM snapshot_commit_archive),'frontier',frontier) FROM pgtrickle.pgt_snapshots WHERE snapshot_table='snapshot_commit_archive'").await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("snapshot-committed-refresh.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "refresh_pid":refresh_pid,"snapshot_pid":snapshot_pid,"witnessed_blocker":true,
+            "expected_committed":committed,"archive":archive,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        archive, committed,
+        "snapshot rows and metadata must describe the same committed refresh"
+    );
+}
+
+#[tokio::test]
+async fn test_restore_after_consumed_history_cleanup_reinitializes_before_catchup() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE restore_history_source(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    db.execute("INSERT INTO restore_history_source VALUES(1,'old')")
+        .await;
+    db.create_st(
+        "restore_history_stream",
+        "SELECT id,value FROM restore_history_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let baseline = lifecycle_state(&db.pool, "restore_history_stream").await;
+    let snapshot: String = db
+        .query_scalar("SELECT pgtrickle.snapshot_stream_table('restore_history_stream','public.restore_history_archive')")
+        .await;
+    db.execute_seq(&[
+        "UPDATE restore_history_source SET value='new' WHERE id=1",
+        "INSERT INTO restore_history_source VALUES(2,'later')",
+    ])
+    .await;
+    let oid = i64::from(db.table_oid("restore_history_source").await);
+    let buffer = db.change_buffer_table(oid).await;
+    let captured: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert!(captured > 0, "committed changes must exist before cleanup");
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='full'"],
+        "SELECT pgtrickle.refresh_stream_table('restore_history_stream')",
+    )
+    .await
+    .unwrap();
+    db.assert_st_matches_query(
+        "restore_history_stream",
+        "SELECT id,value FROM restore_history_source",
+    )
+    .await;
+    let retained: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert_eq!(
+        retained, 0,
+        "ordinary full-refresh cleanup must remove consumed history"
+    );
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot('restore_history_stream',$1)")
+        .bind(&snapshot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let restored = lifecycle_state(&db.pool, "restore_history_stream").await;
+    assert_eq!(
+        restored, baseline,
+        "restore must retain the snapshot rows/frontier pair"
+    );
+    let needs_reinit: bool = db
+        .query_scalar("SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name='restore_history_stream'")
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='differential'"],
+        "SELECT pgtrickle.refresh_stream_table('restore_history_stream')",
+    )
+    .await
+    .unwrap();
+    let recovered = lifecycle_state(&db.pool, "restore_history_stream").await;
+    let action: String = db.query_scalar("SELECT action FROM pgtrickle.pgt_refresh_history WHERE pgt_id=(SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name='restore_history_stream') AND status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1").await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("restore-missing-history.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "scenario":"restore-after-ordinary-cleanup","installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "captured_rows":captured,"retained_after_cleanup":retained,"snapshot_state":baseline,
+        "restored_state":restored,"restored_needs_reinit":needs_reinit,"recovered_state":recovered,
+        "expected_rows":[[1,"new"],[2,"later"]],"refresh_action":action,
+    })).unwrap()).unwrap();
+    db.assert_st_matches_query(
+        "restore_history_stream",
+        "SELECT id,value FROM restore_history_source",
+    )
+    .await;
+    assert!(
+        needs_reinit,
+        "missing history requires protected reinitialization"
+    );
+    assert_eq!(action, "REINITIALIZE");
+}
+
 /// Each first failing prefix is retained with its seed, SQL operations and states.
 #[tokio::test]
 async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal() {
@@ -1721,10 +1894,16 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
                 "slow consumer moved"
             );
         }
+        let catchup_cut: String = fixture
+            .db
+            .query_scalar(&format!(
+                "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+            ))
+            .await;
         record_lifecycle(
             &path,
             &mut history,
-            serde_json::json!({"step":"restore","snapshot":snapshot}),
+            serde_json::json!({"step":"restore","snapshot":snapshot,"expected_source_cut":catchup_cut}),
         );
         sqlx::query("SELECT pgtrickle.restore_from_snapshot('history_fast',$1)")
             .bind(&snapshot)
@@ -1745,6 +1924,11 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "restored catch-up",
         )
         .await;
+        let before_crash = lifecycle_state(&fixture.db.pool, "history_fast").await;
+        assert!(fixture.db.query_scalar::<bool>(&format!(
+            "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_fast'",
+            fixture.oid
+        )).await, "restored catch-up must cover the committed cut");
         record_lifecycle(
             &path,
             &mut history,
@@ -1781,6 +1965,11 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             identity(&fixture.db, "history_identity", fixture.db.container_id()).await,
             fixture.identity
         );
+        assert_eq!(
+            lifecycle_state(&fixture.db.pool, "history_fast").await,
+            before_crash,
+            "retained restart must preserve the committed rows/frontier checkpoint"
+        );
         lifecycle_exact(
             &fixture,
             "history_fast",
@@ -1798,5 +1987,9 @@ async fn test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal(
             "lagging catch-up",
         )
         .await;
+        assert!(fixture.db.query_scalar::<bool>(&format!(
+            "SELECT (frontier->'sources'->'{}'->>'lsn')::pg_lsn >= '{catchup_cut}'::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='history_slow'",
+            fixture.oid
+        )).await, "lagging catch-up must cover the committed cut");
     }
 }

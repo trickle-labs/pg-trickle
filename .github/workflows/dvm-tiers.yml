@@ -115,13 +115,14 @@ jobs:
         run: cargo nextest run --profile ci --test e2e_dvm_composition_tests --no-capture
 
       - name: Run extended recovery histories
+        shell: bash
         env:
           PGS_PROP_CASES: '10'
           PGS_PROP_CYCLES: '12'
         run: |
           mkdir -p artifacts/lifecycle-histories
           ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests --test e2e_refresh_atomicity_tests \
-            -E 'test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier)' \
+            -E 'test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier) | test(=test_restore_after_consumed_history_cleanup_reinitializes_before_catchup) | test(=test_snapshot_waits_for_committed_refresh_before_loading_frontier)' \
             --retries 0 2>&1 | tee artifacts/lifecycle-histories/runtime.log
 
       - name: Run DVM metamorphic checks
