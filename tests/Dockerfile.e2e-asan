@@ -21,8 +21,8 @@ RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
     cd /tmp/postgresql && \
     ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
-    make -j"$(nproc)" CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' LDFLAGS='-fsanitize=address' && \
-    make install CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' LDFLAGS='-fsanitize=address' && \
+    make -j"$(nproc)" CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' LDFLAGS='-L/tmp/postgresql/src/port -L/tmp/postgresql/src/common -fsanitize=address' && \
+    make install CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' LDFLAGS='-L/tmp/postgresql/src/port -L/tmp/postgresql/src/common -fsanitize=address' && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
 RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
