@@ -4,7 +4,7 @@
 
 mod e2e;
 
-use e2e::{oracle, E2eDb};
+use e2e::{E2eDb, oracle};
 
 #[tokio::test]
 async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
@@ -49,16 +49,26 @@ async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
     for (name, canonical, mutant) in cases {
         // Materialize the correct semantics as the candidate result and compare
         // with the mutated semantics, preserving column names and types.
-        db.execute(&format!("CREATE TABLE semantic_actual AS {canonical}")).await;
+        db.execute(&format!("CREATE TABLE semantic_actual AS {canonical}"))
+            .await;
         oracle::compare_st_to_query(&db, "semantic_actual", canonical)
             .await
             .unwrap_or_else(|diff| panic!("{name}: canonical control failed: {diff}"));
         let diff = oracle::compare_st_to_query(&db, "semantic_actual", mutant)
             .await
             .unwrap_err();
-        assert!(diff.comparison_error.is_none(), "{name}: comparator error is not a semantic kill: {diff}");
-        assert!(diff.schema_mismatch.is_none(), "{name}: schema error is not a semantic kill: {diff}");
-        assert!(diff.extra_count > 0 || diff.missing_count > 0, "{name}: no semantic bag delta: {diff}");
+        assert!(
+            diff.comparison_error.is_none(),
+            "{name}: comparator error is not a semantic kill: {diff}"
+        );
+        assert!(
+            diff.schema_mismatch.is_none(),
+            "{name}: schema error is not a semantic kill: {diff}"
+        );
+        assert!(
+            diff.extra_count > 0 || diff.missing_count > 0,
+            "{name}: no semantic bag delta: {diff}"
+        );
         db.execute("DROP TABLE semantic_actual").await;
     }
 }
