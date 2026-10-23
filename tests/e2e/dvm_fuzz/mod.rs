@@ -306,22 +306,22 @@ async fn compare(
             &scenario.query.defining_query,
         )
         .await
-        {
-            let mut observed = failure(
-                scenario,
-                "I-02-numeric-scale",
-                if diff.comparison_error.is_some() {
-                    "OracleFailure"
-                } else if diff.schema_mismatch.is_some() {
-                    "SchemaMismatch"
-                } else {
-                    "MultisetMismatch"
-                },
-                format!("{phase} numeric scale"),
-                cycle,
-                None,
-                diff.to_string(),
-            );
+    {
+        let mut observed = failure(
+            scenario,
+            "I-02-numeric-scale",
+            if diff.comparison_error.is_some() {
+                "OracleFailure"
+            } else if diff.schema_mismatch.is_some() {
+                "SchemaMismatch"
+            } else {
+                "MultisetMismatch"
+            },
+            format!("{phase} numeric scale"),
+            cycle,
+            None,
+            diff.to_string(),
+        );
         observed.relation_diff = Some(diff);
         return Err(observed);
     }
