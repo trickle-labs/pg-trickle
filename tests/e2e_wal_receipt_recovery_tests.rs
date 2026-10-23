@@ -149,7 +149,6 @@ fn phase_code(phase: &str) -> i64 {
         "after_slot_retirement" => 6,
         "slot_retirement_kept" => 7,
         "before_slot_adoption" => 8,
-        "slot_adoption_rejected" => 9,
         _ => panic!("unknown WAL receipt phase {phase}"),
     }
 }
@@ -2288,11 +2287,30 @@ async fn test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_c
         .await;
     db.execute("SELECT pgtrickle.drop_stream_table('retirement_orphan_stream')")
         .await;
-    let (rejected, rejected_pid) = hold_wal_barrier(&db, oid, "slot_adoption_rejected").await;
-    set_wal_phase(&db, oid, "slot_adoption_rejected", &slot).await;
     release_wal_barrier(&mut before, oid, "before_slot_adoption").await;
     drop(before);
-    wait_for_wal_barrier(&db, oid, "slot_adoption_rejected", rejected_pid).await;
+    let rejection = format!(
+        "slot '{slot}' reservation no longer matches current source, consumer or capture ownership"
+    );
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", "--tail", "100", db.container_id()])
+            .output()
+            .await
+            .unwrap();
+        assert!(logs.status.success(), "inspect actual adoption rejection");
+        if String::from_utf8_lossy(&logs.stderr).contains(&rejection) {
+            eprintln!("[slot adoption] rejected removed consumer: {rejection}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "worker did not reject stale adoption: {}",
+            String::from_utf8_lossy(&logs.stderr)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     clear_wal_phase(&db).await;
     for args in [
         vec!["kill", "--signal", "KILL", db.container_id()],
@@ -2308,7 +2326,6 @@ async fn test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_c
             "orphan retained crash/restart failed"
         );
     }
-    drop(rejected);
     db.pool = db.reconnect_after_restart().await;
     assert!(slot_present(&db, &slot).await);
     assert!(db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await);

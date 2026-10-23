@@ -1139,7 +1139,6 @@ fn test_wal_receipt_barrier(
         "after_slot_retirement" => 6,
         "slot_retirement_kept" => 7,
         "before_slot_adoption" => 8,
-        "slot_adoption_rejected" => 9,
         _ => return Ok(()),
     };
     let lock_key = i64::from(source_oid.to_u32()) * 10 + phase_code;
@@ -2812,7 +2811,6 @@ pub fn finish_wal_transition(
         || slot_name_for_source(source_oid) != slot_name
         || !matches!(requested.as_deref(), Some("auto" | "wal"))
     {
-        test_wal_receipt_barrier(source_oid, "slot_adoption_rejected", Some(slot_name))?;
         return Err(PgTrickleError::WalTransitionError(format!(
             "slot '{slot_name}' reservation no longer matches current source, consumer or capture ownership"
         )));
