@@ -814,10 +814,11 @@ async fn test_mixed_diamond_with_view_branch() {
         .await;
     db.execute("INSERT INTO md_prices VALUES (4, 1.99)").await;
 
-    // Refresh both branches then the join
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_prices").await;
-    db.refresh_st("md_st_hw_priced").await;
+    // Await actual source convergence; WAL writer holdback can defer a
+    // recently committed change despite a completed manual refresh.
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_prices").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
@@ -828,8 +829,8 @@ async fn test_mixed_diamond_with_view_branch() {
     // Change a product from hardware to digital
     db.execute("UPDATE md_products SET category = 'digital' WHERE name = 'Cable'")
         .await;
-    db.refresh_st("md_st_hw_products").await;
-    db.refresh_st("md_st_hw_priced").await;
+    db.refresh_st_until_converged("md_st_hw_products").await;
+    db.refresh_st_until_converged("md_st_hw_priced").await;
 
     assert_eq!(
         db.count("public.md_st_hw_priced").await,
