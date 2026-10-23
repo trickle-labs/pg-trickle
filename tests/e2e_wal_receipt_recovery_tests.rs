@@ -1757,6 +1757,233 @@ async fn test_snapshot_waits_for_committed_refresh_before_loading_frontier() {
 }
 
 #[tokio::test]
+async fn test_consumer_initialization_does_not_cover_rows_missing_from_fixed_snapshot() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE registration_source(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    db.execute("CREATE TABLE registration_journal(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        1,
+        "baseline",
+    )
+    .await;
+    db.create_st(
+        "registration_existing",
+        "SELECT id,value FROM registration_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let oid = i64::from(db.table_oid("registration_source").await);
+    let buffer = db.change_buffer_table(oid).await;
+    let pending: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert_eq!(pending, 0, "baseline must have no pending captured rows");
+    let mut rejected = Vec::new();
+    for (index, isolation) in ["REPEATABLE READ", "SERIALIZABLE"].iter().enumerate() {
+        let mut caller = db.pool.begin().await.unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+        let pinned: i64 = sqlx::query_scalar("SELECT count(*) FROM registration_source")
+            .fetch_one(&mut *caller)
+            .await
+            .unwrap();
+        assert_eq!(pinned, index as i64 + 1);
+        let snapshot: String = sqlx::query_scalar("SELECT pg_current_snapshot()::text")
+            .fetch_one(&mut *caller)
+            .await
+            .unwrap();
+        commit_row(
+            &db,
+            "registration_source",
+            "registration_journal",
+            index as i32 + 2,
+            "committed-after-snapshot",
+        )
+        .await;
+        let captured_cut: String = db
+            .query_scalar(&format!(
+                "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+            ))
+            .await;
+        let error = sqlx::query("SELECT pgtrickle.create_stream_table(name=>'registration_new',query=>'SELECT id,value FROM registration_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL')")
+            .execute(&mut *caller).await.expect_err("fixed-snapshot initialization must fail before publishing a frontier").to_string();
+        assert!(
+            error.contains("READ COMMITTED") && error.contains("initialization"),
+            "{error}"
+        );
+        caller.rollback().await.unwrap();
+        assert!(db.query_scalar::<bool>("SELECT to_regclass('public.registration_new') IS NULL AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_stream_tables WHERE pgt_name='registration_new')").await);
+        rejected.push(serde_json::json!({"isolation":isolation,"pinned_snapshot":snapshot,"pinned_rows":pinned,"committed_writer_cut":captured_cut,"error":error,"partial_registration":false}));
+    }
+    db.create_st(
+        "registration_new",
+        "SELECT id,value FROM registration_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let initialized = lifecycle_state(&db.pool, "registration_new").await;
+    db.assert_st_matches_query(
+        "registration_new",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+    let before_refresh: i64 = db.query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='registration_new'").await;
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        4,
+        "after-initialization",
+    )
+    .await;
+    let differential_cut: String = db
+        .query_scalar(&format!(
+            "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='differential'"],
+        "SELECT pgtrickle.refresh_stream_table('registration_new')",
+    )
+    .await
+    .unwrap();
+    let differential: (i64, String) = sqlx::query_as("SELECT refresh_id,action FROM pgtrickle.pgt_refresh_history h JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='registration_new' AND h.status='COMPLETED' ORDER BY refresh_id DESC LIMIT 1").fetch_one(&db.pool).await.unwrap();
+    assert!(differential.0 > before_refresh);
+    assert_eq!(differential.1, "DIFFERENTIAL");
+    let covered: bool = sqlx::query_scalar("SELECT (frontier->'sources'->$1::text->>'lsn')::pg_lsn >= $2::pg_lsn FROM pgtrickle.pgt_stream_tables WHERE pgt_name='registration_new'")
+        .bind(oid.to_string()).bind(&differential_cut).fetch_one(&db.pool).await.unwrap();
+    assert!(
+        covered,
+        "differential retry must cover the committed writer cut"
+    );
+    let mut deferred = db.pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *deferred)
+        .await
+        .unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT count(*) FROM registration_source")
+        .fetch_one(&mut *deferred)
+        .await
+        .unwrap();
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        5,
+        "after-deferred-snapshot",
+    )
+    .await;
+    sqlx::query("SELECT pgtrickle.create_stream_table(name=>'registration_deferred',query=>'SELECT id,value FROM registration_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',initialize=>false)")
+        .execute(&mut *deferred).await.unwrap();
+    deferred.commit().await.unwrap();
+    assert!(db.query_scalar::<bool>("SELECT NOT is_populated AND frontier IS NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_name='registration_deferred'").await);
+    db.refresh_st("registration_deferred").await;
+    db.assert_st_matches_query(
+        "registration_deferred",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+    db.refresh_st("registration_new").await;
+    let refreshed = lifecycle_state(&db.pool, "registration_new").await;
+    let expected: serde_json::Value = db
+        .query_scalar("SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM registration_journal t")
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("registration-fixed-snapshot.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "rejected":rejected,
+            "differential_history":differential,"differential_writer_cut":differential_cut,"frontier_covers_cut":covered,
+            "initialized":initialized,"refreshed":refreshed,"expected_journal":expected,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    db.assert_st_matches_query(
+        "registration_new",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_consumer_fixed_snapshot_rejection_preserves_existing_wal_slot() {
+    let fixture = setup_wal_fixture("registration_reject").await;
+    let mut rejected = Vec::new();
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+        let mut caller = fixture.db.pool.begin().await.unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}"
+        )))
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+        let _: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT count(*) FROM {}",
+            fixture.source
+        )))
+        .fetch_one(&mut *caller)
+        .await
+        .unwrap();
+        let error = sqlx::query(AssertSqlSafe(format!("SELECT pgtrickle.create_stream_table(name=>'registration_rejected',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL')",fixture.source)))
+            .execute(&mut *caller).await.expect_err("reject before CDC setup can drop the existing slot").to_string();
+        assert!(error.contains("READ COMMITTED"), "{error}");
+        caller.rollback().await.unwrap();
+        let slot_preserved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1 AND plugin='test_decoding')")
+            .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+        assert!(slot_preserved);
+        assert_eq!(
+            cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+            Some("WAL")
+        );
+        rejected.push(serde_json::json!({"isolation":isolation,"error":error,"slot_preserved":slot_preserved}));
+    }
+    commit_row(
+        &fixture.db,
+        &fixture.source,
+        &fixture.journal,
+        2,
+        "after-rejected-registration",
+    )
+    .await;
+    wait_for_receipt(
+        &fixture.db.pool,
+        fixture.oid,
+        "ACKNOWLEDGED",
+        "after-rejected-registration",
+    )
+    .await;
+    wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("registration-wal-slot.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "slot":fixture.slot,"rejected":rejected,"subsequent_source_acknowledged":true,"exact_journal":true,
+    })).unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn test_restore_after_consumed_history_cleanup_reinitializes_before_catchup() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")

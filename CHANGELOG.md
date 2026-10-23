@@ -222,6 +222,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Reject initial population under REPEATABLE READ or SERIALIZABLE rather than
+  publish a newer capture frontier over rows from an older snapshot. Retry
+  under READ COMMITTED, or defer initial population until the first refresh
+  (#1219, #1222).
 - Prevent recursive WAL receipt payloads during continued source activity.
   Complete source transactions remain durable before acknowledgement; only
   validated source-free table transactions can advance without another receipt
