@@ -2120,6 +2120,38 @@ async fn test_slot_retirement_keeps_active_stale_and_mismatched_slots() {
                 .await;
         }
     }
+    let before_conflict = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    fixture.db.execute(&format!("INSERT INTO pgtrickle.pgt_wal_slot_retirements(slot_name,source_relid,capture_instance_id) VALUES('{}',{}::oid,'previous-owner')",fixture.slot,fixture.oid)).await;
+    let rejected = sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+        .bind(&fixture.stream)
+        .execute(&fixture.db.pool)
+        .await
+        .expect_err("a stale retirement owner cannot be rebound by API cleanup");
+    assert!(
+        rejected
+            .to_string()
+            .contains("pending reservation for another source or capture owner")
+    );
+    assert_eq!(
+        lifecycle_state(&fixture.db.pool, &fixture.stream).await,
+        before_conflict
+    );
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+    let queued_owner: String = sqlx::query_scalar(
+        "SELECT capture_instance_id FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1",
+    )
+    .bind(&fixture.slot)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(queued_owner, "previous-owner");
+    fixture
+        .db
+        .execute(&format!(
+            "DELETE FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{}'",
+            fixture.slot
+        ))
+        .await;
     fixture
         .db
         .execute(&format!(
@@ -2256,6 +2288,188 @@ async fn test_deferred_consumer_registration_rollback_preserves_wal_slot() {
         lifecycle_state(&fixture.db.pool, &fixture.stream).await,
         baseline
     );
+}
+
+#[tokio::test]
+async fn test_replacement_source_cannot_reassign_pending_slot_retirement() {
+    let fixture = setup_wal_fixture("retirement_replacement").await;
+    disable_wal_scheduler(&fixture).await;
+    fixture
+        .db
+        .execute(&format!("DROP TABLE {}", fixture.source))
+        .await;
+    let original:(i64,String)=sqlx::query_as("SELECT source_relid::bigint,capture_instance_id FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1")
+        .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+    assert_eq!(original.0, fixture.oid);
+    fixture
+        .db
+        .execute(&format!(
+            "CREATE TABLE {}(id int PRIMARY KEY,value text NOT NULL)",
+            fixture.source
+        ))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "ALTER TABLE {} REPLICA IDENTITY FULL",
+            fixture.source
+        ))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "INSERT INTO {} VALUES(1,'replacement')",
+            fixture.source
+        ))
+        .await;
+    let replacement_oid = i64::from(fixture.db.table_oid(&fixture.source).await);
+    assert_ne!(replacement_oid, fixture.oid);
+    let registration=sqlx::query(AssertSqlSafe(format!("SELECT pgtrickle.create_stream_table(name=>'retirement_replacement_new',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')",fixture.source)))
+        .execute(&fixture.db.pool).await;
+    let after:(i64,String)=sqlx::query_as("SELECT source_relid::bigint,capture_instance_id FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1")
+        .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+    let state:String=fixture.db.query_scalar("SELECT jsonb_build_object(
+        'dependencies',(SELECT jsonb_agg(to_jsonb(d)) FROM pgtrickle.pgt_dependencies d),
+        'tracking',(SELECT jsonb_agg(to_jsonb(t)) FROM pgtrickle.pgt_change_tracking t),
+        'slots',(SELECT jsonb_agg(jsonb_build_object('slot_name',slot_name,'plugin',plugin,'database',database,'confirmed_flush_lsn',confirmed_flush_lsn)) FROM pg_replication_slots)
+    )::text").await;
+    let cleanup = sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+        .bind(&fixture.stream)
+        .execute(&fixture.db.pool)
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("slot-retirement-source-replacement.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "old_oid":fixture.oid,"replacement_oid":replacement_oid,"slot":fixture.slot,
+        "state_after_registration":serde_json::from_str::<serde_json::Value>(&state).unwrap(),
+            "intent_before":original,"intent_after_registration":after,
+            "registration_error":registration.as_ref().err().map(ToString::to_string),
+            "old_consumer_cleanup_error":cleanup.as_ref().err().map(ToString::to_string),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        cleanup.is_ok(),
+        "replacement registration must preserve old-consumer cleanup: {cleanup:?}"
+    );
+    assert!(
+        registration.as_ref().err().is_some_and(|error| error
+            .to_string()
+            .contains("pending reservation for another source or capture owner")),
+        "a replacement cannot take over a pending slot reservation"
+    );
+    assert_eq!(
+        after, original,
+        "a committed retirement intent cannot change source or owner"
+    );
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_retirement(&fixture).await;
+    fixture.db.execute(&format!("SELECT pgtrickle.create_stream_table(name=>'retirement_replacement_new',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')",fixture.source)).await;
+    wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
+    fixture
+        .db
+        .execute(&format!(
+            "INSERT INTO {} VALUES(2,'replacement-after-wal')",
+            fixture.source
+        ))
+        .await;
+    wait_for_receipt(
+        &fixture.db.pool,
+        replacement_oid,
+        "ACKNOWLEDGED",
+        "replacement-after-wal",
+    )
+    .await;
+    fixture.db.refresh_st("retirement_replacement_new").await;
+    fixture
+        .db
+        .assert_st_matches_query(
+            "retirement_replacement_new",
+            &format!("SELECT id,value FROM {}", fixture.source),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_slot_retirement_keeps_null_named_reference_across_source_oids() {
+    let fixture = setup_wal_fixture("retirement_cross_oid").await;
+    disable_wal_scheduler(&fixture).await;
+    fixture
+        .db
+        .execute(&format!("DROP TABLE {}", fixture.source))
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "CREATE TABLE {}(id int PRIMARY KEY,value text)",
+            fixture.source
+        ))
+        .await;
+    let replacement_oid = i64::from(fixture.db.table_oid(&fixture.source).await);
+    assert_ne!(replacement_oid, fixture.oid);
+    assert!(fixture.db.query_scalar::<bool>(&format!("SELECT cdc_mode='WAL' AND slot_name IS NULL AND source_stable_name IS NOT NULL FROM pgtrickle.pgt_dependencies WHERE source_relid={}::oid",fixture.oid)).await);
+    // Qualify the reassigned-intent shape observed on e0008f1 independently of new admission.
+    fixture.db.execute(&format!("UPDATE pgtrickle.pgt_wal_slot_retirements SET source_relid={replacement_oid}::oid WHERE slot_name='{}'",fixture.slot)).await;
+    let phase = "slot_retirement_kept";
+    let (mut barrier, pid) = hold_wal_barrier(&fixture.db, replacement_oid, phase).await;
+    set_wal_phase(&fixture.db, replacement_oid, phase, &fixture.slot).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    let kept = format!(
+        "EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.application_name='pgt_wal_receipt:{replacement_oid}:{phase}' AND {pid}=ANY(pg_blocking_pids(a.pid)))"
+    );
+    assert!(fixture.db.wait_for_condition("cross-OID retirement decision",&format!(
+        "SELECT {kept} OR NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{0}') OR NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{0}')",fixture.slot
+    ),WAIT,Duration::from_millis(25)).await);
+    let slot_preserved = slot_present(&fixture.db, &fixture.slot).await;
+    let intent_preserved = retirement_pending(&fixture).await;
+    let kept_witness = fixture
+        .db
+        .query_scalar::<bool>(&format!("SELECT {kept}"))
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("slot-retirement-cross-oid-reference.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "old_oid":fixture.oid,"queued_oid":replacement_oid,"slot":fixture.slot,
+        "old_dependency":"WAL with NULL slot_name and durable stable name",
+        "slot_preserved":slot_preserved,"intent_preserved":intent_preserved,"kept_witness":kept_witness,
+    })).unwrap()).unwrap();
+    assert!(
+        slot_preserved && intent_preserved && kept_witness,
+        "a cross-OID NULL-name WAL reference must prevent actual retirement"
+    );
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    fixture
+        .db
+        .execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{}')",
+            fixture.stream
+        ))
+        .await;
+    clear_wal_phase(&fixture.db).await;
+    release_wal_barrier(&mut barrier, replacement_oid, phase).await;
+    drop(barrier);
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_retirement(&fixture).await;
 }
 
 #[tokio::test]

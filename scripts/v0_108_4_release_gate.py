@@ -15,6 +15,8 @@ CASES = {
         "test_slot_retirement_keeps_active_stale_and_mismatched_slots",
         "test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
         "test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+        "test_replacement_source_cannot_reassign_pending_slot_retirement",
+        "test_slot_retirement_keeps_null_named_reference_across_source_oids",
     )
 }
 

@@ -44,7 +44,9 @@
     "e2e_wal_receipt_recovery_tests::test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash",
     "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_active_stale_and_mismatched_slots",
     "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
-    "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash"
+    "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+    "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids"
   ],
   "required_shards": [
     {
@@ -112,7 +114,9 @@
         "e2e_wal_receipt_recovery_tests::test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash",
         "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_active_stale_and_mismatched_slots",
         "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
-        "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash"
+        "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+        "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
+        "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids"
       ]
     }
   ],
@@ -751,7 +755,9 @@
         "e2e_wal_receipt_recovery_tests::test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash",
         "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_active_stale_and_mismatched_slots",
         "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
-        "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash"
+        "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+        "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
+        "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids"
       ],
       "workload": "transactional local WAL slot retirement, rollback, ownership guards and retained crash recovery"
     },

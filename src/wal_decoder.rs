@@ -518,12 +518,22 @@ fn reserve_slot_cleanup(source_oid: pg_sys::Oid, slot_name: &str) -> Result<(), 
             source_oid.to_u32()
         )));
     }
-    Spi::run_with_args(
-        "INSERT INTO pgtrickle.pgt_wal_slot_retirements(slot_name,source_relid,capture_instance_id)
-         VALUES($1,$2,$3) ON CONFLICT(slot_name) DO UPDATE
-         SET source_relid=EXCLUDED.source_relid,capture_instance_id=EXCLUDED.capture_instance_id,queued_at=now()",
+    let reserved = Spi::get_one_with_args::<bool>(
+        "WITH reserved AS (
+         INSERT INTO pgtrickle.pgt_wal_slot_retirements AS pending(slot_name,source_relid,capture_instance_id)
+         VALUES($1,$2,$3) ON CONFLICT(slot_name) DO UPDATE SET queued_at=now()
+         WHERE pending.source_relid=EXCLUDED.source_relid
+           AND pending.capture_instance_id=EXCLUDED.capture_instance_id
+         RETURNING 1) SELECT EXISTS(SELECT 1 FROM reserved)",
         &[slot_name.into(), source_oid.into(), owner.as_str().into()],
-    ).map_err(|e| PgTrickleError::SpiError(format!("queue retirement of slot '{slot_name}': {e}; upgrade the extension catalog if needed")))
+    ).map_err(|e| PgTrickleError::SpiError(format!("queue retirement of slot '{slot_name}': {e}; upgrade the extension catalog if needed")))?
+    .unwrap_or(false);
+    if !reserved {
+        return Err(PgTrickleError::ReplicationSlotError(format!(
+            "slot '{slot_name}' has a pending reservation for another source or capture owner; retire that slot before retrying"
+        )));
+    }
+    Ok(())
 }
 
 /// Phase 0 only: the scheduler session lock excludes local creation/adoption.
@@ -582,10 +592,12 @@ pub fn drain_retired_replication_slots() -> Result<(), PgTrickleError> {
                     active_reference = true;
                     break;
                 }
-                let expected = dep
-                    .slot_name
-                    .clone()
-                    .unwrap_or_else(|| slot_name_for_source(dep.source_relid));
+                let expected = dep.slot_name.clone().unwrap_or_else(|| {
+                    dep.source_stable_name
+                        .as_ref()
+                        .map(|stable| format!("pgtrickle_{stable}"))
+                        .unwrap_or_else(|| slot_name_for_source(dep.source_relid))
+                });
                 if expected == slot_name {
                     active_reference = true;
                     break;

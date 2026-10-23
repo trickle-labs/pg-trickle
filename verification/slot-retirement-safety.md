@@ -21,12 +21,18 @@ the logged, private `pgt_wal_slot_retirements` catalog. Enqueue failure aborts
 the catalog change. Caller rollback discards the intent along with the consumer
 change. The source-drop hook records local provenance before deleting source
 tracking metadata. The queue deliberately has no cascading source foreign key.
+An existing reservation cannot change its source OID or capture owner: the
+transactional upsert checks both identities atomically and rejects a conflict.
+Reusing a source name can therefore require dropping its old suspended consumer,
+letting the scheduler retire the old slot, and retrying registration. Stale
+capture-owner reservations also require resolving provenance before cleanup.
 
 A later scheduler transaction performs physical removal. It locks the current
 ACTIVE capture owner `FOR SHARE`, checks database and system identity, takes a
 source advisory transaction lock, and rereads each intent `FOR UPDATE`. It scans
 WAL/TRANSITIONING references across all source OIDs by exact slot name, including
-the existing canonical-name fallback for NULL dependency names. A NULL name on
+the persisted stable-name fallback for NULL dependency names before consulting
+live relation names. A NULL name on
 the queued source OID conservatively retains the intent even after source DROP
 makes canonical-name resolution impossible. An absent slot
 is distinct from an existing slot with a mismatched database or plugin; physical
@@ -84,4 +90,9 @@ Required installed observations cover last-consumer rollback, deferred
 registration rollback, committed intent surviving restart, crash after physical
 DROP, stale owner, active reference, logical/physical slot mismatches, owner
 recovery blocking, source-drop cleanup, and rejected adoption of an orphaned
-slot. Qualification results are recorded only after those executions complete.
+slot, and source-name replacement without reservation reassignment. The
+replacement reproducer observes a changed intent and successful old-consumer
+cleanup on the earlier candidate; it does not demonstrate cleanup failure or
+output corruption. The new admission preserves the reservation's source/epoch
+until retirement instead of attempting to prove cross-incarnation reuse here.
+Qualification results are recorded only after those executions complete.

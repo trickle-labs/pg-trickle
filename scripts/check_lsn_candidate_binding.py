@@ -36,6 +36,8 @@ RECEIPT_CASES = [
     "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_active_stale_and_mismatched_slots",
     "e2e_wal_receipt_recovery_tests::test_dropped_wal_source_retains_retirement_until_last_consumer_commits",
     "e2e_wal_receipt_recovery_tests::test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash",
+    "e2e_wal_receipt_recovery_tests::test_replacement_source_cannot_reassign_pending_slot_retirement",
+    "e2e_wal_receipt_recovery_tests::test_slot_retirement_keeps_null_named_reference_across_source_oids",
 ]
 LIFECYCLE_CASES = [
     "e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql",
