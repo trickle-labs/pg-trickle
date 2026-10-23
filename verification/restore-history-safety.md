@@ -1,6 +1,6 @@
 # Snapshot coherence and retained-history restore — #1219
 
-This supplemental runtime repair addresses two reproduced failures on frozen
+This supplemental runtime repair addresses three reproduced failures on frozen
 backend `1a717660`. It is not a formal cleanup/incarnation proof or completion
 of all #1219/#1222 requirements.
 
@@ -14,6 +14,11 @@ of all #1219/#1222 requirements.
    then copied the new committed rows with the old frontier. The regression
    witnesses the snapshot PID's real blocker before committing the refresh and
    compares the entire archive rows/frontier pair to the refresh checkpoint.
+3. An actual restore remained uncommitted while a sibling consumer refreshed
+   FULL. The predecessor's cleanup deleted two history rows using the still
+   visible pre-restore minimum. The repaired path must skip cleanup without
+   blocking that refresh, honor the rewind after commit, and reclaim history
+   only after both consumers catch up.
 
 ## Ordinary implementation
 
@@ -47,7 +52,7 @@ The fallback is conservative: it does not assert history was actually removed.
 
 ## Qualification obligations
 
-The two reproducing Testcontainers regressions must pass on the repaired exact
+The three reproducing Testcontainers regressions must pass on the repaired exact
 package, with unchanged baseline failure logs retained. Existing seeded restore
 histories must still catch up DIFFERENTIALLY using a lagging consumer's retained
 history. Their terminal phases now require restored and lagging frontier coverage
@@ -56,7 +61,7 @@ The cancellation/snapshot witness and existing snapshot ownership/provenance
 tests remain required regression coverage.
 
 Both existing recovery CI steps explicitly select Bash, so a failing test piped
-through tee fails its step. Candidate and scheduled selections include both new
+through tee fails its step. Candidate and scheduled selections include all three
 regressions; artifact retention remains in the existing jobs.
 
 The implementation relies on ordinary capture, dependency/catalog integrity,

@@ -1504,6 +1504,127 @@ async fn lifecycle_refresh(fixture: &Fixture, stream: &str) {
 }
 
 #[tokio::test]
+async fn test_restore_source_lock_defers_cleanup_until_rewind_is_visible() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute_seq(&[
+        "CREATE TABLE restore_lock_source(id int PRIMARY KEY,value text)",
+        "INSERT INTO restore_lock_source VALUES(1,'old')",
+    ])
+    .await;
+    for stream in ["restore_lock_target", "restore_lock_fast"] {
+        db.create_st(
+            stream,
+            "SELECT id,value FROM restore_lock_source",
+            "24h",
+            "DIFFERENTIAL",
+        )
+        .await;
+    }
+    db.execute("SELECT pgtrickle.snapshot_stream_table('restore_lock_target','public.restore_lock_archive')").await;
+    let oid = i64::from(db.table_oid("restore_lock_source").await);
+    let old = frontier(&db, "restore_lock_target", oid).await;
+    let buffer = db.change_buffer_table(oid).await;
+    db.execute("UPDATE restore_lock_source SET value='new'")
+        .await;
+    let cut: String = db
+        .query_scalar(&format!(
+            "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    for stream in ["restore_lock_fast", "restore_lock_target"] {
+        db.try_execute_with_config(
+            &["SET pg_trickle.refresh_strategy='differential'"],
+            &format!("SELECT pgtrickle.refresh_stream_table('{stream}')"),
+        )
+        .await
+        .unwrap();
+    }
+    let needed = format!(
+        "SELECT count(*) FROM {buffer} WHERE action IN ('I','D') AND lsn>'{old}'::pg_lsn AND lsn<='{cut}'::pg_lsn"
+    );
+    let before: i64 = db.query_scalar(&needed).await;
+    assert!(
+        before > 0,
+        "the cleanup schedule must begin with retained required history"
+    );
+    let mut restore = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pgtrickle.restore_from_snapshot('restore_lock_target','public.restore_lock_archive')")
+        .execute(&mut *restore).await.unwrap();
+    db.execute("INSERT INTO restore_lock_source VALUES(2,'concurrent')")
+        .await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        db.try_execute_with_config(
+            &["SET pg_trickle.refresh_strategy='full'"],
+            "SELECT pgtrickle.refresh_stream_table('restore_lock_fast')",
+        ),
+    )
+    .await
+    .expect("cleanup must skip the restore lock without blocking refresh")
+    .unwrap();
+    let during: i64 = db.query_scalar(&needed).await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = std::path::Path::new(&directory).join("restore-cleanup-ordering.json");
+    let mut history = Vec::new();
+    record_lifecycle(
+        &path,
+        &mut history,
+        serde_json::json!({
+            "step":"cleanup during actual uncommitted restore","installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "snapshot_cut":old,"captured_cut":cut,"required_rows_before":before,"required_rows_during":during,
+        }),
+    );
+    assert_eq!(
+        during, before,
+        "cleanup cannot use an obsolete minimum while restore holds the source lock"
+    );
+    restore.commit().await.unwrap();
+    db.execute("INSERT INTO restore_lock_source VALUES(3,'after-restore')")
+        .await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='full'"],
+        "SELECT pgtrickle.refresh_stream_table('restore_lock_fast')",
+    )
+    .await
+    .unwrap();
+    let after: i64 = db.query_scalar(&needed).await;
+    record_lifecycle(
+        &path,
+        &mut history,
+        serde_json::json!({"step":"cleanup after committed rewind","required_rows":after,"target":lifecycle_state(&db.pool,"restore_lock_target").await}),
+    );
+    assert_eq!(
+        after, before,
+        "later cleanup must honor the published restored cut"
+    );
+    db.refresh_st("restore_lock_target").await;
+    for stream in ["restore_lock_target", "restore_lock_fast"] {
+        db.assert_st_matches_query(stream, "SELECT id,value FROM restore_lock_source")
+            .await;
+    }
+    let remaining: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    record_lifecycle(
+        &path,
+        &mut history,
+        serde_json::json!({"step":"protected catch-up completed","remaining_consumed_rows":remaining}),
+    );
+    assert_eq!(
+        remaining, 0,
+        "cleanup may reclaim history after both consumers catch up"
+    );
+}
+
+#[tokio::test]
 async fn test_snapshot_waits_for_committed_refresh_before_loading_frontier() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
