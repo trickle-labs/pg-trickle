@@ -700,6 +700,17 @@ fn encode_tuple_with_version(
     domain: IdentityDomain,
     fields: &[EncodedField<'_>],
 ) -> Result<Vec<u8>, RowIdV2Error> {
+    if let [field] = fields
+        && crate::identity_frame::fixed_scalar_width(field.type_tag) != 0
+    {
+        return crate::identity_frame::encode_scalar_frame(
+            identity_version,
+            domain.tag(),
+            field.type_tag,
+            field.payload,
+        )
+        .ok_or_else(|| wire_error("invalid admitted scalar payload or identity version"));
+    }
     if fields.len() > MAX_TUPLE_FIELDS {
         return Err(RowIdV2Error::TooManyFields {
             found: fields.len(),
@@ -709,9 +720,9 @@ fn encode_tuple_with_version(
     let payload_bytes = fields.iter().try_fold(0usize, |size, field| {
         size.checked_add(field.payload.map_or(0, <[u8]>::len))
     });
-    let output_bytes = match payload_bytes
-        .and_then(|payload_bytes| 6usize.checked_add(fields.len() * 2 + payload_bytes + 1))
-    {
+    let output_bytes = match payload_bytes.and_then(|payload_bytes| {
+        crate::identity_frame::checked_frame_size(fields.len(), payload_bytes)
+    }) {
         Some(size) if size <= MAX_ENCODED_IDENTITY_BYTES => size,
         _ => {
             return Err(RowIdV2Error::EncodedIdentityTooLarge {
@@ -853,6 +864,17 @@ pub fn validate_identity_v2(input: &[u8]) -> Result<(), RowIdV2Error> {
             "unsupported identity version {}",
             input[0]
         )));
+    }
+    if input[2..6] == [0, 0, 0, 1]
+        && input
+            .get(6)
+            .is_some_and(|tag| crate::identity_frame::fixed_scalar_width(*tag) != 0)
+    {
+        return if crate::identity_frame::validate_scalar_frame(input) {
+            Ok(())
+        } else {
+            Err(wire_error("invalid scalar identity framing or payload"))
+        };
     }
     if IdentityDomain::from_str(match input[1] {
         DOMAIN_SCAN_KEY => "SCAN_KEY",
@@ -1805,32 +1827,24 @@ fn encode_record(
         let payload = encode_record_field(&record, attno, field, descriptor, identity_version)?;
         fields.push((descriptor.type_tag, payload));
     }
-    let mut output = Vec::with_capacity(6 + fields.len() * 2 + 1);
-    output.push(identity_version);
-    output.push(domain.tag());
-    output.extend_from_slice(&(fields.len() as u32).to_be_bytes());
-    for (type_tag, payload) in fields {
-        output.push(type_tag);
-        match payload {
-            None => output.push(NULL_TAG),
-            Some(payload) => {
-                output.push(VALUE_TAG);
-                output.extend_from_slice(&payload);
-            }
-        }
-        if output.len() > MAX_ENCODED_IDENTITY_BYTES {
-            return Err(RowIdV2Error::EncodedIdentityTooLarge {
-                maximum: MAX_ENCODED_IDENTITY_BYTES,
-            });
-        }
+    if let [(type_tag, payload)] = fields.as_slice() {
+        return encode_tuple_with_version(
+            identity_version,
+            domain,
+            &[EncodedField {
+                type_tag: *type_tag,
+                payload: payload.as_deref(),
+            }],
+        );
     }
-    if output.len() >= MAX_ENCODED_IDENTITY_BYTES {
-        return Err(RowIdV2Error::EncodedIdentityTooLarge {
-            maximum: MAX_ENCODED_IDENTITY_BYTES,
-        });
-    }
-    output.push(TUPLE_END_TAG);
-    Ok(output)
+    let borrowed = fields
+        .iter()
+        .map(|(type_tag, payload)| EncodedField {
+            type_tag: *type_tag,
+            payload: payload.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    encode_tuple_with_version(identity_version, domain, &borrowed)
 }
 
 /// Encode a PostgreSQL record into exact V2 identity bytes.
