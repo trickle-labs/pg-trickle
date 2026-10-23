@@ -1082,10 +1082,15 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     wait_for_cdc_mode(db, &fixture.source, "TRIGGER").await;
     assert!(
-        db.query_scalar::<bool>(&format!(
-            "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')",
-            fixture.slot
-        ))
+        db.wait_for_condition(
+            "committed trigger-fallback slot retirement",
+            &format!(
+                "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')",
+                fixture.slot
+            ),
+            WAIT,
+            Duration::from_millis(25)
+        )
         .await
     );
     for stream in [&fixture.stream, &shared] {

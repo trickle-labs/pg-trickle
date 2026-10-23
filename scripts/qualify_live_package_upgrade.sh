@@ -70,7 +70,7 @@ OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
 
 WAL_SLOT=""
 if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.108.4" ]]; then
-    psql "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms='100'" >/dev/null
+    psql "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms='1000'" >/dev/null
     psql 'SELECT pg_reload_conf()' >/dev/null
     psql "CREATE TABLE public.retirement_upgrade_source(id int PRIMARY KEY,value text);
         ALTER TABLE public.retirement_upgrade_source REPLICA IDENTITY FULL;
@@ -79,18 +79,22 @@ if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.108.4" ]]; then
             query=>'SELECT id,value FROM public.retirement_upgrade_source',schedule=>'24h',
             refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')" >/dev/null
     for attempt in $(seq 1 90); do
-        WAL_SLOT="$(psql "SELECT slot_name FROM pgtrickle.pgt_dependencies
-            WHERE source_relid='public.retirement_upgrade_source'::regclass AND cdc_mode='WAL'")"
+        WAL_SLOT="$(psql "SELECT d.slot_name FROM pgtrickle.pgt_dependencies d
+            JOIN pg_replication_slots s ON s.slot_name=d.slot_name
+            WHERE d.source_relid='public.retirement_upgrade_source'::regclass
+              AND d.cdc_mode IN ('TRANSITIONING','WAL')
+              AND s.plugin='test_decoding' AND s.database=current_database()")"
         [[ -n "$WAL_SLOT" ]] && break
-        sleep 1
+        sleep 0.05
     done
     [[ -n "$WAL_SLOT" ]] || { echo "published package did not establish actual WAL capture" >&2; exit 1; }
     psql "ALTER SYSTEM SET pg_trickle.enabled='false'" >/dev/null
     psql 'SELECT pg_reload_conf()' >/dev/null
+    WAL_CDC_MODE="$(psql "SELECT cdc_mode FROM pgtrickle.pgt_dependencies WHERE slot_name='$WAL_SLOT'")"
     psql "SELECT to_regclass('pgtrickle.pgt_wal_slot_retirements') IS NULL" | grep -qx t
     WAL_BASELINE="$(psql "SELECT row_to_json(s)::text FROM (SELECT frontier,is_populated,needs_reinit
         FROM pgtrickle.pgt_stream_tables WHERE pgt_name='retirement_upgrade_st') s")"
-    echo "Published WAL capture established before upgrade: slot=$WAL_SLOT state=$WAL_BASELINE"
+    echo "Published WAL slot established before upgrade: slot=$WAL_SLOT cdc_mode=$WAL_CDC_MODE state=$WAL_BASELINE"
 fi
 
 psql "CREATE TABLE public.v106_upgrade_source (id integer PRIMARY KEY, value text NOT NULL); \
