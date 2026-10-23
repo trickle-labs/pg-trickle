@@ -160,7 +160,7 @@ jobs:
         run: python3 scripts/dvm_release_gate.py
 
       - name: Upload DVM artifacts
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: dvm-tiers-artifacts-${{ github.run_id }}

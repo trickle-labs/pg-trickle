@@ -60,6 +60,8 @@ def validate(scenario: dict) -> None:
         raise ValueError("scenario must contain at least one mutation cycle")
     if not scenario["query"].get("columns"):
         raise ValueError("query.columns must not be empty")
+    if not isinstance(scenario["execution"].get("observe_numeric_scale", False), bool):
+        raise ValueError("execution.observe_numeric_scale must be boolean")
     for cycle_index, cycle in enumerate(scenario["cycles"]):
         if not cycle.get("name") or not cycle.get("mutations"):
             raise ValueError(f"cycle {cycle_index} must have a name and mutations")
@@ -135,6 +137,19 @@ def psql(database: str | None, sql: str, tuples: bool = False) -> str:
 def exact_check(scenario: dict, database: str | None) -> None:
     query = scenario["query"]
     columns = ", ".join(query["columns"])
+    if scenario["execution"].get("observe_numeric_scale", False):
+        relation = query["stream_table"].replace("'", "''")
+        numeric = json.loads(psql(database,
+            "SELECT coalesce(jsonb_agg(attname ORDER BY attnum),'[]'::jsonb)::text "
+            "FROM pg_catalog.pg_attribute "
+            f"WHERE attrelid='{relation}'::regclass AND attnum>0 AND NOT attisdropped AND atttypid=1700",
+            tuples=True))
+        admitted = [name for name in numeric if name in query["columns"]]
+        if not admitted:
+            raise ReplayFailure("OracleFailure", "numeric-scale observation has no admitted public numeric column")
+        columns += ", " + ", ".join(
+            'pg_catalog.scale("' + name.replace('"', '""') + '")' for name in admitted
+        )
     actual = f"(SELECT {columns} FROM {query['stream_table']})"
     expected = f"(SELECT {columns} FROM ({query['defining_query']}) AS expected)"
     check = (

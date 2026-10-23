@@ -1,12 +1,120 @@
 //! #1095: durable WAL receipt recovery, replay, and shared-source cleanup.
 
 mod e2e;
+#[path = "../verification/receipt.rs"]
+mod receipt_limit;
 
 use e2e::E2eDb;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, pool::PoolConnection};
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(90);
+
+#[tokio::test]
+async fn test_receipt_prefix_sql_control_rejects_executable_off_by_one() {
+    use sha2::{Digest, Sha256};
+    let digest = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("CREATE TABLE semantic_prefix_source(id int PRIMARY KEY,value text)")
+        .await;
+    for slot in ["semantic_prefix_baseline", "semantic_prefix_mutant"] {
+        let created: String = sqlx::query_scalar(
+            "SELECT slot_name::text FROM pg_create_logical_replication_slot($1,'test_decoding')",
+        )
+        .bind(slot)
+        .fetch_one(&db.pool)
+        .await
+        .expect("slot setup errors cannot qualify a semantic kill");
+        assert_eq!(created, slot);
+    }
+    db.execute("INSERT INTO semantic_prefix_source VALUES(1,'first'),(2,'first')")
+        .await;
+    db.execute("INSERT INTO semantic_prefix_source VALUES(3,'later')")
+        .await;
+    type Message = (String, String, String);
+    let peek: Vec<Message>=sqlx::query_as("SELECT lsn::text,xid::text,data FROM pg_logical_slot_peek_changes('semantic_prefix_baseline',NULL,NULL,'skip-empty-xacts','1')")
+        .fetch_all(&db.pool).await.expect("peek must execute before prefix qualification");
+    assert!(
+        peek.iter()
+            .filter(|message| message.2.starts_with("COMMIT"))
+            .count()
+            >= 2,
+        "two committed transactions must be visible"
+    );
+    let end = peek
+        .iter()
+        .position(|message| message.2.starts_with("COMMIT"))
+        .unwrap()
+        + 1;
+    let expected = peek[..end].to_vec();
+    assert!(
+        expected
+            .iter()
+            .any(|message| message.2.contains("semantic_prefix_source"))
+    );
+    let limit = receipt_limit::receipt_ack_row_limit(expected.len())
+        .expect("native complete prefix must fit checked row bound");
+    let sql = "SELECT lsn::text,xid::text,data FROM pg_logical_slot_get_changes($1,NULL,$2,'skip-empty-xacts','1')";
+    let baseline: Vec<Message> = sqlx::query_as(sql)
+        .bind("semantic_prefix_baseline")
+        .bind(limit)
+        .fetch_all(&db.pool)
+        .await
+        .expect("correct baseline SQL must execute");
+    assert_eq!(
+        baseline, expected,
+        "checked limit must consume exactly the represented complete prefix"
+    );
+    let mutant_limit = limit.checked_add(1).unwrap();
+    let mutant: Vec<Message> = sqlx::query_as(sql)
+        .bind("semantic_prefix_mutant")
+        .bind(mutant_limit)
+        .fetch_all(&db.pool)
+        .await
+        .expect("SQL/infrastructure errors cannot count as detecting the off-by-one mutant");
+    assert_ne!(
+        mutant, expected,
+        "executable n+1 SQL limit must fail the exact-prefix comparison"
+    );
+    assert!(
+        mutant.len() > expected.len() && mutant[..end] == expected,
+        "mutant must cross the represented prefix, not fail elsewhere"
+    );
+    assert!(
+        mutant[end..]
+            .iter()
+            .any(|message| message.2.contains("semantic_prefix_source")),
+        "the extra prefix must include unrepresented source changes"
+    );
+    let directory = std::path::Path::new(".p2p/work/issue-1218-semantic-controls/evidence");
+    std::fs::create_dir_all(directory).unwrap();
+    std::fs::write(directory.join("receipt-prefix-sql-control.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":"pg-trickle-semantic-sql-controls-v1","selected":1,"case":"incomplete-receipt-prefix",
+        "expected_failure_class":"ReceiptPrefixMismatch","failure_class":"ReceiptPrefixMismatch",
+        "expected_phase":"acknowledge_complete_prefix","phase":"acknowledge_complete_prefix",
+        "baseline_passed":true,"mutant_executed":true,"baseline_limit":limit,"mutant_limit":mutant_limit,
+        "source_path":"verification/receipt.rs","source_sha256":digest(include_bytes!("../verification/receipt.rs")),
+        "test_source_sha256":digest(include_bytes!("e2e_wal_receipt_recovery_tests.rs")),
+        "sql_sha256":digest(sql.as_bytes()),"expected":expected,"baseline":baseline,"mutant":mutant,
+        "installed_candidate_commit":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+        "boundary":"The production checked limit feeds PostgreSQL logical-slot SQL; the mutant changes that executable SQL parameter from n to n+1. No decoder, receipt catalog, or cleanup proof is claimed."
+    })).unwrap()).unwrap();
+    for slot in ["semantic_prefix_baseline", "semantic_prefix_mutant"] {
+        sqlx::query("SELECT pg_drop_replication_slot($1)")
+            .bind(slot)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+}
 
 struct Fixture {
     db: E2eDb,
