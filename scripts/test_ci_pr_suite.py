@@ -19,7 +19,7 @@ class AllocationTests(unittest.TestCase):
             "e2e_refresh_atomicity_tests", "e2e_long_txn_visibility_tests",
             "e2e_keyless_duplicate_tests", "e2e_safety_tests", "e2e_rls_wal_tests",
             "e2e_dvm_corpus_tests", "e2e_dvm_negative_control_tests",
-            "e2e_sensitivity_baseline_tests", "e2e_window_state_recovery_tests",
+            "e2e_dvm_semantic_mutant_tests", "e2e_sensitivity_baseline_tests", "e2e_window_state_recovery_tests",
             "e2e_dag_operations_tests", "e2e_dag_concurrent_tests",
             "e2e_monitoring_tests", "e2e_stmt_cdc_tests",
         ):

@@ -43,7 +43,7 @@
       "name": "direct_st_corruption",
       "mutations": [
         {
-          "sql": "UPDATE dvmf_negctl_mm.two_leaf_st SET sum_s = sum_s + 999999 WHERE id = 1 RETURNING 1",
+          "sql": "WITH injection AS MATERIALIZED (SELECT set_config('pg_trickle.internal_refresh', 'true', true)) UPDATE dvmf_negctl_mm.two_leaf_st SET sum_s = sum_s + 999999 FROM injection WHERE id = 1 RETURNING 1",
           "expected_affected_rows": 1
         }
       ]
@@ -66,6 +66,9 @@
   },
   "negative_control": {
     "reason": "Schema, defining_query, and the first mutation cycle are copied verbatim from cor939_two_leaf_snapshot (a real, correct scenario). A second cycle, 'direct_st_corruption', issues a raw UPDATE straight against the stream table's own backing relation, bypassing the tracked source tables entirely. Because DIFFERENTIAL refresh reconciles only deltas observed on tracked sources, it never undoes this out-of-band corruption, so the stream table permanently diverges from a fresh evaluation of defining_query.",
-    "expected_failure_class": "MultisetMismatch"
+    "expected_failure_class": "MultisetMismatch",
+    "expected_phase": "direct_st_corruption exact comparison",
+    "expected_cycle": 1,
+    "expected_mutation": null
   }
 }

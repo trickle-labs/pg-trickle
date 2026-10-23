@@ -15,6 +15,20 @@ from pathlib import Path
 FORMAT_VERSION = 1
 
 
+class ReplayFailure(RuntimeError):
+    def __init__(self, failure_class: str, detail: str):
+        super().__init__(f"{failure_class}: {detail}")
+        self.failure_class = failure_class
+
+
+def matches_negative_control(scenario: dict, failure: dict) -> bool:
+    expected = scenario["negative_control"]
+    return all(
+        failure.get(field) == expected[f"expected_{field}"]
+        for field in ("failure_class", "phase", "cycle", "mutation")
+    )
+
+
 def validate(scenario: dict) -> None:
     if scenario.get("format_version") != FORMAT_VERSION:
         raise ValueError(
@@ -52,6 +66,11 @@ def validate(scenario: dict) -> None:
                 raise ValueError(
                     f"cycle {cycle_index} mutation {mutation_index} has empty SQL"
                 )
+    if "negative_control" in scenario:
+        expected = scenario["negative_control"]
+        for field in ("failure_class", "phase", "cycle", "mutation"):
+            if f"expected_{field}" not in expected:
+                raise ValueError(f"negative_control.expected_{field} is required")
 
 
 def load(path: Path) -> dict:
@@ -121,7 +140,7 @@ def exact_check(scenario: dict, database: str | None) -> None:
         ") THEN 'ok' ELSE 'mismatch' END"
     )
     if psql(database, check, tuples=True).strip() != "ok":
-        raise RuntimeError("MultisetMismatch: exact row comparison failed")
+        raise ReplayFailure("MultisetMismatch", "exact row comparison failed")
 
 
 def mode_check(scenario: dict, database: str | None) -> None:
@@ -138,12 +157,13 @@ def mode_check(scenario: dict, database: str | None) -> None:
         tuples=True,
     ).strip()
     if not mode.startswith(expected["expected_mode"].upper()):
-        raise RuntimeError(
-            f"SilentFallback: expected {expected['expected_mode']}, got {mode!r}"
+        raise ReplayFailure(
+            "SilentFallback", f"expected {expected['expected_mode']}, got {mode!r}"
         )
 
 
-def artifact(scenario: dict, scenario_path: Path, message: str) -> Path:
+def artifact(scenario: dict, scenario_path: Path, failure: dict) -> Path:
+    message = failure["detail"]
     directory = Path(os.environ.get("DVM_ARTIFACT_DIR", "artifacts/dvm-fuzz"))
     directory = directory / scenario["scenario_id"]
     directory.mkdir(parents=True, exist_ok=True)
@@ -204,8 +224,7 @@ def artifact(scenario: dict, scenario_path: Path, message: str) -> Path:
         json.dumps(
             {
                 "scenario_id": scenario["scenario_id"],
-                "failure_class": "ProductFailure",
-                "detail": message,
+                **failure,
                 "generator_version": scenario["generator_version"],
             },
             indent=2,
@@ -227,14 +246,24 @@ def artifact(scenario: dict, scenario_path: Path, message: str) -> Path:
     return directory
 
 
-def run(path: Path, database: str | None) -> None:
+def run(path: Path, database: str | None, expect_negative_control: bool = False) -> None:
     scenario = load(path)
+    if expect_negative_control and "negative_control" not in scenario:
+        raise ValueError("--expect-negative-control requires declared failure metadata")
     schema = scenario["schema"]["name"]
     query = scenario["query"]
+    phase = "schema setup"
+    cycle_index = mutation_index = None
     try:
         psql(database, f"CREATE SCHEMA {schema}")
-        for sql in scenario["schema"]["setup_sql"] + scenario["initial_data"]:
-            psql(database, sql)
+        for label, statements in (
+            ("setup SQL", scenario["schema"]["setup_sql"]),
+            ("initial data", scenario["initial_data"]),
+        ):
+            for index, sql in enumerate(statements):
+                phase = f"{label} {index}"
+                psql(database, sql)
+        phase = "stream-table admission"
         psql(
             database,
             "SELECT pgtrickle.create_stream_table("
@@ -246,11 +275,15 @@ def run(path: Path, database: str | None) -> None:
             + f"'{scenario['execution']['requested_refresh_mode']}')",
         )
         refresh = f"SELECT pgtrickle.refresh_stream_table('{query['stream_table']}')"
+        phase = "initial refresh"
         psql(database, refresh)
+        phase = "initial refresh mode"
         mode_check(scenario, database)
+        phase = "initial exact comparison"
         exact_check(scenario, database)
-        for cycle in scenario["cycles"]:
-            for mutation in cycle["mutations"]:
+        for cycle_index, cycle in enumerate(scenario["cycles"]):
+            phase = f"{cycle['name']} mutation"
+            for mutation_index, mutation in enumerate(cycle["mutations"]):
                 count = psql(
                     database,
                     f"WITH changed AS ({mutation['sql'].rstrip(';')}) "
@@ -259,21 +292,36 @@ def run(path: Path, database: str | None) -> None:
                 )
                 affected = int(count)
                 if affected != mutation["expected_affected_rows"]:
-                    raise RuntimeError(
-                        f"GeneratorInvalid: expected {mutation['expected_affected_rows']} "
+                    raise ReplayFailure(
+                        "GeneratorInvalid", f"expected {mutation['expected_affected_rows']} "
                         f"affected rows, got {affected}"
                     )
+            mutation_index = None
+            phase = f"{cycle['name']} refresh"
             psql(database, refresh)
+            phase = f"{cycle['name']} refresh mode"
             mode_check(scenario, database)
+            phase = f"{cycle['name']} exact comparison"
             exact_check(scenario, database)
     except (RuntimeError, ValueError, OSError) as error:
-        directory = artifact(scenario, path, str(error))
+        failure = {
+            "failure_class": error.failure_class if isinstance(error, ReplayFailure) else "ReplayError",
+            "phase": phase,
+            "cycle": cycle_index,
+            "mutation": mutation_index,
+            "detail": str(error),
+        }
+        directory = artifact(scenario, path, failure)
+        if expect_negative_control and matches_negative_control(scenario, failure):
+            return
         raise RuntimeError(f"{error}; artifact={directory}") from error
     finally:
         try:
             psql(database, f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         except RuntimeError:
             pass
+    if expect_negative_control:
+        raise RuntimeError("negative control passed without its declared failure")
 
 
 def main() -> int:
@@ -281,6 +329,7 @@ def main() -> int:
     parser.add_argument("scenarios", nargs="+", type=Path)
     parser.add_argument("--database")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--expect-negative-control", action="store_true")
     args = parser.parse_args()
     try:
         for path in args.scenarios:
@@ -288,7 +337,7 @@ def main() -> int:
             if args.validate_only:
                 print(f"validated {path} (format {scenario['format_version']})")
             else:
-                run(path, args.database)
+                run(path, args.database, args.expect_negative_control)
                 print(f"replayed {path}")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"dvm-replay: {error}", file=sys.stderr)
