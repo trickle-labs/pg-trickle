@@ -1,5 +1,5 @@
 # Test-only Linux x86_64 PostgreSQL 18.6 and pg_trickle AddressSanitizer build.
-FROM postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+FROM postgres:18.6-bookworm@sha256:3725f4e2499eef5134592b3b4ab79a543ed7f8e533b05b5b637af926630f6650
 
 ARG PG_VERSION=18.6
 ARG RUST_NIGHTLY=nightly-2025-09-01
@@ -20,11 +20,9 @@ RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
     mkdir -p /tmp/postgresql && tar -xjf /tmp/postgresql.tar.bz2 --strip-components=1 -C /tmp/postgresql && \
     cd /tmp/postgresql && \
     CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
-    LDFLAGS='-fsanitize=address' \
-    ./configure --prefix=/usr/local/pgsql \
+    LDFLAGS='-fsanitize=address' ./configure --prefix=/usr/local/pgsql \
       --enable-cassert --with-icu --with-llvm=no --with-openssl && \
-    make -j"$(nproc)" && \
-    make install && \
+    make -j"$(nproc)" && make install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
 RUN export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 && \
