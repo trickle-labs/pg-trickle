@@ -123,6 +123,7 @@ jobs:
         run: |
           python3 scripts/v0_108_3_release_gate.py
           python3 scripts/check_lsn_verification.py --contract-only
+          python3 scripts/check_receipt_verification.py --contract-only
           python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Validate PR coverage allocation
@@ -144,11 +145,22 @@ jobs:
       - name: Run pinned Verus baseline and mutation control
         run: python3 scripts/check_lsn_verification.py
 
+      - name: Run receipt limit baseline and executable mutation control
+        run: python3 scripts/check_receipt_verification.py
+
       - name: Upload exact LSN verification evidence
         uses: actions/upload-artifact@v7
         with:
           name: lsn-verification-evidence
           path: .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-verification*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload exact receipt verification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: receipt-verification-evidence
+          path: .p2p/work/issue-1222-receipt-prefix/evidence/*
           retention-days: 30
           if-no-files-found: error
 
@@ -540,6 +552,12 @@ jobs:
           name: lsn-verification-evidence
           path: .p2p/work/issue-1097-verified-production-lsn/evidence
 
+      - name: Download receipt proof record
+        uses: actions/download-artifact@v8
+        with:
+          name: receipt-verification-evidence
+          path: .p2p/work/issue-1222-receipt-prefix/evidence
+
       - name: Pull postgres:18.6 image
         run: docker pull postgres:18.6
 
@@ -571,6 +589,21 @@ jobs:
             --runtime-case e2e_lsn_contract_tests::test_lsn_wal_transition_rejects_malformed_and_preserves_results \
             --output .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
 
+      - name: Run packaged receipt E2E and bind installed library
+        env:
+          PGT_EXTENSION_DIR: ${{ github.workspace }}/target/release/pg_trickle-pg18
+          PGT_RELEASE_ATTESTATION_PATH: target/receipt-full-install-attestation.json
+        run: |
+          ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests \
+            -E 'test(=test_wal_receipt_small_limits_preserve_complete_transactions)' --retries 0
+          python3 scripts/check_lsn_candidate_binding.py --proof-kind receipt \
+            --proof-record .p2p/work/issue-1222-receipt-prefix/evidence/receipt-verification.json \
+            --package-dir target/release/pg_trickle-pg18 \
+            --installation target/receipt-full-install-attestation.json \
+            --candidate-commit "$GITHUB_SHA" \
+            --runtime-case e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions \
+            --output .p2p/work/issue-1222-receipt-prefix/evidence/receipt-candidate-binding.json
+
       - name: Upload candidate binding evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -580,6 +613,8 @@ jobs:
             target/lsn-install-attestation.json
             target/lsn-full-install-attestation.json
             .p2p/work/issue-1097-verified-production-lsn/evidence/lsn-candidate-binding.json
+            target/receipt-full-install-attestation.json
+            .p2p/work/issue-1222-receipt-prefix/evidence/receipt-candidate-binding.json
           retention-days: 30
           if-no-files-found: warn
 
