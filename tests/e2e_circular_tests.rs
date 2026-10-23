@@ -567,7 +567,6 @@ async fn test_circular_nonconvergence_error_status() {
 #[tokio::test]
 async fn test_circular_drop_member_clears_scc_id() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute("SET pg_trickle.allow_circular = true").await;
 
     db.execute("CREATE TABLE cyc_drop_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
@@ -596,13 +595,19 @@ async fn test_circular_drop_member_clears_scc_id() {
          SELECT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
-    // ALTER B to reference A (completes the cycle)
-    db.execute(
+    // ALTER B to reference A (completes the cycle). The GUC must be
+    // enabled on the same connection as ALTER: a pooled session SET may
+    // apply to a different backend and reject the cycle. SET LOCAL in an
+    // explicit transaction also avoids leaking the setting to other tests.
+    db.execute_seq(&[
+        "BEGIN",
+        "SET LOCAL pg_trickle.allow_circular = true",
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
-         query => $$SELECT id, val FROM cyc_drop_src \
+         query => $SELECT id, val FROM cyc_drop_src \
          UNION ALL \
-         SELECT a.id, a.val FROM cyc_drop_a a$$)",
-    )
+         SELECT a.id, a.val FROM cyc_drop_a a$)",
+        "COMMIT",
+    ])
     .await;
 
     // Verify both have scc_id
