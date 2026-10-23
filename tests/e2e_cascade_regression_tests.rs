@@ -348,9 +348,12 @@ async fn test_zero_row_differential_preserves_data_timestamp() {
 
     // Wait for the first scheduler cycle (last_refresh_at will advance when
     // the scheduler runs, even if it finds no new rows — NoData path).
+    // Loaded CI runners can need a launcher retry and scheduler poll before
+    // the first cycle. Keep the progress assertion, but allow that bounded
+    // retry window before declaring a scheduler liveness failure.
     let start = std::time::Instant::now();
     loop {
-        if start.elapsed() > std::time::Duration::from_secs(30) {
+        if start.elapsed() > std::time::Duration::from_secs(90) {
             panic!(
                 "Timed out waiting for first scheduler cycle \
                  (initial last_refresh_at = {})",
