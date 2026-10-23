@@ -29,7 +29,7 @@ RUN curl -fsSLo /tmp/postgresql.tar.bz2 \
       echo "PostgreSQL ASan install attempt ${attempt} failed; retrying" >&2; \
     done; test "$installed" -eq 1) && \
     make -C src/bin/pg_config clean && \
-    make -C src/bin/pg_config && \
+    make -C src/bin/pg_config LDFLAGS='-fsanitize=address' && \
     make -C src/bin/pg_config install && \
     rm -rf /tmp/postgresql /tmp/postgresql.tar.bz2
 
