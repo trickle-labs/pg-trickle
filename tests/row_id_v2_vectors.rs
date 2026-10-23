@@ -80,6 +80,8 @@ fn row_id_v2_corpus_is_independent_and_exact() {
         let bytes = hex(vector);
         assert!(!bytes.is_empty() && bytes.len().is_multiple_of(2));
         assert!(bytes.chars().all(|c| c.is_ascii_hexdigit()));
+        validate_identity_v2(&decode_hex(bytes))
+            .unwrap_or_else(|error| panic!("invalid golden frame {}: {error}", vector["name"]));
         assert!(
             bytes.ends_with("ff"),
             "{} is not tuple-terminated",
@@ -104,7 +106,7 @@ fn row_id_v2_corpus_is_independent_and_exact() {
             .iter()
             .find(|v| v["name"] == "scan_int4_minus_one")
             .map(hex),
-        Some("02010000000103017fffffff")
+        Some("02010000000103017fffffffff")
     );
     assert_eq!(
         vectors
@@ -124,6 +126,18 @@ fn row_id_v2_corpus_is_independent_and_exact() {
         Some("0203000000010701fff8000000000000ff")
     );
 
+    let minus_one = encode_signed(-1, 4).expect("int4 minus-one payload");
+    assert_eq!(
+        encode_tuple(
+            IdentityDomain::ScanKey,
+            &[EncodedField::value(TYPE_INT4, &minus_one)]
+        )
+        .unwrap(),
+        decode_hex(hex(vectors
+            .iter()
+            .find(|v| v["name"] == "scan_int4_minus_one")
+            .unwrap()))
+    );
     let payload = encode_signed(1, 4).expect("int4 payload");
     let generated = encode_tuple(
         IdentityDomain::ScanKey,

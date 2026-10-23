@@ -42,7 +42,23 @@ JOIN_PLAN_CASES = [
     "e2e_join_tests::test_join_endpoint_scope_preserves_throwing_projections_and_unaffected_rows",
     "e2e_refresh_atomicity_tests::test_join_endpoint_fence_witnesses_writer_blocking_and_next_cut",
 ]
+IDENTITY_FRAME_CASES = [
+    "e2e_row_id_v2_tests::test_identity_scalar_frames_preserve_installed_v2_v3_bytes",
+    "e2e_row_id_v2_tests::test_identity_colliding_probes_preserve_merge_and_join_complete_ids",
+]
 PROOF_CONTRACTS = {
+    "identity_frame": {
+        "schema": "pg-trickle-identity-frame-verification-v1",
+        "obligations": {"fixed_scalar_width", "checked_frame_size", "validate_scalar_frame", "encode_scalar_frame", "unique_scalar_decoding"},
+        "cases": IDENTITY_FRAME_CASES,
+        "inputs": [
+            "src/lib.rs", "src/dvm/row_id_v2.rs", "src/dvm/row_id.rs", "src/hash.rs", "src/refresh/codegen.rs",
+            "src/dvm/operators/join_common.rs", "src/refresh/merge/mod.rs", "src/refresh/merge/insert.rs",
+            "tests/row_id_v2_vectors.rs", "tests/fixtures/row_id_v2_vectors.json", "tests/e2e_row_id_v2_tests.rs",
+            "Cargo.toml", "Cargo.lock",
+        ],
+        "mutants": {"lost-terminator", "trailing-input", "invalid-bool-payload", "lost-domain", "lost-size-payload"},
+    },
     "join_plan": {
         "schema": "pg-trickle-join-plan-verification-v1",
         "obligations": {"admitted_equality_type", "check_endpoint_plan", "scope_pair", "unchanged_pair_has_zero_difference"},
