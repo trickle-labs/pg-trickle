@@ -1927,6 +1927,52 @@ async fn test_consumer_initialization_does_not_cover_rows_missing_from_fixed_sna
 }
 
 #[tokio::test]
+async fn test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier() {
+    let fixture = setup_wal_fixture("drop_rollback").await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    assert!(fixture.db.wait_for_condition("idle WAL slot before rollback", &format!(
+        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{}' AND NOT active)",fixture.slot
+    ), WAIT, Duration::from_millis(25)).await);
+    let baseline = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    let mut caller = fixture.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+        .bind(&fixture.stream)
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+    caller.rollback().await.unwrap();
+    let restored = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    let mode = cdc_mode(&fixture.db, &fixture.source).await;
+    let slot_preserved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1 AND plugin='test_decoding')")
+        .bind(&fixture.slot).fetch_one(&fixture.db.pool).await.unwrap();
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("slot-drop-rollback.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "baseline":baseline,"restored":restored,"mode":mode,"slot":fixture.slot,
+            "slot_preserved":slot_preserved,"scheduler_disabled":true,"slot_was_idle":true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored, baseline,
+        "rollback must restore rows and frontier"
+    );
+    assert_eq!(mode.as_deref(), Some("WAL"));
+    assert!(
+        slot_preserved,
+        "rollback must preserve the restored consumer's WAL retention boundary"
+    );
+}
+
+#[tokio::test]
 async fn test_consumer_fixed_snapshot_rejection_preserves_existing_wal_slot() {
     let fixture = setup_wal_fixture("registration_reject").await;
     let mut rejected = Vec::new();
