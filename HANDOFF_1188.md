@@ -8,7 +8,7 @@ This handoff covers the follow-up work for GitHub issue [#1188](https://github.c
 - Branch: `ci/1188-cost-comparison`
 - The published comparison branch was at `58363734` when run `39772191763` was dispatched. The working branch now includes current `main` (merge commit `310c92f6`) so the PR will not revert later merged WAL and verification changes; the frozen replay source guard remains `863eb42f`.
 - Replay evidence is retained under ignored `target/ci1188-comparison/run-39682504980/`, `run-39729948300/`, and `run-39747899962/`; the handoff itself remains untracked.
-- The follow-up PR is separate from merged PR #1190. This branch is being prepared as a draft because the matched comparison remains invalid.
+- Draft follow-up [PR #1235](https://github.com/trickle-labs/pg-trickle/pull/1235) is open from this branch, separate from merged PR #1190. It remains a draft because the matched comparison is invalid.
 
 The remote branch contains the matched comparison workflow and accumulated test/harness fixes. The post-restart acknowledged WAL receipt is part of the frozen source tree at `6de32e0`. The workflow now guards the follow-up fixture repairs at `863eb42f0343c3f0610e7ca92036c840ccd8b586`.
 
