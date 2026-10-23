@@ -167,6 +167,36 @@ inputs and log hashes. The later LSN suite (11/11), eight additional installatio
 observations and sixth binding were completed by the primary runner after that
 review; they are not silently included in the reviewer's accepted evidence.
 
+## Supplemental semantic oracle controls — #1218
+
+Independent read-only reviewer `review_1220` inspected supplemental specification
+`semantic-oracle-controls.md` and frozen source
+`503eb546dbd383d114b0faf7f531a954992951a0`. The four actual-adapter SQL
+mutants require nonempty, correct baselines and successfully executed wrong
+results. The checked slot bound n=4 yields the represented transaction; the
+executable n+1=5 mutation returns seven messages including later source changes.
+Numeric scale stays attached to complete rows and duplicate multiplicities;
+the CLI control requires the exact class, phase, cycle and mutation coordinate.
+
+The reviewer found that Python admission could count private numeric columns
+explicitly listed by a custom scenario, contrary to Rust and the specification.
+Follow-up at `b3d41cb67aeafc5d531e9f10f448b5e909255435` accepted explicit
+`__pgt_` exclusion and the private-only regression. Final corrected live Python
+replay passed all three histories and detected only the intended
+`MultisetMismatch / scale_corruption exact comparison / cycle 0 / mutation null`.
+
+Final bounded evidence was independently inspected and accepted: 27 native
+tests, 22 installed selections (58 unrelated filtered), floors 34/34 and 54/54,
+and 62 Python checks. The 13 frozen source hashes, seven complete log hashes
+and 11 installation observations agree with the manifest and actual package.
+Native Rust inputs are identical between compiled `503eb546` and reviewed
+`b3d41cb`; installed backend remains `1a717660`, library SHA-256
+`32b7d5f1cd53c5115581ddf68da3e043f1a1acb7252d7bf24db2312c02731259`.
+
+No remaining bounded blocker was found. The reviewer executed no project code.
+This accepts the listed observation/control boundaries, not whole-program
+correctness, authenticated compilation provenance or merge approval.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

@@ -97,6 +97,27 @@ package remain the frozen backend candidate
 The supplemental test source is frozen separately; installation attestations
 must name the backend candidate rather than claiming it contains these tests.
 
+Completed supplemental test revision:
+`b3d41cb67aeafc5d531e9f10f448b5e909255435`. Native Rust inputs are identical
+to compiled revision `503eb546dbd383d114b0faf7f531a954992951a0`; the second
+commit only excludes private numeric columns in Python admission and adds its
+regression. Formatting/lint pass with zero warnings. Qualification records:
+
+| Selection | Observed result |
+| --- | --- |
+| Native component suite, including four controls | 27/27, no skips/retries |
+| Installed corpus, route matrix, scale and receipt controls | 22/22, 58 unrelated cases filtered, no retries |
+| PR and scheduled semantic floors | 34/34 and 54/54, no failures |
+| Python unit checks | 62/62 |
+| Corrected live Python baseline and corruption replay | 1/1 test; three histories plus the intended exact-phase mismatch |
+| Existing proof CI contract checks | all six pass |
+
+`evidence/qualification-manifest.json` under the local artifact root retains
+13 frozen source hashes and seven complete log hashes. All 11 installation
+observations match the declared backend and actual three-file package payload.
+Independent read-only review accepted the bounded final evidence after finding
+and resolving the private-column admission gap. The reviewer executed no tests.
+
 These controls establish detection on the listed observations and histories.
 They do not authenticate build provenance, establish SQL/FFI correctness,
 prove all plans or recovery protocols, or authorize merge. The parent quality
