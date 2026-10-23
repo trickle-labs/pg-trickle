@@ -1521,6 +1521,18 @@ pub(crate) fn create_stream_table_impl(
         });
     }
     let should_initialize = initialize && orchestration_mode != "EXTERNAL";
+    if should_initialize
+        && Spi::get_one::<bool>(
+            "SELECT current_setting('transaction_isolation') IN ('repeatable read','serializable')",
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("initialization isolation: {e}")))?
+        .unwrap_or(true)
+    {
+        return Err(PgTrickleError::SafeFrontierUnavailable {
+            context: format!("initialization of {name}"),
+            reason: "initialization requires READ COMMITTED isolation to align copied rows with their frontier".into(),
+        });
+    }
     if initialize && !should_initialize {
         pgrx::notice!(
             "pg_trickle: EXTERNAL stream table {} will remain unpopulated until its coordinator submits a refresh",

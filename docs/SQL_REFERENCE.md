@@ -281,6 +281,13 @@ pgtrickle.create_stream_table(
 | `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
 | `orchestration_mode` | `text` | `'MANAGED'` | Durable refresh owner. `MANAGED` enables pg_trickle scheduling; `EXTERNAL` leaves refresh submission to an external coordinator. `EXTERNAL` cannot be combined with `IMMEDIATE`. |
 
+Populating a table during creation requires READ COMMITTED-compatible isolation.
+REPEATABLE READ and SERIALIZABLE calls that populate the new table are rejected:
+an older transaction snapshot cannot be paired safely with a current capture
+frontier. Retry creation under READ COMMITTED, or create with `initialize =>
+false` and perform the first refresh under READ COMMITTED. Failed creation
+publishes no table, dependency or frontier.
+
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
 instead of CDC triggers or WAL replication slots. If the effective or explicit
