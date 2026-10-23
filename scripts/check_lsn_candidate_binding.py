@@ -28,6 +28,8 @@ REQUIRED_OBLIGATIONS = {
 }
 RECEIPT_CASES = [
     "e2e_wal_receipt_recovery_tests::test_wal_receipt_small_limits_preserve_complete_transactions",
+    "e2e_wal_receipt_recovery_tests::test_wal_receipts_do_not_recursively_capture_their_own_payloads",
+    "e2e_wal_receipt_recovery_tests::test_wal_receipt_commit_order_preserves_late_old_lsn_transaction",
 ]
 LIFECYCLE_CASES = [
     "e2e_having_transition_tests::test_having_all_nine_truth_transitions_match_postgresql",
@@ -78,8 +80,9 @@ PROOF_CONTRACTS = {
         "cases": EXPECTED_CASES, "inputs": [],
     },
     "receipt": {
-        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit"},
+        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit", "may_skip_bookkeeping_row"},
         "cases": RECEIPT_CASES, "inputs": ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"],
+        "mutants": {"off-by-one", "skip-source-row", "skip-unknown-table", "skip-other-action"},
     },
     "aggregate_lifecycle": {
         "schema": "pg-trickle-aggregate-lifecycle-verification-v1",

@@ -18,6 +18,15 @@ class ReceiptMutationTests(unittest.TestCase):
     def test_production_import_and_call_remain_bound(self):
         receipt.check_contract()
 
+    def test_bookkeeping_mutations_cannot_use_stale_or_duplicated_sites(self):
+        source=receipt.SOURCE.read_text()
+        for name in receipt.MUTATIONS:
+            changed=receipt.mutate(source,name)
+            self.assertNotEqual(source,changed)
+            for invalid in ["",source+source,changed]:
+                with self.assertRaisesRegex(ValueError,"exactly one executable"):
+                    receipt.mutate(invalid,name)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,12 @@
 use vstd::prelude::*;
 
 verus! {
+pub fn may_skip_bookkeeping_row(source_change: bool, known_table: bool, ordinary_dml: bool) -> (result: bool)
+    ensures result == (!source_change && known_table && ordinary_dml),
+{
+    !source_change && known_table && ordinary_dml
+}
+
 // Keep executable comparisons identical to the arithmetic bounds in the proof.
 #[allow(clippy::manual_range_contains)]
 pub fn receipt_ack_row_limit(message_count: usize) -> (result: Option<i32>)
@@ -34,7 +40,21 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
-    use super::receipt_ack_row_limit;
+    use super::{may_skip_bookkeeping_row, receipt_ack_row_limit};
+
+    #[test]
+    fn test_bookkeeping_skip_never_admits_source_unknown_or_other_action() {
+        for source in [false, true] {
+            for known in [false, true] {
+                for dml in [false, true] {
+                    assert_eq!(
+                        may_skip_bookkeeping_row(source, known, dml),
+                        !source && known && dml
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_receipt_ack_limit_bounds_and_exact_stop() {
