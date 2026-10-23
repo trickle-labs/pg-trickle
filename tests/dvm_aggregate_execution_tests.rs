@@ -7,6 +7,8 @@
 #[path = "../verification/cdc_elision.rs"]
 mod cdc_elision;
 mod common;
+#[path = "../verification/join_plan.rs"]
+mod join_plan;
 #[path = "../verification/aggregate_lifecycle.rs"]
 mod lifecycle;
 
@@ -14,6 +16,98 @@ use common::TestDb;
 use pg_trickle::dvm::DiffContext;
 use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
+
+#[tokio::test]
+async fn test_join_endpoint_sql_preserves_images_retractions_and_bag_duplicates() {
+    let db = TestDb::new().await;
+    assert!(join_plan::admitted_equality_type(23));
+    assert!(!join_plan::admitted_equality_type(1700));
+    let insert = join_plan::Term {
+        left_scan: 0,
+        right_scan: 1,
+        left_boundary: join_plan::Boundary::After,
+        right_boundary: join_plan::Boundary::After,
+        retract: false,
+    };
+    let delete = join_plan::Term {
+        left_boundary: join_plan::Boundary::Before,
+        right_boundary: join_plan::Boundary::Before,
+        retract: true,
+        ..insert
+    };
+    let columns = vec!["n".to_string(), "j".to_string()];
+    let sql =
+        join_plan::endpoint_changes_sql("old_endpoint", "new_endpoint", &columns, insert, delete)
+            .unwrap();
+    let query = format!(
+        "WITH old_endpoint AS (SELECT decode(id,'hex') AS __pgt_row_id,n,j FROM (VALUES \
+           ('01',1.0::numeric,'{{\"x\":1}}'::json),('02',NULL,NULL),('04',4.0,'{{\"x\":4}}'), \
+           ('05',2.0,'{{\"x\":5}}'),('06',NULL,NULL)) v(id,n,j)), \
+         new_endpoint AS (SELECT decode(id,'hex') AS __pgt_row_id,n,j FROM (VALUES \
+           ('01',1.00::numeric,'{{\"x\":1}}'::json),('03',NULL,'{{\"x\":3}}'), \
+           ('04',4.0,'{{\"x\":4}}'),('05',2.0,'{{\"x\":55}}')) v(id,n,j)) \
+         SELECT encode(__pgt_row_id,'hex'),__pgt_action,scale(n),j::text FROM ({sql}) changes ORDER BY 1,2"
+    );
+    let rows: Vec<(String, String, Option<i32>, Option<String>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(query.clone()))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    let expected = [
+        ("01", "D", Some(1), Some("{\"x\":1}")),
+        ("01", "I", Some(2), Some("{\"x\":1}")),
+        ("02", "D", None, None),
+        ("03", "I", None, Some("{\"x\":3}")),
+        ("05", "D", Some(1), Some("{\"x\":5}")),
+        ("05", "I", Some(1), Some("{\"x\":55}")),
+        ("06", "D", None, None),
+    ]
+    .into_iter()
+    .map(|(id, action, scale, json)| {
+        (
+            id.to_string(),
+            action.to_string(),
+            scale,
+            json.map(str::to_string),
+        )
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(rows, expected, "endpoint bag/image actions differ");
+    db.execute("CREATE SCHEMA endpoint_shadow").await;
+    db.execute("CREATE FUNCTION endpoint_shadow.never_equal(bytea,bytea) RETURNS boolean LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT false'").await;
+    db.execute("CREATE OPERATOR endpoint_shadow.= (FUNCTION=endpoint_shadow.never_equal,LEFTARG=bytea,RIGHTARG=bytea)").await;
+    let mut connection = db.pool.acquire().await.unwrap();
+    sqlx::query("SET search_path=endpoint_shadow,pg_catalog,public")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let (shadowed, builtin_key): (bool, bool) =
+        sqlx::query_as("SELECT decode('01','hex')=decode('01','hex'),1=1")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    assert!(
+        !shadowed && builtin_key,
+        "control must shadow only internal bytea equality"
+    );
+    let shadow_rows: Vec<(String, String, Option<i32>, Option<String>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(query))
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        shadow_rows, expected,
+        "owner search_path changed complete identity matching"
+    );
+    let mixed = join_plan::Term {
+        right_boundary: join_plan::Boundary::Before,
+        ..insert
+    };
+    assert!(
+        join_plan::endpoint_changes_sql("old_endpoint", "new_endpoint", &columns, mixed, delete)
+            .is_none()
+    );
+}
 
 #[tokio::test]
 async fn test_cdc_keyed_weight_uses_complete_images_without_scalar_equality() {

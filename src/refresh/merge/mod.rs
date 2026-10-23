@@ -1919,7 +1919,7 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.108.3-deferred-history".hash(&mut hasher);
+        "v0.108.3-join-endpoints".hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
             st.defining_query.as_ref() as *const str,
@@ -1948,7 +1948,11 @@ pub fn execute_differential_refresh_with_tuning(
     // enter the ordinary cross-refresh template cache.
     let graph_same_pass = crate::refresh::current_safe_bound().is_some();
     // Concrete SQL embeds this window's cuts and staged-source decisions.
+    let endpoint_join = with_stream_owner(st, || {
+        dvm::query_needs_endpoint_join_fence(&effective_defining_query)
+    })?;
     let concrete_delta = has_recursive_cte
+        || endpoint_join
         || incremental_window_state.is_some()
         || graph_same_pass
         || crate::config::pg_trickle_dvm_decision_trace()

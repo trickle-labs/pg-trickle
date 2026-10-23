@@ -120,6 +120,40 @@ class CandidateBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "production input differs"):
             binding.validate_binding(**arguments)
 
+    def test_join_binding_requires_controls_callers_and_both_runtime_cases(self) -> None:
+        import check_join_plan_verification as driver
+
+        contract = binding.PROOF_CONTRACTS["join_plan"]
+        self.assertEqual(contract["inputs"], driver.PRODUCTION_INPUTS)
+        self.assertEqual(contract["mutants"], set(driver.MUTATIONS))
+        self.source = binding.ROOT / "verification/join_plan.rs"
+        self.proof.update({
+            "schema": contract["schema"], "source_sha256": binding.digest(self.source),
+            "obligations": sorted(contract["obligations"]),
+            "production_inputs": {path: binding.digest(binding.ROOT / path) for path in contract["inputs"]},
+            "semantic_mutations": {name: {"returncode": 1, "failure_kind": "postcondition",
+                                           "summary": "verification results:: 5 verified, 1 errors"}
+                                   for name in contract["mutants"]},
+        })
+        arguments = dict(proof=self.proof, source=self.source, package_dir=self.package,
+                         installation=self.installation, runtime_cases=binding.JOIN_PLAN_CASES,
+                         candidate_commit="fixture-commit", proof_kind="join_plan")
+        self.assertEqual(binding.validate_binding(**arguments)["schema"],
+                         "pg-trickle-join-plan-candidate-binding-v1")
+        with self.assertRaisesRegex(ValueError, "all required JOIN_PLAN E2E cases"):
+            binding.validate_binding(**{**arguments, "runtime_cases": binding.JOIN_PLAN_CASES[:1]})
+        for name in contract["mutants"]:
+            control = self.proof["semantic_mutations"].pop(name)
+            with self.assertRaisesRegex(ValueError, "omits a required executable mutant"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = {**control, "failure_kind": "compile-error"}
+            with self.assertRaisesRegex(ValueError, "intended postcondition"):
+                binding.validate_binding(**arguments)
+            self.proof["semantic_mutations"][name] = control
+        self.proof["production_inputs"]["src/api/refresh_ops.rs"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "production input differs"):
+            binding.validate_binding(**arguments)
+
     def test_cdc_binding_requires_both_controls_and_trigger_callers(self) -> None:
         self.source = binding.ROOT / "verification/cdc_elision.rs"
         contract = binding.PROOF_CONTRACTS["cdc_elision"]

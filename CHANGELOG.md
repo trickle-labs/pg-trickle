@@ -222,6 +222,13 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Evaluate computed projections over affected old/old and new/new inner-join
+  endpoints for admitted keyed trigger sources, avoiding intermediate
+  divide-by-zero errors when both committed endpoints are valid (#1211, #1223).
+  Manual refresh fences source writes until transaction end and requires
+  READ COMMITTED isolation. The restricted route covers single built-in
+  boolean/integer/UUID equality keys, including single-key USING; other join
+  routes retain their existing behavior.
 - Preserve numeric scale-only UPDATEs for narrow and shared CDC consumers in
   both row and statement trigger modes (#1210, #1221). Changed-column masks use
   binary images for admitted fixed-size built-in types and conservatively retain
