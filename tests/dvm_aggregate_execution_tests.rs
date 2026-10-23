@@ -5,11 +5,134 @@
 //! algebraic and rescan aggregate families.
 
 mod common;
+#[path = "../verification/aggregate_lifecycle.rs"]
+mod lifecycle;
 
 use common::TestDb;
 use pg_trickle::dvm::DiffContext;
 use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
+
+#[test]
+fn test_lifecycle_having_sql_uses_total_truth_tests_and_identity_guards() {
+    let tree = OpTree::Filter {
+        predicate: binop(">", colref("total_amount"), lit("0")),
+        child: Box::new(grouped_aggregate(sum_col("amount", "total_amount"))),
+    };
+    let sql = make_aggregate_ctx("agg_sum_st", &["region", "total_amount"])
+        .differentiate(&tree)
+        .unwrap();
+    assert!(sql.contains("IS NOT TRUE"), "{sql}");
+    assert!(sql.contains("IS TRUE"), "{sql}");
+    assert!(!sql.contains("WHERE NOT ("), "{sql}");
+    assert!(sql.contains("AND __pgt_action = 'I'"), "{sql}");
+    assert!(sql.contains("st.__pgt_row_id ="), "{sql}");
+}
+
+#[tokio::test]
+async fn test_lifecycle_visibility_decisions_match_postgresql_bag_differences() {
+    let db = TestDb::new().await;
+    type Observation = (bool, Option<bool>, bool, Option<bool>, bool, bool, bool);
+    let rows: Vec<Observation> = sqlx::query_as(
+        "WITH truth(p) AS (VALUES (TRUE), (FALSE), (NULL::bool)), \
+         present(e) AS (VALUES (TRUE), (FALSE)), changed(c) AS (VALUES (TRUE), (FALSE)) \
+         SELECT a.e, p.p, b.e, q.p, c.c, \
+           EXISTS((SELECT 7 WHERE a.e AND p.p) EXCEPT ALL \
+                  (SELECT CASE WHEN c.c THEN 8 ELSE 7 END WHERE b.e AND q.p)), \
+           EXISTS((SELECT CASE WHEN c.c THEN 8 ELSE 7 END WHERE b.e AND q.p) EXCEPT ALL \
+                  (SELECT 7 WHERE a.e AND p.p)) \
+         FROM present a CROSS JOIN truth p CROSS JOIN present b CROSS JOIN truth q CROSS JOIN changed c"
+    ).fetch_all(&db.pool).await.unwrap();
+    assert_eq!(rows.len(), 72);
+    for (old_exists, old_truth, new_exists, new_truth, changed, retract, insert) in rows {
+        let actions =
+            lifecycle::visibility_actions(old_exists, old_truth, new_exists, new_truth, changed);
+        assert_eq!(
+            (actions.retract, actions.insert),
+            (retract, insert),
+            "old=({old_exists}, {old_truth:?}), new=({new_exists}, {new_truth:?}), changed={changed}"
+        );
+    }
+    let rendered = lifecycle::having_retraction_sql("p");
+    let admitted = lifecycle::having_admission_sql("p");
+    let observations: Vec<(Option<bool>, bool, bool, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT p, ({rendered}), (NOT p) IS TRUE, ({admitted}) FROM (VALUES (TRUE), (FALSE), (NULL::bool)) v(p)"
+    ))).fetch_all(&db.pool).await.unwrap();
+    assert_eq!(
+        observations,
+        vec![
+            (Some(true), false, false, true),
+            (Some(false), true, true, false),
+            (None, true, false, false)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_lifecycle_group_and_null_plans_match_postgresql_small_bags() {
+    let db = TestDb::new().await;
+    let values = ["NULL::int", "-1", "0", "1"];
+    let mut bags = vec!["SELECT NULL::int AS v WHERE FALSE".to_string()];
+    for (index, value) in values.iter().enumerate() {
+        bags.push(format!("VALUES ({value})"));
+        for other in &values[index..] {
+            bags.push(format!("VALUES ({value}), ({other})"));
+        }
+    }
+    assert_eq!(bags.len(), 15);
+    let mut observed = 0;
+    for global in [false, true] {
+        for bag in &bags {
+            let direct = if global {
+                "SELECT COUNT(*), COUNT(v), SUM(v) FROM data"
+            } else {
+                "SELECT COUNT(*), COUNT(v), SUM(v) FROM (SELECT 1 AS g, v FROM data) d GROUP BY g"
+            };
+            let expected: Vec<(i64, i64, Option<i64>)> = sqlx::query_as(sqlx::AssertSqlSafe(
+                format!("WITH data(v) AS ({bag}) {direct}"),
+            ))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+            let presence = lifecycle::group_presence_sql(global, "rows");
+            let total = lifecycle::aggregate_value_sql(true, "nonnull", "COALESCE(total, 99)");
+            let count = lifecycle::aggregate_value_sql(false, "nonnull", "rows");
+            let actual: Vec<(i64, i64, Option<i64>)> =
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "WITH data(v) AS ({bag}), state AS \
+                 (SELECT COUNT(*) AS rows, COUNT(v) AS nonnull, SUM(v) AS total FROM data) \
+                 SELECT {count}, nonnull, {total} FROM state WHERE {presence}"
+                )))
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(actual, expected, "global={global}, bag={bag}");
+            observed += 1;
+        }
+    }
+    assert_eq!(observed, 30);
+    let expected = [[["N", "I"], ["D", "U"]], [["I", "I"], ["U", "U"]]];
+    for global in [false, true] {
+        for old in [false, true] {
+            for nonempty in [false, true] {
+                let expression = lifecycle::group_action_sql(
+                    global,
+                    if old { "TRUE" } else { "FALSE" },
+                    if nonempty { "1" } else { "0" },
+                );
+                let actual: String =
+                    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT {expression}")))
+                        .fetch_one(&db.pool)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    actual,
+                    expected[global as usize][old as usize][nonempty as usize]
+                );
+            }
+        }
+    }
+}
 
 fn int_col(name: &str) -> Column {
     Column {
