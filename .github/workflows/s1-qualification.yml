@@ -79,6 +79,7 @@ jobs:
             tar --null -T - -czf _s1/evidence/candidate-source.tar.gz
           python3 benchmarks/s1/check_frozen_harness.py
           python3 benchmarks/s1/test_bootstrap_compat.py
+          python3 benchmarks/s1/test_exec_launch_retry.py
           python3 benchmarks/s1/test_check_result.py
           python3 benchmarks/s1/qualification/run_bounded.py --self-check
           python3 benchmarks/s1/qualification/test_supervisor.py
