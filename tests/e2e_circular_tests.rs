@@ -567,7 +567,8 @@ async fn test_circular_nonconvergence_error_status() {
 #[tokio::test]
 async fn test_circular_drop_member_clears_scc_id() {
     let db = E2eDb::new().await.with_extension().await;
-    db.execute("SET pg_trickle.allow_circular = true").await;
+    db.alter_system_set_and_wait("pg_trickle.allow_circular", "true", "on")
+        .await;
 
     db.execute("CREATE TABLE cyc_drop_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
