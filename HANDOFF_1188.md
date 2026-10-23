@@ -6,11 +6,11 @@ This handoff covers the follow-up work for GitHub issue [#1188](https://github.c
 
 - Repository: `/Users/grove/projects/pg-trickle2`
 - Branch: `ci/1188-cost-comparison`
-- The published comparison branch was at `58363734` when run `39772191763` was dispatched. The working branch now includes current `main` (merge commit `310c92f6`) so the PR will not revert later merged WAL and verification changes; the frozen replay source guard remains `863eb42f`.
-- Replay evidence is retained under ignored `target/ci1188-comparison/run-39682504980/`, `run-39729948300/`, and `run-39747899962/`; the handoff itself remains untracked.
-- Draft follow-up [PR #1235](https://github.com/trickle-labs/pg-trickle/pull/1235) is open from this branch, separate from merged PR #1190. It remains a draft because the matched comparison is invalid.
+- The comparison branch includes current `main` (merge commit `310c92f6`) so the PR will not revert later merged WAL and verification changes. The latest frozen replay source guard is `1ed8d756`.
+- Replay evidence is retained under ignored `target/ci1188-comparison/run-39682504980/`, `run-39729948300/`, and `run-39747899962/`; the handoff is tracked in this branch.
+- Follow-up [PR #1235](https://github.com/trickle-labs/pg-trickle/pull/1235) is open and marked ready for review, separate from merged PR #1190. Its latest head is `9b44aec26005364a378845f043f7e287fa2da364`.
 
-The remote branch contains the matched comparison workflow and accumulated test/harness fixes. The post-restart acknowledged WAL receipt is part of the frozen source tree at `6de32e0`. The workflow now guards the follow-up fixture repairs at `863eb42f0343c3f0610e7ca92036c840ccd8b586`.
+The remote branch contains the matched comparison workflow and accumulated test/harness fixes. The post-restart acknowledged WAL receipt is part of current `main`. The workflow guards the follow-up fixture repairs and current-main source at `1ed8d756114bc9a9b381b568befc2a8ae6f5c3a6`.
 
 ## Latest comparison run
 
@@ -30,6 +30,12 @@ Failures retained in `target/ci1188-comparison/run-39682504980/`:
 
 The comparison is **inconclusive**. Do not turn these durations into savings or update issue #1188 as complete. See the matched replay history in `docs/CI_COVERAGE.md` before repeating investigations.
 
+## Current attempt after review (2026-10-23)
+
+The intermittent witnesses found in run `39772191763` were stabilized in `1ed8d756`: nested-view refreshes now wait for exact convergence, the error-count test pauses the scheduler and retries its post-fix refresh, and the DVM failpoint witness establishes a completed differential refresh before arming the failure. `just fmt` and `just lint` passed. The workflow source guard was advanced to this commit in `9b44aec`; the source/test freeze check and workflow YAML parse passed.
+
+Matched replay [run `40031584350`](https://github.com/trickle-labs/pg-trickle/actions/runs/40031584350) was dispatched on `9b44aec26005364a378845f043f7e287fa2da364` on 2026-10-23. As of this handoff update, its `Comparison inputs` job remains queued and has not started, so it has produced no new validation or performance evidence. The previous completed PR CI and auxiliary checks passed on `4c696047`, before the latest test-fixture and source-pin commits; no checks are attached to the current head yet. Keep the issue open and the comparison inconclusive until the matched run and current-head PR checks complete successfully.
+
 ## Repair progress (2026-10-22)
 
 The three refresh-related failures now use existing E2E helpers: exact convergence for the recursive CTE and HAVING migrations, and a completed-refresh retry for the P-2 metadata backfill. The catalog-only post-restart wait for CDC mode `WAL` did not prove that the scheduler had resumed decoding. The test now commits a separate readiness row and waits for its WAL receipt acknowledgement before arming the pre-receipt barrier. This WAL fix still needs Testcontainers reproduction.
@@ -42,10 +48,10 @@ Current local repairs: the initial DVM refresh now waits for a completed manual 
 
 ## Next actions
 
-1. Investigate the WAL decoder stall from the new diagnostic state: after readiness receipt acknowledgement, the dependency has returned to `TRANSITIONING` with no slot/cutover and the scheduler has no active query. Trace the transition/restart path and its lock ownership before changing the fixture again.
-2. Reproduce and stabilize `test_view_inline_nested_view`, `test_consecutive_errors_tracked_and_reset`, and the intermittent DVM recovery assertion without relaxing their result or failure-state checks. The latest evidence and logs are in `target/ci1188-comparison/run-39772191763/`.
-3. After fixes, run `just fmt`, then `just lint`, update the frozen source pin, and dispatch another matched hosted comparison. Do not report savings until `compare_ci_allocations.py` returns `valid: true`.
-4. Once a valid pair exists, record execution and queue/wait data separately in `docs/CI_COVERAGE.md`, update the draft PR, and review remaining acceptance criteria. Keep #1188 open until the documented acceptance is complete.
+1. Wait for run `40031584350` to receive a runner and finish. Inspect its artifacts and validator result; do not report savings unless `compare_ci_allocations.py` returns `valid: true`.
+2. Ensure normal PR checks run and pass on head `9b44aec26005364a378845f043f7e287fa2da364`; the last completed PR checks were for `4c696047`.
+3. If the matched run exposes another real fixture race or correctness failure, repair without relaxing assertions, run `just fmt` then `just lint`, advance the frozen source pin, and dispatch a fresh paired comparison.
+4. Once a valid pair exists, record execution and queue/wait data separately in `docs/CI_COVERAGE.md`, update the PR description, verify all issue acceptance criteria, and only then close #1188 after the final disposition is authorized.
 
 ## Useful commands
 
