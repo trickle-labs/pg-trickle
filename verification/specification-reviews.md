@@ -197,6 +197,44 @@ No remaining bounded blocker was found. The reviewer executed no project code.
 This accepts the listed observation/control boundaries, not whole-program
 correctness, authenticated compilation provenance or merge approval.
 
+## Recovery histories and snapshot/restore follow-up — #1219
+
+Independent read-only reviewer `review_1221` inspected the original bounded
+histories at `fc23780c`. The journal, rollback/cancellation, restart identity
+and actual trigger witnesses were adequate, but review found a CI blocker:
+tee could hide failing recovery commands without explicit Bash/pipefail.
+Terminal phases also lacked explicit frontier coverage and precrash checkpoint
+equality. Both gaps are repaired and enforced by the follow-up.
+
+Source review accepted frozen backend
+`0ab22465b99f5e4dde2cf595f5b5d50216b20209`: catalog-row locking/reload pairs
+snapshot metadata with copied rows; sorted source locks serialize protected-cut
+inspection and restore with both cleanup minima; unprovable history requires
+reinitialization while a lagging consumer retains differential reuse. The
+conservative READ COMMITTED / TABLE admission and self-equal-cut restriction
+match the specification. No source-level blocker remained.
+
+The test-only freeze `efae4dccbddd43b357fee1fc3017a026febeffe8` adds an
+actual uncommitted restore versus sibling FULL-cleanup schedule. All three
+predecessor failures are retained. Final repaired artifacts show coherent
+snapshot rows/frontier, missing-history REINITIALIZE and 2 history rows during
+restore, 2 after rewind, then 0 after catch-up.
+
+The reviewer accepted completed bounded qualification: initial 10/10 (four
+recovery cases, three security scenarios and three helpers), ordering 1/1,
+scheduled 5/5 including ten seeds/twelve cycles, fourteen required proof-runtime
+cases, 2633 units, 62 Python checks and semantic floors 34/34 and 54/54. All
+seven frozen input and fourteen log hashes match. The actual package, all 40
+installation observations and six regenerated bindings agree on backend and
+library SHA-256
+`4a1afb720c7d88d6efe27a2a24c832b0797fbf20db52314e233363d99bf38983`.
+Existing six proofs/mutants retain their bounded claims; their source/caller
+hashes match. No reviewer edits, builds, tests or proof executions occurred.
+
+This accepts the observed repair, not complete recovery/cleanup/incarnation
+proofs, untested schedules, remote CI success, authenticated compilation
+provenance or merge approval.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and
