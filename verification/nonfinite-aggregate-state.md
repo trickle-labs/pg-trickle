@@ -52,4 +52,28 @@ barrier schedule
 `test_refresh_nonfinite_aggregate_keeps_later_writer_for_next_cut`.
 The 34-case PR floor and 54-case scheduled floor remain required. Passing these
 checks qualifies these histories, not all numeric arithmetic or the whole
-quality program. Installed qualification and independent review are pending.
+quality program.
+
+Frozen executable candidate `1a717660030487b1d5e63f683c86e40f528b8fe6`
+passes those three named runtime observations. The state-only history now
+updates a finite input from 1 to 4 while Infinity remains, removes Infinity
+immediately, and requires PostgreSQL's finite result 4. The generated SQL
+also compares raw-domain initialization with guarded delta admission.
+Both observed floors pass: 34/34 PR cases and 54/54 scheduled cases, with no
+unsupported or FULL substitution. The connected installed selection passes
+47/47 (71 unrelated cases filtered), with zero retries. The existing LSN suite
+also passes 11/11, including all four required installed cases. All 52 installation
+observations declare that candidate and agree with the extracted package on
+library SHA-256
+`32b7d5f1cd53c5115581ddf68da3e043f1a1acb7252d7bf24db2312c02731259`.
+The full unit suite passes 2633/2633; all 26 native aggregate tests pass.
+One native suite invocation marked a passing pure lifecycle test leaky; its
+isolated observation passed without that marker. Neither record was discarded.
+
+Independent read-only reviewer `review_1220` accepted the source/specification
+follow-up after identifying and resolving domain admission asymmetry and a
+non-discriminating inverse-update history. This is a reviewed runtime repair,
+not an additional Verus arithmetic proof. Existing production proof baselines
+and executable mutation controls were regenerated, and all six corresponding
+source/package/installation bindings pass on this package. Their original
+proof boundaries and trusted build/test-runner assumptions remain intact.

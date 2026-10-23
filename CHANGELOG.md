@@ -222,6 +222,12 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Preserve finite SUM/AVG contributions when built-in numeric/float NaN or
+  infinity inputs are changed or removed, including private-state updates while
+  the displayed value stays infinite (#1217). Recovery uses captured deltas
+  without adding a live-source rescan or FULL fallback.
+- Use the maintained total-row count for an unprojected HAVING COUNT(*), rather
+  than emitting an aggregate call in the differential WHERE clause.
 - Use checked framing for single-field boolean/integer/UUID identities and
   verified tuple-capacity arithmetic, preserving valid V2/V3 identity bytes
   while rejecting malformed boolean payloads (#1224).
