@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,14 @@ CASE = "test_join_endpoint_sql_preserves_images_retractions_and_bag_duplicates"
 
 def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain_output(output: str) -> str:
+    """Normalize runner color escapes before checking nextest/cargo evidence."""
+    return ANSI_ESCAPE.sub("", output)
 
 
 def run(target: str, log: Path) -> subprocess.CompletedProcess:
@@ -44,7 +53,8 @@ def main() -> int:
     if native.count(import_path) != 1 or module.exists() or target.exists():
         raise ValueError("native import moved or temporary control files already exist")
     baseline = run("dvm_aggregate_execution_tests", EVIDENCE / "join-sql-baseline.log")
-    if baseline.returncode or CASE not in baseline.stdout or "1 passed" not in baseline.stdout:
+    baseline_text = plain_output(baseline.stdout)
+    if baseline.returncode or CASE not in baseline_text or not re.search(r"\b1 passed\b", baseline_text):
         raise RuntimeError("native endpoint baseline did not execute and pass")
     owned = []
     try:
@@ -57,9 +67,17 @@ def main() -> int:
                 output.write(contents)
             owned.append(path)
         result = run("__pgt_join_sql_mutant", EVIDENCE / "join-sql-missing-retraction.log")
-        if result.returncode == 0 or "test result: FAILED." not in result.stdout \
-                or "endpoint bag/image actions differ" not in result.stdout \
-                or "assertion `left == right` failed" not in result.stdout:
+        mutant_text = plain_output(result.stdout)
+        # cargo test reports "test result: FAILED.", while nextest reports a
+        # failing test and a "Summary ... failed" line. Require the exact
+        # assertion in both cases; a compile or infrastructure failure is not
+        # an acceptable mutant kill.
+        failed_test = ("test result: FAILED." in mutant_text or
+                       (re.search(r"\bFAIL\b", mutant_text) is not None and
+                        re.search(r"\b1 failed\b", mutant_text) is not None))
+        if result.returncode == 0 or not failed_test \
+                or "endpoint bag/image actions differ" not in mutant_text \
+                or "assertion `left == right` failed" not in mutant_text:
             raise RuntimeError("SQL mutant did not fail the intended exact-action comparison")
         if SOURCE.read_text(encoding="utf-8") != original:
             raise RuntimeError("production source changed during SQL qualification")
