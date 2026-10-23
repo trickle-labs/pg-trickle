@@ -933,7 +933,7 @@ pub fn generate_delta_query_cached(
     }
 
     // Invalidate persisted templates that still evaluate mixed endpoint pairs.
-    let query_hash = hash_string(&format!("v0.108.3-join-endpoints:{defining_query}"));
+    let query_hash = hash_string(&format!("v0.108.3-nonfinite-state:{defining_query}"));
 
     // G8.1: Cross-session cache invalidation — flush if the shared
     // generation counter has advanced past our local snapshot.
@@ -1679,10 +1679,8 @@ pub fn query_statistical_aux_types(defining_query: &str) -> Vec<(String, String)
         .unwrap_or_default()
 }
 
-/// Returns `(nonnull_col_name, arg_sql)` tuples for each non-DISTINCT SUM
-/// aggregate above a FULL JOIN child that needs an auxiliary nonnull-count
-/// column (`__pgt_aux_nonnull_*`) for P2-2 NULL-transition correction.
-/// Empty if no such aggregates exist.
+/// Input-state columns for non-DISTINCT SUM/AVG: qualifying counts and,
+/// where needed, finite subtotals plus counts of special numeric inputs.
 pub fn query_nonnull_aux_columns(defining_query: &str) -> Vec<(String, String)> {
     parse_defining_query(defining_query)
         .map(|tree| tree.nonnull_aux_columns())

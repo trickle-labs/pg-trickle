@@ -16,7 +16,13 @@ pub(crate) fn rewrite_having_expr(expr: &Expr, aggregates: &[AggExpr]) -> Expr {
     match expr {
         Expr::FuncCall { func_name, args } => {
             let name_lower = func_name.to_lowercase();
+            let count_star = name_lower == "count"
+                && args.len() == 1
+                && matches!(&args[0], Expr::Raw(sql) if sql == "*");
             for agg in aggregates {
+                if count_star && agg.filter.is_some() {
+                    continue;
+                }
                 let agg_name = agg.function.sql_name().to_lowercase();
                 if name_lower != agg_name {
                     continue;
@@ -37,6 +43,13 @@ pub(crate) fn rewrite_having_expr(expr: &Expr, aggregates: &[AggExpr]) -> Expr {
                         column_name: agg.alias.clone(),
                     };
                 }
+            }
+            if count_star {
+                // The aggregate already maintains COUNT(*) even when SELECT omits it.
+                return Expr::ColumnRef {
+                    table_alias: None,
+                    column_name: "__pgt_count".into(),
+                };
             }
             // No match – keep as-is but recurse into args.
             Expr::FuncCall {
@@ -134,6 +147,24 @@ mod tests {
     }
 
     // ── rewrite_having_expr ──────────────────────────────────────────────
+
+    #[test]
+    fn test_having_unprojected_count_star_uses_total_group_count() {
+        let count = Expr::FuncCall {
+            func_name: "COUNT".into(),
+            args: vec![Expr::Raw("*".into())],
+        };
+        assert_eq!(
+            rewrite_having_expr(&count, &[make_sum_agg("v", "total")]).to_sql(),
+            "__pgt_count"
+        );
+        let mut filtered = make_count_star_agg("qualifying");
+        filtered.filter = Some(Expr::Raw("v>0".into()));
+        assert_eq!(
+            rewrite_having_expr(&count, &[filtered]).to_sql(),
+            "__pgt_count"
+        );
+    }
 
     #[test]
     fn test_rewrite_having_expr_count_star_rewritten() {
