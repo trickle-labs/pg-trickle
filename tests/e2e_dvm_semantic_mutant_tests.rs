@@ -49,7 +49,7 @@ async fn test_semantic_mutants_are_killed_by_exact_bag_oracle() {
     for (name, canonical, mutant) in cases {
         // Materialize the correct semantics as the candidate result and compare
         // with the mutated semantics, preserving column names and types.
-        db.execute(&format!("CREATE TEMP TABLE semantic_actual AS {canonical}")).await;
+        db.execute(&format!("CREATE TABLE semantic_actual AS {canonical}")).await;
         oracle::compare_st_to_query(&db, "semantic_actual", canonical)
             .await
             .unwrap_or_else(|diff| panic!("{name}: canonical control failed: {diff}"));
