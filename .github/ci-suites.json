@@ -23,6 +23,7 @@
     "e2e_dvm_fuzz_tests",
     "e2e_dvm_metamorphic_tests",
     "e2e_dvm_negative_control_tests",
+    "e2e_dvm_semantic_mutant_tests",
     "e2e_dvm_shrink_tests",
     "e2e_dvm_strategy_tests",
     "e2e_ec01_property_tests",
