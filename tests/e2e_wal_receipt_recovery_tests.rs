@@ -714,17 +714,20 @@ async fn run_trigger_fallback_case(phase: &str) {
         .await;
     let buffer = db.change_buffer_table(fixture.oid).await;
     let value = format!("fallback-{phase}-pending");
+    // Capture the WAL boundary before the new source transaction. Earlier
+    // buffer rows can legitimately be retained for slower consumers.
+    let pending_start_lsn: String = db.query_scalar("SELECT pg_current_wal_lsn()::text").await;
     let (barrier, blocker_pid) = hold_wal_barrier(db, fixture.oid, phase).await;
     set_wal_phase(db, fixture.oid, phase, &value).await;
     commit_row(db, &fixture.source, &fixture.journal, 2, &value).await;
     wait_for_wal_barrier(db, fixture.oid, phase, blocker_pid).await;
     assert_eq!(
         db.query_scalar::<i64>(&format!(
-            "SELECT count(*) FROM {buffer} WHERE action <> 'S'"
+            "SELECT count(*) FROM {buffer} WHERE action <> 'S' AND lsn > '{pending_start_lsn}'::pg_lsn"
         ))
         .await,
         0,
-        "pending commit must have no trigger or replay copy"
+        "pending commit must have no trigger or replay copy after the pre-commit WAL boundary"
     );
     assert!(exact_diff(&db.pool, &fixture.stream, &fixture.journal).await > 0);
     if phase == "before_replay" {
