@@ -512,13 +512,13 @@ async fn test_circular_nonconvergence_error_status() {
     // validation failures, then ALTER them into a cycle.
     db.execute(
         "SELECT pgtrickle.create_stream_table('cyc_nc_a', \
-         $$SELECT val FROM cyc_nc_seed$$, \
+         $SELECT val FROM cyc_nc_seed$, \
          '1s', 'DIFFERENTIAL', false)",
     )
     .await;
     db.execute(
         "SELECT pgtrickle.create_stream_table('cyc_nc_b', \
-         $$SELECT val FROM cyc_nc_seed$$, \
+         $SELECT val FROM cyc_nc_seed$, \
          '1s', 'DIFFERENTIAL', false)",
     )
     .await;
@@ -526,14 +526,14 @@ async fn test_circular_nonconvergence_error_status() {
     // Monotonically increasing cycle: A adds 1 to B, B reads from A
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_nc_a', \
-         query => $$SELECT val FROM cyc_nc_seed \
+         query => $SELECT val FROM cyc_nc_seed \
            UNION ALL \
-           SELECT val + 1 FROM cyc_nc_b$$)",
+           SELECT val + 1 FROM cyc_nc_b$)",
     )
     .await;
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_nc_b', \
-         query => $$SELECT val FROM cyc_nc_a$$)",
+         query => $SELECT val FROM cyc_nc_a$)",
     )
     .await;
 
@@ -595,13 +595,19 @@ async fn test_circular_drop_member_clears_scc_id() {
          SELECT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
-    // ALTER B to reference A (completes the cycle)
-    db.execute(
+    // ALTER B to reference A (completes the cycle). The GUC must be
+    // enabled on the same connection as ALTER: a pooled session SET may
+    // apply to a different backend and reject the cycle. SET LOCAL in an
+    // explicit transaction also avoids leaking the setting to other tests.
+    db.execute_seq(&[
+        "BEGIN",
+        "SET LOCAL pg_trickle.allow_circular = true",
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
          query => $$SELECT id, val FROM cyc_drop_src \
          UNION ALL \
          SELECT a.id, a.val FROM cyc_drop_a a$$)",
-    )
+        "COMMIT",
+    ])
     .await;
 
     // Verify both have scc_id

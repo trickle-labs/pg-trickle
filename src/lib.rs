@@ -67,6 +67,8 @@ pub(crate) mod metrics_server;
 #[allow(dead_code)]
 mod monitor;
 pub mod otel;
+#[path = "../verification/receipt.rs"]
+pub(crate) mod receipt;
 #[allow(dead_code)]
 mod refresh;
 #[allow(dead_code)]

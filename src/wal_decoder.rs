@@ -696,6 +696,55 @@ struct WalReceipt {
     source_change: bool,
 }
 
+/// Decode order is commit order; individual row LSNs can precede a prior transaction's commit.
+fn receipt_transaction_ends(receipts: &[WalReceipt]) -> Result<Vec<usize>, PgTrickleError> {
+    let mut ends = Vec::new();
+    let mut start = 0;
+    let mut previous_commit = None;
+    for (index, receipt) in receipts.iter().enumerate() {
+        let invalid = || {
+            PgTrickleError::WalTransitionError(format!(
+                "invalid transaction framing at WAL receipt {}",
+                receipt.receipt_id
+            ))
+        };
+        let xid = receipt.source_xid.as_deref().ok_or_else(invalid)?;
+        if receipt.slot_name != receipts[0].slot_name
+            || (index > 0 && receipts[index - 1].receipt_id >= receipt.receipt_id)
+        {
+            return Err(invalid());
+        }
+        if index == start {
+            if receipt.data != format!("BEGIN {xid}") {
+                return Err(invalid());
+            }
+        } else if receipt.source_xid != receipts[start].source_xid {
+            return Err(invalid());
+        } else if receipt.data == format!("COMMIT {xid}") {
+            let commit = lsn_position(&receipt.lsn)?;
+            if previous_commit.is_some_and(|previous| previous >= commit) {
+                return Err(invalid());
+            }
+            for row in &receipts[start..=index] {
+                if lsn_position(&row.lsn)? > commit {
+                    return Err(invalid());
+                }
+            }
+            ends.push(index + 1);
+            start = index + 1;
+            previous_commit = Some(commit);
+        } else if receipt.data.starts_with("BEGIN ") || receipt.data.starts_with("COMMIT ") {
+            return Err(invalid());
+        }
+    }
+    if start != receipts.len() {
+        return Err(PgTrickleError::WalTransitionError(
+            "incomplete WAL receipt transaction".into(),
+        ));
+    }
+    Ok(ends)
+}
+
 fn load_wal_receipts(
     source_oid: pg_sys::Oid,
     status: &str,
@@ -704,10 +753,23 @@ fn load_wal_receipts(
     Spi::connect(|client| {
         let rows = client
             .select(
-                "SELECT receipt_id, slot_name, lsn::text, source_xid::text, data, source_change \
+                "WITH cutoff AS ( \
+                     SELECT receipt_id FROM pgtrickle.pgt_wal_receipts \
+                      WHERE source_relid = $1 AND status = $2 \
+                      ORDER BY receipt_id LIMIT $3 \
+                 ), boundary AS ( \
+                     SELECT receipt_id FROM pgtrickle.pgt_wal_receipts \
+                      WHERE source_relid = $1 AND status = $2 \
+                        AND receipt_id >= \
+                            (SELECT max(receipt_id) FROM cutoff) \
+                        AND data LIKE 'COMMIT %' \
+                      ORDER BY receipt_id LIMIT 1 \
+                 ) \
+                 SELECT receipt_id, slot_name, lsn::text, source_xid::text, data, source_change \
                    FROM pgtrickle.pgt_wal_receipts \
                   WHERE source_relid = $1 AND status = $2 \
-                  ORDER BY lsn, receipt_id LIMIT $3",
+                    AND receipt_id <= (SELECT receipt_id FROM boundary) \
+                  ORDER BY receipt_id",
                 None,
                 &[source_oid.into(), status.into(), limit.into()],
             )
@@ -744,6 +806,37 @@ fn load_wal_receipts(
                     .unwrap_or(false),
             });
         }
+        if receipts.is_empty() {
+            let pending = client
+                .select(
+                    "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+                     WHERE source_relid = $1 AND status = $2)",
+                    None,
+                    &[source_oid.into(), status.into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .first()
+                .get::<bool>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(false);
+            if pending {
+                return Err(PgTrickleError::WalTransitionError(format!(
+                    "incomplete {status} WAL receipt transaction for source OID {}",
+                    source_oid.to_u32()
+                )));
+            }
+        } else if !receipts
+            .first()
+            .is_some_and(|receipt| receipt.data.starts_with("BEGIN "))
+            || !receipts
+                .last()
+                .is_some_and(|receipt| receipt.data.starts_with("COMMIT "))
+        {
+            return Err(PgTrickleError::WalTransitionError(format!(
+                "invalid {status} WAL receipt transaction boundary for source OID {}",
+                source_oid.to_u32()
+            )));
+        }
         Ok(receipts)
     })
 }
@@ -752,18 +845,18 @@ fn set_receipts_status(
     source_oid: pg_sys::Oid,
     from_status: &str,
     to_status: &str,
-    through_lsn: &str,
+    through_receipt_id: i64,
 ) -> Result<(), PgTrickleError> {
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_wal_receipts \
             SET status = $2, \
                 acknowledged_at = CASE WHEN $2 = 'ACKNOWLEDGED' THEN now() ELSE acknowledged_at END \
-          WHERE source_relid = $1 AND status = $3 AND lsn <= $4::pg_lsn",
+          WHERE source_relid = $1 AND status = $3 AND receipt_id <= $4",
         &[
             source_oid.into(),
             to_status.into(),
             from_status.into(),
-            through_lsn.into(),
+            through_receipt_id.into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(format!("update WAL receipt status: {e}")))
@@ -874,8 +967,13 @@ pub fn replay_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleE
 
             let pk_columns = cdc::resolve_pk_columns(dep.source_relid)?;
             let columns = cdc::resolve_source_column_defs(dep.source_relid)?;
-            for receipt in &receipts {
-                if receipt.source_change {
+            let mut start = 0;
+            for end in receipt_transaction_ends(&receipts)? {
+                let commit_lsn = &receipts[end - 1].lsn;
+                for receipt in &receipts[start..end] {
+                    if !receipt.source_change {
+                        continue;
+                    }
                     let action = parse_pgoutput_action(&receipt.data).ok_or_else(|| {
                         PgTrickleError::WalTransitionError(format!(
                             "WAL receipt {} has no DML action",
@@ -884,7 +982,7 @@ pub fn replay_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleE
                     })?;
                     write_decoded_change(
                         dep.source_relid.to_u32(),
-                        &receipt.lsn,
+                        commit_lsn,
                         receipt.source_xid.as_deref(),
                         &action,
                         &receipt.data,
@@ -893,15 +991,16 @@ pub fn replay_pending_wal_receipts(change_schema: &str) -> Result<(), PgTrickleE
                         &columns,
                     )?;
                 }
+                start = end;
             }
 
-            let through_lsn = receipts
+            let through_receipt_id = receipts
                 .last()
-                .map(|receipt| receipt.lsn.as_str())
+                .map(|receipt| receipt.receipt_id)
                 .ok_or_else(|| {
                     PgTrickleError::InternalError("WAL receipt batch is empty".into())
                 })?;
-            set_receipts_status(dep.source_relid, "RECEIVED", "APPLIED", through_lsn)
+            set_receipts_status(dep.source_relid, "RECEIVED", "APPLIED", through_receipt_id)
         })();
         if let Err(error) = replay_result {
             warning!(
@@ -935,6 +1034,7 @@ fn acknowledge_receipt_batch(
     source_oid: pg_sys::Oid,
     receipts: &[WalReceipt],
 ) -> Result<(), PgTrickleError> {
+    let transaction_ends = receipt_transaction_ends(receipts)?;
     let first = receipts.first().ok_or_else(|| {
         PgTrickleError::InternalError("cannot acknowledge empty WAL batch".into())
     })?;
@@ -954,22 +1054,22 @@ fn acknowledge_receipt_batch(
             ))
         })?;
         let confirmed_position = lsn_position(&confirmed_lsn)?;
-        let expected = receipts
-            .iter()
-            .filter(|receipt| {
-                // PostgreSQL reports the slot's starting boundary at the
-                // first change LSN, so the acknowledgement read must include
-                // that boundary record as well.
-                lsn_position(&receipt.lsn)
-                    .map(|position| position >= confirmed_position)
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
+        let mut first_unconsumed = 0;
+        for end in transaction_ends {
+            if lsn_position(&receipts[end - 1].lsn)? <= confirmed_position {
+                first_unconsumed = end;
+            } else {
+                break;
+            }
+        }
+        let expected = &receipts[first_unconsumed..];
         if !expected.is_empty() {
-            let max_changes = i32::try_from(expected.len()).map_err(|_| {
-                PgTrickleError::WalTransitionError("WAL receipt batch is too large".into())
+            let max_changes = crate::receipt::receipt_ack_row_limit(expected.len()).ok_or_else(|| {
+                PgTrickleError::WalTransitionError(
+                    "WAL acknowledgement requires a complete transaction within the row-count bound".into(),
+                )
             })?;
-            // Match receipt LSN order while retaining decoder order for equal LSNs.
+            // Order receipt LSNs, retaining decoder order within each LSN.
             let sql = format!(
                 "SELECT lsn::text, xid::text, data \
                    FROM pg_logical_slot_get_changes('{}', NULL, {}) \
@@ -1012,13 +1112,19 @@ fn acknowledge_receipt_batch(
                     source_oid.to_u32()
                 )));
             }
-            for receipt in &expected {
+            for receipt in expected {
                 test_wal_receipt_barrier(source_oid, "after_slot_advance", Some(&receipt.data))?;
             }
         }
     }
 
-    set_receipts_status(source_oid, "APPLIED", "ACKNOWLEDGED", through_lsn)?;
+    let through_receipt_id = receipts
+        .last()
+        .map(|receipt| receipt.receipt_id)
+        .ok_or_else(|| {
+            PgTrickleError::InternalError("cannot acknowledge empty WAL batch".into())
+        })?;
+    set_receipts_status(source_oid, "APPLIED", "ACKNOWLEDGED", through_receipt_id)?;
     update_acknowledged_watermark(source_oid, through_lsn)?;
     Ok(())
 }
@@ -3007,6 +3113,35 @@ pub fn write_worker_changes_to_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_receipt_transactions_preserve_commit_order_and_reject_partial_frames() {
+        let receipt = |id, xid: &str, lsn: &str, data: &str| WalReceipt {
+            receipt_id: id,
+            slot_name: "slot".into(),
+            lsn: lsn.into(),
+            source_xid: Some(xid.into()),
+            data: data.into(),
+            source_change: false,
+        };
+        let rows = vec![
+            receipt(1, "11", "0/20", "BEGIN 11"),
+            receipt(2, "11", "0/20", "table public.src: INSERT: id[integer]:2"),
+            receipt(3, "11", "0/30", "COMMIT 11"),
+            receipt(4, "10", "0/10", "BEGIN 10"),
+            receipt(5, "10", "0/10", "table public.src: INSERT: id[integer]:1"),
+            receipt(6, "10", "0/40", "COMMIT 10"),
+        ];
+        assert_eq!(receipt_transaction_ends(&rows).unwrap(), vec![3, 6]);
+        assert!(receipt_transaction_ends(&rows[..5]).is_err());
+        assert!(receipt_transaction_ends(&rows[1..]).is_err());
+        let mut wrong_xid = rows.clone();
+        wrong_xid[1].source_xid = Some("12".into());
+        assert!(receipt_transaction_ends(&wrong_xid).is_err());
+        let mut wrong_slot = rows.clone();
+        wrong_slot[1].slot_name = "other_slot".into();
+        assert!(receipt_transaction_ends(&wrong_slot).is_err());
+    }
     use proptest::prelude::*;
 
     #[test]

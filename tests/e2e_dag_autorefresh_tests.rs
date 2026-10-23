@@ -339,16 +339,18 @@ async fn test_autorefresh_no_spurious_3_layer() {
     )
     .await;
 
-    // Wait for each layer to consume any stale buffer entries before recording
-    // the no-op baseline.
-    wait_for_chain_refresh_cycles(
-        &db,
-        &["arns_l1", "arns_l2", "arns_l3"],
-        Duration::from_secs(30),
-    )
-    .await;
+    // A scheduled root can complete NO_DATA cycles, but unchanged
+    // downstream tables need not refresh. Check the initialized chain
+    // instead of waiting for an unnecessary l3 scheduler cycle.
+    wait_for_refresh_cycle(&db, "arns_l1", Duration::from_secs(30)).await;
+    db.assert_st_matches_query("arns_l1", "SELECT id, val FROM arns_src")
+        .await;
+    db.assert_st_matches_query("arns_l2", "SELECT id, val * 2 AS doubled FROM arns_src")
+        .await;
+    db.assert_st_matches_query("arns_l3", "SELECT id, val * 2 + 1 AS result FROM arns_src")
+        .await;
 
-    // Record data_timestamps after first cycle
+    // Record data_timestamps after the initialized snapshot
     let ts_after_first: Vec<String> = {
         let mut v = Vec::new();
         for name in &["arns_l1", "arns_l2", "arns_l3"] {
@@ -363,30 +365,10 @@ async fn test_autorefresh_no_spurious_3_layer() {
         v
     };
 
-    // Wait for second scheduler cycle (no DML)
-    let lr_after_first: String = db
-        .query_scalar(
-            "SELECT last_refresh_at::text FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_name = 'arns_l3'",
-        )
-        .await;
-
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > Duration::from_secs(30) {
-            panic!("Timed out waiting for second scheduler cycle");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let lr: String = db
-            .query_scalar(
-                "SELECT last_refresh_at::text FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_name = 'arns_l3'",
-            )
-            .await;
-        if lr != lr_after_first {
-            break;
-        }
-    }
+    // Observe two more root scheduler cycles with no DML.
+    // Dependent STs may legitimately remain idle.
+    wait_for_refresh_cycle(&db, "arns_l1", Duration::from_secs(30)).await;
+    wait_for_refresh_cycle(&db, "arns_l1", Duration::from_secs(30)).await;
 
     // data_timestamps must remain stable — no spurious advance
     let names = ["arns_l1", "arns_l2", "arns_l3"];
@@ -553,21 +535,17 @@ async fn settle_auto_invariants(
     timeout: Duration,
 ) {
     let deadline = std::time::Instant::now() + timeout;
-    // Check actual data instead of requiring a no-op scheduler tick.
-    let mut last_nudge = std::time::Instant::now();
+    // Poll the actual multiset invariants rather than require an additional
+    // refresh timestamp transition. A scheduled NO_DATA cycle, or a refresh
+    // completed before our first read, need not advance last_refresh_at.
+    // A deadline violation still reports the exact public row differences.
     loop {
         if check_auto_invariants(db).await {
             return;
         }
         if std::time::Instant::now() >= deadline {
-            // Timeout — run the standard assertion to produce a clear failure.
             assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
-            return;
-        }
-        // Keep polling until the shared deadline, even under scheduler deferral.
-        if last_nudge.elapsed() >= Duration::from_secs(5) {
-            db.nudge_launcher_rescan().await;
-            last_nudge = std::time::Instant::now();
+            panic!("auto-refresh invariants did not converge by deadline");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -591,14 +569,17 @@ async fn run_autorefresh_trace(seed: u64, config: &TraceConfig) {
     db.execute("CREATE TABLE prop_auto_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
 
-    for (st, query) in AUTO_INVARIANTS {
-        db.create_st(st, query, "1s", "DIFFERENTIAL").await;
-    }
-
+    // Seed before materializing the chain so the initial snapshot is
+    // deterministic. Later trace mutations still exercise asynchronous CDC
+    // propagation through all three layers.
     for _ in 0..config.initial_rows {
         let (id, val) = (ids.alloc(), rng.i32_range(0, 10));
         db.execute(&format!("INSERT INTO prop_auto_src VALUES ({id}, {val})"))
             .await;
+    }
+
+    for (st, query) in AUTO_INVARIANTS {
+        db.create_st(st, query, "1s", "DIFFERENTIAL").await;
     }
 
     // Wait for the full cascade to propagate through all 3 layers and for
