@@ -24,10 +24,18 @@ def container_has_exited(code, stdout, stderr):
 
 
 def postgres_is_restarting(result):
-    return (result.returncode != 0 and 'connection to server' in result.stderr
-            and any(message in result.stderr for message in (
-                'No such file or directory', 'the database system is starting up',
-                'the database system is shutting down', 'server closed the connection unexpectedly')))
+    # The harness deliberately restarts PostgreSQL, and Docker may report a
+    # stopped container during a sample even if it is running again by the
+    # next inspect. Retry only this exact transition, not Docker daemon errors.
+    docker_transition = re.fullmatch(
+        r"Error response from daemon: container [0-9a-f]{64} is not running",
+        result.stderr.strip(),
+    )
+    return (result.returncode != 0 and (bool(docker_transition) or
+            ('connection to server' in result.stderr
+             and any(message in result.stderr for message in (
+                 'No such file or directory', 'the database system is starting up',
+                 'the database system is shutting down', 'server closed the connection unexpectedly')))))
 
 
 def postgres_metrics(args):
@@ -59,8 +67,12 @@ def capture_logs(name, path, previous=None):
 
 
 def disk_metrics(args):
-    # Temporary relations can disappear while du walks PostgreSQL's data directory.
-    vanished = r"du: cannot access '.*/base/[0-9]+/t[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?': No such file or directory"
+    # Temporary relations and pg_internal.init can disappear during PostgreSQL
+    # maintenance/restarts while du walks the data directory. Retry these
+    # specific ENOENT paths, never arbitrary missing files or permission errors.
+    vanished = (r"du: cannot access '.*/base/[0-9]+/(?:"
+                r"t[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?"
+                r"|pg_internal\.init)': No such file or directory")
     for attempt in range(5):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
         transient = result.stderr.splitlines()
