@@ -1757,6 +1757,101 @@ async fn test_snapshot_waits_for_committed_refresh_before_loading_frontier() {
 }
 
 #[tokio::test]
+async fn test_consumer_initialization_does_not_cover_rows_missing_from_fixed_snapshot() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")
+        .await;
+    db.execute("CREATE TABLE registration_source(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    db.execute("CREATE TABLE registration_journal(id int PRIMARY KEY,value text NOT NULL)")
+        .await;
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        1,
+        "baseline",
+    )
+    .await;
+    db.create_st(
+        "registration_existing",
+        "SELECT id,value FROM registration_source",
+        "24h",
+        "DIFFERENTIAL",
+    )
+    .await;
+    let oid = i64::from(db.table_oid("registration_source").await);
+    let buffer = db.change_buffer_table(oid).await;
+    let pending: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    assert_eq!(pending, 0, "baseline must have no pending captured rows");
+    let mut caller = db.pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *caller)
+        .await
+        .unwrap();
+    let pinned: i64 = sqlx::query_scalar("SELECT count(*) FROM registration_source")
+        .fetch_one(&mut *caller)
+        .await
+        .unwrap();
+    assert_eq!(pinned, 1);
+    let snapshot: String = sqlx::query_scalar("SELECT pg_current_snapshot()::text")
+        .fetch_one(&mut *caller)
+        .await
+        .unwrap();
+    commit_row(
+        &db,
+        "registration_source",
+        "registration_journal",
+        2,
+        "committed-after-snapshot",
+    )
+    .await;
+    let captured_cut: String = db
+        .query_scalar(&format!(
+            "SELECT max(lsn)::text FROM {buffer} WHERE action IN ('I','D')"
+        ))
+        .await;
+    sqlx::query("SELECT pgtrickle.create_stream_table(name=>'registration_new',query=>'SELECT id,value FROM registration_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL')")
+        .execute(&mut *caller).await.unwrap();
+    caller.commit().await.unwrap();
+    let initialized = lifecycle_state(&db.pool, "registration_new").await;
+    db.try_execute_with_config(
+        &["SET pg_trickle.refresh_strategy='differential'"],
+        "SELECT pgtrickle.refresh_stream_table('registration_new')",
+    )
+    .await
+    .unwrap();
+    let refreshed = lifecycle_state(&db.pool, "registration_new").await;
+    let expected: serde_json::Value = db
+        .query_scalar("SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM registration_journal t")
+        .await;
+    let directory = std::env::var("PGT_LIFECYCLE_ARTIFACT_DIR")
+        .unwrap_or_else(|_| "artifacts/lifecycle-histories".into());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        std::path::Path::new(&directory).join("registration-fixed-snapshot.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
+            "pinned_snapshot":snapshot,"pinned_rows":pinned,"committed_writer_cut":captured_cut,
+            "initialized":initialized,"refreshed":refreshed,"expected_journal":expected,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    db.assert_st_matches_query(
+        "registration_new",
+        "SELECT id,value FROM registration_journal",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_restore_after_consumed_history_cleanup_reinitializes_before_catchup() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
