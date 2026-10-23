@@ -396,31 +396,6 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     );
 }
 
-#[cfg(not(feature = "light-e2e"))]
-async fn wait_for_scheduler_refresh(
-    db: &E2eDb,
-    pgt_name: &str,
-    timeout: std::time::Duration,
-) -> bool {
-    let initial = db
-        .query_scalar_opt::<String>(&format!(
-            "SELECT last_refresh_at::text FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_name = '{pgt_name}'"
-        ))
-        .await;
-    db.wait_for_condition(
-        "scheduler refresh",
-        &format!(
-            "SELECT last_refresh_at IS NOT NULL AND last_refresh_at::text <> '{}' \
-             FROM pgtrickle.pgt_stream_tables WHERE pgt_name = '{pgt_name}'",
-            initial.unwrap_or_default()
-        ),
-        timeout,
-        std::time::Duration::from_millis(300),
-    )
-    .await
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 2.6 — CALCULATED DIFFERENTIAL leaf auto-cascades from FULL upstream
 // ═══════════════════════════════════════════════════════════════════════════
