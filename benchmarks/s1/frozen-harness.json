@@ -55,7 +55,7 @@
     "showcase/mdm-stewardship/01-fixture.sql": "cab7cbe1d02f3d435c12f8ea0bf8c078069626da9b33677a0f3ff3ad2f4cac4a",
     "showcase/mdm-stewardship/02-read-only-package.sql": "f1b41ed7a641f79a7e89dbfad9e560cac5846f989c7c3d00446f5e538b9a837d",
     "test_supervisor.py": "dd623af980b9f9d2ac9042e3198b704ae62a46f856f61fe8fe2383f1fe819e34",
-    "tests/integrations/pg-mdm/time/audit-r53-repair.py": "12a98b8953543f088d71c52eca30b34b4a4441eef750c7cc087fd3113df75210",
+    "tests/integrations/pg-mdm/time/audit-r53-repair.py": "bd05aebafa2a05fe436f3c7a13802f153bab9832c23b4c886b0a117431f6ef28",
     "tests/integrations/pg-mdm/time/bootstrap_compat.py": "7b1a5a6051a206ffc56816bbc79ad9e957cd0404a36c6d68d36faf17b1ae9bb5",
     "tests/integrations/pg-mdm/time/boundaries.sql": "8ea5931a9fd0e62753b391b46d27040e23dc36d23b19fb193ec499d9adb097cc",
     "tests/integrations/pg-mdm/time/idle.sql": "0789246af7071271336dc8cecb8e865022c86068701bb7eafd375c489ec93779",
