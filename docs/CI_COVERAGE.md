@@ -615,3 +615,22 @@ after rejected input while decoding continued. It now pins the initial receipt
 ID boundary, waits for that cohort to be acknowledged, and compares the same
 cohort after rejection. New bookkeeping receipts remain outside the protected
 cohort. All 11 LSN contract checks passed without retries after this repair.
+
+The next matched allocation replay, hosted run `39772191763` at comparison SHA
+`58363734`, passed the producer, both integration jobs, and all six light
+shards, but both full jobs failed, so the pair is invalid and has no usable
+cost comparison. The before broad inventory passed 2,167/2,168; the nested
+view test observed two rows instead of three. Its lateral convergence and
+scheduler due-time tests passed. The before isolated WAL phase passed 15/16:
+the pre-receipt crash-boundary test timed out after 196.6 seconds. The
+dependency was `TRANSITIONING` with no slot or cutover recorded after the
+readiness receipt had been acknowledged; disabling autovacuum on the ephemeral
+receipt table did not remove the stall. Before recovery repetitions passed
+9/10, with the same `NO_DATA` versus `DIFFERENTIAL` assertion as prior runs.
+The after bounded inventory passed 1,199/1,200; the third refresh unexpectedly
+succeeded in `test_consecutive_errors_tracked_and_reset`. After recovery
+repetitions passed 10/10. Source, package, workload image, Rust, nextest, and
+PostgreSQL identities matched; the hosted runner image revision and kernel
+differed. The validator rejected the run because both full jobs failed. Full
+logs, identity records, and validator inputs are retained under
+`target/ci1188-comparison/run-39772191763/`.
