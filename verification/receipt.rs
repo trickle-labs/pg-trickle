@@ -9,6 +9,31 @@
 use vstd::prelude::*;
 
 verus! {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetiredSlotState { Absent, Owned, Mismatch }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetiredSlotAction { Keep, Forget, Drop }
+
+pub fn retired_slot_action(owner_matches: bool, active_reference: bool, slot: RetiredSlotState) -> (action: RetiredSlotAction)
+    ensures
+        match action {
+            RetiredSlotAction::Keep => !owner_matches || active_reference || slot == RetiredSlotState::Mismatch,
+            RetiredSlotAction::Forget => owner_matches && !active_reference && slot == RetiredSlotState::Absent,
+            RetiredSlotAction::Drop => owner_matches && !active_reference && slot == RetiredSlotState::Owned,
+        },
+{
+    if !owner_matches || active_reference {
+        RetiredSlotAction::Keep
+    } else {
+        match slot {
+            RetiredSlotState::Absent => RetiredSlotAction::Forget,
+            RetiredSlotState::Owned => RetiredSlotAction::Drop,
+            RetiredSlotState::Mismatch => RetiredSlotAction::Keep,
+        }
+    }
+}
+
 // Recognition and source classification are adapter assumptions; no catalog whitelist.
 pub fn may_skip_source_free_row(source_change: bool, recognized_table: bool, ordinary_dml: bool) -> (result: bool)
     ensures result == (!source_change && recognized_table && ordinary_dml),
@@ -41,7 +66,27 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{may_skip_source_free_row, receipt_ack_row_limit};
+    use super::{
+        RetiredSlotAction, RetiredSlotState, may_skip_source_free_row, receipt_ack_row_limit,
+        retired_slot_action,
+    };
+
+    #[test]
+    fn test_retirement_requires_current_owner_unreferenced_matching_slot() {
+        use RetiredSlotAction::{Drop, Forget, Keep};
+        use RetiredSlotState::{Absent, Mismatch, Owned};
+        for (owner, referenced, slot, expected) in [
+            (true, false, Owned, Drop),
+            (true, false, Absent, Forget),
+            (true, false, Mismatch, Keep),
+            (false, false, Owned, Keep),
+            (false, false, Absent, Keep),
+            (true, true, Owned, Keep),
+            (true, true, Absent, Keep),
+        ] {
+            assert_eq!(retired_slot_action(owner, referenced, slot), expected);
+        }
+    }
 
     #[test]
     fn test_source_free_skip_never_admits_source_unrecognized_or_other_action() {

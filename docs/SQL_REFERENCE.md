@@ -1297,6 +1297,10 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Drops the underlying storage table with `CASCADE`.
 - Removes all catalog entries (metadata, dependencies, refresh history).
 - Cleans up CDC triggers and change buffer tables for source tables that are no longer tracked by any ST.
+- Local WAL slot removal is queued transactionally and performed by the
+  scheduler after commit. Rolling back the call preserves the slot. A disabled
+  scheduler defers physical cleanup and WAL release. Upgrade the extension
+  catalog to `0.108.4` before using this behavior.
 - Automatically drops a downstream publication only when its recorded binding
   still matches; stale bindings reject the stream-table drop for safety.
 

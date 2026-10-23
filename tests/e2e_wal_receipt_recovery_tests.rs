@@ -145,6 +145,11 @@ fn phase_code(phase: &str) -> i64 {
         "before_replay" => 2,
         "before_ack" => 3,
         "after_slot_advance" => 4,
+        "before_slot_retirement" => 5,
+        "after_slot_retirement" => 6,
+        "slot_retirement_kept" => 7,
+        "before_slot_adoption" => 8,
+        "slot_adoption_rejected" => 9,
         _ => panic!("unknown WAL receipt phase {phase}"),
     }
 }
@@ -1924,6 +1929,369 @@ async fn test_consumer_initialization_does_not_cover_rows_missing_from_fixed_sna
         "SELECT id,value FROM registration_journal",
     )
     .await;
+}
+
+async fn disable_wal_scheduler(fixture: &Fixture) {
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    assert!(fixture.db.wait_for_condition("idle WAL slot", &format!(
+        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{}' AND NOT active)",fixture.slot
+    ), WAIT, Duration::from_millis(25)).await);
+}
+
+async fn retirement_pending(fixture: &Fixture) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name=$1)",
+    )
+    .bind(&fixture.slot)
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap()
+}
+
+async fn slot_present(db: &E2eDb, slot: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)")
+        .bind(slot)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+async fn wait_for_retirement(fixture: &Fixture) {
+    assert!(fixture.db.wait_for_condition("committed slot retirement", &format!(
+        "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{0}') AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{0}')",fixture.slot
+    ), WAIT, Duration::from_millis(25)).await);
+}
+
+#[tokio::test]
+async fn test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash() {
+    let mut fixture = setup_wal_fixture("retirement_crash").await;
+    disable_wal_scheduler(&fixture).await;
+    assert!(
+        !fixture
+            .db
+            .query_scalar::<bool>("SELECT pg_try_advisory_lock(1346851927,0)")
+            .await,
+        "live scheduler must retain the local pipeline session mutex"
+    );
+    fixture
+        .db
+        .execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{}')",
+            fixture.stream
+        ))
+        .await;
+    assert!(retirement_pending(&fixture).await);
+    assert!(
+        slot_present(&fixture.db, &fixture.slot).await,
+        "API commit cannot physically drop the slot"
+    );
+    fixture.db.pool = restart_and_check_named(&fixture, "wal_retirement_crash_identity").await;
+    assert!(
+        retirement_pending(&fixture).await,
+        "retirement intent must survive a retained restart"
+    );
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+
+    let phase = "after_slot_retirement";
+    let (barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+    set_wal_phase(&fixture.db, fixture.oid, phase, &fixture.slot).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+    assert!(
+        !slot_present(&fixture.db, &fixture.slot).await,
+        "witness must follow actual physical DROP"
+    );
+    assert!(
+        retirement_pending(&fixture).await,
+        "intent deletion is still uncommitted"
+    );
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    clear_wal_phase(&fixture.db).await;
+    for args in [
+        vec!["kill", "--signal", "KILL", fixture.db.container_id()],
+        vec!["start", fixture.db.container_id()],
+    ] {
+        let output = tokio::process::Command::new("docker")
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "retirement crash/restart failed");
+    }
+    drop(barrier);
+    fixture.db.pool = fixture.db.reconnect_after_restart().await;
+    assert!(
+        retirement_pending(&fixture).await,
+        "aborted worker deletion must retain committed intent"
+    );
+    assert!(!slot_present(&fixture.db, &fixture.slot).await);
+    assert_eq!(
+        identity(
+            &fixture.db,
+            "wal_retirement_crash_identity",
+            fixture.db.container_id()
+        )
+        .await,
+        fixture.identity
+    );
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_retirement(&fixture).await;
+}
+
+#[tokio::test]
+async fn test_slot_retirement_keeps_active_stale_and_mismatched_slots() {
+    let fixture = setup_wal_fixture("retirement_kept").await;
+    disable_wal_scheduler(&fixture).await;
+    // Exercise each guard in the actual worker, including SQL NULL physical-slot fields.
+    for (slot, owner, create) in [
+        (fixture.slot.clone(), "instance_id", None),
+        (
+            "retirement_stale".into(),
+            "'stale-owner'",
+            Some("SELECT pg_create_logical_replication_slot('retirement_stale','test_decoding')"),
+        ),
+        (
+            "retirement_plugin".into(),
+            "instance_id",
+            Some("SELECT pg_create_logical_replication_slot('retirement_plugin','pgoutput')"),
+        ),
+        (
+            "retirement_physical".into(),
+            "instance_id",
+            Some("SELECT pg_create_physical_replication_slot('retirement_physical')"),
+        ),
+    ] {
+        if let Some(sql) = create {
+            fixture.db.execute(sql).await;
+        }
+        fixture.db.execute(&format!("INSERT INTO pgtrickle.pgt_wal_slot_retirements(slot_name,source_relid,capture_instance_id) SELECT '{slot}',{}::oid,{owner} FROM pgtrickle.pgt_capture_instance",fixture.oid)).await;
+        let phase = "slot_retirement_kept";
+        let (mut barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+        set_wal_phase(&fixture.db, fixture.oid, phase, &slot).await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+        assert!(
+            slot_present(&fixture.db, &slot).await,
+            "guard must preserve {slot}"
+        );
+        assert!(fixture.db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await,
+            "mismatch must retain its diagnostic intent");
+        assert_eq!(
+            cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+            Some("WAL")
+        );
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+            .await;
+        clear_wal_phase(&fixture.db).await;
+        release_wal_barrier(&mut barrier, fixture.oid, phase).await;
+        drop(barrier);
+        // Block until the witnessed worker transaction releases its intent lock.
+        fixture
+            .db
+            .execute(&format!(
+                "DELETE FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}'"
+            ))
+            .await;
+        if create.is_some() {
+            fixture
+                .db
+                .execute(&format!("SELECT pg_drop_replication_slot('{slot}')"))
+                .await;
+        }
+    }
+    fixture
+        .db
+        .execute(&format!(
+            "SELECT pgtrickle.drop_stream_table('{}')",
+            fixture.stream
+        ))
+        .await;
+    let phase = "before_slot_retirement";
+    let (mut barrier, pid) = hold_wal_barrier(&fixture.db, fixture.oid, phase).await;
+    set_wal_phase(&fixture.db, fixture.oid, phase, &fixture.slot).await;
+    fixture
+        .db
+        .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    let worker = wait_for_wal_barrier(&fixture.db, fixture.oid, phase, pid).await;
+    let mut recovery = fixture.db.pool.acquire().await.unwrap();
+    let recovery_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *recovery)
+        .await
+        .unwrap();
+    let recovery_task = tokio::spawn(async move {
+        let result = sqlx::query("SELECT pgtrickle.recover_capture_instance()")
+            .execute(&mut *recovery)
+            .await;
+        result.expect_err("the blocked recovery call must be cancelled");
+    });
+    assert!(
+        fixture
+            .db
+            .wait_for_condition(
+                "capture recovery blocked by retirement owner lock",
+                &format!("SELECT {worker}=ANY(pg_blocking_pids({recovery_pid}))"),
+                WAIT,
+                Duration::from_millis(25)
+            )
+            .await
+    );
+    assert!(
+        fixture
+            .db
+            .query_scalar::<bool>(&format!("SELECT pg_cancel_backend({recovery_pid})"))
+            .await
+    );
+    recovery_task.await.unwrap();
+    clear_wal_phase(&fixture.db).await;
+    release_wal_barrier(&mut barrier, fixture.oid, phase).await;
+    drop(barrier);
+    wait_for_retirement(&fixture).await;
+}
+
+#[tokio::test]
+async fn test_dropped_wal_source_retains_retirement_until_last_consumer_commits() {
+    for legacy in [false, true] {
+        let fixture = setup_wal_fixture(if legacy {
+            "retirement_source_drop_legacy"
+        } else {
+            "retirement_source_drop"
+        })
+        .await;
+        disable_wal_scheduler(&fixture).await;
+        if legacy {
+            fixture.db.execute(&format!("UPDATE pgtrickle.pgt_dependencies SET slot_name=NULL WHERE source_relid={}::oid",fixture.oid)).await;
+        }
+        fixture
+            .db
+            .execute(&format!("DROP TABLE {}", fixture.source))
+            .await;
+        assert!(
+            retirement_pending(&fixture).await,
+            "source-drop hook must retain exact slot provenance"
+        );
+        let mut caller = fixture.db.pool.begin().await.unwrap();
+        sqlx::query("SELECT pgtrickle.drop_stream_table($1)")
+            .bind(&fixture.stream)
+            .execute(&mut *caller)
+            .await
+            .unwrap();
+        caller.rollback().await.unwrap();
+        assert!(slot_present(&fixture.db, &fixture.slot).await);
+        assert!(retirement_pending(&fixture).await);
+        fixture
+            .db
+            .execute(&format!(
+                "SELECT pgtrickle.drop_stream_table('{}')",
+                fixture.stream
+            ))
+            .await;
+        fixture
+            .db
+            .alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+            .await;
+        wait_for_retirement(&fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn test_deferred_consumer_registration_rollback_preserves_wal_slot() {
+    let fixture = setup_wal_fixture("deferred_rollback").await;
+    disable_wal_scheduler(&fixture).await;
+    let baseline = lifecycle_state(&fixture.db.pool, &fixture.stream).await;
+    let mut caller = fixture.db.pool.begin().await.unwrap();
+    sqlx::query(AssertSqlSafe(format!("SELECT pgtrickle.create_stream_table(name=>'deferred_abandoned',query=>'SELECT id,value FROM {}',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',initialize=>false)",fixture.source)))
+        .execute(&mut *caller).await.unwrap();
+    caller.rollback().await.unwrap();
+    assert!(slot_present(&fixture.db, &fixture.slot).await);
+    assert!(
+        !retirement_pending(&fixture).await,
+        "rollback must discard retirement intent"
+    );
+    assert_eq!(
+        cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+        Some("WAL")
+    );
+    assert_eq!(
+        lifecycle_state(&fixture.db.pool, &fixture.stream).await,
+        baseline
+    );
+}
+
+#[tokio::test]
+async fn test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash() {
+    let mut db = E2eDb::new_dedicated().await.with_extension().await;
+    configure_scheduler(&db).await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("CREATE TABLE retirement_orphan_source(id int PRIMARY KEY,value text); ALTER TABLE retirement_orphan_source REPLICA IDENTITY FULL; INSERT INTO retirement_orphan_source VALUES(1,'baseline')").await;
+    db.execute("SELECT pgtrickle.create_stream_table(name=>'retirement_orphan_stream',query=>'SELECT id,value FROM retirement_orphan_source',schedule=>'24h',refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')").await;
+    let oid = i64::from(db.table_oid("retirement_orphan_source").await);
+    let stable: String = db
+        .query_scalar(&format!("SELECT pgtrickle.source_stable_name({oid}::oid)"))
+        .await;
+    let slot = format!("pgtrickle_{stable}");
+    let (mut before, before_pid) = hold_wal_barrier(&db, oid, "before_slot_adoption").await;
+    set_wal_phase(&db, oid, "before_slot_adoption", &slot).await;
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    wait_for_wal_barrier(&db, oid, "before_slot_adoption", before_pid).await;
+    assert!(
+        slot_present(&db, &slot).await,
+        "pristine creation must precede the witness"
+    );
+    assert!(db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await,
+        "creation must already have a committed reservation");
+    db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
+        .await;
+    db.execute("SELECT pgtrickle.drop_stream_table('retirement_orphan_stream')")
+        .await;
+    let (rejected, rejected_pid) = hold_wal_barrier(&db, oid, "slot_adoption_rejected").await;
+    set_wal_phase(&db, oid, "slot_adoption_rejected", &slot).await;
+    release_wal_barrier(&mut before, oid, "before_slot_adoption").await;
+    drop(before);
+    wait_for_wal_barrier(&db, oid, "slot_adoption_rejected", rejected_pid).await;
+    clear_wal_phase(&db).await;
+    for args in [
+        vec!["kill", "--signal", "KILL", db.container_id()],
+        vec!["start", db.container_id()],
+    ] {
+        let output = tokio::process::Command::new("docker")
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "orphan retained crash/restart failed"
+        );
+    }
+    drop(rejected);
+    db.pool = db.reconnect_after_restart().await;
+    assert!(slot_present(&db, &slot).await);
+    assert!(db.query_scalar::<bool>(&format!("SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')")).await);
+    db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    assert!(db.wait_for_condition("orphan retired after rejected adoption",&format!(
+        "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{slot}') AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='{slot}')"
+    ),WAIT,Duration::from_millis(25)).await);
 }
 
 #[tokio::test]

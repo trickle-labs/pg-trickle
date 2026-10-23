@@ -5,6 +5,10 @@ set -euo pipefail
 
 FROM_VERSION="${1:?previous release version required}"
 TO_VERSION="${2:?candidate release version required}"
+IDENTITY_MIGRATION=false
+if [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.3" || "$TO_VERSION" == "0.108.4" ) ]]; then
+    IDENTITY_MIGRATION=true
+fi
 CANDIDATE_DIR="${PGT_EXTENSION_DIR:?candidate package directory is required}"
 ARCHIVE_NAME="pg_trickle-${FROM_VERSION}-pg18-linux-amd64.tar.gz"
 WORK_DIR="$(mktemp -d)"
@@ -63,6 +67,31 @@ OLD_VERSION="$(psql 'SELECT pgtrickle.version()')"
     echo "previous package reports $OLD_VERSION, expected $FROM_VERSION" >&2
     exit 1
 }
+
+WAL_SLOT=""
+if [[ "$FROM_VERSION" == "0.108.3" && "$TO_VERSION" == "0.108.4" ]]; then
+    psql "ALTER SYSTEM SET pg_trickle.scheduler_interval_ms='100'" >/dev/null
+    psql 'SELECT pg_reload_conf()' >/dev/null
+    psql "CREATE TABLE public.retirement_upgrade_source(id int PRIMARY KEY,value text);
+        ALTER TABLE public.retirement_upgrade_source REPLICA IDENTITY FULL;
+        INSERT INTO public.retirement_upgrade_source VALUES(1,'published baseline');
+        SELECT pgtrickle.create_stream_table(name=>'retirement_upgrade_st',
+            query=>'SELECT id,value FROM public.retirement_upgrade_source',schedule=>'24h',
+            refresh_mode=>'DIFFERENTIAL',cdc_mode=>'wal')" >/dev/null
+    for attempt in $(seq 1 90); do
+        WAL_SLOT="$(psql "SELECT slot_name FROM pgtrickle.pgt_dependencies
+            WHERE source_relid='public.retirement_upgrade_source'::regclass AND cdc_mode='WAL'")"
+        [[ -n "$WAL_SLOT" ]] && break
+        sleep 1
+    done
+    [[ -n "$WAL_SLOT" ]] || { echo "published package did not establish actual WAL capture" >&2; exit 1; }
+    psql "ALTER SYSTEM SET pg_trickle.enabled='false'" >/dev/null
+    psql 'SELECT pg_reload_conf()' >/dev/null
+    psql "SELECT to_regclass('pgtrickle.pgt_wal_slot_retirements') IS NULL" | grep -qx t
+    WAL_BASELINE="$(psql "SELECT row_to_json(s)::text FROM (SELECT frontier,is_populated,needs_reinit
+        FROM pgtrickle.pgt_stream_tables WHERE pgt_name='retirement_upgrade_st') s")"
+    echo "Published WAL capture established before upgrade: slot=$WAL_SLOT state=$WAL_BASELINE"
+fi
 
 psql "CREATE TABLE public.v106_upgrade_source (id integer PRIMARY KEY, value text NOT NULL); \
       INSERT INTO public.v106_upgrade_source VALUES (1, 'one'), (2, 'two'); \
@@ -148,12 +177,15 @@ QUIESCED="$(psql 'SELECT pgtrickle.quiesce(30)')"
 
 UPGRADE_DIR="$CANDIDATE_DIR/usr/share/postgresql/18/extension"
 if [[ ! -f "$UPGRADE_DIR/pg_trickle--${FROM_VERSION}--${TO_VERSION}.sql" ]]; then
-    [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$TO_VERSION" == "0.108.3" ) ]]
+    [[ "$FROM_VERSION" == "0.106.1" && ( "$TO_VERSION" == "0.108.1" || "$IDENTITY_MIGRATION" == true ) ]]
     test -f "$UPGRADE_DIR/pg_trickle--0.106.1--0.107.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.107.0--0.108.0.sql"
     test -f "$UPGRADE_DIR/pg_trickle--0.108.0--0.108.1.sql"
-    if [[ "$TO_VERSION" == "0.108.3" ]]; then
+    if [[ "$IDENTITY_MIGRATION" == true ]]; then
         test -f "$UPGRADE_DIR/pg_trickle--0.108.1--0.108.3.sql"
+    fi
+    if [[ "$TO_VERSION" == "0.108.4" ]]; then
+        test -f "$UPGRADE_DIR/pg_trickle--0.108.3--0.108.4.sql"
     fi
 fi
 docker cp "$CANDIDATE_DIR/usr/lib/postgresql/18/lib/." "$CONTAINER_ID:/usr/lib/postgresql/18/lib/"
@@ -182,7 +214,7 @@ if [[ -n "${PGT_RELEASE_ATTESTATION_PATH:-}" ]]; then
         --candidate-root "$CANDIDATE_DIR" \
         --output "$PGT_RELEASE_ATTESTATION_PATH"
 fi
-if [[ "$TO_VERSION" == "0.108.3" ]]; then
+if [[ "$IDENTITY_MIGRATION" == true ]]; then
     psql "ALTER EXTENSION pg_trickle UPDATE TO '0.108.1'" >/dev/null
     if psql "ALTER EXTENSION pg_trickle UPDATE TO '${TO_VERSION}'" >"$WORK_DIR/blocked-upgrade.log" 2>&1; then
         echo "identity migration accepted an active consumer" >&2
@@ -226,7 +258,7 @@ BATCHES_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(b)::text, '|' 
 PAYLOAD_AFTER="$(psql "SELECT md5(COALESCE(string_agg(row_to_json(p)::text, '|' \
     ORDER BY batch_token, ordinal), '')) FROM ${DELTA_RELATION} p")"
 [[ "$PENDING_AFTER" == "$PENDING_BEFORE" ]] || { echo "pending CDC rows changed across upgrade" >&2; exit 1; }
-if [[ "$TO_VERSION" == "0.108.3" ]]; then
+if [[ "$IDENTITY_MIGRATION" == true ]]; then
     [[ "$GRAPH_AFTER" != "$GRAPH_BEFORE" ]] || { echo "identity migration did not invalidate graph binding" >&2; exit 1; }
     psql "SELECT row_identity_version IS NULL AND needs_reinit FROM pgtrickle.pgt_stream_tables \
         WHERE pgt_name = 'v106_upgrade_st'" | grep -qx t
@@ -238,13 +270,13 @@ fi
 [[ "$CURSOR_AFTER" == "$CURSOR_BEFORE" ]] || { echo "consumer cursor changed across upgrade" >&2; exit 1; }
 [[ "$BATCHES_AFTER" == "$BATCHES_BEFORE" ]] || { echo "output batches changed across upgrade" >&2; exit 1; }
 [[ "$PAYLOAD_AFTER" == "$PAYLOAD_BEFORE" ]] || { echo "typed output payload changed across upgrade" >&2; exit 1; }
-if [[ "$TO_VERSION" != "0.108.3" ]]; then
+if [[ "$IDENTITY_MIGRATION" != true ]]; then
     psql "SELECT pgtrickle.ack_output_delta_resnapshot( \
         '${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid);" | grep -qx ACTIVE
 fi
 
 refresh_graph
-if [[ "$TO_VERSION" == "0.108.3" ]]; then
+if [[ "$IDENTITY_MIGRATION" == true ]]; then
     psql "SELECT row_identity_version = 3 AND NOT needs_reinit FROM pgtrickle.pgt_stream_tables \
         WHERE pgt_name = 'v106_upgrade_st'" | grep -qx t
     if psql "SELECT pgtrickle.ack_output_delta_resnapshot('${FENCED_CONSUMER_ID}'::uuid, '${FENCED_TOKEN}'::uuid)" >"$WORK_DIR/stale-token.log" 2>&1; then
@@ -262,4 +294,30 @@ psql "SELECT NOT EXISTS ( \
      SELECT id, value FROM public.v106_upgrade_source) UNION ALL \
     (SELECT id, value FROM public.v106_upgrade_source EXCEPT ALL \
      SELECT id, value FROM public.v106_upgrade_st))" | grep -qx t
-echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION} with pending changes and durable consumer data preserved; identity migration requires a fresh resnapshot."
+if [[ -n "$WAL_SLOT" ]]; then
+    [[ "$(psql "SELECT row_to_json(s)::text FROM (SELECT frontier,is_populated,needs_reinit
+        FROM pgtrickle.pgt_stream_tables WHERE pgt_name='retirement_upgrade_st') s")" == "$WAL_BASELINE" ]]
+    psql "SELECT NOT EXISTS((SELECT id,value FROM retirement_upgrade_st EXCEPT ALL SELECT id,value FROM retirement_upgrade_source)
+        UNION ALL (SELECT id,value FROM retirement_upgrade_source EXCEPT ALL SELECT id,value FROM retirement_upgrade_st))" | grep -qx t
+    psql "SELECT c.relpersistence='p' AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a WHERE grantee=0)
+        FROM pg_class c WHERE c.oid='pgtrickle.pgt_wal_slot_retirements'::regclass" | grep -qx t
+    psql "SELECT 'WHERE false'=e.extcondition[array_position(e.extconfig,'pgtrickle.pgt_wal_slot_retirements'::regclass::oid)]
+        FROM pg_extension e WHERE e.extname='pg_trickle'" | grep -qx t
+    psql "BEGIN; SELECT pgtrickle.drop_stream_table('retirement_upgrade_st'); ROLLBACK" >/dev/null
+    psql "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='$WAL_SLOT')
+        AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements)" | grep -qx t
+    psql "SELECT pgtrickle.drop_stream_table('retirement_upgrade_st')" >/dev/null
+    psql "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='$WAL_SLOT')
+        AND EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='$WAL_SLOT')" | grep -qx t
+    psql "ALTER SYSTEM SET pg_trickle.enabled='true'" >/dev/null
+    psql 'SELECT pg_reload_conf()' >/dev/null
+    for attempt in $(seq 1 90); do
+        retired="$(psql "SELECT NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='$WAL_SLOT')
+            AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_wal_slot_retirements WHERE slot_name='$WAL_SLOT')")"
+        [[ "$retired" == t ]] && break
+        sleep 1
+    done
+    [[ "$retired" == t ]] || { echo "upgraded scheduler did not retire committed slot" >&2; exit 1; }
+    echo "Published WAL state survived upgrade; durable private retirement catalog, rollback and committed drain passed."
+fi
+echo "Published v${FROM_VERSION} binary upgraded to v${TO_VERSION} with pending changes and durable consumer data preserved."

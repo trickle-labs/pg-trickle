@@ -674,6 +674,18 @@ CREATE INDEX IF NOT EXISTS pgt_wal_receipts_pending_idx
 REVOKE ALL ON TABLE pgtrickle.pgt_wal_receipts FROM PUBLIC;
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_wal_receipts', '');
 
+-- Retirement commits before a later scheduler transaction removes the slot.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_wal_slot_retirements (
+    slot_name            TEXT PRIMARY KEY,
+    source_relid         OID NOT NULL,
+    capture_instance_id  TEXT NOT NULL,
+    queued_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+REVOKE ALL ON TABLE pgtrickle.pgt_wal_slot_retirements FROM PUBLIC;
+SELECT pg_catalog.pg_extension_config_dump(
+    'pgtrickle.pgt_wal_slot_retirements', 'WHERE false'
+);
+
 -- v0.92.0: durable capture ownership and upgrade quiescence state.
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_capture_instance (
     singleton                   BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),

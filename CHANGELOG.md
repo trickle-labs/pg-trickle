@@ -222,6 +222,10 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Retire local WAL slots only after consumer removal or trigger fallback commits.
+  Caller rollback preserves the original slot; durable cleanup reservations also
+  cover interrupted creation and restart after physical removal. This requires
+  the `0.108.3` to `0.108.4` catalog upgrade (#1222).
 - Reject initial population under REPEATABLE READ or SERIALIZABLE rather than
   publish a newer capture frontier over rows from an older snapshot. Retry
   under READ COMMITTED, or defer initial population until the first refresh

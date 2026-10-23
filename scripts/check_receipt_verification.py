@@ -10,12 +10,20 @@ import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/receipt.rs"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1222-receipt-prefix/evidence"
-OBLIGATIONS = ["receipt_ack_row_limit", "may_skip_source_free_row"]
+OBLIGATIONS = ["receipt_ack_row_limit", "may_skip_source_free_row", "retired_slot_action"]
+PRODUCTION_INPUTS = [
+    "src/lib.rs", "src/wal_decoder.rs", "src/api/helpers.rs", "src/api/alter.rs",
+    "src/hooks.rs", "src/scheduler/scheduler_loop.rs", "src/config/scheduler.rs",
+    "sql/pg_trickle--0.108.3--0.108.4.sql", "Cargo.toml", "Cargo.lock",
+]
 MUTATIONS = {
     "off-by-one": ("Some(message_count as i32)", "Some((message_count + 1) as i32)"),
     "skip-source-row": ("    !source_change && recognized_table && ordinary_dml\n", "    recognized_table && ordinary_dml\n"),
     "skip-unrecognized-table": ("    !source_change && recognized_table && ordinary_dml\n", "    !source_change && ordinary_dml\n"),
     "skip-other-action": ("    !source_change && recognized_table && ordinary_dml\n", "    !source_change && recognized_table\n"),
+    "retire-stale-owner": ("if !owner_matches || active_reference {", "if active_reference {"),
+    "retire-active-reference": ("if !owner_matches || active_reference {", "if !owner_matches {"),
+    "retire-mismatched-slot": ("RetiredSlotState::Mismatch => RetiredSlotAction::Keep,", "RetiredSlotState::Mismatch => RetiredSlotAction::Drop,"),
 }
 
 
@@ -37,6 +45,8 @@ def check_contract() -> None:
         raise ValueError("production acknowledgement does not execute the verified limit")
     if "crate::receipt::may_skip_source_free_row(" not in (runner.ROOT / "src/wal_decoder.rs").read_text():
         raise ValueError("production bookkeeping classification bypasses the verified decision")
+    if "crate::receipt::retired_slot_action(" not in (runner.ROOT / "src/wal_decoder.rs").read_text():
+        raise ValueError("production retirement bypasses the verified decision")
 
 
 def run_checks() -> None:
@@ -72,14 +82,14 @@ def run_checks() -> None:
             "obligations": OBLIGATIONS,
             "production_inputs": {
                 path: runner.sha256((runner.ROOT / path).read_bytes())
-                for path in ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"]
+                for path in PRODUCTION_INPUTS
             },
             "baseline": {"returncode": baseline.returncode, "summary": summary[0],
                          "output_sha256": runner.sha256(baseline.stdout.encode())},
             "semantic_mutation": controls["off-by-one"], "semantic_mutations": controls,
         }
         (EVIDENCE / "receipt-verification.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        print("Receipt limit and bookkeeping gate verified; all four executable mutants rejected. "
+        print("Receipt limit, bookkeeping and retirement gates verified; all executable mutants rejected. "
               f"Evidence: {EVIDENCE.relative_to(runner.ROOT)}")
     finally:
         mutant.unlink(missing_ok=True)
