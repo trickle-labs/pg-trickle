@@ -553,9 +553,8 @@ async fn settle_auto_invariants(
     timeout: Duration,
 ) {
     let deadline = std::time::Instant::now() + timeout;
-    // First wait: give the fused chain one opportunity to run.
-    wait_for_refresh_cycle(db, "prop_auto_l3", timeout).await;
-
+    // Check actual data instead of requiring a no-op scheduler tick.
+    let mut last_nudge = std::time::Instant::now();
     loop {
         if check_auto_invariants(db).await {
             return;
@@ -565,16 +564,12 @@ async fn settle_auto_invariants(
             assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
             return;
         }
-        // Wait for another scheduler cycle (l1 is the leaf and must process
-        // CDC before l2/l3 can be correct).  Cap the inner wait at the
-        // remaining time so the outer deadline is always respected (important
-        // for slow coverage / instrumented builds where 15 s may expire).
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining < Duration::from_millis(500) {
-            assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
-            return;
+        // Keep polling until the shared deadline, even under scheduler deferral.
+        if last_nudge.elapsed() >= Duration::from_secs(5) {
+            db.nudge_launcher_rescan().await;
+            last_nudge = std::time::Instant::now();
         }
-        wait_for_refresh_cycle(db, "prop_auto_l1", remaining.min(Duration::from_secs(30))).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
