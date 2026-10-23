@@ -3,7 +3,7 @@
 This runtime repair follows the remaining `special_sum` failure in #1217.
 It adds no formal arithmetic claim to the bounded #1220 lifecycle proof.
 
-For exact built-in numeric, real and double precision arguments, retain one
+For exact built-in numeric, real and double precision effective arguments, retain one
 private JSONB state per non-DISTINCT SUM/AVG: a numeric subtotal of finite
 inputs and separate counts of NaN, positive infinity and negative infinity.
 Initialize it from the same query and FILTER as the public aggregate. Update
@@ -29,8 +29,12 @@ rebuild creates and populates the additional private column for old tables.
 
 Known integer-column SUM/AVG queries keep their existing storage and producer.
 Unresolved expressions use SQL type checks; the new special-input arithmetic
-admits only the three exact argument OIDs. Numeric domains and custom types do
-not gain special-input support through this repair. DISTINCT and intermediate
+admits only the three exact OIDs of the effective action/FILTER-wrapped CASE
+argument. CASE can coerce a domain expression to its base numeric type, which
+then participates in this route. Initialization uses the same CASE coercion;
+raw-domain initialization and action-guarded updates must produce the same state.
+A known bare Scan domain column keeps its
+existing route. This is not general domain or custom-type support. DISTINCT and intermediate
 aggregate algorithms retain their existing routes. Arbitrary floating-point
 regrouping, bit-level rounding equivalence and finite overflow are not proved
 by this state representation or its small-value runtime examples.

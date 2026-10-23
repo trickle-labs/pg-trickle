@@ -125,6 +125,23 @@ async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxil
         ))
         .await;
     assert_eq!(result, "1");
+    db.execute("CREATE DOMAIN special_number AS numeric").await;
+    let wrapped = "CASE WHEN keep THEN v END";
+    let state = nonfinite::state_sql(wrapped);
+    let initial = nonfinite::state_sql("v");
+    let observed: bool = db
+        .query_scalar(&format!(
+            "SELECT \
+        bool_and(pg_typeof(v)::oid <> 1700 AND pg_typeof({wrapped})::oid=1700) \
+        AND ({state}) = '{{\"finite\":1,\"nan\":0,\"pos\":1,\"neg\":0}}'::jsonb \
+        AND ({initial})=({state}) \
+        FROM (VALUES('Infinity'::special_number,true),(1::special_number,true)) x(v,keep)"
+        ))
+        .await;
+    assert!(
+        observed,
+        "domain initialization and CASE-guarded deltas must admit the same effective base type"
+    );
 }
 
 #[tokio::test]

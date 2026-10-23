@@ -2,6 +2,8 @@
 
 /// Keep the subtotal separate: Infinity - Infinity cannot recover finite inputs.
 pub(crate) fn state_sql(argument: &str) -> String {
+    // Match action/FILTER CASE coercion when initialization receives a bare domain expression.
+    let argument = format!("CASE WHEN true THEN ({argument}) END");
     let admitted = format!("pg_catalog.pg_typeof({argument})::oid IN (700,701,1700)");
     format!(
         "CASE WHEN pg_catalog.pg_typeof(SUM({argument}))::oid IN (700,701,1700) THEN \

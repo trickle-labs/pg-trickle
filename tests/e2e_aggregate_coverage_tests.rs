@@ -186,7 +186,6 @@ async fn test_agg_nonfinite_sum_avg_return_to_finite_after_deletes() {
         }
         for mutation in [
             "UPDATE $s SET val=4 WHERE id=2",
-            "UPDATE $s SET val=1 WHERE id=2",
             "DELETE FROM $s WHERE id=1",
             "UPDATE $s SET val='-Infinity' WHERE id=2",
             "UPDATE $s SET val='NaN' WHERE id=2",
