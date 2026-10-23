@@ -491,6 +491,128 @@ async fn receipt_slot_reached(db: &E2eDb, slot: &str, oid: i64, value: &str) -> 
     .expect("inspect WAL slot acknowledgement")
 }
 
+#[tokio::test]
+async fn test_wal_receipt_commit_order_preserves_late_old_lsn_transaction() {
+    let fixture = setup_wal_fixture("commit_order").await;
+    let mut late = fixture.db.pool.begin().await.unwrap();
+    for table in [&fixture.source, &fixture.journal] {
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO public.{table} VALUES (2, 'late-old-lsn')"
+        )))
+        .execute(&mut *late)
+        .await
+        .unwrap();
+    }
+    commit_row(
+        &fixture.db,
+        &fixture.source,
+        &fixture.journal,
+        3,
+        "early-new-lsn",
+    )
+    .await;
+    wait_for_receipt(
+        &fixture.db.pool,
+        fixture.oid,
+        "ACKNOWLEDGED",
+        "early-new-lsn",
+    )
+    .await;
+    // The writer fence may hold the stream frontier while the older transaction is open.
+    late.commit().await.unwrap();
+    wait_for_receipt(
+        &fixture.db.pool,
+        fixture.oid,
+        "ACKNOWLEDGED",
+        "late-old-lsn",
+    )
+    .await;
+    wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+    assert_eq!(
+        cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
+        Some("WAL")
+    );
+    let rows: i64 = fixture
+        .db
+        .query_scalar(&format!("SELECT count(*) FROM {}", fixture.stream))
+        .await;
+    assert_eq!(
+        rows, 3,
+        "late commit must survive the newer row's consumed frontier"
+    );
+}
+
+#[tokio::test]
+async fn test_wal_receipt_small_limits_preserve_complete_transactions() {
+    let fixture = setup_wal_fixture("complete_prefix").await;
+    // 52 source rows + 52 journal rows + BEGIN/COMMIT straddle the minimum GUC value (100).
+    for (cycle, limit) in [100, 106, 107].into_iter().enumerate() {
+        fixture
+            .db
+            .alter_system_set_and_wait(
+                "pg_trickle.wal_max_changes_per_poll",
+                &limit.to_string(),
+                &limit.to_string(),
+            )
+            .await;
+        let before: i64 = fixture
+            .db
+            .query_scalar("SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history")
+            .await;
+        let token = format!("complete-prefix-{cycle}");
+        let mut tx = fixture.db.pool.begin().await.unwrap();
+        for table in [&fixture.source, &fixture.journal] {
+            sqlx::query(AssertSqlSafe(format!(
+                "INSERT INTO public.{table} SELECT id, $3 FROM generate_series($1::int, $2::int) id"
+            )))
+            .bind(2 + cycle as i32 * 52)
+            .bind(53 + cycle as i32 * 52)
+            .bind(&token)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        let xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        wait_for_receipt(&fixture.db.pool, fixture.oid, "ACKNOWLEDGED", &token).await;
+        wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
+        let mode = cdc_mode(&fixture.db, &fixture.source).await;
+        if mode.as_deref() != Some("WAL") {
+            let logs = tokio::process::Command::new("docker")
+                .args(["logs", "--tail", "200", fixture.db.container_id()])
+                .output()
+                .await
+                .unwrap();
+            panic!(
+                "limit={limit}: capture={mode:?}\n{}",
+                String::from_utf8_lossy(&logs.stderr)
+            );
+        }
+        let (messages, pending, commits): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE status <> 'ACKNOWLEDGED'), \
+             count(*) FILTER (WHERE data LIKE 'COMMIT %') \
+             FROM pgtrickle.pgt_wal_receipts WHERE source_relid = $1 AND source_xid::text = $2",
+        )
+        .bind(fixture.oid)
+        .bind(xid)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+        assert_eq!((messages, pending, commits), (106, 0, 1), "limit={limit}");
+        let reinitialized: bool = fixture.db.query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_refresh_history \
+             WHERE refresh_id > {before} AND (action IN ('FULL', 'REINITIALIZE') OR was_full_fallback))"
+        )).await;
+        assert!(
+            !reinitialized,
+            "limit={limit}: fallback cannot qualify receipt batching"
+        );
+    }
+}
+
 async fn run_interruption_case(phase: &str, status: &str, restart_twice: bool) {
     let fixture = setup_wal_fixture(phase).await;
     let sentinel_table = format!("wal_{}_identity", phase.replace('-', "_"));
