@@ -71,6 +71,6 @@
     "tests/integrations/pg-mdm/v0.48-live.sql": "72b7b7f623039882abdb11e1f59d92c915f3da70b9bded89de6d22de04a54725",
     "tests/integrations/pg-mdm/v0.48-security.sql": "054da4e498cc376f9dcfe96ab0a1d25afaa9233ad70c6bf43bc1938eab5e96d0",
     "tests/integrations/pg-mdm/v0.48-adjacent-upgrade.sql": "ca84ce45865c9d2a1cf037d9d67d421bda3f8cbbcaf24d4480dc215021cd1b8f",
-    "test_exec_launch_retry.py": "fbbfddd2c8be49c41599ffe41c5c95946a8c2575155f244ae10773ae3c6b5d59"
+    "test_exec_launch_retry.py": "92f78d3e74e307957de53c4c13808c72fa1dfaee0c92203b2ebe46f294597df5"
   }
 }
