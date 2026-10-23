@@ -299,8 +299,8 @@ async fn compare(
     // Opt-in: preserve the stricter numeric representation observation for
     // suites that deliberately test NUMERIC scale, without changing the
     // default SQL value-equality contract.
-    if std::env::var_os("DVM_OBSERVE_NUMERIC_SCALE").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        if let Err(diff) = e2e::oracle::compare_st_to_query_with_numeric_scale(
+    if std::env::var_os("DVM_OBSERVE_NUMERIC_SCALE").as_deref() == Some(std::ffi::OsStr::new("1"))
+        && let Err(diff) = e2e::oracle::compare_st_to_query_with_numeric_scale(
             db,
             &scenario.query.stream_table,
             &scenario.query.defining_query,
@@ -322,9 +322,8 @@ async fn compare(
                 None,
                 diff.to_string(),
             );
-            observed.relation_diff = Some(diff);
-            return Err(observed);
-        }
+        observed.relation_diff = Some(diff);
+        return Err(observed);
     }
     Ok(())
 }
