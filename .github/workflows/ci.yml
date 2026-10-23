@@ -1657,7 +1657,7 @@ jobs:
           done
           docker cp sql/archive/pg_trickle--0.107.0.sql \
             pgtrickle-shipping-upgrade:/usr/share/postgresql/18/extension/
-          docker exec pgtrickle-shipping-upgrade psql -U postgres -v ON_ERROR_STOP=1 -c "
+          docker exec pgtrickle-shipping-upgrade psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
             DROP EXTENSION pg_trickle CASCADE;
             CREATE EXTENSION pg_trickle VERSION '0.107.0';
             CREATE TABLE shipping_upgrade_src (id INT PRIMARY KEY, val TEXT);
