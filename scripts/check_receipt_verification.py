@@ -10,12 +10,12 @@ import check_lsn_verification as runner
 
 SOURCE = runner.ROOT / "verification/receipt.rs"
 EVIDENCE = runner.ROOT / ".p2p/work/issue-1222-receipt-prefix/evidence"
-OBLIGATIONS = ["receipt_ack_row_limit", "may_skip_bookkeeping_row"]
+OBLIGATIONS = ["receipt_ack_row_limit", "may_skip_source_free_row"]
 MUTATIONS = {
     "off-by-one": ("Some(message_count as i32)", "Some((message_count + 1) as i32)"),
-    "skip-source-row": ("    !source_change && known_table && ordinary_dml\n", "    known_table && ordinary_dml\n"),
-    "skip-unknown-table": ("    !source_change && known_table && ordinary_dml\n", "    !source_change && ordinary_dml\n"),
-    "skip-other-action": ("    !source_change && known_table && ordinary_dml\n", "    !source_change && known_table\n"),
+    "skip-source-row": ("    !source_change && recognized_table && ordinary_dml\n", "    recognized_table && ordinary_dml\n"),
+    "skip-unrecognized-table": ("    !source_change && recognized_table && ordinary_dml\n", "    !source_change && ordinary_dml\n"),
+    "skip-other-action": ("    !source_change && recognized_table && ordinary_dml\n", "    !source_change && recognized_table\n"),
 }
 
 
@@ -35,7 +35,7 @@ def check_contract() -> None:
         runner.ROOT / "src/wal_decoder.rs"
     ).read_text():
         raise ValueError("production acknowledgement does not execute the verified limit")
-    if "crate::receipt::may_skip_bookkeeping_row(" not in (runner.ROOT / "src/wal_decoder.rs").read_text():
+    if "crate::receipt::may_skip_source_free_row(" not in (runner.ROOT / "src/wal_decoder.rs").read_text():
         raise ValueError("production bookkeeping classification bypasses the verified decision")
 
 

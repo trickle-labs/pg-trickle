@@ -80,9 +80,9 @@ PROOF_CONTRACTS = {
         "cases": EXPECTED_CASES, "inputs": [],
     },
     "receipt": {
-        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit", "may_skip_bookkeeping_row"},
+        "schema": "pg-trickle-receipt-verification-v1", "obligations": {"receipt_ack_row_limit", "may_skip_source_free_row"},
         "cases": RECEIPT_CASES, "inputs": ["src/lib.rs", "src/wal_decoder.rs", "Cargo.toml", "Cargo.lock"],
-        "mutants": {"off-by-one", "skip-source-row", "skip-unknown-table", "skip-other-action"},
+        "mutants": {"off-by-one", "skip-source-row", "skip-unrecognized-table", "skip-other-action"},
     },
     "aggregate_lifecycle": {
         "schema": "pg-trickle-aggregate-lifecycle-verification-v1",

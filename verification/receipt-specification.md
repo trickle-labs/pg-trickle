@@ -5,10 +5,10 @@ cleanup, incarnation, reset/restore or recovery-transition proof work.
 
 The original raw-stream adapter below describes frozen `c06b7125`. The
 subsequent [feedback repair](receipt-feedback-safety.md) conservatively omits
-source-free private bookkeeping transactions from persistence and validates
-their place in a freshly peeked exact consuming prefix. Source and unknown
+source-free ordinary table transactions from persistence and validates their
+place in a freshly peeked exact consuming prefix. Source and unrecognized
 transactions retain complete durable receipts. The arithmetic contract still
-uses the entire consumed raw prefix, including bookkeeping, as n.
+uses the entire consumed raw prefix, including source-free work, as n.
 
 ## Independent contract
 

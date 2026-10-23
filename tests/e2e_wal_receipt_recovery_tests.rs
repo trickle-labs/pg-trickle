@@ -626,11 +626,18 @@ async fn test_wal_receipts_do_not_recursively_capture_their_own_payloads() {
                 'recursive_receipts',count(*) FILTER(WHERE data LIKE '%table pgtrickle.pgt_wal_receipts:%table pgtrickle.pgt_wal_receipts:%'))
              FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1",
         ).bind(fixture.oid).fetch_one(&fixture.db.pool).await.unwrap();
+        let recursive_transaction: serde_json::Value = sqlx::query_scalar(
+            "SELECT coalesce(jsonb_agg(jsonb_build_object('source_xid',source_xid,'source_change',source_change,'data',left(data,600)) ORDER BY receipt_id),'[]'::jsonb)
+             FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1 AND source_xid IN (
+               SELECT source_xid FROM pgtrickle.pgt_wal_receipts WHERE source_relid=$1
+               AND data LIKE '%table pgtrickle.pgt_wal_receipts:%table pgtrickle.pgt_wal_receipts:%' LIMIT 1)",
+        ).bind(fixture.oid).fetch_one(&fixture.db.pool).await.unwrap();
         record_lifecycle(
             &path,
             &mut history,
             serde_json::json!({
                 "cycle":cycle,"source_acknowledged":true,"sample":sample,
+                "recursive_transaction":recursive_transaction,
                 "installed_candidate":std::env::var("PGT_RELEASE_CANDIDATE_COMMIT").ok(),
             }),
         );

@@ -596,7 +596,7 @@ pub fn poll_wal_changes(
     for end in receipt_transaction_ends(&rows)? {
         let transaction = &rows[start..end];
         start = end;
-        if is_bookkeeping_transaction(transaction) {
+        if is_source_free_transaction(transaction) {
             continue;
         }
         for row in transaction {
@@ -721,17 +721,15 @@ fn same_decoded_messages(left: &[WalReceipt], right: &[WalReceipt]) -> bool {
         .eq(right.iter().map(|r| (&r.lsn, &r.source_xid, &r.data)))
 }
 
-/// Called only after complete BEGIN/COMMIT framing has been checked.
-fn is_bookkeeping_transaction(rows: &[WalReceipt]) -> bool {
+/// Called only after complete framing; replay has no effect for source-free DML.
+fn is_source_free_transaction(rows: &[WalReceipt]) -> bool {
     rows.get(1..rows.len().saturating_sub(1))
         .is_some_and(|body| {
             body.iter().all(|row| {
-                crate::receipt::may_skip_bookkeeping_row(
+                crate::receipt::may_skip_source_free_row(
                     row.source_change,
-                    matches!(
-                        extract_table_name_from_test_decoding(&row.data),
-                        Some("pgtrickle.pgt_wal_receipts" | "pgtrickle.pgt_change_tracking")
-                    ),
+                    extract_table_name_from_test_decoding(&row.data)
+                        .is_some_and(|name| !name.is_empty()),
                     matches!(parse_pgoutput_action(&row.data), Some('I' | 'U' | 'D')),
                 )
             })
@@ -1087,7 +1085,7 @@ fn represented_slot_prefix(
         {
             represented = applied_end;
             next += 1;
-        } else if !is_bookkeeping_transaction(transaction) {
+        } else if !is_source_free_transaction(transaction) {
             if next < applied_ends.len() {
                 return Err(PgTrickleError::WalTransitionError(
                     "decoded transaction differs from the next applied WAL receipt".into(),
@@ -3180,7 +3178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_receipt_bookkeeping_skip_rejects_source_unknown_and_truncate() {
+    fn test_receipt_source_free_skip_rejects_source_unrecognized_and_truncate() {
         let known = "table pgtrickle.pgt_wal_receipts: UPDATE: data[text]:'payload'";
         for (body, source, expected) in [
             (known, false, true),
@@ -3190,11 +3188,13 @@ mod tests {
                 false,
                 true,
             ),
-            ("table public.unknown: INSERT: id[integer]:1", false, false),
+            ("table public.other: INSERT: id[integer]:1", false, true),
+            ("table public.src: INSERT: id[integer]:1", true, false),
+            ("table : INSERT: id[integer]:1", false, false),
             (
                 "table pgtrickle.pgt_wal_receipts_extra: INSERT: id[integer]:1",
                 false,
-                false,
+                true,
             ),
             (
                 "table pgtrickle.pgt_wal_receipts: TRUNCATE: (no-flags)",
@@ -3209,16 +3209,30 @@ mod tests {
         ] {
             let tx = decoded_transaction(1, &[(body, source)]);
             receipt_transaction_ends(&tx).unwrap();
-            assert_eq!(is_bookkeeping_transaction(&tx), expected, "{body}");
+            assert_eq!(is_source_free_transaction(&tx), expected, "{body}");
         }
-        assert!(!is_bookkeeping_transaction(&decoded_transaction(
+        assert!(!is_source_free_transaction(&decoded_transaction(
             1,
             &[
                 (known, false),
                 ("table public.src: INSERT: id[integer]:1", true)
             ]
         )));
-        assert!(is_bookkeeping_transaction(&decoded_transaction(1, &[])));
+        assert!(is_source_free_transaction(&decoded_transaction(1, &[])));
+        assert!(is_source_free_transaction(&decoded_transaction(
+            1,
+            &[
+                (known, false),
+                (
+                    "table pgtrickle_changes.changes_42: INSERT: id[integer]:1",
+                    false
+                ),
+                (
+                    "table pgtrickle.pgt_capture_instance: UPDATE: singleton[boolean]:true",
+                    false
+                ),
+            ]
+        )));
     }
 
     #[test]
@@ -3238,8 +3252,13 @@ mod tests {
                 false,
             )],
         );
-        let unknown =
-            decoded_transaction(4, &[("table public.other: INSERT: id[integer]:2", false)]);
+        let unknown = decoded_transaction(
+            4,
+            &[(
+                "message: transactional: 1 prefix: user, sz: 0 content:",
+                false,
+            )],
+        );
         let raw = [noise1.clone(), source.clone(), noise3.clone(), unknown].concat();
         assert_eq!(
             represented_slot_prefix(&raw, &source, 0).unwrap(),
