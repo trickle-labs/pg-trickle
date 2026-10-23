@@ -587,14 +587,17 @@ async fn run_autorefresh_trace(seed: u64, config: &TraceConfig) {
     db.execute("CREATE TABLE prop_auto_src (id INT PRIMARY KEY, val INT NOT NULL)")
         .await;
 
-    for (st, query) in AUTO_INVARIANTS {
-        db.create_st(st, query, "1s", "DIFFERENTIAL").await;
-    }
-
+    // Seed before materializing the chain so the initial snapshot is
+    // deterministic. Later trace mutations still exercise asynchronous CDC
+    // propagation through all three layers.
     for _ in 0..config.initial_rows {
         let (id, val) = (ids.alloc(), rng.i32_range(0, 10));
         db.execute(&format!("INSERT INTO prop_auto_src VALUES ({id}, {val})"))
             .await;
+    }
+
+    for (st, query) in AUTO_INVARIANTS {
+        db.create_st(st, query, "1s", "DIFFERENTIAL").await;
     }
 
     // Wait for the full cascade to propagate through all 3 layers and for
