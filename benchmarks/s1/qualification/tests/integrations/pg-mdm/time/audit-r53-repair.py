@@ -14,6 +14,26 @@ import uuid
 from bootstrap_compat import adapt_bootstrap
 
 
+def run_docker_exec_with_launch_retry(args, *, timeout=300, on_retry=None):
+    """Retry only OCI exec errors proving the container command never launched.
+
+    No retry is permitted for a started psql process (including SQL errors),
+    Docker daemon failures, timeouts, or any other uncertain-execution case.
+    """
+    for attempt in range(3):
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        did_not_start = (len(args) >= 4 and args[:2] == ("docker", "exec")
+                         and result.returncode != 0 and not result.stdout
+                         and result.stderr.strip() ==
+                         "OCI runtime exec failed: exec failed: unable to start container process: "
+                         "procReady not received")
+        if not did_not_start or attempt == 2:
+            return result
+        if on_retry is not None:
+            on_retry(attempt + 1, args)
+        time.sleep(1 + attempt)
+
+
 def main():
     image, output = sys.argv[1:3]
     maintenance = sys.argv[3:] == ["--maintenance"]
@@ -52,8 +72,16 @@ def main():
     churn_completed_batches = 0
     churn_phase_started = False
 
+    def record_docker_exec_retry(attempt, args):
+        # Retain a bounded, non-sensitive retry receipt in the exact-run evidence.
+        observations.setdefault("docker_exec_launch_retries", []).append({
+            "attempt": attempt, "container": args[2], "program": args[3],
+            "reason": "OCI exec process did not start",
+        })
+        print("RETRY: OCI docker exec not started; attempt " + str(attempt), flush=True)
+
     def command(*args):
-        result = subprocess.run(args, capture_output=True, text=True, timeout=300)
+        result = run_docker_exec_with_launch_retry(args, on_retry=record_docker_exec_retry)
         if result.returncode:
             raise RuntimeError(" ".join(args) + "\n" + result.stdout + result.stderr)
         return result.stdout
@@ -65,10 +93,10 @@ def main():
 
     def profiled_sql(query, database=None):
         database = database or active_database[0]
-        result = subprocess.run(
+        result = run_docker_exec_with_launch_retry(
             ["docker", "exec", container, "psql", "-XAtq", "-U", "postgres", "-d",
              database, "-v", "ON_ERROR_STOP=1", "-c", query],
-            capture_output=True, text=True, timeout=300)
+            on_retry=record_docker_exec_retry)
         if result.returncode:
             raise RuntimeError(query + "\n" + result.stdout + result.stderr)
         with profile_log.open("a") as log:
@@ -734,10 +762,10 @@ def main():
             "SELECT count(*) FROM pgreact_mdm.route_cases("
             "'pgreact_mdm.authorized_policy_cases_v1'::regclass, "
             "'s1-idle-feasibility', NULL::text)")
-        route_plan_result = subprocess.run(
+        route_plan_result = run_docker_exec_with_launch_retry(
             ["docker", "exec", container, "psql", "-XAtq", "-U", "postgres",
              "-d", active_database[0], "-v", "ON_ERROR_STOP=1", "-c", route_plan_query],
-            capture_output=True, text=True, timeout=300)
+            on_retry=record_docker_exec_retry)
         if route_plan_result.returncode:
             raise RuntimeError(route_plan_query + "\n" + route_plan_result.stderr)
         route_plan_count = int(route_plan_result.stdout.strip().splitlines()[-1])
