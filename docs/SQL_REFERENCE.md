@@ -288,6 +288,10 @@ frontier. Retry creation under READ COMMITTED, or create with `initialize =>
 false` and perform the first refresh under READ COMMITTED. Failed creation
 publishes no table, dependency or frontier.
 
+For a consumer previously initialized from an old fixed snapshot, use a FULL
+refresh or `reinitialize_stream_table` under READ COMMITTED to rebuild its
+baseline; ordinary differential refresh may already be past the missing change.
+
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
 instead of CDC triggers or WAL replication slots. If the effective or explicit

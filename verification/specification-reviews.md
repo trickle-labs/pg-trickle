@@ -269,6 +269,39 @@ prefix-loop correctness, incarnation, cleanup, durability and full recovery
 proofs remain outside the formal claim. Build/named-execution provenance remains
 trusted runner input; this grants no merge approval.
 
+## Initial registration snapshot follow-up — #1219 / #1222
+
+Independent read-only reviewer `review_1221` identified and accepted a repair
+for initialized creation under an already-pinned fixed snapshot. Reproducer
+`e0b6a2e4` against backend `1bcd6a8e` successfully created/refreshed a consumer
+with one row instead of two committed journal rows, while publishing a cut
+beyond the missing writer change. The complete failing observation is retained.
+
+Review moved isolation admission from the initializer to shared creation before
+storage/CDC setup: legacy WAL reconciliation can drop slots that rollback cannot
+restore. Final source `49a8ed9ed4e3ce67251296b41c74e8b000597c28` rejects
+populated creation under REPEATABLE READ/SERIALIZABLE before these effects.
+Deferred/external creation keeps its frontierless behavior. Review also required
+fresh DIFFERENTIAL execution and writer-cut coverage instead of trusting the
+requested strategy alone.
+
+Final bounded evidence was accepted: 26/26 WAL-binary tests, fourteen core cases,
+2636 units, 26 Python checks and semantic floors 34/34 and 54/54. Both isolation
+rejections preserve the existing WAL slot/mode and permit later real source
+acknowledgement. READ COMMITTED retry, differential catch-up and deferred
+initialization across another commit match the independent journal.
+All 44 actual three-file package observations and six bindings agree on library
+SHA-256 `fe054e9f9cf89202c82a417fc79a866031b70de6f69e73586943dfa9f4d61670`.
+Five backend-frozen input hashes, separately qualified documentation and thirteen
+complete log hashes match. The initial daemon-EOF build failure and successful
+same-source retry remain retained; no runtime test was retried.
+
+The reviewer ran no project code. Existing six proof source/caller hashes match;
+retaining those records does not imply new proof execution or a new theorem.
+Previously stale consumers need FULL refresh/reinitialization under READ
+COMMITTED. Full cleanup/incarnation/protocol correctness, authenticated build
+provenance, latest-head remote CI and merge approval remain outside acceptance.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

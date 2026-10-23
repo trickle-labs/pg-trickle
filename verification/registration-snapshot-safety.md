@@ -42,6 +42,8 @@ guard applies to initial population regardless of requested maintenance mode.
 Creation without population (`initialize => false`, or external orchestration
 that disables population) does not execute this path and publishes no populated
 frontier. Its first refresh must establish the ordinary safe baseline.
+Previously affected consumers need a FULL refresh or explicit reinitialization
+under READ COMMITTED; this admission guard does not repair an old stale baseline.
 
 The regression checks both fixed-snapshot isolation levels, actual committed
 writer changes, the specific isolation rejection and absence of a partial
@@ -54,9 +56,18 @@ through its first READ COMMITTED refresh.
 
 This is a runtime adapter repair, not a new formal theorem. Existing bounded
 proofs retain their claims; any caller-input hash changed by the repair must
-be regenerated and bound to the installed package. Installed qualification is
-pending. It must exercise rejection/retry/deferral, existing creation modes,
-recovery boundaries and current semantic floors.
+be regenerated and bound to the installed package. All six existing proof
+source/caller hashes remain unchanged for this repair.
+
+Installed qualification of `49a8ed9ed4e3ce67251296b41c74e8b000597c28`
+passes the full WAL binary 26/26 (twenty-one scenarios and five helpers),
+fourteen additional core cases and semantic floors 34/34 and 54/54. The actual
+package, all 44 installation observations and six bindings agree on library
+SHA-256 `fe054e9f9cf89202c82a417fc79a866031b70de6f69e73586943dfa9f4d61670`.
+The first Docker build's daemon-EOF log and successful same-source build retry
+are retained; no runtime test retry was used. Independent read-only review
+accepted the bounded source and evidence, including five backend-frozen inputs,
+separately qualified documentation and thirteen complete log hashes.
 
 PostgreSQL SPI snapshot behavior, relation locks, transactional DDL, source
 identity/classification and capture atomicity remain trusted database/adapter
