@@ -553,28 +553,19 @@ async fn settle_auto_invariants(
     timeout: Duration,
 ) {
     let deadline = std::time::Instant::now() + timeout;
-    // First wait: give the fused chain one opportunity to run.
-    wait_for_refresh_cycle(db, "prop_auto_l3", timeout).await;
-
+    // Poll the actual multiset invariants rather than require an additional
+    // refresh timestamp transition. A scheduled NO_DATA cycle, or a refresh
+    // completed before our first read, need not advance last_refresh_at.
+    // A deadline violation still reports the exact public row differences.
     loop {
         if check_auto_invariants(db).await {
             return;
         }
         if std::time::Instant::now() >= deadline {
-            // Timeout — run the standard assertion to produce a clear failure.
             assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
-            return;
+            panic!("auto-refresh invariants did not converge by deadline");
         }
-        // Wait for another scheduler cycle (l1 is the leaf and must process
-        // CDC before l2/l3 can be correct).  Cap the inner wait at the
-        // remaining time so the outer deadline is always respected (important
-        // for slow coverage / instrumented builds where 15 s may expire).
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining < Duration::from_millis(500) {
-            assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
-            return;
-        }
-        wait_for_refresh_cycle(db, "prop_auto_l1", remaining.min(Duration::from_secs(30))).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
