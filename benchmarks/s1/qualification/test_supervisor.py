@@ -101,6 +101,15 @@ with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedPr
     assert run_mock.call_count == 1
 
 assert not bounded.postgres_is_restarting(subprocess.CompletedProcess([], 1, "", "ERROR: No such file or directory"))
+assert not bounded.postgres_is_restarting(subprocess.CompletedProcess([], 1, "", "Cannot connect to the Docker daemon"))
+docker_transition = subprocess.CompletedProcess(
+    [], 1, "", "Error response from daemon: container " + "a" * 64 + " is not running\n")
+assert bounded.postgres_is_restarting(docker_transition)
+healthy_after_restart = subprocess.CompletedProcess([], 0, '{"database_bytes":1,"wal_bytes":2}', "")
+with patch.object(bounded.subprocess, "run", side_effect=[docker_transition, healthy_after_restart]) as run_mock, \
+     patch.object(bounded.time, "sleep") as sleep_mock:
+    assert bounded.postgres_metrics(["docker", "exec", name, "psql"]) is healthy_after_restart
+    assert run_mock.call_count == 2 and sleep_mock.call_count == 1
 
 for persists in (False, True):
     processes = []
@@ -171,6 +180,14 @@ for failures, expected_calls in ((2, 3), (5, 5)):
         result = bounded.disk_metrics([])
     assert run_mock.call_count == expected_calls
     assert result is (healthy if failures == 2 else vanished)
+vanished_internal = subprocess.CompletedProcess(
+    [], 1, "1024 /data\n",
+    "du: cannot access '/var/lib/postgresql/18/docker/base/27081/pg_internal.init': No such file or directory\n")
+with patch.object(bounded.subprocess, "run", side_effect=[vanished_internal, healthy]) as run_mock, \
+     patch.object(bounded.time, "sleep") as sleep_mock:
+    assert bounded.disk_metrics(["docker", "exec", name, "sh"]) is healthy
+    assert run_mock.call_count == 2 and sleep_mock.call_count == 1
+
 for message in ("permission denied", "du: cannot access '/data/global/pg_control': No such file or directory",
                 vanished.stderr + "permission denied"):
     with patch.object(bounded.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", message)) as run_mock:
