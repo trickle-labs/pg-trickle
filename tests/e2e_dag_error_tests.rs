@@ -197,6 +197,10 @@ async fn test_consecutive_errors_tracked_and_reset() {
         "DIFFERENTIAL",
     )
     .await;
+    // The test calls the manual refresh API three times; stop scheduler ticks
+    // from claiming one of those refresh windows and returning a success NOTICE.
+    db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['err_cnt_st'])")
+        .await;
 
     // Now add the bad row — any subsequent DIFFERENTIAL refresh will hit denom=0.
     db.execute("INSERT INTO err_cnt_src (val, denom) VALUES (10, 0)")
@@ -226,7 +230,7 @@ async fn test_consecutive_errors_tracked_and_reset() {
         .await;
 
     // After fixing the data, the refresh should succeed.
-    db.refresh_st("err_cnt_st").await;
+    db.refresh_st_with_retry("err_cnt_st").await;
     // Manual success clears errors
     let (_, _, _, err_count_after) = db.pgt_status("err_cnt_st").await;
     assert_eq!(

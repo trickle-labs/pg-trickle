@@ -170,6 +170,38 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .await
     .expect("baseline stream table should match direct query");
 
+    let pgt_name = scenario
+        .query
+        .stream_table
+        .rsplit('.')
+        .next()
+        .expect("stream table name");
+    // Freeze scheduler ownership, then complete a real differential refresh
+    // so the failure must preserve DIFFERENTIAL as the last mode.
+    db.execute(&format!(
+        "SELECT pgtrickle.pause_scheduler(ARRAY['{}'])",
+        scenario.query.stream_table
+    ))
+    .await;
+    db.execute(&format!(
+        "UPDATE {}.left_leaf SET score = score + 1 WHERE id = 1",
+        scenario.schema.name
+    ))
+    .await;
+    db.refresh_st_with_retry(&scenario.query.stream_table).await;
+    let prior_mode: Option<String> = sqlx::query_scalar(
+        "SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = $1",
+    )
+    .bind(pgt_name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect completed pre-failure refresh mode");
+    assert_eq!(
+        prior_mode.as_deref(),
+        Some("DIFFERENTIAL"),
+        "pre-failure refresh should establish the mode to preserve"
+    );
+
     let checkpoint = format!("{}.two_leaf_checkpoint", scenario.schema.name);
     db.execute(&format!(
         "CREATE TABLE {checkpoint} AS TABLE {}",
@@ -178,12 +210,6 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     .await;
 
     // ── Turn the refresh failpoint ON for this stream table ──────────────
-    let pgt_name = scenario
-        .query
-        .stream_table
-        .rsplit('.')
-        .next()
-        .expect("stream table name");
     db.alter_system_set_and_wait(
         "pg_trickle.test_chaos_for_table",
         &format!("'{pgt_name}'"),
@@ -197,6 +223,11 @@ async fn test_dvm_failpoint_preserves_last_committed_result_and_recovers() {
     for mutation in &cycle.mutations {
         db.execute(&mutation.sql).await;
     }
+    db.execute(&format!(
+        "SELECT pgtrickle.resume_scheduler(ARRAY['{}'])",
+        scenario.query.stream_table
+    ))
+    .await;
 
     let failure = wait_for_scheduler_failure(&db, pgt_name, Duration::from_secs(60))
         .await
