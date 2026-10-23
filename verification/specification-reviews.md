@@ -302,6 +302,55 @@ Previously stale consumers need FULL refresh/reinitialization under READ
 COMMITTED. Full cleanup/incarnation/protocol correctness, authenticated build
 provenance, latest-head remote CI and merge approval remain outside acceptance.
 
+## Local WAL slot retirement (#1222 follow-up)
+
+Two independent read-only reviewers examined the bounded specification and
+production paths at frozen backend `f0a8c6439fb11dbc71aefc67f6675a95732e2cd5`.
+Review found and required fixes for optional SPI lookups, physical-slot NULL
+classification, references after source tracking deletion, legacy NULL slot
+names, and stale qualification commands. A later source-name-reuse review
+separated two facts: observed intent reassignment did not prevent old-consumer
+cleanup, while a direct seeded cross-OID worker history did actually remove a
+still-referenced slot. The unsupported cleanup/output-corruption prediction
+was withdrawn. The final reservation check is conservative admission; durable
+stable-name resolution independently repairs the global reference guard.
+
+The direct positive history witnesses the worker Keep barrier with slot and
+intent preserved, then requires actual retirement after removing the old
+consumer. Source replacement separately witnesses conflict rejection, unchanged
+source/owner tuple, successful old-consumer cleanup, actual retirement, retry,
+fresh WAL acknowledgement and exact downstream results.
+
+Completed bounded evidence was accepted for publication: 35/35 WAL-binary
+tests, 15/15 additional core cases, semantic floors 34/34 and 54/54, 2637 units,
+64 Python checks, formatting/lint without warnings, release-contract and
+upgrade-completeness checks. The actual published predecessor upgrade preserves
+an observed TRANSITIONING slot; completed predecessor WAL handoff remains
+unqualified, with its earlier failed setup retained separately.
+
+The proof reviewer reconstructed all 27 executable mutants and checked their
+source/output hashes and intended postcondition failures. Six reexecuted
+baselines pass: LSN 44/0, receipt 5/0, lifecycle 6/0, CDC 4/0, join 6/0 and
+identity 6/0. Receipt declares three functional obligations; the retirement
+theorem covers the shared finite gate, not SQL reference extraction, reservation
+CAS, PostgreSQL locking, durability or complete recovery transitions.
+
+The final evidence reviewer independently checked all 29 frozen input hashes,
+98 complete copied logs, counterexample/positive JSONs, package, generated SQL,
+runtime layer and published predecessor archive. All 55 actual four-file
+installation observations match library SHA-256
+`a7b58da8fb8dd0af867e3c64d423c0cd7e15471b4e87eadbc639dde52eb43303`,
+candidate commit and six bindings. Every bound runtime case has a recorded
+PASS in the final logs. The generated archive-only commit `b73dbf28` preserves
+the SQL-line multiset and exactly matches the packaged install SQL.
+
+Neither reviewer ran project checks or edited files. Acceptance is confined to
+this local-capture publication slice. Remote Citus/dblink, full release
+qualification, authenticated build/named-execution provenance, complete
+prefix/incarnation/protocol proofs, latest-head remote CI and merge approval
+remain outside acceptance. See `verification/slot-retirement-safety.md` and
+`.p2p/work/issue-1222-slot-retirement/ownership/evidence/qualification-manifest.json`.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

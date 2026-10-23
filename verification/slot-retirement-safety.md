@@ -95,4 +95,47 @@ replacement reproducer observes a changed intent and successful old-consumer
 cleanup on the earlier candidate; it does not demonstrate cleanup failure or
 output corruption. The new admission preserves the reservation's source/epoch
 until retirement instead of attempting to prove cross-incarnation reuse here.
-Qualification results are recorded only after those executions complete.
+The direct cross-OID test separately seeds the reassigned-intent state observed
+on `e0008f12`: the old relation is absent, the old dependency remains WAL with
+a NULL slot name and durable stable name, and the queued OID identifies its
+replacement. That earlier worker actually removed both slot and intent. The
+final worker reaches the Keep barrier with both preserved, then retires the
+slot after removal of the old consumer. This isolates reference resolution
+from the new reservation admission check; no output-corruption claim follows.
+
+## Completed candidate qualification
+
+Frozen backend `f0a8c6439fb11dbc71aefc67f6675a95732e2cd5` was built as
+`pg_trickle_1222:retirement-f0a8c64`. Its extracted and installed library is
+SHA-256 `a7b58da8fb8dd0af867e3c64d423c0cd7e15471b4e87eadbc639dde52eb43303`.
+The generated fresh-install SQL was archived in `b73dbf28`; its noncomment
+SQL-line multiset is unchanged and its bytes equal the final packaged SQL.
+Generated ordering and whitespace are retained exactly.
+
+The complete WAL/recovery binary passes 35/35, the additional core selection
+15/15, and the observed semantic floors 34/34 and 54/54, with no runtime
+retries. Formatting/lint pass without warnings, 2637 Rust units and 64 Python
+tests pass, and the current release-contract and upgrade-completeness checks
+pass. This does not claim execution of every release qualification suite.
+
+All six pinned Verus suites were reexecuted. Baselines are LSN 44/0,
+receipt 5/0, lifecycle 6/0, CDC 4/0, join 6/0 and identity 6/0. All 27
+executable mutants fail their intended postconditions. Receipt has three
+declared functional obligations; its extra verified items include derives.
+The SQL reservation compare-and-set and reference extraction are not proved
+by the finite retirement gate.
+
+The actual published `0.108.3` package upgrades with its observed TRANSITIONING
+slot, rows/frontier and pending changes preserved. The private logged queue,
+rollback preservation and committed drain pass after upgrade. An earlier
+attempt requiring completed predecessor WAL handoff failed during predecessor
+setup and is retained; completed predecessor handoff remains unqualified.
+
+The local evidence root is
+`.p2p/work/issue-1222-slot-retirement/ownership/evidence/`. Its manifest binds
+29 frozen non-documentation inputs, six proof/package/installation records
+and 55 actual four-file installation observations. It retains complete prior
+failed attempts and separate counterexamples. Original rollback, reservation
+reassignment without cleanup failure, and actual cross-OID retirement failure
+are distinct observations. Independent source/proof/evidence review boundaries
+are recorded in `verification/specification-reviews.md`.
