@@ -528,10 +528,10 @@ async fn test_wal_receipt_commit_order_preserves_late_old_lsn_transaction() {
     )
     .await;
     wait_for_exact(&fixture.db.pool, &fixture.stream, &fixture.journal).await;
-    assert_eq!(
-        cdc_mode(&fixture.db, &fixture.source).await.as_deref(),
-        Some("WAL")
-    );
+    // Receipt acknowledgement may precede completion of the asynchronous
+    // TRIGGER-to-WAL handoff. Verify eventual WAL mode rather than sampling
+    // the transient state at the exact moment the data converges.
+    wait_for_cdc_mode(&fixture.db, &fixture.source, "WAL").await;
     let rows: i64 = fixture
         .db
         .query_scalar(&format!("SELECT count(*) FROM {}", fixture.stream))
