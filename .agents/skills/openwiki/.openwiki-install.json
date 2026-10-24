@@ -1,0 +1,18 @@
+{
+  "package": "openwiki",
+  "version": "0.7.0",
+  "target": "codex",
+  "mcpServerCommand": {
+    "command": "openwiki",
+    "args": [
+      "mcp",
+      "--host",
+      "codex"
+    ]
+  },
+  "files": {
+    "agents/bob.yaml": "01eeaf2b7f709ae511f444e2b8e34f27a4a38885fc9b34a1ef8b2bb158d41362",
+    "agents/openai.yaml": "01eeaf2b7f709ae511f444e2b8e34f27a4a38885fc9b34a1ef8b2bb158d41362",
+    "SKILL.md": "37bdbb313de37998d85094ffe349e0c05dc05816299b1adf05bbd686c3b698ac"
+  }
+}

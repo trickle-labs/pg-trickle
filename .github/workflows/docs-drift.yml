@@ -15,6 +15,8 @@ on:
       - 'scripts/test_api_doc_filters.py'
       - 'plans/**'
       - '.github/workflows/docs-drift.yml'
+      - '!**/AGENTS.md'
+      - '!docs/agents/openwiki.md'
   pull_request:
     branches: [main]
     paths:
@@ -29,6 +31,8 @@ on:
       - 'scripts/test_api_doc_filters.py'
       - 'plans/**'
       - '.github/workflows/docs-drift.yml'
+      - '!**/AGENTS.md'
+      - '!docs/agents/openwiki.md'
   schedule:
     - cron: '30 6 * * 1'
   workflow_dispatch:

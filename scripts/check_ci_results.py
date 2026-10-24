@@ -8,27 +8,27 @@ import os
 
 
 def check(needs: dict, *, draft: bool) -> list[str]:
-    outputs = needs["release-qualification-contract"].get("outputs", {})
+    outputs = needs.get("release-qualification-contract", {}).get("outputs", {})
     errors = []
     if outputs.get("runtime") not in {"true", "false"}:
         errors.append("release-qualification-contract: missing/invalid runtime selection")
     runtime = outputs.get("runtime") == "true"
     ready = runtime and not draft
-    required = {"release-qualification-contract", "lsn-verification", "upgrade-check"}
+    required = {"release-qualification-contract", "upgrade-check"}
     if runtime:
         required.update({"unit-tests", "integration-tests"})
     if runtime or outputs.get("monitoring") == "true":
         required.add("otel-collector-contract")
     if ready:
         required.update({
-            "windows-compile-gate", "detect-e2e-gates", "light-e2e-package",
+            "windows-compile-gate", "light-e2e-package",
             "light-e2e-tests", "release-evidence-runtime", "lsn-candidate-runtime",
             "e2e-sensitive-gate",
         })
-        flags = needs["detect-e2e-gates"].get("outputs", {})
+        flags = outputs
         for name in ("unsafe_boundary_changed", "failure_recovery_changed"):
             if flags.get(name) not in {"true", "false"}:
-                errors.append(f"detect-e2e-gates: missing/invalid {name}")
+                errors.append(f"release-qualification-contract: missing/invalid {name}")
         if flags.get("unsafe_boundary_changed") == "true":
             required.add("unsafe-boundary-asan")
     if not draft and (runtime or outputs.get("shipping") == "true"):

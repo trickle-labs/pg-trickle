@@ -1,0 +1,35 @@
+# Private local state and agent configuration
+.git/
+.p2p/
+.aws/
+.openwiki/
+.agents/
+.codex/
+.idea/
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Build output, dependencies, caches, and local test artifacts
+target/
+node_modules/
+.venv*/
+__pycache__/
+*.py[cod]
+book/
+coverage/
+_e2e_pkg/
+fuzz/artifacts/
+tests/pg_regress/results/
+tests/pg_regress/regression.diffs
+tests/pg_regress/regression.out
+tests/generated/schema.rs
+*.log
+*.profraw
+*.profdata
+clippy_output.txt
+test_output.txt
+staged_files.txt
+.DS_Store

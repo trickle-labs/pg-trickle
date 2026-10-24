@@ -579,13 +579,27 @@ async fn test_diamond_convergence_cascades_with_one_active_branch() {
     )
     .await;
 
-    // Wait for initial auto-cascade to populate dconv_tip
+    // A fast first cascade may finish before we start waiting. Check both
+    // its contents and a completed scheduler history entry instead of waiting
+    // for a second timestamp advance that need not happen on CALCULATED STs.
     let initial = db
-        .wait_for_auto_refresh("dconv_tip", std::time::Duration::from_secs(60))
+        .wait_for_condition(
+            "dconv_tip initial scheduler cascade",
+            "SELECT (SELECT COUNT(*) = 4 FROM public.dconv_tip)
+                AND EXISTS (
+                    SELECT 1 FROM pgtrickle.pgt_refresh_history h
+                    JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
+                    WHERE st.pgt_name = 'dconv_tip'
+                      AND h.status = 'COMPLETED'
+                      AND h.initiated_by = 'SCHEDULER'
+                )",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(300),
+        )
         .await;
     assert!(
         initial,
-        "dconv_tip never received its first scheduler-driven refresh within 60s"
+        "dconv_tip never completed its initial scheduler cascade within 60s"
     );
 
     let initial_count: i64 = db.count("public.dconv_tip").await;

@@ -1,0 +1,444 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:48d3b2cde38849304c0bf1b135222d89173fa279085d52dd12549877943c93a3",
+  "claims": [
+    {
+      "id": "claim_be86e3e6a1e4471f94945bd5479ae813",
+      "statement": "Capture ownership is recorded as a singleton instance ID plus database OID and PostgreSQL system identifier; mismatches or existing quarantine fail closed, and identity matching alone cannot distinguish physical copies preserving both identifiers.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L161-L252",
+          "version": "repo-lines-v1:sha256:d617ad986b2add2cc992fffbadd58310c4d38edd2a9069dc773c502129e24436:eyJzZWxlY3RlZExpbmVDb3VudCI6OTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlkNGYyZWIxMTM4MjY4NjRhYWNiOTc3NWQyNGRmYmUwMjdlZjMxODAzYjZiOGY5NGU2NDJhMDI4NDRlNWZiZGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI1NTllNWVkMWNmOTRmOGY3Mjk0NDk4MGM0MjViN2IwY2VlMTBiOTFjYTNmMzkxNTk4ZTY1NmIwODI5NzQyOGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUwYjk4MTFlNzAwYWE5NzQxNzdlODdlYjgzNTdkYTAwMDg2MmI3ZWQzMmQxM2JmN2E0NGJlMjhkMjc1OWExOTkifQ"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L75-L98",
+          "version": "repo-lines-v1:sha256:7752f98baeeaa398d40ff7f50984b7d207f9ea2d63bfda3f8cbb544f3409991e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjliZWI5OGY1MzI2OGZjZWMzZTBiMmE1OWMzMmFkZGJmNGE4MzVjODUzNjQ5ODljYmUzMGZmZTM0MTNhMWMyODkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImExYjFmNTlmODkxMTdlZTVkMTBhNzExOWI3NmU5NWQ5NTk3ODJiMzRiNjM5NDVkZGUxMzM1ZmZhNTkxOGVlYjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE3NzBhNGJhZjkyZjljODRiODJiNzE0YTFkMTE3YjgwYTA4YWNiNGJhZmM5ZDViNGZkNGU4NjBiY2YzMDc4OTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_21f36b46b0c44f52b02d22fb933b3928",
+      "statement": "Identity mismatch quarantines capture and suspends stream tables not already suspended with needs_reinit and CDC_CLONE_DETECTED; scheduler dispatch and ready-asserting API entrypoints refuse non-ready capture gates.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/alter.rs#L3317-L3318",
+          "version": "repo-lines-v1:sha256:8bcf1c06fffd19abdab734acd5bda20eec0a7fcc6084a296f7c57bad0e5c89e0:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjE2Njg2MGMyMzIyNWJiMzhhNDY2MzRlYzQ5MGY0NDNmZDBmMTY1MTI5NWNjNzQzNmEyZWU0MDFjOGJkNDZiMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZWFiNDc4OTE4M2E4NGE1YWI2MTFlMGM3NGY0ZGRkYTFiOWYyZTRiOTEzY2I2ZjVjNjU1YjZmZGZlNzU3MzZjZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTllNzYzNTVjZjExOTk0ODBjM2Y5OTgzNmIxNDg2Yzg0MWQ4OTFmYWFkOTA0YzYwOGUwOTMwMjJkMzc1N2FlZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDk4MTJkYWRmYjZjYWNhMWE3ZWQ2NDRhZDI0NDQ0ZGNhYzQ1OWM5ZmNiMDk0ZGRmN2NmMjc3MTBjY2ZlMDI2MyJ9"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L161-L270",
+          "version": "repo-lines-v1:sha256:6f5f782f5e8e8171c66a841b821b3cbdbd442af6178804975531219f3da02016:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5ZDRmMmViMTEzODI2ODY0YWFjYjk3NzVkMjRkZmJlMDI3ZWYzMTgwM2I2YjhmOTRlNjQyYTAyODQ0ZTVmYmRkIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0ODkzZjQwZTM3ODFlYjg5NmM4MmQwNDZhMDgwNjdhMTFlMzVjZGYyZjFkZmFmMjZmZWE5MGI4ZGI2Njc2NDEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2MDYzYzRkMWFmOGNkODliYjBiZGQ3NjU3ZmZjYmY2ODA2YTYxMGQ3OWQ2YzhkNGMzMDdjMjQxZGYzOTAwNTIyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIzNjg4ZmU0MjRhMmNiNTJkODVhOGY2MDNmODE4NTlhZDZkM2FiMTg3MGM3ODdmMDI4NWYzMzU5ZWFhOGM1N2E2In0"
+        },
+        {
+          "resource": "repo://src/api/refresh_ops.rs#L255-L255",
+          "version": "repo-lines-v1:sha256:eab4789183a84a5ab611e0c74f4ddda1b9f2e4b913cb6f5c655b6fdfe75736cf:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZWFiNDc4OTE4M2E4NGE1YWI2MTFlMGM3NGY0ZGRkYTFiOWYyZTRiOTEzY2I2ZjVjNjU1YjZmZGZlNzU3MzZjZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZWFiNDc4OTE4M2E4NGE1YWI2MTFlMGM3NGY0ZGRkYTFiOWYyZTRiOTEzY2I2ZjVjNjU1YjZmZGZlNzU3MzZjZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjA0MmRjMzk2MTJlYzBkYzdmZDg4NDg4OThmNGFmY2ZjMTBhZGRkODNjMTYxZmExZmQ1NDYzNzg5MzViNDJjOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYWJjZDIwMWU4ZmY4ZmUxMWIxYjRlZjc4MmFlOGE5MmQ5MzYyNDFhNjMxZDI5YzBiZjRkNDRlYzJjNjU3NmM3NSJ9"
+        },
+        {
+          "resource": "repo://src/scheduler/scheduler_loop.rs#L1235-L1255",
+          "version": "repo-lines-v1:sha256:1d6627b71eda37eea50222b71e9a263dc0e6634b55d74d1f19d397249b7de071:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ0ZjA1Yjg2ZjY5YmM3ZGU0MDQ2MzYxYTk4MWNkNmFmNmJiYTI3ODg3OWVlMWQ1YmQ4MjYxMzExYzQ2NjQwYTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU4NjkwZWIwYTZmNzkzZDRjMGY1N2ZhMzIyMmMwYmY5ZTQyZjFlZWJkZWMxMmQ3OTYxMmUwZWExN2Q5MDYzNjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA4YmZlMDhiNTY2OGY2MWNkNmY1Zjg5NTJhN2RiZGJkNWJiNmY2ZGFhOWJkMmRmZjlhMzg0ZGZkMGEwMGU5ODMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIxNTljNGVhMmIwMzNhMDFhNjMzOGE1NThmZGNhYmQ1ZjZjZDk5MWY5YzIyM2I1M2UwOGYzM2Q1MGVmNjk4ZjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_829a1557a16a451fa540fdc4a8f157dd",
+      "statement": "quiesce signals a drain and only persists QUIESCED after completion, returning false on unavailable signaling or timeout; pause_all aliases a 60-second quiesce, and resume_all restores ACTIVE but rejects quarantine.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L816-L888",
+          "version": "repo-lines-v1:sha256:9709cfa9a72b490eab0033bdb8c775372314527eacd14f2869e8674da1392c33:eyJzZWxlY3RlZExpbmVDb3VudCI6NzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZkZGUwZjcxNGZkYzU5MjViMGE1ZWI2OWYwMGY3ODZmMDFhZTllYjE0YzY2N2Q5M2EzZmQ3ZWMzYTI5MDllMDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQxODViMzVkNGFlNWVjYjFhYjQzOGI2NWI5ZDY2MTc1MTRkNDYzZjNhNjgzZTFjZjA2ZTQ3YjViNzRmZWVlYTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdhOGRiM2M1M2Q3NTU0ZjNkNzllNzUyMjM3ZjFhMjJkMTI2ZjYzYTg2YWY4ZDA5NjdlM2IxMzkwODExZjQ4NWYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d1d8ade6ea6a4115aee83685a0f5d6b8",
+      "statement": "Explicit capture adoption creates a new instance identity and clears quarantine but leaves every stream suspended, unpopulated, needing reinitialization with a null frontier; it does not remap dependency OIDs.",
+      "evidence": [
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L103-L113",
+          "version": "repo-lines-v1:sha256:fbcbf212e894feb5d1892f4c6ccb28ec08fa680574983f68669621fa50cf3510:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI4MzdjOTlmMGZhNDMzZmFiYjEwNGJlNWRmNGYxMTE1ZjhkNjRjOGNiZTUwNTlkMGQ4ZjEwODA3OTVjMTM0NzMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZjMzU1NzJmYTcyMzcwYjU5ZGQ2YzBlMGYwZWM5ODY4MGJjMGI3YThmMDk4ODljZDdhZjA4YTBhMTZjYjhmM2UiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA5NDNmMDk5NDQxYzZjNWYwM2UyZmZjMTY2ZjRhODYxNzZkYTA4YzllM2E1YTg2ZWU4ODg0MTIyODNkNzUzMjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEzNGViYmI5ODY4YWFhYmFlMzI5ZDI0Yzc4NTI5NGZmYmU3MTBjNTA3MmMxNDkwNDdmZmJlMDIwYTA0MTQxZTQifQ"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L890-L959",
+          "version": "repo-lines-v1:sha256:28b011498afa46f6e684e7bcc79740f6a8b6287dbeed4162e6c27deb2d5ab9d9:eyJzZWxlY3RlZExpbmVDb3VudCI6NzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjYWUzMWUyODYzM2VlODRhZTgzMGRhZDQzOWMyNjZmMGE5OTFjZTljZWE3YzE5Mjc2NzAxYmUxNDQ0ZGVjN2EiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBlYzJkNWI4Nzc0NGVjMmEyNmQ2YThhMDYwYmQ0M2I4ZDRjZjdkOWJlMWMwZGFhZjVlYjk2OWQ3ZDhkM2I4ZDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjgwNDI1YmFlOGNiNTk0ZDZkYjFmMjEyYzBlNzQ4ZmU4MjhkY2IzYmE3MjVjNmVkYTEzN2RiZGUxY2Y0ZTE3ZDUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b521ba933b484b1599cb868bcba39feb",
+      "statement": "Capture adoption rotates output-delta log identity, invalidates non-dropped consumers with DATABASE_INSTANCE_CHANGED, and deletes outstanding resnapshot records while retaining old batches and cursors for a new baseline.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/output_delta.rs#L438-L491",
+          "version": "repo-lines-v1:sha256:e2766e4477d22ae0879983602013dcb8a9c5a0c49c3e539e42a3167e85ad5bbb:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzZGZlODFjYjQxMTU1NjMwMDU0YTQ0ZmExNDNmMDNhMmFhZjRjNDY1MWZlZjcxNjNhNmYyNTMyMGIwZGJhYzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg4MzEyMzNkMjhkOTUzNWQ3YjM3NjFkMjFhM2U5YWU0M2Q4MTYwZmQ1MTAzNWExNTM3ZDAxODJlODY4OGY4OWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYyMmMyY2FhNzAxNzJiMTE3YTA3N2Q2ZjAzOWRhMDE1YzlmZjhiYmY2MDQyNjFkZWQ1ZTZmMjhlNWFmZGFlNTkifQ"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L939-L941",
+          "version": "repo-lines-v1:sha256:52d6e0e92a669588680d88633b537f4aaafc57da7731e39a06e2b5b81ac6f5e8:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMThlNmU3NDc2M2ZiMDgzZjllNmIyMjcyYmMzZTk3NzYxNWFlZDM3YTYyYjg4YjIzOGMxZGRmYjc1NTQ3YTNiYiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDg5M2Y0MGUzNzgxZWI4OTZjODJkMDQ2YTA4MDY3YTExZTM1Y2RmMmYxZGZhZjI2ZmVhOTBiOGRiNjY3NjQxMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZmJiMjc3MDc0NGI1ODAyZDA2NDcwMzJlODJjOGFhYWJiZGNhOTU3NGE4NDc1ZmEyMDY5ZmUwODM5ZWJmMzczMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjgzOGQ1NWY4YmZkNTEwOTZkZTNlODgxOGE4Mzk5MzU1ZTE0MWI2MWYxMmM3NWNjZjMzMWYxNWEyNmFjMmI5NiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_339b76852a3d49d99b9f2e0219959986",
+      "statement": "capture_instance_status reads stored state, whereas validate_recovery runs the identity gate and checks source existence, trigger availability, buffer registration/relation/schema, required WAL slots and lost WAL, and persisted frontier LSNs.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L314-L813",
+          "version": "repo-lines-v1:sha256:fb24036e312ff6bc7bd6820dd811d781ff7d1a2834979d469fc485909f8315b9:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI3ZWFiNTllYWNmNDlmYmE5MGRhNjJiZDExODUwNjE0ZGEwZWEzMGE2NzBmMDUxZDUxODdmMjk2MjhkNTZkYjk5IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI3MGY3Njc2NWEzZWM5MmMwNjYxNmUwM2NiYjU0NGI3NDU4ZGQzZGM1MzhlNWVlZGRlZTY4NzAxZDk2MmRiY2M0IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI4ZWRmYzg5ZWUwYTEzN2IzZmNiMGVkMGFjNGNlOTI1ODJjNzU1MjNjMzEyNDRmY2I1N2YwZDExNjI5Mjk5ZGYxIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_cb09a3228de74c2580073053589ac667",
+      "statement": "Missing triggers, slots, WAL, or buffers and corrupt buffer schema require reinitialization, while clone detection and the reserved interrupted-repair failure classify as operator intervention; current interrupted-repair representation is a taxonomy entry rather than a durable repair journal.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L12-L65",
+          "version": "repo-lines-v1:sha256:3045bba4c5f154fd2cb5ede90bb4ea3518257df6a456182fd3e10183127e56dd:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3MTZhZjcwOWZlZDM0OWNiNzdjYjRkYTYyZjk2ZjI3NTEyMmE4MzEzMTRlNGM1NmNkZjdlOGI4ZmZhNDFjZTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQxYjNjZWY3Y2Y5NWFkZWFhM2I0OGMzNzNjMjY0NjkzYWI5MTE4YzFhZDQ1MjE3OTJkMDIwNjdiOTAyNjNmZmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRlYWNkYjgzOTNjNTFlOGVhMzk3MTliZTFhMjVlNDE5ZTcxZThhMTJlODYxOWI2ZGYyNTFjZDA3MjU5YjE3MjkifQ"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L314-L781",
+          "version": "repo-lines-v1:sha256:71aa75b5797c31238f0534686b1e1d6fc8d1809c2d36a6a2a88b2a38b5f8d7c4:eyJzZWxlY3RlZExpbmVDb3VudCI6NDY4LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI3ZWFiNTllYWNmNDlmYmE5MGRhNjJiZDExODUwNjE0ZGEwZWEzMGE2NzBmMDUxZDUxODdmMjk2MjhkNTZkYjk5IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0MTJjYTM0NWNjZjc1YmY5YzA4MDZiY2U2OTViZThkZTgwOGI3OTk4NDI1MWE3YTU0ZDIwMmNmNjEwMWRkNDUxIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJiYmZmYzMxYzA3ODgzNzgzYmVkZTk1MzFhYTkyM2VjNWRkMGE1ZmRkOTc0NjJjZTU3MGI1NzM5NGNiMjdmZWUwIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_9102057b456d43e3b10fe430fd54bab7",
+      "statement": "A persisted source frontier ahead of pg_current_wal_lsn suspends the stream with RECOVERY_FRONTIER_UNPROVEN and requires rebuilding rather than silently advancing or clamping the frontier.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L691-L762",
+          "version": "repo-lines-v1:sha256:9cb8917f84b3152287e0f76cbf72384c4ac1ec0e8bfdaa8b125fbed74bb02bab:eyJzZWxlY3RlZExpbmVDb3VudCI6NzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBmZmM4OWVlYjY0ZDg4Mzc3NmQwOGE3Y2FjYzUzYzJkNDA3ZThiNjQ5NDEyNjVkYmE1ZTM2NzIzYmQ4NGQ1M2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyODExNWU5ZTM3Yjg1MDRlMmZhOTJiMTM4YTRlNzkxOGYxYzhiYTgxNjM0NWIwMjM3MzFhZjNkZDgxZGFmMDIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjljZjZkMDY2YmY0YjQzZTljYTIwYmY5MTZjNGJhYjcyMDM4OGMyZWEyMjE2MGI4ZDJjNGY4MGViZDRlNTcxNTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIwYmJmMjQ4MTE2ZTVjOWY3ZTBmN2NiYTg1MzllYWM0YjdkMGYwMTE1MWYwYTc5MTJkZTdmZDYwMWU0M2ZjNDUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6e170f1335c14e80806d9bafc2186271",
+      "statement": "Missing sources produce dependency BLOCKER checks and suspend affected streams, but current validate_recovery top-level aggregation only recognizes quarantine and REINITIALIZATION_REQUIRED before defaulting to SAFE, so individual checks must be inspected.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L335-L369",
+          "version": "repo-lines-v1:sha256:a542ee76b40bbf23b81d327cb8cb8f4553c7b4aee82940119aeac6e5de652144:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2MjI0MzkzMTlkYWEwOTIxM2VmODM2ZjkyNTAxZmIyZTRjZWZjYjc5NDI3NmQzOTk4ODdlODNlYzMxMTA3NzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyODExNWU5ZTM3Yjg1MDRlMmZhOTJiMTM4YTRlNzkxOGYxYzhiYTgxNjM0NWIwMjM3MzFhZjNkZDgxZGFmMDIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE1ZWI3YTNhOTczMjQxZTlhNDMxNDc5MmE1MDlmOGMyZDUyODVlYzEzMjVmZDYxNjEzOWQwMzViYTA3MTJjYTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE0YTAzMjE5MDljYmIyNDAxMjkxODllNjhjODY0NjFmM2E0ODEzZjZkYjNhOGZhYTA0ZDVlZDk4MTU2ZTEwYjMifQ"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L764-L780",
+          "version": "repo-lines-v1:sha256:42b59efc24f37746dabcc9759fc864fcab077d431ffc967121cfbda2fcf41e56:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJmNmIyOWJjNmE3ZjExYjI5YzkzNTFiZTA0Mjk0NjM0NDcyMTRmMDIyZDE0ZDA5Y2ZiOGYzZmFlMjdmYzBmMGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFjY2NmMDdlODU4ODFlM2VjODBhOGFiNzc0ODQ4YzBmODc4NmViZmVhYzIxY2UxNDllMWI0NWUzODQxYzAxZmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjljZjZkMDY2YmY0YjQzZTljYTIwYmY5MTZjNGJhYjcyMDM4OGMyZWEyMjE2MGI4ZDJjNGY4MGViZDRlNTcxNTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU5YmYwNGI5YWM1OGE2OWZhMmE3YWE5MzNlZmMwODc5ZWYwZDJjNGI4YTkyNTNiNTE4MzM3ODA2ZTI5ZjFlMzEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_96b7ac88d53c4a5c8a6093eba4113620",
+      "statement": "repair_stream_table requires a ready capture owner and caller ownership, orders source locks before advisory/catalog locks, verifies publication binding, resets private state and frontiers, and attempts reconstruction of missing capture infrastructure.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/alter.rs#L3317-L3500",
+          "version": "repo-lines-v1:sha256:33e42f1a6b22f051d34d11b7bb0ee85f77d46704c737db48827c6fe71a7eced9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTg0LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiMTY2ODYwYzIzMjI1YmIzOGE0NjYzNGVjNDkwZjQ0M2ZkMGYxNjUxMjk1Y2M3NDM2YTJlZTQwMWM4YmQ0NmIwIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0ODkzZjQwZTM3ODFlYjg5NmM4MmQwNDZhMDgwNjdhMTFlMzVjZGYyZjFkZmFmMjZmZWE5MGI4ZGI2Njc2NDEzIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxOWU3NjM1NWNmMTE5OTQ4MGMzZjk5ODM2YjE0ODZjODQxZDg5MWZhYWQ5MDRjNjA4ZTA5MzAyMmQzNzU3YWVlIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI5MmM5MzhmZmIyNGZiYjMzMzM0YTJlMzJjNWEwYjc2NjdhZjc0MDBmODQxZjQyYzQzMjQ0OWNlMjM4Mzk4MzdiIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_ecfe421c692941a88a8048f97619f19f",
+      "statement": "Repair rejects missing dependencies, can prohibit storage replacement under publication contracts, rebuilds IMMEDIATE storage under source locks, leaves deferred streams needing full rebuilding, and clears error/fuse state to restore refresh eligibility.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/alter.rs#L3373-L3395",
+          "version": "repo-lines-v1:sha256:2b7b04e927bf502be44321e2cf053f6dba56faca56417f96071eb6163dab9fd9:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5NDI5MDEwYmUyM2Q0MzNmYjE5NjJjNTk1ZjUxN2JlMjMwYWY0ZWVkOWE4YjI1Y2M3OWI5YWEyMWUyNmEzYzciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzNjg1NTAwMDEyOGFiNTM2ZDhiMzFiZDc5YzY1NDdkNGI3ZWQ5YTY2ZjY4YmE1ODFlZjY3MDFhYjk4YTZjZTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIzMjNmMTIyYTg3NzQyOWUzZmNjMmFhYzc1YmIwNzkxMjU2NDU1MjNkMzQ2YmY5YTlhNDQwNDE5YTVlMDIxOTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI0ZDAwZGU3OTAzZWYxNjhlZDYxMTAyYTk5M2U5NWZhZTQ1MTg4YWMzMDBmZDA5NmZlMDEzMzZjMGU0YmExZmMifQ"
+        },
+        {
+          "resource": "repo://src/api/alter.rs#L3502-L3542",
+          "version": "repo-lines-v1:sha256:eb8e4dcc73fc3ed34d55844b6f701ee2693ec183d9619745069f48d466917ef4:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzOWY0OWQxZDMxMGZkNThkYjRmODY0NmZhNjljY2Y5YmVkYzE3NzgyMDhmMTJjMzY0ZTNlNzg4ZTkyMDJiMGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE1MGU1OTliMmI2MDJmMGVmNjliNzU3ZDZmYzg1ZWQzOWY1ZGMzYjgzOWY1MmFiMmQ5NzcwYjFlZGQyYjA5Y2IiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk5OWJkZWZlZWFjYTYzNDBlMDI5MGRjODZlODg5Yzg5ZDVlMTg5YWE1YmE0NGI1ODViM2I3MDczNGY0YTYyZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMxYzBjOWYwNDMxOGM3ZTM4Nzc2ZWU5Yjc0ZDU0YjkyMjk5ODBmM2YxZTUwZDU0MDJlOTdjZTI0NzU4N2Y1OWIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1765fb55b7844438bccbf290aa28c482",
+      "statement": "reinitialize_stream_table reuses repair and protected ALTER QUERY rebuilding for output-schema evolution; neither it nor repair automatically reconciles logical-restore source OID changes.",
+      "evidence": [
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L109-L113",
+          "version": "repo-lines-v1:sha256:f8fb9d096226a1eca5a96418e636bceb43d7269a3495915827ffd5d92b97d8c6:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjg5ZDBkM2Q3MTQ1NWU4NzE3ZjEwMmE5OThkYjQ5OWRhNGU1NDEzNWM3YmM2NmU0ODlhNGRhYmE1MjVhNGU5ZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNmMzNTU3MmZhNzIzNzBiNTlkZDZjMGUwZjBlYzk4NjgwYmMwYjdhOGYwOTg4OWNkN2FmMDhhMGExNmNiOGYzZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDE3YWNhMzVjOGZhMzg5ZGJmMGE5YmE2NmViZTczNDVlNGUxNGRmODViMWJhNDhmZjdjNThmMmE2YzU5OWVkMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTM0ZWJiYjk4NjhhYWFiYWUzMjlkMjRjNzg1Mjk0ZmZiZTcxMGM1MDcyYzE0OTA0N2ZmYmUwMjBhMDQxNDFlNCJ9"
+        },
+        {
+          "resource": "repo://src/api/alter.rs#L3554-L3578",
+          "version": "repo-lines-v1:sha256:ae62d88f03957ce992487079a23ee552dce490a88b91c3e06945ad05bcfe2746:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY2ZTkwZmViZWRlNjY5OTFkMDE1MjE5YTlkYjAzZjk2MjJjZTk3NTZhMDBhMmFjY2E1OTIwOWEyNGUxYjI3YjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0YWY0NWVhMjdhNjc0Mzg0NzIwZjYxOTc0ZDI4MmI5MmRhY2ZiMDY3NTU4ZTNiOTVhZGE3YWYzYWQzOTNkYWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjExZjViOGM1OGExNDU3ODk4Mzk4NjU0NDEyYzRmMTNmMDM1YTYzOWJiYTM5ZWIyZjk1MmFhYmNkMTZhZjFlMTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI3MDg5Y2YyZGJmYjI4MjEyM2ZjN2Q1MmVmOGQ4YWNmMDY2NGI3NTg4ZTZjNWE4NzFkNWI5Y2RjY2JkZTJmN2MifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5947aa1f53e4475a809f8d055465f8b4",
+      "statement": "Scheduler crash recovery marks refresh-history records left RUNNING as FAILED with an interruption message because unfinished refresh transactions were rolled back by PostgreSQL.",
+      "evidence": [
+        {
+          "resource": "repo://src/scheduler/mod.rs#L1597-L1630",
+          "version": "repo-lines-v1:sha256:c9b52f9ca6b6fc43c81434a1bff54c819e25bbccf1f1692d9644448bfff98c61:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmOGJiZGNhYWU3MzUxMzU3OWQ1ODExNjQ0N2Y5NzIzNWYyNTkzNDNjY2QyM2RmZTQxNjc3MzYwMzAxZjBiY2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY0YmJmYzgzNGY3MTQ3MDI5YTM3YjM1ZWU0NmVkZDI3MmFiMDYzYTUyYWFhZjQ5ZGFlMWUyYTBmMjU2NDk1OGEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4b54de791b83439384c983ccc32e9b69",
+      "statement": "change_buffer_durability defaults to logged, supports unlogged buffers that lose crash persistence and require full refresh, and sync logged buffers with synchronous_commit on; unlogged_buffers remains a compatibility alias.",
+      "evidence": [
+        {
+          "resource": "repo://src/cdc/mod.rs#L275-L304",
+          "version": "repo-lines-v1:sha256:894177258cd3ec729472f10b1b5eab5957a9be6ddf8c6ccf95814e4e3dc02a7c:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVlOTg0MmUwMGI1Y2Q0N2VhNjBmNDBhZjg3OTgwYTYzZTliZjQ5MTY5ODU1NjU0M2FiMmYyYWQyM2ZmYjdhNWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0NzVlOTRhOTA0YWM0OWIzMTU0ZDQ2NzJhNjZlODYyOWI4NmRhYzc0ZTNlMjkzN2JlNjkyN2FlM2RhMTFjNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJjMzQwNDNlZDZjNTU1OTUwN2Q0YjQ2ODEyZjYwYTA3YWRlOWUyNTY2ZGM5OGU3NTdmNjI5MjIxYTczNGRkZDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIyZTM1NjBjYTFmNjFmMzgxN2I5NjIwOTAzOTY0MGE2ZGVmYmViZTIyM2JiNTViMWRiNWNhYmUzMmIyZTYyMDAifQ"
+        },
+        {
+          "resource": "repo://src/config/cdc.rs#L174-L188",
+          "version": "repo-lines-v1:sha256:cfcddc986daef4b67ac957765bdb5fb4846dc15cf1a01b778a2fef63fda45886:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkxMWU4YjYyZTMzYmM0ODQxYzg2YTUyYmJmZDQyNGFlNDFlMGJiZWE4MjQyMmQxMGUwZDIwYjlmMzA1ZmI0MGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM0OWZhZmI5OTVmMzM1ZmRlMjUxZmU5ODliYjk1NGYxMWQ1YTM3MTA4OGI1Y2MyMTJkYzhlMjllZDRiNmNkNzUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA4YzhhMTRiNmRlOGFlNTc3ZmY3NjBkMDFjZWVjNWNmZTY0ZGI3YTYwOTdiZGM3NWE5YmM4MGNlMTU2Y2Y1NDYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVlNWY2MmMzZTFmODk5OTljZTQ4NmNkN2YzZmU3OTA0OTYyMjllNTQ5ZTdmMzRhZTlmNDI2MTNmN2M3ZjM4ZTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0392009439994b199b9a3782d2c9fffb",
+      "statement": "For populated streams not already needing reinitialization, the scheduler validates required buffer state; missing sentinels reveal crash truncation or damage and validation failure marks the stream for full reinitialization.",
+      "evidence": [
+        {
+          "resource": "repo://src/cdc/mod.rs#L307-L375",
+          "version": "repo-lines-v1:sha256:5a3c7e11771ebb8e1aa798fb439c4cf45bebfec6326b7396ee081fe8bf2086bd:eyJzZWxlY3RlZExpbmVDb3VudCI6NjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmNTVkYmMxMmQ1ODUxZDNmODRjODAwYzVjMTBlNTJlMmE4ZGVkMGZhMTFmMWUwNzU5NWE1ZWE5ODQxMGVkOWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0NzVlOTRhOTA0YWM0OWIzMTU0ZDQ2NzJhNjZlODYyOWI4NmRhYzc0ZTNlMjkzN2JlNjkyN2FlM2RhMTFjNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU5Nzg2MDBmNTY1MDM3ODE3ZjA1OWI2OTdhN2JlYjU5MWNhOGY4MjI1MWViYTFhN2IwNTk0MTg4NmY2ODU4NTcifQ"
+        },
+        {
+          "resource": "repo://src/scheduler/mod.rs#L4721-L4760",
+          "version": "repo-lines-v1:sha256:a5abcca20c875e69df752b0a3f71192e3af9f1750d83eece006f41a907e937b9:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlMTcyNWNhYzIyYWI3YjY3MzIyYTc0YjNjMThmYmM1ZTQwYjcyZDhhYmVjODkzMTY4YjIyYWNhNjNkMDMzNWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImMzODFmM2FiZjVmNWQ0NjUyYmYwYjM5MDJkY2Q4MmJlNTg2NjkyMGY1MDU1ODc1YjdkNjEwODBkYzkzYzhmZDUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4272574818bb4b6f8f756924f156b85c",
+      "statement": "Stable CDC object names support naming continuity but source registrations and synthetic sentinels remain source-identity-bound, so stable names are not automatic OID reconciliation or recovery of lost change rows.",
+      "evidence": [
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L109-L113",
+          "version": "repo-lines-v1:sha256:f8fb9d096226a1eca5a96418e636bceb43d7269a3495915827ffd5d92b97d8c6:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjg5ZDBkM2Q3MTQ1NWU4NzE3ZjEwMmE5OThkYjQ5OWRhNGU1NDEzNWM3YmM2NmU0ODlhNGRhYmE1MjVhNGU5ZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNmMzNTU3MmZhNzIzNzBiNTlkZDZjMGUwZjBlYzk4NjgwYmMwYjdhOGYwOTg4OWNkN2FmMDhhMGExNmNiOGYzZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDE3YWNhMzVjOGZhMzg5ZGJmMGE5YmE2NmViZTczNDVlNGUxNGRmODViMWJhNDhmZjdjNThmMmE2YzU5OWVkMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTM0ZWJiYjk4NjhhYWFiYWUzMjlkMjRjNzg1Mjk0ZmZiZTcxMGM1MDcyYzE0OTA0N2ZmYmUwMjBhMDQxNDFlNCJ9"
+        },
+        {
+          "resource": "repo://src/cdc/mod.rs#L307-L375",
+          "version": "repo-lines-v1:sha256:5a3c7e11771ebb8e1aa798fb439c4cf45bebfec6326b7396ee081fe8bf2086bd:eyJzZWxlY3RlZExpbmVDb3VudCI6NjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmNTVkYmMxMmQ1ODUxZDNmODRjODAwYzVjMTBlNTJlMmE4ZGVkMGZhMTFmMWUwNzU5NWE1ZWE5ODQxMGVkOWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY0NzVlOTRhOTA0YWM0OWIzMTU0ZDQ2NzJhNjZlODYyOWI4NmRhYzc0ZTNlMjkzN2JlNjkyN2FlM2RhMTFjNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwNjNjNGQxYWY4Y2Q4OWJiMGJkZDc2NTdmZmNiZjY4MDZhNjEwZDc5ZDZjOGQ0YzMwN2MyNDFkZjM5MDA1MjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU5Nzg2MDBmNTY1MDM3ODE3ZjA1OWI2OTdhN2JlYjU5MWNhOGY4MjI1MWViYTFhN2IwNTk0MTg4NmY2ODU4NTcifQ"
+        },
+        {
+          "resource": "repo://src/cdc/mod.rs#L98-L135",
+          "version": "repo-lines-v1:sha256:cea64673dd09a7b1ebae29b28b69702c506dca5d0a4bea37a2c0d9be3bc63d66:eyJzZWxlY3RlZExpbmVDb3VudCI6MzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlOWRmZjU4NGY5OTgxODA1NDdlOGZhOTM3ODBhYjFjMGRlNzQ2Yzg4ZjU1MmIxMjgzY2M3NWM1NjdjNDRmMGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4YWM0MDk2ODQ2NDk2Yzk4MTRlNmNhOTQ5ODhhMjFjYzE3YmQwNTJlM2JlZjAyZjc4NDI2N2Y0M2RlODg3NjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVkMDkwY2U0MWQ0ODE4OTQzMDAyOTUwNjI4MDE4ZjY4MjRjMmNkOGZhMWFhYTc5N2RmMGY2OTUxZmU0MWNkODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEyNmIxYjk5ZWRmY2M0ZDI3MWQ2MjMwYzhiNTQ3Y2Y5YmNiYzkwOGVkYjliNWIwNDExOGJjOWFiNGNhYWZmMTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_eb2ad1605eea4d18bab78fab93c22725",
+      "statement": "Logical dumps retain durable configuration and dependency/CDC catalog rows under config-dump policy, exclude private window-state rows and WAL replication slots, and do not provide an automatic capture-resume contract.",
+      "evidence": [
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L183-L202",
+          "version": "repo-lines-v1:sha256:330e2bf35d2465c8bb28b56153e921cad49ed865f32f4397abf9e81b6cacceeb:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMDk1MDVjOGNkN2FlZjY1YTQ0ZDNlZGQ0YzdhZTRiOTYwYWFhYWRkMWE5NTI1NTU3OWIxYTViNDQ3ZmE5N2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlhM2RlNjNkMzI5M2Y3NzA1OTliMjIzOTI5ZTQzNTIxYzhhMjZkNDU0NzQ5MDBkOTNjODkyYzU5ZDcxZDk0OWQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjJlYjdkMjZiMDUyYjBiZDYzNzhlZmI2M2M3YWRlNGI0YWVjNTU2MmNmY2JhOTBjMDFlMTI2ZWQ4Y2M5Y2E5MWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZhMjRmYjRlZjc1NDlkMzc3YTQwNGFiMmU1MWQ5OTI2ZTMyN2ZhOGJkMGFhZGEwODMwM2ZiMDVjYmY5ZGYyOTUifQ"
+        },
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L67-L80",
+          "version": "repo-lines-v1:sha256:eb6aca6e442bdb2f2e1bd87eb0a66969624d77c009b7b33e3ca5c7e54c0e9308:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMyOWY5ZjI3MmMzMzRkYWY5MmNkM2JhNDM5NjYxOTYyMzRkN2I0YWQ0MGQxMTZiZTAzMmEyM2E5OWNhZjc2YmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYzMDQyZGU3MGM2ZjdjNjUzMDYwNTY4ODZhNjllZGZlOTc5ZWYzNWE2MWZiNTE5MmQ0ZDUwYmJiMWEwNzk3YmEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNlNTgxZjc2M2U2MGM4YTRkM2Y3MjY5NDZjOGFhNTliNGM2MDA2N2QwYWMxZDkyZjQ3MzZlYTk2NDk2NDMyY2IifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_pg_dump_tests.rs",
+          "version": "repo-file-v1:sha256:b6d06cf525189baff5d2771bd58c9ba5b603d0bdc89ca0a28a78fe385f288b3d"
+        }
+      ]
+    },
+    {
+      "id": "claim_4dce385f6437472293825392245a9e0a",
+      "statement": "The supported OID-shifted logical restore workflow stops scheduling and writes, exports definitions, adopts changed capture ownership, recreates the DAG in dependency order, and rebuilds/validates capture rather than guessing old-to-new relation mappings.",
+      "evidence": [
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L93-L181",
+          "version": "repo-lines-v1:sha256:8575f03045d46a5a094d9f12862ad368cd6eb72e5a0f210a38d3a9fe6a0fce34:eyJzZWxlY3RlZExpbmVDb3VudCI6ODksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdmOTUwMmExMjc4MjVkMDZkZDc5MzE2NTQ1MDc2ZWY0NjIyY2IxOWVjYjQzZjNkOGYzYTRhZTE3ODM2MTQ0YTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBhZTEyNGZjMzkyMzRlZWNmMTgwNGMzM2RmNjkwNDM3NmJhZTVmNGNmMTk4M2ZiNjZkY2M4NDFhYzI3NjE3YjMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjBjZDI3MDgyY2UxZGNlNTdlNzU2MWNhMDZjMzViYjgxMjU4ZGRlMTQzZmM0MmFkMzRjNjMzMjQzMDIwYmExZjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM4MjBjMWU1MzkwMTI4ZWM4ODE2NDY4NzU1ZjQ2YjRjOGRjM2M4MmJmNWU5ZTQzZjhmM2M2ZmQwZGUyZjcxYjUifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_pg_dump_tests.rs",
+          "version": "repo-file-v1:sha256:b6d06cf525189baff5d2771bd58c9ba5b603d0bdc89ca0a28a78fe385f288b3d"
+        }
+      ]
+    },
+    {
+      "id": "claim_f03957e24446411ab14d709296b4f27c",
+      "statement": "Physical backups may preserve relation identities and runtime capture state, but restore or promotion still requires identity, slot/WAL, and frontier validation before writes and scheduling resume.",
+      "evidence": [
+        {
+          "resource": "repo://docs/BACKUP_AND_RESTORE.md#L30-L63",
+          "version": "repo-lines-v1:sha256:57598cb62510ec2ae83865d30fa8f7599693d8d1f6bdf512a98eade77c0273f8:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE0MGZjOGFhMDkzYjVmNmU3OTBjNjY5YTRlMTE3ODYwZDBlODk5N2M2YzZlNTdhYTRkNzc5NmNhMjQ3YjljYzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE5MGFmOWM0NWQ3OGEzNGM2ZDgxZDU3NWZiNGZlNjcyYTg2MDM2ZDZhYmNiZmM5OWY5NGFmMDYwYWI5ZjkxNDciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwMWYyZWMxNzU5M2MxMDU0ZWI0NjM2N2Q4NDUzZWYyNGExNzNjZTk2YjcxMTdkOTFmOWE2OGQ0NGZlZjhiMDEifQ"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L605-L762",
+          "version": "repo-lines-v1:sha256:da41990de50fb798016067b0393361850661c594f549f697337057468b3fa2b3:eyJzZWxlY3RlZExpbmVDb3VudCI6MTU4LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJlMjU0NDJhNTY1NmZhMDEzMDMxMDVkYjg2NWNkMjdjNjljNWEwNjdlZTAxYmIyNWEzMmY2ZTEwMWVhOWVlM2Y1IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJlMjgxMTVlOWUzN2I4NTA0ZTJmYTkyYjEzOGE0ZTc5MThmMWM4YmE4MTYzNDViMDIzNzMxYWYzZGQ4MWRhZjAyIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI5Y2Y2ZDA2NmJmNGI0M2U5Y2EyMGJmOTE2YzRiYWI3MjAzODhjMmVhMjIxNjBiOGQyYzRmODBlYmQ0ZTU3MTU5IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIyMGJiZjI0ODExNmU1YzlmN2UwZjdjYmE4NTM5ZWFjNGI3ZDBmMDExNTFmMGE3OTEyZGU3ZmQ2MDFlNDNmYzQ1In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_7f6634fdc1dc4c87bcca22ab8cecb99f",
+      "statement": "pg_trickle_dump exports stream creation/configuration SQL in topological dependency order from catalog definitions and selected policies, not source data, WAL resources, or runtime checkpoint state.",
+      "evidence": [
+        {
+          "resource": "repo://src/bin/pg_trickle_dump.rs#L137-L253",
+          "version": "repo-lines-v1:sha256:0793e90eed41bfa003e4c1488f104e56f11eb1bd211a628d7c9e25c1edbb01b5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTE3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI2Zjc0NTQyNzc3NzlhNmY1ZWVmY2UwNWQ3MWUxNWM5ZTVjNWEwYzU0MWE1ZmU1ODMyNTkyMzhiODcxMDYyYWRiIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI4NThkMTQ5NTRhMGNiODNlZTQ2Mzc4NzljNTdkZWExZjBjMTdhZDNmNmUyNjA5YzQyMjYwYjgwZmMzOTg3YzFmIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIyNTBmZWQ2NGJlZmZiYTQyMjhiYWMzYzZmMzJjYjQ1ODZjMDZkOTc1ZmVkYjA1ZjZkZDBiYTQ1YjEyMWM2Y2JiIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJjOGFmNzkwMWNkNDQ2MTA2NTYyOTY3ZGYwZDMyYzYwNDNhOWEzMWQ3NTMzNjhiZGIzZGNmMWU3Zjg4NzVhNzU2In0"
+        },
+        {
+          "resource": "repo://src/bin/pg_trickle_dump.rs#L297-L342",
+          "version": "repo-lines-v1:sha256:6eb1a1ed3de6901d954b671a2a133ed3dbbbfcf1bcabe204bc4f3be245c72720:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhhZTg1MmJlOTJjMjg0ZDY4Mjk5ZDM2Y2Q4YWU2OTZmZDE2NTdjYTU2MmUwMjU3MmY0YzFkNmFjMzJmZmI5NGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY0MTM0NDNkZGI1ODUzMTgxYTJhMzNjZDZlZjUyMzA0OTRjYjRlOWYzM2RjODg1NTcxZmRkMzBhOWY5NzE5MzkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_38dc3efb66b740d7948ae4ca68804629",
+      "statement": "Stream snapshots are ordinary relations registered in pgt_snapshots with version, frontier, and time metadata; restore validates relation/catalog provenance, expected stream identity, version compatibility, caller access, and output layout rather than trusting a same-named table.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/snapshot.rs#L1-L16",
+          "version": "repo-lines-v1:sha256:3ce1549c1fcf5d0af16c2cb8236f906886ce521efd463e11859a6ba163f8f08e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNlZjM1MWZhM2EyNGZiZmRiNzY5ODJlNTI5OTlmNDU2Y2I0YmZhM2VkNDVkMDQ5YmJlYTI3Njk4ZjhkMmU5MWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjljOGRjYTA5NmVlNjc0ODQ3OGUwNDZiOTAwNTA3ZjMyODJkMmE0OGFmNTEwZjY0YjI2YzJmNGZhZGMwZDY1YmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE0MGE4MmVjMTI1ZjYyMTQwN2VjMDhhNGM0YjdkZWRmODg4MDkzNDJlNjQzMDkxYmUxMTM3ZjllOWY3YjVkM2IifQ"
+        },
+        {
+          "resource": "repo://src/api/snapshot.rs#L1002-L1026",
+          "version": "repo-lines-v1:sha256:77a1f235e0c94e52412a246101e4a72824f05fec172643dffb449b08753a968c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE1ZDdmOTJhNmQyZGM1ZTYyYWVkZGIzMTg1OWQ2ZmVhMDU0N2FmZjYzYWYxYmJiMWZlMzY0MjI0YTcwYjk3ODYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjMjNlNDM0YjI0NGJkNWVhNDQ5YWMxYzhhZmY1ODY1NWNhMjAxOWJjZTM1ZmI3YTExNzNiYTU4MTU2NWZmODAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA1YzNmZTllZjk4MDdhODU3ZjQ0MWVjZTgyYTNhMzU4MTQzMmRkZWQzMGVhN2FjYjdkMjgyMDIyYmE4NzUzYTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMwZmQ2N2I4NTA3OTg2ZDYxZDQyNTE4ZjBkNzQ2OTBkODBkNjlmN2EzNjNiZjU2ZGFjMzRjZDI0MTQxZTY3MGIifQ"
+        },
+        {
+          "resource": "repo://src/api/snapshot.rs#L666-L756",
+          "version": "repo-lines-v1:sha256:604919db31621a76be53037251a5eb29113d5d27705d750a1616488994f25c2c:eyJzZWxlY3RlZExpbmVDb3VudCI6OTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwYTllOTkyYzhiNzAwNmVkNmY5NTMyNWYwZDAyMDNlMWI4NGFiZmQxZWNkZjk1OThhM2YzOWE2ZTk1ZmVmOTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNhZTU3YzlmZDBlN2E4YTRiMWNiN2M3MWE3MzY0NDBiNTFlNjdhMGFmNTlmMTBlYjYwMDA2NzJmMGNlZTE0YmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5ZTc2MzU1Y2YxMTk5NDgwYzNmOTk4MzZiMTQ4NmM4NDFkODkxZmFhZDkwNGM2MDhlMDkzMDIyZDM3NTdhZWUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE3MmExNWY4ZWZhNWEzZTNlNzUyYTE0NjZhNDc5ZDUzOTZhMTNkNGNmZDYzNWMyYmRkNTE0M2NmNzAwNjQxODgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_25ecc20ff04248cca6d1357cb8278801",
+      "statement": "Snapshot restore uses an ACCESS EXCLUSIVE storage lock and an internal subtransaction for truncation, explicit-column insertion, and frontier restoration, rolling back failures; when frontier metadata exists it restores the frontier and population state without itself proving retained subsequent CDC history or restoring consumers.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/snapshot.rs#L1031-L1110",
+          "version": "repo-lines-v1:sha256:c5ee132aabfd044b85e165209d8dbeddf218bcdb79c6486108c8813b75df0f8f:eyJzZWxlY3RlZExpbmVDb3VudCI6ODAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5NjFmY2JmZGZjYzFkZjU0NGY4Y2RkZmExZThjMjM0MzljMThkZjIzZGE5NDlmMjQ1M2RhNjQ4N2QyNjJmNTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRlMjE1YzljZjNjOGI3NjhlNTY4ZTE0ZTY5NWFhYzk3YTI3ZTA2MmE0YmJkODgzZWRiMGUyM2Q5OTBjZDRhMmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZkYjVlYjdiNjc4ODgxZGJlOTk2YzJjMDg1MDQzZmYwNjAzOTY4MTI0NGIwMDBlNmVhMjBkZDYzMzRkN2UyOGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNjODQ5YjRhM2MwNWYyZGI4MTgzOGYwOWMzM2FjYjBhZjM4MzU4OTljZmJhNzg5NjAyNmE1MTZjM2YxMjVkZTEifQ"
+        },
+        {
+          "resource": "repo://src/api/snapshot.rs#L35-L88",
+          "version": "repo-lines-v1:sha256:5cb1c1a6feacd53e243e443af440a9c3a703b1b0b17c4d34d77477fd8c982e2c:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJiYWExZDM0ZjJkMzk4ODk3MjA4OGVhNGI0OTU3YzJiZjMzNDdjYTMxNjNkOWU5NGI5M2RkYmM0Yzk1OGU3NzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM4NDk0Y2NkMDg1YTUyMjVkMTBjNjU1MjY1ZGNhY2FmNGZhMmU5MzM5NmVhNjc0YzJlOGZjYTc0YTc2ZmExMWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZjZThkZTVhYjRmOTllNjQ3OGE0ZmM0NmIzMGIwY2Q3NGZjZTNiZTFlZWYzMmNjODMyZDBkNGViOTMzZjhhYTAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7a77db68587a4ac09d15c6d6748b746a",
+      "statement": "Fresh installation uses pgrx-generated entrypoint SQL and extension_sql definitions, while existing installations depend on hand-authored migrations, so changing Rust/fresh-install definitions alone does not maintain upgrade parity.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/check_upgrade_completeness.sh#L1-L19",
+          "version": "repo-lines-v1:sha256:b459dc09ff3548ba37e11ff097556e3f9ad13c22392d2e4913bc81f9be53aea6:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkOTVmYzA0YTgwYzk1MmY0OWNlNDE4ODYyN2M1M2IwZmJlOGM0NDA0MWI5NTJkNTkyYWNkMWRlOTk4NjE0NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY2YjhmMjhhMTg4ZjllMjM4YzVmNzQ0ZjZlMDZhMzQzNGZhZTE1N2RhYmRlYWE0Mjg1ZTU3OWEzM2E1ODg1YzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU1NWU0NGM3ZmM0MWM4MGFhNmVkZjMyNWU5NTUzZjM1MmEwZDNiOTg2MGMzYjZjMWUzZmFhM2ZhMTZhOGNiOGQifQ"
+        },
+        {
+          "resource": "repo://src/lib.rs",
+          "version": "repo-file-v1:sha256:828b7d36723b798b6c67ac44d8fee45236e5d879ac02e32575eff6f79a09426f"
+        },
+        {
+          "resource": "repo://tests/e2e_upgrade_tests.rs#L1337-L1403",
+          "version": "repo-lines-v1:sha256:3cd9058709ca20df3856cc6e37ec2d9b397c27737f735560b7d8f054ca29e491:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlkYWE1NjVjY2Y2ZGYyYTBkZGM2NzNkMTY1N2UyYWUwYmZmZWRhYmI0Y2VhNWZlMjAwOTIzNjk2NWY2OTYwZWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxOTQ4NGVlZGYzNjRmYjhjMTJmMWViOThmYmY2YTliNGY2NTBmNDI3ODc0YThkNzM1OTAxMGFhZGU0MzFiYzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUzMDU5ZDU0ODdhMTMxMTg3MzJjMTJkNjM3ZTYzYWQzNDQ0MWI2YzI5ZTFiNzE4MjdlYTU0ZWJiNDlmYTMxN2UiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM3ZWI5NTk0MzZhYTg4ODI5YzUzN2FjZGYwMTY1NzkxNDFlZTkxYmFlYzE2ZTA1NTI3NzE0OWFiNGUzMTE2Y2QifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_69b6fa56a6af46258bb938d0167f3173",
+      "statement": "check_upgrade_completeness.sh statically compares new generated install SQL, an optional old baseline, and the upgrade script to detect omitted new SQL objects and columns; its name-based checks do not establish semantic equivalence.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/check_upgrade_completeness.sh",
+          "version": "repo-file-v1:sha256:95e4d6391466aeb032a8e17f9f05269070e9b4bb3b28b517b6d6d15a18a35ff4"
+        }
+      ]
+    },
+    {
+      "id": "claim_88b25d254af54959933e3b04167f657a",
+      "statement": "catalog_manifest.py produces normalized live manifests and diffs covering schemas, relations, columns, constraints, indexes, routines, views, event triggers, extension membership, and config-dump policy, including normalization of extension owner.",
+      "evidence": [
+        {
+          "resource": "repo://scripts/catalog_manifest.py#L17-L48",
+          "version": "repo-lines-v1:sha256:fa189b82ce42bd5ebb69670cc73e216e234e52f034cfc7deb4fa7100b6c0eeec:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlN2Q4NTY3YmJlYjI0NjQ5MDljMzhmOWY4ZTY3Yjg2MWQxOWYwOTBiZjkzNjJiMjNmNjUwZmU0MTA2Y2FlNTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNjYjc4NGY1MmFiZmIxNjA1NzAxNDI1NWQ4Y2RhODIzNDMzNmNjMjUwMDk0ZmJiNjBhOGU5Mjg2NzBjYmQyMzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg4YjE0NDAzOWQyYjc0ZDNlNWU4ZDM4NzAxMmY5ODBkZmFlOGE4ZWQ2NTg0OTRjYjViZTk0NmQzYjMzODExYzAifQ"
+        },
+        {
+          "resource": "repo://scripts/catalog_manifest.py#L510-L582",
+          "version": "repo-lines-v1:sha256:3f3ede3b1facd3514e0437a0bda1e8374556ec9e06dc2aacd7401298b1c890d4:eyJzZWxlY3RlZExpbmVDb3VudCI6NzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc1NDIwNTNlYWU0OWU2Yzc0M2UwM2Y2ZjUxYTU4NWNlNmMyN2ExZGUwY2EyZWFlMDA5OWExZTM4M2Y0ODdlMTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlMWYyNDhkZDM3YzAyY2RhYTJiYjZmMmU3YmZlNWI3Mzg4ODNkN2Y2MDVmNGYzMDcyMjkxM2Q0MDYxOGVkZjkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYyYTRiYjAxNGExZmUyNDEzMTdkOWM2MTUzYTliMTNjOGZkZjZhNTExN2Y4MWVkYjFkYWMyYWMxN2VjZTJiNzkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA3Mjg3YzY4NjM3OGY5MDk3MTc3NjRjMGE4Nzg3YTAxNDUyYTZmM2IzZGE4OTRmOGZlZWJlYjk0MDcwOGI2MmQifQ"
+        },
+        {
+          "resource": "repo://scripts/catalog_manifest.py#L76-L83",
+          "version": "repo-lines-v1:sha256:609b497d36f722abe61bc5109d609a3db2e4a1d5e81a798a257a584ba9bd72bd:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDg0NzYxMjA0YWMwNDZiN2ZmYzcxZjM3ODg0NzgzODA3ODQyZmJlNjU0NWMzMmEzODFlYjY4MDE0NjRhMDU1NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTkzYTEzMDYyZjEwZWU0ZjEyMThkOTNlMzdhNmY4MWQzNDZmZjExZWM3ZTU1ZGQ1NDJlMmQyZDJlZjA3MTFmMSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMjRiMmE0NGE2NjI5OTkxNjc0NjE2NmEyNjk5MDU5MmZkZmZiZjdhM2EzMDEzNDRkNjE0OTIyMGUzNzhjMGQxOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjBjNzc2MjdjNzJhMDJhMTBhM2NjNGZlNWU3MDdjZjA5YmY1NzMwMzUwMjlkODM4Mjg4N2EyZjYyN2ZkYjUwNyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_8e7b88da46eb4d1fadbc6e66b27093d7",
+      "statement": "Safe release changes require version synchronization through check-version-sync and review of compiled package, installed extension, and pgt_schema_version coherence; SQL parity must include security and dump-policy boundaries.",
+      "evidence": [
+        {
+          "resource": "repo://docs/RELEASE.md#L97-L122",
+          "version": "repo-lines-v1:sha256:3cbff8160bfd20fcb79b8e9eca335b5837455b0e57194a612eb38d09bdd3a6f0:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiZTAyYzQ3ODRiZWZjY2JhMTY2YzRhMWRiZGM1OWE0NGZkMmFmZTI0ZmRiZWU5ZmM5NDYxMDJjMzVlMTYwNGIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ5MTFmYTU1ODgyYzVhOTZhZjZjNWQ4ODA1NWRlZGIwNDhhNzc5MTA3MWI4ZWUzYmQ0MDk4Mzk3ZGE2ZDA2NWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYwMTQyY2FiOTlhMDhmMWNiZjIxYTc1YjBhZTVmZjgwNDZlYjRjN2QyYmU2YzMwNGY0MmIyMWQyMWE3N2Q5YmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU5NjQzM2U5ZDA0ZmI3MTgwYTMyMjIyMjc4ODk1ZDU3NWI4N2VjMjYxZGRjYWNhODViOTJmMDlmYTUzMTkzNGIifQ"
+        },
+        {
+          "resource": "repo://scripts/catalog_manifest.py",
+          "version": "repo-file-v1:sha256:0a2a4253c8378d16bbbe7b7a9c843cc8d34dc604b3b412b7c5bbe1003cdb4a5c"
+        },
+        {
+          "resource": "repo://src/api/recovery.rs#L1033-L1054",
+          "version": "repo-lines-v1:sha256:a74d1687c599eb71af3246abee8e2d67ca22d2622ab6211afa592515bb058739:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE3MDkyNGQ5ZDA1MDY4NDhkNzgwMTQyZGZhMTJhNzYwNGQ3OTg4MmVlNGFmY2Y3NTRmMzY4ODNkNmI3Mjk1MTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyODExNWU5ZTM3Yjg1MDRlMmZhOTJiMTM4YTRlNzkxOGYxYzhiYTgxNjM0NWIwMjM3MzFhZjNkZDgxZGFmMDIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZkMTk2ZWM0MzExMWFiYTcwMTIwYmNiMmViOWZmMjM5NGUwMTYxNDM3NzRmYzNhNzIwNzI0MzRjZDg4MDg5YzciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNiZWU2MmY3NTJjNmE3NWY2OWFmNWYyNWJjYTIxMTcyOGFhNGNhNTcwMjQ3MDFjMjRmZjljZjhhZjQwYmQ3NzUifQ"
+        },
+        {
+          "resource": "repo://tests/e2e_upgrade_tests.rs#L181-L228",
+          "version": "repo-lines-v1:sha256:e6cf4117d78d44e2abdb22a5ece5487a53936d7b7ec1a4d133725b8735633851:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFjMWEzMzM4Y2VhNmNhZDk1MTIwZjFkZDI2OTQ5Yjc3OWZlY2Y0NDZjMWQyZWMyMWNhNTlkYTAzYjM4NDA0ZDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU4MGI5YmZiOGJjM2YyZjdlYTZjM2QxYzBmNzI4ZjA1NzhiYmRhNTU0YjE5MDM0ZWE4ZDFiMGIyZDE1MTNmOGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc3NzJlOTI3NWNiNmEyNGZmYTg5NTJjY2E3N2U2YTRhNWEyYWRlNjNjZWQ0MzUxYzZiYzU4NjBhYWZlNTIyZDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjhkMWE2OTJmZTJkOTM5ZWUwMDVhMjdmYzFkZjI1MGZhMTBjYTIxMzlkZjJkMTU2NTE0YmI0NjViYTliMGNjOGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e39b59221d1d4d8b9c4fbd27840cf054",
+      "statement": "The 0.108.2 to 0.108.3 migration nulls row identity/probe versions and forces stream reinitialization, while its output-delta contract guard prevents incompatible changes with live consumers unless the allowed invalidation/resnapshot conditions hold.",
+      "evidence": [
+        {
+          "resource": "repo://sql/pg_trickle--0.108.2--0.108.3.sql",
+          "version": "repo-file-v1:sha256:75855392da24cc3367937da490cf816590e4bc913b113cd355faed7e35f1e27c"
+        }
+      ]
+    },
+    {
+      "id": "claim_9a58d25a40aa4090afb01d3aa16b4cf4",
+      "statement": "Upgrade preflight reports blockers for quarantine, suspended/error/reinitializing streams and invalid catalog identities, recommends drain for jobs/backlog, warns on version mismatch, and always requires external disk-headroom review.",
+      "evidence": [
+        {
+          "resource": "repo://src/api/recovery.rs#L962-L1067",
+          "version": "repo-lines-v1:sha256:f4f9d304f2ee50dd1e5db9408f35166b446204afa78814808c1041b6375c9b3e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA2LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJmMjJlYmMyYTI2ODA5MzVmYzU2M2U5MjUxNGIwN2VlMTRhZjIyODUyOGJkOTU3ZjIzZmMzODdjMTI4MWY3MmU0IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiJhY2NjZjA3ZTg1ODgxZTNlYzgwYThhYjc3NDg0OGMwZjg3ODZlYmZlYWMyMWNlMTQ5ZTFiNDVlMzg0MWMwMWZiIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlOTZmOGNiMDgzZmE4MDBhNGRjZDI5Njk3MjJkN2I5MjY4NmFkZDllYmUzNjU1NDkyZmE2NzJiMWE3Y2VkMjQyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI2MzRkODk3NGUxYjQ3ZjA1YmVlNzkwOGQ2YzQ4NDc4NDBlYzg4YTU0YjNiZDdhOTUzODllODRjM2YzYzE1OWIwIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_fb34841bd01b4505bbec0713d9956650",
+      "statement": "Focused failure tests cover timeout, cancellation, cleanup, repeated-error recovery, identity mismatch/adoption, locked-heartbeat progress, quiesce/resume, missing triggers/slots, and future-frontier failure schedules.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_failure_recovery_tests.rs",
+          "version": "repo-file-v1:sha256:fc50f4150c88cbdb2e0cc4fe87e08d845110b804e5f329f020415e8602b27f05"
+        }
+      ]
+    },
+    {
+      "id": "claim_85eb2985c6f74e26b2a226162699a14f",
+      "statement": "UNLOGGED buffer tests cover configuration, creation, conversion/idempotence, and compatibility rather than a complete power-loss/promotion matrix; the dump test specifically demonstrates OID-shifted two-level DAG recreation with scheduling stopped.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_pg_dump_tests.rs",
+          "version": "repo-file-v1:sha256:b6d06cf525189baff5d2771bd58c9ba5b603d0bdc89ca0a28a78fe385f288b3d"
+        },
+        {
+          "resource": "repo://tests/e2e_unlogged_buffer_tests.rs",
+          "version": "repo-file-v1:sha256:0af98944212f534872e2591a1b7f0efd0d826c80d56f56a5c167dc15d74de7bb"
+        }
+      ]
+    },
+    {
+      "id": "claim_f9e61e0bde6546f18551739122abe573",
+      "statement": "Upgrade tests cover catalog/function/version/dump-policy parity and persisted state, but several chain/drain cases are ignored by default; the major-version-named test only runs preflight/quiesce/resume, and the identity-upgrade fixture uses current code with historical SQL and seeded old-format state rather than an old library.",
+      "evidence": [
+        {
+          "resource": "repo://tests/e2e_upgrade_tests.rs#L1939-L2058",
+          "version": "repo-lines-v1:sha256:0c1f95c305c0878c196c4f5b23beadbf771fbd8725fe015fe9256f4d27c90504:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5NDg3ZTlmNzEyOTQ3ODkyNjk2OWE1NTNlZDY5ZDdjMzY3NjBlNDBiNGJiMTJiZjk5YzljOTQzZjRlODliMDI3IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI1ZmU1YWRjODk1ZDA3OTViNTE3YWUwNmIwYjgxM2Q4MWVmNWZmZGEzODYxMzIzNTRkMTllYzgzZTk5YmVlOTBkIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI1MTBhZDg0YmFkMTFjMTQyODE4ZGJkYmRmZjNmYWZhMjdiNjVjZTFhNzhhYjkyMWIzM2UxNTNhMmIyY2UyYTkxIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI3YjcxMWY0N2QyMGRiZmMzYjNhZTExNmM1ZjVmNjIyNDg3NmVjOTZlNDJlYWQ2MTc5ZWU2MGY3OTdkM2QxMDU2In0"
+        },
+        {
+          "resource": "repo://tests/e2e_upgrade_tests.rs#L894-L1403",
+          "version": "repo-lines-v1:sha256:9e9c32d149a19641bfd8fd1e66a6d92eb0d4343e96864086dd810d83818b13a4:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJlMDhkMGExNjA0MDYxN2YyNWY0YjYwMjFhYzE0ZTUyMjBlOTk4NTI4ZjJjMjI1MTc3YTFkNzc4ZDQwNzY0MTgxIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI1MTk0ODRlZWRmMzY0ZmI4YzEyZjFlYjk4ZmJmNmE5YjRmNjUwZjQyNzg3NGE4ZDczNTkwMTBhYWRlNDMxYmM4IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJhYmVmZmZmMDI4NzViZTc3ZTQwNTBiZThjZTlmNmRhYWYyYWJhMWQ0Njg2NzRmZTE4NDU3YjQ3MWMwNzAzODI2IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIzN2ViOTU5NDM2YWE4ODgyOWM1MzdhY2RmMDE2NTc5MTQxZWU5MWJhZWMxNmUwNTUyNzcxNDlhYjRlMzExNmNkIn0"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.7.2",
+    "at": "2026-10-21T18:25:47.780Z"
+  }
+}

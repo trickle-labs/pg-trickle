@@ -627,7 +627,9 @@ async fn test_view_inline_truncate_base() {
     // TRUNCATE the base table — since view was inlined, the TRUNCATE
     // trigger on the base table should fire
     db.execute("TRUNCATE vi_trunc_base").await;
-    db.refresh_st("vi_st_trunc").await;
+    // A completed refresh can defer TRUNCATE's invalidation under writer
+    // holdback. Require eventual exact convergence, not just a successful call.
+    db.refresh_st_until_converged("vi_st_trunc").await;
 
     db.assert_st_matches_query("vi_st_trunc", "SELECT id, val FROM vi_trunc_view")
         .await;
