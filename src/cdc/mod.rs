@@ -2742,8 +2742,8 @@ fn build_pk_hash_stmt_expr(
 
 /// WB-1: Build the `changed_cols` VARBIT expression for statement-level UPDATE triggers.
 ///
-/// Uses `n."col" IS DISTINCT FROM o."col"` (transition table aliases) instead
-/// of `NEW."col" IS DISTINCT FROM OLD."col"`.
+/// Uses the same typed representation comparison as row-level triggers, with
+/// transition-table aliases for statement-level UPDATEs.
 /// Bit at position `i` (leftmost = 0) is B'1' when column `i` changed.
 fn build_changed_cols_bitmask_stmt_expr(
     pk_columns: &[String],
@@ -2756,20 +2756,11 @@ fn build_changed_cols_bitmask_stmt_expr(
         .iter()
         .map(|(col_name, type_name)| {
             let qcol = col_name.replace('"', "\"\"");
-            // pgvector types (vector, halfvec, sparsevec) do not define an '='
-            // operator, so IS DISTINCT FROM (which uses '=') would fail.
-            // Cast to text for comparison — text always supports equality.
-            if triggers::is_pgvector_type(type_name) {
-                format!(
-                    "(CASE WHEN n.\"{qcol}\"::text IS DISTINCT FROM o.\"{qcol}\"::text \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            } else {
-                format!(
-                    "(CASE WHEN n.\"{qcol}\" IS DISTINCT FROM o.\"{qcol}\" \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            }
+            triggers::changed_col_bit_expr(
+                &format!("n.\"{qcol}\""),
+                &format!("o.\"{qcol}\""),
+                type_name,
+            )
         })
         .collect();
     Some(parts.join(" ||\n\t\t        "))
@@ -3813,6 +3804,21 @@ mod tests {
         );
         assert!(expr.contains("NEW."), "should reference NEW: {expr}");
         assert!(expr.contains("OLD."), "should reference OLD: {expr}");
+    }
+
+    #[test]
+    fn test_statement_bitmask_compares_numeric_scale_representation() {
+        let pk = vec!["id".to_string()];
+        let cols = vec![
+            ("id".to_string(), "integer".to_string()),
+            ("amount".to_string(), "numeric(12, 2)".to_string()),
+        ];
+        let expr = build_changed_cols_bitmask_stmt_expr(&pk, &cols).unwrap();
+        assert!(
+            expr.contains("n.\"amount\" IS DISTINCT FROM o.\"amount\" OR")
+                && expr.contains("scale(n.\"amount\") IS DISTINCT FROM scale(o.\"amount\")"),
+            "statement changed_cols must observe numeric scale changes: {expr}"
+        );
     }
 
     #[test]
