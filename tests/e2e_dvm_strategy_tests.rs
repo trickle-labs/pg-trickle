@@ -46,7 +46,11 @@ async fn test_v0876_strategy_variants_converge_for_corpus_cases() {
     let db = E2eDb::new().await.with_extension().await;
 
     for scenario in &scenarios {
-        for case in strategy::all_variants() {
+        // The bounded receipt-witnessed case below owns WAL qualification.
+        for case in strategy::all_variants()
+            .into_iter()
+            .filter(|case| case.cdc_mode == strategy::CdcModeVariant::Trigger)
+        {
             db.alter_system_set_and_wait(
                 "pg_trickle.cdc_mode",
                 strategy::cdc_mode_literal(case.cdc_mode),
@@ -68,6 +72,198 @@ async fn test_v0876_strategy_variants_converge_for_corpus_cases() {
 
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'auto'", "auto")
         .await;
+}
+
+fn route_matches(
+    expected_mode: &str,
+    action: &str,
+    status: &str,
+    strategy: &str,
+    fallback: bool,
+    rows_changed: i64,
+) -> bool {
+    action == expected_mode
+        && status == "COMPLETED"
+        && !fallback
+        && rows_changed > 0
+        && (expected_mode != "DIFFERENTIAL" || strategy != "FULL")
+}
+
+#[test]
+fn test_strategy_route_witness_rejects_silent_fallback_and_empty_work() {
+    assert!(route_matches(
+        "DIFFERENTIAL",
+        "DIFFERENTIAL",
+        "COMPLETED",
+        "MERGE",
+        false,
+        1
+    ));
+    assert!(route_matches("FULL", "FULL", "COMPLETED", "FULL", false, 1));
+    for (action, status, strategy, fallback, changed) in [
+        ("FULL", "COMPLETED", "FULL", true, 1),
+        ("DIFFERENTIAL", "COMPLETED", "FULL", false, 1),
+        ("DIFFERENTIAL", "FAILED", "MERGE", false, 1),
+        ("DIFFERENTIAL", "COMPLETED", "MERGE", false, 0),
+    ] {
+        assert!(!route_matches(
+            "DIFFERENTIAL",
+            action,
+            status,
+            strategy,
+            fallback,
+            changed
+        ));
+    }
+}
+
+/// A bounded PR matrix: every axis executes committed INSERT, UPDATE and DELETE.
+/// Longer composed-corpus combinations remain in the scheduled test above.
+#[tokio::test]
+async fn test_strategy_changed_data_trigger_wal_full_differential_witnessed() {
+    use std::time::Duration;
+
+    let wait = Duration::from_secs(60);
+    let mut observed = 0;
+    for case in strategy::all_variants() {
+        let db = E2eDb::new_dedicated().await.with_extension().await;
+        db.alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "100", "100")
+            .await;
+        assert!(
+            db.wait_for_scheduler(wait).await,
+            "{case:?}: scheduler missing"
+        );
+        db.execute_seq(&[
+            "CREATE TABLE route_source (id INT PRIMARY KEY, value TEXT)",
+            "ALTER TABLE route_source REPLICA IDENTITY FULL",
+            "INSERT INTO route_source VALUES (1, 'baseline')",
+        ])
+        .await;
+        let mode = strategy::requested_refresh_mode(case.refresh_mode);
+        let cdc = strategy::cdc_mode_name(case.cdc_mode);
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table(name => 'route_stream', \
+             query => 'SELECT id, value FROM route_source', schedule => '24h', \
+             refresh_mode => '{mode}', cdc_mode => '{cdc}')"
+        ))
+        .await;
+        let expected_cdc = cdc.to_uppercase();
+        let mode_query = format!(
+            "SELECT count(*) = 1 AND bool_and(cdc_mode = '{expected_cdc}') \
+             FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = 'route_source'::regclass"
+        );
+        assert!(
+            db.wait_for_condition(
+                "selected CDC route",
+                &mode_query,
+                wait,
+                Duration::from_millis(50)
+            )
+            .await,
+            "{case:?}: source did not reach the selected CDC route"
+        );
+        db.refresh_st("route_stream").await;
+        for (cycle, mutation) in [
+            "INSERT INTO route_source VALUES (2, 'route-insert')",
+            "UPDATE route_source SET value = 'route-update' WHERE id = 2",
+            "DELETE FROM route_source WHERE id = 2",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let before: i64 = db
+                .query_scalar(
+                    "SELECT COALESCE(max(refresh_id), 0) FROM pgtrickle.pgt_refresh_history",
+                )
+                .await;
+            let receipt_before: i64 = db
+                .query_scalar("SELECT COALESCE(max(receipt_id), 0) FROM pgtrickle.pgt_wal_receipts")
+                .await;
+            db.execute(mutation).await;
+            if case.cdc_mode == strategy::CdcModeVariant::Wal {
+                assert!(
+                    db.wait_for_condition(
+                        "changed row durably received and applied through WAL",
+                        &format!(
+                            "SELECT EXISTS (SELECT 1 FROM pgtrickle.pgt_wal_receipts \
+                         WHERE source_relid = 'route_source'::regclass \
+                         AND receipt_id > {receipt_before} AND source_change \
+                         AND status = 'ACKNOWLEDGED' AND data LIKE '%route-%')"
+                        ),
+                        wait,
+                        Duration::from_millis(50)
+                    )
+                    .await,
+                    "{case:?} cycle {cycle}: missing applied WAL receipt"
+                );
+            }
+            if !db.query_scalar::<bool>(&mode_query).await {
+                let logs = tokio::process::Command::new("docker")
+                    .args(["logs", "--tail", "150", db.container_id()])
+                    .output()
+                    .await
+                    .expect("collect failing route's PostgreSQL log");
+                panic!(
+                    "{case:?} cycle {cycle}: CDC fallback\n{}",
+                    String::from_utf8_lossy(&logs.stderr)
+                );
+            }
+            let buffer = db
+                .change_buffer_table(db.table_oid("route_source").await as i64)
+                .await;
+            let captured: i64 = db
+                .query_scalar(&format!(
+                    "SELECT count(*) FROM {buffer} WHERE action IN ('I', 'U', 'D')"
+                ))
+                .await;
+            assert!(
+                captured > 0,
+                "{case:?} cycle {cycle}: change buffer was empty"
+            );
+            db.try_execute_with_config(
+                &[&format!(
+                    "SET pg_trickle.refresh_strategy = '{}'",
+                    mode.to_lowercase()
+                )],
+                "SELECT pgtrickle.refresh_stream_table('route_stream')",
+            )
+            .await
+            .expect("changed-data refresh must succeed");
+            let (action, status, merge, fallback, changed): (String, String, String, bool, i64) =
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "SELECT action, status, COALESCE(merge_strategy_used, ''), \
+                     was_full_fallback, rows_inserted + rows_updated + rows_deleted \
+                     FROM pgtrickle.pgt_refresh_history \
+                     WHERE refresh_id > {before} AND pgt_id = \
+                     (SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'route_stream') \
+                     ORDER BY refresh_id DESC LIMIT 1"
+                ))).fetch_one(&db.pool).await.expect("must record a new refresh for this cycle");
+            assert!(
+                route_matches(mode, &action, &status, &merge, fallback, changed),
+                "{case:?} cycle {cycle}: {action}, {status}, {merge}, fallback={fallback}, rows={changed}"
+            );
+            e2e::oracle::assert_effective_refresh_mode(&db, "route_stream", mode)
+                .await
+                .unwrap();
+            e2e::oracle::assert_st_query_exact(
+                &db,
+                "route_stream",
+                "SELECT id, value FROM route_source",
+                "witnessed changed-data route",
+            )
+            .await;
+            assert!(
+                db.query_scalar::<bool>(&mode_query).await,
+                "{case:?} cycle {cycle}: CDC fallback"
+            );
+            observed += 1;
+        }
+    }
+    assert_eq!(
+        observed, 12,
+        "all four routes and three mutations must be observed"
+    );
 }
 
 /// A single committed multi-row transaction and the same mutations applied

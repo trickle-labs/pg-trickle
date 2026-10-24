@@ -751,6 +751,18 @@ fn generate_delta_query_impl(
     // P2-5: Resolve CDC column ordinals for each source table so the
     // scan operator can build a changed_cols bitmask filter.
     ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
+    ctx.set_source_deferred_keys(resolve_deferred_keys_for_sources(&source_oids)?);
+    if operators::join::computed_projection_needs_endpoints(&result.tree) {
+        ctx.set_builtin_equality_types(match stream_owner {
+            Some(st) => crate::refresh::with_stream_owner(st, resolve_builtin_equality_types)?,
+            None => resolve_builtin_equality_types()?,
+        });
+        ctx.set_fenced_endpoint_sources(resolve_fenced_endpoint_sources(
+            &source_oids,
+            prev_frontier,
+            new_frontier,
+        )?);
+    }
 
     // A-2: Resolve key columns (GROUP BY, JOIN ON, WHERE) per source table
     // so the scan operator can compute a key-only bitmask for value-only
@@ -864,7 +876,17 @@ pub fn generate_delta_query_cached(
 ) -> Result<DeltaQueryResult, PgTrickleError> {
     // Decision traces describe a concrete differentiation, so bypass both
     // template caches while tracing is enabled.
-    if crate::config::pg_trickle_dvm_decision_trace()
+    let endpoint_join = if !prev_frontier.is_empty() && !new_frontier.is_empty() {
+        match stream_owner {
+            Some(st) => crate::refresh::with_stream_owner(st, || {
+                query_needs_endpoint_join_fence(defining_query)
+            })?,
+            None => query_needs_endpoint_join_fence(defining_query)?,
+        }
+    } else {
+        false
+    };
+    if (crate::config::pg_trickle_dvm_decision_trace() || endpoint_join)
         && !prev_frontier.is_empty()
         && !new_frontier.is_empty()
     {
@@ -910,9 +932,8 @@ pub fn generate_delta_query_cached(
         );
     }
 
-    // Salt v0.87.8 templates so catalog-cached SQL from pre-staging releases
-    // cannot be reused under the stream-owner boundary.
-    let query_hash = hash_string(&format!("v0.87.8-stage:{defining_query}"));
+    // Invalidate persisted templates that still evaluate mixed endpoint pairs.
+    let query_hash = hash_string(&format!("v0.108.3-nonfinite-state:{defining_query}"));
 
     // G8.1: Cross-session cache invalidation — flush if the shared
     // generation counter has advanced past our local snapshot.
@@ -1078,6 +1099,13 @@ pub fn generate_delta_query_cached(
 
         // P2-5: Resolve CDC column ordinals for bitmask filter.
         ctx.set_source_cdc_columns(resolve_cdc_columns_for_sources(&source_oids));
+        ctx.set_source_deferred_keys(resolve_deferred_keys_for_sources(&source_oids)?);
+        if operators::join::computed_projection_needs_endpoints(&result.tree) {
+            ctx.set_builtin_equality_types(match stream_owner {
+                Some(st) => crate::refresh::with_stream_owner(st, resolve_builtin_equality_types)?,
+                None => resolve_builtin_equality_types()?,
+            });
+        }
 
         // A-2: Resolve key columns for value-only UPDATE detection.
         ctx.set_source_key_columns(result.tree.source_key_columns_used());
@@ -1177,6 +1205,103 @@ fn resolve_cdc_columns_for_sources(source_oids: &[u32]) -> HashMap<u32, Vec<Stri
         }
     }
     map
+}
+
+pub(crate) fn query_needs_endpoint_join_fence(query: &str) -> Result<bool, PgTrickleError> {
+    if !query.to_ascii_lowercase().contains("join") {
+        return Ok(false);
+    }
+    parse_defining_query(query)
+        .map(|tree| operators::join::computed_projection_needs_endpoints(&tree))
+}
+
+fn resolve_fenced_endpoint_sources(
+    sources: &[u32],
+    prev_frontier: &Frontier,
+    new_frontier: &Frontier,
+) -> Result<std::collections::HashSet<u32>, PgTrickleError> {
+    let mut fenced = std::collections::HashSet::new();
+    for &oid in sources {
+        let protected = pgrx::Spi::get_one_with_args::<bool>(
+            "WITH RECURSIVE sources(oid) AS (SELECT $1::oid UNION \
+                 SELECT i.inhrelid FROM pg_catalog.pg_inherits i JOIN sources s ON i.inhparent=s.oid) \
+             SELECT NOT EXISTS(SELECT 1 FROM sources s WHERE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_locks \
+              WHERE relation=s.oid AND pid=pg_backend_pid() AND granted \
+                AND mode IN ('ShareLock','ShareRowExclusiveLock','ExclusiveLock','AccessExclusiveLock'))) \
+             AND current_setting('transaction_isolation') IN ('read committed','read uncommitted') \
+             AND EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies WHERE source_relid=$1) \
+             AND NOT EXISTS(SELECT 1 FROM pgtrickle.pgt_dependencies \
+                 WHERE source_relid=$1 AND (source_type<>'TABLE' OR cdc_mode<>'TRIGGER'))",
+            &[pgrx::pg_sys::Oid::from(oid).into()],
+        ).map_err(|e|PgTrickleError::SpiError(format!("join source {oid} fence admission: {e}")))?.unwrap_or(false);
+        if !protected {
+            continue;
+        }
+        let buffer = crate::cdc::buffer_base_name_for_oid(pgrx::pg_sys::Oid::from(oid));
+        let schema = diff::quote_ident(&crate::config::pg_trickle_change_buffer_schema());
+        let sql = format!(
+            "SELECT NOT EXISTS(SELECT 1 FROM {schema}.{} \
+                 WHERE (action IN ('I','D','T') AND lsn > $1::pg_lsn) \
+                    OR (action='T' AND lsn > $2::pg_lsn))",
+            diff::quote_ident(&buffer),
+        );
+        let new_cut = new_frontier.get_lsn(oid);
+        let prev_cut = prev_frontier.get_lsn(oid);
+        if pgrx::Spi::get_one_with_args::<bool>(
+            &sql,
+            &[new_cut.as_str().into(), prev_cut.as_str().into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("join source {oid} endpoint fence: {e}")))?
+        .unwrap_or(false)
+        {
+            fenced.insert(oid);
+        }
+    }
+    Ok(fenced)
+}
+
+fn resolve_builtin_equality_types() -> Result<std::collections::HashSet<u32>, PgTrickleError> {
+    pgrx::Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT o.oprleft::bigint FROM pg_catalog.pg_operator o \
+             JOIN pg_catalog.pg_namespace n ON n.oid=o.oprnamespace \
+             WHERE n.nspname='pg_catalog' AND o.oprname='=' AND o.oprleft=o.oprright \
+               AND o.oprleft IN (16,20,21,23,2950) AND pg_catalog.pg_operator_is_visible(o.oid)",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(format!("join equality policy: {e}")))?;
+        let mut types = std::collections::HashSet::new();
+        for row in rows {
+            if let Some(oid) = row
+                .get::<i64>(1)
+                .map_err(|e| PgTrickleError::SpiError(format!("join equality type: {e}")))?
+            {
+                types.insert(oid as u32);
+            }
+        }
+        Ok(types)
+    })
+}
+
+fn resolve_deferred_keys_for_sources(
+    source_oids: &[u32],
+) -> Result<std::collections::HashSet<u32>, PgTrickleError> {
+    let mut deferred = std::collections::HashSet::new();
+    for &oid in source_oids {
+        let is_deferred = pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint \
+             WHERE conrelid=$1 AND contype='p' AND condeferrable)",
+            &[pgrx::pg_sys::Oid::from(oid).into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(format!("source {oid} key constraints: {e}")))?
+        .unwrap_or(false);
+        if is_deferred {
+            deferred.insert(oid);
+        }
+    }
+    Ok(deferred)
 }
 
 /// ST-ST-4: Resolve which source OIDs are stream tables and map them
@@ -1554,10 +1679,8 @@ pub fn query_statistical_aux_types(defining_query: &str) -> Vec<(String, String)
         .unwrap_or_default()
 }
 
-/// Returns `(nonnull_col_name, arg_sql)` tuples for each non-DISTINCT SUM
-/// aggregate above a FULL JOIN child that needs an auxiliary nonnull-count
-/// column (`__pgt_aux_nonnull_*`) for P2-2 NULL-transition correction.
-/// Empty if no such aggregates exist.
+/// Input-state columns for non-DISTINCT SUM/AVG: qualifying counts and,
+/// where needed, finite subtotals plus counts of special numeric inputs.
 pub fn query_nonnull_aux_columns(defining_query: &str) -> Vec<(String, String)> {
     parse_defining_query(defining_query)
         .map(|tree| tree.nonnull_aux_columns())

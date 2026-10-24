@@ -291,15 +291,12 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
 /// because PostgreSQL rejects transaction-control SQL via SPI.
 ///
 /// A41-5 — Isolation invariants:
-/// - `atomic_group` (`is_repeatable_read = false`): each member refresh runs
-///   in its own internal sub-transaction with `READ COMMITTED` isolation.
-///   Members see each other's committed writes once the prior sub-transaction
-///   commits.  Failure of any member rolls back the entire group atomically.
-/// - `repeatable_read_group` (`is_repeatable_read = true`): an explicit
-///   `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` is issued before the
-///   group executes.  All members share the same snapshot as of the group
-///   transaction start.  No member sees writes from others, and the group
-///   appears as a single atomic unit to external observers.
+/// - `atomic_group` (`is_repeatable_read = false`): members execute in one
+///   worker transaction and group subtransaction with READ COMMITTED isolation.
+///   Later members see earlier writes; failure rolls back the whole group.
+/// - `repeatable_read_group` (`is_repeatable_read = true`): the dedicated
+///   worker configures REPEATABLE READ before starting the work transaction.
+///   Members share its external snapshot and see the transaction's own writes.
 fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> RefreshOutcome {
     log!(
         "pg_trickle refresh worker: {} group — {} members (job {})",
@@ -311,17 +308,6 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
         job.member_pgt_ids.len(),
         job.job_id,
     );
-
-    if is_repeatable_read {
-        // Upgrade top-level worker transaction to REPEATABLE READ snapshot isolation
-        if let Err(e) = pgrx::Spi::run("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ") {
-            pgrx::log!(
-                "pg_trickle refresh worker: failed to set REPEATABLE READ isolation: {}",
-                e
-            );
-            return RefreshOutcome::PermanentFailure;
-        }
-    }
 
     let subtxn = SubTransaction::begin();
 
@@ -2982,6 +2968,10 @@ fn iterate_to_fixpoint(
         return;
     }
 
+    if !crate::api::scheduler_control::admit_scheduler_targets(&member_ids) {
+        return;
+    }
+
     // Build member names for logging.
     let member_names: Vec<String> = member_ids
         .iter()
@@ -3239,6 +3229,10 @@ fn refresh_single_st(
 
     let needs_refresh = check_schedule(&st, dag_ref);
     if !needs_refresh && !st.needs_reinit {
+        return;
+    }
+
+    if !crate::api::scheduler_control::admit_scheduler_targets(&[pgt_id]) {
         return;
     }
 

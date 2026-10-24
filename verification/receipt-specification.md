@@ -3,6 +3,19 @@
 This is the first slice of #1222, part of #1225. It does not complete the
 cleanup, incarnation, reset/restore or recovery-transition proof work.
 
+The original raw-stream adapter below describes frozen `c06b7125`. The
+subsequent [feedback repair](receipt-feedback-safety.md) conservatively omits
+source-free ordinary table transactions from persistence and validates their
+place in a freshly peeked exact consuming prefix. Source and unrecognized
+transactions retain complete durable receipts. The arithmetic contract still
+uses the entire consumed raw prefix, including source-free work, as n.
+
+The [framing follow-up](receipt-framing-specification.md) moves the actual
+transaction-boundary scan into the shared verified module. Its successful-
+output theorem covers complete framing under an immutable borrowed-message
+adapter contract; String classification, SQL selection and durability remain
+separate obligations. This extends the arithmetic slice without changing it.
+
 ## Independent contract
 
 For a persisted, applied prefix containing `n` decoder messages and ending at a
@@ -24,7 +37,7 @@ Verus and `src/wal_decoder.rs::acknowledge_receipt_batch`. Its postcondition
 establishes the exact limit and its bounds. Changing the request to `n + 1`
 fails that postcondition; it is not a compile-error mutation control.
 
-## Adapter obligations and separate runtime evidence
+## Original adapter obligations and separate runtime evidence
 
 - `poll_wal_changes` persists the complete decoder output atomically before
   replay or acknowledgement. The decoder includes unrelated table messages;
@@ -61,13 +74,17 @@ durability are **not** established by this arithmetic proof. Existing receipt
 barriers and retained-cluster recovery tests remain necessary. In particular,
 the proof does not turn a maximum observed LSN into a complete recoverable
 prefix and does not authorize cleanup, reset, restore or source reuse.
-Independent specification review remains pending; the arithmetic postcondition
-and executable control are not a proof of the transaction-framing adapter.
+An independent read-only agent review accepted the bounded arithmetic
+specification at `c06b71252c86aa6e0b1da2e68927280cb9e5de65`. See
+[the review record](specification-reviews.md). The arithmetic postcondition and
+executable control are not a proof of the transaction-framing adapter.
 
 ## Reproduction and CI
 
 Run `python3 scripts/check_receipt_verification.py` for the pinned Verus
-baseline and executable mutation. It reuses the LSN proof runner, compiler and
+baseline and executable mutations. The feedback follow-up adds the source-free
+bookkeeping decision and three guard mutants to the original n+1 control.
+It reuses the LSN proof runner, compiler and
 solver identity collection, summary checks and source digests. Records are in
 `.p2p/work/issue-1222-receipt-prefix/evidence/`. Ordinary Rust boundary tests
 cover the minimum, maximum and rejected count domains. CI executes this proof
@@ -84,7 +101,14 @@ bash scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests \
 
 An arithmetic proof record alone is not source/package/installation binding.
 The existing binding helper's `--proof-kind receipt` mode additionally requires
-matching caller/build-input hashes, the named receipt E2E case and matching
+matching caller/build-input hashes, all three required receipt E2E cases and matching
 packaged/installed library bytes. The existing packaged-candidate CI job runs
 this mode after the receipt test. A configured workflow is not evidence that
 its installed-candidate qualification has run successfully.
+
+The binding helper trusts the surrounding build/test runner for build origin
+and successful execution of the supplied test names. The historical local
+observations had a NULL candidate commit; they establish package/install byte
+equality, not independent frozen-build provenance. Current binding rejects
+missing or mismatched runtime commit fields. The suite's duplicated-result
+control tests the bag oracle, rather than a duplicate-replay executable mutant.

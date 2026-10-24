@@ -84,6 +84,9 @@
   },
   "negative_control": {
     "reason": "The UPDATE in the simultaneous-two-leaf-change cycle declares expected_affected_rows=2 for a WHERE id=1 update that can only affect 1 row. Replay must fail with GeneratorInvalid. Padding cycles/rows before and after exist so the release gate and just dvm-shrink have real reduction work to do.",
-    "expected_failure_class": "GeneratorInvalid"
+    "expected_failure_class": "GeneratorInvalid",
+    "expected_phase": "simultaneous-two-leaf-change mutation",
+    "expected_cycle": 2,
+    "expected_mutation": 1
   }
 }

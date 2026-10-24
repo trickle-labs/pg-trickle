@@ -728,10 +728,10 @@ async fn test_stmt_cdc_numeric_scale_changes_reach_shared_consumers() {
         let scale_query = format!("SELECT id, scale(amount) AS amount_scale FROM {source}");
 
         db.execute(&format!(
-            "CREATE TABLE {source} (id INT PRIMARY KEY, amount NUMERIC, pad TEXT)"
+            "CREATE TABLE {source} (id INT PRIMARY KEY, amount NUMERIC, pad INT)"
         ))
         .await;
-        db.execute(&format!("INSERT INTO {source} VALUES (1, 1.0, 'seed')"))
+        db.execute(&format!("INSERT INTO {source} VALUES (1, 1.0, 7)"))
             .await;
 
         let create_all = format!(
@@ -817,7 +817,7 @@ async fn test_stmt_cdc_numeric_scale_changes_reach_shared_consumers() {
                 !all_first,
             ),
             (
-                format!("INSERT INTO {source} VALUES (2, 3.00, 'inserted')"),
+                format!("INSERT INTO {source} VALUES (2, 3.00, 8)"),
                 "I:NULL",
                 1,
                 !all_first,

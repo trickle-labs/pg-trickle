@@ -9,6 +9,7 @@
 //! - Vanishes (new_count ≤ 0, was > 0) → DELETE
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
+use super::nonfinite;
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
     build_snapshot_inline_from, build_snapshot_sql, snapshot_join_column_name,
@@ -16,6 +17,14 @@ use crate::dvm::operators::join_common::{
 use crate::dvm::operators::scan::build_hash_expr_for_domain;
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree, apply_column_aliases};
 use crate::error::PgTrickleError;
+
+fn special_delta_selects(argument: &str, action: &str, filter: Option<&str>) -> String {
+    let guard = filter
+        .map(|filter| format!(" AND ({filter})"))
+        .unwrap_or_default();
+    let argument = format!("CASE WHEN {action}{guard} THEN ({argument}) END");
+    nonfinite::state_sql(&argument)
+}
 
 /// Resolve a column reference expression against child CTE column names.
 ///
@@ -984,16 +993,17 @@ fn build_intermediate_agg_delta(
             format!("{delta_cte} AS d({delta_group_aliases})")
         };
 
-        let old_presence = if group_columns.is_empty() {
-            String::new()
-        } else {
-            format!("\nWHERE ({old_pgt_count}) > 0")
-        };
-        let new_presence = if group_columns.is_empty() {
-            String::new()
-        } else {
-            "\nWHERE n.__pgt_count > 0".to_string()
-        };
+        let old_presence = format!(
+            "\nWHERE {}",
+            crate::aggregate_lifecycle::group_presence_sql(group_columns.is_empty(), old_pgt_count,)
+        );
+        let new_presence = format!(
+            "\nWHERE {}",
+            crate::aggregate_lifecycle::group_presence_sql(
+                group_columns.is_empty(),
+                "n.__pgt_count",
+            )
+        );
         let final_sql = format!(
             "\
 -- D events: old state (algebraic: old = new - ins + del)
@@ -1349,6 +1359,34 @@ fn build_rescan_cte(
             agg_to_rescan_sql(agg),
             quote_ident(&agg.alias),
         ));
+        if config.force_all_aggs && agg.needs_nonfinite_state(child) {
+            let argument = agg
+                .argument
+                .as_ref()
+                .map(Expr::to_sql)
+                .unwrap_or_else(|| "0".into());
+            let argument = if let Some(filter) = &agg.filter {
+                format!("CASE WHEN {} THEN ({argument}) END", filter.to_sql())
+            } else {
+                argument
+            };
+            selects.push(format!(
+                "COALESCE({}, 'null'::jsonb) AS {}",
+                nonfinite::state_sql(&argument),
+                quote_ident(&format!("__pgt_aux_special_{}", agg.alias))
+            ));
+        }
+        if config.force_all_aggs && matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
+            for (function, suffix) in [(AggFunc::Sum, "sum"), (AggFunc::Count, "count")] {
+                let mut auxiliary = (*agg).clone();
+                auxiliary.function = function;
+                selects.push(format!(
+                    "COALESCE({}, 0) AS {}",
+                    agg_to_rescan_sql(&auxiliary),
+                    quote_ident(&format!("__pgt_rescan_{suffix}_{}", agg.alias)),
+                ));
+            }
+        }
         if config.include_special_aggs && matches!(agg.function, AggFunc::Avg) && !agg.is_distinct {
             selects.push(format!(
                 "{} AS {}",
@@ -1904,6 +1942,19 @@ fn generate_direct_agg_delta(
 
         // SUM needs a qualifying non-NULL count so the algebraic merge can
         // restore PostgreSQL's NULL result when the last value disappears.
+        if agg.needs_nonfinite_state(scan) {
+            let argument = case_rewrites
+                .get(&agg.alias)
+                .cloned()
+                .unwrap_or_else(|| direct_agg_argument_expr(agg));
+            for (action, prefix) in [("I", "ins"), ("D", "del")] {
+                select_exprs.push(format!(
+                    "{} AS {}",
+                    special_delta_selects(&argument, &format!("c.action='{action}'"), None),
+                    quote_ident(&format!("__{prefix}_special_{}", agg.alias))
+                ));
+            }
+        }
         if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
             let argument = case_rewrites
                 .get(&agg.alias)
@@ -1978,12 +2029,9 @@ fn direct_agg_delta_exprs(agg: &AggExpr, _has_value_only: bool) -> (String, Stri
                 .map(|e| format!("c.{}", quote_ident(&e.output_name())))
                 .unwrap_or_else(|| "1".to_string());
             (
-                format!(
-                    "SUM(CASE WHEN c.action = 'I' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
-                ),
-                format!(
-                    "SUM(CASE WHEN c.action = 'D' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
-                ),
+                // COUNT checks the datum null flag; IS NOT NULL tests composite fields.
+                format!("COUNT({col}) FILTER (WHERE c.action = 'I')"),
+                format!("COUNT({col}) FILTER (WHERE c.action = 'D')"),
             )
         }
         AggFunc::Sum => {
@@ -2116,6 +2164,28 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let alias_d = format!("__del_{}", agg.alias);
             delta_selects.push(format!("{ins_expr} AS {}", quote_ident(&alias_i)));
             delta_selects.push(format!("{del_expr} AS {}", quote_ident(&alias_d)));
+            if agg.needs_nonfinite_state(child) {
+                let argument = agg
+                    .argument
+                    .as_ref()
+                    .map(|expr| resolve_expr_for_child(expr, child_cols))
+                    .unwrap_or_else(|| "0".into());
+                let filter = agg
+                    .filter
+                    .as_ref()
+                    .map(|expr| resolve_expr_for_child(expr, child_cols));
+                for (action, prefix) in [("I", "ins"), ("D", "del")] {
+                    delta_selects.push(format!(
+                        "{} AS {}",
+                        special_delta_selects(
+                            &argument,
+                            &format!("__pgt_action='{action}'"),
+                            filter.as_deref()
+                        ),
+                        quote_ident(&format!("__{prefix}_special_{}", agg.alias))
+                    ));
+                }
+            }
 
             if matches!(agg.function, AggFunc::Sum | AggFunc::Avg) && !agg.is_distinct {
                 let argument = agg
@@ -2310,6 +2380,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     };
 
     let mut merge_selects = Vec::new();
+    let mut special_joins = String::new();
     // Use the existing row ID from the target when the group already exists
     // (LEFT JOIN hit), otherwise compute a hash from the group-by columns.
     // This ensures the DVM-generated row IDs are compatible with however the
@@ -2349,12 +2420,11 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     merge_selects.push("COALESCE(st.__pgt_count, 0) AS old_count".to_string());
 
     // Per-aggregate new values + old values for G-S1 change detection
-    for agg in aggregates {
-        // SUM and AVG use rescan values only when deltas contain special
-        // numeric values; ordinary changes keep the algebraic path.
+    for (aggregate_index, agg) in aggregates.iter().enumerate() {
+        // SUM also uses a rescan when special-value deltas require it.
         let agg_has_nonnull_aux = matches!(agg.function, AggFunc::Sum) && !agg.is_distinct;
         let agg_has_rescan = has_rescan;
-        let new_val_expr = agg_merge_expr_mapped(
+        let mut new_val_expr = agg_merge_expr_mapped(
             agg,
             agg_has_rescan,
             use_having_rescan,
@@ -2365,6 +2435,78 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 .and_then(|m| m.get(&agg.alias))
                 .map(|s| s.as_str()),
         );
+        let special = if agg.needs_nonfinite_state(child) {
+            let state_column =
+                quote_ident(&format!("__pgt_aux_special_{}", st_col_name(&agg.alias)));
+            let old = format!("st.{state_column}");
+            let inserts = format!("d.{}", quote_ident(&format!("__ins_special_{}", agg.alias)));
+            let deletes = format!("d.{}", quote_ident(&format!("__del_special_{}", agg.alias)));
+            let merged = initialize_having_group(
+                use_having_rescan,
+                &format!(
+                    "r.{}",
+                    quote_ident(&format!("__pgt_aux_special_{}", agg.alias))
+                ),
+                &nonfinite::merge_sql(&old, &inserts, &deletes),
+            );
+            let state = format!("__pgt_ns_{aggregate_index}.state");
+            special_joins.push_str(&format!(
+                "\nLEFT JOIN LATERAL (SELECT {merged} AS state) __pgt_ns_{aggregate_index} ON TRUE"
+            ));
+            merge_selects.push(format!(
+                "{old} AS {}",
+                quote_ident(&format!("old___pgt_aux_special_{}", agg.alias))
+            ));
+            merge_selects.push(format!(
+                "COALESCE({state}, 'null'::jsonb) AS {}",
+                quote_ident(&format!("new___pgt_aux_special_{}", agg.alias))
+            ));
+            let guard = format!(
+                "({} OR {} OR {})",
+                nonfinite::has_special_sql(&old),
+                nonfinite::has_special_sql(&inserts),
+                nonfinite::has_special_sql(&deletes)
+            );
+            let special_sum = format!("({})::numeric", nonfinite::value_sql(&state));
+            let value = if matches!(agg.function, AggFunc::Avg) {
+                let count = initialize_having_group(
+                    use_having_rescan,
+                    &format!(
+                        "r.{}",
+                        quote_ident(&format!("__pgt_rescan_count_{}", agg.alias))
+                    ),
+                    &format!(
+                        "COALESCE(st.{},0)+COALESCE(d.{},0)-COALESCE(d.{},0)",
+                        quote_ident(&format!("__pgt_aux_count_{}", st_col_name(&agg.alias))),
+                        quote_ident(&format!("__ins_count_{}", agg.alias)),
+                        quote_ident(&format!("__del_count_{}", agg.alias))
+                    ),
+                );
+                format!("({special_sum}/NULLIF({count},0))::text")
+            } else {
+                format!(
+                    "CASE WHEN {} > 0 THEN ({special_sum})::text END",
+                    sum_nonnull_count_expr(&agg.alias, &st_col_name(&agg.alias), use_having_rescan)
+                )
+            };
+            let column = st_col_name(&agg.alias);
+            let literal =
+                |value: &str| format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''"));
+            let mut fields = group_columns
+                .iter()
+                .map(|group| format!("{},d.{}", literal(&st_col_name(group)), quote_ident(group)))
+                .collect::<Vec<_>>();
+            fields.push(format!("{},{value}", literal(&column)));
+            let restored = format!(
+                "(pg_catalog.jsonb_populate_record(st,pg_catalog.jsonb_build_object({}))).{}",
+                fields.join(","),
+                quote_ident(&column)
+            );
+            new_val_expr = format!("CASE WHEN {guard} THEN {restored} ELSE {new_val_expr} END");
+            Some((guard, special_sum))
+        } else {
+            None
+        };
         merge_selects.push(format!(
             "{new_val_expr} AS {}",
             quote_ident(&format!("new_{}", agg.alias)),
@@ -2389,24 +2531,42 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             let ins_cnt = quote_ident(&format!("__ins_count_{}", agg.alias));
             let del_cnt = quote_ident(&format!("__del_count_{}", agg.alias));
 
-            let aux_sum_value = format!(
-                "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
+            let mut sum = initialize_having_group(
+                use_having_rescan && matches!(agg.function, AggFunc::Avg),
+                &format!(
+                    "COALESCE(r.{}, 0)",
+                    quote_ident(&format!("__pgt_rescan_sum_{}", agg.alias))
+                ),
+                &format!(
+                    "COALESCE(st.{aux_sum}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)"
+                ),
             );
-            let aux_sum_value = if matches!(agg.function, AggFunc::Avg) && has_rescan {
-                format!(
-                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {aux_sum_value} END",
+            if matches!(agg.function, AggFunc::Avg) && has_rescan {
+                sum = format!(
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{} ELSE {sum} END",
                     quote_ident(&format!("__special_{}", agg.alias)),
                     quote_ident(&format!("__pgt_aux_sum_{}", agg.alias)),
-                )
-            } else {
-                aux_sum_value
-            };
+                );
+            }
+            if let Some((guard, special_sum)) = &special {
+                sum = format!("CASE WHEN {guard} THEN {special_sum} ELSE {sum} END");
+            }
+            let count = initialize_having_group(
+                use_having_rescan && matches!(agg.function, AggFunc::Avg),
+                &format!(
+                    "COALESCE(r.{}, 0)",
+                    quote_ident(&format!("__pgt_rescan_count_{}", agg.alias))
+                ),
+                &format!(
+                    "COALESCE(st.{aux_cnt}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0)"
+                ),
+            );
             merge_selects.push(format!(
-                "{aux_sum_value} AS {}",
+                "{sum} AS {}",
                 quote_ident(&format!("new___pgt_aux_sum_{}", agg.alias)),
             ));
             merge_selects.push(format!(
-                "COALESCE(st.{aux_cnt}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0) AS {}",
+                "{count} AS {}",
                 quote_ident(&format!("new___pgt_aux_count_{}", agg.alias)),
             ));
         }
@@ -2441,22 +2601,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // Update the SUM nonnull-count auxiliary column.
         if agg_has_nonnull_aux {
             let st_alias = st_col_name(&agg.alias);
-            let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_alias}"));
-            let ins_nonnull = quote_ident(&format!("__ins_nonnull_{}", agg.alias));
-            let del_nonnull = quote_ident(&format!("__del_nonnull_{}", agg.alias));
-            let algebraic = format!(
-                "COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)"
-            );
-            let new_nonnull = if use_having_rescan {
-                format!(
-                    "CASE WHEN st.__pgt_count IS NULL \
-                     THEN COALESCE(r.{}, 0) \
-                     ELSE {algebraic} END",
-                    quote_ident(&format!("__pgt_nonnull_{}", agg.alias)),
-                )
-            } else {
-                algebraic
-            };
+            let new_nonnull = sum_nonnull_count_expr(&agg.alias, &st_alias, use_having_rescan);
             merge_selects.push(format!(
                 "{new_nonnull} AS {}",
                 quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias)),
@@ -2473,31 +2618,14 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     let is_scalar_agg = group_by.is_empty();
 
     // Action classification (same COALESCE guards as new_count)
-    // A hidden HAVING group can requalify through an UPDATE with zero net row count.
-    let action_case = if is_scalar_agg {
-        "\
-CASE
-    WHEN st.__pgt_count IS NULL AND (COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'I'
-    ELSE 'U'
-END AS __pgt_meta_action"
-            .to_string()
-    } else if use_having_rescan && has_rescan {
-        "\
-CASE
-    WHEN st.__pgt_count IS NULL AND COALESCE(r.__pgt_count, 0) > 0 THEN 'I'
-    WHEN COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) <= 0 THEN 'D'
-    ELSE 'U'
-END AS __pgt_meta_action"
-            .to_string()
-    } else {
-        "\
-CASE
-    WHEN st.__pgt_count IS NULL AND (COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)) > 0 THEN 'I'
-    WHEN COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) <= 0 THEN 'D'
-    ELSE 'U'
-END AS __pgt_meta_action"
-            .to_string()
-    };
+    let action_case = format!(
+        "{} AS __pgt_meta_action",
+        crate::aggregate_lifecycle::group_action_sql(
+            is_scalar_agg,
+            "st.__pgt_count IS NOT NULL",
+            &new_count_expr,
+        )
+    );
     merge_selects.push(action_case);
 
     // Join condition on group-by columns
@@ -2555,7 +2683,7 @@ END AS __pgt_meta_action"
         format!("{delta_cte} AS d({delta_group_aliases})")
     };
     let merge_sql = format!(
-        "SELECT {selects}\nFROM {delta_from}\nLEFT JOIN {st_table} st ON {join_cond}{rescan_join}",
+        "SELECT {selects}\nFROM {delta_from}\nLEFT JOIN {st_table} st ON {join_cond}{rescan_join}{special_joins}",
         selects = merge_selects.join(",\n       "),
     );
     ctx.add_cte(merge_cte.clone(), merge_sql);
@@ -2580,6 +2708,9 @@ END AS __pgt_meta_action"
     output_cols.push("__pgt_count".to_string());
     for agg in aggregates {
         output_cols.push(agg.alias.clone());
+        if agg.needs_nonfinite_state(child) {
+            output_cols.push(format!("__pgt_aux_special_{}", agg.alias));
+        }
         // AVG/STDDEV/VAR auxiliary columns flow through to the MERGE
         if is_algebraic_via_aux(agg) {
             output_cols.push(format!("__pgt_aux_sum_{}", agg.alias));
@@ -2638,19 +2769,15 @@ END AS __pgt_meta_action"
                     | AggFunc::VarPop
                     | AggFunc::VarSamp
             );
-        if needs_null_on_empty {
-            agg_cases.push(format!(
-                "CASE WHEN m.__pgt_meta_action = 'D' THEN m.{old_col} \
-                 WHEN m.new_count <= 0 THEN NULL \
-                 ELSE m.{new_col} END AS {}",
-                quote_ident(&agg.alias),
-            ));
-        } else {
-            agg_cases.push(format!(
-                "CASE WHEN m.__pgt_meta_action = 'D' THEN m.{old_col} ELSE m.{new_col} END AS {}",
-                quote_ident(&agg.alias),
-            ));
-        }
+        let new_value = crate::aggregate_lifecycle::aggregate_value_sql(
+            needs_null_on_empty,
+            "m.new_count",
+            &format!("m.{new_col}"),
+        );
+        agg_cases.push(format!(
+            "CASE WHEN m.__pgt_meta_action = 'D' THEN m.{old_col} ELSE {new_value} END AS {}",
+            quote_ident(&agg.alias),
+        ));
 
         // AVG auxiliary columns: propagate the algebraically computed values
         if is_algebraic_via_aux(agg) {
@@ -2667,6 +2794,12 @@ END AS __pgt_meta_action"
             agg_cases.push(format!(
                 "CASE WHEN m.__pgt_meta_action = 'D' THEN 0 ELSE m.{new_aux_cnt} END AS {aux_cnt_alias}",
             ));
+        }
+
+        if agg.needs_nonfinite_state(child) {
+            let new = quote_ident(&format!("new___pgt_aux_special_{}", agg.alias));
+            let alias = quote_ident(&format!("__pgt_aux_special_{}", agg.alias));
+            agg_cases.push(format!("m.{new} AS {alias}"));
         }
 
         // STDDEV/VAR: propagate the sum-of-squares auxiliary column
@@ -2728,6 +2861,13 @@ END AS __pgt_meta_action"
             new = quote_ident(&format!("new_{}", agg.alias)),
             old = quote_ident(&format!("old_{}", agg.alias)),
         ));
+        if agg.needs_nonfinite_state(child) {
+            change_checks.push(format!(
+                "m.{} IS DISTINCT FROM m.{}",
+                quote_ident(&format!("new___pgt_aux_special_{}", agg.alias)),
+                quote_ident(&format!("old___pgt_aux_special_{}", agg.alias))
+            ));
+        }
     }
     let change_guard = change_checks.join("\n          OR ");
 
@@ -2753,14 +2893,16 @@ WHERE m.__pgt_meta_action IN ('I', 'D')
     })
 }
 
-/// Generate SUM expressions for INSERT/DELETE tracking in the delta CTE.
+/// Generate aggregate expressions for INSERT/DELETE tracking in the delta CTE.
 ///
 /// Aggregate arguments are stripped of table qualifiers because the child
 /// CTE (e.g. join delta) outputs unqualified column names.
 ///
 /// When a FILTER clause is present, its condition is added as an additional
-/// AND guard in all CASE WHEN expressions, so only rows passing the filter
-/// contribute to the aggregate delta.
+/// guard in the outer CASE WHEN or aggregate FILTER, so excluded rows never
+/// evaluate arguments.
+/// Argument-dependent NULL checks must stay inside that CASE, since SQL AND
+/// does not guarantee evaluation order.
 pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
     if agg.is_distinct {
         return (
@@ -2790,12 +2932,9 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
                 .map(|e| resolve_expr_for_child(e, child_cols))
                 .unwrap_or("*".into());
             (
-                format!(
-                    "SUM(CASE WHEN __pgt_action = 'I' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)"
-                ),
-                format!(
-                    "SUM(CASE WHEN __pgt_action = 'D' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)"
-                ),
+                // Preserve COUNT's datum null semantics, including composite arguments.
+                format!("COUNT({col}) FILTER (WHERE __pgt_action = 'I'{filter_and})"),
+                format!("COUNT({col}) FILTER (WHERE __pgt_action = 'D'{filter_and})"),
             )
         }
         AggFunc::Sum => {
@@ -2865,10 +3004,10 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
             let guard = format!("{x_col} IS NOT NULL AND {y_col} IS NOT NULL");
             (
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'I' AND {guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
                 ),
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'D' AND {guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
                 ),
             )
         }
@@ -2896,10 +3035,10 @@ pub fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String)
             // We only need to detect "any change happened" — counting suffices.
             (
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} AND {col} IS NOT NULL THEN 1 ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)"
                 ),
                 format!(
-                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} AND {col} IS NOT NULL THEN 1 ELSE 0 END)"
+                    "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)"
                 ),
             )
         }
@@ -2949,10 +3088,10 @@ fn agg_avg_count_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, S
 
     (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN 1 ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} THEN 1 ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN 1 ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} THEN 1 ELSE 0 END ELSE 0 END)"
         ),
     )
 }
@@ -3015,10 +3154,10 @@ fn agg_nonnull_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, Str
         .unwrap_or_else(|| "1".to_string());
     (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)::bigint"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)::bigint"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)::bigint"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END ELSE 0 END)::bigint"
         ),
     )
 }
@@ -3080,55 +3219,71 @@ fn agg_covar_delta_exprs(
 
     let ins = (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({x_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({x_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'I' AND {non_null_guard}{filter_and} \
-         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'I'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
     );
     let del = (
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({x_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({x_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} THEN ({y_col}) ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} THEN ({y_col}) ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
-         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({x_col})::{cast_type} * ({x_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
         format!(
-            "SUM(CASE WHEN __pgt_action = 'D' AND {non_null_guard}{filter_and} \
-         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END)"
+            "SUM(CASE WHEN __pgt_action = 'D'{filter_and} THEN CASE WHEN {non_null_guard} \
+         THEN ({y_col})::{cast_type} * ({y_col})::{cast_type} ELSE 0 END ELSE 0 END)"
         ),
     );
     (ins, del)
 }
 
-/// Generate the merge expression for computing the new aggregate value.
-///
-/// When `has_rescan` is true, group-rescan aggregates reference the rescan
-/// CTE (`r.{alias}`) instead of producing a NULL sentinel. This correctly
-/// re-aggregates the affected group from source data.
-///
-/// When no column aliasing is in effect, use [`agg_merge_expr`] which
-/// defaults `st_col` to `agg.alias`.
+// A group omitted by HAVING has no stored accumulators; initialize all of them from the rescan.
+fn initialize_having_group(having_rescan: bool, rescanned: &str, algebraic: &str) -> String {
+    if having_rescan {
+        format!("CASE WHEN st.__pgt_count IS NULL THEN {rescanned} ELSE {algebraic} END")
+    } else {
+        algebraic.to_string()
+    }
+}
+
+fn sum_nonnull_count_expr(alias: &str, st_col: &str, having_rescan: bool) -> String {
+    let aux = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
+    let ins = quote_ident(&format!("__ins_nonnull_{alias}"));
+    let del = quote_ident(&format!("__del_nonnull_{alias}"));
+    initialize_having_group(
+        having_rescan,
+        &format!(
+            "COALESCE(r.{}, 0)",
+            quote_ident(&format!("__pgt_nonnull_{alias}"))
+        ),
+        &format!("COALESCE(st.{aux}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)"),
+    )
+}
+
+/// Generate a new aggregate value, resolving stored aliases and absent HAVING groups.
 fn agg_merge_expr_mapped(
     agg: &AggExpr,
     has_rescan: bool,
@@ -3188,16 +3343,11 @@ fn agg_merge_expr_mapped(
                 //   = 0 → all argument values in the group are now NULL.
                 //          Restore NULL here; an outer Project applies
                 //          COALESCE, if the defining query requested it.
-                let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
-                let ins_nonnull = quote_ident(&format!("__ins_nonnull_{alias}"));
-                let del_nonnull = quote_ident(&format!("__del_nonnull_{alias}"));
                 let algebraic =
                     format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)");
-                let value = if having_rescan {
-                    format!("CASE WHEN st.__pgt_count IS NULL THEN r.{r_qt} ELSE {algebraic} END")
-                } else {
-                    algebraic
-                };
+                let value =
+                    initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
+                let new_nonnull = sum_nonnull_count_expr(alias, st_col, having_rescan);
                 let value = if has_rescan {
                     format!(
                         "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
@@ -3206,13 +3356,7 @@ fn agg_merge_expr_mapped(
                 } else {
                     value
                 };
-                format!(
-                    "CASE \
-                     WHEN (COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)) > 0 \
-                     THEN {value} \
-                     ELSE NULL \
-                     END",
-                )
+                crate::aggregate_lifecycle::aggregate_value_sql(true, &new_nonnull, &value)
             } else if has_rescan {
                 // Rescan CTE available (HAVING context):
                 // use the re-aggregated value for any changed group.
@@ -3256,13 +3400,14 @@ fn agg_merge_expr_mapped(
                 "(COALESCE(st.{aux_sum_col}, 0) + COALESCE(d.{ins_sum}, 0) - COALESCE(d.{del_sum}, 0)) \
                  / NULLIF(COALESCE(st.{aux_count_col}, 0) + COALESCE(d.{ins_cnt}, 0) - COALESCE(d.{del_cnt}, 0), 0)",
             );
+            let value = initialize_having_group(having_rescan, &format!("r.{r_qt}"), &algebraic);
             if has_rescan {
                 format!(
-                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {algebraic} END",
+                    "CASE WHEN COALESCE(d.{}, 0) > 0 THEN r.{r_qt} ELSE {value} END",
                     quote_ident(&format!("__special_{alias}")),
                 )
             } else {
-                algebraic
+                value
             }
         }
         // STDDEV/VAR: algebraic via sum, sum-of-squares, and count auxiliaries.
@@ -3810,8 +3955,24 @@ mod tests {
         let agg = count_col("name", "name_count");
         let child_cols = vec!["name".to_string()];
         let (ins, del) = agg_delta_exprs(&agg, &child_cols);
-        assert!(ins.contains("IS NOT NULL"));
-        assert!(del.contains("IS NOT NULL"));
+        assert_eq!(ins, "COUNT(name) FILTER (WHERE __pgt_action = 'I')");
+        assert_eq!(del, "COUNT(name) FILTER (WHERE __pgt_action = 'D')");
+    }
+
+    #[test]
+    fn test_agg_delta_exprs_count_expression_with_filter() {
+        let mut agg = count_col("payload", "cnt");
+        agg.argument = Some(Expr::Raw("ROW(a, b)".to_string()));
+        agg.filter = Some(binop("=", colref("active"), lit("true")));
+        let (ins, del) = agg_delta_exprs(&agg, &[]);
+        assert_eq!(
+            ins,
+            "COUNT(ROW(a, b)) FILTER (WHERE __pgt_action = 'I' AND (active = true))"
+        );
+        assert_eq!(
+            del,
+            "COUNT(ROW(a, b)) FILTER (WHERE __pgt_action = 'D' AND (active = true))"
+        );
     }
 
     #[test]
@@ -4293,6 +4454,85 @@ mod tests {
     }
 
     // ── B5: FILTER clause tests ──────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_filter_guards_argument_evaluation() {
+        let child_cols = vec!["v".to_string(), "w".to_string(), "keep".to_string()];
+        for function in [
+            AggFunc::Count,
+            AggFunc::Sum,
+            AggFunc::Avg,
+            AggFunc::StddevPop,
+            AggFunc::VarSamp,
+            AggFunc::CovarPop,
+            AggFunc::RegrCount,
+            AggFunc::BoolAnd,
+        ] {
+            let mut agg = with_filter(count_col("v", "a"), colref("keep"));
+            agg.function = function;
+            agg.argument = Some(binop("/", lit("100"), colref("v")));
+            agg.second_arg = Some(binop("/", lit("100"), colref("w")));
+            let mut exprs = vec![agg_delta_exprs(&agg, &child_cols)];
+            if matches!(agg.function, AggFunc::Sum) {
+                exprs.push(agg_nonnull_delta_exprs(&agg, &child_cols));
+            }
+            if is_algebraic_via_aux(&agg) {
+                exprs.push(agg_avg_count_delta_exprs(&agg, &child_cols));
+            }
+            if agg.function.needs_sum_of_squares() {
+                exprs.push(agg_sum2_delta_exprs(&agg, &child_cols));
+            }
+            if agg.function.needs_cross_products() {
+                let (ins, del) = agg_covar_delta_exprs(&agg, &child_cols);
+                exprs.extend([
+                    (ins.0, del.0),
+                    (ins.1, del.1),
+                    (ins.2, del.2),
+                    (ins.3, del.3),
+                    (ins.4, del.4),
+                ]);
+            }
+            let tree = aggregate(
+                vec![],
+                vec![agg],
+                scan(1, "t", "public", "t", &["v", "w", "keep"]),
+            );
+            let mut initial_args: Vec<String> = tree
+                .avg_aux_columns()
+                .into_iter()
+                .map(|(_, _, arg)| arg)
+                .collect();
+            initial_args.extend(
+                tree.sum2_aux_columns()
+                    .into_iter()
+                    .chain(tree.covar_aux_columns())
+                    .chain(tree.nonnull_aux_columns())
+                    .map(|(_, arg)| arg),
+            );
+            for arg in initial_args {
+                for part in arg.split('|') {
+                    assert!(
+                        part.starts_with("CASE WHEN keep THEN ("),
+                        "initial auxiliary must guard argument evaluation: {part}"
+                    );
+                }
+            }
+            for (ins, del) in exprs {
+                for (action, sql) in [("I", ins), ("D", del)] {
+                    assert!(
+                        sql.starts_with(&format!(
+                            "SUM(CASE WHEN __pgt_action = '{action}' AND keep THEN "
+                        )) || (sql.starts_with("COUNT(")
+                            && sql.ends_with(&format!(
+                                "FILTER (WHERE __pgt_action = '{action}' AND keep)"
+                            ))),
+                        "FILTER must guard every argument-dependent expression: {sql}"
+                    );
+                    assert!(sql.contains("100 / v"), "missing argument: {sql}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_agg_delta_exprs_count_star_with_filter() {
@@ -5871,7 +6111,8 @@ mod tests {
         let result = diff_aggregate(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        assert!(sql.contains("amount IS NOT NULL AND active"));
+        assert!(sql.contains("AND active THEN CASE WHEN amount IS NOT NULL"));
+        assert!(!sql.contains("amount IS NOT NULL AND active"));
         assert!(sql.contains("__pgt_aux_nonnull_total"));
     }
 
@@ -6731,14 +6972,8 @@ mod tests {
             statistical_support: None,
         };
         let (ins, del) = direct_agg_delta_exprs(&agg, true);
-        assert!(
-            !ins.contains("'V'"),
-            "COUNT(col) insert should not include 'V': {ins}"
-        );
-        assert!(
-            !del.contains("'V'"),
-            "COUNT(col) delete should not include 'V': {del}"
-        );
+        assert_eq!(ins, "COUNT(c.\"id\") FILTER (WHERE c.action = 'I')");
+        assert_eq!(del, "COUNT(c.\"id\") FILTER (WHERE c.action = 'D')");
     }
 
     #[test]

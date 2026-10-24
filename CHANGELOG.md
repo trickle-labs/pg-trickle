@@ -222,6 +222,67 @@ Run `ALTER EXTENSION pg_trickle UPDATE` after installing the 0.87.12 files.
 
 ## [Unreleased]
 
+- Verify the production WAL transaction-boundary scan against complete receipt
+  framing, including XID/slot/order and per-transaction LSN bounds, while keeping
+  persisted formats and lazy error behavior unchanged (#1222).
+- Make scheduler pause wait for admitted inline and worker transactions,
+  including synchronous IMMEDIATE descendants, and reject dispatch selected
+  before a pause but admitted afterward. Dedicated repeatable-read jobs now
+  set isolation before their first work snapshot (#1219).
+- Retire local WAL slots only after consumer removal or trigger fallback commits.
+  Caller rollback preserves the original slot; durable cleanup reservations also
+  cover interrupted creation and restart after physical removal. This requires
+  the `0.108.3` to `0.108.4` catalog upgrade (#1222).
+- Reject initial population under REPEATABLE READ or SERIALIZABLE rather than
+  publish a newer capture frontier over rows from an older snapshot. Retry
+  under READ COMMITTED, or defer initial population until the first refresh
+  (#1219, #1222).
+- Prevent recursive WAL receipt payloads during continued source activity.
+  Complete source transactions remain durable before acknowledgement; only
+  validated source-free table transactions can advance without another receipt
+  (#1222).
+- Keep archival snapshot rows and frontiers from the same committed refresh.
+  Restoring an older archive retains differential catch-up only when its
+  required history is protected; otherwise the next refresh reinitializes.
+  Cleanup now honors an in-progress restore before deleting consumed history
+  (#1219).
+- Preserve finite SUM/AVG contributions when built-in numeric/float NaN or
+  infinity inputs are changed or removed, including private-state updates while
+  the displayed value stays infinite (#1217). Recovery uses captured deltas
+  without adding a live-source rescan or FULL fallback.
+- Use the maintained total-row count for an unprojected HAVING COUNT(*), rather
+  than emitting an aggregate call in the differential WHERE clause.
+- Use checked framing for single-field boolean/integer/UUID identities and
+  verified tuple-capacity arithmetic, preserving valid V2/V3 identity bytes
+  while rejecting malformed boolean payloads (#1224).
+- Evaluate computed projections over affected old/old and new/new inner-join
+  endpoints for admitted keyed trigger sources, avoiding intermediate
+  divide-by-zero errors when both committed endpoints are valid (#1211, #1223).
+  Manual refresh fences source writes until transaction end and requires
+  READ COMMITTED isolation. The restricted route covers single built-in
+  boolean/integer/UUID equality keys, including single-key USING; other join
+  routes retain their existing behavior.
+- Preserve numeric scale-only UPDATEs for narrow and shared CDC consumers in
+  both row and statement trigger modes (#1210, #1221). Changed-column masks use
+  binary images for admitted fixed-size built-in types and conservatively retain
+  variable-length and unknown types. Existing installations must rebuild CDC
+  triggers with the new library and fully refresh results already made stale
+  by omitted updates.
+- Keep concrete differential windows out of the reusable MERGE cache, including
+  decision tracing and per-leaf snapshot overrides, so later refreshes cannot
+  reuse earlier LSN cuts (#1221).
+- Retain deferred-key payload replacements even when their INSERT precedes the
+  old DELETE. Keyed delta reduction compares complete binary row images, so
+  numeric representation changes survive and json payloads need no equality
+  operator (#1180, #1221).
+- Count non-NULL composite values containing NULL fields correctly during
+  differential refresh, including filtered counts (#1203). Existing affected
+  stream tables need a FULL refresh to correct previously stored undercounts.
+- Keep aggregate `FILTER` predicates ahead of argument evaluation during
+  differential refresh and auxiliary-state initialization (#1204). After
+  upgrading, rebuild the auxiliary state of existing filtered
+  AVG/statistical/covariance stream tables whose initialization ignored their
+  filters.
 - Recompute affected old and new inner-join endpoint bags for non-equality
   predicates, preventing errors from transient cross-snapshot row pairs while
   preserving exact duplicate counts and the algebraic path for simple

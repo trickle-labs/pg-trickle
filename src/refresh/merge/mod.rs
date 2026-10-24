@@ -1919,7 +1919,7 @@ pub fn execute_differential_refresh_with_tuning(
     let query_hash: u64 = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.87.8-stage".hash(&mut hasher);
+        "v0.108.3-nonfinite-state".hash(&mut hasher);
         if std::ptr::eq(
             effective_defining_query.as_ref() as *const str,
             st.defining_query.as_ref() as *const str,
@@ -1947,6 +1947,17 @@ pub fn execute_differential_refresh_with_tuning(
     // upstream staged D/I rows, so graph-specific SQL must not come from or
     // enter the ordinary cross-refresh template cache.
     let graph_same_pass = crate::refresh::current_safe_bound().is_some();
+    // Concrete SQL embeds this window's cuts and staged-source decisions.
+    let endpoint_join = with_stream_owner(st, || {
+        dvm::query_needs_endpoint_join_fence(&effective_defining_query)
+    })?;
+    let concrete_delta = has_recursive_cte
+        || endpoint_join
+        || incremental_window_state.is_some()
+        || graph_same_pass
+        || crate::config::pg_trickle_dvm_decision_trace()
+        || !get_fallback_leaf_oids().is_empty()
+        || !crate::refresh::get_st_bypass_tables().is_empty();
     // Non-recursive CTEs (WITH … AS (…)) are fully supported by the DVM
     // engine: parse_defining_query_full() builds CteScan nodes and the
     // diff engine processes them via diff_cte_scan().  There is no need for
@@ -1955,7 +1966,7 @@ pub fn execute_differential_refresh_with_tuning(
     // generate their delta SQL on every refresh instead of caching a
     // template with LSN placeholders).
 
-    let cached = if has_recursive_cte || incremental_window_state.is_some() || graph_same_pass {
+    let cached = if concrete_delta {
         None
     } else {
         MERGE_TEMPLATE_CACHE
@@ -2056,7 +2067,7 @@ pub fn execute_differential_refresh_with_tuning(
                 name,
                 Some(st),
             )?
-        } else if has_recursive_cte || graph_same_pass {
+        } else if concrete_delta {
             dvm::generate_delta_query_staged(
                 st.pgt_id,
                 &effective_defining_query,
@@ -2113,12 +2124,11 @@ pub fn execute_differential_refresh_with_tuning(
 
         // Build the MERGE template using the raw delta SQL template
         // (with __PGS_PREV_LSN_* / __PGS_NEW_LSN_* placeholder tokens).
-        let delta_sql_template =
-            if has_recursive_cte || incremental_window_state.is_some() || graph_same_pass {
-                delta_sql.clone()
-            } else {
-                dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_sql.clone())
-            };
+        let delta_sql_template = if concrete_delta {
+            delta_sql.clone()
+        } else {
+            dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_sql.clone())
+        };
 
         // Build template USING clause — skip deduplication when deduplicated (G-M1)
         // EC-06a: For keyless sources, weight-aggregate to cancel within-delta
@@ -2176,7 +2186,7 @@ pub fn execute_differential_refresh_with_tuning(
             };
 
         // Store templates in the cache for subsequent refreshes.
-        if !has_recursive_cte && incremental_window_state.is_none() && !graph_same_pass {
+        if !concrete_delta {
             // P-8: Resize LRU cache if needed, then put() (automatically evicts LRU at capacity).
             maybe_evict_lru_cache_entry();
             MERGE_TEMPLATE_CACHE.with(|cache| {

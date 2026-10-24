@@ -65,23 +65,31 @@ pub(super) fn is_numeric_type(type_name: &str) -> bool {
 }
 
 pub(super) fn changed_col_bit_expr(new_value: &str, old_value: &str, type_name: &str) -> String {
-    let comparison = if is_pgvector_type(type_name) {
-        format!("{new_value}::text IS DISTINCT FROM {old_value}::text")
-    } else if is_numeric_type(type_name) {
+    if is_pgvector_type(type_name) {
+        return format!(
+            "(CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_type'::regclass::oid AND d.objid = t.oid \
+             JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+             WHERE t.oid = pg_catalog.pg_typeof({new_value})::oid \
+               AND d.refclassid = 'pg_catalog.pg_extension'::regclass::oid AND d.deptype = 'e' \
+               AND e.extname = 'vector' AND t.typname IN ('vector', 'halfvec', 'sparsevec')) \
+             THEN CASE WHEN {new_value}::text IS DISTINCT FROM {old_value}::text \
+                       THEN B'1' ELSE B'0' END ELSE B'1' END)::varbit"
+        );
+    }
+    let comparison = if is_numeric_type(type_name) {
         format!(
             "{new_value} IS DISTINCT FROM {old_value} OR \
              scale({new_value}) IS DISTINCT FROM scale({old_value})"
         )
     } else {
-        format!("{new_value} IS DISTINCT FROM {old_value}")
+        return crate::cdc_elision::changed_column_sql(old_value, new_value);
     };
     format!("(CASE WHEN {comparison} THEN B'1' ELSE B'0' END)::varbit")
 }
 
 /// Build the VARBIT bitmask expression for `changed_cols` in UPDATE triggers.
-///
-/// Each non-PK column gets a changed bit; numeric columns also compare scale,
-/// which PostgreSQL expressions can observe even when numeric equality holds.
+/// Numeric scale changes and admitted binary images are observable by SQL.
 ///
 /// Returns `None` for keyless tables (`pk_columns` empty): all columns
 /// contribute to the content hash and must always be present.
@@ -158,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_changed_cols_bitmask_expr_pgvector_casts_to_text() {
+    fn test_build_changed_cols_bitmask_expr_unknown_types_retain_changes() {
         let pk = vec!["id".to_string()];
         let cols = vec![
             ("id".to_string(), "integer".to_string()),
@@ -166,8 +174,8 @@ mod tests {
         ];
         let expr = build_changed_cols_bitmask_expr(&pk, &cols).unwrap();
         assert!(
-            expr.contains("::text"),
-            "pgvector col should cast to text: {expr}"
+            expr.contains("ELSE B'1' END)::varbit"),
+            "unknown pgvector types must retain changes: {expr}"
         );
 
         let qualified_expr = build_changed_cols_bitmask_expr(
@@ -179,8 +187,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            qualified_expr.contains("NEW.\"embedding\"::text"),
-            "schema-qualified pgvector col should cast to text: {qualified_expr}"
+            qualified_expr.contains("pg_catalog.pg_typeof(NEW.\"embedding\")::oid"),
+            "actual type OIDs must govern the policy: {qualified_expr}"
         );
     }
 

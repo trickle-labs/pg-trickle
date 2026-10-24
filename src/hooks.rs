@@ -1614,6 +1614,44 @@ fn handle_dropped_table(obj: &DroppedObject) {
         return;
     }
 
+    // Preserve local slot provenance before deleting source tracking metadata.
+    let local = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking WHERE source_relid=$1 AND source_placement='local')",
+        &[obj.objid.into()],
+    )
+    .unwrap_or_else(|e| {
+        pgrx::error!("pg_trickle: cannot inspect source tracking before dropping {identity}: {e}")
+    })
+    .unwrap_or(false);
+    if local {
+        let fallback_slot = Spi::get_one_with_args::<String>(
+            "SELECT 'pgtrickle_' || coalesce(source_stable_name,source_relid::text)
+             FROM pgtrickle.pgt_change_tracking WHERE source_relid=$1",
+            &[obj.objid.into()],
+        )
+        .unwrap_or_else(|e| {
+            pgrx::error!("pg_trickle: cannot resolve WAL slot before dropping {identity}: {e}")
+        })
+        .unwrap_or_else(|| {
+            pgrx::error!("pg_trickle: source tracking disappeared before dropping {identity}")
+        });
+        let deps = StDependency::get_all().unwrap_or_else(|e| {
+            pgrx::error!("pg_trickle: cannot inspect WAL slots before dropping {identity}: {e}")
+        });
+        for dep in deps.iter().filter(|dep| dep.source_relid == obj.objid) {
+            let slot = match dep.slot_name.as_deref() {
+                Some(slot) => slot,
+                None if matches!(dep.cdc_mode, CdcMode::Wal | CdcMode::Transitioning) => {
+                    &fallback_slot
+                }
+                None => continue,
+            };
+            crate::wal_decoder::retire_replication_slot(obj.objid, slot).unwrap_or_else(|e| {
+                pgrx::error!("pg_trickle: cannot queue WAL slot before dropping {identity}: {e}")
+            });
+        }
+    }
+
     // A source drop does not cascade to pg_trickle's separately-owned CDC
     // buffer or its registry row. Remove both before a replacement relation
     // can reuse the stable buffer name.

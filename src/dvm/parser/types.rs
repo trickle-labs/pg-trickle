@@ -612,6 +612,32 @@ pub struct AggExpr {
 }
 
 impl AggExpr {
+    pub(crate) fn needs_nonfinite_state(&self, child: &OpTree) -> bool {
+        if self.is_distinct || !matches!(self.function, AggFunc::Sum | AggFunc::Avg) {
+            return false;
+        }
+        let mut source = child;
+        while let OpTree::Filter { child, .. } = source {
+            source = child;
+        }
+        if let (Some(Expr::ColumnRef { column_name, .. }), OpTree::Scan { columns, .. }) =
+            (&self.argument, source)
+            && let Some(column) = columns.iter().find(|column| column.name == *column_name)
+        {
+            return matches!(column.type_oid, 700 | 701 | 1700);
+        }
+        // Expressions and composite children are admitted by the generated SQL's result-type check.
+        true
+    }
+
+    fn filtered_arg_sql(&self, arg_sql: String) -> String {
+        if let Some(filter) = &self.filter {
+            format!("CASE WHEN {} THEN ({arg_sql}) END", filter.to_sql())
+        } else {
+            arg_sql
+        }
+    }
+
     pub fn statistical_accumulator_type(&self) -> Option<&ResolvedSqlType> {
         self.statistical_support
             .as_ref()
@@ -2006,7 +2032,7 @@ impl OpTree {
                         aux.push((
                             format!("__pgt_aux_sum_{}", agg.alias),
                             format!("__pgt_aux_count_{}", agg.alias),
-                            arg_sql,
+                            agg.filtered_arg_sql(arg_sql),
                         ));
                     }
                 }
@@ -2037,7 +2063,10 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "1".to_string());
-                        aux.push((format!("__pgt_aux_sum2_{}", agg.alias), arg_sql));
+                        aux.push((
+                            format!("__pgt_aux_sum2_{}", agg.alias),
+                            agg.filtered_arg_sql(arg_sql),
+                        ));
                     }
                 }
                 aux
@@ -2078,6 +2107,8 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "0".to_string());
+                        let y_sql = agg.filtered_arg_sql(y_sql);
+                        let x_sql = agg.filtered_arg_sql(x_sql);
                         let a = &agg.alias;
                         // Use a combined key for arg_sql: "x_expr|y_expr"
                         aux.push((format!("__pgt_aux_sumx_{a}"), x_sql.clone()));
@@ -2129,8 +2160,8 @@ impl OpTree {
         }
     }
 
-    /// For each non-DISTINCT SUM aggregate,
-    /// returns a tuple of `(nonnull_col_name, arg_sql)`:
+    /// Input-state columns for each non-DISTINCT SUM/AVG aggregate.
+    /// Each tuple is `(column_name, arg_sql)`; SUM's qualifying count uses:
     /// - `nonnull_col_name`: `__pgt_aux_nonnull_{alias}` — stores running
     ///   count of non-NULL argument values in the group
     /// - `arg_sql`: the SQL expression for the aggregate argument
@@ -2141,10 +2172,15 @@ impl OpTree {
     /// predicates are folded into the tracked expression so initialization and
     /// delta maintenance count the same rows.
     ///
+    /// `__pgt_aux_special_*` additionally retains a finite subtotal and special
+    /// input counts for SUM/AVG over numeric/float inputs or unresolved expressions.
+    /// The shared storage/initialization path uses JSONB for these state columns.
     /// Returns an empty vec if the operator tree is not an aggregate query.
     pub fn nonnull_aux_columns(&self) -> Vec<(String, String)> {
         match self {
-            OpTree::Aggregate { aggregates, .. } => {
+            OpTree::Aggregate {
+                aggregates, child, ..
+            } => {
                 let mut aux = Vec::new();
                 for agg in aggregates {
                     if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
@@ -2153,12 +2189,19 @@ impl OpTree {
                             .as_ref()
                             .map(|e| e.to_sql())
                             .unwrap_or_else(|| "0".to_string());
-                        let arg_sql = if let Some(filter) = &agg.filter {
-                            format!("CASE WHEN {} THEN ({arg_sql}) END", filter.to_sql())
-                        } else {
-                            arg_sql
-                        };
+                        let arg_sql = agg.filtered_arg_sql(arg_sql);
                         aux.push((format!("__pgt_aux_nonnull_{}", agg.alias), arg_sql));
+                    }
+                    if agg.needs_nonfinite_state(child) {
+                        let argument = agg
+                            .argument
+                            .as_ref()
+                            .map(Expr::to_sql)
+                            .unwrap_or_else(|| "0".into());
+                        aux.push((
+                            format!("__pgt_aux_special_{}", agg.alias),
+                            agg.filtered_arg_sql(argument),
+                        ));
                     }
                 }
                 aux

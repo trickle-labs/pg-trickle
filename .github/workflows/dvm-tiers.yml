@@ -106,10 +106,25 @@ jobs:
         run: ./tests/build_e2e_image.sh
 
       - name: Run DVM regression corpus
+        env:
+          DVM_SEMANTIC_MAX_BAG_SIZE: '3'
+          PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
         run: cargo nextest run --profile ci --test e2e_dvm_corpus_tests --no-capture
 
       - name: Run DVM composition matrix
         run: cargo nextest run --profile ci --test e2e_dvm_composition_tests --no-capture
+
+      - name: Run extended recovery histories
+        shell: bash
+        env:
+          PGT_RELEASE_CANDIDATE_COMMIT: ${{ github.sha }}
+          PGS_PROP_CASES: '10'
+          PGS_PROP_CYCLES: '12'
+        run: |
+          mkdir -p artifacts/lifecycle-histories
+          ./scripts/run_e2e_tests.sh --test e2e_wal_receipt_recovery_tests --test e2e_refresh_atomicity_tests \
+            -E 'test(=test_lifecycle_seeded_restore_lag_and_crash_preserve_committed_journal) | test(=test_snapshot_during_witnessed_cancel_keeps_committed_rows_and_frontier) | test(=test_scheduler_pause_drain_protects_transitive_immediate_descendant) | test(=test_scheduler_pause_drain_waits_for_witnessed_inline_refresh) | test(=test_scheduler_pause_rejects_dispatch_queued_after_pause_returns) | test(=test_scheduler_repeatable_read_job_rechecks_pause_before_refresh) | test(=test_restore_after_consumed_history_cleanup_reinitializes_before_catchup) | test(=test_snapshot_waits_for_committed_refresh_before_loading_frontier) | test(=test_restore_source_lock_defers_cleanup_until_rewind_is_visible) | test(=test_consumer_initialization_does_not_cover_rows_missing_from_fixed_snapshot) | test(=test_consumer_fixed_snapshot_rejection_preserves_existing_wal_slot) | test(=test_last_wal_consumer_drop_rollback_preserves_slot_and_frontier) | test(=test_deferred_consumer_registration_rollback_preserves_wal_slot) | test(=test_slot_retirement_commits_before_drop_and_recovers_after_drop_crash) | test(=test_slot_retirement_keeps_active_stale_and_mismatched_slots) | test(=test_dropped_wal_source_retains_retirement_until_last_consumer_commits) | test(=test_slot_adoption_rejects_removed_consumer_and_recovers_orphan_after_crash) | test(=test_replacement_source_cannot_reassign_pending_slot_retirement) | test(=test_slot_retirement_keeps_null_named_reference_across_source_oids) | test(=test_wal_receipts_do_not_recursively_capture_their_own_payloads) | test(=test_wal_receipt_commit_order_preserves_late_old_lsn_transaction)' \
+            --retries 0 2>&1 | tee artifacts/lifecycle-histories/runtime.log
 
       - name: Run DVM metamorphic checks
         run: cargo nextest run --profile ci --test e2e_dvm_metamorphic_tests --no-capture
@@ -147,11 +162,13 @@ jobs:
         run: python3 scripts/dvm_release_gate.py
 
       - name: Upload DVM artifacts
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: dvm-tiers-artifacts-${{ github.run_id }}
-          path: artifacts/dvm-fuzz/
+          path: |
+            artifacts/dvm-fuzz/
+            artifacts/lifecycle-histories/
           if-no-files-found: ignore
           retention-days: 30
 

@@ -39,15 +39,6 @@ def run_step(name: str, command: str) -> tuple[bool, str]:
     return result.returncode == 0, output
 
 
-def extract_failure_class(output: str) -> str | None:
-    """Pull the failure class out of dvm_replay.py's `dvm-replay: <class>: ...` line."""
-    marker = "dvm-replay: "
-    idx = output.find(marker)
-    if idx == -1:
-        return None
-    return output[idx + len(marker):].split(":", 1)[0].strip()
-
-
 def check_negative_controls(database: str | None) -> tuple[bool, str]:
     """Every scenario in tests/corpus/dvm_negative_controls/ must fail replay
     with its declared failure class. Without --database we can only confirm
@@ -86,20 +77,11 @@ def check_negative_controls(database: str | None) -> tuple[bool, str]:
             passed, output = run_step(
                 f"negative-control:{path.name}",
                 "python3 scripts/dvm_replay.py "
-                f"{shlex.quote(str(path))} --database {shlex.quote(database)}",
+                f"{shlex.quote(str(path))} --database {shlex.quote(database)} --expect-negative-control",
             )
-            if passed:
+            if not passed:
                 lines.append(
-                    f"FAIL {path.name}: replay did NOT fail (expected {expected_class}) "
-                    "-- detection silently broke"
-                )
-                all_ok = False
-                continue
-            actual_class = extract_failure_class(output)
-            if actual_class != expected_class:
-                lines.append(
-                    f"FAIL {path.name}: replay failed with class {actual_class!r}, "
-                    f"expected {expected_class!r}"
+                    f"FAIL {path.name}: declared failure was not detected: {output.strip()}"
                 )
                 all_ok = False
             else:

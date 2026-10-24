@@ -165,7 +165,13 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     }
 
     // Differentiate the child
-    let child_result = ctx.diff_node(differential_child)?;
+    let saved_endpoint_policy = ctx.endpoint_join_required;
+    ctx.endpoint_join_required |= expressions
+        .iter()
+        .any(|expr| !matches!(expr, Expr::ColumnRef { .. } | Expr::Literal(_)));
+    let child_result = ctx.diff_node(differential_child);
+    ctx.endpoint_join_required = saved_endpoint_policy;
+    let child_result = child_result?;
 
     // Restore st_user_columns, alias map, and coalesce defaults
     ctx.st_user_columns = saved_st_cols;
@@ -360,6 +366,9 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     // Each column entry is ~20 chars on average; reserve based on count.
     let extra_cap = if has_count_l && has_count_r { 40 } else { 0 } + aux_cols.len() * 24;
     let mut extra_cols_select = String::with_capacity(extra_cap);
+    if child_result.has_key_changed {
+        extra_cols_select.push_str(", \"__pgt_key_changed\"");
+    }
     if has_count_l && has_count_r {
         extra_cols_select.push_str(", \"__pgt_count_l\", \"__pgt_count_r\"");
     }
@@ -1115,6 +1124,19 @@ mod tests {
         let tree = project(vec![colref("val")], vec!["val"], child);
         let result = diff_project(&mut ctx, &tree).unwrap();
         assert!(result.is_deduplicated);
+    }
+
+    #[test]
+    fn test_diff_project_forwards_advertised_key_change_metadata() {
+        let mut ctx = test_ctx();
+        ctx.set_source_deferred_keys(std::collections::HashSet::from([1]));
+        let child = scan_with_pk(1, "t", "public", "t", &["id", "val"], &["id"]);
+        let tree = project(vec![colref("val")], vec!["val"], child);
+        let result = diff_project(&mut ctx, &tree).unwrap();
+        let sql = ctx.cte_sql(&result.cte_name).unwrap();
+        assert!(result.has_key_changed);
+        assert!(sql.contains(", \"__pgt_key_changed\""), "{sql}");
+        assert_eq!(result.columns, vec!["val"]);
     }
 
     #[test]

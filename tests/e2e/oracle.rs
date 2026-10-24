@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const JSON_OID: u32 = 114;
+const NUMERIC_OID: u32 = 1700;
 static NEXT_TEMP_VIEW: AtomicU64 = AtomicU64::new(0);
 type RelationColumnRows = Vec<(i64, String, i64, i64, i64)>;
 
@@ -440,6 +441,17 @@ fn public_projection(signature: &RelationSignature) -> String {
         .join(", ")
 }
 
+fn numeric_scale_projection(signature: &RelationSignature) -> String {
+    let mut projection = public_projection(signature);
+    for column in &signature.columns {
+        if column.type_oid == NUMERIC_OID {
+            // Keep scale attached to its complete row so duplicate values cannot swap observations.
+            projection.push_str(&format!(", scale({})", quote_identifier(&column.name)));
+        }
+    }
+    projection
+}
+
 async fn count_rows(db: &E2eDb, query: String) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .fetch_one(&db.pool)
@@ -458,6 +470,25 @@ pub async fn compare_st_to_query(
     db: &E2eDb,
     st_table: &str,
     defining_query: &str,
+) -> Result<(), RelationDiff> {
+    compare_st_to_query_observing(db, st_table, defining_query, false).await
+}
+
+/// Opt-in contract for top-level numeric results whose scale is observable.
+/// Schema and exact bags are still checked; physical bytes and other type families are excluded.
+pub async fn compare_st_to_query_with_numeric_scale(
+    db: &E2eDb,
+    st_table: &str,
+    defining_query: &str,
+) -> Result<(), RelationDiff> {
+    compare_st_to_query_observing(db, st_table, defining_query, true).await
+}
+
+async fn compare_st_to_query_observing(
+    db: &E2eDb,
+    st_table: &str,
+    defining_query: &str,
+    observe_numeric_scale: bool,
 ) -> Result<(), RelationDiff> {
     let actual_sig = match fetch_relation_signature_from_table(db, st_table).await {
         Ok(signature) => signature,
@@ -506,10 +537,27 @@ pub async fn compare_st_to_query(
         });
     }
 
-    let actual_subquery = format!("SELECT {} FROM {st_table}", public_projection(&actual_sig));
+    if observe_numeric_scale
+        && !actual_sig
+            .columns
+            .iter()
+            .any(|column| column.type_oid == NUMERIC_OID)
+    {
+        return Err(RelationDiff::comparison_error(
+            "numeric-scale observation has no admitted public numeric column",
+            actual_sig,
+            expected_sig,
+        ));
+    }
+    let projection = if observe_numeric_scale {
+        numeric_scale_projection
+    } else {
+        public_projection
+    };
+    let actual_subquery = format!("SELECT {} FROM {st_table}", projection(&actual_sig));
     let expected_subquery = format!(
         "SELECT {} FROM ({defining_query}) __pgt_dq",
-        public_projection(&expected_sig)
+        projection(&expected_sig)
     );
 
     let count_query = format!(

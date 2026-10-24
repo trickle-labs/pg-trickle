@@ -344,8 +344,8 @@ pub(crate) fn drain_pending_cleanups() {
         let lock_acquired =
             // nosemgrep: rust.spi.query.dynamic-format — oid is a u32 from internal catalog lookup, not user input
             Spi::get_one::<bool>(&format!("SELECT pg_try_advisory_xact_lock({oid}::bigint)"))
-                .unwrap_or(Some(true))
-                .unwrap_or(true);
+                .unwrap_or(Some(false))
+                .unwrap_or(false);
         if !lock_acquired {
             pgrx::debug1!(
                 "[pg_trickle] D-1: cleanup advisory lock contended for OID {}, \
@@ -497,12 +497,26 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
 
     let values_list = source_oids
         .iter()
+        .filter(|&&oid| {
+            // Restore serializes frontier rewinds with both cleanup paths.
+            Spi::get_one_with_args::<bool>(
+                "SELECT pg_try_advisory_xact_lock($1::bigint)",
+                &[i64::from(oid).into()],
+            )
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        })
         .map(|oid| {
             let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
             format!("({oid}::oid, '{buf_name}')")
         })
         .collect::<Vec<_>>()
         .join(",");
+
+    if values_list.is_empty() {
+        return;
+    }
 
     let metadata = Spi::connect(|client| -> Vec<(u32, bool, Option<String>)> {
         let sql = format!(
@@ -1953,8 +1967,8 @@ pub(crate) fn build_is_distinct_clause(user_cols: &[String]) -> String {
 ///
 /// When only a non-PK column changes (e.g. category_name), diff_project
 /// produces a D row and an I row that share the same `__pgt_row_id` (because
-/// the hash is over PK columns only).  The weight aggregation groups by
-/// `(row_id, col_list)`, so these two rows land in *different* groups and both
+/// the hash is over PK columns only). Weight aggregation separates complete
+/// binary payload images, so these two rows land in different groups and both
 /// survive the HAVING clause — giving two MERGE source rows targeting the same
 /// ST row, which PostgreSQL rejects with "MERGE command cannot affect row a
 /// second time".
@@ -1964,22 +1978,10 @@ pub(crate) fn build_is_distinct_clause(user_cols: &[String]) -> String {
 /// selects the I row (carrying the new column values).  MERGE then performs a
 /// single WHEN MATCHED … UPDATE, which is the correct semantic for a non-PK
 /// column change.
+/// Binary record ordering also preserves SQL-equal numeric representations and
+/// supports payloads such as json that have no scalar equality operator.
 pub(crate) fn build_weight_agg_using(delta_sql: &str, user_col_list: &str) -> String {
-    format!(
-        "(SELECT DISTINCT ON (\"__pgt_row_id\") \
-                \"__pgt_row_id\", \"__pgt_action\", {user_col_list} \
-         FROM (\
-             SELECT __pgt_row_id, \
-                    CASE WHEN SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) > 0 \
-                         THEN 'I' ELSE 'D' END AS __pgt_action, \
-                    {user_col_list} \
-             FROM ({delta_sql}) __raw \
-             GROUP BY __pgt_row_id, {user_col_list} \
-             HAVING SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) <> 0\
-         ) \"__weighted\" \
-         ORDER BY \"__pgt_row_id\", \
-                  CASE WHEN \"__pgt_action\" = 'I' THEN 0 ELSE 1 END)"
-    )
+    crate::cdc_elision::keyed_weight_sql(delta_sql, user_col_list)
 }
 
 /// EC-06a: Weight-aggregate a keyless delta to cancel within-delta I/D pairs.
@@ -2512,7 +2514,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // that existed before the v0.59.0 upgrade and haven't been ALTERed yet).
     let query_hash = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        "v0.87.8-stage".hash(&mut hasher);
+        "v0.108.3-nonfinite-state".hash(&mut hasher);
         if st.defining_query_hash != 0 {
             st.defining_query_hash.hash(&mut hasher);
         } else {

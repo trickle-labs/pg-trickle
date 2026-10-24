@@ -342,6 +342,7 @@ pub(super) fn setup_cdc_for_source(
 pub(super) fn cleanup_cdc_for_source(
     source_oid: pg_sys::Oid,
     cdc_mode: CdcMode,
+    slot_name: Option<&str>,
     excluding_pgt_id: Option<i64>,
 ) -> Result<(), PgTrickleError> {
     // Check if any other STs still reference this source. During ALTER flows,
@@ -374,8 +375,8 @@ pub(super) fn cleanup_cdc_for_source(
         // If WAL-based CDC was active (or transitioning), clean up
         // the replication slot and publication first.
         if matches!(cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
-            let slot_name = wal_decoder::slot_name_for_source(source_oid);
-            wal_decoder::drop_replication_slot(&slot_name)?;
+            let default_slot = wal_decoder::slot_name_for_source(source_oid);
+            wal_decoder::retire_replication_slot(source_oid, slot_name.unwrap_or(&default_slot))?;
             wal_decoder::drop_publication(source_oid)?;
         }
 
@@ -2737,8 +2738,13 @@ pub(super) fn build_create_table_sql(
     // SUM NULL-transition correction (P2-2).
     let mut nonnull_aux_sql = String::new();
     for (nonnull_col, _arg_sql) in nonnull_aux_columns {
+        let (storage_type, default) = if nonnull_col.starts_with("__pgt_aux_special_") {
+            ("JSONB", "'null'::jsonb")
+        } else {
+            ("BIGINT", "0")
+        };
         nonnull_aux_sql.push_str(&format!(
-            ",\n    {} BIGINT NOT NULL DEFAULT 0",
+            ",\n    {} {storage_type} NOT NULL DEFAULT {default}",
             quote_identifier(nonnull_col),
         ));
     }
@@ -3297,6 +3303,14 @@ pub fn inject_nonnull_aux(query: &str, nonnull_aux_columns: &[(String, String)])
     if let Some(pos) = find_top_level_keyword(query, "FROM") {
         let mut extra = String::new();
         for (nonnull_col, arg_sql) in nonnull_aux_columns {
+            if nonnull_col.starts_with("__pgt_aux_special_") {
+                extra.push_str(&format!(
+                    ", COALESCE({}, 'null'::jsonb) AS {}",
+                    crate::dvm::operators::nonfinite::state_sql(arg_sql),
+                    quote_identifier(nonnull_col)
+                ));
+                continue;
+            }
             extra.push_str(&format!(
                 ", COUNT(CASE WHEN ({arg_sql}) IS NOT NULL THEN 1 END) AS {}",
                 quote_identifier(nonnull_col),

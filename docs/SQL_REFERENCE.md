@@ -281,6 +281,17 @@ pgtrickle.create_stream_table(
 | `storage_backend` | `text` | `NULL` | Columnar storage backend to use for the stream table storage table (e.g. `'hydra'`, `'citus_columnar'`). When set, differential refreshes use the `delete_insert` strategy (columnar backends are append-only). |
 | `orchestration_mode` | `text` | `'MANAGED'` | Durable refresh owner. `MANAGED` enables pg_trickle scheduling; `EXTERNAL` leaves refresh submission to an external coordinator. `EXTERNAL` cannot be combined with `IMMEDIATE`. |
 
+Populating a table during creation requires READ COMMITTED-compatible isolation.
+REPEATABLE READ and SERIALIZABLE calls that populate the new table are rejected:
+an older transaction snapshot cannot be paired safely with a current capture
+frontier. Retry creation under READ COMMITTED, or create with `initialize =>
+false` and perform the first refresh under READ COMMITTED. Failed creation
+publishes no table, dependency or frontier.
+
+For a consumer previously initialized from an old fixed snapshot, use a FULL
+refresh or `reinitialize_stream_table` under READ COMMITTED to rebuild its
+baseline; ordinary differential refresh may already be past the missing change.
+
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
 instead of CDC triggers or WAL replication slots. If the effective or explicit
@@ -1286,6 +1297,13 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Drops the underlying storage table with `CASCADE`.
 - Removes all catalog entries (metadata, dependencies, refresh history).
 - Cleans up CDC triggers and change buffer tables for source tables that are no longer tracked by any ST.
+- Local WAL slot removal is queued transactionally and performed by the
+  scheduler after commit. Rolling back the call preserves the slot. A disabled
+  scheduler defers physical cleanup and WAL release. Upgrade the extension
+  catalog to `0.108.4` before using this behavior.
+- Reusing a dropped source's name can conflict with its pending WAL slot
+  reservation. Drop the old suspended consumer, let the scheduler finish that
+  retirement, then retry registering the replacement source.
 - Automatically drops a downstream publication only when its recorded binding
   still matches; stale bindings reject the stream-table drop for safety.
 
@@ -3041,8 +3059,7 @@ re-attaches the trigger to each source table.
 pgtrickle.rebuild_cdc_triggers() → text
 ```
 
-Returns `'done'` on success. Emits a `WARNING` per table on error and
-continues processing remaining sources.
+Returns `'done'` on success. A trigger rebuild failure aborts the transaction.
 
 **When to use:**
 
@@ -3061,7 +3078,7 @@ SELECT pgtrickle.rebuild_cdc_triggers();
 **Notes:**
 - Called automatically during `ALTER EXTENSION pg_trickle UPDATE` (0.3.0 → 0.4.0) migration.
 - Safe to call at any time — existing triggers are dropped and recreated.
-- On error for a specific table, a `WARNING` is logged and processing continues with remaining sources.
+- Existing trigger function bodies keep their previous changed-column policy until rebuilt with the new library. Rebuilding installs representation-aware numeric change tracking; it cannot recover updates already omitted by the old mask. Fully refresh affected stored results and resnapshot dependent consumers as required by their recovery contract.
 
 ---
 
@@ -5746,7 +5763,7 @@ operation. The main use cases are:
 
 - **Replica bootstrap** — populate a new standby without a full re-scan
 - **PITR alignment** — re-align stream table frontiers after point-in-time
-  recovery so the first refresh is DIFFERENTIAL, not a full re-scan
+  recovery, retaining differential catch-up when required history is protected
 - **Archiving** — preserve a historical snapshot for audit or rollback
 
 ### `pgtrickle.snapshot_stream_table(name, target)`
@@ -5795,8 +5812,12 @@ pgtrickle.restore_from_snapshot(
 After `restore_from_snapshot()` completes:
 
 1. The stream table's rows are replaced with the snapshot contents.
-2. The frontier is set to the snapshot's frontier, so the **next refresh cycle
-   is DIFFERENTIAL** — only changes made after the snapshot are fetched.
+2. The frontier is set to the snapshot's frontier. Differential catch-up is
+   retained when an existing consumer still protects each required table-source
+   cut (or the target already has that exact cut). Otherwise the next refresh
+   performs protected reinitialization, because cleanup may have removed the
+   history needed to replay an older snapshot. Snapshot creation and restore
+   serialize metadata and row copying with refreshes.
 
 The caller must own the destination stream table and have `SELECT` privilege on
 the snapshot. The snapshot relation must still match its cataloged OID,
@@ -6099,6 +6120,13 @@ SELECT pgtrickle.pause_scheduler(ARRAY['public.order_totals', 'public.customer_s
 - Raises `ERROR` if any name in `nodes` does not exist in `pgtrickle.pgt_stream_tables`.
 - Safe to call on already-paused nodes (idempotent).
 - Returns `'OK'` on success.
+- Drains admitted inline and worker units through transaction completion.
+  A unit containing any paused member cannot begin refresh work. Dispatch
+  selected before pause may finish recording a skipped/retryable job afterward.
+- A drain timeout raises `ERROR`; the target nodes remain paused. Manual
+  refresh remains available. Concurrent pause/resume calls should be coordinated.
+- Serialize creation or alteration of IMMEDIATE dependency edges with pause
+  operations; pause admission does not fence concurrent topology changes.
 
 ---
 

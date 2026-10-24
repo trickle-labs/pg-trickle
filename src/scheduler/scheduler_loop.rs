@@ -472,6 +472,18 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         config::pg_trickle_scheduler_interval_ms(),
     );
 
+    // A session lock also covers pristine slot creation in later transactions.
+    let exclusive_scheduler = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        Spi::get_one::<bool>("SELECT pg_try_advisory_lock(1346851927, 0)")
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+    }));
+    if !exclusive_scheduler {
+        info!("pg_trickle scheduler: another coordinator owns this database");
+        return;
+    }
+
     // Mark scheduler as running in shared memory so cluster_worker_summary()
     // and other shmem-based health consumers reflect the correct state.
     // SAFETY: MyProcPid is always valid inside a background worker.
@@ -871,6 +883,13 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             shmem::active_worker_count(),
             now_ms,
         );
+
+        // Retirement was committed by an earlier API/worker transaction.
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            if let Err(error) = wal_decoder::drain_retired_replication_slots() {
+                warning!("pg_trickle: WAL slot retirement deferred: {}", error);
+            }
+        }));
 
         // WAL transition processing — three phases with separate transactions
         // to ensure slot creation happens in a pristine transaction (no prior
@@ -1779,6 +1798,17 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 // inside is done through SPI (which handles its own C-level exception
                 // boundaries), so a Rust-visible panic from this block is not
                 // expected.
+                let member_ids: Vec<i64> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| match member {
+                        NodeId::StreamTable(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                if !crate::api::scheduler_control::admit_scheduler_targets(&member_ids) {
+                    continue;
+                }
                 let subtxn = SubTransaction::begin();
 
                 let mut group_ok = true;

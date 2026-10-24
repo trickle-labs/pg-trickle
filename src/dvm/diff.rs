@@ -80,6 +80,9 @@ pub struct CdcContext {
     use_placeholders: bool,
     delta_source: DeltaSource,
     source_cdc_columns: HashMap<u32, Vec<String>>,
+    source_deferred_keys: HashSet<u32>,
+    builtin_equality_types: HashSet<u32>,
+    fenced_endpoint_sources: HashSet<u32>,
     source_key_columns: HashMap<u32, Vec<String>>,
     st_source_pgt_ids: HashMap<u32, i64>,
     source_buffer_names: HashMap<u32, String>,
@@ -146,6 +149,8 @@ pub struct DiffContext {
     /// (e.g. child of aggregate, join, union, set operation, CTE body, window)
     /// and cannot merge directly into the target stream table.
     pub inside_intermediate: bool,
+    /// Computed projections require endpoint rows rather than mixed join pairs.
+    pub endpoint_join_required: bool,
     /// Whether the stream table has a `__pgt_count` auxiliary column.
     /// True when the top-level OpTree contains Aggregate or Distinct.
     /// Used by the aggregate operator to detect intermediate aggregates
@@ -632,6 +637,9 @@ impl DiffContext {
                 use_placeholders: false,
                 delta_source: DeltaSource::ChangeBuffer,
                 source_cdc_columns: HashMap::new(),
+                source_deferred_keys: HashSet::new(),
+                builtin_equality_types: HashSet::new(),
+                fenced_endpoint_sources: HashSet::new(),
                 source_key_columns: HashMap::new(),
                 st_source_pgt_ids: HashMap::new(),
                 source_buffer_names: HashMap::new(),
@@ -664,6 +672,7 @@ impl DiffContext {
             st_scan_payload_identity: false,
             inside_semijoin: false,
             inside_intermediate: false,
+            endpoint_join_required: false,
             st_has_pgt_count: false,
             st_column_alias_map: None,
             having_filter: false,
@@ -722,6 +731,43 @@ impl DiffContext {
 
     pub(crate) fn set_source_cdc_columns(&mut self, columns: HashMap<u32, Vec<String>>) {
         self.cdc.source_cdc_columns = columns;
+    }
+
+    pub(crate) fn source_has_deferred_key(&self, oid: u32) -> bool {
+        self.cdc.source_deferred_keys.contains(&oid)
+    }
+
+    pub(crate) fn set_source_deferred_keys(&mut self, sources: HashSet<u32>) {
+        self.cdc.source_deferred_keys = sources;
+    }
+
+    pub(crate) fn has_builtin_equality(&self, oid: u32) -> bool {
+        self.cdc.builtin_equality_types.contains(&oid)
+    }
+
+    pub(crate) fn set_builtin_equality_types(&mut self, types: HashSet<u32>) {
+        self.cdc.builtin_equality_types = types;
+    }
+
+    pub(crate) fn source_endpoint_is_fenced(&self, oid: u32) -> bool {
+        self.cdc.fenced_endpoint_sources.contains(&oid)
+    }
+
+    pub(crate) fn set_fenced_endpoint_sources(&mut self, sources: HashSet<u32>) {
+        self.cdc.fenced_endpoint_sources = sources;
+    }
+
+    pub(crate) fn record_endpoint_join(&mut self, cte: &str) {
+        if let Some(trace) = self.decision_trace.as_mut() {
+            trace.record(
+                "root.innerjoin.endpoints",
+                "JoinEndpoint",
+                Vec::new(),
+                Some("affected_key_endpoints".to_string()),
+                ["coherent_endpoints".to_string()],
+                Some(cte.to_string()),
+            );
+        }
     }
 
     pub(crate) fn source_key_columns(&self) -> &HashMap<u32, Vec<String>> {
