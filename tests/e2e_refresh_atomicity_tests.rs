@@ -739,6 +739,62 @@ async fn test_refresh_two_callers_publish_one_consistent_result() {
 }
 
 #[tokio::test]
+async fn test_refresh_nonfinite_aggregate_keeps_later_writer_for_next_cut() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("CREATE TABLE atomic_special_source(id int PRIMARY KEY,val numeric)")
+        .await;
+    db.execute("INSERT INTO atomic_special_source VALUES(1,'Infinity'),(2,1)")
+        .await;
+    let stream = "atomic_special_st";
+    let query = "SELECT SUM(val) AS total,AVG(val) AS mean FROM atomic_special_source";
+    db.create_st(stream, query, "1h", "DIFFERENTIAL").await;
+    db.execute("DELETE FROM atomic_special_source WHERE id=1")
+        .await;
+    let id = pgt_id(&db, stream).await;
+    set_chaos(&db, stream, "input_boundary").await;
+    let (mut barrier, blocker_pid) = hold_barrier(&db, id, "input_boundary").await;
+    let (refresh, _) = start_manual_refresh(&db, stream).await;
+    let witness = wait_for_barrier(
+        &db,
+        id,
+        "input_boundary",
+        blocker_pid,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(witness.pid > 0);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        db.execute("INSERT INTO atomic_special_source VALUES(3,3)"),
+    )
+    .await
+    .expect("later writer must commit while the refresh waits at its selected cut");
+    release_barrier(&mut barrier, id, "input_boundary").await;
+    tokio::time::timeout(Duration::from_secs(10), refresh)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    clear_chaos(&db).await;
+    let first: bool = db
+        .query_scalar("SELECT total=1 AND mean=1 FROM atomic_special_st")
+        .await;
+    assert!(
+        first,
+        "the first aggregate refresh must exclude the later writer"
+    );
+    db.refresh_st(stream).await;
+    let second: bool = db
+        .query_scalar("SELECT total=4 AND mean=2 FROM atomic_special_st")
+        .await;
+    assert!(
+        second,
+        "the next cut must consume the later writer exactly once"
+    );
+    assert_recovered_action(&db, stream, query, "DIFFERENTIAL").await;
+}
+
+#[tokio::test]
 async fn test_refresh_concurrent_writer_preserves_next_batch() {
     let db = E2eDb::new_dedicated().await.with_extension().await;
     let source = "atomic_writer_source";

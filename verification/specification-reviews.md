@@ -137,6 +137,36 @@ merge, authenticate build provenance, or prove multi-field framing, scalar
 canonicalization, SQL/FFI behavior, transaction protocols or hash uniqueness.
 The build/test runner remains trusted for compilation origin and named success.
 
+## Non-finite aggregate runtime follow-up — #1217 / #1220 boundary
+
+Independent read-only reviewer `review_1220` reviewed the supplemental
+[runtime specification](nonfinite-aggregate-state.md) and production callers.
+The initial frozen `e8a9f3b` review found two gaps: inverse finite updates
+could cancel before the regression observed their state, and a raw domain
+initializer could disagree with an action-guarded CASE's base-type admission.
+The strengthened history removes Infinity immediately after finite 1-to-4,
+and the shared state renderer now gives initialization the same CASE coercion.
+The native check compares both rendered states and exact finite/special values.
+
+The reviewer accepted both fixes at
+`1a717660030487b1d5e63f683c86e40f528b8fe6`, with no remaining bounded
+source/specification blocker. The #1220 arithmetic-proof exclusion remains
+explicit. No reviewer executed code, authenticated compilation provenance,
+approved a merge, or qualified arbitrary floating-point regrouping/rounding,
+finite overflow or the entire quality program. Final installed evidence review
+is separate from this source acceptance.
+
+The same reviewer subsequently accepted the completed bounded nonfinite
+evidence: strengthened history 1/1, connected installed selection 47/47 with
+71 unrelated cases filtered, observed floors 34/34 and 54/54, and units
+2633/2633. The actual package, first 44 installation observations and five
+completed bindings agree on candidate and SHA-256
+`32b7d5f1cd53c5115581ddf68da3e043f1a1acb7252d7bf24db2312c02731259`.
+The reviewer checked six baseline/mutant records against their actual source
+inputs and log hashes. The later LSN suite (11/11), eight additional installation
+observations and sixth binding were completed by the primary runner after that
+review; they are not silently included in the reviewer's accepted evidence.
+
 ## Shared evidence boundary
 
 The reviews identified that candidate binding checks source hashes and

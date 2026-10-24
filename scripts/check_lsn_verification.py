@@ -96,6 +96,17 @@ def run_tool_identity(tool: str, arguments: list[str], log_path: Path) -> str:
     return identity
 
 
+def check_ci_proof_job(proof_job: str) -> None:
+    for step in re.split(r"(?m)(?=^      - )", proof_job):
+        if re.search(r"(?m)^        uses: actions/upload-artifact@\S+$", step):
+            # Retain failed-proof evidence without making any proof command conditional.
+            step = step.replace("        if: always()\n", "", 1)
+        if "if:" in step or "continue-on-error:" in step:
+            raise ValueError("CI proof job can be conditionally skipped or ignored")
+    if "run: python3 scripts/check_lsn_verification.py\n" not in proof_job:
+        raise ValueError("CI proof job does not run the fail-closed verifier command exactly")
+
+
 def check_contract() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     for obligation in REQUIRED_OBLIGATIONS:
@@ -119,10 +130,7 @@ def check_contract() -> None:
     if f"docker pull {IMAGE}" not in workflow:
         raise ValueError("CI does not pull the exact pinned Verus image before --pull=never")
     proof_job = workflow.split("  lsn-verification:", 1)[1].split("  # ── Unit tests", 1)[0]
-    if "if:" in proof_job or "continue-on-error:" in proof_job:
-        raise ValueError("CI proof job can be conditionally skipped or ignored")
-    if "run: python3 scripts/check_lsn_verification.py\n" not in proof_job:
-        raise ValueError("CI proof job does not run the fail-closed verifier command exactly")
+    check_ci_proof_job(proof_job)
 
 
 def run_checks() -> None:

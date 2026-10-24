@@ -2737,8 +2737,13 @@ pub(super) fn build_create_table_sql(
     // SUM NULL-transition correction (P2-2).
     let mut nonnull_aux_sql = String::new();
     for (nonnull_col, _arg_sql) in nonnull_aux_columns {
+        let (storage_type, default) = if nonnull_col.starts_with("__pgt_aux_special_") {
+            ("JSONB", "'null'::jsonb")
+        } else {
+            ("BIGINT", "0")
+        };
         nonnull_aux_sql.push_str(&format!(
-            ",\n    {} BIGINT NOT NULL DEFAULT 0",
+            ",\n    {} {storage_type} NOT NULL DEFAULT {default}",
             quote_identifier(nonnull_col),
         ));
     }
@@ -3297,6 +3302,14 @@ pub fn inject_nonnull_aux(query: &str, nonnull_aux_columns: &[(String, String)])
     if let Some(pos) = find_top_level_keyword(query, "FROM") {
         let mut extra = String::new();
         for (nonnull_col, arg_sql) in nonnull_aux_columns {
+            if nonnull_col.starts_with("__pgt_aux_special_") {
+                extra.push_str(&format!(
+                    ", COALESCE({}, 'null'::jsonb) AS {}",
+                    crate::dvm::operators::nonfinite::state_sql(arg_sql),
+                    quote_identifier(nonnull_col)
+                ));
+                continue;
+            }
             extra.push_str(&format!(
                 ", COUNT(CASE WHEN ({arg_sql}) IS NOT NULL THEN 1 END) AS {}",
                 quote_identifier(nonnull_col),

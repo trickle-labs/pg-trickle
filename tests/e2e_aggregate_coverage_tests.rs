@@ -152,6 +152,68 @@ async fn test_vector_aggregate_selected_for_bounded_mixed_pages_and_text_key_fal
 }
 
 #[tokio::test]
+async fn test_agg_nonfinite_sum_avg_return_to_finite_after_deletes() {
+    let db = E2eDb::new_dedicated().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = off")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    for (index, sql_type) in ["numeric", "real", "double precision"].iter().enumerate() {
+        let source = format!("special_source_{index}");
+        db.execute(&format!(
+            "CREATE TABLE {source} (id int PRIMARY KEY, grp int, val {sql_type})"
+        ))
+        .await;
+        db.execute(&format!(
+            "INSERT INTO {source} VALUES (1,1,'Infinity'),(2,1,1),(3,2,7)"
+        ))
+        .await;
+        let queries = [
+            format!("SELECT grp, SUM(val) AS total FROM {source} GROUP BY grp"),
+            format!("SELECT grp, AVG(val) AS mean FROM {source} GROUP BY grp"),
+            format!("SELECT SUM(val) AS total, AVG(val) AS mean FROM {source}"),
+            format!(
+                "SELECT grp, SUM(val) FILTER (WHERE id <> 3) AS total, AVG(val) FILTER (WHERE id <> 3) AS mean FROM {source} GROUP BY grp HAVING COUNT(*) > 0"
+            ),
+        ];
+        for (route, query) in queries.iter().enumerate() {
+            db.create_st(
+                &format!("special_st_{index}_{route}"),
+                query,
+                "1h",
+                "DIFFERENTIAL",
+            )
+            .await;
+        }
+        for mutation in [
+            "UPDATE $s SET val=4 WHERE id=2",
+            "DELETE FROM $s WHERE id=1",
+            "UPDATE $s SET val='-Infinity' WHERE id=2",
+            "UPDATE $s SET val='NaN' WHERE id=2",
+            "UPDATE $s SET val=NULL WHERE id=2",
+            "UPDATE $s SET val=-1 WHERE id=2",
+            "INSERT INTO $s VALUES (4,1,3)",
+            "DELETE FROM $s WHERE grp=1",
+        ] {
+            db.execute(&mutation.replace("$s", &source)).await;
+            for (route, query) in queries.iter().enumerate() {
+                let stream = format!("special_st_{index}_{route}");
+                refresh_vector_st(&db, &stream).await;
+                db.assert_st_matches_query(&stream, query).await;
+                let differential: bool = db.query_scalar(&format!(
+                    "SELECT h.action='DIFFERENTIAL' AND h.status='COMPLETED' AND NOT h.was_full_fallback FROM pgtrickle.pgt_refresh_history h \
+                     JOIN pgtrickle.pgt_stream_tables s USING(pgt_id) WHERE s.pgt_name='{stream}' \
+                     ORDER BY refresh_id DESC LIMIT 1"
+                )).await;
+                assert!(
+                    differential,
+                    "{stream}: repair must retain differential refresh"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_agg_sum_differential() {
     let db = E2eDb::new().await.with_extension().await;
     db.execute("CREATE TABLE agg_sum (id SERIAL PRIMARY KEY, grp TEXT, val INT)")

@@ -11,11 +11,138 @@ mod common;
 mod join_plan;
 #[path = "../verification/aggregate_lifecycle.rs"]
 mod lifecycle;
+#[path = "../src/dvm/operators/nonfinite.rs"]
+mod nonfinite;
 
 use common::TestDb;
 use pg_trickle::dvm::DiffContext;
 use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree, SortExpr};
 use pg_trickle::version::Frontier;
+
+#[tokio::test]
+async fn test_nonfinite_aggregate_state_uses_frozen_delta_and_restores_avg_auxiliary() {
+    let db = TestDb::new().await;
+    for (sql_type, oid, average_type) in [
+        ("numeric", 1700, "numeric"),
+        ("real", 700, "double precision"),
+        ("double precision", 701, "double precision"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS public.special_st,public.orders,pgtrickle_changes.changes_1; \
+             CREATE SCHEMA IF NOT EXISTS pgtrickle_changes; \
+             CREATE TABLE public.orders(id int,region text,amount {sql_type},label text); \
+             CREATE TABLE pgtrickle_changes.changes_1(change_id bigserial,lsn pg_lsn,action text,__pgt_row_id bytea,id int,region text,amount {sql_type},label text); \
+             CREATE TABLE public.special_st(__pgt_row_id bytea,region text,__pgt_count bigint,total {sql_type},mean {average_type}, \
+                 __pgt_aux_nonnull_total bigint,__pgt_aux_sum_mean numeric,__pgt_aux_count_mean bigint, \
+                 __pgt_aux_special_total jsonb,__pgt_aux_special_mean jsonb); \
+             INSERT INTO public.orders VALUES(2,'east',1,''),(3,'east',3,''); \
+             INSERT INTO pgtrickle_changes.changes_1(lsn,action,__pgt_row_id,id,region,amount,label) VALUES('0/1','D',decode('01','hex'),1,'east','Infinity',''), \
+                 ('0/20','I',decode('03','hex'),3,'east',3,''); \
+             INSERT INTO public.special_st VALUES(decode('10','hex'),'east',2,'Infinity','Infinity',2,'Infinity',2, \
+                 '{{\"finite\":1,\"nan\":0,\"pos\":1,\"neg\":0}}','{{\"finite\":1,\"nan\":0,\"pos\":1,\"neg\":0}}');"
+        ))).execute(&db.pool).await.unwrap();
+        let mut scan = scan_orders();
+        if let OpTree::Scan { columns, .. } = &mut scan {
+            columns
+                .iter_mut()
+                .find(|column| column.name == "amount")
+                .unwrap()
+                .type_oid = oid;
+        }
+        let tree = OpTree::Aggregate {
+            group_by: vec![colref("region")],
+            aggregates: vec![sum_col("amount", "total"), avg_col("amount", "mean")],
+            child: Box::new(scan),
+        };
+        let delta = make_aggregate_ctx("special_st", &["region", "total", "mean"])
+            .differentiate(&tree)
+            .unwrap();
+        let (count,total,mean,aux): (i64,String,String,String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT __pgt_count,total::text,mean::text,__pgt_aux_sum_mean::text FROM ({delta}) d"
+        ))).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(
+            (count, total, mean.parse::<f64>().unwrap(), aux),
+            (1, "1".into(), 1.0, "1".into()),
+            "{sql_type}: later source insert must remain outside the cut"
+        );
+        db.execute(&format!("WITH delta AS ({delta}) UPDATE public.special_st s SET \
+            __pgt_count=d.__pgt_count,total=d.total,mean=d.mean,__pgt_aux_sum_mean=d.__pgt_aux_sum_mean, \
+            __pgt_aux_count_mean=d.__pgt_aux_count_mean,__pgt_aux_nonnull_total=d.__pgt_aux_nonnull_total, \
+            __pgt_aux_special_total=d.__pgt_aux_special_total,__pgt_aux_special_mean=d.__pgt_aux_special_mean FROM delta d WHERE s.region=d.region")).await;
+        let mut previous = Frontier::new();
+        previous.set_source(1, "0/10".into(), "2025-01-01T00:00:10Z".into());
+        let mut next = Frontier::new();
+        next.set_source(1, "0/30".into(), "2025-01-01T00:00:30Z".into());
+        let mut ctx =
+            DiffContext::new_standalone(previous, next).with_pgt_name("public", "special_st");
+        ctx.st_user_columns = Some(vec!["region".into(), "total".into(), "mean".into()]);
+        ctx.st_has_pgt_count = true;
+        let delta = ctx.differentiate(&tree).unwrap();
+        let (count, total, mean): (i64, String, String) = sqlx::query_as(sqlx::AssertSqlSafe(
+            format!("SELECT __pgt_count,total::text,mean::numeric::text FROM ({delta}) d"),
+        ))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(total, "4");
+        assert_eq!(
+            mean.parse::<f64>().unwrap(),
+            2.0,
+            "{sql_type}: next cut must consume the later insert once"
+        );
+        if oid == 1700 {
+            db.execute("CREATE DOMAIN special_region AS text NOT NULL")
+                .await;
+            db.execute("ALTER TABLE special_st ALTER COLUMN region TYPE special_region")
+                .await;
+            db.execute("TRUNCATE special_st,pgtrickle_changes.changes_1")
+                .await;
+            db.execute("INSERT INTO pgtrickle_changes.changes_1(lsn,action,__pgt_row_id,id,region,amount,label) VALUES('0/1','I',decode('04','hex'),4,'new','Infinity','')").await;
+            let delta = make_aggregate_ctx("special_st", &["region", "total", "mean"])
+                .differentiate(&tree)
+                .unwrap();
+            let total: String = db
+                .query_scalar(&format!("SELECT total::text FROM ({delta}) d"))
+                .await;
+            assert_eq!(
+                total, "Infinity",
+                "new group must preserve a NOT NULL domain grouping key"
+            );
+        }
+    }
+    // Exercise the same initialization and signed-state helpers against native aggregates.
+    let initial = nonfinite::state_sql("v");
+    let merged = nonfinite::merge_sql("a.state", "i.state", "d.state");
+    let value = nonfinite::value_sql("m.state");
+    let guard = nonfinite::has_special_sql("a.state");
+    let result: String = db
+        .query_scalar(&format!(
+            "WITH a AS(SELECT {initial} state FROM (VALUES('Infinity'::numeric),(1)) x(v)), \
+        i AS(SELECT {initial} state FROM (SELECT NULL::numeric v WHERE false) x), \
+        d AS(SELECT {initial} state FROM (VALUES('Infinity'::numeric)) x(v)), \
+        m AS(SELECT {merged} state FROM a,i,d WHERE {guard}) SELECT {value} FROM m"
+        ))
+        .await;
+    assert_eq!(result, "1");
+    db.execute("CREATE DOMAIN special_number AS numeric").await;
+    let wrapped = "CASE WHEN keep THEN v END";
+    let state = nonfinite::state_sql(wrapped);
+    let initial = nonfinite::state_sql("v");
+    let observed: bool = db
+        .query_scalar(&format!(
+            "SELECT \
+        bool_and(pg_typeof(v)::oid <> 1700 AND pg_typeof({wrapped})::oid=1700) \
+        AND ({state}) = '{{\"finite\":1,\"nan\":0,\"pos\":1,\"neg\":0}}'::jsonb \
+        AND ({initial})=({state}) \
+        FROM (VALUES('Infinity'::special_number,true),(1::special_number,true)) x(v,keep)"
+        ))
+        .await;
+    assert!(
+        observed,
+        "domain initialization and CASE-guarded deltas must admit the same effective base type"
+    );
+}
 
 #[tokio::test]
 async fn test_join_endpoint_sql_preserves_images_retractions_and_bag_duplicates() {
