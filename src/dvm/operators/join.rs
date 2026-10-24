@@ -1545,6 +1545,18 @@ mod tests {
     }
 
     #[test]
+    fn test_build_base_table_key_exprs_serializes_unsupported_types() {
+        let mut node = scan_not_null(1, "orders", "public", "o", &["id", "name"]);
+        if let OpTree::Scan { columns, .. } = &mut node {
+            columns[1].type_oid = 19;
+        }
+        assert_eq!(
+            build_base_table_key_exprs(&node, "r"),
+            vec!["row_to_json(ROW(r.\"id\", r.\"name\"))::text"]
+        );
+    }
+
+    #[test]
     fn test_build_base_table_key_exprs_all_nullable_fallback() {
         let node = scan(1, "orders", "public", "o", &["id", "name"]);
         let exprs = build_base_table_key_exprs(&node, "r");
