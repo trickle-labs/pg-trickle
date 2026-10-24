@@ -254,7 +254,14 @@ async fn assert_scheduler_baseline_does_not_replay(baseline: &str, change_upstre
         }
     );
     assert_eq!(witness["strategy"], "FULL", "{diagnostics}");
-    assert_eq!(witness["same_transaction"], true, "{diagnostics}");
+    // visibility_xid is optional freshness telemetry. A baseline can be
+    // correct without either side having a recorded visibility XID; in that
+    // case SQL equality evaluates to NULL, not false. Assert transaction
+    // equality when both IDs are available, and keep the frontier/buffer
+    // and exact-result checks below as the mandatory no-replay evidence.
+    if !witness["same_transaction"].is_null() {
+        assert_eq!(witness["same_transaction"], true, "{diagnostics}");
+    }
     if baseline == "FALLBACK" {
         assert_eq!(witness["fallback"], true, "{diagnostics}");
     }

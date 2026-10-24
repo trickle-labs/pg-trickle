@@ -443,18 +443,38 @@ async fn test_outbox_refresh_rejects_recreated_tide_outbox() {
         .await;
     db.execute("INSERT INTO ob20_src VALUES (4, 'd')").await;
 
-    let result = db
-        .try_execute("SELECT pgtrickle.refresh_stream_table('ob20_st')")
-        .await;
-    assert!(
-        result.is_err(),
-        "refresh must fail closed on stale outbox identity"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("stale") || err.contains("binding"),
-        "error should identify the stale binding; got: {err}"
-    );
+    // A manual refresh can complete as NO_DATA while the writer-holdback
+    // watermark defers the just-committed insert. Retry until the pending
+    // change is eligible, but never accept a successful *data-changing*
+    // refresh with the stale outbox attached.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match db
+            .try_execute("SELECT pgtrickle.refresh_stream_table('ob20_st')")
+            .await
+        {
+            Err(error) => {
+                let err = error.to_string();
+                assert!(
+                    err.contains("stale") || err.contains("binding"),
+                    "error should identify the stale binding; got: {err}"
+                );
+                break;
+            }
+            Ok(()) => {
+                assert_eq!(
+                    db.count("public.ob20_st").await,
+                    3,
+                    "refresh must not publish changed data through a stale outbox"
+                );
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "refresh never rejected stale outbox identity after writer holdback"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

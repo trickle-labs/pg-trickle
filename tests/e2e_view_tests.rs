@@ -52,6 +52,49 @@ async fn test_view_inline_using_quoted_key_preserves_outer_join_results() {
     }
 }
 
+#[tokio::test]
+async fn test_view_inline_chained_inner_using_proves_merged_key() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute_seq(&[
+        "SET pg_trickle.differential_max_change_ratio = 1",
+        "CREATE TABLE vi_chain_cases (id int PRIMARY KEY, value text)",
+        "CREATE TABLE vi_chain_selected (id int PRIMARY KEY)",
+        "CREATE TABLE vi_chain_allowed (id int PRIMARY KEY)",
+        "INSERT INTO vi_chain_cases VALUES (1, 'one'), (2, 'two'), (3, 'three')",
+        "INSERT INTO vi_chain_selected VALUES (1), (2)",
+        "INSERT INTO vi_chain_allowed VALUES (2), (3)",
+        "CREATE VIEW vi_chain_projection AS SELECT id, value FROM vi_chain_cases",
+    ])
+    .await;
+
+    // Both earlier inputs expose id, but their INNER USING condition proves
+    // equality. The third JOIN USING must not silently become a cross join.
+    let query = "SELECT a.id, a.value FROM vi_chain_projection a \
+                 JOIN vi_chain_selected b USING (id) \
+                 JOIN vi_chain_allowed c USING (id)";
+    db.create_st("vi_chain_result", query, "1h", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("vi_chain_result", query).await;
+
+    // No matching id=1 until a new allowed row is inserted.
+    db.execute("INSERT INTO vi_chain_allowed VALUES (1)").await;
+    db.refresh_st("vi_chain_result").await;
+    db.assert_st_matches_query("vi_chain_result", query).await;
+
+    // Delete a matching id and change the surviving row's payload.
+    db.execute("DELETE FROM vi_chain_selected WHERE id = 2")
+        .await;
+    db.execute("UPDATE vi_chain_cases SET value = 'updated' WHERE id = 1")
+        .await;
+    db.refresh_st("vi_chain_result").await;
+    db.assert_st_matches_query("vi_chain_result", query).await;
+
+    db.execute("DELETE FROM vi_chain_allowed WHERE id = 1")
+        .await;
+    db.refresh_st("vi_chain_result").await;
+    db.assert_st_matches_query("vi_chain_result", query).await;
+}
+
 // ── Basic View Inlining (DIFFERENTIAL) ─────────────────────────────────
 
 #[tokio::test]

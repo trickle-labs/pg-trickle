@@ -3952,13 +3952,18 @@ unsafe fn parse_from_item_inner(
                     right: Box::new(join_using_column(&right, &column)?),
                 });
             }
-            Expr::Raw(
-                conditions
-                    .iter()
-                    .map(Expr::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(" AND "),
-            )
+            // Retain the typed equality/provenance tree rather than
+            // flattening to Raw SQL; a later USING join must be able to prove
+            // whether a key exposed by both nested inputs is truly merged.
+            let mut predicates = conditions.into_iter();
+            let first = predicates.next().ok_or_else(|| {
+                PgTrickleError::QueryParseError("USING clause has no columns".into())
+            })?;
+            predicates.fold(first, |left, right| Expr::BinaryOp {
+                op: "AND".into(),
+                left: Box::new(left),
+                right: Box::new(right),
+            })
         } else if join.quals.is_null() {
             Expr::Literal("TRUE".into())
         } else {

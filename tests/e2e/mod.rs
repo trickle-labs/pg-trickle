@@ -649,13 +649,18 @@ impl E2eDb {
         let connection_string = connection_string(shared.port, &db_name);
         let pool = Self::connect_with_retry(&connection_string, 15).await;
 
-        E2eDb {
+        let db = E2eDb {
             pool,
             connection_string,
             container_id: shared.container_id.clone(),
             _shared_scheduler_test_guard: Some(shared_scheduler_test_guard),
             _container: ContainerLease::Shared { _shared: shared },
-        }
+        };
+        // Tests of scheduled progress must not be deferred by host load.
+        // The per-test server configuration is reset for the next fixture.
+        db.alter_system_set_and_wait("pg_trickle.load_shed_threshold", "0", "0")
+            .await;
+        db
     }
 
     /// Start a container configured for benchmarking with resource
