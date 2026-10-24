@@ -34,6 +34,13 @@ async fn wait_for_wal_mode(db: &E2eDb, source: &str) {
 #[tokio::test]
 async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    // Exercise WAL differential execution without adaptive FULL selection.
+    db.alter_system_set_and_wait(
+        "pg_trickle.refresh_strategy",
+        "'differential'",
+        "differential",
+    )
+    .await;
 
     db.execute(
         "CREATE TABLE rls_wal_src (id INT PRIMARY KEY, tenant_id INT NOT NULL, val TEXT NOT NULL)",
@@ -84,11 +91,14 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     db.assert_st_matches_query("rls_wal_st", query).await;
 
     wait_for_wal_mode(&db, "rls_wal_src").await;
-    // Drain cutover work before establishing the baseline for differential mutations.
+    // Drain cutover receipts before checking the differential refreshes caused by DML.
     db.execute("SELECT pgtrickle.pause_scheduler(ARRAY['rls_wal_st'])")
         .await;
     db.refresh_st_with_retry("rls_wal_st").await;
     db.execute("SELECT pgtrickle.resume_scheduler(ARRAY['rls_wal_st'])")
+        .await;
+    let baseline: i64 = db
+        .query_scalar("SELECT max(refresh_id) FROM pgtrickle.pgt_refresh_history")
         .await;
     db.execute("INSERT INTO rls_wal_src VALUES (3, 30, 'c')")
         .await;
@@ -116,8 +126,39 @@ async fn test_rls_bypassrls_owner_differential_wal_matches_query() {
     );
     db.assert_st_matches_query("rls_wal_st", query).await;
 
-    let effective_mode: String = db
-        .query_scalar("SELECT effective_refresh_mode FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'rls_wal_st'")
+    // Idle scheduler ticks may overwrite effective_refresh_mode with NO_DATA.
+    let ran_differential: bool = db
+        .query_scalar(&format!(
+            "SELECT COALESCE(bool_or(\
+                action = 'DIFFERENTIAL' AND NOT was_full_fallback \
+                AND merge_strategy_used IS DISTINCT FROM 'FULL' AND delta_row_count > 0\
+             ), false) FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                            WHERE pgt_name = 'rls_wal_st') \
+               AND refresh_id > {baseline} AND status = 'COMPLETED' AND action <> 'NO_DATA'"
+        ))
         .await;
-    assert_eq!(effective_mode, "DIFFERENTIAL");
+    let history: String = db
+        .query_scalar(
+            "SELECT jsonb_agg(jsonb_build_object(\
+                'action', action, 'reason', refresh_reason, \
+                'fallback', was_full_fallback, 'delta', delta_row_count, \
+                'status', status, 'error', error_message\
+             ) ORDER BY refresh_id)::text \
+             FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = (SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                            WHERE pgt_name = 'rls_wal_st')",
+        )
+        .await;
+    assert!(
+        ran_differential,
+        "expected nonempty differential WAL refreshes: {history}"
+    );
+    let cdc_mode: String = db
+        .query_scalar(
+            "SELECT cdc_mode FROM pgtrickle.pgt_dependencies \
+             WHERE source_relid = 'rls_wal_src'::regclass AND source_type = 'TABLE'",
+        )
+        .await;
+    assert_eq!(cdc_mode, "WAL", "CDC must stay on WAL: {history}");
 }
