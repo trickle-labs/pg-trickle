@@ -202,11 +202,15 @@ async fn test_consecutive_errors_tracked_and_reset() {
     db.execute("INSERT INTO err_cnt_src (val, denom) VALUES (10, 0)")
         .await;
 
-    // Try refresh multiple times — each should fail with division by zero.
+    // Give every attempt fresh failing CDC input. A failed refresh may
+    // consume the prior change notification even though its SQL transaction
+    // rolls back, so retrying without another mutation can take NO_DATA.
     // NOTE: consecutive_errors is tracked by the background SCHEDULER, not by
     // manual refresh_stream_table() calls (a failed SQL function call rolls back
     // the entire transaction, including any catalog writes).
     for i in 1..=3 {
+        db.execute("INSERT INTO err_cnt_src (val, denom) VALUES (10, 0)")
+            .await;
         let result = db
             .try_execute("SELECT pgtrickle.refresh_stream_table('err_cnt_st')")
             .await;

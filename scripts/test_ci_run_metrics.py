@@ -8,6 +8,7 @@ class MetricsTests(unittest.TestCase):
         run = {
             "status": "completed", "conclusion": "success", "html_url": "fixture",
             "head_sha": "abc", "event": "pull_request",
+            "created_at": "2026-10-18T09:59:00Z",
         }
         job = {
             "name": "suite", "conclusion": "success",
@@ -19,8 +20,26 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result["creation_to_start_minutes"], 3)
         self.assertEqual(result["execution_minutes"], 2)
         self.assertEqual(result["conclusion"], "success")
+        self.assertEqual(result["wall_minutes"], 6)
+        self.assertEqual(result["time_to_green_minutes"], 6)
+        self.assertEqual(result["jobs"][0]["release_delay_minutes"], 1)
+        self.assertIsNone(result["first_failed_step_minutes"])
         run["conclusion"] = "failure"
-        self.assertEqual(summarize(run, [job])["conclusion"], "failure")
+        job["steps"] = [{
+            "name": "test", "conclusion": "failure",
+            "started_at": "2026-10-18T10:03:00Z", "completed_at": "2026-10-18T10:04:00Z",
+        }]
+        failed = summarize(run, [job])
+        self.assertIsNone(failed["time_to_green_minutes"])
+        self.assertEqual(failed["first_failed_step_minutes"], 5)
+        self.assertEqual(failed["jobs"][0]["steps"][0]["execution_minutes"], 1)
+        run["conclusion"] = "cancelled"
+        self.assertIsNone(summarize(run, [job])["time_to_green_minutes"])
+        run["conclusion"] = "success"
+        # Parallel execution adds runner cost but not wall time.
+        parallel = summarize(run, [job, job])
+        self.assertEqual(parallel["execution_minutes"], 4)
+        self.assertEqual(parallel["wall_minutes"], 6)
         run["status"] = "in_progress"
         with self.assertRaisesRegex(ValueError, "partial timings"):
             summarize(run, [job])
