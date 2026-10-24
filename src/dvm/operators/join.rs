@@ -1374,7 +1374,7 @@ mod tests {
         assert_sql_contains(&sql, "EXCEPT ALL");
         assert_sql_contains(&sql, "__pgt_cte_join_endpoint_new_");
         assert_sql_contains(&sql, "__pgt_cte_join_endpoint_old_");
-        assert_sql_contains(&sql, "l.id IN (SELECT id FROM");
+        assert_sql_contains(&sql, "l.\"id\" IN (SELECT \"id\" FROM");
         assert!(
             !sql.contains("Part 1:"),
             "unsafe predicate used algebraic delta: {sql}"
